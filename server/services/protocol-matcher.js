@@ -1,3 +1,9 @@
+// A rule's `serviceKeys` are the catalog service keys it claims: a booking
+// that carries one (service_key_snapshot) resolves to that rule's visit
+// regardless of its display name — "Termite Spot Treatment Service" names no
+// foam term but IS the foam / drill visit, and the bait-station services
+// ("Termite Installation Setup", "… Cartridge Replacement") are station work,
+// not the inspection their names fall to.
 const MATCH_RULES = [
   {
     programKey: 'bed_bug',
@@ -144,6 +150,7 @@ const MATCH_RULES = [
     programKey: 'termite',
     visit: 4,
     reason: 'foam_drill',
+    serviceKeys: ['termite_spot_treatment'],
     terms: ['foam', 'drill', 'void', 'localized'],
   },
   {
@@ -156,24 +163,28 @@ const MATCH_RULES = [
     programKey: 'termite',
     visit: 3,
     reason: 'liquid_perimeter',
+    serviceKeys: ['termite_liquid', 'termite_trenching', 'termite_pretreatment', 'termite_slab_pretreat'],
     terms: ['liquid', 'trench', 'trenching', 'rod', 'rodding', 'termidor', 'perimeter', 'pre-slab', 'preslab'],
   },
   {
     programKey: 'termite',
     visit: 2,
     reason: 'bait_monitoring',
+    serviceKeys: ['termite_bait', 'termite_monitoring', 'termite_installation_setup', 'termite_active_annual', 'termite_active_bait_quarterly', 'termite_cartridge_replacement', 'pest_termite_bait_quarterly'],
     terms: ['bait', 'baiting', 'bait station', 'bait stations', 'station', 'stations', 'monitoring', 'monitor', 'monitors'],
   },
   {
     programKey: 'termite',
     visit: 6,
     reason: 'renewal_inspection',
+    serviceKeys: ['termite_renewal', 'termite_bond_1yr', 'termite_bond_5yr', 'termite_bond_10yr'],
     terms: ['renewal', 'warranty', 'annual'],
   },
   {
     programKey: 'termite',
     visit: 1,
     reason: 'termite_inspection',
+    serviceKeys: ['termite_inspection'],
     terms: ['termite', 'wdo', 'wood destroying', 'swarmer', 'swarm'],
   },
   {
@@ -220,6 +231,10 @@ const MATCH_RULES = [
     programKey: 'pest',
     visit: 1,
     reason: 'general_pest',
+    // The general-pest catalog rows: "Initial Pest Cleanout" is a general
+    // active-infestation treatment, not the German-roach cleanout its name
+    // would otherwise match.
+    serviceKeys: ['pest_general_quarterly', 'pest_general_monthly', 'pest_initial_cleanout'],
     terms: ['pest', 'quarterly', 'bimonthly', 'bi-monthly', 'monthly', 'perimeter'],
   },
   {
@@ -314,14 +329,17 @@ function findVisit(program, visitNumber) {
   return (program?.visits || []).find((visit) => Number(visit.visit) === Number(visitNumber)) || null;
 }
 
-function matchServiceProtocol(protocols, serviceType) {
+function matchServiceProtocol(protocols, serviceType, { serviceKey = null } = {}) {
   const normalized = normalize(serviceType);
-  const fallbackProgramKey = programKeyForService(serviceType);
+  // The catalog service key outranks the name: a rule that claims the key
+  // is the match, and the program is that rule's.
+  const keyRule = serviceKey ? MATCH_RULES.find((rule) => rule.serviceKeys?.includes(serviceKey)) || null : null;
+  const fallbackProgramKey = keyRule?.programKey || programKeyForService(serviceType);
   const rules = MATCH_RULES.filter((rule) => {
     if (fallbackProgramKey === 'lawn') return false;
     return rule.programKey === fallbackProgramKey;
   });
-  const matchedRule = rules.find((rule) => rule.terms.some((term) => matchesTerm(normalized, term)));
+  const matchedRule = keyRule || rules.find((rule) => rule.terms.some((term) => matchesTerm(normalized, term)));
   const programKey = matchedRule?.programKey || fallbackProgramKey;
   const program = protocols?.[programKey] || null;
   if (!program) return { programKey, program: null, matchedVisit: null, matched: false, reason: 'program_missing' };

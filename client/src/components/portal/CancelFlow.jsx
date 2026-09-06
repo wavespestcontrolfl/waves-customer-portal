@@ -307,11 +307,11 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
   const pairPrimary = { ...primaryButton, ...pairBox, opacity: busy ? 0.65 : 1, cursor: busy ? 'wait' : 'pointer' };
   const pairSecondary = { ...secondaryButton, ...pairBox };
   const pairCancel = { ...pairPrimary, background: B.grayMid };
-  const heading = { margin: 0, fontSize: 15, color: B.glassNavy, fontWeight: 850, outline: 'none' };
+  const heading = { margin: 0, fontSize: 15, color: B.glassNavy, fontWeight: 700, outline: 'none' };
   const body = { fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.45 };
   const backLink = { ...smallLinkButton, fontSize: 14, padding: '6px 0', marginLeft: 0 };
   const chip = (active) => ({
-    padding: '13px 16px', borderRadius: 999, fontSize: 14, fontWeight: 800,
+    padding: '13px 16px', borderRadius: 999, fontSize: 14, fontWeight: 700,
     border: `1px solid ${active ? B.red : '#D8D0C0'}`,
     background: active ? `${B.red}10` : '#fff',
     color: active ? B.red : B.grayDark,
@@ -361,7 +361,7 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
             <dt style={{ margin: 0, color: muted, fontWeight: 700 }}>{label}</dt>
             <dd style={{ margin: 0, color: B.grayDark }}>
               {value}
-              {link && <> · <a href={link.href} target="_blank" rel="noopener noreferrer" className="waves-focus-ring" style={{ color: B.glassNavy, fontWeight: 800 }}>{link.label}</a></>}
+              {link && <> · <a href={link.href} target="_blank" rel="noopener noreferrer" className="waves-focus-ring" style={{ color: B.glassNavy, fontWeight: 700 }}>{link.label}</a></>}
             </dd>
           </div>
         ))}
@@ -382,7 +382,7 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
         : outcome.confirmation === 'email' ? ' A confirmation email is on its way.'
           : ' Keep this screen as your confirmation.';
     return (
-      <div role="status" style={{ marginTop: 12, color: B.grayDark, fontSize: 14, fontWeight: 850, lineHeight: 1.5 }}>
+      <div role="status" style={{ marginTop: 12, color: B.grayDark, fontSize: 14, fontWeight: 700, lineHeight: 1.5 }}>
         {outcome.processed
           ? `${scoped ? `${listWords(outcome.scope)} cancelled; ${listWords(outcome.remaining)} continue${outcome.tierAfter ? ` under WaveGuard ${outcome.tierAfter}` : ''}` : `Your plan is cancelled${outcome.effectiveDate ? ` as of ${fmtDate(outcome.effectiveDate)}` : ''}`}. ${scoped ? 'The cancelled visits are off the calendar.' : 'Upcoming visits are off the calendar and autopay is off.'} Nothing more is charged for ${scoped ? 'the cancelled services' : 'future service'}; a visit already inside its late-cancellation window keeps its scheduled-visit fee.${confirmationLine} Changed your mind? Call ${WAVES_PHONE_DISPLAY} and we will put it back.`
           : 'We received your cancellation and are closing out your plan by hand. You will hear from us within 1 business day to confirm exactly what has stopped.'}
@@ -437,7 +437,7 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
         <div style={body}>Here is exactly what changes. Nothing happens until you confirm on the last step.</div>
         {families.length > 1 && (
           <fieldset style={{ border: 'none', margin: '12px 0 0', padding: 0 }}>
-            <legend style={{ fontSize: 14, fontWeight: 800, color: B.glassNavy, padding: 0 }}>What to cancel</legend>
+            <legend style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, padding: 0 }}>What to cancel</legend>
             <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Uncheck any service you want to keep.</div>
             {families.map((f) => (
               <label key={f.key} style={checkRow}>
@@ -586,7 +586,7 @@ export default function CancelFlow({ tierName, styles, compact, onOpenRequest, r
         )}
         {receipt?.reserviceUrl && (
           <div style={{ marginTop: 10 }}>
-            <a href={receipt.reserviceUrl} className="waves-focus-ring" style={{ fontSize: 14, fontWeight: 800, color: B.glassNavy }}>Pick your re-service time</a>
+            <a href={receipt.reserviceUrl} className="waves-focus-ring" style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Pick your re-service time</a>
           </div>
         )}
         <div style={{ ...body, marginTop: 10 }}>

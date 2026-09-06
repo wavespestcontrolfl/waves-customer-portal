@@ -46,42 +46,51 @@ describe('relay session → owed commitments', () => {
     expect(conversation).toContain("notePromise: (kind, verdict = true, extra = {}) => { this._promises.set(String(kind || ''), { verdict: verdict === true, expectation: extra?.expectation || null, at: new Date() }); },");
     expect(conversation).toContain('this._promises = new Map();');
     const reconcileAt = conversation.indexOf('const updated = await reconcileQuery');
-    const recordAt = conversation.indexOf("const { recordRelayCommitments } = require('../call-commitments');");
+    // The close-time call site (PR 2B factored the write into _recordCommitments, used by the owning close AND the late-segment pass).
+    const recordAt = conversation.indexOf("await this._recordCommitments({ transcript: commitmentsTranscript, sessionKey: this.sessionKey || null });");
     expect(reconcileAt).toBeGreaterThan(-1);
     expect(recordAt).toBeGreaterThan(reconcileAt);
-    const site = conversation.slice(recordAt - 500, recordAt + 1000);
-    expect(site).toContain('if (updated && transcriptUpdate?.transcription) {');
-    expect(site).toContain("isEnabled('callCommitments')");
-    expect(site).toContain('transcript: transcriptUpdate.transcription,');
-    expect(site).toContain("estimateQueued: this._promises.has('send_estimate') ? this._promises.get('send_estimate').verdict : null,");
-    expect(site).toContain("estimateExpectation: this._promises.get('send_estimate')?.expectation || null,");
+    const site = conversation.slice(recordAt - 1500, recordAt + 200);
+    // Close-time eligibility is exercised by voice-relay-segment-close and
+    // the PostgreSQL segment suite, including a silent resumed transfer.
+    expect(site).toContain('let commitmentsTranscript = transcriptUpdate ? transcriptUpdate.transcription : null;'); // the scrubbed transcript the reconcile wrote… or, on a reconnected call, the persisted composed one (PR 2B)
+    const helperAt = conversation.indexOf('async _recordCommitments({ transcript, sessionKey, promises = this._promises }) {');
+    expect(helperAt).toBeGreaterThan(-1);
+    const helper = conversation.slice(helperAt, helperAt + 1600);
+    expect(helper).toContain("isEnabled('callCommitments')");
+    expect(helper).toContain("const { recordRelayCommitments } = require('../call-commitments');");
+    expect(helper).toContain("estimateQueued: promises.has('send_estimate') ? promises.get('send_estimate').verdict : null,");
+    expect(helper).toContain("estimateExpectation: promises.get('send_estimate')?.expectation || null,");
     // The deadline runs from the moment the tool spoke the expectation, not from the close.
-    expect(site).toContain("estimatePromisedAt: this._promises.get('send_estimate')?.at || null,");
+    expect(helper).toContain("estimatePromisedAt: promises.get('send_estimate')?.at || null,");
     // The claim nonce rides into the write so the owner is re-checked under
     // the row lock, not only by the reconcile UPDATE before it.
-    expect(site).toContain('sessionKey: this.sessionKey || null,');
+    expect(site).toContain('sessionKey: this.sessionKey || null });');
     // Never the raw turns: those are unscrubbed.
     expect(site).not.toContain('transcript: this._transcript');
-    // Railway logs are plaintext: the three commitment log lines, the
-    // message-sync failure line, and the three telemetry lines (per-turn
-    // stats, relay event shape, relay_failed salvage) carry a masked CallSid.
-    expect(conversation).toContain("const { maskSid } = require('../twilio-failure-alerts');");
-    expect(conversation.match(/callSid=\$\{maskSid\(this\.callSid\)\}/g)).toHaveLength(7);
+    // Check the commitment log messages themselves. Counting unrelated
+    // recovery logs makes a behavior-preserving PR split fail this privacy test.
+    const commitmentLogs = helper.split('\n').filter((line) => line.includes('logger.'));
+    expect(commitmentLogs).toHaveLength(3);
+    for (const line of commitmentLogs) expect(line).toContain('maskSid(this.callSid)');
   });
 
   test('the promises are recorded even when the voice-message sync rejects: the sync has its own catch ahead of the commitments block (codex #3725 r18 P2)', () => {
     const syncAt = conversation.indexOf('await syncVoiceMessageForCall(this.callSid);');
-    const commitmentsAt = conversation.indexOf("require('../call-commitments')");
+    const commitmentsAt = conversation.indexOf("await this._recordCommitments({ transcript: commitmentsTranscript, sessionKey: this.sessionKey || null });");
     expect(syncAt).toBeGreaterThan(-1);
     expect(commitmentsAt).toBeGreaterThan(syncAt);
     const between = conversation.slice(syncAt, commitmentsAt);
     expect(between).toMatch(/catch \(syncErr\)/);
   });
 
-  test('a superseded socket never records promises (its close-time writes are skipped wholesale)', () => {
-    const guardAt = conversation.indexOf('if (this.callSid && !supersededAtClose) {');
-    const recordAt = conversation.indexOf("const { recordRelayCommitments } = require('../call-commitments');");
+  test('a superseded socket never records promises under its OWN key (its close-time writes are skipped wholesale; PR 2B\'s late-segment pass runs under the row\'s CURRENT owner)', () => {
+    const guardAt = conversation.indexOf('if (supersededAtClose) {');
+    const closeBody = conversation.slice(guardAt, conversation.indexOf('await this._runCaptureFloor(reason);', guardAt));
+    expect(closeBody).toMatch(/return;\s*}/);
+    const recordAt = conversation.indexOf("await this._recordCommitments({ transcript: commitmentsTranscript, sessionKey: this.sessionKey || null });");
     expect(guardAt).toBeGreaterThan(-1);
     expect(recordAt).toBeGreaterThan(guardAt);
+    expect(conversation).toContain("sessionKey: owner || this.sessionKey, promises });"); // the ROW's latest promises, never the superseded socket's map
   });
 });

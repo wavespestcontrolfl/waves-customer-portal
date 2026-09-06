@@ -53,7 +53,7 @@
   top: -10px;
   left: 50%;
   transform: translateX(-50%);
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 700;
   letter-spacing: 0.07em;
   text-transform: uppercase;
@@ -484,5 +484,52 @@
   [data-glass-theme] .gc-section-cta,
   [data-glass-theme] .gc-phone {
     transition: none;
+  }
+}
+
+/* The estimate's own glass (no data-glass attribute) follows the shared
+   sheet's solid fallbacks: no backdrop-filter, Reduce Transparency. */
+@media (prefers-reduced-transparency: reduce) {
+  [data-glass-theme] .gc-freq-btn,
+  [data-glass-theme] .gc-freq-btn:hover,
+  [data-glass-theme] .gc-slot-priority,
+  [data-glass-theme] .gc-slot-rain,
+  [data-glass-theme] .gc-tech-chip,
+  [data-glass-theme] .gc-proof,
+  [data-glass-theme] .gc-mbb {
+    background: rgba(255, 255, 255, 0.93) !important;
+    border-color: #7C8DA0 !important; /* opaque: the translucent white border vanishes on the solid surface */
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  [data-glass-theme] .gc-freq-btn[data-active],
+  [data-glass-theme] .gc-freq-btn[data-active]:hover,
+  [data-glass-theme] .gc-scarcity,
+  [data-glass-theme] .gc-section-cta,
+  [data-glass-theme] .gc-section-cta:hover {
+    background: #F4B014 !important;
+    border-color: #9A6200 !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  [data-glass-theme] .gc-freq-btn,
+  [data-glass-theme] .gc-freq-btn:hover,
+  [data-glass-theme] .gc-slot-priority,
+  [data-glass-theme] .gc-slot-rain,
+  [data-glass-theme] .gc-tech-chip,
+  [data-glass-theme] .gc-proof,
+  [data-glass-theme] .gc-mbb {
+    background: rgba(255, 255, 255, 0.93) !important;
+    border-color: #7C8DA0 !important; /* opaque: the translucent white border vanishes on the solid surface */
+  }
+  [data-glass-theme] .gc-freq-btn[data-active],
+  [data-glass-theme] .gc-freq-btn[data-active]:hover,
+  [data-glass-theme] .gc-scarcity,
+  [data-glass-theme] .gc-section-cta,
+  [data-glass-theme] .gc-section-cta:hover {
+    background: #F4B014 !important;
+    border-color: #9A6200 !important;
   }
 }

@@ -759,6 +759,18 @@ describe('acquireAnyway', () => {
     expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
   });
 
+  test.each(['contacted', 'negotiating'])('Acquire anyway counts sent %s execution cards in its summary', async (status) => {
+    const s = scenario({ make: outreachPath, path: { acquisition_type: 'content_submission', submission_url: 'https://example.org/submit' }, domain: { spam_score: 30, score: 40 } });
+    await nightly(s.db);
+    Object.assign(placements(s.db)[0], { status, outreach_status: 'sent' });
+    expect(domainState(s.db)).toBe('rejected');
+    const result = await Q.acquireAnyway(s.db, { domainId: s.d.id, actor: ACTOR, now: NOW, bridge: inline });
+    const { cards } = await Q.listOwnerQueue(s.db);
+    expect(cards).toHaveLength(1);
+    expect(cards[0].rows.some((r) => r.dimension === 'execution' && r.approvable)).toBe(true);
+    expect(result).toMatchObject({ awaiting: 1, summary_unavailable: false });
+  });
+
   test('INVALID is never waivable; passing floors leave nothing to waive; no path refuses', async () => {
     const inv = scenario({ domain: { agent_state: 'rejected', rejected_by: 'owner' }, path: { last_investigated_at: null } });
     await expect(Q.acquireAnyway(inv.db, { domainId: inv.d.id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/not actionable/) });
@@ -836,4 +848,104 @@ describe('acquireAnyway', () => {
     expect(r.agent_state).toBe('qualified');
     expect(placements(s.db)).toHaveLength(N);
   });
+});
+
+
+test.each(['contacted', 'negotiating'])('send-first %s placement exposes and accepts its deferred owner execution approval', async (status) => {
+  const { db, p } = scenario({ make: outreachPath, path: { acquisition_type: 'content_submission', link_type: 'editorial', submission_url: 'https://example.org/submit', execution_after_send: true }, policy: { auto_free_acquisition: false, preferred_provider: 'deterministic_runner' } });
+  await nightly(db);
+  const execution = openRows(db, 'execution').find(r => r.instance_kind === '-');
+  expect(execution.level).toBe('OWNER_FREE');
+  const placement = placementOf(db, execution);
+  placement.status = status;
+  placement.outreach_status = 'sent';
+  placement.outreach_sent_at = NOW;
+  Object.assign(openRows(db, 'communication').find(r => r.instance_kind === '-'), { satisfied_at: NOW, satisfied_reason: 'sent' });
+  await nightly(db);
+  const card = (await Q.listOwnerQueue(db)).cards.find(c => c.placement.id === placement.id);
+  expect(card).toBeDefined();
+  expect(card.rows.find(r => r.id === execution.id)).toMatchObject({ approvable: true });
+  const result = await Q.approveRow(db, { authorityId: execution.id, actor: ACTOR, now: NOW, bridge: inline });
+  expect(result.attached).toContain(execution.id);
+  expect(placement.status).toBe(status);
+  expect(await require('../services/seo/link-execution-authority').authorize(db, placement, p, 'deterministic_runner')).toMatchObject({ approval: { dimension: 'execution', action: 'acquire' } });
+});
+
+test('an unsent contacted placement cannot approve a deferred execution', async () => {
+  const { db } = await parked();
+  const execution = openRows(db, 'execution')[0];
+  const placement = placementOf(db, execution);
+  placement.status = 'contacted'; placement.outreach_status = 'none';
+  await expect(Q.approveRow(db, { authorityId: execution.id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409 });
+});
+
+
+test.each(['placed', 'live', 'indexed'])('exhausted %s drafts require a submit-first path, including on cards with other actions', async (status) => {
+  const s = scenario({ make: outreachPath, domain: { agent_state: 'acquired' }, path: { acquisition_type: 'content_submission', execution_after_send: true } });
+  const id = uid();
+  placements(s.db).push({ id, domain_id: s.d.id, path_id: s.p.id, status, link_type: 'resource', outreach_status: 'none', outreach_draft_attempts: 4 });
+  rows(s.db).push({ id: uid(), prospect_id: id, path_id: s.p.id, dimension: 'communication', instance_kind: '-', level: 'AUTO_OUTREACH', satisfied_at: null });
+  expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
+  const followup = { id: uid(), prospect_id: id, path_id: s.p.id, dimension: 'communication', instance_kind: 'followup', level: 'OWNER_OUTREACH', satisfied_at: null };
+  rows(s.db).push(followup);
+  expect((await Q.listOwnerQueue(s.db)).cards[0]).toMatchObject({ outreach_draft_exhausted: false });
+  rows(s.db).pop();
+  storedPath(s.db).execution_after_send = false;
+  expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
+  rows(s.db).push({ id: uid(), prospect_id: id, path_id: s.p.id, dimension: 'execution', instance_kind: '-', satisfied_at: NOW });
+  const result = await Q.listOwnerQueue(s.db);
+  expect(result.cards).toHaveLength(1);
+  expect(result.cards[0]).toMatchObject({ outreach_draft_exhausted: true, placement: { status } });
+  placements(s.db)[0].outreach_status = 'sent';
+  expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
+});
+
+
+test.each(['placed', 'live', 'indexed'])('late initial %s cards require submit-first but follow-ups remain visible', async (status) => {
+  const s = scenario({ make: outreachPath, domain: { agent_state: 'acquired' }, path: { acquisition_type: 'content_submission', execution_after_send: true } });
+  const id = uid();
+  placements(s.db).push({ id, domain_id: s.d.id, path_id: s.p.id, status, outreach_status: 'drafted' });
+  const row = { id: uid(), prospect_id: id, path_id: s.p.id, dimension: 'communication', instance_kind: '-', level: 'OWNER_OUTREACH', satisfied_at: null };
+  rows(s.db).push(row);
+  expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
+  const send = jest.fn();
+  await expect(Q.sendRow(s.db, { authorityId: row.id, actor: ACTOR, draftHash: 'synthetic', send })).rejects.toMatchObject({ status: 409 });
+  expect(send).not.toHaveBeenCalled();
+  storedPath(s.db).execution_after_send = false;
+  expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
+  const execution = { id: uid(), prospect_id: id, path_id: s.p.id, dimension: 'execution', instance_kind: '-', satisfied_at: null };
+  rows(s.db).push(execution);
+  expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
+  await expect(Q.sendRow(s.db, { authorityId: row.id, actor: ACTOR, draftHash: 'synthetic', send })).rejects.toMatchObject({ status: 409 });
+  expect(send).not.toHaveBeenCalled();
+  execution.satisfied_at = NOW;
+  expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(1);
+  execution.ended_at = NOW;
+  expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
+  execution.ended_at = null;
+  execution.path_id = uid();
+  expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
+  execution.path_id = s.p.id;
+  // An independent payment decision retains the card without enabling its initial send.
+  execution.satisfied_at = null;
+  rows(s.db).push({ id: uid(), prospect_id: id, path_id: s.p.id, dimension: 'payment', instance_kind: '-', level: 'OWNER_PAYMENT', satisfied_at: null });
+  expect((await Q.listOwnerQueue(s.db)).cards[0].rows.find((r) => r.id === row.id).approvable).toBe(false);
+  storedPath(s.db).execution_after_send = true;
+  row.instance_kind = 'followup';
+  expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(1);
+});
+
+test.each(['prospect', 'awaiting_owner'])('exhausted open %s drafts remain recoverable on send-first paths', async (status) => {
+  const s = scenario({ make: outreachPath });
+  placements(s.db).push({ id: uid(), domain_id: s.d.id, path_id: s.p.id, status, outreach_status: 'none', outreach_draft_attempts: 4 });
+  expect((await Q.listOwnerQueue(s.db)).cards[0]).toMatchObject({ outreach_draft_exhausted: true });
+  const domain = s.db._tables.seo_link_domains[0];
+  const alternate = outreachPath(domain);
+  s.db._tables.seo_link_acquisition_paths.push(alternate);
+  for (const bestPath of [alternate.id, null]) {
+    domain.best_path_id = bestPath;
+    expect((await Q.listOwnerQueue(s.db)).cards.some((card) => card.outreach_draft_exhausted)).toBe(false);
+  }
+  domain.best_path_id = s.p.id;
+  expect((await Q.listOwnerQueue(s.db)).cards[0]).toMatchObject({ outreach_draft_exhausted: true });
 });

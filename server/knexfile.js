@@ -1,5 +1,5 @@
 // Load .env for local dev — on Railway, env vars are injected directly
-require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+require('./config/load-env')();
 
 function hasUsableDatabaseUrl(value) {
   const url = String(value || '').trim();

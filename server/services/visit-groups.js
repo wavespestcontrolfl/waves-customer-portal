@@ -23,6 +23,7 @@
  */
 
 const db = require('../models/db');
+const { assertAssignableTechnician } = require('./technician-eligibility');
 
 const OPEN_STATUSES = ['open'];
 // Row-status vocabularies live in the canonical visit-context module.
@@ -316,9 +317,18 @@ async function assertRowMovableAlone(t, rowId, observedVisitId) {
   }
 }
 
-async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId } = {}) {
+async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId, actorId = null, noticeActorId } = {}) {
   const { assignDispatchJob } = require('./dispatch-assignment');
-  await assignDispatchJob({ jobId: rowId, technicianId, actorId: null, emit: true, trx: t, skipVisitSeam, ...(expectTechnicianId !== undefined ? { expectTechnicianId } : {}) });
+  // actorId: the staff row behind a unit move (dispatch_alerts.resolved_by
+  // + the broadcast). noticeActorId: who the tech's card names when that is
+  // not a staff row — the customer moving the stop online — so their own
+  // move stays silent and the card never says "by the office" for a
+  // customer move (codex r9 P2).
+  await assignDispatchJob({
+    jobId: rowId, technicianId, actorId, emit: true, trx: t, skipVisitSeam,
+    ...(expectTechnicianId !== undefined ? { expectTechnicianId } : {}),
+    ...(noticeActorId !== undefined ? { noticeActorId } : {}),
+  });
 }
 
 /**
@@ -1866,7 +1876,7 @@ function visitSummariesForRows(rows, {
 // path, never two drifting copies). True = do not send:
 //   1. a LIVE move_hold_until on the row's reminder record;
 //   2. renderedSlotMs (the epoch of the slot the body quotes) matching
-//      neither the row's own start nor the grouped stop's canonical start;
+//      neither the row's promised arrival nor the grouped stop's canonical start;
 //   3. the hold RE-READ after the slot/visit awaits — a mover can claim
 //      between the first hold read and those queries, with the row still
 //      showing the pre-move slot.
@@ -1885,7 +1895,7 @@ async function appointmentSendHeld(scheduledServiceId, renderedSlotMs = null) {
     if (Number.isFinite(renderedSlotMs)) {
       const live = await db('scheduled_services')
         .where({ id: scheduledServiceId })
-        .first('scheduled_date', 'window_start', 'visit_id');
+        .first('id', 'reservation_service_mix', 'scheduled_date', 'window_start', 'visit_id');
       if (!live || !live.scheduled_date) return true; // row gone/stale — never send the old slot
       const { parseETDateTime, etCalendarDayOf } = require('../utils/datetime-et');
       const day = etCalendarDayOf(live.scheduled_date);
@@ -1893,7 +1903,8 @@ async function appointmentSendHeld(scheduledServiceId, renderedSlotMs = null) {
         const at = parseETDateTime(`${day}T${hhmm || '08:00'}`);
         return at && !Number.isNaN(at.getTime()) ? at.getTime() : null;
       };
-      const candidates = [toMs(live.window_start ? String(live.window_start).slice(0, 5) : null)];
+      const arrivalStart = await require('./reservation-arrival').arrivalStartForService(db, live);
+      const candidates = [toMs(arrivalStart ? String(arrivalStart).slice(0, 5) : null)];
       if (live.visit_id) {
         const stopStart = await liveStopStartHHMM(db, live.visit_id);
         if (stopStart) candidates.push(toMs(stopStart));
@@ -2456,7 +2467,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         }
         const patch = { scheduled_date: newDateStr, window_start: starts[0] || null, window_end: ends.length ? ends[ends.length - 1] : null };
         if (repairKey !== visit.stop_base_key) { patch.stop_base_key = repairKey; patch.stop_seq = await nextStopSeq(t, repairKey); }
-        if (options.technicianId !== undefined) patch.technician_id = options.technicianId || null;
+        if (options.technicianId !== undefined) {
+          await assertAssignableTechnician(options.technicianId || null, { conn: t });
+          patch.technician_id = options.technicianId || null;
+        }
         // Mirror the normal retarget's lifecycle reset (codex r43): a
         // repaired LIVE move (allowLive) or date change must not leave the
         // parent marked underway with its tracker one-shots consumed at
@@ -2703,13 +2717,20 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // dispatch broadcast). The rebooker's occupancy probe therefore runs on
     // the row's CURRENT technician; staff surfaces are advisory anyway.
     const { technicianId: _primaryTech, ...primaryBase } = options;
+    // A unit move that ALSO changes technician re-points every member
+    // through assignDispatchJob right after — that writer sends the
+    // moved-off / new-visit pair, so the member's own rebooker call must not
+    // first tell the old tech "visit moved" (tech-visit-notifications.js).
+    const unitTechChanges = Object.prototype.hasOwnProperty.call(options, 'technicianId')
+      && (options.technicianId || null) !== (target.expect.technician_id || null);
+    const noticeOpts = unitTechChanges ? { suppressTechNotice: true } : {};
     const memberOpts = target.isPrimary
-      ? { ...primaryBase, expect: primaryExpect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect }
+      ? { ...primaryBase, ...noticeOpts, expect: primaryExpect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect }
       // A sibling is ALWAYS a single-row move (codex r4): the dispatch
       // surface previewed/acknowledged series scope for the tapped row
       // only, so a recurring sibling must never shift its own future
       // series undisclosed.
-      : { ...siblingBase, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect };
+      : { ...siblingBase, ...noticeOpts, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect };
     // Callers sync reminders for the tapped row only (r2): every moved
     // sibling gets its reminder row synced here, notice suppressed — the
     // visit's one reminder text is the primary's. A sibling's own series
@@ -2756,7 +2777,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
               await acquireOccupancyLock(t, newDateStr);
               await t.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['slot-reserve', `${options.technicianId}:${newDateStr}`]);
               // the row's COMMITTED window (a start-only landing derived its end); the landed contract is the fallback
-              const row = await t('scheduled_services').where({ id: target.id }).first('window_start', 'window_end', 'estimated_duration_minutes').catch(() => null);
+              const row = await t('scheduled_services').where({ id: target.id }).first('window_start', 'window_end', 'estimated_duration_minutes', 'service_type').catch(() => null);
               const windowStart = (row && row.window_start) || landed.window_start || target.startHHMM || null;
               const windowEnd = (row && row.window_end) || landed.window_end || null;
               const probeEnd = windowEnd ? String(windowEnd).slice(0, 5) : (windowStart ? shiftClock(String(windowStart).slice(0, 5), Number(row && row.estimated_duration_minutes) || 60) : null);
@@ -2779,8 +2800,30 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
                 throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), { statusCode: 409, isOperational: true, code: 'SLOT_TAKEN', conflictId: clashId });
               }
               if (clashId) warnings.push(`service ${target.id} overlaps another job on the destination technician's route (${clashId})`);
+              // Destination capability fence for THIS member on the transaction
+              // that assigns it (auto-dispatch's options.moveGuard). The member
+              // guard ran under the planning lock, which is released by now, so
+              // a category turned Off since planning is caught here, before the
+              // assignment write; the row lands on its old technician and is
+              // reported failed like any other refused member.
+              if (typeof options.moveGuard === 'function') {
+                const memberRow = row && row.service_type !== undefined
+                  ? { id: target.id, ...row }
+                  : await t('scheduled_services').where({ id: target.id }).first('id', 'service_type', 'technician_id');
+                await options.moveGuard({ trx: t, technicianId: options.technicianId, service: memberRow || { id: target.id } });
+              }
             }
-            await alignMemberTechnician(t, target.id, options.technicianId || null, { skipVisitSeam: true, expectTechnicianId: target.expect.technician_id || null });
+            await alignMemberTechnician(t, target.id, options.technicianId || null, {
+              skipVisitSeam: true,
+              expectTechnicianId: target.expect.technician_id || null,
+              // Staff UUID only — assignDispatchJob's actorId also stamps
+              // dispatch_alerts.resolved_by; a system label never goes there.
+              actorId: options.actorId || null,
+              // The card's actor: the staff row when there is one, else the
+              // rebooker's initiatedBy label (a customer's online move reads
+              // "by the customer online", as the moved-off card below does).
+              noticeActorId: options.actorId || initiatedBy || null,
+            });
           });
           return;
         } catch (err) {
@@ -2788,6 +2831,33 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
           if (err && err.code === '40P01') continue;
           break;
         }
+      }
+      // The row moved but stays on its old technician: that tech's "visit
+      // moved" card was suppressed on the member's rebooker call (the
+      // reassignment was going to send the pair) — send it now so the move
+      // is never silent for the person still holding the stop.
+      const holder = target.committedTechnicianId !== undefined
+        ? target.committedTechnicianId
+        : (target.expect.technician_id || null);
+      if (Object.prototype.hasOwnProperty.call(options, 'technicianId')
+        && (options.technicianId || null) !== (target.expect.technician_id || null)
+        && holder) {
+        const win = targetTuple(target);
+        // The snapshot asserts only what the plan knows (pre-push audit P1):
+        // an object-shaped window carries no end, and a row without one had
+        // none to plan from — the rebooker derives the end from the duration
+        // either way — and asserting `null` there made the write-time check
+        // drop this card against the committed end, leaving the holder
+        // silent. The card's own text reads the committed row.
+        const snapshot = { date: newDateStr, windowStart: win.window_start ?? null };
+        if (win.window_end) snapshot.windowEnd = win.window_end;
+        void require('./tech-visit-notifications').notifyVisitRescheduled({
+          visitId: target.id,
+          technicianId: holder,
+          actorId: options.actorId || initiatedBy || null,
+          previous: { date: target.expect.scheduled_date, windowStart: target.expect.window_start, windowEnd: target.expect.window_end },
+          snapshot,
+        });
       }
       await failSibling(target, { code: lastErr.code || 'ASSIGNMENT_FAILED' }, `moved but its technician reassignment failed: ${lastErr.message}`, { movedButUnassigned: true });
     };
@@ -2819,6 +2889,11 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // snapshot (codex r6): an operator confirm between plan and move must
       // not be rewound by a caller restoring 'pending'.
       if (r && r.previousStatus) target.previousStatus = String(r.previousStatus);
+      // The holder on the COMMITTED row (codex r10 P1): a reassignment that
+      // raced the plan can have landed a third technician — the fence in
+      // alignMember then fails for exactly that reason, and the fallback
+      // card must go to whoever holds the stop now, not the plan's tech.
+      if (r && r.technicianId !== undefined) target.committedTechnicianId = r.technicianId || null;
       if (r && Array.isArray(r.warnings)) warnings.push(...r.warnings);
       if (target.isPrimary) primaryResult = r;
       await alignMember();
@@ -2987,7 +3062,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         patch.stop_base_key = newKey;
         patch.stop_seq = await nextStopSeq(t, newKey);
       }
-      if (options.technicianId !== undefined) patch.technician_id = options.technicianId || null;
+      if (options.technicianId !== undefined) {
+        await assertAssignableTechnician(options.technicianId || null, { conn: t });
+        patch.technician_id = options.technicianId || null;
+      }
       if (plan.anyLive || newDateStr !== plan.oldDate) {
         // The members' lifecycle was rewound by the rebooker; the visit's
         // must follow, and the day's tracker one-shots re-arm.
@@ -3100,6 +3178,7 @@ module.exports = {
   ensureLegacyCompletable,
   dissolveForLegacyCompletion,
   stopBaseKey,
+  lockStop,
   lockStopForRow,
   openMembers,
   visitActivity,

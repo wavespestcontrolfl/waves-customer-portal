@@ -17,7 +17,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 // loads the REAL module (and its real clampTitle/clampMetaDescription).
 jest.mock('../services/content-astro/github-client', () => ({}));
 jest.mock('../services/content-astro/author-service', () => ({ getAuthor: jest.fn() }));
-jest.mock('../services/content/image-generator', () => ({ generate: jest.fn() }));
+jest.mock('../services/content/image-generator', () => ({ generate: jest.fn(), planFor: jest.fn(() => ({ style: 'photo', setting: 'inside a residential garage', timeOfDay: 'late afternoon', vantage: 'eye level' })), retryStyleFor: jest.fn(() => 'illustration') }));
 jest.mock('../services/content/fact-check-gate', () => ({ evaluate: jest.fn() }));
 
 const runner = require('../services/content/autonomous-runner');

@@ -27,7 +27,7 @@ const UNIQUE = {
 function fakeDb(seed = {}) {
   const store = {
     seo_backlinks: [], seo_link_domains: [], seo_link_domain_sources: [], seo_link_acquisition_paths: [],
-    seo_link_prospects: [], seo_link_placement_backlinks: [], ...seed,
+    seo_link_attempts: [], seo_link_prospects: [], seo_link_placement_backlinks: [], ...seed,
   };
   const writes = [];
   const seq = {};

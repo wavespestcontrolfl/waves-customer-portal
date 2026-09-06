@@ -51,7 +51,9 @@ export function canSendCardRequest(data) {
 // visit-oriented wording below must not leak into these outcomes.
 export function describeAutopaySetupLinkResult(result) {
   if (!result) return { tone: 'bad', text: 'Request failed — try again' };
-  if (result.action === 'sent') return { tone: 'good', text: 'Auto Pay setup link texted' };
+  if (result.action === 'sent') {
+    return { tone: 'good', text: result.channel === 'email' ? 'Auto Pay setup link emailed' : 'Auto Pay setup link texted' };
+  }
   if (result.action === 'auto_secured') return { tone: 'good', text: 'A consented card was already on file — Auto Pay enrolled, no link needed' };
   if (result.action === 'link_created') {
     return { tone: 'good', text: result.copied ? 'Auto Pay setup link copied to clipboard' : 'Auto Pay setup link ready — copy it from below' };
@@ -59,6 +61,10 @@ export function describeAutopaySetupLinkResult(result) {
   const reason = String(result.reason || '');
   if (reason === 'gate_off') return { tone: 'muted', text: 'Auto Pay setup links are switched off (GATE_AUTOPAY_SETUP_LINK)' };
   if (reason === 'template_inactive') return { tone: 'muted', text: 'The Auto Pay setup text is inactive in Templates — copy the link instead' };
+  if (reason === 'email_template_inactive') return { tone: 'muted', text: 'The Auto Pay setup email is inactive in Templates — copy the link instead' };
+  if (reason === 'no_customer_email') return { tone: 'bad', text: 'No email address on file for this customer' };
+  if (reason === 'email_prefs_check_uncertain') return { tone: 'bad', text: 'Could not confirm this customer\'s email preferences — try again in a moment' };
+  if (reason === 'email_opted_out') return { tone: 'muted', text: 'Not sent — this customer has email notifications turned off. Copy or text the link instead' };
   if (reason === 'payer_billed') return { tone: 'muted', text: 'Skipped — this customer bills to a third-party payer' };
   // A transient lookup failure is NOT a confirmed payer — say so, so the
   // operator retries instead of assuming third-party billing.

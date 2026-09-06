@@ -459,13 +459,6 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       push('operational', "Every swapped stop's route order is cleared on both sides — stops append after each day's ordered run until the next optimization");
     }
   }
-  // Receiving a restock also re-runs the WaveGuard lawn-readiness recheck,
-  // which can resolve or rewrite open lawn_protocol_readiness rows in the
-  // Command Center (codex r7 on #3648) — a conditional alert write the
-  // operator is approving, so it must be on the card.
-  if (toolName === 'update_restock_request' && params?.action === 'receive') {
-    push('operational', 'Receiving also re-checks WaveGuard lawn-protocol readiness: open readiness alerts in the Command Center may be resolved or rewritten by that recheck (runs after the stock commit; a recheck failure is reported, never silent)');
-  }
   if (toolName === 'cancel_appointment' && preview?.cancellation) {
     // The follow-through's money effects, from the rails' own previews.
     const c = preview.cancellation;

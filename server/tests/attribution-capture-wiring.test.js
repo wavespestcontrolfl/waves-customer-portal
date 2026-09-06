@@ -264,7 +264,12 @@ describe('lead-funnel-bridge call sites', () => {
     const src = read('../routes/admin-leads.js');
     expect(src).toMatch(/bridgeLeadFunnelStage\(req\.params\.id, updates\.status\)/);
     expect(src).toMatch(/bridgeLeadFunnelStage\(req\.params\.id, 'contacted'\)/);
-    expect(src).toMatch(/bridgeLeadFunnelStage\(req\.params\.id, 'won'\)/);
+    // The book route's won mirror is the shared settlement (bridge + wizard
+    // repeat settlement), not a bare bridge (codex #3834 r32 P1).
+    expect(src).toMatch(/leadAttribution\.settleWonFunnelRow\(req\.params\.id, customerId\)/);
+    expect(src).not.toMatch(/bridgeLeadFunnelStage\(req\.params\.id, 'won'\)/);
+    // ...and so is the PUT status editor's won (codex #3834 r34 P1).
+    expect(src).toMatch(/if \(updates\.status === 'won'\) await leadAttribution\.settleWonFunnelRow\(req\.params\.id, lead\.customer_id \|\| null\)/);
   });
 
   test('lead-response agent contacted transition bridges', () => {
@@ -281,6 +286,12 @@ describe('lead-funnel-bridge call sites', () => {
     const src = read('../services/intelligence-bar/leads-tools.js');
     expect(src).toMatch(/bridgeLeadFunnelStage\(lead\.id, new_status\)/);
     expect(src).toMatch(/bridgeLeadsFunnelStage\(ids, new_status\)/);
+    // A won through either tool is the shared settlement (codex #3834 r34 P1).
+    expect(src).toMatch(/new_status === 'won'\n\s+\? await leadAttribution\.settleWonFunnelRow\(lead\.id, updatedRows\[0\]\.customer_id \|\| null\)/);
+    expect(src).toMatch(/new_status === 'won' \? await settleBulkWon\(ids\) : await bridgeLeadsFunnelStage\(ids, new_status\)/);
+    // The bulk won keeps the set bridge and settles only wizard repeats (codex r35 P2).
+    expect(src).toMatch(/const funnel = await bridgeLeadsFunnelStage\(ids, 'won'\)/);
+    expect(src).toMatch(/for \(const row of repeats\) await leadAttribution\.settleWonFunnelRow\(row\.id, row\.customer_id \|\| null\)/);
   });
 
   test('the bridge isolates transactional callers behind a savepoint', () => {

@@ -1,3 +1,4 @@
+import lawnScores from '@lawn-scores';
 // client/src/pages/admin/SchedulePage.jsx
 //
 // Shared-utility module for the V2 dispatch surface. The V1 page
@@ -33,6 +34,7 @@
 //   chosen slot is taken between modal open and submit?
 import { useState, useEffect, useMemo, useRef } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
+import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 
 import { addETDays, etDateString } from "../../lib/timezone";
@@ -56,6 +58,8 @@ import {
   specialtyCompletionFor,
   specialtyFindingActionConflict,
 } from "../../lib/service-completion-presets";
+import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, previousLawnAssessment } from "../../lib/lawn-completion";
+import LawnFindingPicker from "../../components/tech/LawnFindingPicker";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useCancelFeeNotice } from "../../components/schedule/CancelFeeNotice";
 import {
@@ -78,6 +82,7 @@ import { useSlotConflicts } from "../../components/schedule/useSlotConflicts";
 import { appointmentHistory as buildAppointmentHistory } from "../../components/schedule/customerAppointments";
 
 import BestTimeHint from "../../components/schedule/BestTimeHint";
+import IntelligenceBarShell from "../../components/admin/IntelligenceBarShell";
 import { useBestTimes } from "../../components/schedule/useBestTimes";
 import SeriesMoveNotice from "../../components/schedule/SeriesMoveNotice";
 import {
@@ -1509,6 +1514,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     return base + addonDur;
   })();
   const { conflicts: slotConflicts } = useSlotConflicts({
+    serviceId: service.id,
+    technicianId: form.technicianId || null,
     date: form.scheduledDate,
     windowStart: form.windowStart,
     windowEnd: form.windowEnd,
@@ -1518,6 +1525,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // Advisory drive-detour suggestions for the same fixed day — picking a
   // chip only fills the window fields (never saves).
   const { bestTimes } = useBestTimes({
+    arrivalWindows: true,
     date: form.scheduledDate,
     serviceId: service.id,
     customerId: service.customerId || service.customer_id,
@@ -1646,6 +1654,24 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [createInvoice, setCreateInvoice] = useState(
     !!(service.createInvoiceOnComplete ?? service.create_invoice_on_complete),
   );
+  const [addressOptions, setAddressOptions] = useState([]);
+  const [addressState, setAddressState] = useState("loading");
+  const [selectedPropertyId, setSelectedPropertyId] = useState("");
+  const selectedProperty = addressOptions.find((property) => property.id === selectedPropertyId);
+  useEffect(() => {
+    let cancelled = false;
+    const customerId = service.customerId || service.customer_id;
+    setAddressState("loading");
+    setSelectedPropertyId("");
+    adminFetch(`/admin/customers/${customerId}/properties?context=appointment_address`)
+      .then((data) => {
+        if (cancelled) return;
+        setAddressOptions(data.properties || []);
+        setAddressState(data.canChangeAppointmentAddress === true ? "ready" : "disabled");
+      })
+      .catch(() => { if (!cancelled) setAddressState("error"); });
+    return () => { cancelled = true; };
+  }, [service.customerId, service.customer_id, service.id]);
   const [customerData, setCustomerData] = useState(null);
   const [customerLoading, setCustomerLoading] = useState(false);
   const [payers, setPayers] = useState([]);
@@ -2162,6 +2188,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         method: "PUT",
         body: JSON.stringify({
           ...form,
+          ...(selectedPropertyId ? { propertyId: selectedPropertyId } : {}),
           notifyCustomer: notifyOnMove || undefined,
           // Collective-move ack — bound to the previewed occurrence set the
           // modal showed (empty when this save is not a collective move).
@@ -3411,13 +3438,38 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               >
                 Customer location
               </div>{" "}
+              {addressState === "ready" && addressOptions.length > 0 && (
+                <div style={{ marginBottom: 14 }}>
+                  <label htmlFor="appointment-property" style={{ ...labelStyle, fontSize: 14 }}>Service address</label>
+                  <select id="appointment-property" value={selectedPropertyId}
+                    onChange={(event) => setSelectedPropertyId(event.target.value)}
+                    disabled={saving} style={{ ...inputStyle, maxWidth: "100%" }}>
+                    <option value="">Keep current appointment address</option>
+                    {addressOptions.map((property) => (
+                      <option key={property.id} value={property.id}>
+                        {[property.label, property.address_line1, property.address_line2, property.city, property.state, property.zip].filter(Boolean).join(", ")}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedPropertyId && (
+                    <p style={{ fontSize: 14, color: D.muted, margin: "8px 0 0" }}>
+                      {serviceHasSeries
+                        ? "Saving applies this address to this appointment and all upcoming appointments in this plan, including appointments created later."
+                        : "Saving changes this appointment’s address."}
+                      {" Services grouped at the same stop stay together."}
+                    </p>
+                  )}
+                </div>
+              )}
+              {addressState === "loading" && <p style={{ fontSize: 14, color: D.muted }}>Loading saved addresses…</p>}
+              {addressState === "error" && <p role="alert" style={{ fontSize: 14 }}>Saved addresses could not be loaded. Reopen this appointment to try again.</p>}
               <div style={{ display: "grid", gap: 12 }}>
                 {" "}
                 <div>
                   {" "}
                   <label style={labelStyle}>Street address</label>{" "}
                   <input
-                    value={service.address || customer.address?.line1 || ""}
+                    value={selectedProperty ? [selectedProperty.address_line1, selectedProperty.address_line2].filter(Boolean).join(" ") : service.address || customer.address?.line1 || ""}
                     readOnly
                     className="font-medium"
                     style={{ ...inputStyle, background: "#F9FAFB" }}
@@ -3435,7 +3487,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     {" "}
                     <label style={labelStyle}>City</label>{" "}
                     <input
-                      value={service.city || customer.address?.city || ""}
+                      value={selectedProperty ? selectedProperty.city || "" : service.city || customer.address?.city || ""}
                       readOnly
                       className="font-medium"
                       style={{ ...inputStyle, background: "#F9FAFB" }}
@@ -3445,7 +3497,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     {" "}
                     <label style={labelStyle}>State</label>{" "}
                     <input
-                      value={customer.address?.state || "Florida"}
+                      value={selectedProperty ? selectedProperty.state || "" : service.state || customer.address?.state || "Florida"}
                       readOnly
                       className="font-medium"
                       style={{ ...inputStyle, background: "#F9FAFB" }}
@@ -4638,6 +4690,489 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 // =========================================================================
 // PROTOCOL PANEL — shows all 5 protocol layers for a service
 // =========================================================================
+// ── Job card (GATE_JOB_CARD) ────────────────────────────────────────────────
+// The drawer's cliff-notes tab. Same inline-style + shadowed-D system as the
+// rest of ProtocolPanel; the shared IntelligenceBarShell mounted under the
+// header is the one imported component. Server shape: GET
+// /admin/protocols/job-card/:serviceId (services/job-card.js).
+
+const JOB_CARD_CHIP = {
+  ok: { label: "OK", bg: "#F4F4F5", fg: "#3F3F46" },
+  hold: { label: "Hold", bg: "#C8312F", fg: "#FFFFFF" },
+  unknown: { label: "Unknown", bg: "#F4F4F5", fg: "#71717A" },
+};
+
+function JobCardChip({ tone = "unknown", label, D }) {
+  const c = JOB_CARD_CHIP[tone] || JOB_CARD_CHIP.unknown;
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        padding: "2px 8px",
+        borderRadius: 2,
+        background: c.bg,
+        color: c.fg,
+        fontSize: 11,
+        fontWeight: 500,
+        textTransform: "uppercase",
+        letterSpacing: "0.06em",
+        border: `1px solid ${tone === "hold" ? "#C8312F" : D.border}`,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {label || c.label}
+    </span>
+  );
+}
+
+function JobCardCollapsible({ title, right = null, defaultOpen = false, children, D }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, background: D.card, marginBottom: 8 }}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
+          padding: "12px 14px",
+          minHeight: 44,
+          background: "transparent",
+          border: "none",
+          cursor: "pointer",
+          textAlign: "left",
+          color: D.heading,
+          fontSize: 14,
+          fontWeight: 500,
+        }}
+      >
+        <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+          <span style={{ color: D.muted, fontSize: 12, width: 10, flexShrink: 0 }}>{open ? "▾" : "▸"}</span>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</span>
+        </span>
+        {right && <span style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>{right}</span>}
+      </button>
+      {open && <div style={{ padding: "0 14px 14px", borderTop: `1px solid ${D.border}` }}>{children}</div>}
+    </div>
+  );
+}
+
+function JobCardStrip({ strip, D }) {
+  const [shown, setShown] = useState({});
+  const phoneHref = strip?.phone ? strip.phone.replace(/[^\d+]/g, "") : "";
+  const btn = {
+    flex: 1,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    minHeight: 44,
+    padding: "0 12px",
+    borderRadius: 2,
+    border: `1px solid ${D.heading}`,
+    background: D.heading,
+    color: D.white,
+    fontSize: 12,
+    fontWeight: 500,
+    textTransform: "uppercase",
+    letterSpacing: "0.06em",
+    textDecoration: "none",
+  };
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>{strip?.name || "Customer"}</div>
+      {strip?.program && <div style={{ fontSize: 13, color: D.muted, marginTop: 2 }}>{strip.program}</div>}
+      {phoneHref && (
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <a href={`tel:${phoneHref}`} style={btn}>Call</a>
+          <a href={`sms:${phoneHref}`} style={{ ...btn, background: D.card, color: D.heading }}>Text</a>
+        </div>
+      )}
+      {(strip?.access?.codes || []).length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
+          {strip.access.codes.map((c) => (
+            <button
+              key={c.label}
+              type="button"
+              onClick={() => setShown((s) => ({ ...s, [c.label]: !s[c.label] }))}
+              style={{
+                minHeight: 36,
+                padding: "0 10px",
+                borderRadius: 2,
+                border: `1px solid ${D.inputBorder}`,
+                background: D.card,
+                color: D.text,
+                fontSize: 13,
+                cursor: "pointer",
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {c.label}: {shown[c.label] ? c.code : "tap to show"}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function JobCardSprayCheck({ sprayCheck, products, D }) {
+  const f = sprayCheck?.forecast;
+  const range = f?.tempF && f.tempF[0] != null ? `${f.tempF[0]}–${f.tempF[1]}°F` : null;
+  return (
+    <JobCardCollapsible
+      title="Spray check"
+      defaultOpen
+      D={D}
+      right={sprayCheck?.hold ? <JobCardChip tone="hold" D={D} /> : null}
+    >
+      <div style={{ fontSize: 13, color: D.text, marginTop: 10 }}>
+        {f ? (
+          <div>
+            Next {sprayCheck.windowHours} h: {range || "temp n/a"}, wind {f.windMph != null ? `${f.windMph} mph` : "n/a"}, rain {f.rainPct != null ? `${f.rainPct}%` : "n/a"}
+            {f.shortForecast ? `, ${f.shortForecast.toLowerCase()}` : ""}
+          </div>
+        ) : (
+          <div style={{ color: D.muted }}>{sprayCheck.window === "not_today" ? "Judged on the visit day — open the card that morning." : sprayCheck.coordsSource === "none" ? "No property pin on file — no forecast, every product unknown." : "No forecast right now."}</div>
+        )}
+        {products.length > 0 && (
+          <div style={{ marginTop: 8, display: "grid", gap: 4 }}>
+            {products.map((p) => (
+              <div key={p.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+                <span style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                  {p.verdict !== "ok" && p.verdictReason && (
+                    <span style={{ fontSize: 12, color: p.verdict === "hold" ? "#C8312F" : D.muted }}>{p.verdictReason}</span>
+                  )}
+                  <JobCardChip tone={p.verdict} D={D} />
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </JobCardCollapsible>
+  );
+}
+
+function fmtUnit(unit) {
+  return unit ? String(unit).replace(/_/g, " ") : "";
+}
+
+// Small doses keep their precision: under 1 oz they render in mL / g (a
+// syringe or scale number), anything else to three significant decimals.
+const SMALL_DOSE = { "fl oz": ["mL", 29.5735], fl_oz: ["mL", 29.5735], oz: ["g", 28.3495] };
+function fmtAmount(amount, unit) {
+  if (amount == null) return null;
+  const n = Number(amount);
+  const small = n > 0 && n < 1 ? SMALL_DOSE[String(unit || "").toLowerCase()] : null;
+  if (small) return `${(n * small[1]).toFixed(1).replace(/\.0$/, "")} ${small[0]}`;
+  const txt = n >= 100 ? Math.round(n).toString() : n.toFixed(n < 1 ? 3 : 2).replace(/\.?0+$/, "");
+  const u = fmtUnit(unit);
+  return `${txt}${u ? ` ${u}` : ""}`;
+}
+
+function JobCardOrderButton({ productId, name, order, D, compact = false }) {
+  const [state, setState] = useState("idle");
+  const [msg, setMsg] = useState("");
+  const submit = async () => {
+    if (state === "confirm") {
+      setState("sending");
+      try {
+        const data = await adminFetch(`/admin/inventory/waveguard-forecast/${productId}/restock-request`, {
+          method: "POST",
+          body: JSON.stringify({ requestedQuantity: order?.quantity || 1, unit: order?.unit || undefined, priority: "high", reason: `Job card: ${name}` }),
+        });
+        setState("done");
+        setMsg(data?.existing ? "Already on the order list" : "Added to the order list");
+      } catch (err) {
+        setState("idle");
+        setMsg(err?.message || "Could not add");
+      }
+      return;
+    }
+    setState("confirm");
+  };
+  const detail = [order?.packSize, order?.lastPrice != null ? "$" + Number(order.lastPrice).toFixed(2) : null].filter(Boolean).join(" · ");
+  // No order quantity yet (mix request still pending) → nothing to submit;
+  // the fallback of 1 unit would under-order a multi-unit pack.
+  const ready = order?.quantity > 0;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <button
+        type="button"
+        onClick={submit}
+        disabled={!ready || state === "sending" || state === "done"}
+        style={{
+          minHeight: compact ? 36 : 44,
+          padding: "0 12px",
+          borderRadius: 2,
+          border: `1px solid ${D.heading}`,
+          background: state === "confirm" ? D.heading : D.card,
+          color: state === "confirm" ? D.white : D.heading,
+          fontSize: 12,
+          fontWeight: 500,
+          textTransform: "uppercase",
+          letterSpacing: "0.06em",
+          cursor: state === "done" ? "default" : "pointer",
+          opacity: state === "done" ? 0.6 : 1,
+        }}
+      >
+        {state === "confirm" ? "Tap again to order" : state === "sending" ? "Adding…" : state === "done" ? "Ordered" : "Order more"}
+      </button>
+      {detail && <span style={{ fontSize: 12, color: D.muted }}>{detail}</span>}
+      {msg && <span style={{ fontSize: 12, color: D.muted }}>{msg}</span>}
+    </div>
+  );
+}
+
+function JobCardProduct({ p, D }) {
+  const amount = fmtAmount(p.planned?.amount, p.planned?.unit);
+  // The shortage line names the plan's requirement even while the dose is withheld.
+  const demand = fmtAmount(p.demand?.amount, p.demand?.unit) || amount;
+  const right = (
+    <>
+      {p.conditional && <span style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>If needed</span>}
+      {p.short && <JobCardChip tone="hold" label="Short" D={D} />}
+      <JobCardChip tone={p.verdict} D={D} />
+      {amount && <span style={{ fontSize: 13, color: D.text, fontVariantNumeric: "tabular-nums" }}>{amount}</span>}
+    </>
+  );
+  return (
+    <JobCardCollapsible title={p.name} right={right} D={D}>
+      <div style={{ fontSize: 13, color: D.text, marginTop: 10, display: "grid", gap: 8 }}>
+        {p.line && <div style={{ color: D.muted }}>{p.line}</div>}
+        {p.verdict !== "ok" && p.verdictReason && (
+          <div style={{ color: p.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {p.verdictReason}</div>
+        )}
+        {p.precautions && <div>{p.precautions}</div>}
+        {p.signalWord && <div style={{ color: D.muted }}>Signal word: {p.signalWord}</div>}
+        {p.short && (
+          <div style={{ color: "#C8312F" }}>
+            {demand
+              ? `On hand ${fmtAmount(p.onHand, p.onHandUnit)} vs ${demand} planned.`
+              : `On hand ${fmtAmount(p.onHand, p.onHandUnit)} — short of the planned amount (withheld).`}
+          </div>
+        )}
+        {!p.short && p.onHand != null && (
+          <div style={{ color: D.muted }}>On hand {fmtAmount(p.onHand, p.onHandUnit)}{p.lowStock ? " (low)" : ""}</div>
+        )}
+        {p.amountNote && <div style={{ color: D.muted }}>{p.amountNote}</div>}
+        {p.stockNote && <div style={{ color: D.muted }}>{p.stockNote}</div>}
+        {p.rotation && <div style={{ color: D.muted }}>{p.rotation}</div>}
+        {(p.labelUrl || p.sdsUrl) && (
+          <div style={{ display: "flex", gap: 12 }}>
+            {p.labelUrl && <a href={p.labelUrl} target="_blank" rel="noreferrer" style={{ color: D.heading }}>Label</a>}
+            {p.sdsUrl && <a href={p.sdsUrl} target="_blank" rel="noreferrer" style={{ color: D.heading }}>SDS</a>}
+          </div>
+        )}
+        <JobCardOrderButton productId={p.id} name={p.name} order={p.order} D={D} compact />
+      </div>
+    </JobCardCollapsible>
+  );
+}
+
+function JobCardTank({ tank, serviceId, D }) {
+  const [gallons, setGallons] = useState(110);
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState([]);
+  const [picked, setPicked] = useState(null);
+  const [mix, setMix] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    const term = q.trim();
+    if (term.length < 2) {
+      setResults([]);
+      return undefined;
+    }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const data = await adminFetch(`/admin/protocols/job-card/products?q=${encodeURIComponent(term)}`);
+        if (!cancelled) setResults(data?.products || []);
+      } catch {
+        if (!cancelled) setResults([]);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [q]);
+
+  useEffect(() => {
+    if (!picked) {
+      setMix(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setBusy(true);
+    // Never show the previous product's verdict beside the new one.
+    setMix(null);
+    adminFetch(`/admin/protocols/job-card/mix?serviceId=${encodeURIComponent(serviceId)}&productId=${encodeURIComponent(picked.id)}&gallons=${gallons}`)
+      .then((data) => { if (!cancelled) setMix(data); })
+      .catch(() => { if (!cancelled) setMix({ amount: null, reason: "Could not load the mix" }); })
+      .finally(() => { if (!cancelled) setBusy(false); });
+    return () => { cancelled = true; };
+  }, [picked, gallons, serviceId]);
+
+  const pill = (g) => ({
+    flex: 1,
+    minHeight: 44,
+    borderRadius: 2,
+    border: `1px solid ${gallons === g ? D.heading : D.inputBorder}`,
+    background: gallons === g ? D.heading : D.card,
+    color: gallons === g ? D.white : D.text,
+    fontSize: 12,
+    fontWeight: 500,
+    textTransform: "uppercase",
+    letterSpacing: "0.06em",
+    cursor: "pointer",
+  });
+
+  return (
+    <JobCardCollapsible
+      title="Tank"
+      defaultOpen
+      D={D}
+      right={tank && !tank.calibrated ? <JobCardChip tone="hold" label={tank.unavailable ? "Unavailable" : "Not calibrated"} D={D} /> : null}
+    >
+      <div style={{ marginTop: 10, display: "grid", gap: 10 }}>
+        {tank && !tank.calibrated && (
+          <div style={{ fontSize: 13, color: "#C8312F" }}>{tank.reason}. Per-1,000 sq ft amounts are withheld {tank.unavailable ? "until the check succeeds" : "until a calibrated rig is on file"}; per-gallon dilutions still mix.</div>
+        )}
+        <div style={{ display: "flex", gap: 8 }}>
+          <button type="button" style={pill(110)} onClick={() => setGallons(110)}>110 gal</button>
+          <button type="button" style={pill(1)} onClick={() => setGallons(1)}>1 gal</button>
+        </div>
+        <input
+          value={q}
+          onChange={(e) => { setQ(e.target.value); setPicked(null); }}
+          placeholder="Search a product to mix"
+          inputMode="search"
+          style={{
+            width: "100%",
+            boxSizing: "border-box",
+            minHeight: 44,
+            padding: "0 12px",
+            borderRadius: 2,
+            border: `1px solid ${D.inputBorder}`,
+            background: D.input,
+            color: D.text,
+            fontSize: 14,
+          }}
+        />
+        {!picked && results.length > 0 && (
+          <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, overflow: "hidden" }}>
+            {results.map((r) => (
+              <button
+                key={r.id}
+                type="button"
+                onClick={() => { setPicked(r); setQ(r.name); setResults([]); }}
+                style={{
+                  width: "100%",
+                  textAlign: "left",
+                  minHeight: 44,
+                  padding: "0 12px",
+                  background: D.card,
+                  border: "none",
+                  borderBottom: `1px solid ${D.border}`,
+                  color: D.text,
+                  fontSize: 14,
+                  cursor: "pointer",
+                }}
+              >
+                {r.name}
+              </button>
+            ))}
+          </div>
+        )}
+        {picked && (
+          <div style={{ border: `1px solid ${D.border}`, borderRadius: 2, padding: 12, display: "grid", gap: 8 }}>
+            <div style={{ fontSize: 14, fontWeight: 500, color: D.heading, display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+              <span>{picked.name}</span>
+              {mix?.sprayCheck && <JobCardChip tone={mix.sprayCheck.verdict} D={D} />}
+            </div>
+            {mix?.sprayCheck && mix.sprayCheck.verdict !== "ok" && mix.sprayCheck.reason && (
+              <div style={{ fontSize: 12, color: mix.sprayCheck.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {mix.sprayCheck.reason}</div>
+            )}
+            {mix?.context?.line && <div style={{ fontSize: 12, color: D.muted }}>Under add-on: {mix.context.line}{mix.context.conditional ? " · if needed" : ""}</div>}
+            {busy ? (
+              <div style={{ fontSize: 13, color: D.muted }}>Working out the mix…</div>
+            ) : mix?.amount != null ? (
+              <div style={{ fontSize: 20, fontWeight: 500, color: D.heading, fontVariantNumeric: "tabular-nums" }}>
+                {fmtAmount(mix.amount, mix.unit)}{mix.amountMax != null ? ` – ${fmtAmount(mix.amountMax, mix.unit)}` : ""} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {gallons} gal{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
+              </div>
+            ) : (
+              <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>
+            )}
+            {mix && (mix.ratePer1000 != null || mix.ratePerGallon) && (
+              <div style={{ fontSize: 12, color: D.muted }}>
+                Label rate {mix.ratePerGallon ? `${mix.ratePerGallon.lo}${mix.ratePerGallon.hi > mix.ratePerGallon.lo ? `–${mix.ratePerGallon.hi}` : ""} ${fmtUnit(mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}
+              </div>
+            )}
+            <JobCardOrderButton key={picked.id} productId={picked.id} name={picked.name} order={mix?.order} D={D} compact />
+          </div>
+        )}
+      </div>
+    </JobCardCollapsible>
+  );
+}
+
+function JobCardTab({ card, loading, error, D }) {
+  if (loading) {
+    return <div style={{ padding: 40, textAlign: "center", color: D.muted }}>Loading job card...</div>;
+  }
+  if (error || !card) {
+    return <div style={{ padding: 24, textAlign: "center", color: D.muted }}>Job card unavailable right now.</div>;
+  }
+  const products = card.products || [];
+  return (
+    <div>
+      <JobCardStrip strip={card.strip} D={D} />
+      {card.paragraph?.text && (
+        <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>{card.paragraph.text}</p>
+      )}
+      {card.notes?.chemicalSensitivity && (
+        <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 8px" }}>Chemical sensitivity: {card.notes.chemicalSensitivity}</p>
+      )}
+      {card.notes?.petsSecured && (
+        <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 8px" }}>Pets: {card.notes.petsSecured}</p>
+      )}
+      {card.notes?.instructions && (
+        <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 8px" }}>Instructions: {card.notes.instructions}</p>
+      )}
+      {card.notes?.visitNotes && (
+        <p style={{ fontSize: 14, lineHeight: 1.5, color: D.text, margin: "0 0 14px" }}>Visit note: {card.notes.visitNotes}</p>
+      )}
+      <JobCardSprayCheck sprayCheck={card.sprayCheck} products={products} D={D} />
+      <JobCardTank tank={card.tank} serviceId={card.serviceId} D={D} />
+      {card.planBlocks?.length > 0 && (
+        <div style={{ border: "1px solid #C8312F", borderRadius: 2, padding: "10px 12px", margin: "14px 0 0", fontSize: 14, color: D.text }}>
+          <div style={{ fontWeight: 500, color: "#C8312F", marginBottom: 4 }}>Lawn plan blocked — amounts withheld</div>
+          {card.planBlocks.map((b, i) => <div key={b.code || i}>{b.message}</div>)}
+        </div>
+      )}
+      {products.length > 0 && (
+        <div style={{ fontSize: 11, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.06em", color: D.muted, margin: "14px 0 6px" }}>
+          Products{card.visit?.number ? ` · visit ${card.visit.number}` : ""}{card.addons?.length ? ` · + ${card.addons.map((a) => (a.visit?.number ? `${a.name} (visit ${a.visit.number})` : a.name)).join(", ")}` : ""}
+        </div>
+      )}
+      {(card.addons || []).filter((a) => a.note).map((a) => (
+        <div key={a.name} style={{ fontSize: 13, color: D.muted, marginBottom: 6 }}>{a.name}: {a.note}</div>
+      ))}
+      {products.map((p) => <JobCardProduct key={p.id} p={p} D={D} />)}
+      {products.length === 0 && (
+        <div style={{ fontSize: 13, color: D.muted }}>{card.lineNote || "No protocol products matched this visit."}</div>
+      )}
+    </div>
+  );
+}
+
 export function ProtocolPanel({ service, onClose }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
@@ -4677,6 +5212,12 @@ export function ProtocolPanel({ service, onClose }) {
   const [protocolMatchReason, setProtocolMatchReason] = useState(null);
   const [productLabels, setProductLabels] = useState([]);
   const [loading, setLoading] = useState(true);
+  // Job card (GATE_JOB_CARD): { enabled:false } from the server hides the tab.
+  const [jobCard, setJobCard] = useState(null);
+  const [jobCardLoading, setJobCardLoading] = useState(true);
+  const [jobCardError, setJobCardError] = useState(false);
+  const [loadErrors, setLoadErrors] = useState([]);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   // Classify from the RAW service type when the payload carries it: the
   // schedule day view sends a normalized display name ("Lawn + Tree & Shrub"
   // becomes "Tree & Shrub Care") while the server's line-scoped fields are
@@ -4684,13 +5225,51 @@ export function ProtocolPanel({ service, onClose }) {
   const panelServiceType = service.serviceTypeRaw || service.serviceType;
   const serviceCategory = detectServiceCategory(panelServiceType);
   const isLawn = serviceCategory === "lawn";
-  const [activeSection, setActiveSection] = useState(
-    isLawn ? "lawn_protocol" : "overview",
-  );
+  // Fail closed: only an affirmative { enabled: true } opens the gated tab and
+  // ask bar. A failed request is shown as a notice under the header instead.
+  const jobCardEnabled = Boolean(jobCard?.enabled);
+  const protocolEnabled = Boolean(jobCard?.protocol?.enabled);
+  const defaultSection = jobCardEnabled
+    ? "job_card"
+    : isLawn
+      ? "lawn_protocol"
+      : "overview";
+  const [requestedSection, setActiveSection] = useState(defaultSection);
 
   useEffect(() => {
-    setActiveSection(isLawn ? "lawn_protocol" : "overview");
-  }, [service?.id, isLawn]);
+    setActiveSection(defaultSection);
+  }, [service?.id, defaultSection]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setJobCard(null);
+    setJobCardError(false);
+    if (!service?.id) {
+      setJobCardLoading(false);
+      return undefined;
+    }
+    setJobCardLoading(true);
+    setJobCardError(false);
+    adminFetch(`/admin/protocols/job-card/${service.id}`)
+      .then((data) => {
+        if (cancelled) return;
+        setJobCard(data && data.enabled ? data : { enabled: false });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // A failed request (503 safety-data outage, network) keeps the tab
+        // and shows its unavailable state — never a silent fall-back to
+        // the legacy view. Only a successful { enabled: false } hides it.
+        setJobCard(null);
+        setJobCardError(true);
+      })
+      .finally(() => {
+        if (!cancelled) setJobCardLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [service?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -4705,6 +5284,11 @@ export function ProtocolPanel({ service, onClose }) {
     const month = new Date().getMonth() + 1;
 
     setLoading(true);
+    setLoadErrors([]);
+    setPhotos([]);
+    setSeasonal([]);
+    setScripts([]);
+    setEquipment([]);
     setLawnProtocol(null);
     setLawnMix(null);
     setLawnContext({ trackKey: null, lawnSqft: null });
@@ -4713,22 +5297,25 @@ export function ProtocolPanel({ service, onClose }) {
     setProtocolMatchReason(null);
 
     (async () => {
+      const failedSections = [];
       const profileResponse =
         isLawn && service.customerId
           ? await adminFetch(
               `/admin/customers/${service.customerId}/turf-profile`,
-            ).catch(() => null)
+            ).catch(() => {
+              failedSections.push("Turf profile");
+              return null;
+            })
           : null;
+      if (cancelled) return;
       const profile = profileResponse?.profile || null;
-      const trackKey = isLawn
-        ? [
-            profile?.track_key,
-            profile?.grass_type,
-            service.lawnType,
-            service.lawn_type,
-          ]
-            .map(protocolTrackForLawnType)
-            .find(Boolean) || null
+      const profileLawnTypes = [profile?.track_key, profile?.grass_type];
+      const recordedLawnTypes = profileLawnTypes.some((value) => String(value || "").trim())
+        ? profileLawnTypes
+        : [service.lawnType, service.lawn_type];
+      const trackKey = isLawn && !failedSections.includes("Turf profile")
+        ? recordedLawnTypes.map(protocolTrackForLawnType).find(Boolean)
+          || (recordedLawnTypes.some((value) => String(value || '').trim()) ? null : "st_augustine")
         : null;
       const lawnSqft = isLawn
         ? lawnAreaForProtocol({
@@ -4737,7 +5324,7 @@ export function ProtocolPanel({ service, onClose }) {
           })
         : null;
 
-      const [p, s, sc, eq, lp, lm, sp] = await Promise.all([
+      const results = await Promise.allSettled([
         adminFetch(
           // The photos endpoint derives its line from literal tokens
           // (lawn/turf, tree/shrub, pest, mosquito, termite) — send the
@@ -4775,10 +5362,19 @@ export function ProtocolPanel({ service, onClose }) {
       ]);
 
       if (cancelled) return;
-      setPhotos(p.photos || []);
-      setSeasonal(s.pests || []);
-      setScripts(sc.scripts || []);
-      setEquipment(eq.checklists || []);
+      const sectionNames = [
+        "ID guide", "Pest pressure", "Scripts", "Equipment",
+        "Lawn protocol", "Mix quantities", "Service protocol",
+      ];
+      results.forEach((result, index) => {
+        if (result.status === "rejected") failedSections.push(sectionNames[index]);
+      });
+      const [p, s, sc, eq, lp, lm, sp] = results.map((result) => result.value);
+      setLoadErrors(failedSections);
+      setPhotos(p?.photos || []);
+      setSeasonal(s?.pests || []);
+      setScripts(sc?.scripts || []);
+      setEquipment(eq?.checklists || []);
       setLawnProtocol(lp?.track || null);
       setLawnMix(lm || null);
       setLawnContext({ trackKey, lawnSqft });
@@ -4787,16 +5383,21 @@ export function ProtocolPanel({ service, onClose }) {
       setProtocolMatchReason(sp?.reason || null);
       setLoading(false);
     })().catch(() => {
-      if (!cancelled) setLoading(false);
+      if (!cancelled) {
+        setLoadErrors(["Service guidance"]);
+        setLoading(false);
+      }
     });
 
     return () => {
       cancelled = true;
     };
-  }, [service, isLawn, serviceCategory]);
+  }, [service, isLawn, serviceCategory, loadAttempt]);
 
   const SECTIONS = [
-    ...(isLawn
+    ...(jobCardEnabled ? [{ id: "job_card", label: " Job card", count: null }] : []),
+    ...(protocolEnabled ? [{ id: "visit_protocol", label: " Protocol", count: null }] : []),
+    ...(!protocolEnabled && isLawn
       ? [
           {
             id: "lawn_protocol",
@@ -4805,7 +5406,7 @@ export function ProtocolPanel({ service, onClose }) {
           },
         ]
       : []),
-    ...(!isLawn && serviceProtocol
+    ...(!protocolEnabled && !isLawn && serviceProtocol
       ? [
           {
             id: "service_protocol",
@@ -4822,6 +5423,10 @@ export function ProtocolPanel({ service, onClose }) {
     { id: "scripts", label: " Scripts", count: scripts.length },
     { id: "equipment", label: " Equipment", count: equipment.length },
   ];
+
+  const activeSection = SECTIONS.some((section) => section.id === requestedSection)
+    ? requestedSection
+    : defaultSection;
 
   // Pest pressure stays ordinal but monochrome — peak gets alert-fg because
   // it's a genuine "act now" signal; the rest step down a zinc ramp.
@@ -4879,9 +5484,16 @@ export function ProtocolPanel({ service, onClose }) {
           <div style={{ fontSize: 16, fontWeight: 500, color: D.heading }}>
             Service Protocol
           </div>{" "}
-          <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
-            {service.serviceType} — {service.customerName}
-          </div>{" "}
+          {!jobCardEnabled && service && (
+            <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+              {service.serviceType} — {service.customerName}
+            </div>
+          )}
+          {!jobCardEnabled && jobCardError && (
+            <div style={{ fontSize: 12, color: "#C8312F", marginTop: 2 }}>
+              Job card unavailable right now — safety facts, precautions and plan checks did not load.
+            </div>
+          )}
         </div>{" "}
         <button
           onClick={onClose}
@@ -4896,15 +5508,33 @@ export function ProtocolPanel({ service, onClose }) {
           ×
         </button>{" "}
       </div>
-      {/* Section tabs */}
+      {/* Ask bar — the dispatch IB context, scoped to this stop */}
+      {jobCardEnabled && (
+        <div style={{ padding: "12px 16px 0" }}>
+          <IntelligenceBarShell
+            context="dispatch"
+            buildPageData={() => ({
+              scheduledServiceId: service.id,
+              customerId: service.customerId,
+              serviceType: panelServiceType,
+              date: service.scheduledDate || service.date || null,
+            })}
+            placeholder="Ask about this stop…"
+            responseMaxHeight="320px"
+          />
+        </div>
+      )}
+      {/* Section tabs — equal pills, same look as the mobile Schedule/More
+          row on Dispatch (h-11, uppercase label, zinc-900 active). */}
       <div
         style={{
           display: "flex",
-          gap: 16,
-          padding: "0 16px",
+          gap: 8,
+          padding: "0 16px 12px",
           borderBottom: `1px solid ${D.border}`,
           overflowX: "auto",
           WebkitOverflowScrolling: "touch",
+          scrollbarWidth: "none",
           flexWrap: "nowrap",
         }}
       >
@@ -4915,20 +5545,20 @@ export function ProtocolPanel({ service, onClose }) {
               key={s.id}
               onClick={() => setActiveSection(s.id)}
               style={{
-                padding: "12px 2px",
-                marginBottom: -1,
-                background: "transparent",
-                border: "none",
-                borderBottom: `2px solid ${active ? D.heading : "transparent"}`,
+                flex: "1 0 auto",
+                minWidth: 96,
+                height: 44,
+                padding: "0 12px",
+                borderRadius: 2,
+                border: `1px solid ${active ? D.heading : D.inputBorder}`,
+                background: active ? D.heading : D.card,
+                color: active ? D.white : D.muted,
                 cursor: "pointer",
                 whiteSpace: "nowrap",
-                fontSize: 11,
+                fontSize: 14,
                 fontWeight: 500,
                 textTransform: "uppercase",
                 letterSpacing: "0.06em",
-                flexShrink: 0,
-                minHeight: 44,
-                color: active ? D.heading : D.muted,
               }}
             >
               {s.label.trim()}
@@ -4939,7 +5569,24 @@ export function ProtocolPanel({ service, onClose }) {
       </div>
       {/* Content */}
       <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
-        {loading ? (
+        {loadErrors.length > 0 && activeSection !== "job_card" && activeSection !== "visit_protocol" && (
+          <div role="alert" style={{ border: `1px solid ${D.border}`, padding: 12, marginBottom: 16, fontSize: 14, color: D.text }}>
+            <div>Could not load: {loadErrors.join(", ")}.</div>
+            <div style={{ marginTop: 4 }}>Available guidance is shown below.</div>
+            <button
+              type="button"
+              onClick={() => setLoadAttempt((attempt) => attempt + 1)}
+              style={{ marginTop: 8, minHeight: 44, padding: "8px 12px", border: `1px solid ${D.inputBorder}`, borderRadius: 4, background: D.card, color: D.heading, fontSize: 14, cursor: "pointer" }}
+            >
+              Retry loading
+            </button>
+          </div>
+        )}
+        {activeSection === "job_card" && jobCardEnabled ? (
+          <JobCardTab card={jobCard} loading={jobCardLoading} error={jobCardError} D={D} />
+        ) : activeSection === "visit_protocol" && protocolEnabled ? (
+          <VisitProtocol key={jobCard.serviceId} card={jobCard} D={D} onJobCard={() => setActiveSection("job_card")} />
+        ) : loading ? (
           <div style={{ padding: 40, textAlign: "center", color: D.muted }}>
             Loading protocol...
           </div>
@@ -4975,54 +5622,56 @@ export function ProtocolPanel({ service, onClose }) {
                     Set the customer turf type to St. Augustine, Bermuda,
                     Zoysia, or Bahia to show the correct protocol.
                   </div>
-                ) : !lawnProtocol ? (
-                  <div
-                    style={{
-                      color: D.muted,
-                      fontSize: 13,
-                      padding: 20,
-                      textAlign: "center",
-                    }}
-                  >
-                    Lawn protocol unavailable
-                  </div>
                 ) : (
                   <>
                     {" "}
-                    <div
-                      style={{
-                        background: D.bg,
-                        borderRadius: 10,
-                        padding: 14,
-                        border: `1px solid ${D.border}`,
-                        marginBottom: 12,
-                      }}
-                    >
-                      {" "}
+                    {!lawnProtocol ? (
                       <div
                         style={{
+                          color: D.muted,
                           fontSize: 13,
-                          fontWeight: 500,
-                          color: D.heading,
-                          marginBottom: 6,
+                          padding: 20,
+                          textAlign: "center",
                         }}
                       >
-                        {lawnProtocol.name}
+                        Lawn protocol unavailable
                       </div>
-                      {(lawnProtocol.notes || []).slice(0, 5).map((note, i) => (
+                    ) : (
+                      <div
+                        style={{
+                          background: D.bg,
+                          borderRadius: 10,
+                          padding: 14,
+                          border: `1px solid ${D.border}`,
+                          marginBottom: 12,
+                        }}
+                      >
+                        {" "}
                         <div
-                          key={i}
                           style={{
-                            fontSize: 11,
-                            color: note.startsWith("") ? D.red : D.text,
-                            lineHeight: 1.45,
-                            marginBottom: 4,
+                            fontSize: 13,
+                            fontWeight: 500,
+                            color: D.heading,
+                            marginBottom: 6,
                           }}
                         >
-                          {note}
+                          {lawnProtocol.name}
                         </div>
-                      ))}
-                    </div>
+                        {(lawnProtocol.notes || []).slice(0, 5).map((note, i) => (
+                          <div
+                            key={i}
+                            style={{
+                              fontSize: 11,
+                              color: note.startsWith("") ? D.red : D.text,
+                              lineHeight: 1.45,
+                              marginBottom: 4,
+                            }}
+                          >
+                            {note}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     {!lawnContext.lawnSqft && (
                       <div
                         style={{
@@ -5125,66 +5774,78 @@ export function ProtocolPanel({ service, onClose }) {
                             {w.message}
                           </div>
                         ))}
-                        {(lawnMix.items || []).map((item, i) => (
-                          <div
-                            key={`${i}-${item.raw}`}
-                            style={{
-                              padding: "9px 0",
-                              borderTop:
-                                i === 0 ? "none" : `1px solid ${D.border}`,
-                            }}
-                          >
-                            {" "}
+                        {(lawnMix.items || []).map((item, i) => {
+                          const areaMix = item.jobMix || item.plannedMix;
+                          const tankMix = item.fullTankMix || item.plannedFullTankMix;
+                          const plannedOnly = !item.jobMix && !!(item.plannedMix || item.plannedFullTankMix);
+                          return (
                             <div
+                              key={`${i}-${item.raw}`}
+                              role="group"
+                              aria-label={item.product?.name || item.raw}
                               style={{
-                                display: "flex",
-                                justifyContent: "space-between",
-                                gap: 10,
+                                padding: "9px 0",
+                                borderTop:
+                                  i === 0 ? "none" : `1px solid ${D.border}`,
                               }}
                             >
                               {" "}
-                              <div style={{ minWidth: 0 }}>
-                                {" "}
-                                <div
-                                  style={{
-                                    fontSize: 12,
-                                    fontWeight: 500,
-                                    color: D.heading,
-                                  }}
-                                >
-                                  {item.product?.name || item.raw}
-                                </div>{" "}
-                                <div
-                                  style={{
-                                    fontSize: 10,
-                                    color: D.muted,
-                                    lineHeight: 1.4,
-                                  }}
-                                >
-                                  {item.raw}
-                                </div>{" "}
-                              </div>{" "}
                               <div
                                 style={{
-                                  fontSize: 11,
-                                  color: D.text,
-                                  textAlign: "right",
-                                  flexShrink: 0,
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  gap: 10,
                                 }}
                               >
                                 {" "}
-                                <div>
-                                  {fmtProtocolNumber(item.jobMix?.amount)}{" "}
-                                  {item.jobMix?.amountUnit || ""}
+                                <div style={{ minWidth: 0 }}>
+                                  {" "}
+                                  <div
+                                    style={{
+                                      fontSize: 12,
+                                      fontWeight: 500,
+                                      color: D.heading,
+                                    }}
+                                  >
+                                    {item.product?.name || item.raw}
+                                  </div>{" "}
+                                  <div
+                                    style={{
+                                      fontSize: 10,
+                                      color: D.muted,
+                                      lineHeight: 1.4,
+                                    }}
+                                  >
+                                    {item.raw}
+                                  </div>{" "}
+                                  {plannedOnly && (
+                                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                                      Optional preview
+                                    </div>
+                                  )}
                                 </div>{" "}
-                                <div style={{ color: D.muted }}>
-                                  {fmtProtocolNumber(item.fullTankMix?.amount)}{" "}
-                                  {item.fullTankMix?.amountUnit || ""}/tank
+                                <div
+                                  style={{
+                                    fontSize: 11,
+                                    color: plannedOnly ? D.muted : D.text,
+                                    textAlign: "right",
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {" "}
+                                  <div>
+                                    {fmtProtocolNumber(areaMix?.amount)}{" "}
+                                    {areaMix?.amountUnit || ""}
+                                  </div>{" "}
+                                  <div style={{ color: D.muted }}>
+                                    {fmtProtocolNumber(tankMix?.amount)}{" "}
+                                    {tankMix?.amountUnit || ""}/tank
+                                  </div>{" "}
                                 </div>{" "}
                               </div>{" "}
-                            </div>{" "}
-                          </div>
-                        ))}
+                            </div>
+                          );
+                        })}
                         {lawnMix.mixingOrder?.length > 0 && (
                           <div
                             style={{
@@ -5232,89 +5893,93 @@ export function ProtocolPanel({ service, onClose }) {
                         )}
                       </div>
                     )}
-                    <div
-                      style={{
-                        fontSize: 12,
-                        fontWeight: 500,
-                        color: D.heading,
-                        marginBottom: 8,
-                      }}
-                    >
-                      Annual Protocol Calendar
-                    </div>
-                    {(lawnProtocol.visits || []).map((v) => (
-                      <div
-                        key={v.visit}
-                        style={{
-                          background: D.bg,
-                          borderRadius: 10,
-                          padding: 12,
-                          border: `1px solid ${D.border}`,
-                          marginBottom: 8,
-                        }}
-                      >
-                        {" "}
+                    {lawnProtocol && (
+                      <>
                         <div
                           style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            gap: 10,
-                            marginBottom: 6,
+                            fontSize: 12,
+                            fontWeight: 500,
+                            color: D.heading,
+                            marginBottom: 8,
                           }}
                         >
-                          {" "}
-                          <div
-                            style={{
-                              fontSize: 12,
-                              fontWeight: 500,
-                              color: D.heading,
-                            }}
-                          >
-                            Visit {v.visit} · {v.month}
-                          </div>{" "}
-                          <div style={{ fontSize: 11, color: D.muted }}>
-                            Legacy mat: ${v.material_cost || "—"}
-                          </div>{" "}
-                        </div>{" "}
-                        <div
-                          style={{
-                            fontSize: 11,
-                            color: D.text,
-                            whiteSpace: "pre-wrap",
-                            lineHeight: 1.45,
-                          }}
-                        >
-                          {v.primary}
+                          Annual Protocol Calendar
                         </div>
-                        {v.secondary && (
+                        {(lawnProtocol.visits || []).map((v) => (
                           <div
+                            key={v.visit}
                             style={{
-                              fontSize: 11,
-                              color: D.muted,
-                              whiteSpace: "pre-wrap",
-                              lineHeight: 1.45,
-                              marginTop: 6,
+                              background: D.bg,
+                              borderRadius: 10,
+                              padding: 12,
+                              border: `1px solid ${D.border}`,
+                              marginBottom: 8,
                             }}
                           >
-                            {v.secondary}
+                            {" "}
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "space-between",
+                                gap: 10,
+                                marginBottom: 6,
+                              }}
+                            >
+                              {" "}
+                              <div
+                                style={{
+                                  fontSize: 12,
+                                  fontWeight: 500,
+                                  color: D.heading,
+                                }}
+                              >
+                                Visit {v.visit} · {v.month}
+                              </div>{" "}
+                              <div style={{ fontSize: 11, color: D.muted }}>
+                                Legacy mat: ${v.material_cost || "—"}
+                              </div>{" "}
+                            </div>{" "}
+                            <div
+                              style={{
+                                fontSize: 11,
+                                color: D.text,
+                                whiteSpace: "pre-wrap",
+                                lineHeight: 1.45,
+                              }}
+                            >
+                              {v.primary}
+                            </div>
+                            {v.secondary && (
+                              <div
+                                style={{
+                                  fontSize: 11,
+                                  color: D.muted,
+                                  whiteSpace: "pre-wrap",
+                                  lineHeight: 1.45,
+                                  marginTop: 6,
+                                }}
+                              >
+                                {v.secondary}
+                              </div>
+                            )}
+                            {stripLegacyBoilerplate(v.notes) && (
+                              <div
+                                style={{
+                                  fontSize: 10,
+                                  color: D.muted,
+                                  lineHeight: 1.4,
+                                  marginTop: 6,
+                                  paddingTop: 6,
+                                  borderTop: `1px solid ${D.border}`,
+                                }}
+                              >
+                                {stripLegacyBoilerplate(v.notes)}
+                              </div>
+                            )}
                           </div>
-                        )}
-                        {stripLegacyBoilerplate(v.notes) && (
-                          <div
-                            style={{
-                              fontSize: 10,
-                              color: D.muted,
-                              lineHeight: 1.4,
-                              marginTop: 6,
-                              paddingTop: 6,
-                              borderTop: `1px solid ${D.border}`,
-                            }}
-                          >
-                            {stripLegacyBoilerplate(v.notes)}
-                          </div>
-                        )}
-                      </div>
-                    ))}
+                        ))}
+                      </>
+                    )}
                   </>
                 )}
               </div>
@@ -5835,7 +6500,7 @@ export function ProtocolPanel({ service, onClose }) {
                       textAlign: "center",
                     }}
                   >
-                    No seasonal data for this service line
+                    {loadErrors.includes("Pest pressure") ? "Pest pressure unavailable" : "No seasonal data for this service line"}
                   </div>
                 ) : (
                   seasonal.map((p, i) => (
@@ -5939,7 +6604,7 @@ export function ProtocolPanel({ service, onClose }) {
                       textAlign: "center",
                     }}
                   >
-                    No photo references for this service
+                    {loadErrors.includes("ID guide") ? "ID guide unavailable" : "No photo references for this service"}
                   </div>
                 ) : (
                   photos.map((p, i) => (
@@ -6017,7 +6682,7 @@ export function ProtocolPanel({ service, onClose }) {
                       textAlign: "center",
                     }}
                   >
-                    No scripts for this service line
+                    {loadErrors.includes("Scripts") ? "Scripts unavailable" : "No scripts for this service line"}
                   </div>
                 ) : (
                   scripts.map((s, i) => (
@@ -6096,7 +6761,7 @@ export function ProtocolPanel({ service, onClose }) {
                       textAlign: "center",
                     }}
                   >
-                    No checklist for this service type
+                    {loadErrors.includes("Equipment") ? "Equipment checklist unavailable" : "No checklist for this service type"}
                   </div>
                 ) : (
                   equipment.map((checklist, ci) => (
@@ -6264,6 +6929,8 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   // them.
   const manualBlock = windowFor(manualTime);
   const { conflicts: manualConflicts } = useSlotConflicts({
+    serviceId: service.id,
+    technicianId: service.technicianId || service.technician_id || null,
     date: manualDate,
     windowStart: manualBlock?.start || manualTime,
     windowEnd: manualBlock?.end,
@@ -7532,9 +8199,9 @@ export function TypedFindingsSection({
 // tech now corrects one "Stress" score directly instead of separate Fungus/Thatch.
 const LAWN_ASSESSMENT_METRICS = [
   { key: "turf_density", label: "Density" },
-  { key: "weed_suppression", label: "Weeds" },
+  { key: "weed_suppression", label: "Weed control" },
   { key: "color_health", label: "Color" },
-  { key: "stress_damage", label: "Stress" },
+  { key: "stress_damage", label: "Condition" },
 ];
 
 // Stress flags and the "Protocol field checks" inputs (thatch, chinch pair,
@@ -7612,6 +8279,43 @@ function parseAssessmentScores(row = {}) {
 }
 
 
+function LawnPreviousVisitCard({ service }) {
+  const [state, setState] = useState({ loading: true, row: null, error: false });
+  const customerId = service.customerId || service.customer_id;
+  const day = service.scheduledDate || service.scheduled_date || service.date;
+  useEffect(() => {
+    let live = true;
+    setState({ loading: true, row: null, error: false });
+    if (!customerId) { setState({ loading: false, row: null, error: false }); return undefined; }
+    adminFetch(`/admin/lawn-assessment/history/${customerId}`)
+      .then((data) => { if (live) setState({ loading: false, row: previousLawnAssessment(data.history, { id: service.id, date: day }), error: false }); })
+      .catch(() => { if (live) setState({ loading: false, row: null, error: true }); });
+    return () => { live = false; };
+  }, [customerId, day, service.id]);
+  const row = state.row && {
+    ...state.row,
+    overall_score: lawnScores.calculateLawnOverallScore(state.row),
+    stress_damage: lawnScores.resolveStressDamage(state.row),
+  };
+  const display = (value) => value == null || !Number.isFinite(Number(value)) ? "—" : `${Math.round(Number(value))}/100`;
+  return (
+    <section aria-label="Previous lawn visit" style={{ margin: "16px 0", padding: 14, background: D.white, border: `1px solid ${D.border}`, borderRadius: 12, color: D.heading }}>
+      <div style={{ fontSize: 16, fontWeight: 500 }}>Last Visit</div>
+      {state.loading ? <p style={{ fontSize: 14 }}>Loading previous scores…</p>
+        : state.error ? <p style={{ fontSize: 14 }} role="status">Previous scores could not be loaded.</p>
+        : !row ? <p style={{ fontSize: 14 }}>No earlier confirmed assessment. Today’s assessment will establish a baseline.</p>
+        : <>
+          <p style={{ fontSize: 14 }}>Overall score <strong>{display(row.overall_score)}</strong></p>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10 }}>
+            {LAWN_ASSESSMENT_METRICS.map((metric) => <div key={metric.key} style={{ fontSize: 14, padding: 10, border: `1px solid ${D.border}`, borderRadius: 8 }}>
+              <div>{metric.label}</div><strong>{display(row[metric.key])}</strong>
+            </div>)}
+          </div>
+        </>}
+    </section>
+  );
+}
+
 function LawnAssessmentCompletionBlock({
   service,
   disabled,
@@ -7620,14 +8324,8 @@ function LawnAssessmentCompletionBlock({
   // once it settles — the parent must not treat the pre-load null confirmed
   // id as "retake pending".
   onReady,
-  // Optional on-site lawn-length (gauge) photo — captured inline next to the turf
-  // photos here, but stored on the shared turf-height state (CompletionPanel owns
-  // it). Only rendered when the gauge-reading capture applies (turf-height flag).
-  gaugePhoto = null,
-  onGaugePhoto,
-  showGaugePhoto = false,
-  // Gauge reading (height-of-cut) — sits inline with the lawn-length photo it
-  // documents. Stored on the same shared turf-height state.
+  // Height measurement stays optional; separate lawn-length photo capture is retired.
+  showGaugeReading = false,
   gaugeHeightIn = null,
   onGaugeHeight,
   // The tech's free-text visit notes (owned by CompletionPanel) — passed through
@@ -7643,18 +8341,6 @@ function LawnAssessmentCompletionBlock({
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState("");
   const fileRef = useRef(null);
-  const gaugeFileRef = useRef(null);
-
-  async function onPickGaugePhoto(e) {
-    const file = (e.target.files || [])[0];
-    if (!file) return;
-    try {
-      const photo = await prepareCompletionPhoto(file);
-      onGaugePhoto?.({ data: photo.data, name: photo.name || "lawn-length.jpg" });
-    } catch { alert("Could not prepare the lawn length photo."); }
-    if (gaugeFileRef.current) gaugeFileRef.current.value = "";
-  }
-
   useEffect(() => {
     let cancelled = false;
     setPhotos([]);
@@ -7822,7 +8508,7 @@ function LawnAssessmentCompletionBlock({
       {loading && (
         <div style={{ fontSize: 12, color: D.muted }}>Checking existing assessment...</div>
       )}
-      {/* Capture row — always visible so the lawn-length photo + gauge reading can be
+      {/* Capture row — always visible so the mowing-height reading can be
           added even after the assessment is analyzed (Codex P1). "Add turf photos" +
           "Analyze lawn" stay pre-analysis only. */}
       <input
@@ -7858,38 +8544,9 @@ function LawnAssessmentCompletionBlock({
             <span style={{ fontSize: 12, color: D.muted }}>{photos.length}/3</span>
           </>
         )}
-            {showGaugePhoto && (
+            {showGaugeReading && (
               <>
-                <input
-                  ref={gaugeFileRef}
-                  type="file"
-                  accept="image/*"
-                  capture="environment"
-                  onChange={onPickGaugePhoto}
-                  style={{ display: "none" }}
-                />
-                <button
-                  type="button"
-                  onClick={() => gaugeFileRef.current?.click()}
-                  disabled={disabled || analyzing}
-                  style={{
-                    height: 38,
-                    padding: "0 14px",
-                    borderRadius: 8,
-                    border: `1px solid ${D.border}`,
-                    background: D.white,
-                    color: D.heading,
-                    fontSize: 13,
-                    fontWeight: 500,
-                    cursor: disabled || analyzing ? "not-allowed" : "pointer",
-                    opacity: disabled || analyzing ? 0.55 : 1,
-                  }}
-                >
-                  Add lawn length photo
-                </button>
-                <span style={{ fontSize: 12, color: D.muted }}>{gaugePhoto ? 1 : 0}/1</span>
-                {/* Gauge reading (height of cut) — sits with the lawn-length photo it documents. */}
-                <span style={{ fontSize: 12, color: D.muted, fontWeight: 500 }}>Gauge reading</span>
+                <span style={{ fontSize: 12, color: D.muted, fontWeight: 500 }}>Lawn length</span>
                 <input
                   type="number"
                   inputMode="decimal"
@@ -7994,9 +8651,9 @@ function LawnAssessmentCompletionBlock({
                   }}
                 >
                   <div style={{ fontSize: 15, fontWeight: 500, color: lawnScoreColor(value), lineHeight: 1.1 }}>
-                    {value}%
+                    {value}/100
                   </div>
-                  <div style={{ fontSize: 10, color: D.muted, marginTop: 3 }}>{metric.label}</div>
+                  <div style={{ fontSize: 14, color: D.muted, marginTop: 3 }}>{metric.label}</div>
                   {!confirmed && (
                     <div style={{ display: "flex", justifyContent: "center", gap: 4, marginTop: 6 }}>
                       <button type="button" onClick={() => adjustScore(metric.key, -5)} style={scoreButtonStyle}>
@@ -8684,9 +9341,7 @@ function smsRecapPreview(value) {
   return text ? `${text} - Waves` : "";
 }
 
-// (Removed the standalone TurfHeightCapture component + its grass-band map — the
-// gauge reading is now captured inline in LawnAssessmentCompletionBlock next to
-// the lawn-length photo it documents.)
+// Mowing height is captured inline in LawnAssessmentCompletionBlock.
 
 // Recap chips — action tags (top 8 + more). role is sent to the server, which
 // derives the friendly customer caption (recap-media.js ROLE_MAP). Mirrors the
@@ -9705,6 +10360,7 @@ export function CompletionPanel({
   // including the mobile payment handoff — through this callback.
   onCompletionResult,
 }) {
+  const { enabled: completionImprovements } = useFeatureFlagReady("lawn-completion-improvements");
   const [notes, setNotes] = useState("");
   // Voice-to-text for the notes box. Appends final transcript chunks; the tech
   // taps the mic again to stop. (Phase 2: the single notes box is the tech's
@@ -9957,11 +10613,19 @@ export function CompletionPanel({
   // flag had no closeout UI to collect the required fields and every
   // completion hard-400'd (tree_shrub_closeout_lockout).
   const { enabled: pestRecapFlag, ready: pestRecapReady } = useFeatureFlagReady("pest-recap-v1");
-  const [turfHeight, setTurfHeight] = useState({ heightIn: null, gaugePhoto: null });
+  const [turfHeight, setTurfHeight] = useState({ heightIn: null });
   const [treeShrubCloseout, setTreeShrubCloseout] = useState(() =>
     defaultTreeShrubCloseout(service),
   );
-  const [areasServiced, setAreasServiced] = useState([]);
+  const lawnDefaultAreas = completionImprovements && serviceLineFromType(service.serviceType || service.service_type) === "lawn" && !service.findingsSchema
+    ? LAWN_DEFAULT_AREAS : [];
+  const [areasServiced, setAreasServiced] = useState(() => [...lawnDefaultAreas]);
+  const lawnAreasInitializedRef = useRef(completionImprovements);
+  useEffect(() => {
+    if (!completionImprovements || lawnAreasInitializedRef.current) return;
+    lawnAreasInitializedRef.current = true;
+    setAreasServiced((current) => current.length ? current : [...lawnDefaultAreas]);
+  }, [completionImprovements, lawnDefaultAreas]);
   // Property satellite basemap (bait-station marking). The manual per-area
   // zone-mark widget this also fed was retired 2026-07-23 — the traced
   // Treatment Zone Mapper is the report's coverage-map source now.
@@ -11008,6 +11672,29 @@ export function CompletionPanel({
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
   }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit]);
+  const lawnDefaultMixSeededRef = useRef(false);
+  const lawnDefaultMixSnapshotRef = useRef(null);
+  useEffect(() => {
+    if (!completionImprovements || !isLawn || !inventoryAdvisoryTier || treatmentPlanLoading || treatmentPlanError || lawnAssessmentReady === false) return;
+    if (!products?.length) return;
+    const currentSnapshot = JSON.stringify(selectedProducts);
+    // Refresh only an untouched seed when today’s assessment changes the plan.
+    if (lawnDefaultMixSeededRef.current && currentSnapshot !== lawnDefaultMixSnapshotRef.current) return;
+    if (!lawnDefaultMixSeededRef.current && selectedProducts.length) { lawnDefaultMixSeededRef.current = true; return; }
+    const rows = lawnPlanSelections(treatmentPlanMixItems, buildSelectedProduct, products);
+    const nextSnapshot = JSON.stringify(rows);
+    if (nextSnapshot === currentSnapshot) return;
+    lawnDefaultMixSeededRef.current = true;
+    lawnDefaultMixSnapshotRef.current = JSON.stringify(rows);
+    setSelectedProducts(rows);
+  }, [completionImprovements, isLawn, inventoryAdvisoryTier, treatmentPlanMixItems, treatmentPlanLoading, treatmentPlanError, lawnAssessmentReady, products, selectedProducts]);
+  useEffect(() => {
+    if (!completionImprovements || !isLawn) return;
+    const area = areasServiced.join(", ");
+    setSelectedProducts((current) => current.some((product) => product.applicationAreaDefault && product.applicationArea !== area)
+      ? current.map((product) => product.applicationAreaDefault ? { ...product, applicationArea: area } : product)
+      : current);
+  }, [completionImprovements, isLawn, areasServiced, selectedProducts]);
   const treeShrubCloseoutRequired =
     !isTypedFindings &&
     ["tree_shrub", "palm"].includes(serviceLineForCloseout);
@@ -11390,7 +12077,7 @@ export function CompletionPanel({
   // or restored closeout can never POST before the advisories had a chance to
   // render (the server records conditions now instead of rejecting them).
   const closeoutAdvisoriesPending =
-    calibrationRequired &&
+    (calibrationRequired || (completionImprovements && isLawn)) &&
     !isIncompleteVisit &&
     (treatmentPlanLoading || (isLawn && protocolActionsLoading));
   const treeShrubProductFlags = treeShrubProductFlagsClient(selectedProducts);
@@ -11589,7 +12276,7 @@ export function CompletionPanel({
   ]);
 
   useEffect(() => {
-    if (!calibrationRequired) return;
+    if (!calibrationRequired && !(completionImprovements && isLawn)) return;
     let cancelled = false;
     setTreatmentPlanError("");
     setTreatmentPlanLoading(true);
@@ -11666,13 +12353,23 @@ export function CompletionPanel({
     return () => {
       cancelled = true;
     };
-  }, [calibrationRequired, service.id, lawnAssessmentRevision]);
+  }, [calibrationRequired, completionImprovements, isLawn, service.id, lawnAssessmentRevision]);
 
   useEffect(() => {
     setTreeShrubCloseout(defaultTreeShrubCloseout(service));
   }, [service.id]);
 
+  // Save the newest edit when Details, checkout, or Close unmounts the panel
+  // before the autosave delay. Discovery below resets the ref for a new visit.
+  useEffect(() => () => {
+    const draft = draftSnapshotRef.current;
+    if (draft?.serviceId === service.id) {
+      localStorage.setItem(completionDraftKey(service.id), JSON.stringify(draft));
+    }
+  }, [service.id]);
+
   useEffect(() => {
+    draftSnapshotRef.current = null;
     draftReadyRef.current = false;
     setSavedDraft(null);
     setShowDraftPrompt(false);
@@ -11701,9 +12398,10 @@ export function CompletionPanel({
       // input — opening the panel must not mint a draft (and a restore
       // prompt). Any edit, removal, or addition changes the JSON and
       // drafts as before.
-      (selectedProducts.length > 0 &&
-        JSON.stringify(selectedProducts) !== pestDefaultMixSnapshotRef.current) ||
-      areasServiced.length ||
+      ((selectedProducts.length > 0 || lawnDefaultMixSnapshotRef.current) &&
+        JSON.stringify(selectedProducts) !== pestDefaultMixSnapshotRef.current &&
+        JSON.stringify(selectedProducts) !== lawnDefaultMixSnapshotRef.current) ||
+      JSON.stringify(areasServiced) !== JSON.stringify(lawnDefaultAreas) ||
       customerInteraction ||
       customerConcern.trim() ||
       selectedProtocolActionLabels.length ||
@@ -11762,6 +12460,7 @@ export function CompletionPanel({
         savedAt: new Date().toISOString(),
         notes,
         selectedProducts,
+        lawnDefaultMixSnapshot: lawnDefaultMixSnapshotRef.current,
         sendSms,
         includePayLink,
         requestReview,
@@ -11869,11 +12568,10 @@ export function CompletionPanel({
         // billing-409 checkout detour survival).
         companionState,
       };
-    // Latest draft is always reachable synchronously — the billing-409
-    // detour unmounts this panel before the debounce timer fires, and the
-    // cleanup below would otherwise drop the newest edits.
+    // The departure cleanup reads this snapshot before cancelling autosave.
     draftSnapshotRef.current = draft;
     const timer = setTimeout(() => {
+      if (draftSnapshotRef.current !== draft) return;
       localStorage.setItem(
         completionDraftKey(service.id),
         JSON.stringify(draft),
@@ -11946,6 +12644,9 @@ export function CompletionPanel({
 
   function restoreDraft() {
     if (!savedDraft) return;
+    lawnAreasInitializedRef.current = true;
+    lawnDefaultMixSeededRef.current = true;
+    if (savedDraft.lawnDefaultMixSnapshot) lawnDefaultMixSnapshotRef.current = savedDraft.lawnDefaultMixSnapshot;
     setNotes(savedDraft.notes || "");
     setSelectedProducts(
       Array.isArray(savedDraft.selectedProducts)
@@ -12341,6 +13042,7 @@ export function CompletionPanel({
   }
 
   function discardDraft() {
+    draftSnapshotRef.current = null;
     localStorage.removeItem(completionDraftKey(service.id));
     // Photos live in memory rather than localStorage. A deliberate Discard
     // must clear them too or old evidence remains attached to the
@@ -12680,7 +13382,9 @@ export function CompletionPanel({
     return lines.filter((line) => !seen.has(line.toLowerCase()) && seen.add(line.toLowerCase()));
   }
   function observationFreeText() {
-    return uniqueLines([...freeTextLines(observationsText), ...freeTextLines(parkedFound), ...taggedNoteLines("found")]);
+    const lines = uniqueLines([...freeTextLines(observationsText), ...freeTextLines(parkedFound), ...taggedNoteLines("found")]);
+    const selected = new Set(activeSelectedLabels(selectedObservationLabels).map((label) => label.toLowerCase()));
+    return lines.filter((line) => !selected.has(line.toLowerCase()));
   }
   function recommendationFreeText() {
     return uniqueLines([...freeTextLines(recommendationsText), ...freeTextLines(parkedNext), ...taggedNoteLines("next")]);
@@ -12984,6 +13688,7 @@ export function CompletionPanel({
     // from them), so a post-generation product change invalidates an
     // untouched draft the same way a typed edit does (codex r28).
     invalidateGeneratedReportOnTypedEdit();
+    lawnDefaultMixSeededRef.current = true;
     setSelectedProducts((prev) => [...prev, buildSelectedProduct(product)]);
     setProductSearch("");
   }
@@ -13135,6 +13840,7 @@ export function CompletionPanel({
   }
   function removeProduct(productId) {
     if (generating) return;
+    lawnDefaultMixSeededRef.current = true;
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
       prev.filter((p) => p.productId !== productId),
@@ -13142,11 +13848,13 @@ export function CompletionPanel({
   }
   function updateProduct(productId, field, value) {
     if (generating) return;
+    lawnDefaultMixSeededRef.current = true;
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
       prev.map((p) => {
         if (p.productId !== productId) return p;
         const next = { ...p, [field]: value };
+        if (field === "applicationArea") next.applicationAreaDefault = false;
         if (field === "applicationMethod") {
           const areaRequirement = requiredApplicationArea(
             value,
@@ -13210,6 +13918,8 @@ export function CompletionPanel({
   }
   function toggleArea(area) {
     if (generating) return;
+    lawnAreasInitializedRef.current = true;
+    invalidateGeneratedReportOnTypedEdit();
     setAreasServiced((prev) =>
       prev.includes(area) ? prev.filter((a) => a !== area) : [...prev, area],
     );
@@ -13262,6 +13972,7 @@ export function CompletionPanel({
   // when the panel unmounted mid-flight (caller stops without touching
   // submitting state on the stale mount), else "done".
   function finishCompletionSuccess(result) {
+    draftSnapshotRef.current = null;
     sideEffectsRetryRef.current = 0;
     sideEffectsCommittedRef.current = false;
     lastSubmitBodyRef.current = null;
@@ -13336,6 +14047,7 @@ export function CompletionPanel({
   // completed visit stops being reopenable, run the parent-equivalent
   // bookkeeping, and close out — never the generic failure path.
   function resolveCrossKeyCompleted() {
+    draftSnapshotRef.current = null;
     sideEffectsCommittedRef.current = false;
     lastSubmitBodyRef.current = null;
     setCommittedReplayReady(false);
@@ -13896,6 +14608,7 @@ export function CompletionPanel({
           specialtyProtocolActions.length > 0
             ? specialtyProtocolActions.some((action) => action.label === label)
             : !isLawn ||
+              (completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
               (protocolActionsLoaded &&
                 protocolActions.some(
                   (action) =>
@@ -14091,7 +14804,9 @@ export function CompletionPanel({
         observations: reportObservations,
         structuredObservations: specialtyCompletion
           ? activeSelectedLabels(selectedObservationLabels)
-          : [],
+          : completionImprovements && isLawn
+            ? activeSelectedLabels(selectedObservationLabels).filter(isLawnFindingSelection)
+            : [],
         recommendations: reportRecommendations,
         lawnAssessmentId,
         // Tree & Shrub AI photo assessment. When the background review ran,
@@ -14121,12 +14836,9 @@ export function CompletionPanel({
           caption: photo.caption || null,
           ...(photo.captionSource === "ai" ? { aiTags: { captionSource: "ai" } } : {}),
         })),
-        // Gauge reading (lawn only, behind the flag). Both the height-of-cut
-        // reading and the on-site lawn-length photo are OPTIONAL; the server
-        // snapshots the authoritative band. Off-flag/non-lawn these are inert.
+        // Optional mowing height. The server snapshots the authoritative band.
         ...(turfHeightFlag && isLawn ? {
           manualHeightIn: turfHeight.heightIn,
-          gaugePhoto: turfHeight.gaugePhoto,
         } : {}),
       };
       if (isCustomerConcernInteraction(customerInteraction) && customerConcern) {
@@ -14371,7 +15083,9 @@ export function CompletionPanel({
   }));
   const effectiveProtocolActions = specialtyProtocolActions.length
     ? specialtyProtocolActions
-    : protocolActions;
+    : completionImprovements && isLawn
+      ? [...protocolActions, ...LAWN_FIELD_ACTIONS]
+      : protocolActions;
   const protocolActionFallbackChips = isLawn ? [] : CHIP_ACTIONS;
   const hideProtocolActionsField =
     isLawn &&
@@ -14469,6 +15183,12 @@ export function CompletionPanel({
       }
       applyProtocolAction(option.action, { conflictLabels: conflicts || [] });
     }
+  }
+  function handleLawnFindingAdd(text) {
+    if (generating || photoAnalyzing || activeSelectedLabels(selectedObservationLabels).includes(text)) return;
+    const detached = invalidateGeneratedReportOnTypedEdit();
+    appendUniqueLabel(setSelectedObservationLabels, text);
+    if (!detached) addChipNote("Found", text);
   }
   function handleSpecialtyFindingChange(group, value) {
     if (generating || photoAnalyzing) return;
@@ -15376,9 +16096,7 @@ export function CompletionPanel({
                   disabled={isIncompleteVisit || submitting || generating}
                   onConfirmed={handleLawnAssessmentConfirmed}
                   onReady={setLawnAssessmentReady}
-                  showGaugePhoto={turfHeightFlag}
-                  gaugePhoto={turfHeight.gaugePhoto}
-                  onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}
+                  showGaugeReading={turfHeightFlag}
                   gaugeHeightIn={turfHeight.heightIn}
                   onGaugeHeight={(v) => setTurfHeight((t) => ({ ...t, heightIn: v }))}
                   technicianNotes={notes}
@@ -15409,7 +16127,8 @@ export function CompletionPanel({
                 />
               </Field>
             )}
-            {calibrationRequired && treatmentPlanStructuredProtocol?.window && (
+            {completionImprovements && isLawn && <LawnPreviousVisitCard service={service} />}
+            {!completionImprovements && calibrationRequired && treatmentPlanStructuredProtocol?.window && (
               <Field label="Lawn Care Protocol">
                 <ProtocolMixSummary
                   protocol={treatmentPlanStructuredProtocol}
@@ -15472,7 +16191,7 @@ export function CompletionPanel({
                 ))}
               </select>{" "}
             </Field>{" "}
-            <Field label="Technician notes">
+            <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}<Field label="Technician notes">
               {" "}
               <div style={{ position: "relative" }}>
                 <textarea
@@ -15539,7 +16258,7 @@ export function CompletionPanel({
                   </button>
                 )}
               </div>
-            </Field>
+            </Field></details>
             {/* Post-AI-draft structured selections — the tagged lines no
                 longer ride in the report text, so the pills are the deselect
                 handle (tap × to remove an item before completing). */}
@@ -15611,7 +16330,10 @@ export function CompletionPanel({
                 </Field>
               );
             })}
+            {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
             {!isTypedFindings && !hideProtocolActionsField && (
+              <details open={!(completionImprovements && isLawn) || undefined}>
+                {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
               <Field label="Protocol actions">
                 {!specialtyCompletion && protocolActionsLoading ? (
                   <div style={{ fontFamily: font, fontSize: 13, color: M.ink4 }}>
@@ -15667,6 +16389,7 @@ export function CompletionPanel({
                   </>
                 )}
               </Field>
+              </details>
             )}
             {/* Frozen while an AI draft is in flight (codex P2) — the
                 generate payload snapshots these fields, and an edit landing
@@ -17657,9 +18380,7 @@ export function CompletionPanel({
                 disabled={isIncompleteVisit || submitting || generating}
                 onConfirmed={handleLawnAssessmentConfirmed}
                 onReady={setLawnAssessmentReady}
-                showGaugePhoto={turfHeightFlag}
-                gaugePhoto={turfHeight.gaugePhoto}
-                onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}
+                showGaugeReading={turfHeightFlag}
                 gaugeHeightIn={turfHeight.heightIn}
                 onGaugeHeight={(v) => setTurfHeight((t) => ({ ...t, heightIn: v }))}
                 technicianNotes={notes}
@@ -17739,7 +18460,8 @@ export function CompletionPanel({
               )}
             </div>
           )}
-          {calibrationRequired && treatmentPlanStructuredProtocol?.window && (
+          {completionImprovements && isLawn && <LawnPreviousVisitCard service={service} />}
+          {!completionImprovements && calibrationRequired && treatmentPlanStructuredProtocol?.window && (
             <div style={{ marginBottom: 20 }}>
               <label style={labelStyle}>Lawn Care Protocol</label>
               <div style={{ marginBottom: 10 }}>
@@ -17852,6 +18574,7 @@ export function CompletionPanel({
             ))}
           </select>
           {/* Technician Notes */}
+          <details open={!(completionImprovements && isLawn) || undefined}>{completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Add a note{notes.trim() ? " · recorded" : ""}</summary>}
           <label style={labelStyle}>Technician Notes</label>{" "}
           <div style={{ position: "relative" }}>
             <textarea
@@ -17924,6 +18647,7 @@ export function CompletionPanel({
               </button>
             )}
           </div>
+          </details>
           {/* Post-AI-draft structured selections — the tagged lines no longer
               ride in the report text, so the pills are the deselect handle
               (click × to remove an item before completing). */}
@@ -17998,8 +18722,11 @@ export function CompletionPanel({
                 </div>
               );
             })}
+            {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
             {!isTypedFindings && !hideProtocolActionsField && (
-            <div style={{ marginBottom: 12 }}>
+            <details open={!(completionImprovements && isLawn) || undefined}>
+                {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
+              <div style={{ marginBottom: 12 }}>
               <label style={{ ...labelStyle, color: D.blue }}>
                 Protocol Actions
               </label>
@@ -18053,6 +18780,7 @@ export function CompletionPanel({
                 </>
               )}
             </div>
+              </details>
             )}
             {/* Frozen while an AI draft is in flight (codex P2) — mirrors
                 the mobile variant. Observations also freeze during photo

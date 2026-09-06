@@ -38,7 +38,7 @@ function missedCallEligible(row, now = Date.now()) {
   if (!row || row.direction !== 'inbound' || !row.customer_id) return false;
   if (row.recording_sid || row.recording_url) return false;          // voicemail lane owns it
   if (row.voicemail_callback_alerted_at) return false;                // voicemail lane already rang
-  if (row.call_outcome === 'ai_handled') return false;
+  if (row.call_outcome === 'ai_handled' || row.call_outcome === 'ai_transferred') return false; // Sandy handled it / handed it to a person
   if (!outcomeUnanswered(row)) return false;                          // human / ai_agent / unknown-outcome
   const meta = parseMeta(row.metadata);
   if (meta.missed_call_settled_at) return false;                      // delivered / superseded
@@ -74,7 +74,7 @@ async function ringMissedCallIfUnanswered(callSid) {
       .whereNull('recording_sid')
       .whereNull('recording_url')
       .whereNull('voicemail_callback_alerted_at')
-      .whereRaw("COALESCE(call_outcome,'') <> 'ai_handled'")
+      .whereRaw("COALESCE(call_outcome,'') NOT IN ('ai_handled', 'ai_transferred')")
       .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
       .update({ metadata: db.raw("COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('missed_call_notified_at', ?::text)", [token]) });
     if (!claimed) return false;

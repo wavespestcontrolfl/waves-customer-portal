@@ -498,4 +498,4 @@ async function getActivity({ windowHours } = {}) {
   };
 }
 
-module.exports = { getActivity, buildActivity, runStatus, STATUSES, clampWindowHours, MISSING_TABLE_SQLSTATE };
+module.exports = { getActivity, buildActivity, runStatus, RUN_STAGES, TERMINAL_APPROVAL, STATUSES, clampWindowHours, MISSING_TABLE_SQLSTATE };

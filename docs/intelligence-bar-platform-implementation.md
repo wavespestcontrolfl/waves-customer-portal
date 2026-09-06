@@ -47,7 +47,7 @@ mocked provider response is not evidence of end-to-end capability.
 ## Foundation implementation
 
 - `action-registry.js` validates explicit role/side-effect/approval policy for the
-  existing 208 definitions and dynamically loads authorized cross-module tools.
+  existing 209 definitions and dynamically loads authorized cross-module tools.
   Unknown classifications and injected top-level actor/approval fields fail closed.
 - `outcomes.js` recognizes blocked/failed/unknown/partial/provider-accepted results.
   Confirmation and recovered cards use stored outcomes; accepted SMS audit failures
@@ -79,31 +79,37 @@ financial, communications, or other domain operation.
 `npm run check:ib-coverage` compares AST request fingerprints with the reviewed
 manifest. New or changed calls need a concrete tool + outcome evidence or an
 explicit exception for that exact fingerprint. The original `a2bb0bc49` census
-remains the baseline; an unmapped baseline row is unsupported/unverified, never
+remains recorded. The task branch was updated to `e4de41345` before Phase 2;
+25 additional upstream sites and ten upstream fingerprint changes are separately
+marked with that source commit. Deleted upstream sites remain recorded, and no
+task-authored operation was grandfathered. An unmapped baseline row is unsupported/unverified, never
 an implicit exception. Wrapper/dynamic endpoints and local exports remain in
 scope. Server-generated action variants need separate semantic review even when
 one UI request site dispatches them.
 
-Current foundation census: 1,667 UI sites; ten transport exceptions; 1,657 domain
+Current foundation census: 1,692 UI sites; ten transport exceptions; 1,682 domain
 sites still unsupported/unverified in the matrix. Registration of existing tools
 has deliberately not been relabeled as verified application parity.
 
 ## Verification evidence
 
 - Real Express route + bearer authentication + domain executor + isolated Railway
-  development Postgres, scripted model: ten tests pass in
+  development Postgres, scripted model: thirteen tests pass in
   `server/tests/intelligence-bar-platform-db.test.js`. Independent row reads verify
   A changes while viewed B remains unchanged. Cases include ID tampering, bulk
   targeting, message-body names, surname mismatch, request replay, stale runner,
   actor/session mismatch, revoked auth, ambiguity selection, failed predecessor, and
-  full-precision customer-version comparison under the domain row lock.
-- Client regression tests: eight pass across GlobalCommandPalette,
+  full-precision customer-version comparison under the domain row lock. Integrated
+  regressions also cover saved-property destination changes, exact unlinked-email
+  sender selection, cancellation receipts, and recovery before the first checkpoint.
+- Client regression tests: eighteen pass across GlobalCommandPalette,
   PendingActionsCard, and useIntelligenceBar. They cover query-only navigation,
-  double Enter, close/reopen, Clear races, failed results, restored warnings, and
+  non-URL appointment selection, double Enter, close/reopen, Clear races, failed results, restored warnings, and
   timeout-after-commit recovery without a second POST.
-- Focused existing IB suites: 49 suites / 474 tests passed, followed by all
-  36 write-gate contract tests after adding the new helper/discovery classifications. The DB suite skips in the
-  no-DB run and passes separately above. An accidental whole-repository test
+- Integrated IB regression run: 51 suites / 539 tests passed with one search SQL
+  assertion failing; preserving the upstream query corrected it, and the two
+  affected suites then passed all 15 tests. Four optional context tests and the
+  ten database tests skip without a database; the database tests passed separately. An accidental whole-repository test
   selection was stopped; full-repository completion is not claimed.
 - Coverage-check regressions: three pass (wrapper/dynamic census, changed-source
   fingerprint enforcement, required action policy and verification evidence).

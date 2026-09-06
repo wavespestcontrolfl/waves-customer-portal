@@ -109,7 +109,7 @@ def poll():
     """Return (state: "ok" | "down" | "config", snapshot|None, detail: str)."""
     url = f"{PORTAL_URL}/api/integrations/watchdog-worker/status"
     try:
-        req = urllib.request.Request(url, headers=signed_headers("GET", url, key_id=KEY_ID), method="GET")
+        req = urllib.request.Request(url, headers={**signed_headers("GET", url, key_id=KEY_ID), "User-Agent": "Waves-Operations-Watchdog/1.0"}, method="GET")
     except (ValueError, OSError) as e:
         # A malformed PORTAL_URL or an unreadable secret is local
         # configuration (exit 2), never an outage finding.

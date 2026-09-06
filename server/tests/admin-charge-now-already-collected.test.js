@@ -20,7 +20,9 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/payment-router', () => ({ getServiceForCustomer: jest.fn() }));
+jest.mock('../services/stripe', () => ({
+  charge: jest.fn(), chargeOneTime: jest.fn(), chargeMonthly: jest.fn(),
+}));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(async () => ({ sent: true })),
 }));
@@ -39,7 +41,7 @@ jest.mock('../middleware/admin-auth', () => ({
 
 const express = require('express');
 const db = require('../models/db');
-const PaymentRouter = require('../services/payment-router');
+const StripeService = require('../services/stripe');
 const { logAutopay } = require('../services/autopay-log');
 const router = require('../routes/admin-billing-health');
 
@@ -83,12 +85,11 @@ describe('charge-now already-collected guard', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    chargeMock = jest.fn(async () => ({ id: 'pay-new', metadata: null }));
-    chargeOneTimeMock = jest.fn(async () => ({ id: 'pay-new', metadata: null }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({
-      charge: chargeMock,
-      chargeOneTime: chargeOneTimeMock,
-    });
+    StripeService.charge.mockReset();
+    StripeService.chargeOneTime.mockReset();
+    StripeService.chargeMonthly.mockReset();
+    chargeMock = StripeService.charge.mockResolvedValue({ id: 'pay-new', metadata: null });
+    chargeOneTimeMock = StripeService.chargeOneTime.mockResolvedValue({ id: 'pay-new', metadata: null });
     paymentsQB = makeQB({ first: null });
     db.mockImplementation((table) => {
       if (table === 'customers') return makeQB({ first: CUSTOMER });

@@ -82,13 +82,13 @@ const LANE_RUNTIME = {
   sms_verifier: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check' },
   // offline, not measurement: the nightly judge goes through createDeepMessage,
   // which deliberately falls back to the OpenAI leg and records who judged.
-  shadow_judge: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', maturity: 'M0', ...LONG_BATCH },
+  shadow_judge: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', maturity: 'M0', workflow_id: 'shadow-judge', ...LONG_BATCH },
   // event, not daily: the distiller skips when a profile is pending or no new
   // corpus exists, and the sealed exam returns already_examined once the
   // current prompt/profile has been scored — healthy lanes that stay quiet.
   // M3: a profile that passes its deterministic checks is approved by
   // auto_distiller and made live without a human (audit-logged).
-  voice_profile: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, maturity: 'M3', ...LONG_BATCH },
+  voice_profile: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null, maturity: 'M3', workflow_id: 'voice-profile-distiller', ...LONG_BATCH },
   sealed_eval: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'measurement', eval_family: 'routine_copy', ...LONG_BATCH },
   quarantine_arbiter: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'transcription_contact' },
   // Route canaries: one tiny probe per draft route at boot + every 6h; the
@@ -102,12 +102,13 @@ const LANE_RUNTIME = {
   // direct_sdk (Codex r15): V1 extraction and transcript relabeling are raw Gemini / OpenAI fetches in call-recording-processor.js.
   // offline (Codex r16): each is one provider with no cross-provider answer, retried by the background call pipeline.
   call_extraction_v1: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction', ...CALL_PIPELINE },
-  call_research: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', ...LONG_BATCH },
+  // workflow_id = the cron job (scheduler.js runExclusive name) whose body IS this lane's run — the module names the lane on its calls — so job_health rows read with the lane's long-batch policy, not the 1-min default (Codex r3). Lanes served by two jobs (sms_pathology: classify + propose; sealed_eval: seal + autorun) or one job serving two lanes (sms-draft-canary) stay unmapped until the S5 cron wrap registers the job per run.
+  call_research: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', workflow_id: 'call-research-miner', ...LONG_BATCH },
   transcription: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'interactive', eval_family: 'transcription_contact', ...CALL_PIPELINE },
   transcript_label: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'transcription_contact', ...CALL_PIPELINE },
   contact_pass: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact', ...CALL_PIPELINE },
   call_sentiment: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
-  call_self_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', ...LONG_BATCH },
+  call_self_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', workflow_id: 'call-self-audit', ...LONG_BATCH },
   lead_synopsis: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction' },
   // The hourly cron only verifies follow-ups (no model call); the model runs
   // per scored call and for the weekly recommendation — candidate-driven.
@@ -163,7 +164,9 @@ const LANE_RUNTIME = {
   // M3 (Codex r19): the public lawn analyzer persists customer_summary and returns the teaser without staff review.
   lawn_diag_writer: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'service_report', maturity: 'M3' },
   // direct_sdk + offline (Codex r18): the WDO treatment-photo path in admin-projects.js is one anthropic.messages.create with no fallback.
-  wdo_project_brief: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: null },
+  // Both sites (brief + treatment-photo read) ride dispatchWithFallback, so the
+  // adapters record them; the direct_sdk mark was stale (S2c follow-up).
+  wdo_project_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null },
   // internal_write: a project-scoped lookup persists the answer to projects.wdo_history (admin-projects.js) — Codex r9.
   wdo_history: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'retrieval_qa' },
 
@@ -198,6 +201,9 @@ const LANE_RUNTIME = {
   // route (or a day with no eligible visits) makes no model call.
   // M3 (Codex r21): the generator writes body + provenance straight into scheduled_services.pre_service_brief; no approval boundary.
   previsit_brief: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', maturity: 'M3' },
+  // interactive: runs while the tech opens the drawer — bounded cross-provider
+  // fallback, then the deterministic template (Codex r8 on #3885).
+  job_card_paragraph: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'retrieval_qa', maturity: 'M1' },
   // M2 (Codex r20): notes / email copy land in the editable invoice fields, never saved or sent directly.
   invoice_summary: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M2' },
   // M3 (Codex r21): appointment-tagger generates and persists the brief the moment the appointment is tagged.

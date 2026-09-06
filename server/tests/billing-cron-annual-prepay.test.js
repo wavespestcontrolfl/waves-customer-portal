@@ -52,9 +52,11 @@ jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(() => P
 jest.mock('../services/payment-lifecycle-email', () => ({ sendChargeSuccess: jest.fn(), sendChargeFailed: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({}));
 jest.mock('../services/billing-helpers', () => ({ isBillingDayMatch: jest.fn(() => true) }));
-jest.mock('../services/payment-router', () => ({ getServiceForCustomer: jest.fn() }));
+jest.mock('../services/stripe', () => ({
+  charge: jest.fn(), chargeOneTime: jest.fn(), chargeMonthly: jest.fn(),
+}));
 
-const PaymentRouter = require('../services/payment-router');
+const StripeService = require('../services/stripe');
 const { logAutopay } = require('../services/autopay-log');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 const BillingCron = require('../services/billing-cron');
@@ -63,6 +65,9 @@ beforeEach(() => {
   mockCustomers = [];
   mockTermRows = [];
   jest.clearAllMocks();
+  StripeService.charge.mockReset();
+  StripeService.chargeOneTime.mockReset();
+  StripeService.chargeMonthly.mockReset();
 });
 
 describe('getActivelyCoveredCustomerIds', () => {
@@ -94,7 +99,9 @@ describe('processMonthlyBilling — annual-prepay suppression', () => {
     const result = await BillingCron.processMonthlyBilling();
 
     // Never reached the charge path…
-    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(StripeService.charge).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
     // …and was logged + counted as a skip with the prepay reason.
     expect(logAutopay).toHaveBeenCalledWith('cust-A', 'skipped_annual_prepay');
     expect(result.charged).toBe(0);
@@ -108,12 +115,11 @@ describe('processMonthlyBilling — annual-prepay suppression', () => {
       autopay_paused_until: null, autopay_payment_method_id: 'pm_2', billing_day: 1,
     }];
     mockTermRows = []; // no coverage
-    const chargeMonthly = jest.fn(() => Promise.resolve({ id: 'pay_1', amount: 33 }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({ chargeMonthly });
+    const chargeMonthly = StripeService.chargeMonthly.mockResolvedValue({ id: 'pay_1', amount: 33 });
 
     await BillingCron.processMonthlyBilling();
 
-    expect(PaymentRouter.getServiceForCustomer).toHaveBeenCalledWith('cust-Z');
+    expect(StripeService.chargeMonthly).toHaveBeenCalledTimes(1);
     expect(chargeMonthly).toHaveBeenCalledWith('cust-Z');
   });
 
@@ -131,7 +137,9 @@ describe('processMonthlyBilling — annual-prepay suppression', () => {
     try {
       const result = await BillingCron.processMonthlyBilling();
 
-      expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+      expect(StripeService.charge).not.toHaveBeenCalled();
+      expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+      expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
       expect(logAutopay).toHaveBeenCalledWith('cust-P', 'skipped_annual_prepay_pending');
       expect(result.charged).toBe(0);
       expect(result.skipped).toBe(1);

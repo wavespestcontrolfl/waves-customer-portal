@@ -21,7 +21,7 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle, disabled =
 
   return (
     <div style={estimateCard()}>
-      <div style={{ fontSize: 12, fontWeight: 700, color: W.textCaption,
+      <div style={{ fontSize: 14, fontWeight: 700, color: W.textCaption,
         textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8 }}>
         Customize your visit
       </div>
@@ -66,7 +66,7 @@ export default function AddOnsBlock({ addOns, selectedKeys, onToggle, disabled =
                 </div>
               ) : null}
               {savings ? (
-                <div style={{ fontSize: 14, color: checked ? W.green : '#9CA3AF', fontWeight: 800, marginTop: 8 }}>
+                <div style={{ fontSize: 14, color: checked ? W.green : '#9CA3AF', fontWeight: 700, marginTop: 8 }}>
                   {checked ? `Save ${savings}` : 'Savings applied to your estimate'}
                 </div>
               ) : null}

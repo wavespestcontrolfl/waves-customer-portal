@@ -1911,13 +1911,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // rule as the attach in public-property-lookup.js. CASE keeps the
         // ownership-predicated UPDATE atomic (no read-then-write).
         // The replace branch carries forward additional_properties and the
-        // declared timeline captured at the property-lookup stage, and the
-        // duplicate_of_lead_id marker a repeat run stamped (codex #3834 r2
-        // P1 — it is re-derived below against what THIS stage typed)
+        // declared timeline captured at the property-lookup stage, a
+        // won_estimate_id stamp, and the duplicate_of_lead_id marker a
+        // repeat run stamped (codex #3834 r2 P1) — this merge write is the
+        // path that does NOT re-derive the label (gate off, or a lost
+        // claim; the claimed write below derives its own marker)
         // (jsonb_strip_nulls drops a key the prior row never had); a value in
         // THIS stage's snapshot wins the merge.
         extracted_data: db.raw(
-          "CASE WHEN lead_type = 'quote_wizard' THEN jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'duplicate_of_lead_id', COALESCE(extracted_data, '{}'::jsonb)->'duplicate_of_lead_id')) || ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
+          "CASE WHEN lead_type = 'quote_wizard' THEN jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'duplicate_of_lead_id', COALESCE(extracted_data, '{}'::jsonb)->'duplicate_of_lead_id', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id')) || ?::jsonb ELSE COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb END",
           [extractedData, extractedData]
         ),
         updated_at: new Date(),
@@ -1929,61 +1931,100 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       if (fbc) updateFields.fbc = fbc;
       if (fbp) updateFields.fbp = fbp;
       if (anonId) updateFields.anon_id = anonId;
-      const rows = await db('leads')
+      const RETURNING = ['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data', 'created_at'];
+      const ownRow = () => db('leads')
         .where({ id: leadId })
         .whereNull('deleted_at')
-        .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()])
-        .update(updateFields)
-        .returning(['id', 'lead_source_id', 'lead_type', 'status', 'extracted_data', 'created_at']);
-      lead = rows[0];
-      if (lead && lead.lead_type === 'quote_wizard' && (lead.status === 'new' || lead.status === 'duplicate')) {
-        // The normal wizard flow mints a 'new' row at the property-lookup
-        // stage and hands its token here, so this is where a repeat through
-        // the documented flow is first fully typed (codex #3834 r7 P1). And a
-        // marker computed from an earlier stage's fields may be stale: this
-        // stage may have changed the property or the service (r4 P1), and a
-        // different inquiry is not a duplicate of the old one. Re-run the
-        // exact predicate against what was just typed, excluding THIS row —
-        // the label moves, lands, or clears on this row only; nothing on the
-        // original is written.
-        const stored = lead.status === 'duplicate' ? duplicateOfFromExtracted(lead.extracted_data) : null;
+        .whereRaw('LOWER(email) = ?', [String(contactEmail).toLowerCase().trim()]);
+      // The normal wizard flow mints a 'new' row at the property-lookup
+      // stage and hands its token here, so this is where a repeat through
+      // the documented flow is first fully typed (codex #3834 r7 P1). And a
+      // marker computed from an earlier stage's fields may be stale: this
+      // stage may have changed the property or the service (r4 P1), and a
+      // different inquiry is not a duplicate of the old one. Re-run the
+      // exact predicate against what was just typed, excluding THIS row —
+      // the label moves, lands, or clears on this row only; nothing on the
+      // original is written.
+      const relabelable = (row) => !!row && row.lead_type === 'quote_wizard' && (row.status === 'new' || row.status === 'duplicate');
+      // ONE write lands this request's fields on the run's own row under
+      // `claim`. With a label (a marker, or null for 'new') the status and
+      // marker that label implies land in the same statement over the
+      // replace snapshot (quote_wizard rows: each stage supersedes the last)
+      // that carries forward additional_properties, the declared timeline
+      // and a won_estimate_id stamp — never the carried marker. Without a
+      // label the fields land through the merge write (updateFields, which
+      // keeps the stored marker) and the label stays the row's own. 0 rows
+      // leaves `lead` null.
+      const land = async (claim, label) => {
+        const relabel = label === undefined ? {} : {
+          status: label ? 'duplicate' : 'new',
+          extracted_data: db.raw(
+            "jsonb_strip_nulls(jsonb_build_object('additional_properties', COALESCE(extracted_data, '{}'::jsonb)->'additional_properties', 'timeline', COALESCE(extracted_data, '{}'::jsonb)->'timeline', 'won_estimate_id', COALESCE(extracted_data, '{}'::jsonb)->'won_estimate_id')) || ?::jsonb || ?::jsonb",
+            [extractedData, JSON.stringify(label ? { duplicate_of_lead_id: label } : {})],
+          ),
+        };
+        const rows = await claim(ownRow()).update({ ...updateFields, ...relabel }).returning(RETURNING);
+        lead = rows[0] || null;
+        if (lead && label !== undefined) duplicateOfLeadId = label;
+        else if (relabelable(lead)) duplicateOfLeadId = lead.status === 'duplicate' ? duplicateOfFromExtracted(lead.extracted_data) : null;
+      };
+      // The typed fields and the label they imply land in ONE claimed
+      // write: the row's status and marker, as read just before, are the
+      // claim. A fields-first write followed by a separate relabel left a
+      // window where the row carried the NEW address or service under the
+      // OLD marker, and a booking or acceptance resolver reading it in that
+      // gap converted it and let the settlement book the old root (codex
+      // #3834 r37 P1). Scoped to the status just read as before: a staff
+      // transition landing in between (won / lost / contacted) wins and
+      // this public retry claims 0 rows instead of regressing it (r9 P1);
+      // on 0 rows the row is re-read and claimed once more — a concurrent
+      // request on this token that moved the label — and a row still in
+      // play after that reopens as 'new' (below). Gate off: the stored
+      // marker is kept as is (no lookup, no relabel — the kill switch must
+      // not reopen the pipeline it labelled) through the merge write.
+      let prior = dedupeOn ? await ownRow().first(RETURNING) : null;
+      lead = null;
+      for (let attempt = 0; !lead && relabelable(prior) && attempt < 2; attempt++) {
+        const stored = prior.status === 'duplicate' ? duplicateOfFromExtracted(prior.extracted_data) : null;
         // A submission that adds properties is a wider inquiry, never a
         // repeat (codex #3834 r10 P1): the extra addresses live only on
         // this row and each is a manual follow-up quote the pipeline must
         // still show — a 'duplicate' label would bury them. The list the
-        // property-lookup stage stored counts too (the update above carried
-        // it forward when this stage omitted the optional field, r12 P1).
-        const widerInquiry = additionalProperties.length > 0 || (parseExtracted(lead.extracted_data)?.additional_properties?.length > 0);
-        duplicateOfLeadId = !dedupeOn ? stored : widerInquiry ? null : await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, excludeLeadId: lead.id, beforeCreatedAt: lead.created_at });
-        // Scoped to the status just read: a staff transition landing in
-        // between (won / lost / contacted) wins, and this public retry
-        // updates 0 rows instead of regressing it (codex #3834 r9 P1). On 0
-        // rows the request keeps the marker the row actually carries, so the
-        // attribution skip and the bell label follow the database, not the
-        // relabel that did not land.
-        // ...and to the identity this request wrote (contact, address,
-        // service, extra-property count as observed on the row): two
-        // requests on one lookup token typing different inquiries must not
-        // stamp one request's marker onto the other's fields (r13 P1).
+        // property-lookup stage stored counts too (it is carried forward
+        // when this stage omitted the optional field, r12 P1).
+        const priorExtraCount = parseExtracted(prior.extracted_data)?.additional_properties?.length || 0;
+        const widerInquiry = additionalProperties.length > 0 || priorExtraCount > 0;
+        const desired = widerInquiry ? null : await findPriorOpenWizardLeadId(db, { email: contactEmail, phone: contactPhone, address: quoteFullAddress, serviceKey: leadServiceKey, serviceInterest, excludeLeadId: prior.id, beforeCreatedAt: prior.created_at });
+        // ...claimed on the stored extra-property list as read as well: a
+        // concurrent submission on this token that added properties (status
+        // still 'new', marker still null) made it a wider inquiry, and this
+        // claim must lose rather than label it a duplicate (pre-push P1).
+        await land((q) => q
+          .where({ status: prior.status })
+          .whereRaw("extracted_data->>'duplicate_of_lead_id' IS NOT DISTINCT FROM ?", [stored])
+          .whereRaw("COALESCE(jsonb_array_length(COALESCE(extracted_data, '{}'::jsonb)->'additional_properties'), 0) = ?", [priorExtraCount]), desired);
+        if (!lead) prior = await ownRow().first(RETURNING);
+      }
+      // Claims exhausted while the row is still a wizard row in play
+      // (concurrent requests on one token retyping in a tight loop): this
+      // request's fields must never land under a marker another request
+      // derived for ITS fields — that is the mismatch the claimed write
+      // exists to prevent (pre-push P1 on 5e2777f). The row reopens as
+      // 'new' with the marker cleared: one self-consistent open lead (the
+      // pre-dedupe outcome), never a mislabelled one. Still claimed on the
+      // status being in play, so a staff transition wins here too.
+      if (!lead && relabelable(prior)) await land((q) => q.whereIn('status', ['new', 'duplicate']), null);
+      // Gate off, or the row left play (a staff transition won): the fields
+      // land through the merge write and the label is the row's own — the
+      // stored marker when the gate is off; whatever the winning write left
+      // otherwise (nothing follows a marker on a row that is no longer
+      // 'duplicate').
+      if (!lead) await land((q) => q);
+      if (relabelable(lead)) {
+        // The identity this request wrote (contact, address, service,
+        // extra-property count as observed on the row) scopes every later
+        // public write that moves the label (r13 P1).
         observedExtraCount = parseExtracted(lead.extracted_data)?.additional_properties?.length || 0;
-        if (duplicateOfLeadId !== stored) {
-          const relabelled = await db('leads')
-            .where({ id: lead.id, status: lead.status })
-            .modify(scopedToTypedIdentity)
-            .update(duplicateOfLeadId
-            ? { status: 'duplicate', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ duplicate_of_lead_id: duplicateOfLeadId })]), updated_at: new Date() }
-            : { status: 'new', extracted_data: db.raw("COALESCE(extracted_data, '{}'::jsonb) - 'duplicate_of_lead_id'"), updated_at: new Date() });
-          if (!relabelled) {
-            // 0 rows: a staff transition, or a concurrent request on this
-            // token, won. Follow the row AS IT IS NOW — not the marker this
-            // request read before the race: the other request may have just
-            // filed this row as a repeat (and dropped its lead-stage funnel
-            // row), and trusting the stale read would re-validate a null
-            // marker and re-insert that row (codex #3834 r17 P1).
-            Object.assign(lead, await db('leads').where({ id: lead.id }).first('status', 'extracted_data'));
-            duplicateOfLeadId = lead.status === 'duplicate' ? duplicateOfFromExtracted(lead.extracted_data) : null;
-          }
-        }
         if (dedupeOn && duplicateOfLeadId) {
           // The row is filed as a repeat: a funnel row it carries at the
           // lead stage — its own earlier stamp, or a concurrent repeat's
@@ -1997,10 +2038,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           // that reopened the row as 'new' in between keeps its only funnel
           // row (codex r24 P2). Runs whenever the row carries the desired
           // label, not only when this request wrote it: a retry after a
-          // relabel that committed but a delete that did not (stored ==
-          // desired), or a lost relabel re-read as this duplicate, finishes
-          // the cleanup — the statement's own guards make it 0 rows for any
-          // row that does not carry exactly this label (codex #3834 r26 P2).
+          // relabel that committed but a delete that did not, or a lost
+          // claim re-read as this duplicate, finishes the cleanup — the
+          // statement's own guards make it 0 rows for any row that does not
+          // carry exactly this label (codex #3834 r26 P2).
           await db('ad_service_attribution')
             .where({ lead_id: lead.id, funnel_stage: 'lead' })
             .whereExists(db('leads').select(db.raw('1')).where({ id: lead.id, status: 'duplicate' }).whereRaw("extracted_data->>'duplicate_of_lead_id' = ?", [duplicateOfLeadId]).modify(scopedToTypedIdentity))

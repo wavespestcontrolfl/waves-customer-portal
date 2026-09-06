@@ -40,6 +40,11 @@ jest.mock('../middleware/admin-auth', () => {
   };
 });
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/dispatch-assignment', () => ({
+  ...jest.requireActual('../services/dispatch-assignment'),
+  assignDispatchJob: jest.fn(),
+  emitDispatchJobUpdate: jest.fn(),
+}));
 jest.mock('../services/scheduling/occupancy', () => {
   const actual = jest.requireActual('../services/scheduling/occupancy');
   const mocked = {
@@ -82,6 +87,7 @@ const SVC = {
   id: 'svc-1',
   customer_id: 'cust-1',
   scheduled_date: '2099-07-01',
+  day: '2099-07-01', // to_char projection used by the shared tech-day fence
   window_start: '09:00:00',
   window_end: '10:00:00',
   status: 'confirmed',
@@ -139,7 +145,10 @@ beforeEach(() => {
   db.fn = { now: jest.fn(() => 'now()') };
   db.mockImplementation((table) => chain(table === 'scheduled_services' ? { ...SVC } : (table === 'customers' ? { id: 'cust-1', first_name: 'Test', last_name: 'Customer', phone: null, email: null } : undefined)));
   trx = jest.fn((table) => chain(table === 'scheduled_services' ? { ...SVC } : (table === 'customers' ? { id: 'cust-1' } : undefined)));
-  trx.raw = jest.fn(async (sql, bindings) => { callOrder.push(`raw:${String(sql).slice(0, 40)}`); return { sql, bindings, rows: [] }; });
+  trx.raw = jest.fn(async (sql, bindings) => {
+    callOrder.push(bindings?.[0] === 'slot-reserve' ? `techday:${bindings[1]}` : `raw:${String(sql).slice(0, 40)}`);
+    return { sql, bindings, rows: [] };
+  });
   trx.fn = { now: jest.fn(() => 'now()') };
   trx.transaction = jest.fn(async (cb) => cb(trx));
   trx.commit = jest.fn();
@@ -292,6 +301,78 @@ describe('PUT /:id/update-details — date/window move', () => {
 
   test('an edit that touches neither date nor window takes no date lock', async () => {
     await put('svc-1', { notes: 'gate code 1234' });
+    expect(acquireOccupancyLock).not.toHaveBeenCalled();
+    expect(findConflictingVisits).not.toHaveBeenCalled();
+  });
+});
+
+describe('PUT /:id/update-details — arrival warnings for partial route edits', () => {
+  const savedGate = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+  afterEach(() => {
+    if (savedGate === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = savedGate;
+  });
+
+  test.each([
+    { technicianId: '00000000-0000-4000-8000-000000000002' },
+    { routeOrder: 2 },
+  ])('a route-only edit %j commits with the route warning under the date lock', async (change) => {
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    const row = { ...SVC };
+    trx.mockImplementation((table) => chain(table === 'scheduled_services' ? { ...row } : undefined));
+    require('../services/dispatch-assignment').assignDispatchJob.mockImplementation(async ({ technicianId }) => {
+      row.technician_id = technicianId;
+      return { changed: true };
+    });
+    const warning = 'The route cannot keep every promised arrival window.';
+    findConflictingVisits.mockResolvedValue([{ id: SVC.id, warning }]);
+
+    const { status, body } = await put(SVC.id, change);
+
+    expect(status).toBe(200);
+    expect(body.warnings).toEqual([warning]);
+    expect(acquireOccupancyLock).toHaveBeenCalledWith(trx, SVC.scheduled_date);
+    expect(callOrder.indexOf(`occupancy:${SVC.scheduled_date}`)).toBeLessThan(callOrder.indexOf('comms'));
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
+      db: trx, date: SVC.scheduled_date, windowStart: '09:00', windowEnd: '10:00',
+      arrivalWindow: expect.objectContaining({ serviceId: SVC.id }),
+    }));
+    if (change.technicianId) expect(row.technician_id).toBe(change.technicianId);
+  });
+
+  test.each([{ windowStart: '13:00' }, { estimatedDuration: 90 }, { routeOrder: 2 }])(
+    'same-day edit %j fences route reordering before the probe', async (change) => {
+      process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+      findConflictingVisits.mockImplementation(async () => { callOrder.push('probe'); return []; });
+      const { status } = await put(SVC.id, change);
+      expect(status).toBe(200);
+      const fence = callOrder.indexOf(`techday:unassigned:${SVC.scheduled_date}`);
+      expect(fence).toBeGreaterThan(callOrder.indexOf(`occupancy:${SVC.scheduled_date}`));
+      expect(fence).toBeLessThan(callOrder.indexOf('comms'));
+      expect(fence).toBeLessThan(callOrder.indexOf('probe'));
+    },
+  );
+
+  test('a concurrent technician change refuses to simulate under a stale route lock', async () => {
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    trx.mockImplementation((table) => {
+      const c = chain(table === 'scheduled_services' ? { ...SVC } : undefined);
+      if (table === 'scheduled_services') c.first.mockImplementation(async () => ({
+        ...SVC, technician_id: c.forUpdate.mock.calls.length ? 'changed-tech' : null,
+      }));
+      return c;
+    });
+    const { status, body } = await put(SVC.id, { windowStart: '13:00' });
+    expect(status).toBe(409);
+    expect(body.code).toBe('VISIT_CHANGED_RETRY');
+    expect(findConflictingVisits).not.toHaveBeenCalled();
+  });
+
+  test('the kill switch keeps route-only edits on the legacy path', async () => {
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'false';
+    const { status, body } = await put(SVC.id, { routeOrder: 2 });
+    expect(status).toBe(200);
+    expect(body.warnings).toBeUndefined();
     expect(acquireOccupancyLock).not.toHaveBeenCalled();
     expect(findConflictingVisits).not.toHaveBeenCalled();
   });

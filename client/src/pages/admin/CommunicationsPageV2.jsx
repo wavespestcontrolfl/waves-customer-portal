@@ -95,6 +95,7 @@ import {
   Button,
   Card,
   Dialog,
+  Radio,
   DialogHeader,
   DialogTitle,
   DialogBody,
@@ -219,14 +220,14 @@ function findKnownWavesNumber(value) {
 const TABS = [
   {
     key: "events",
-    label: "Events",
+    label: "Message Automations",
     Icon: Zap,
   },
   { key: "sms", label: "SMS", Icon: MessageSquare },
   { key: "calls", label: "Calls", Icon: PhoneCall },
   { key: "triage", label: "Triage", Icon: Inbox },
   // Open promises across calls (call_commitments) — staff-wide like Calls.
-  { key: "owed", label: "Owed", Icon: ClipboardList },
+  { key: "owed", label: "Promises", Icon: ClipboardList },
   // Management tabs below are owner-only (2026-08-25 role lockdown):
   // template/routing/notification CONFIG and staff-performance scoring are
   // not day-to-day comms work. Events/SMS/Calls/Triage stay staff-wide.
@@ -696,7 +697,24 @@ export function buildReservicePrefill({ firstName, laneLabel, url }) {
   } re-service here: ${url}`;
 }
 
-// The Insert Link sheet's "For this customer" rows. reschedule/reservice
+// Both-channel review ask: the /sms response says whether the email copy went.
+export function reviewEmailNote(outcome) {
+  if (!outcome) return "";
+  if (outcome.sent) return " Review request emailed too.";
+  const why = {
+    text_not_sent: "the text did not go out, so the email was held back",
+    no_email: "no email on file",
+    email_off: "review emails are off in their preferences",
+    email_blocked: "the address is suppressed",
+    prefs_unavailable: "preferences could not be read",
+    email_not_attempted: "the text went out but its delivery could not be recorded, so the email was held back — send it from Quick Links",
+    email_uncertain: "it may or may not have gone out — check the customer's email log before sending it again",
+    already_reviewed: "this customer is already marked as having left a review",
+  }[outcome.reason] || "it could not be sent";
+  return ` Review email skipped — ${why}.`;
+}
+
+// The Quick Links sheet's "For this customer" rows. reschedule/reservice
 // keep their dedicated endpoints; the other minted kinds go through
 // POST /admin/communications/customer-link. portal_login is the one static
 // row in the group — same link for everyone, scheme-less per the SMS
@@ -704,7 +722,10 @@ export function buildReservicePrefill({ firstName, laneLabel, url }) {
 export const CUSTOMER_COMPOSER_LINKS = [
   { key: "reschedule", name: "Reschedule link", keywords: "appointment move change visit time", dynamic: true },
   { key: "reservice", name: "Re-service link", keywords: "free callback between visit retreat", dynamic: true },
-  { key: "review_request", name: "Review request link", keywords: "rate rating feedback stars ask google", dynamic: true },
+  // channels: picking the row asks Text / Email / Both (owner ruling
+  // 2026-09-03) — Text inserts the link, Email sends the review email now,
+  // Both inserts the link and emails when the text is sent.
+  { key: "review_request", name: "Review request", keywords: "rate rating feedback stars ask google email", dynamic: true, channels: true },
   { key: "pay_balance", name: "Pay balance link", keywords: "pay payment invoice bill billing owe money", dynamic: true },
   { key: "estimate", name: "Latest estimate link", keywords: "estimate proposal open pending price quote", dynamic: true },
   { key: "referral", name: "Referral link", keywords: "refer friend neighbor share reward", dynamic: true },
@@ -715,6 +736,7 @@ export const CUSTOMER_COMPOSER_LINKS = [
   { key: "service_report", name: "Latest service report link", keywords: "report service report visit summary last recap", dynamic: true },
   { key: "contract", name: "Contract signing link", keywords: "contract sign signature agreement document esign", dynamic: true },
   { key: "statement", name: "Statement pay link", keywords: "statement payer bill-to property manager builder net30 pay", dynamic: true },
+  { key: "project_report", name: "Project report link", keywords: "project report wdo termite inspection specialty findings pdf", dynamic: true },
   {
     key: "portal_login",
     name: "Portal login",
@@ -1207,7 +1229,7 @@ function SmsTab() {
     // A per-row bearer credential (Auto Pay setup, contract signing, prep
     // guide — anything the server minted with an expiresAt — plus the
     // kinds it flags immediateOnly: card request, statement pay, appointment
-    // page, service report) is only
+    // page, service report, project report) is only
     // re-checked at delivery on the immediate send; the schedule picker has
     // no upper bound and a draft dispatches without a re-check. Immediate
     // sends only, same rule as review links (the server re-fences).
@@ -1284,7 +1306,7 @@ function SmsTab() {
           text: `Scheduled for ${formatScheduledForToast(scheduledFor)}.`,
         });
       } else {
-        await adminFetch("/admin/communications/sms", {
+        const sent = await adminFetch("/admin/communications/sms", {
           method: "POST",
           body: JSON.stringify({
             to: toNumber.trim(),
@@ -1305,12 +1327,14 @@ function SmsTab() {
             // The send that just left IS the review ask — the server marks
             // the inline review_requests row delivered (see /sms route).
             reviewRequestId: insertedCustomerLinks.review_request?.requestId || undefined,
+            // Both: email the same ask once the text has really sent.
+            reviewRequestEmail: insertedCustomerLinks.review_request?.emailToo ? true : undefined,
             // A freshly inserted contract signing link is unwritten until
             // this send activates it — the server needs the contract it names.
             contractId: insertedCustomerLinks.contract?.contractId || undefined,
           }),
         });
-        setSendResult({ ok: true, text: "Message sent." });
+        setSendResult({ ok: true, text: `Message sent.${reviewEmailNote(sent?.reviewEmail)}` });
       }
       setToNumber("");
       setToSearch("");
@@ -1740,7 +1764,7 @@ function SmsTab() {
   // response guard, replace-don't-stack per kind, and the strip-on-
   // recipient-change effect below.
   const CUSTOMER_LINK_NOTES = {
-    review_request: (d) => `Review request added — personal link${d.firstName ? ` for ${d.firstName}` : ""}.`,
+    review_request: (d) => `Review request added — personal link${d.firstName ? ` for ${d.firstName}` : ""}${d.channel === "both" ? "; the email goes out when you send" : ""}.`,
     pay_balance: (d) =>
       d.balance
         ? `Pay link added — $${Number(d.balance.total).toFixed(2)} open across ${d.balance.count === 1 ? "1 invoice" : `${d.balance.count} invoices`}.`
@@ -1760,6 +1784,7 @@ function SmsTab() {
       d.statement
         ? `Statement pay link added — ${d.statement.number}, $${Number(d.statement.total).toFixed(2)} for ${d.statement.payerName}.`
         : "Statement pay link added.",
+    project_report: (d) => `Project report link added${d.projectReport?.title ? ` — ${d.projectReport.title}` : ""}${d.projectReport?.projectDate ? ` (${d.projectReport.projectDate})` : ""}.`,
   };
 
   // Withdrawal is NON-destructive: the pending review row is SHARED — every
@@ -1769,7 +1794,82 @@ function SmsTab() {
   // auto-sends), the customer's next insert reuses it, and only a claimed
   // /sms send delivers it.
 
-  const handleInsertCustomerLink = async (kind) => {
+  // Email channel: the server sent the review email — nothing to insert,
+  // and a Text/Both review link still in the draft comes OUT: the email
+  // started the ask's cooldown, so the composer send would be refused for
+  // the stale reviewRequestId (GH Codex #3856 r2 P2).
+  const applyEmailedReviewAsk = (kind, d) => {
+    const staleUrl = insertedCustomerLinks[kind]?.url || null;
+    if (staleUrl) {
+      setMsgBody((b) => stripLinkLines(b, staleUrl));
+      setInsertedCustomerLinks((m) => {
+        const { [kind]: _dropped, ...rest } = m;
+        return rest;
+      });
+    }
+    setSendResult({
+      ok: true,
+      text: `Review request emailed${d.firstName ? ` to ${d.firstName}` : ""}.${staleUrl ? " The review link was removed from the text." : ""}`,
+    });
+  };
+
+  // Owner-bound kinds (Auto Pay, prep guide, appointment page, service
+  // report) hand back the resolved owner: adopt it as the selected customer
+  // when none was picked, so the send carries customerId and the
+  // recipient's own consent policy applies (the server refuses the strict-
+  // owner kinds otherwise). The phone did
+  // not change — links already minted for this recipient with no selected
+  // customer adopt the resolved owner too, or the recipient-change effects
+  // would strip them (r4 P2).
+  const adoptResolvedOwner = (d, requestCustomerId, requestRecipientKey) => {
+    if (requestCustomerId || !d.customerId) return;
+    const adopt = (e) => (
+      e && e.recipientKey === requestRecipientKey && e.customerId == null
+        ? { ...e, customerId: d.customerId }
+        : e
+    );
+    setSelectedCustomerId(d.customerId);
+    setInsertedResched(adopt);
+    setInsertedReservice(adopt);
+    setInsertedCustomerLinks((m) => Object.fromEntries(Object.entries(m).map(([k, e]) => [k, adopt(e)])));
+  };
+
+  // The minted line goes into the draft. Replace-don't-stack per kind (same
+  // rule as the reschedule insert): a replaced review link's row is NOT
+  // canceled — reuse means the fresh insert hands back the same shared row
+  // anyway. A standalone line (Auto Pay: the reviewed SMS template, already
+  // greeted) goes in as-is; the generic prefill wraps the others.
+  const insertCustomerLinkLine = ({ kind, channel, d, requestRecipientKey, linkCustomerId }) => {
+    const clause = String(d.line || "").trim() || `${d.url}`;
+    const prefill = d.standalone ? clause : buildCustomerLinkPrefill({ firstName: d.firstName, clause });
+    const prevUrl = insertedCustomerLinks[kind]?.url || null;
+    setMsgBody((b) => {
+      const base = prevUrl ? stripLinkLines(b, prevUrl) : b;
+      return base.trim()
+        ? `${base.replace(/\s+$/, "")}\n\n${clause}`
+        : prefill || clause;
+    });
+    setInsertedCustomerLinks((m) => ({
+      ...m,
+      [kind]: {
+        url: d.url,
+        recipientKey: requestRecipientKey,
+        customerId: linkCustomerId,
+        requestId: d.requestId || null,
+        contractId: d.contract?.id || null,
+        // Both: the send posts reviewRequestEmail so the same ask is
+        // emailed once the text has really gone out.
+        emailToo: channel === "both",
+        // Expiring / immediate-only bearer links refuse scheduled and
+        // draft sends (see the send boundary) — the server says which.
+        expiresAt: d.expiresAt || null,
+        immediateOnly: !!d.immediateOnly,
+      },
+    }));
+    setSendResult({ ok: true, text: (CUSTOMER_LINK_NOTES[kind] || (() => "Link added."))({ ...d, channel }) });
+  };
+
+  const handleInsertCustomerLink = async (kind, channel = null) => {
     const requestRecipient = toNumber.trim();
     if (!requestRecipient || insertingCustomerLink) return;
     const requestRecipientKey = smsThreadKey(requestRecipient);
@@ -1798,11 +1898,18 @@ function SmsTab() {
           phone: requestRecipient,
           customerId: requestCustomerId || undefined,
           kind,
+          channel: channel || undefined,
         }),
       });
       if (contextChanged()) {
         // The mint landed after the operator moved on — just drop it. The
         // shared pending row stays reusable (see the withdrawal note above).
+        // (An Email-channel review ask has already been sent by the server;
+        // the toast is the only thing dropped.)
+        return;
+      }
+      if (d.sent && channel === "email") {
+        applyEmailedReviewAsk(kind, d);
         return;
       }
       if (d.autoSecured) {
@@ -1816,56 +1923,8 @@ function SmsTab() {
         });
         return;
       }
-      const clause = String(d.line || "").trim() || `${d.url}`;
-      // A standalone line (Auto Pay: the reviewed SMS template, already
-      // greeted) goes in as-is; the generic prefill wraps the others.
-      const prefill = d.standalone ? clause : buildCustomerLinkPrefill({ firstName: d.firstName, clause });
-      // Owner-bound kinds (Auto Pay, card request, contract, prep guide,
-      // appointment page, service report) hand back the resolved owner:
-      // adopt it as the selected customer when none was picked, so the send
-      // carries customerId and the recipient's own consent policy applies
-      // (the server refuses the strict-owner kinds otherwise).
-      const linkCustomerId = d.customerId || requestCustomerId;
-      if (!requestCustomerId && d.customerId) {
-        // The phone did not change — links already minted for this
-        // recipient with no selected customer adopt the resolved owner too,
-        // or the recipient-change effects would strip them (r4 P2).
-        const adopt = (e) => (
-          e && e.recipientKey === requestRecipientKey && e.customerId == null
-            ? { ...e, customerId: d.customerId }
-            : e
-        );
-        setSelectedCustomerId(d.customerId);
-        setInsertedResched(adopt);
-        setInsertedReservice(adopt);
-        setInsertedCustomerLinks((m) => Object.fromEntries(Object.entries(m).map(([k, e]) => [k, adopt(e)])));
-      }
-      // Replace-don't-stack per kind (same rule as the reschedule insert).
-      // A replaced review link's row is NOT canceled: reuse means the fresh
-      // insert hands back the same shared row anyway.
-      const prevEntry = insertedCustomerLinks[kind] || null;
-      const prevUrl = prevEntry?.url || null;
-      setMsgBody((b) => {
-        const base = prevUrl ? stripLinkLines(b, prevUrl) : b;
-        return base.trim()
-          ? `${base.replace(/\s+$/, "")}\n\n${clause}`
-          : prefill || clause;
-      });
-      setInsertedCustomerLinks((m) => ({
-        ...m,
-        [kind]: {
-          url: d.url,
-          recipientKey: requestRecipientKey,
-          customerId: linkCustomerId,
-          requestId: d.requestId || null,
-          contractId: d.contract?.id || null,
-          // Expiring / immediate-only bearer links refuse scheduled and
-          // draft sends (see the send boundary) — the server says which.
-          expiresAt: d.expiresAt || null,
-          immediateOnly: !!d.immediateOnly,
-        },
-      }));
-      setSendResult({ ok: true, text: (CUSTOMER_LINK_NOTES[kind] || (() => "Link added."))(d) });
+      adoptResolvedOwner(d, requestCustomerId, requestRecipientKey);
+      insertCustomerLinkLine({ kind, channel, d, requestRecipientKey, linkCustomerId: d.customerId || requestCustomerId });
     } catch (e) {
       if (!contextChanged()) {
         setSendResult({ ok: false, text: e.message });
@@ -1927,11 +1986,11 @@ function SmsTab() {
     [libraryLinks, smsIsAdminRole],
   );
 
-  const handleInsertSheetPick = (link) => {
+  const handleInsertSheetPick = (link, channel = null) => {
     setShowLinkSheet(false);
     if (link.key === "reschedule") return handleInsertRescheduleLink();
     if (link.key === "reservice") return handleInsertReserviceLink();
-    if (link.dynamic) return handleInsertCustomerLink(link.key);
+    if (link.dynamic) return handleInsertCustomerLink(link.key, channel);
     return handleInsertLibraryLink(link);
   };
 
@@ -2772,13 +2831,13 @@ function SmsTab() {
               !!insertingCustomerLink ||
               !toNumber.trim()
             }
-            title="Insert a customer, review, website, or app link into the message"
+            title="Quick Links — insert a customer, review, website, or app link into the message"
             aria-haspopup="dialog"
             aria-expanded={showLinkSheet}
           >
             {insertingResched || insertingReservice || insertingCustomerLink
               ? "Adding…"
-              : "Insert Link"}
+              : "Quick Links"}
           </Button>{" "}
           <Button
             variant="secondary"
@@ -3127,10 +3186,24 @@ const PREP_TYPES = [
   { value: "flea", label: "Flea treatment" },
   { value: "bed_bug", label: "Bed bug treatment" },
   { value: "cockroach", label: "Cockroach treatment" },
+  { value: "interior_pest", label: "Interior pest treatment" },
+  { value: "rodent", label: "Rodent service" },
+  { value: "termite", label: "Termite service" },
+  { value: "mosquito", label: "Mosquito treatment" },
+  { value: "lawn", label: "Lawn treatment" },
+];
+
+// Operator-chosen channel (owner ruling 2026-09-03). Text carries the
+// guide page link, which needs an upcoming visit of that type.
+const PREP_CHANNELS = [
+  { value: "both", label: "Email and text" },
+  { value: "email", label: "Email only" },
+  { value: "sms", label: "Text only" },
 ];
 
 function PrepSendDialog({ open, onClose }) {
   const [pestType, setPestType] = useState("flea");
+  const [channel, setChannel] = useState("both");
   const [search, setSearch] = useState("");
   const [results, setResults] = useState([]);
   const [searching, setSearching] = useState(false);
@@ -3141,6 +3214,7 @@ function PrepSendDialog({ open, onClose }) {
   useEffect(() => {
     if (!open) {
       setPestType("flea");
+      setChannel("both");
       setSearch("");
       setResults([]);
       setSelected(null);
@@ -3189,9 +3263,10 @@ function PrepSendDialog({ open, onClose }) {
     try {
       const data = await adminFetch("/admin/communications/send-prep", {
         method: "POST",
-        body: JSON.stringify({ customerId: selected.id, pestType }),
+        body: JSON.stringify({ customerId: selected.id, pestType, channel }),
       });
-      setResult({ ok: true, text: data?.message || "Prep sent." });
+      // A Both send with one leg down is flagged, not celebrated.
+      setResult({ ok: !data?.partial, text: data?.message || "Prep sent." });
     } catch (e) {
       setResult({ ok: false, text: e.message || "Couldn't send the prep." });
     } finally {
@@ -3206,8 +3281,9 @@ function PrepSendDialog({ open, onClose }) {
       </DialogHeader>
       <DialogBody>
         <p className="text-13 text-zinc-600 mb-3">
-          Search a customer by name. We'll email the prep guide if they have an
-          email on file, otherwise we'll text it.
+          Search a customer by name, pick the guide, and choose how it goes
+          out. A text carries the guide page link, so it needs an upcoming
+          visit of that type on the calendar.
         </p>
         <label className="block text-11 uppercase tracking-label text-zinc-500 mb-1">
           Treatment
@@ -3226,6 +3302,23 @@ function PrepSendDialog({ open, onClose }) {
             </option>
           ))}
         </select>
+        <fieldset className="flex flex-col gap-2 border-0 p-0 m-0 mb-3 min-w-0">
+          <legend className="text-11 uppercase tracking-label text-zinc-500 mb-1 p-0">Send by</legend>
+          {PREP_CHANNELS.map((c) => (
+            <Radio
+              key={c.value}
+              id={`prep-channel-${c.value}`}
+              name="prep-channel"
+              label={c.label}
+              checked={channel === c.value}
+              onChange={() => {
+                setChannel(c.value);
+                setResult(null);
+              }}
+              disabled={sending}
+            />
+          ))}
+        </fieldset>
         {selected ? (
           <div className="flex items-center justify-between border-hairline border-zinc-200 rounded-sm px-3 py-2.5">
             <div className="min-w-0">

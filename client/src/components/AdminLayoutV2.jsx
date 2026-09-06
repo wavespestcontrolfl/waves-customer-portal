@@ -1,3 +1,4 @@
+import { IntelligenceBarPageDataProvider } from '../hooks/useIntelligenceBarPageData';
 /*
  * AdminLayoutV2 — Square Dashboard-inspired light admin shell.
  *
@@ -25,7 +26,7 @@ import {
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
 import { refetchFlags, useFeatureFlag } from "../hooks/useFeatureFlag";
-import { adminFetch } from "../utils/admin-fetch";
+import { adminFetch, adminLoginUrl } from "../utils/admin-fetch";
 import { trackAdminPageView, markUsageSource } from "../lib/adminUsage";
 import {
   ADMIN_DESKTOP_NAV_SECTIONS,
@@ -76,7 +77,7 @@ export default function AdminLayoutV2() {
   useEffect(() => {
     const token = localStorage.getItem("waves_admin_token");
     if (!token) {
-      navigate("/admin/login", { replace: true });
+      navigate(adminLoginUrl(location), { replace: true });
       return;
     }
     adminFetch("/admin/auth/me")
@@ -104,7 +105,7 @@ export default function AdminLayoutV2() {
           localStorage.removeItem("waves_admin_token");
           localStorage.removeItem("waves_admin_user");
           refetchFlags().catch(() => {});
-          navigate("/admin/login", { replace: true });
+          navigate(adminLoginUrl(location), { replace: true });
           return;
         }
         setAuthStatus("error");
@@ -159,8 +160,13 @@ export default function AdminLayoutV2() {
   const openPalette = () => paletteRef.current?.open();
 
   const sidebarVisible = !isMobile || sidebarOpen;
+  // The redirect effect runs after render. Apply its existing role policy to
+  // the outlet too, so a restricted child's effects cannot run for one frame.
+  const canRenderRoute = authStatus === "ready"
+    && (user?.role === "admin" || !isPathAdminOnly(location.pathname));
 
   return (
+    <IntelligenceBarPageDataProvider>
     <div
       className="admin-shell-v2"
       style={{
@@ -590,7 +596,7 @@ export default function AdminLayoutV2() {
         className="admin-main"
         ref={mainRef}
       >
-        {authStatus === "ready" ? (
+        {canRenderRoute ? (
           <Outlet context={{ user }} />
         ) : (
           <div role={authStatus === "error" ? "alert" : "status"}>
@@ -679,5 +685,6 @@ export default function AdminLayoutV2() {
       {/* Global ⌘K palette */}
       <GlobalCommandPalette ref={paletteRef} />
     </div>
+    </IntelligenceBarPageDataProvider>
   );
 }

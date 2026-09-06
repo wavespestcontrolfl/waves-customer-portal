@@ -50,7 +50,7 @@ Use for: "which vendors do we use?", "how many products does SiteOne carry?", "w
   },
   {
     name: 'compare_vendor_pricing',
-    description: `Compare prices for a specific product across all vendors. Shows each vendor's price, price-per-oz, and identifies the cheapest.
+    description: `Compare prices for a specific product across all vendors. Shows each vendor's price, price per oz (per unit for count-based products such as stations or traps), and identifies the cheapest.
 Use for: "compare SiteOne vs LESCO on Bifen IT", "where's the cheapest Demand CS?", "pricing breakdown for Prodiamine"`,
     input_schema: {
       type: 'object',
@@ -356,24 +356,24 @@ function eligibleVendorRows(qb) {
     });
 }
 
-function rankVendorRows(rows) {
+function rankVendorRows(rows, product) {
+  // The canonical writer's scoring, verbatim (Codex #3974 r1 P1): per-oz when
+  // a measured row exists, per-UNIT for count-based products, raw price only
+  // when nothing scales — so the IB can never name a different winner than
+  // the catalog. Entries keep { row, perOz, rank, price }; rank is on the
+  // chosen basis (null when unrankable) and unrankable rows sort last.
   const adminInventoryRoute = require('../../routes/admin-inventory');
-  const scored = rows.map((row) => {
-    const perOz = adminInventoryRoute.vendorRowPricePerOz(row);
-    // Unit-aware landed conversion (r22-push P0) — never assume $/oz.
-    const landed = adminInventoryRoute.storedUnitCostPerOz(row.landed_unit_price, row.unit_normalized);
-    const rank = landed != null ? landed : perOz;
-    const price = Number(row.price_amount ?? row.price) || 0;
-    return { row, perOz, rank, price };
-  });
-  scored.sort((a, b) => {
-    if (a.rank == null && b.rank == null) return a.price - b.price;
-    if (a.rank == null) return 1;
-    if (b.rank == null) return -1;
-    return (a.rank - b.rank) || (a.price - b.price);
-  });
-  return scored;
+  return adminInventoryRoute.scoreVendorRows(rows, product);
 }
+
+// The basis a ranking was decided on, in words the model can repeat (Codex
+// #3974 r2 P2): a count-based product's spread is dollars per UNIT, not per oz.
+const BASIS_TEXT = {
+  oz: 'per-oz unit cost (landed when known)',
+  count: 'per-unit cost for a count-based product (landed when shipping/tax are known)',
+  raw: 'raw pack price (no comparable size on the rows)',
+};
+const basisUnit = (mode) => (mode === 'count' ? 'unit' : 'oz');
 
 async function compareVendorPricing(input) {
   const { product_name, product_id } = input;
@@ -392,12 +392,13 @@ async function compareVendorPricing(input) {
 
   // Ordered by UNIT cost, not raw pack price — a $40/32 oz offer must not
   // present as "cheaper" than a $50/64 oz one.
-  const ranked = rankVendorRows(rows);
+  const { mode, ranked } = rankVendorRows(rows, product);
   const cheapest = ranked.length > 0 ? ranked[0] : null;
-  const dearest = ranked.length > 0 ? ranked[ranked.length - 1] : null;
-  const perOzSpread = cheapest?.rank != null && dearest?.rank != null && ranked.length > 1
-    ? dearest.rank - cheapest.rank
-    : 0;
+  // The spread runs to the last COMPARABLE vendor (Codex #3974 r3 P2): an
+  // incompatible row (rank null) sits last by design and must not null it.
+  const comparable = ranked.filter((r) => r.rank != null);
+  const dearest = comparable.length > 1 ? comparable[comparable.length - 1] : null;
+  const spread = cheapest?.rank != null && dearest ? dearest.rank - cheapest.rank : 0;
 
   return {
     product: {
@@ -406,11 +407,15 @@ async function compareVendorPricing(input) {
       current_best_price: product.best_price ? parseFloat(product.best_price) : null,
       current_best_vendor: product.best_vendor,
     },
-    vendor_prices: ranked.map(({ row: p, perOz }) => ({
+    vendor_prices: ranked.map(({ row: p, perOz, perUnit, rankPerUnit }) => ({
       vendor: p.vendor_name,
       price: parseFloat(p.price_amount ?? p.price ?? 0),
       quantity: p.quantity,
       price_per_oz: perOz != null ? Math.round(perOz * 10000) / 10000 : null,
+      price_per_unit: perUnit != null ? Math.round(perUnit * 10000) / 10000 : null,
+      // Landed per-unit (shipping / tax on the current price) is what a
+      // count-mode winner was chosen on (Codex #3974 r3 P2).
+      landed_price_per_unit: rankPerUnit != null ? Math.round(rankPerUnit * 10000) / 10000 : null,
       landed_price_per_oz: (() => {
         const adminInventoryRoute2 = require('../../routes/admin-inventory');
         return adminInventoryRoute2.storedUnitCostPerOz(p.landed_unit_price, p.unit_normalized);
@@ -422,9 +427,11 @@ async function compareVendorPricing(input) {
     cheapest_vendor: cheapest?.row.vendor_name,
     cheapest_price: cheapest ? parseFloat(cheapest.row.price_amount ?? cheapest.row.price ?? 0) : null,
     cheapest_price_per_oz: cheapest?.perOz != null ? Math.round(cheapest.perOz * 10000) / 10000 : null,
-    price_range: perOzSpread > 0 ? `$${perOzSpread.toFixed(4)}/oz spread across ${ranked.length} vendors` : null,
+    cheapest_price_per_unit: cheapest?.perUnit != null ? Math.round(cheapest.perUnit * 10000) / 10000 : null,
+    cheapest_landed_price_per_unit: cheapest?.rankPerUnit != null ? Math.round(cheapest.rankPerUnit * 10000) / 10000 : null,
+    price_range: spread > 0 ? `$${spread.toFixed(4)}/${basisUnit(mode)} spread across ${ranked.length} vendors` : null,
     vendor_count: ranked.length,
-    comparison_basis: 'per-oz unit cost (landed when known)',
+    comparison_basis: BASIS_TEXT[mode],
   };
 }
 
@@ -451,12 +458,17 @@ async function findCheapestVendor(input) {
       .join('vendors', 'vendor_pricing.vendor_id', 'vendors.id')
       .select('vendor_pricing.*', 'vendors.name as vendor_name');
 
-    // Same per-oz basis as compareVendorPricing (GH r3 P1).
-    const ranked = rankVendorRows(rows).slice(0, 3);
+    // Same basis as compareVendorPricing (GH r3 P1) — per oz, or per unit
+    // for a count-based product (Codex #3974 r2 P2).
+    const scored = rankVendorRows(rows, p);
+    const ranked = scored.ranked.slice(0, 3);
+    const savingsKey = scored.mode === 'count' ? 'savings_per_unit_vs_next' : 'savings_per_oz_vs_next';
     const asEntry = (r) => (r ? {
       vendor: r.row.vendor_name,
       price: parseFloat(r.row.price_amount ?? r.row.price ?? 0),
       price_per_oz: r.perOz != null ? Math.round(r.perOz * 10000) / 10000 : null,
+      price_per_unit: r.perUnit != null ? Math.round(r.perUnit * 10000) / 10000 : null,
+      landed_price_per_unit: r.rankPerUnit != null ? Math.round(r.rankPerUnit * 10000) / 10000 : null,
     } : null);
     results.push({
       product: p.name,
@@ -467,13 +479,14 @@ async function findCheapestVendor(input) {
       // Savings on the SAME basis the ranking used (r16-push P1): rank is
       // landed per-oz when known — sticker deltas could go negative under
       // heavy shipping despite a correct winner.
-      savings_per_oz_vs_next: ranked.length >= 2 && ranked[0].rank != null && ranked[1].rank != null
+      comparison_basis: BASIS_TEXT[scored.mode],
+      [savingsKey]: ranked.length >= 2 && ranked[0].rank != null && ranked[1].rank != null
         ? Math.round((ranked[1].rank - ranked[0].rank) * 10000) / 10000
         : null,
     });
   }
 
-  return { results, total: results.length, comparison_basis: 'per-oz unit cost (landed when known)' };
+  return { results, total: results.length, comparison_basis: 'per-oz unit cost (landed when known); per-unit for count-based products — see each result' };
 }
 
 
@@ -1231,6 +1244,11 @@ async function createRestockRequest(input) {
   return db.transaction(async (trx) => {
     const fresh = await trx('products_catalog').where('id', product.id).forUpdate().first();
     if (!fresh) return { error: 'Product not found' };
+    // An automatic order already claimed/placed for this product: refuse —
+    // the Restock tab carries the order line (pre-push P0). Checked BEFORE
+    // the shared live-request read so the order-specific message wins.
+    try { await require('../procurement/order-dispatch').assertNoLiveAutoOrder(trx, product.id); }
+    catch (err) { if (err.code === 'auto_order_live') return { error: err.message, auto_order_live: true }; throw err; }
     const live = await findLiveRestockRequest(trx, fresh.id);
     if (live) {
       return {
@@ -1285,6 +1303,104 @@ async function createRestockRequest(input) {
   });
 }
 
+
+// The two non-receive transitions, under the request lock (Codex r10 P2:
+// action routing is its own stage, apart from the locked receive).
+async function transitionRestockRequest(trx, { request, product, action }) {
+  if (action === 'mark_ordered') {
+    await trx('product_restock_requests').where('id', request.id).update({ status: 'ordered', updated_at: new Date() });
+    return { success: true, request_id: request.id, product: product.name, status: 'ordered' };
+  }
+  if (action === 'cancel') {
+    await trx('product_restock_requests').where('id', request.id).update({
+      status: 'cancelled', closed_at: new Date(), updated_at: new Date(),
+    });
+    return { success: true, request_id: request.id, product: product.name, status: 'cancelled' };
+  }
+}
+
+// The locked receive: quantity re-derived under the request + product locks,
+// the approved card's exact delta re-asserted, stock + movement + close.
+async function receiveRestockLocked(trx, { request, lockedRequest, input, receivePlan, secondReceive = false }) {
+  // receive — recompute against the locked product row, never the preview.
+  // When the operator gave no quantity, the default is re-derived HERE,
+  // under the request lock: an automatic order that went placing → placed
+  // between the preview and this transaction must receive what it actually
+  // bought, not the requested figure (pre-push P0).
+  const fresh = await trx('products_catalog').where('id', request.product_id).forUpdate().first();
+  if (!fresh) return { error: 'Product not found' };
+  const enteredQuantity = toNumber(input.quantity)
+    ?? await require('../procurement/order-dispatch').orderedQuantityFor(trx, request.id)
+    ?? toNumber(lockedRequest.requested_quantity);
+  if (!enteredQuantity || enteredQuantity <= 0) return { error: 'Receive quantity is required' };
+  const inventoryUnit = fresh.inventory_unit || receivePlan.enteredUnit;
+  const received = describeInventoryConversion(enteredQuantity, receivePlan.enteredUnit, inventoryUnit);
+  if (!received.convertible || received.amount == null) {
+    return { error: `Cannot convert receive unit ${receivePlan.enteredUnit} to inventory unit ${inventoryUnit}` };
+  }
+  const stockBefore = toNumber(fresh.inventory_on_hand) ?? 0;
+  const stockAfter = round4(stockBefore + received.amount);
+
+  // The card approved an EXACT stock delta (GH r11 P1): re-assert it
+  // here, under the request + product row locks — the entered quantity
+  // and unit were derived from unlocked reads, so a request or product
+  // edited after the confirm-time preview could otherwise add a
+  // different amount than the operator saw.
+  const approvedReceive = input._verified_receive;
+  if (approvedReceive && (round4(received.amount) !== round4(toNumber(approvedReceive.adds) ?? NaN)
+    || String(inventoryUnit) !== String(approvedReceive.unit)
+    // The card shows exact before/after totals — the starting balance
+    // binds too (pre-push r11 P1), so a concurrent movement refuses
+    // rather than landing an unapproved final balance.
+    || round4(stockBefore) !== round4(toNumber(approvedReceive.stock_before) ?? NaN))) {
+    return {
+      error: 'The receive amounts changed after the card was shown (request, product, or stock level edited) — nothing was received. Ask again for a fresh confirmation card.',
+      preview_changed: true,
+    };
+  }
+
+  await trx('products_catalog').where('id', fresh.id).update({
+    inventory_on_hand: stockAfter,
+    inventory_unit: inventoryUnit,
+    updated_at: new Date(),
+  });
+  const [movement] = await trx('product_inventory_movements').insert({
+    product_id: fresh.id,
+    movement_type: 'restock',
+    quantity: received.amount,
+    unit: inventoryUnit,
+    stock_before: stockBefore,
+    stock_after: stockAfter,
+    metadata: {
+      source: 'intelligence_bar_restock_receive',
+      restockRequestId: request.id,
+      note: input.note || null,
+      enteredQuantity: enteredQuantity,
+      enteredUnit: receivePlan.enteredUnit,
+      conversionConfidence: received.confidence,
+      ...(secondReceive ? { secondReceive: true } : {}),
+    },
+  }).returning('*');
+  // The late order's own receipt: the marker that kept the live-order
+  // guards closed comes off in this transaction (Codex r27 P1).
+  if (secondReceive) await require('../procurement/order-dispatch').settleLandedAfterReceive(trx, request.id);
+  await trx('product_restock_requests').where('id', request.id).update({
+    status: 'received', closed_at: new Date(), updated_at: new Date(),
+  });
+
+  return {
+    success: true,
+    request_id: request.id,
+    product: fresh.name,
+    status: 'received',
+    stock_before: stockBefore,
+    added: received.amount,
+    stock_after: stockAfter,
+    unit: inventoryUnit,
+    movement_id: movement?.id || null,
+  };
+}
+
 async function updateRestockRequest(input) {
   const action = String(input.action || '').toLowerCase();
   if (!['mark_ordered', 'receive', 'cancel'].includes(action)) {
@@ -1294,7 +1410,12 @@ async function updateRestockRequest(input) {
 
   const request = await db('product_restock_requests').where('id', input.request_id).first();
   if (!request) return { error: 'Restock request not found' };
-  if (request.status === 'received' || request.status === 'cancelled') {
+  // ONE more receive on a received request whose automatic order landed
+  // after that receipt (ledger evidence.landedAfterReceive — Codex r27 P1);
+  // the locked guard below re-derives it before anything is written.
+  const secondReceive = action === 'receive' && request.status === 'received'
+    && await require('../procurement/order-dispatch').landedAfterReceiveFor(db, request.id);
+  if ((request.status === 'received' && !secondReceive) || request.status === 'cancelled') {
     return { error: `This request is already ${request.status} — no further actions allowed` };
   }
   const product = await db('products_catalog').where('id', request.product_id).first();
@@ -1302,7 +1423,10 @@ async function updateRestockRequest(input) {
 
   let receivePlan = null;
   if (action === 'receive') {
-    const qty = toNumber(input.quantity) ?? toNumber(request.requested_quantity);
+    // Default = what the automatic order actually bought (packages round
+    // up), else the requested figure (Codex r2 P1).
+    const orderedQuantity = await require('../procurement/order-dispatch').orderedQuantityFor(db, request.id);
+    const qty = toNumber(input.quantity) ?? orderedQuantity ?? toNumber(request.requested_quantity);
     const enteredUnit = input.unit || request.unit || product.inventory_unit;
     if (!qty || qty <= 0 || !enteredUnit) return { error: 'Receive quantity and unit are required' };
     const inventoryUnit = product.inventory_unit || enteredUnit;
@@ -1337,110 +1461,37 @@ async function updateRestockRequest(input) {
   }
 
   const result = await db.transaction(async (trx) => {
+    // LOCK ORDER: the request's ledger row first, then the request — the
+    // order the dispatcher's record transaction and the revoke CLI use, so
+    // a receive racing a revoke waits instead of deadlocking (hook r27 P1).
+    await trx('vendor_orders').where('restock_request_id', request.id).forUpdate().first('id');
     // Re-check under lock: a concurrent confirm can close this request
     // between the unlocked pre-check above and this transaction. Without
     // the request-row lock, two receives would both add stock.
     const lockedRequest = await trx('product_restock_requests').where('id', request.id).forUpdate().first();
     if (!lockedRequest) return { error: 'Restock request not found' };
-    if (lockedRequest.status === 'received' || lockedRequest.status === 'cancelled') {
+    // Automatic-order guard (pre-push P0s): no action while the order is
+    // placing; no cancel while a dispatched order is unreceived and unrevoked.
+    let guard;
+    try { guard = await require('../procurement/order-dispatch').assertManualActionAllowed(trx, request.id, action); }
+    catch (err) { if (err.code === 'auto_order_placing' || err.code === 'auto_order_out') return { error: err.message, [err.code]: true }; throw err; }
+    const lockedSecondReceive = secondReceive && lockedRequest.status === 'received' && !!guard.landedAfterReceive;
+    if ((lockedRequest.status === 'received' && !lockedSecondReceive) || lockedRequest.status === 'cancelled') {
       return { error: `This request is already ${lockedRequest.status} — no further actions allowed` };
     }
 
-    if (action === 'mark_ordered') {
-      await trx('product_restock_requests').where('id', request.id).update({ status: 'ordered', updated_at: new Date() });
-      return { success: true, request_id: request.id, product: product.name, status: 'ordered' };
-    }
-    if (action === 'cancel') {
-      await trx('product_restock_requests').where('id', request.id).update({
-        status: 'cancelled', closed_at: new Date(), updated_at: new Date(),
-      });
-      return { success: true, request_id: request.id, product: product.name, status: 'cancelled' };
-    }
-
-    // receive — recompute against the locked product row, never the preview
-    const fresh = await trx('products_catalog').where('id', request.product_id).forUpdate().first();
-    if (!fresh) return { error: 'Product not found' };
-    const inventoryUnit = fresh.inventory_unit || receivePlan.enteredUnit;
-    const received = describeInventoryConversion(receivePlan.enteredQuantity, receivePlan.enteredUnit, inventoryUnit);
-    if (!received.convertible || received.amount == null) {
-      return { error: `Cannot convert receive unit ${receivePlan.enteredUnit} to inventory unit ${inventoryUnit}` };
-    }
-    const stockBefore = toNumber(fresh.inventory_on_hand) ?? 0;
-    const stockAfter = round4(stockBefore + received.amount);
-
-    // The card approved an EXACT stock delta (GH r11 P1): re-assert it
-    // here, under the request + product row locks — the entered quantity
-    // and unit were derived from unlocked reads, so a request or product
-    // edited after the confirm-time preview could otherwise add a
-    // different amount than the operator saw.
-    const approvedReceive = input._verified_receive;
-    if (approvedReceive && (round4(received.amount) !== round4(toNumber(approvedReceive.adds) ?? NaN)
-      || String(inventoryUnit) !== String(approvedReceive.unit)
-      // The card shows exact before/after totals — the starting balance
-      // binds too (pre-push r11 P1), so a concurrent movement refuses
-      // rather than landing an unapproved final balance.
-      || round4(stockBefore) !== round4(toNumber(approvedReceive.stock_before) ?? NaN))) {
-      return {
-        error: 'The receive amounts changed after the card was shown (request, product, or stock level edited) — nothing was received. Ask again for a fresh confirmation card.',
-        preview_changed: true,
-      };
-    }
-
-    await trx('products_catalog').where('id', fresh.id).update({
-      inventory_on_hand: stockAfter,
-      inventory_unit: inventoryUnit,
-      updated_at: new Date(),
-    });
-    const [movement] = await trx('product_inventory_movements').insert({
-      product_id: fresh.id,
-      movement_type: 'restock',
-      quantity: received.amount,
-      unit: inventoryUnit,
-      stock_before: stockBefore,
-      stock_after: stockAfter,
-      metadata: {
-        source: 'intelligence_bar_restock_receive',
-        restockRequestId: request.id,
-        note: input.note || null,
-        enteredQuantity: receivePlan.enteredQuantity,
-        enteredUnit: receivePlan.enteredUnit,
-        conversionConfidence: received.confidence,
-      },
-    }).returning('*');
-    await trx('product_restock_requests').where('id', request.id).update({
-      status: 'received', closed_at: new Date(), updated_at: new Date(),
-    });
-
-    return {
-      success: true,
-      request_id: request.id,
-      product: fresh.name,
-      status: 'received',
-      stock_before: stockBefore,
-      added: received.amount,
-      stock_after: stockAfter,
-      unit: inventoryUnit,
-      movement_id: movement?.id || null,
-    };
+    const outcome = action !== 'receive'
+      ? await transitionRestockRequest(trx, { request, product, action })
+      : await receiveRestockLocked(trx, { request, lockedRequest, input, receivePlan, secondReceive: lockedSecondReceive });
+    // A completed action resolves the request's ledger bell ("order
+    // manually" / "receive or revoke"): retired in the same transaction so
+    // no one follows it (Codex r28 P2) — only after the action succeeded; a
+    // receive that returns an error (preview changed, unit unconvertible)
+    // received nothing and keeps its bell (hook P1).
+    if (outcome?.success) await require('../procurement/order-dispatch').settleRequestLedgerBells(trx, request.id);
+    return outcome;
   });
 
-  if (result.success && action === 'receive') {
-    // Same WaveGuard-readiness recheck the admin receive endpoint runs —
-    // non-fatal, the stock is already committed.
-    try {
-      const adminInventoryRoute = require('../../routes/admin-inventory');
-      if (typeof adminInventoryRoute.syncLawnReadinessAfterRestock === 'function') {
-        result.readiness_recheck = await adminInventoryRoute.syncLawnReadinessAfterRestock();
-      }
-    } catch (recheckErr) {
-      logger.warn(`[intelligence-bar:procurement] restock readiness recheck failed: ${recheckErr.message}`);
-      result.readiness_recheck = { error: recheckErr.message };
-      // The card renders only result.warning, and the contract promises a
-      // recheck failure is reported (GH r16 P2) — promote it there, never
-      // leave it buried in a field the operator never sees.
-      result.warning = [result.warning, 'Stock received, but the WaveGuard lawn-readiness recheck failed — open readiness alerts in the Command Center may be stale until the next recheck.'].filter(Boolean).join(' ');
-    }
-  }
   return result;
 }
 

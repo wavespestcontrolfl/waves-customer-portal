@@ -59,6 +59,8 @@ class CampaignAdvisor {
 
     const capacity = await this.getWeekCapacity();
     const targets = await db('ad_targets').first();
+    // Same live assignable count the budget manager uses for capacity.
+    const techCount = await BudgetManager.getTechCountForArea();
 
     const budgetLog = await db('ad_budget_log')
       .where('created_at', '>=', new Date(now - 7 * 86400000))
@@ -176,7 +178,7 @@ SEO/GSC RULES:
 BUSINESS CONTEXT:
 - Waves Pest Control, SWFL (Manatee / Sarasota / Charlotte counties), 5 staffed offices (Bradenton, Sarasota, Venice, Parrish, Lakewood Ranch)
 - Main site: wavespestcontrol.com + a 15-site hub-and-spoke network
-- 1 field technician (Adam), max ~${targets?.max_services_per_tech || 8} services per tech per day — capacity is tight, so weigh scaling recommendations against it
+- ${techCount} field technician${techCount === 1 ? '' : 's'} on the dispatch roster, max ~${targets?.max_services_per_tech || 8} services per tech per day — capacity is tight, so weigh scaling recommendations against it
 - WaveGuard membership tiers: Bronze/Silver/Gold/Platinum with 0/10/15/20% discounts
 - Recurring lawn services use $35/hr loaded labor cost and a 45% fully loaded floor
 - Current performance targets: ROAS > ${targets?.min_roas || 4.0}, CPA < $${targets?.max_cpa || 40}, CVR > ${((targets?.min_conversion_rate || 0.03) * 100).toFixed(0)}%, AOV > $${targets?.target_aov || 120}

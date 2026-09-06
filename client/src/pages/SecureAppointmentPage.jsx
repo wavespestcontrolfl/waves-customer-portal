@@ -22,8 +22,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
+import { FLOW_COLUMN_MAX } from '../theme-doc';
 import { WavesShell } from '../components/brand';
-import BrandFooter from '../components/BrandFooter';
 import { useGlassSurface } from '../glass/glass-engine';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import SecurePlanChoice from '../components/estimate/SecurePlanChoice';
@@ -58,8 +58,8 @@ const PRIMARY_CTA = {
   border: `1px solid ${COLORS.glassNavy}`,
   borderRadius: 8,
   fontFamily: FONTS.ui,
-  fontWeight: 800,
-  fontSize: 15,
+  fontWeight: 700,
+  fontSize: 16,
   cursor: 'pointer',
   textDecoration: 'none',
 };
@@ -67,9 +67,8 @@ const PRIMARY_CTA = {
 function Shell({ children }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: S.text }}>
+      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: FLOW_COLUMN_MAX, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: S.text }}>
         {children}
-        <BrandFooter />
       </div>
     </WavesShell>
   );
@@ -96,7 +95,7 @@ function VisitSummary({ data }) {
   const parts = [data.serviceType, data.dateDisplay, data.windowDisplay].filter(Boolean);
   if (!parts.length) return null;
   return (
-    <div data-glass="soft" style={{ background: '#F8FCFE', border: '1px solid #CFE7F5', borderRadius: 8, padding: '12px 14px', marginTop: 12, fontSize: 15, color: S.text, fontWeight: 600 }}>
+    <div data-glass="soft" style={{ background: '#F8FCFE', border: '1px solid #CFE7F5', borderRadius: 8, padding: '12px 14px', marginTop: 12, fontSize: 16, color: S.text, fontWeight: 600 }}>
       {parts.join(' · ')}
     </div>
   );
@@ -105,7 +104,7 @@ function VisitSummary({ data }) {
 export default function SecureAppointmentPage() {
   const { token } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
 
   const [state, setState] = useState('loading'); // loading | notfound | closed | unavailable | ready | secured | prepay_selected
   const [data, setData] = useState(null);
@@ -424,7 +423,7 @@ export default function SecureAppointmentPage() {
   if (state === 'loading') {
     return (
       <Shell>
-        <Card><div style={{ fontSize: 15, color: S.body }}>Loading your appointment&hellip;</div></Card>
+        <Card><div style={{ fontSize: 16, color: S.body }}>Loading your appointment&hellip;</div></Card>
       </Shell>
     );
   }
@@ -434,7 +433,7 @@ export default function SecureAppointmentPage() {
       <Shell>
         <Card>
           <h1 style={{ fontFamily: FONTS.heading, fontSize: 22, margin: 0, color: S.text }}>We couldn&rsquo;t find that link</h1>
-          <p style={{ fontSize: 15, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
+          <p style={{ fontSize: 16, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
             The link may have been mistyped. Text or call us and we&rsquo;ll sort it out.
           </p>
           <ContactRow />
@@ -450,7 +449,7 @@ export default function SecureAppointmentPage() {
           <h1 style={{ fontFamily: FONTS.heading, fontSize: 22, margin: 0, color: S.text }}>
             {standalone ? 'This link is no longer active' : 'Nothing needed here'}
           </h1>
-          <p style={{ fontSize: 15, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
+          <p style={{ fontSize: 16, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
             {standalone
               ? 'This Auto Pay setup link has expired or Auto Pay is already set up. Text or call us for a fresh link — we’re happy to help.'
               : <>This appointment doesn&rsquo;t need a card on file anymore. If anything changed, text or call us — we&rsquo;re happy to help.</>}
@@ -468,7 +467,7 @@ export default function SecureAppointmentPage() {
           <h1 style={{ fontFamily: FONTS.heading, fontSize: 22, margin: 0, color: S.text }}>
             {data?.firstName ? `You're all set, ${data.firstName}!` : 'You’re all set!'}
           </h1>
-          <p style={{ fontSize: 15, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
+          <p style={{ fontSize: 16, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
             {standalone
               ? 'Auto Pay is set up. Nothing was charged today — after each completed service, that service’s amount is charged to your saved payment method automatically. You can change or remove it anytime in the Waves app.'
               : 'Your card is on file and your appointment is secured. Nothing was charged today — your card is only charged after your service is completed.'}
@@ -503,7 +502,7 @@ export default function SecureAppointmentPage() {
       <Shell>
         <Card>
           <h1 style={{ fontFamily: FONTS.heading, fontSize: 22, margin: 0, color: S.text }}>Finishing up&hellip;</h1>
-          <p style={{ fontSize: 15, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
+          <p style={{ fontSize: 16, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
             Your payment method was received and Auto Pay is being turned on. Refresh
             this page in a moment to confirm.
           </p>
@@ -520,7 +519,7 @@ export default function SecureAppointmentPage() {
           <h1 style={{ fontFamily: FONTS.heading, fontSize: 22, margin: 0, color: S.text }}>
             {data?.firstName ? `${data.firstName}, you chose the annual plan` : 'You chose the annual plan'}
           </h1>
-          <p style={{ fontSize: 15, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
+          <p style={{ fontSize: 16, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
             Your annual prepay invoice is ready. Pay it once and every visit
             this year is covered — no charges after your visits.
           </p>
@@ -569,7 +568,7 @@ export default function SecureAppointmentPage() {
       <Shell>
         <Card>
           <h1 style={{ fontFamily: FONTS.heading, fontSize: 22, margin: 0, color: S.text }}>We hit a snag</h1>
-          <p style={{ fontSize: 15, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
+          <p style={{ fontSize: 16, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
             The secure card form isn&rsquo;t available right now. Text or call us
             and we&rsquo;ll take care of it.
           </p>
@@ -599,7 +598,7 @@ export default function SecureAppointmentPage() {
               ? (data?.firstName ? `${data.firstName}, choose how you’d like to pay` : 'Choose how you’d like to pay')
               : <>{greeting}&rsquo;re one step from all set</>}
         </h1>
-        <p style={{ fontSize: 15, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
+        <p style={{ fontSize: 16, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
           {standalone
             ? `Save a ${bankOffered ? 'card or bank account' : 'card'} and each completed service is paid automatically. Nothing is charged today.`
             : planRecurring
@@ -627,7 +626,7 @@ export default function SecureAppointmentPage() {
             }}
           >
             <span style={{ fontSize: 14.5, fontWeight: 700, color: S.text }}>Your service total</span>
-            <span style={{ fontSize: 22, fontWeight: 800, color: S.text }}>{fmtMoney(planContext.perVisit)}</span>
+            <span style={{ fontSize: 22, fontWeight: 700, color: S.text }}>{fmtMoney(planContext.perVisit)}</span>
           </div>
         ) : null}
         {planRecurring ? (
@@ -674,7 +673,7 @@ export default function SecureAppointmentPage() {
                   : (planRecurring ? 'Save card & confirm my plan' : 'Save card & secure my visit')}
             </button>
             {(planRecurring || planOneTime) ? (
-              <p style={{ textAlign: 'center', fontSize: 12.5, color: S.muted, marginTop: 10, marginBottom: 0 }}>
+              <p style={{ textAlign: 'center', fontSize: 14.5, color: S.muted, marginTop: 10, marginBottom: 0 }}>
                 Nothing is charged today.
               </p>
             ) : null}

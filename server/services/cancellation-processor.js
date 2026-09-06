@@ -1001,16 +1001,22 @@ async function processCancellationRequest({
 
   let recurrenceStopped = 0;
   try {
-    let stopQuery = db('scheduled_services').where({ customer_id: customerId, recurring_ongoing: true });
-    if (scopedIds) stopQuery = stopQuery.whereIn('id', [...scopedIds]);
-    // Stamp the attempt's reason on every row whose recurrence this stop
-    // clears (codex GH r8 P1): when the plan's only footprint was a
-    // COMPLETED series anchor riding recurring_ongoing=true, the flag
-    // itself is gone after this update and the row never turns
-    // 'cancelled' — the reason is the surviving request-correlated
-    // evidence restart's family recovery reads. Status is untouched; the
-    // tracker renders reasons only on cancelled-status rows.
-    recurrenceStopped = await stopQuery.update({ recurring_ongoing: false, cancellation_reason: rowReason, updated_at: new Date() });
+    await db.transaction(async trx => {
+      let seriesQuery = trx('scheduled_services').where({ customer_id: customerId, is_recurring: true });
+      if (scopedIds) seriesQuery = seriesQuery.whereIn('id', [...scopedIds]);
+      const rows = await seriesQuery.select('id', 'recurring_parent_id', 'customer_id', 'recurring_pattern');
+      await require('./recurring-plan-decisions').recordRecurringSeriesStops(trx, rows);
+      let stopQuery = trx('scheduled_services').where({ customer_id: customerId, recurring_ongoing: true });
+      if (scopedIds) stopQuery = stopQuery.whereIn('id', [...scopedIds]);
+      // Stamp the attempt's reason on every row whose recurrence this stop
+      // clears (codex GH r8 P1): when the plan's only footprint was a
+      // COMPLETED series anchor riding recurring_ongoing=true, the flag
+      // itself is gone after this update and the row never turns
+      // 'cancelled' — the reason is the surviving request-correlated
+      // evidence restart's family recovery reads. Status is untouched; the
+      // tracker renders reasons only on cancelled-status rows.
+      recurrenceStopped = await stopQuery.update({ recurring_ongoing: false, cancellation_reason: rowReason, updated_at: new Date() });
+    });
   } catch (err) {
     errors.push('stop_recurrence');
     logger.error(`[cancellation-processor] failed to stop recurrence for ${customerId}: ${err.message}`);
@@ -1146,6 +1152,10 @@ async function processCancellationRequest({
           // land after a compensating revert and close the reminder row of
           // a re-armed active visit (codex r3).
           notifyCustomer: 'caller_suppress',
+          // The tech notice waits for the live-state check below: a cancel
+          // the tech raced by going en route is reverted, and must never
+          // have told them their visit was cancelled.
+          suppressTechNotice: true,
         });
         flipped = true;
       } catch (err) {
@@ -1207,6 +1217,14 @@ async function processCancellationRequest({
         }
         cancelledCount += 1;
         cancelledIds.push(svc.id);
+        // The cancel stands — now the assigned tech hears it (post-commit,
+        // best-effort, gate-dark; recipient read from the row). The actor
+        // is the customer (portal path) or the acting staff row, so the card
+        // reads "by the customer online" / "by <name>", and a staff member
+        // cancelling their own visit stays silent.
+        void require('./tech-visit-notifications').notifyVisitCancelled({
+          visitId: svc.id, actorId: actorType === 'customer' ? 'customer' : (actor?.userId || null), previousStatus: svc.status,
+        });
       }
     }
 

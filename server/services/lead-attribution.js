@@ -1,4 +1,4 @@
-const { scopeToProspects } = require('./lead-statuses');
+const { scopeToProspects, OPEN_LEAD_STATUSES } = require('./lead-statuses');
 const db = require('../models/db');
 const logger = require('./logger');
 
@@ -170,7 +170,14 @@ async function attributeInboundContact({ from, to, type, callSid, messageSid, ca
 // ---------------------------------------------------------------------------
 // 2. markConverted
 // ---------------------------------------------------------------------------
-async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource } = {}) {
+// `onlyIfStatusIn` (the estimate-accept claim paths) makes the status write
+// conditional on the state the caller claimed, and `onlyIfIdentity` on the
+// identity it validated (customer link, phone, email, as read — a row staff
+// re-assigned or re-contacted since is no longer that opportunity, and the
+// write must lose rather than overwrite its customer, codex #3834 r18 P1):
+// 0 rows ⇒ a concurrent transition wins and nothing below runs.
+// Returns whether the lead converted.
+async function markConverted(leadId, { customerId, monthlyValue, initialServiceValue, waveguardTier, triggerSource, onlyIfStatusIn, onlyIfIdentity, onlyIfSoleLinkedRow, estimateId } = {}) {
   // Only write the fields the caller actually supplied. Trigger-driven
   // conversions (service completed / invoice sent) have no estimate to source
   // revenue from, so they omit the value fields rather than null them out —
@@ -182,34 +189,50 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
     is_qualified: true,
     updated_at: new Date(),
   };
-  if (customerId !== undefined) updates.customer_id = customerId || null;
-  if (monthlyValue !== undefined) updates.monthly_value = monthlyValue || null;
-  if (initialServiceValue !== undefined) updates.initial_service_value = initialServiceValue || null;
-  if (waveguardTier !== undefined) updates.waveguard_tier = waveguardTier || null;
+  const supplied = [['customer_id', customerId], ['monthly_value', monthlyValue], ['initial_service_value', initialServiceValue], ['waveguard_tier', waveguardTier]];
+  for (const [column, value] of supplied) if (value !== undefined) updates[column] = value || null;
+  // The estimate this conversion closed is persisted on the lead's own row
+  // (extracted_data.won_estimate_id — never the estimate_id FK, which stays
+  // the draft's own link per the #3834 rules) so a later re-convert that
+  // carries no estimate settles under the SAME scope: without it, an admin
+  // replay after a deposit on estimate B let the root linked to estimate A
+  // take the funnel row and dropped the repeat's (codex #3834 r37 P1).
+  if (estimateId) updates.extracted_data = db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ won_estimate_id: String(estimateId) })]);
 
   // Soft-deleted leads are out of every live mutation path: 0 rows updated
   // means the lead is missing or deleted, and nothing below should run.
-  const updatedRows = await db('leads').where('id', leadId).whereNull('deleted_at').update(updates);
+  const claim = db('leads').where('id', leadId).whereNull('deleted_at');
+  if (onlyIfStatusIn) claim.whereIn('status', onlyIfStatusIn);
+  if (onlyIfIdentity) claim.where(onlyIfIdentity);
+  // The wizard-fallback conversions (a 'duplicate' row standing in for the
+  // deal) win only while NO other live row of the accepted estimate is open
+  // or already won — judged in the same statement as the status write, so
+  // two overlapping acceptance retries, or a retry racing a link of the
+  // original to this estimate, cannot leave two won rows on one estimate
+  // (codex #3883 r1 P1).
+  if (onlyIfSoleLinkedRow) {
+    claim.whereNotExists(db('leads').select(db.raw('1')).where('estimate_id', onlyIfSoleLinkedRow).whereNot('id', leadId).whereNull('deleted_at')
+      .where((q) => q.where('status', 'won').orWhereIn('status', OPEN_LEAD_STATUSES)));
+  }
+  const updatedRows = await claim.update(updates);
   if (!updatedRows) {
-    logger.info(`[LeadAttribution] markConverted skipped — lead ${leadId} missing or deleted`);
-    return;
+    logger.info(`[LeadAttribution] markConverted skipped — lead ${leadId} missing, deleted, or no longer in the state the caller read`);
+    return false;
   }
 
-  // Mirror the win onto the lead's ad_service_attribution funnel row
-  // (won → 'booked'; 'completed' stays the revenue sync's to write). Monotonic
-  // in SQL and best-effort — never blocks the conversion.
-  await bridgeLeadFunnelStage(leadId, 'won');
+  const linkedCustomer = customerId || null;
+  await settleWonFunnelRow(leadId, linkedCustomer, estimateId || null);
 
   // Attach the lead's quote to the customer so it becomes a customer estimate —
   // visible in the New Appointment "Estimate source" and convertible (until now
   // a lead estimate kept customer_id = NULL and was invisible/unbookable). Lazy
   // require breaks the lead-estimate-link ⇄ lead-attribution cycle. Best-effort:
   // a backfill miss must never break the conversion.
-  if (customerId) {
+  if (linkedCustomer) {
     try {
       const lead = await db('leads').where('id', leadId).first('id', 'estimate_id', 'phone', 'email');
       const { linkLeadEstimatesToCustomer } = require('./lead-estimate-link');
-      await linkLeadEstimatesToCustomer({ lead, customerId });
+      await linkLeadEstimatesToCustomer({ lead, customerId: linkedCustomer });
     } catch (err) {
       logger.warn(`[LeadAttribution] estimate→customer backfill failed for lead ${leadId}: ${err.message}`);
     }
@@ -224,6 +247,44 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
   });
 
   logger.info(`[LeadAttribution] Lead ${leadId} converted${triggerSource ? ` (${triggerSource})` : ''}`);
+  return true;
+}
+
+// Where a won lead's win lands in the ad funnel — the ONE mechanism for every
+// writer of status='won' (markConverted; the admin book route, which converts
+// inside its booking transaction and mirrors the funnel post-commit — codex
+// #3834 r32 P1). Mirror the win onto the lead's ad_service_attribution row
+// (won → 'booked'; 'completed' stays the revenue sync's to write) — monotonic
+// in SQL and best-effort, never blocks the conversion. A wizard repeat's win
+// the bridge could not land on any row — /calculate dropped the row's
+// lead-stage funnel row when it was filed as a repeat — is settled by
+// settleRepeatFunnelRow: its root's row advances to booked when the root is
+// still this customer's open opportunity, else the repeat's own row is
+// rebuilt from its stored touch, at booked — inside the settlement's own
+// transaction, under its lock on the repeat still being won (codex #3834
+// r14 P2, r22 P2, r27 P1/P2; pre-push P1 on 28489d7). ONLY a repeat
+// (quote_wizard row carrying the marker): every
+// other lead with no row has none on purpose — an inbound call on the Ads
+// bridge number leaves its slot empty for the delayed bridge to claim as
+// paid, and a generic rebuild would stamp it organic first (codex r24 P1).
+// Settled even when the bridge DID land: a row the repeat kept because
+// /calculate's own delete failed advances here while its root's row also
+// stands, and the settlement is what reconciles the two (codex r29 P2).
+// Best-effort like the bridge and the stamp: the status write has committed,
+// so a settlement read that fails must not fail the conversion (codex r28
+// P2). Lazy require: the lead-estimate-link ⇄ lead-attribution cycle.
+// `estimateId` (the estimate the conversion closed, when it closed one)
+// scopes which root may take the win's row — see settleRepeatFunnelRow.
+// Returns the bridge's result so a caller that surfaces a bridge ERROR as a
+// warning (the Intelligence Bar cards) still can.
+async function settleWonFunnelRow(leadId, customerId = null, estimateId = null) {
+  const bridged = await bridgeLeadFunnelStage(leadId, 'won');
+  try {
+    await require('./lead-estimate-link').settleRepeatFunnelRow(db, leadId, { customerId, estimateId });
+  } catch (err) {
+    logger.warn(`[LeadAttribution] funnel-row settlement failed for lead ${leadId}: ${err.message}`);
+  }
+  return bridged;
 }
 
 // ---------------------------------------------------------------------------
@@ -679,6 +740,7 @@ module.exports = {
   normalizePhone,
   attributeInboundContact,
   markConverted,
+  settleWonFunnelRow,
   markLost,
   logFirstResponse,
   logSourceTouch,

@@ -2,11 +2,14 @@ import { useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 
 // URL = state for the Agents hub. The hub owns ?tab=; the Models tab and the
-// hub's area strip read and write ?area= here so a deep link reproduces the
-// exact view and a defaulted value never litters the URL. The hub's tab
-// beacon keys on ?tab= only, so this param never re-fires it.
+// hub's area strip read and write ?area= here, the Control center reads and
+// writes ?window= / ?status=, so a deep link reproduces the exact view and a
+// defaulted value never litters the URL. The hub's tab beacon keys on ?tab=
+// only, so these params never re-fire it.
 
-export const PARAM_DEFAULTS = { area: null };
+export const WINDOWS = ["today", "7d", "30d"];
+export const STATUSES = ["all", "active", "attention", "idle"];
+export const PARAM_DEFAULTS = { area: null, window: "7d", status: "all" };
 
 export function useHubParams() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -26,9 +29,13 @@ export function useHubParams() {
     },
     [setSearchParams],
   );
+  const windowParam = searchParams.get("window");
+  const statusParam = searchParams.get("status");
   return {
     tab: searchParams.get("tab"),
     area: searchParams.get("area") || PARAM_DEFAULTS.area,
+    window: WINDOWS.includes(windowParam) ? windowParam : PARAM_DEFAULTS.window,
+    status: STATUSES.includes(statusParam) ? statusParam : PARAM_DEFAULTS.status,
     set,
   };
 }

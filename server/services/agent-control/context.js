@@ -138,4 +138,5 @@ module.exports = {
   withPromptVersion,
   newTraceId,
   newSpanId,
+  isKnownLane,
 };

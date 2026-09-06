@@ -841,6 +841,16 @@ describe('builtinTranscriptMayReplace (pure) and POST /transcription', () => {
     expect(builtinTranscriptMayReplace({ transcription: 'x', transcription_provider: null })).toBe(true);
     expect(builtinTranscriptMayReplace({ transcription: 'x', transcription_provider: 'openai' })).toBe(false);
     expect(builtinTranscriptMayReplace({ transcription: 'x', transcription_provider: 'gemini' })).toBe(false);
+    // Sandy PR 2A: the relay's own transcript yields to the recording's text ONLY on a transferred row whose AI segment is stashed.
+    const stashed = { relay_transcript: { text: 'Agent: hi' }, relay_handoff: {} };
+    expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay', metadata: stashed })).toBe(true);
+    expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay', metadata: JSON.stringify(stashed) })).toBe(true);
+    expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay', metadata: { relay_handoff: {} } })).toBe(false); // not stashed
+    expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay', metadata: { relay_transcript: { text: 'Agent: hi' } } })).toBe(false); // not a transfer, not reconnected
+    expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay', metadata: { relay_transcript: { text: 'Agent: hi' }, relay_reconnects: 1 } })).toBe(true); // a reconnected call's voicemail (PR 2B)
+    expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay', metadata: { relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Agent: hi' }] } })).toBe(true); // …preserved in durable segments (a silent resumed leg wrote no stash)
+    expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay', metadata: { relay_reconnects: 1, relay_segments: [{ generation: 1, text: '' }] } })).toBe(false); // an empty segment preserves nothing
+    expect(builtinTranscriptMayReplace({ transcription: 'Agent: hi', transcription_provider: 'conversation_relay' })).toBe(false);
   });
 
   test('a late built-in transcription does not overwrite the diarized provider transcript the extraction ran on', async () => {

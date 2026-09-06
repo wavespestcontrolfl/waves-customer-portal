@@ -8,12 +8,12 @@ import MobileServiceLibrary from "./MobileServiceLibrary";
 afterEach(cleanup);
 
 describe("MobileServiceLibrary", () => {
-  it("exposes Protocol & Readiness from the mobile Services menu", () => {
+  it("exposes Treatment Plans from the mobile Services menu", () => {
     const onOpenProtocols = vi.fn();
     render(<MobileServiceLibrary onOpenProtocols={onOpenProtocols} />);
 
     fireEvent.click(
-      screen.getByRole("button", { name: /Protocol & Readiness/i }),
+      screen.getByRole("button", { name: /Treatment Plans/i }),
     );
 
     expect(onOpenProtocols).toHaveBeenCalledTimes(1);

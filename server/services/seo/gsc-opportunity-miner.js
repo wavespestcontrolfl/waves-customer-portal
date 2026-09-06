@@ -4449,6 +4449,7 @@ class GscOpportunityMiner {
          ON CONFLICT (dedupe_key) DO UPDATE
            SET score = EXCLUDED.score,
                score_breakdown = EXCLUDED.score_breakdown,
+               claim_id = CASE WHEN opportunity_queue.status = 'expired' THEN NULL ELSE opportunity_queue.claim_id END,
                -- Preserve the runner's one-shot gate_retry marker across the
                -- wholesale metadata refresh: a first hard-gate failure defers
                -- the row with feedback recorded here, and the morning miner

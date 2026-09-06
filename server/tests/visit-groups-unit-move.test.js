@@ -18,9 +18,17 @@ jest.mock('../models/db', () => {
       orWhereRaw() { chain._ops.push(['orWhereRaw', ...arguments]); return chain; },
       leftJoin() { chain._ops.push(['leftJoin', ...arguments]); return chain; },
       forUpdate() { chain._ops.push(['forUpdate']); return chain; },
+      forShare() { chain._ops.push(['forShare']); return chain; },
       orderBy() { chain._ops.push(['orderBy', ...arguments]); return chain; },
       max() { chain._ops.push(['max', ...arguments]); return chain; },
-      first(...cols) { log.push({ table, op: 'first', ops: chain._ops, cols }); return Promise.resolve(script[table] && script[table].first ? script[table].first(chain._ops, cols) : null); },
+      first(...cols) {
+        log.push({ table, op: 'first', ops: chain._ops, cols });
+        if (script[table] && script[table].first) return Promise.resolve(script[table].first(chain._ops, cols));
+        // Save-time eligibility read (technician-eligibility.js): every tech a
+        // test assigns is on staff and field-dispatchable unless scripted.
+        if (table === 'technicians') return Promise.resolve({ id: 't9', employment_status: 'active', field_dispatchable: true });
+        return Promise.resolve(null);
+      },
       select(...cols) { log.push({ table, op: 'select', ops: chain._ops, cols }); return Promise.resolve(script[table] && script[table].select ? script[table].select(chain._ops) : []); },
       update(values) { log.push({ table, op: 'update', ops: chain._ops, values }); return Promise.resolve(1); },
       count() { chain._ops.push(['count', ...arguments]); return chain; },
@@ -47,6 +55,7 @@ jest.mock('../services/job-status', () => ({ transitionJobStatus: jest.fn().mock
 jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn().mockResolvedValue({}) }));
 jest.mock('../services/scheduling/occupancy', () => ({ findConflictingVisits: jest.fn().mockResolvedValue([]), acquireOccupancyLock: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../services/dispatch-assignment', () => ({ assignDispatchJob: jest.fn().mockResolvedValue({ changed: true }) }));
+jest.mock('../services/tech-visit-notifications', () => ({ notifyVisitRescheduled: jest.fn(), notifyTechVisitChange: jest.fn(), notifyAssignmentChange: jest.fn() }));
 
 const db = require('../models/db');
 const AppointmentReminders = require('../services/appointment-reminders');
@@ -60,7 +69,8 @@ const SERVICE = { id: 'a', visit_id: 'v1' };
 function fakeRebooker(behaviour = {}) {
   const impl = async (id, date, win, reason, by, opts) => {
     if (behaviour[id] === 'throw') throw Object.assign(new Error(`member ${id} boom`), { code: 'SLOT_TAKEN' });
-    return { success: true, originalDate: '2026-08-30', newDate: date, id, win, opts };
+    // An object behaviour is merged into the result (e.g. the committed holder the rebooker reports).
+    return { success: true, originalDate: '2026-08-30', newDate: date, id, win, opts, ...(behaviour[id] && typeof behaviour[id] === 'object' ? behaviour[id] : {}) };
   };
   return { reschedule: jest.fn(impl), rescheduleSeries: jest.fn(impl) };
 }
@@ -94,6 +104,34 @@ describe('moveVisitAsUnit', () => {
     expect(await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).toBe(null);
     db.__script = script({ members: [member('a')] });
     expect(await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' })).toBe(null);
+  });
+
+  test('options.moveGuard runs for EVERY member in the assignment transaction with the destination tech, before assignDispatchJob; a refusal leaves that member on its old tech and reported failed', async () => {
+    // landed rows: a re-pointed to t2 by the (mocked) assignment; b refused, so it stays on t1
+    db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })], landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '13:00', window_end: '14:00', technician_id: 't2' },
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '14:00', window_end: '15:00', technician_id: 't1' },
+    ] });
+    const seen = [];
+    const moveGuard = jest.fn(async ({ trx, technicianId, service }) => {
+      seen.push({ trxIsFn: typeof trx === 'function', technicianId, id: service.id, assignsSoFar: assignDispatchJob.mock.calls.length });
+      if (service.id === 'b') throw Object.assign(new Error('deactivated for lawn'), { statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+    });
+    const out = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00', reason: 'auto_dispatch', initiatedBy: 'auto_dispatch', options: { technicianId: 't2', moveGuard } });
+    // both members checked against the DESTINATION (t2), each before its own assignment write
+    expect(seen).toEqual([
+      { trxIsFn: true, technicianId: 't2', id: 'a', assignsSoFar: 0 },
+      { trxIsFn: true, technicianId: 't2', id: 'b', assignsSoFar: 1 },
+    ]);
+    // a assigned; b refused → never assigned, reported failed
+    expect(assignDispatchJob).toHaveBeenCalledTimes(1);
+    expect(assignDispatchJob.mock.calls[0][0]).toMatchObject({ jobId: 'a', technicianId: 't2' });
+    // b's row DID move (its rebooker call committed) but stays on its old tech: reported
+    // "moved but unassigned", never silently split-tech; a is clean.
+    expect(out.visitMove.moved).toEqual(['a', 'b']);
+    expect(out.visitMove.failed).toEqual([
+      expect.objectContaining({ id: 'b', movedButUnassigned: true, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' }),
+    ]);
   });
 
   test('date + window move: members moved first (primary with caller options, siblings with their OWN fence), then the parent retargeted from the rows that landed', async () => {
@@ -579,6 +617,37 @@ describe('moveVisitAsUnit — codex #3609 r13', () => {
     const staleTech = await moveVisitAsUnit({ rebooker: fakeRebooker({ a: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't9' } });
     expect(staleTech.visitMove.moved).toEqual(['a', 'b']);
     expect(staleTech.visitMove.failed).toEqual([expect.objectContaining({ id: 'a', code: 'ASSIGNMENT_STALE' })]);
+    // The holder's fallback "visit moved" card (its rebooker card was suppressed for the pair): the plan
+    // asserts date + start; a member with no end time gets an object-shaped window whose end the rebooker
+    // derives, so the snapshot must NOT assert `windowEnd: null` or the write-time check drops the card.
+    const { notifyVisitRescheduled } = require('../services/tech-visit-notifications');
+    expect(notifyVisitRescheduled).toHaveBeenCalledTimes(1);
+    const fallback = notifyVisitRescheduled.mock.calls[0][0];
+    expect(fallback).toMatchObject({ visitId: 'a', technicianId: 't1', snapshot: { date: '2026-09-02', windowStart: '09:00', windowEnd: '10:00' } });
+    jest.clearAllMocks(); db.__calls.length = 0;
+    db.__script = script({ members: [member('a', { window_end: null }), member('b')], landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't1' },
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't9' },
+    ] });
+    assignDispatchJob.mockRejectedValueOnce(Object.assign(new Error('stale'), { statusCode: 409, code: 'ASSIGNMENT_STALE' }));
+    const openEndedOut = await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin', options: { technicianId: 't9' } });
+    expect(openEndedOut.visitMove.failed).toEqual([expect.objectContaining({ id: 'a', code: 'ASSIGNMENT_STALE', movedButUnassigned: true })]);
+    expect(notifyVisitRescheduled).toHaveBeenCalledTimes(1);
+    const openEnded = notifyVisitRescheduled.mock.calls[0][0];
+    expect(openEnded.actorId).toBe('admin');
+    expect(openEnded.snapshot).toEqual({ date: '2026-09-02', windowStart: '09:00' });
+    expect('windowEnd' in openEnded.snapshot).toBe(false);
+    // The fallback card goes to the holder the COMMITTED move reported (a raced reassignment landed t3 —
+    // the very reason the stale fence failed), never to the plan's expected technician.
+    jest.clearAllMocks(); db.__calls.length = 0;
+    db.__script = script({ members: [member('a'), member('b')], landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't3' },
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't9' },
+    ] });
+    assignDispatchJob.mockRejectedValueOnce(Object.assign(new Error('stale'), { statusCode: 409, code: 'ASSIGNMENT_STALE' }));
+    await moveVisitAsUnit({ rebooker: fakeRebooker({ a: { technicianId: 't3' } }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', initiatedBy: 'admin', options: { technicianId: 't9' } });
+    expect(notifyVisitRescheduled).toHaveBeenCalledTimes(1);
+    expect(notifyVisitRescheduled.mock.calls[0][0]).toMatchObject({ visitId: 'a', technicianId: 't3' });
     jest.clearAllMocks(); db.__calls.length = 0;
     db.__script = script({ members: [member('a'), member('b')], landedRows: { b: landedRow() } });
     const out = await moveVisitAsUnit({ rebooker: fakeRebooker({ b: 'throw' }), serviceId: 'a', service: SERVICE, newDate: '2026-09-02' });
@@ -613,7 +682,8 @@ describe('moveVisitAsUnit — codex #3609 r15 + local audit', () => {
     expect(assignDispatchJob).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'a', technicianId: 't9', expectTechnicianId: 't1', skipVisitSeam: true }));
     // skipVisitSeam: the per-row seam must not run on a half-reassigned visit (codex r16 P1) — step 4 runs it per member after the retarget
     // expectTechnicianId = the PLANNED pre-move tech (local audit): a newer operator reassignment is never overwritten
-    expect(assignDispatchJob).toHaveBeenCalledWith({ jobId: 'b', technicianId: 't9', actorId: null, emit: true, trx: expect.any(Function), skipVisitSeam: true, expectTechnicianId: 't1' });
+    // noticeActorId: the card names the rebooker's initiatedBy when no staff row was given; actorId (resolved_by) stays null
+    expect(assignDispatchJob).toHaveBeenCalledWith({ jobId: 'b', technicianId: 't9', actorId: null, emit: true, trx: expect.any(Function), skipVisitSeam: true, expectTechnicianId: 't1', noticeActorId: 'admin' });
     // every moved member reports the slot it landed on, for the caller's fenced bookkeeping
     expect(out.visitMove.members.find((m) => m.id === 'b').landed).toEqual({ scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00' });
     // and the parent still carries the technician

@@ -6182,7 +6182,7 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain("document.querySelectorAll('[data-standard-invoice-copy-total]')");
     expect(html).not.toContain('data-first-visit-grand-total');
     expect(html).toContain('let firstVisitTotal = 0;');
-    expect(html).toContain('.payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:800;color:#1B2C5B;text-align:right;white-space:nowrap}');
+    expect(html).toContain('.payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:700;color:#1B2C5B;text-align:right;white-space:nowrap}');
     expect(html).not.toContain('.payment-summary-row.total strong');
     expect(html).not.toContain('How billing works');
     expect(html).not.toContain('For comparison, this plan averages');

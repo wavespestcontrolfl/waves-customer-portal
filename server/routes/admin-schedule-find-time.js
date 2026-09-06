@@ -13,6 +13,7 @@
  *     serviceId?,             // existing-visit surfaces: rank at the VISIT's stamped address
  *     excludeServiceIds?,     // drop these visits from occupancy (reschedule self-exclusion)
  *     slotStepMinutes?,       // snap starts to this granularity (1–120)
+ *     arrivalWindows?,        // supported edit/drag picker opt-in
  *     hint?,                  // advisory best-times consumer — gated (GATE_BEST_TIME_HINTS)
  *   }
  */
@@ -27,7 +28,8 @@ const { loadOccupancy, conflictsForTarget } = require('../services/rain-out');
 const { gateEnvValue } = require('../config/feature-gates');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
-const { stampedDivergesSql } = require('../services/stamped-address');
+const { serviceLocationSelects, resolveServiceLocation } = require('../services/scheduling/day-stops');
+const { arrivalWindowRoutingEnabled } = require('../services/scheduling/arrival-route');
 
 const MAX_FIND_TIME_DAYS = 90;
 
@@ -73,28 +75,18 @@ async function resolveFindTimeTarget({ serviceId, customerId, address, lat, lng 
       .where('scheduled_services.id', serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .first(
-        db.raw(`COALESCE(scheduled_services.lat, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END) as visit_lat`),
-        db.raw(`COALESCE(scheduled_services.lng, CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END) as visit_lng`),
-        db.raw('COALESCE(scheduled_services.service_address_line1, customers.address_line1) as visit_line1'),
-        db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as visit_city'),
-        db.raw('COALESCE(scheduled_services.service_address_state, customers.state) as visit_state'),
-        db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as visit_zip'),
+        ...serviceLocationSelects(db),
         'scheduled_services.customer_id as visit_customer_id',
         'customers.profile_label as visit_profile_label',
       );
     if (!visit) throw httpError(404, 'Visit not found');
     resolvedCustomerId = resolvedCustomerId || visit.visit_customer_id || null;
     profileLabel = visit.visit_profile_label || null;
-    targetAddress = targetAddress
-      || [visit.visit_line1, visit.visit_city, visit.visit_state, visit.visit_zip].filter(Boolean).join(', ')
-      || null;
-    const vLat = finiteNumber(visit.visit_lat);
-    const vLng = finiteNumber(visit.visit_lng);
-    if (vLat != null && vLng != null) {
-      targetLat = vLat;
-      targetLng = vLng;
-      source = 'visit_stamp';
-    }
+    const location = await resolveServiceLocation(visit, targetAddress);
+    targetAddress = location.address || null;
+    targetLat = finiteNumber(location.lat);
+    targetLng = finiteNumber(location.lng);
+    source = location.source;
   }
 
   // With a serviceId in hand the visit resolution above is authoritative —
@@ -123,7 +115,7 @@ async function resolveFindTimeTarget({ serviceId, customerId, address, lat, lng 
     }
   }
 
-  if ((targetLat == null || targetLng == null) && targetAddress) {
+  if (!serviceId && (targetLat == null || targetLng == null) && targetAddress) {
     const geocoded = await geocodeAddress(targetAddress);
     if (geocoded) {
       targetLat = geocoded.lat;
@@ -152,7 +144,7 @@ router.post('/', async (req, res) => {
       customerId, address, lat, lng,
       durationMinutes, dateFrom, dateTo,
       technicianId, topN,
-      hint, serviceId, excludeServiceIds, slotStepMinutes,
+      hint, serviceId, arrivalWindows, excludeServiceIds, slotStepMinutes,
     } = req.body || {};
 
     // Best-time hint consumers go dark behind GATE_BEST_TIME_HINTS — read
@@ -192,7 +184,12 @@ router.post('/', async (req, res) => {
     const maxTo = etDateString(addETDays(parseETDateTime(`${from}T12:00`), MAX_FIND_TIME_DAYS));
     const clampedTo = to > maxTo ? maxTo : to;
 
-    const target = await resolveFindTimeTarget({ serviceId, customerId, address, lat, lng });
+    const useArrivalWindows = hint && serviceId && arrivalWindows === true && arrivalWindowRoutingEnabled();
+    // Arrival checks load the saved appointment too. Request coordinates or
+    // an address echo must not make its hint promise a different destination.
+    const target = await resolveFindTimeTarget(useArrivalWindows
+      ? { serviceId }
+      : { serviceId, customerId, address, lat, lng });
 
     const requestedTopN = Math.min(Math.max(parseInt(topN, 10) || 10, 1), 100);
     const result = await findAvailableSlots({
@@ -207,6 +204,9 @@ router.post('/', async (req, res) => {
       topN: hint ? Math.min(requestedTopN * 3, 30) : requestedTopN,
       // undefined = the engine's own defaults ([] / exact-minute starts).
       excludeServiceIds,
+      // Existing-visit staff hints share their route check with the edit
+      // and rebooker save probes. Other consumers retain their slot contract.
+      ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId } } : {}),
       slotStepMinutes: slotStepMinutes !== undefined ? Number(slotStepMinutes) : undefined,
       // Staff tool: blackout days stay visible — admin manual scheduling is
       // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).
@@ -242,6 +242,10 @@ router.post('/', async (req, res) => {
         const step = slotStepMinutes !== undefined ? Number(slotStepMinutes) : 1;
         const spanMin = Math.max(15, parseInt(durationMinutes, 10) || 60);
         result.slots = result.slots.flatMap((s) => {
+          // The full arrival simulation already checked every actual work
+          // span against unassigned/other-tech work and live holds. Comparing
+          // its promise to nominal work blocks here would recreate the bug.
+          if (s.route_mode === 'arrival_windows') return [s];
           const baseMin = toMin(s.start_time);
           if (baseMin == null) return [];
           const latest = Number.isFinite(s.latest_start_min) ? s.latest_start_min : baseMin;

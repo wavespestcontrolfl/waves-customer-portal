@@ -94,7 +94,7 @@ describe('SlotPicker (glass stale-selection sweep)', () => {
           refreshSignal={0}
         />,
       );
-      await screen.findByText(/Arrival window:/);
+      await screen.findByText('Monday, June 1');
       expect(onSelect).not.toHaveBeenCalledWith(null);
       // The tech chip stays up for the held selection.
       expect(screen.getByText(/Your technician/)).toBeInTheDocument();
@@ -126,7 +126,7 @@ describe('SlotPicker (glass stale-selection sweep)', () => {
 });
 
 describe('SlotPicker', () => {
-  it('renders the date finder inside the booking card, above the slot list', async () => {
+  it('renders the search above the shared picker and the 90-day date finder below it', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ primary: [slot('initial', '2026-06-01')], expander: [] }));
@@ -147,9 +147,9 @@ describe('SlotPicker', () => {
     const heading = screen.getByText('Search by date or time \u2014 no calling, no hold music, no back-and-forth');
     const finderLabel = screen.getByText(/pick one that works for you/i);
 
-    // Order: heading → finder → slot windows (matches the SSR booking card).
-    expect(heading.compareDocumentPosition(finderLabel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(finderLabel.compareDocumentPosition(firstSlot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Order: heading → picker (day title) → date finder (same order as /book).
+    expect(heading.compareDocumentPosition(firstSlot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(firstSlot.compareDocumentPosition(finderLabel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('shows a 2-hour arrival window from the slot start, not the job block', async () => {
@@ -315,5 +315,23 @@ describe('SlotPicker', () => {
       expect(screen.getByText('11:00 AM')).toBeInTheDocument();
       expect(screen.queryByText('9:00 AM')).not.toBeInTheDocument();
     });
+  });
+});
+
+describe('date availability failures', () => {
+  it.each(['http', 'network'])('shows a retryable error instead of an empty day on %s failure', async (failure) => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ primary: [], expander: [] }));
+    if (failure === 'http') fetchMock.mockResolvedValueOnce({ ok: false, status: 500 });
+    else fetchMock.mockRejectedValueOnce(new Error('Connection lost'));
+    fetchMock.mockResolvedValueOnce(jsonResponse({ primary: [slot('retried', '2099-06-11')], expander: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SlotPicker token="synthetic-token" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} />);
+    fireEvent.change(await screen.findByLabelText(/pick one that works for you/i), { target: { value: '2099-06-11' } });
+    expect(await screen.findByRole('alert')).toHaveTextContent('We couldn’t load times for that day');
+    expect(screen.queryByText(/No open times then/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    await screen.findByText(/Arrival window:/);
+    expect(fetchMock.mock.calls[2][0]).toContain('date=2099-06-11');
   });
 });

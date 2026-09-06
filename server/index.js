@@ -1,3 +1,5 @@
+// Validate managed local mode before loading instrumentation or integrations.
+require('./config/load-env')();
 // Sentry must be initialized before all other imports
 require("./instrument.js");
 const Sentry = require("@sentry/node");
@@ -686,10 +688,15 @@ app.use('/api/admin/protocols', require('./routes/admin-protocols'));
 app.use('/api/admin/revenue', require('./routes/admin-revenue'));
 app.use('/api/admin/schedule/find-time', require('./routes/admin-schedule-find-time'));
 app.use('/api/admin/schedule', require('./routes/admin-schedule'));
-// Standalone technicians list — used by CreateAppointmentModal and other components
+// Standalone technicians list — used by CreateAppointmentModal and other components.
+// Assignable rows only: the modal's picker feeds the save-time eligibility
+// assert, so anyone listed here must be able to take the visit.
 app.get('/api/admin/technicians', require('./middleware/admin-auth').adminAuthenticate, require('./middleware/admin-auth').requireTechOrAdmin, async (req, res, next) => {
   try {
-    const techs = await require('./models/db')('technicians').select('id', 'name', 'role', 'phone', 'active').where({ active: true }).orderBy('name');
+    const techs = await require('./services/technician-eligibility')
+      .applyAssignable(require('./models/db')('technicians'))
+      .select('id', 'name', 'role', 'phone', 'active')
+      .orderBy('name');
     res.json({ technicians: techs });
   } catch (err) { next(err); }
 });
@@ -738,6 +745,7 @@ app.use('/api/integrations/backlink-worker', require('./routes/integrations-back
 // External agent watchdog (Hermes, key hermes_watchdog) — PII-free health
 // snapshot; dark behind GATE_HERMES_WATCHDOG.
 app.use('/api/integrations/watchdog-worker', require('./routes/integrations-watchdog-worker'));
+app.use('/api/integrations/commitments-worker', require('./routes/integrations-commitments-worker'));
 // MCP read-only knowledge tools — machine auth (MCP_SERVICE_TOKEN), gated.
 app.use('/api/mcp', require('./routes/mcp'));
 app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-vendor-login-worker'));
@@ -956,6 +964,12 @@ const PORT = config.port;
 // gives us a handle for graceful shutdown.
 const http = require('http');
 const httpServer = http.createServer(app);
+if (process.env.WAVES_LOCAL_DEV === '1') {
+  httpServer.on('error', (error) => {
+    console.error(`[local-dev] API listener failed: ${error.code}`);
+    process.exit(1);
+  });
+}
 
 const { attachSockets } = require('./sockets');
 const io = attachSockets(httpServer);
@@ -983,19 +997,19 @@ try {
 // without anyone noticing. If you're seeing migration failures, look
 // at the Railway deploy log, not the boot log.
 //
-// Local dev: root package.json has `predev = npm run db:migrate`,
-// so `npm run dev` still auto-migrates against the local DB. Run
-// `npm run db:migrate` manually if you want to migrate without
-// starting the dev server.
+// Managed local dev verifies migrations without writing. Run
+// `npm run dev:migrate` explicitly against the dedicated dev database.
 // Prime the catalog-name cache BEFORE accepting traffic so the first
 // requests already display real service identities instead of the lossy
 // regex fallback (service-catalog-names.js). Bounded: a slow/failed prime
 // falls back to today's behavior rather than delaying boot.
+// Keep this read-only cache in managed dev too: its canonical names are
+// application behavior, unlike the mutating recovery workers below.
 const primeCatalogNames = config.nodeEnv === 'test'
   ? Promise.resolve()
   : require('./services/service-catalog-names').startCatalogNameRefresh(logger);
 
-primeCatalogNames.then(() => httpServer.listen(PORT, () => {
+primeCatalogNames.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV === '1' ? '127.0.0.1' : undefined, () => {
   const mem = process.memoryUsage();
   logger.info(`Waves API running on port ${PORT} | RSS: ${Math.round(mem.rss/1024/1024)}MB | Heap: ${Math.round(mem.heapUsed/1024/1024)}MB`);
   logger.info(`   Environment: ${config.nodeEnv} | Client: ${config.clientUrl}`);
@@ -1004,13 +1018,25 @@ primeCatalogNames.then(() => httpServer.listen(PORT, () => {
   logger.info(`Database: ${dbUrl ? dbUrl.replace(/:[^:@]+@/, ':***@').substring(0, 60) + '...' : 'NOT SET'}`);
 
   (async () => {
-    if (config.nodeEnv !== 'test') {
+    // Register production schedulers before the potentially slow pricing read.
+    if (process.env.WAVES_LOCAL_DEV !== '1' && config.nodeEnv !== 'test') {
       initScheduledJobs();
-      // Banking sync runs ungated (passive Stripe→DB mirror, no customer
-      // side effects) so payout backfill keeps working when GATE_CRON_JOBS
-      // is off. See scheduler.js for the full rationale.
+      // Banking sync stays ungated so passive payout backfill keeps working
+      // when GATE_CRON_JOBS is off. See scheduler.js for the rationale.
       initBankingSync();
     }
+
+    // This read-only configuration refresh is needed in managed dev too.
+    try {
+      const { syncConstantsFromDB } = require('./services/pricing-engine');
+      await syncConstantsFromDB();
+    } catch (err) {
+      logger.warn(`[pricing-engine] Initial DB sync skipped: ${err.message}`);
+    }
+
+    // The managed launcher uses isolated fixtures; recovery workers must not
+    // mutate those fixtures between assertions. Production recovery is unchanged.
+    if (process.env.WAVES_LOCAL_DEV === '1') return;
 
     // Terminal Tap to Pay: surface missing/short TERMINAL_HANDOFF_SECRET in
     // the deploy log immediately. Not a hard boot failure — the portal is
@@ -1027,14 +1053,6 @@ primeCatalogNames.then(() => httpServer.listen(PORT, () => {
           : '[stripe-terminal] TERMINAL_HANDOFF_SECRET is NOT SET — handoff minting DISABLED. Generate with: openssl rand -hex 32 and set in Railway env.';
         if (config.nodeEnv === 'production') logger.error(msg); else logger.warn(msg);
       }
-    }
-
-    // Sync pricing engine constants from admin-edited DB values
-    try {
-      const { syncConstantsFromDB } = require('./services/pricing-engine');
-      await syncConstantsFromDB();
-    } catch (err) {
-      logger.warn(`[pricing-engine] Initial DB sync skipped: ${err.message}`);
     }
 
     // Stripe payout sync runs twice daily at 8 AM and 8 PM ET via

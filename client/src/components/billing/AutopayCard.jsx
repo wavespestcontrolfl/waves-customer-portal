@@ -110,11 +110,11 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
           <Icon name={icon} size={18} strokeWidth={2} />
         </span>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_BILLING.soft, border: `1px solid ${PORTAL_BILLING.softBorder}`, color: PORTAL_BILLING.text, fontSize: 12, fontWeight: 850, marginLeft: -10 }}>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_BILLING.soft, border: `1px solid ${PORTAL_BILLING.softBorder}`, color: PORTAL_BILLING.text, fontSize: 14, fontWeight: 700, marginLeft: -10 }}>
             <Icon name="card" size={14} strokeWidth={2} />
             Auto Pay
           </div>
-          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: PORTAL_BILLING.text, lineHeight: 1.25 }}>
+          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: PORTAL_BILLING.text, lineHeight: 1.25 }}>
             {title}
           </div>
           {message && (
@@ -127,15 +127,14 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
       {actionLabel && onAction && (
         <button type="button" onClick={onAction} data-glass="chip" style={{
           alignSelf: 'flex-start',
-          minHeight: 36,
+          minHeight: 44,
           padding: '9px 13px',
           borderRadius: 8,
           border: `1px solid ${PORTAL_BILLING.borderStrong}`,
           background: PORTAL_BILLING.surface,
           color: PORTAL_BILLING.text,
           fontSize: 14,
-          fontWeight: 850,
-          fontFamily: FONTS.heading,
+          fontWeight: 700,
           cursor: 'pointer',
         }}>
           {actionLabel}
@@ -491,13 +490,12 @@ export default function AutopayCard({ onStateChange, openRequest = null, onOpenR
     kind === 'primary' ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' };
 
   const btn = (kind = 'primary') => ({
-    padding: '10px 14px', borderRadius: 8, fontSize: 14, fontWeight: 800,
+    padding: '10px 14px', borderRadius: 8, fontSize: 14, fontWeight: 700,
     cursor: saving ? 'not-allowed' : 'pointer', opacity: saving ? 0.6 : 1,
-    fontFamily: FONTS.heading,
     border: kind === 'primary' ? 'none' : `1px solid ${PORTAL_BILLING.borderStrong}`,
     background: kind === 'primary' ? PORTAL_BILLING.text : PORTAL_BILLING.surface,
     color: kind === 'primary' ? '#fff' : PORTAL_BILLING.text,
-    minHeight: 36,
+    minHeight: 44,
   });
 
   const errorBanner = err ? (
@@ -513,7 +511,7 @@ export default function AutopayCard({ onStateChange, openRequest = null, onOpenR
           {/* Embedded in Payment Methods (owner 08-28) the card's own
               eyebrow is dropped — the parent card already carries one. */}
           {!embedded && <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_BILLING.soft, border: `1px solid ${PORTAL_BILLING.softBorder}`, color: PORTAL_BILLING.text, fontSize: 12, fontWeight: 850, marginLeft: -10 }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_BILLING.soft, border: `1px solid ${PORTAL_BILLING.softBorder}`, color: PORTAL_BILLING.text, fontSize: 14, fontWeight: 700, marginLeft: -10 }}>
               <Icon name="card" size={14} strokeWidth={2} />
               Auto Pay / {theme.label}
             </span>
@@ -541,7 +539,7 @@ export default function AutopayCard({ onStateChange, openRequest = null, onOpenR
                 : ['Auto Pay is off', 'Charges will not run automatically.'];
             return (
               <>
-                <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: PORTAL_BILLING.text, lineHeight: 1.25 }}>{head[0]}</div>
+                <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: PORTAL_BILLING.text, lineHeight: 1.25 }}>{head[0]}</div>
                 {head[1] && <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, marginTop: 4, lineHeight: 1.45 }}>{head[1]}</div>}
               </>
             );
@@ -562,7 +560,7 @@ export default function AutopayCard({ onStateChange, openRequest = null, onOpenR
           {bankVerifyUrl && (
             <>
               {' '}
-              <a href={bankVerifyUrl} target="_blank" rel="noopener noreferrer" style={{ color: PORTAL_BILLING.body, fontWeight: 850 }}>
+              <a href={bankVerifyUrl} target="_blank" rel="noopener noreferrer" style={{ color: PORTAL_BILLING.body, fontWeight: 700 }}>
                 Confirm the deposits here
               </a>
               {' '}once they arrive.
@@ -705,7 +703,7 @@ export default function AutopayCard({ onStateChange, openRequest = null, onOpenR
               <input type="number" inputMode="numeric" min={1} max={28} value={selectedDay}
                 onChange={(e) => setSelectedDay(parseInt(e.target.value) || 1)}
                 style={{ padding: 10, fontSize: 14, border: `1px solid ${PORTAL_BILLING.borderStrong}`, borderRadius: 8 }} />
-              <div style={{ fontSize: 12, color: PORTAL_BILLING.muted }}>
+              <div style={{ fontSize: 14, color: PORTAL_BILLING.muted }}>
                 Auto Pay runs on this day each month. Max is the 28th so every month is covered.
               </div>
               <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
@@ -781,7 +779,7 @@ function Modal({ title, children, onClose }) {
         maxHeight: 'min(92dvh, 92vh)', overflowY: 'auto', WebkitOverflowScrolling: 'touch',
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ fontSize: 16, fontWeight: 850, color: PORTAL_BILLING.text, fontFamily: FONTS.heading }}>{title}</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_BILLING.text }}>{title}</div>
           <button type="button" aria-label="Close" onClick={onClose} data-glass="chip" style={{
             background: PORTAL_BILLING.surface,
             border: `1px solid ${PORTAL_BILLING.borderStrong}`,

@@ -8,7 +8,8 @@
  *   1. Raw emoji characters          (use <Icon name="..." /> instead)
  *   2. Hardcoded brand font strings  (import FONTS from theme-brand)
  *   3. Local palette declarations    (import COLORS from theme-brand)
- *   4. Banned body font sizes (11, 13) per customer design brief
+ *   4. Font sizes under 14 (literal or FS token) and weights above 700 per the customer glass sheet —
+ *      JSX camel-case properties AND kebab-case declarations inside embedded <style> templates
  *
  * Run: `node scripts/check-portal-brand.js` or `npm run check:portal-brand`.
  * Exit code 0 = clean, 1 = violations found.
@@ -31,6 +32,13 @@ const SCAN_DIRS = [
   // it carries ~35 legacy violations (13px labels, star glyphs, W tokens)
   // that need their own cleanup pass before the gate can cover it.
   path.join(ROOT, 'client/src/components/booking'),
+  // The V2 report bodies (lawn / pest / mosquito / cockroach / tree & shrub)
+  // and the gauge primitives — swept onto the sheet with #3895.
+  path.join(ROOT, 'client/src/components/report'),
+  // Portal-only components (cancel flow, cancelled plan): the button-weight
+  // rule removal on #3971 exposed 800/850 weights here that the gate could
+  // not see.
+  path.join(ROOT, 'client/src/components/portal'),
 ];
 // Files explicitly excluded — dev-only demos, theme tokens themselves, etc.
 const EXCLUDED_FILES = new Set([
@@ -44,6 +52,8 @@ const EXCLUDED_FILES = new Set([
   // print artifact (GATE_ESTIMATE_DOC_PDF), modeled on the service-report
   // work-order format above — never an on-screen surface.
   'EstimateProposalDocument.jsx',
+  'AdminLoginPage.jsx', // admin surface that happens to live in pages/
+  'TechCapturePreview.jsx', // tech-portal preview harness in pages/
 ]);
 // Filename prefixes that belong to the admin/tech surfaces — separate design
 // system (D palette + DM Sans + density-first, per admin brief), NOT subject
@@ -68,7 +78,30 @@ const FONT_FAMILY_LITERAL_RX = new RegExp(
 
 const LOCAL_PALETTE_RX = /^(?:\s*(?:export\s+)?)const\s+(W|BRAND|PALETTE|THEME|COLORS|PALLETTE)\s*=\s*\{/;
 
-const BANNED_FONT_SIZE_RX = /fontSize:\s*(11|13)\b/;
+// Every literal under the 14px floor (1–13, decimals included) anywhere in
+// the value expression — `12`, `'12px'`, `compact ? 12 : 16` — the same reach
+// as the weight rule. A fraction of a computed size (`size * 0.28`, `14.5`)
+// is not a px literal and is left alone, nor is an arithmetic operand
+// (`baseSize * 1.2`).
+const BANNED_FONT_SIZE_RX = /fontSize:\s*[^,}\n]*?(?<![\w.-])(?<![*/+-]\s*)((?:[1-9]|1[0-3])(?:\.\d+)?)(?:px)?(?![\w.-])(?!\s*[*/])/;
+// Token spellings of the same sizes (FS.micro / FS.caption were 11 / 12 until
+// #3892 deleted them) — a live page must not reach under the floor by name.
+const BANNED_FONT_TOKEN_RX = /fontSize:\s*FS\.(micro|caption)\b/;
+// Customer glass sheet (owner 2026-09-03/05): weights stop at 700. 800/850/900
+// literals render heavier on iPhone than on the Inter/Segoe fallbacks and read
+// as a different face next to the sheet's 600/700; 650/750 are variable-font
+// one-offs that snap unpredictably. Matched anywhere in the value expression
+// (ternaries included) and by name: FW.heavy (800) was deleted with #3895.
+const HEAVY_WEIGHT_RX = /fontWeight:\s*[^,}\n]*?\b(6[5-9]\d|7[1-9]\d|[89]\d\d|FW\.heavy)\b/;
+// The same two rules for CSS authored inside a <style> template literal
+// (kebab-case declarations): `font-size: 10px` / `font-weight: 800` used to
+// pass the gate while the JSX spelling failed it.
+const BANNED_CSS_FONT_SIZE_RX = /font-size:\s*((?:\d|1[0-3])(?:\.\d+)?)px\b/;
+const HEAVY_CSS_WEIGHT_RX = /font-weight:\s*[^;}\n]*?\b(6[5-9]\d|7[1-9]\d|[89]\d\d)\b/;
+// …and as SVG presentation attributes (`<text fontSize="10">`, `fontSize={10}`,
+// `fontWeight="800"`) — the report charts label their axes this way.
+const BANNED_ATTR_FONT_SIZE_RX = /\bfontSize=(?:"((?:[1-9]|1[0-3])(?:\.\d+)?)"|\{((?:[1-9]|1[0-3])(?:\.\d+)?)\})/;
+const HEAVY_ATTR_WEIGHT_RX = /\bfontWeight=(?:"(6[5-9]\d|7[1-9]\d|[89]\d\d)"|\{(6[5-9]\d|7[1-9]\d|[89]\d\d)\})/;
 
 // =========================================================================
 // Walk
@@ -85,6 +118,8 @@ function walk(dir) {
     if (!entry.isFile()) continue;
     if (!/\.(jsx?|tsx?)$/.test(entry.name)) continue;
     if (EXCLUDED_FILES.has(entry.name)) continue;
+    // Test fixtures style stub components; they are not customer surfaces.
+    if (/\.test\.[jt]sx?$/.test(entry.name)) continue;
     if (EXCLUDED_DIR_HINTS.some(h => p.includes(h))) continue;
     if (NON_CUSTOMER_FILENAME_PREFIXES.some(pre => entry.name.startsWith(pre))) continue;
     out.push(p);
@@ -134,7 +169,61 @@ function checkFile(filePath) {
       violations.push({
         rule: 'banned-font-size',
         line: n,
-        msg: `fontSize: ${m[1]} — brief bans 11px (too small) and 13px (body floor is 16, labels should be 14 min)`,
+        msg: `fontSize: ${m[1]} — nothing under 14px on a customer surface (labels 14, body 16; owner sheet 2026-09-03)`,
+        snippet: line.trim().slice(0, 140),
+      });
+    }
+    if (BANNED_FONT_TOKEN_RX.test(line)) {
+      const m = line.match(BANNED_FONT_TOKEN_RX);
+      violations.push({
+        rule: 'banned-font-token',
+        line: n,
+        msg: `fontSize: FS.${m[1]} — that token is under the 14px floor; use FS.body`,
+        snippet: line.trim().slice(0, 140),
+      });
+    }
+    if (HEAVY_WEIGHT_RX.test(line)) {
+      const m = line.match(HEAVY_WEIGHT_RX);
+      violations.push({
+        rule: 'heavy-weight',
+        line: n,
+        msg: `fontWeight: ${m[1]} — customer weights are 400 / 500 / 600 / 700 only (owner sheet 2026-09-03)`,
+        snippet: line.trim().slice(0, 140),
+      });
+    }
+    if (BANNED_CSS_FONT_SIZE_RX.test(line)) {
+      const m = line.match(BANNED_CSS_FONT_SIZE_RX);
+      violations.push({
+        rule: 'banned-font-size',
+        line: n,
+        msg: `font-size: ${m[1]}px — nothing under 14px on a customer surface, embedded CSS included (owner sheet 2026-09-03)`,
+        snippet: line.trim().slice(0, 140),
+      });
+    }
+    if (BANNED_ATTR_FONT_SIZE_RX.test(line)) {
+      const m = line.match(BANNED_ATTR_FONT_SIZE_RX);
+      violations.push({
+        rule: 'banned-font-size',
+        line: n,
+        msg: `fontSize=${m[1] || m[2]} — nothing under 14px on a customer surface, SVG text included (owner sheet 2026-09-03)`,
+        snippet: line.trim().slice(0, 140),
+      });
+    }
+    if (HEAVY_ATTR_WEIGHT_RX.test(line)) {
+      const m = line.match(HEAVY_ATTR_WEIGHT_RX);
+      violations.push({
+        rule: 'heavy-weight',
+        line: n,
+        msg: `fontWeight=${m[1] || m[2]} — customer weights are 400 / 500 / 600 / 700 only, SVG text included (owner sheet 2026-09-03)`,
+        snippet: line.trim().slice(0, 140),
+      });
+    }
+    if (HEAVY_CSS_WEIGHT_RX.test(line)) {
+      const m = line.match(HEAVY_CSS_WEIGHT_RX);
+      violations.push({
+        rule: 'heavy-weight',
+        line: n,
+        msg: `font-weight: ${m[1]} — customer weights are 400 / 500 / 600 / 700 only, embedded CSS included (owner sheet 2026-09-03)`,
         snippet: line.trim().slice(0, 140),
       });
     }

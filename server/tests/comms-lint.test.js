@@ -32,11 +32,18 @@ describe('smsSegmentCount', () => {
 });
 
 describe('lintComms mechanics', () => {
+  it('permits SMS emojis while retaining the customer email restriction', () => {
+    const text = 'Great day for it, go gators! 🐊';
+    expect(lintComms(text, { channel: 'sms', audience: 'customer' }).pass).toBe(true);
+    const email = lintComms(text, { channel: 'email', audience: 'customer' });
+    expect(email.failures.map((f) => f.rule)).toContain('no-emoji');
+  });
+
   it('passes a plain clean message and reports which rules ran', () => {
     const r = lintComms('Hello Sarah! You are confirmed for Tuesday at 10am.', { channel: 'sms', audience: 'customer' });
     expect(r.pass).toBe(true);
     expect(r.failures).toEqual([]);
-    expect(r.checked).toContain('no-emoji');
+    expect(r.checked).not.toContain('no-emoji');
     expect(r.checked).toContain('sms-segment-limit');
   });
 

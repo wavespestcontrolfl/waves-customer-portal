@@ -199,8 +199,8 @@ describe('step 2d — pre-draft topic-targeting gate', () => {
 
     expect(result.outcome).toBe('skipped_gate_fail');
     expect(result.skip_reason).toBe('topic_targeting_unavailable');
-    expect(queue.pendingReview).toHaveBeenCalledWith('opp_corpus', 'topic_targeting_unavailable', { claimToken: claimedAt });
-    expect(queue.skip).not.toHaveBeenCalled();
+    expect(queue.skip).toHaveBeenCalledWith('opp_corpus', 'topic_targeting_unavailable', { claimToken: claimedAt });
+    expect(queue.pendingReview).not.toHaveBeenCalled();
     expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
   });
 
@@ -399,7 +399,7 @@ describe('post-draft topic-gate ENGINE failure parks for review (hook, PR codex 
 
     expect(result.outcome).toBe('skipped_gate_fail');
     expect(result.skip_reason).toBe('topic_targeting_unavailable');
-    expect(queue.pendingReview).toHaveBeenCalledWith('opp_boom', 'topic_targeting_unavailable', expect.anything());
+    expect(queue.skip).toHaveBeenCalledWith('opp_boom', 'topic_targeting_unavailable', expect.anything());
     expect(queue.defer).not.toHaveBeenCalled();
     expect(dbMock._updates.map((u) => u.patch).some((p) => typeof p.signal_metadata === 'string' && p.signal_metadata.includes('gate_retry'))).toBe(false);
     expect(result.topic_targeting_result.framing.findings[0].code).toBe('TOPIC_TARGETING_ERROR');

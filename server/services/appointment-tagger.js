@@ -157,6 +157,11 @@ class AppointmentTagger {
 
   // WDO — AI property search + AI pre-inspection brief
   async triggerWDOPrep(service) {
+    service = { ...service,
+      address_line1: service.service_address_line1 ?? service.address_line1,
+      city: service.service_address_city ?? service.city,
+      zip: service.service_address_zip ?? service.zip,
+    };
     const address = `${service.address_line1}, ${service.city}, FL ${service.zip}`;
 
     try {
@@ -178,17 +183,50 @@ class AppointmentTagger {
         brief = this.generateWDOBriefTemplate(service, propertyData);
       }
 
-      await db('scheduled_services').where({ id: service.id }).update({
-        pre_service_brief: JSON.stringify(brief),
-        pre_service_brief_type: 'wdo_inspection',
-        pre_service_brief_generated_at: new Date(),
+      // Address, service and ownership edits (a customer merge repoints the
+      // FK) invalidate research while providers run; a
+      // terminal transition does too, but a live status moving to another live
+      // status (pending → confirmed, confirmed → en_route) keeps the brief —
+      // nothing sweeps a WDO visit later (previsit-brief skips WDO).
+      // One transaction: the conditional update holds the row until the
+      // interaction insert commits, so a concurrent customer merge cannot
+      // repoint the FK between the two and strand the note on the loser.
+      const written = await db.transaction(async (trx) => {
+        // Customer row first: a customer merge (customer-dedupe executeMerge)
+        // locks both customer rows and then repoints their scheduled_services,
+        // while the interaction insert below needs a key-share lock on the
+        // customer after this trx holds the service row. Taking the customer
+        // in the merge's customer-before-child order removes the deadlock; a
+        // merge that wins the lock repoints the row and the conditional
+        // update below discards the brief.
+        if (service.customer_id) {
+          await trx('customers').where({ id: service.customer_id }).forNoKeyUpdate().first('id');
+        }
+        const count = await trx('scheduled_services').where({ id: service.id,
+          customer_id: service.customer_id ?? null,
+          service_id: service.service_id ?? null,
+          service_type: service.service_type ?? null,
+          property_id: service.property_id ?? null,
+          service_address_line1: service.service_address_line1 ?? null,
+          service_address_line2: service.service_address_line2 ?? null,
+          service_address_city: service.service_address_city ?? null,
+          service_address_state: service.service_address_state ?? null,
+          service_address_zip: service.service_address_zip ?? null,
+        }).whereNotIn('status', [...PREP_TERMINAL_STATUSES]).update({
+          pre_service_brief: JSON.stringify(brief),
+          pre_service_brief_type: 'wdo_inspection',
+          pre_service_brief_generated_at: new Date(),
+        });
+        if (!count) return 0;
+        await trx('customer_interactions').insert({
+          customer_id: service.customer_id, interaction_type: 'note',
+          subject: 'WDO pre-inspection brief generated',
+          body: `Risk: ${brief.risk_score}. Priorities: ${(brief.top_3_priorities || []).join(', ')}`,
+        });
+        return count;
       });
 
-      await db('customer_interactions').insert({
-        customer_id: service.customer_id, interaction_type: 'note',
-        subject: 'WDO pre-inspection brief generated',
-        body: `Risk: ${brief.risk_score}. Priorities: ${(brief.top_3_priorities || []).join(', ')}`,
-      });
+      if (!written) return;
 
       logger.info('[appointment-tagger] WDO brief generated', { serviceId: service.id });
     } catch (err) {

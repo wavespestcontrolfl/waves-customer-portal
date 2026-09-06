@@ -9,7 +9,7 @@
  * functions as the report pipeline: one source, no drift.
  */
 const { reportReconciliationIssues } = require('../services/service-report/report-reconciliation');
-const { reportReconcileBlockPayload } = require('../routes/admin-dispatch')._test;
+const { reportReconcileBlockPayload } = require('../services/complete-scheduled-service');
 
 const notes = (did, foundLine) => ['WHAT WE DID', did, 'WHAT WE FOUND', foundLine].join('\n');
 

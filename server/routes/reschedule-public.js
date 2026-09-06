@@ -46,6 +46,7 @@
  */
 
 const express = require('express');
+const { isCustomerRecurringDispatchEnabled } = require('../services/auto-dispatch/config');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
@@ -141,6 +142,10 @@ function seriesScopeMismatch(svc, body) {
   const disclosed = body?.disclosed_collective;
   if (typeof disclosed !== 'boolean') return true;
   if (disclosed !== collectiveAnchorActive()) return true;
+  // Older pages omit this field: they can retain legacy behavior while dark,
+  // but must refresh before consenting to newly enabled future placement.
+  const placementDays = isCustomerRecurringDispatchEnabled() ? 3 : null;
+  if ((body?.disclosed_future_placement_days ?? null) !== placementDays) return true;
   const disclosedDate = String(body?.disclosed_current_date || '').slice(0, 10);
   if (!disclosedDate || disclosedDate !== apptDateStr(svc.scheduled_date)) return true;
   return false;
@@ -478,6 +483,7 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     config,
     today: new Date(),
     excludeServiceIds: [svc.id],
+    excludeSelfBookingId: svc.self_booking_id || null,
     ...(timeOfDay ? { timeOfDay } : {}),
   });
   // A seasonal (Feb–Oct) series visit must not be OFFERED a Nov–Jan target —
@@ -521,6 +527,7 @@ router.get('/:token', async (req, res, next) => {
       // recurring note to "your later visits shift to match" and drops the
       // legacy pull-forward warning (every date move re-anchors).
       collectiveAnchor: isSeriesVisit(svc) && collectiveAnchorActive(),
+      futurePlacementDays: isSeriesVisit(svc) && isCustomerRecurringDispatchEnabled() ? 3 : null,
       // The visit's time already passed without service — the page renders
       // the "we missed each other" rebook framing instead of the standard
       // reschedule copy.
@@ -674,6 +681,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       // from the reschedule_log row the original commit wrote (series
       // commits log reason_code '<reason>_series').
       let replaySeriesShifted = false;
+      let replayPlacementDays = null;
       if (isSeriesVisit(svc)) {
         try {
           const lastLog = await db('reschedule_log')
@@ -685,6 +693,12 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           replaySeriesShifted = !!lastLog
             && String(lastLog.reason_code || '').endsWith('_series')
             && apptDateStr(lastLog.new_date) === date;
+          if (replaySeriesShifted) {
+            const move = await db('series_moves')
+              .where({ anchor_service_id: svc.id, new_date: date, status: 'committed' })
+              .orderBy('created_at', 'desc').first('result');
+            replayPlacementDays = move?.result?.futurePlacementDays || null;
+          }
         } catch (err) {
           logger.warn(`[reschedule-public] replay series-log lookup failed for ${svc.id}: ${err.message}`);
         }
@@ -698,6 +712,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         startLabel: label12(startTime),
         endLabel: label12(svc.window_end),
         seriesShifted: replaySeriesShifted,
+        futurePlacementDays: replayPlacementDays,
       });
     }
 
@@ -769,6 +784,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             technicianId: slot.technician_id,
             expectAnchor: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
             sourceSurface: 'customer_web',
+            disclosedFuturePlacementDays: req.body.disclosed_future_placement_days ?? null,
             travelGap: true,
             // The confirmation is the series pass's durable text (below).
             notifyRequested: true,
@@ -928,6 +944,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       endLabel: slot.end_label,
       // The success card tells the customer their following visits moved too.
       seriesShifted: !!shiftedOccurrences,
+      futurePlacementDays: result.futurePlacementDays || null,
       occurrencesRescheduled: shiftedOccurrences ? shiftedOccurrences.length : 1,
     });
   } catch (err) {

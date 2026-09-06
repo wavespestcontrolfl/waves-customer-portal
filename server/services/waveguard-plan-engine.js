@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const protocols = require('../config/protocols.json');
+const { normalizeGrassType, resolveTrackKey } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { summarizeLedgerRows } = require('./nutrient-ledger');
 const { evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
@@ -851,7 +852,7 @@ function summarizeOrdinanceStatus({ date, ordinances, candidateItems }) {
   return { activeWindows, blocks, warnings };
 }
 
-function summarizeCalibration({ calibration, calibrations, date }) {
+function summarizeCalibration({ calibration, calibrations }) {
   const activeCalibrations = Array.isArray(calibrations)
     ? calibrations
     : (calibration ? [calibration] : []);
@@ -893,22 +894,6 @@ function summarizeCalibration({ calibration, calibrations, date }) {
   const selected = calibration || activeCalibrations[0];
   const warnings = [];
   const blocks = [];
-  if (selected.expires_at && new Date(selected.expires_at) < date) {
-    blocks.push({
-      code: 'expired_calibration',
-      severity: 'block',
-      message: `Calibration for ${selected.system_name || selected.name || 'selected equipment'} is expired.`,
-    });
-  }
-
-  if (selected.calibration_status !== 'field_verified') {
-    blocks.push({
-      code: 'calibration_not_field_verified',
-      severity: 'block',
-      message: `Calibration for ${selected.system_name || selected.name || 'selected equipment'} is not field verified.`,
-    });
-  }
-
   if (!selected.tank_capacity_gal) {
     warnings.push({
       code: 'missing_tank_capacity',
@@ -971,10 +956,13 @@ function findNutrientProductsMissingConversions(items) {
   });
 }
 
-function selectProtocolVisit(profile, serviceDate) {
-  const trackKey = profile?.track_key && protocols.lawn?.[profile.track_key]
-    ? profile.track_key
-    : TRACK_BY_GRASS[profile?.grass_type] || null;
+function selectProtocolVisit(profile, serviceDate, legacyGrass = null) {
+  const profileRecorded = [profile?.track_key, profile?.grass_type]
+    .some((value) => String(value || '').trim());
+  const recorded = profileRecorded || String(legacyGrass || '').trim();
+  const trackKey = resolveTrackKey(profile?.track_key, normalizeGrassType(profile?.grass_type))
+    || (!profileRecorded && resolveTrackKey(null, normalizeGrassType(legacyGrass)))
+    || (recorded ? null : 'st_augustine');
   const track = trackKey ? protocols.lawn?.[trackKey] : null;
   const month = MONTH_ABBR[etParts(serviceDate).month - 1];
   const visit = track?.visits?.find((v) => v.month === month) || null;
@@ -1018,13 +1006,13 @@ async function getApplicableOrdinances(knex, profile, cities = {}) {
   return query;
 }
 
-async function getLatestAssessment(knex, customerId) {
+async function getLatestAssessment(knex, customerId, { strict = false } = {}) {
   const row = await knex('lawn_assessments')
     .where({ customer_id: customerId })
     .orderBy('service_date', 'desc')
     .orderBy('created_at', 'desc')
     .first()
-    .catch(() => null);
+    .catch((err) => { if (strict) throw err; return null; });
   if (!row) return null;
   return {
     ...row,
@@ -1033,7 +1021,10 @@ async function getLatestAssessment(knex, customerId) {
   };
 }
 
-async function getActiveCalibrations(knex, filters = {}) {
+// strict: a failed calibration read throws instead of reading as "no rig"
+// (the job card shows the check as unavailable; the Lawn plan keeps its
+// empty-list default).
+async function getActiveCalibrations(knex, filters = {}, { strict = false } = {}) {
   const query = knex('equipment_calibrations as ec')
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
     .where('ec.active', true)
@@ -1055,10 +1046,13 @@ async function getActiveCalibrations(knex, filters = {}) {
     query.where('ec.id', filters.calibrationId);
   }
 
-  return query.catch(() => []);
+  return query.catch((err) => { if (strict) throw err; return []; });
 }
 
-async function getProducts(knex) {
+// strict: a failed catalog read throws instead of reading as an empty
+// catalog (the job card treats that plan as unavailable; the Lawn plan and
+// closeout keep the lenient default).
+async function getProducts(knex, { strict = false } = {}) {
   const products = await knex('products_catalog')
     .where(function () {
       this.where({ active: true }).orWhereNull('active');
@@ -1073,7 +1067,7 @@ async function getProducts(knex) {
       'label_verified_at',
       'active', 'inventory_on_hand', 'inventory_unit', 'low_stock_threshold',
     )
-    .catch(() => []);
+    .catch((err) => { if (strict) throw err; return []; });
 
   if (!products.length) return products;
 
@@ -1082,7 +1076,9 @@ async function getProducts(knex) {
     ? await knex('product_aliases')
       .whereIn('product_id', productIds)
       .select('product_id', 'alias_name')
-      .catch(() => [])
+      // strict: aliases are how de-branded protocol lines find their
+      // product — a failed read would silently drop them, so it throws too.
+      .catch((err) => { if (strict) throw err; return []; })
     : [];
   const aliasesByProduct = aliases.reduce((acc, row) => {
     if (!acc[row.product_id]) acc[row.product_id] = [];
@@ -1096,7 +1092,7 @@ async function getProducts(knex) {
   }));
 }
 
-async function getAppointmentSubstitutions(knex, serviceId, products) {
+async function getAppointmentSubstitutions(knex, serviceId, products, { strict = false } = {}) {
   if (!(await knex.schema.hasTable('lawn_protocol_product_substitutions'))) return new Map();
   const rows = await knex('lawn_protocol_product_substitutions as lpps')
     .leftJoin('products_catalog as op', 'lpps.original_product_id', 'op.id')
@@ -1108,7 +1104,7 @@ async function getAppointmentSubstitutions(knex, serviceId, products) {
       'op.name as original_product_name',
       'sp.name as substitute_product_name',
     )
-    .catch(() => []);
+    .catch((err) => { if (strict) throw err; return []; });
   const productById = new Map((products || []).map((product) => [String(product.id), product]));
   const map = new Map();
   for (const row of rows) {
@@ -1147,7 +1143,9 @@ function calculateNutrientLedgerFromRows(rows, products, lawnSqft, year) {
   };
 }
 
-async function calculateNutrientLedger(knex, customerId, products, lawnSqft, serviceDate = new Date()) {
+// strict: a failed ledger / service-product read throws instead of reading
+// as "nothing applied this year" (an annual-N block must not vanish).
+async function calculateNutrientLedger(knex, customerId, products, lawnSqft, serviceDate = new Date(), { strict = false } = {}) {
   const year = etParts(serviceDate).year;
   const ledgerRows = await knex('property_nutrient_ledger')
     .where({ customer_id: customerId, application_year: year })
@@ -1167,7 +1165,7 @@ async function calculateNutrientLedger(knex, customerId, products, lawnSqft, ser
       'service_product_id',
     )
     .orderBy('application_date', 'asc')
-    .catch(() => null);
+    .catch((err) => { if (strict) throw err; return null; });
 
   const ledgerSummary = Array.isArray(ledgerRows) && ledgerRows.length
     ? summarizeLedgerRows(ledgerRows, year)
@@ -1186,7 +1184,7 @@ async function calculateNutrientLedger(knex, customerId, products, lawnSqft, ser
     serviceProductQuery.whereNotIn('sp.id', ledgerServiceProductIds);
   }
 
-  const rows = await serviceProductQuery.catch(() => []);
+  const rows = await serviceProductQuery.catch((err) => { if (strict) throw err; return []; });
   const fallbackSummary = calculateNutrientLedgerFromRows(rows, products, lawnSqft, year);
   if (ledgerSummary) {
     return {
@@ -1293,7 +1291,7 @@ async function buildPlanForService(serviceId, options = {}) {
     .select(
       'ss.*',
       'c.first_name', 'c.last_name', 'c.address_line1', 'c.city', 'c.state', 'c.zip',
-      'c.waveguard_tier',
+      'c.waveguard_tier', 'c.lawn_type',
       't.name as technician_name',
     )
     .first();
@@ -1306,14 +1304,18 @@ async function buildPlanForService(serviceId, options = {}) {
   }
 
   const serviceDate = toServiceDate(service.scheduled_date, now);
+  // strict (job card): every safety read below throws on failure instead of
+  // reading as "nothing on file" — turf profile, catalog, substitutions,
+  // latest assessment, ordinance context, manager approvals. The Lawn plan
+  // and closeout keep the lenient default.
+  const strict = options.strict === true;
   const profile = await knex('customer_turf_profiles')
     .where({ customer_id: service.customer_id, active: true })
-    .first()
-    .catch(() => null);
+    .first();
   const profileCompleteness = summarizeTurfProfileCompleteness(profile);
-  const products = await getProducts(knex);
-  const substitutions = await getAppointmentSubstitutions(knex, service.id, products);
-  const latestAssessment = await getLatestAssessment(knex, service.customer_id);
+  const products = await getProducts(knex, { strict });
+  const substitutions = await getAppointmentSubstitutions(knex, service.id, products, { strict });
+  const latestAssessment = await getLatestAssessment(knex, service.customer_id, { strict });
   const stressFlags = latestAssessment?.stress_flags || {};
   // One resolved city for BOTH the ordinance query and the property gate the
   // panel displays — the restriction must be labeled with the city it was
@@ -1329,14 +1331,14 @@ async function buildPlanForService(serviceId, options = {}) {
     equipmentSystemId: options.equipmentSystemId || service.assigned_equipment_system_id,
     calibrationId: options.calibrationId || service.assigned_calibration_id,
   });
-  const nutrientLedger = await calculateNutrientLedger(knex, service.customer_id, products, profile?.lawn_sqft, serviceDate);
+  const nutrientLedger = await calculateNutrientLedger(knex, service.customer_id, products, profile?.lawn_sqft, serviceDate, { strict });
 
-  const { trackKey, track, month, visit } = selectProtocolVisit(profile, serviceDate);
+  const { trackKey, track, month, visit } = selectProtocolVisit(profile, serviceDate, service.lawn_type);
   const structuredProtocolContext = await getProtocolWindowContext(knex, {
     serviceDate,
     grassTrack: trackKey || TRACK_BY_GRASS[profile?.grass_type] || 'st_augustine',
     region: 'swfl',
-  }).catch(() => null);
+  }).catch((err) => { if (strict) throw err; return null; });
   const structuredProtocol = summarizeProtocolContext(structuredProtocolContext);
   const baseLines = parseProtocolLines(visit?.primary, 'base');
   const conditionalLines = parseProtocolLines(visit?.secondary, 'conditional');
@@ -1559,6 +1561,7 @@ async function buildPlanForService(serviceId, options = {}) {
         rateUnit: item.mix?.rateUnit,
       })),
     serviceDate: etDateString(serviceDate),
+    strict,
   });
   for (const block of managerApprovals.blocks) blocks.push(block);
   for (const warning of managerApprovals.warnings) warnings.push(warning);
@@ -1651,7 +1654,9 @@ async function buildPlanForService(serviceId, options = {}) {
 }
 
 module.exports = {
+  buildProductInventorySnapshot,
   buildPlanForService,
+  selectProtocolVisit,
   calculateProductAmount,
   parseVisitNutrientTargets,
   summarizeMaterialCost,
@@ -1672,6 +1677,10 @@ module.exports = {
   MAY_FERTILIZER_BRANCH,
   isConditionalSelected,
   summarizeCalibration,
+  getActiveCalibrations,
+  itemHasNitrogen,
+  itemHasPhosphorus,
+  itemIsPgr,
   summarizeOrdinanceStatus,
   summarizeTurfProfileCompleteness,
 };

@@ -4,6 +4,7 @@
  * without a database or report token. Served by `npx vite` at
  * /preview-service-report.html?scenario=<key>. NOT part of the app build.
  */
+import '../fonts.css';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';

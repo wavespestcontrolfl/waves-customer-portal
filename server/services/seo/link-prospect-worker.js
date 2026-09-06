@@ -68,25 +68,17 @@ function parseQuality(q) {
  * Lease up to n unworked prospects of a lane, atomically. FOR UPDATE SKIP LOCKED
  * so parallel Hermes subagents never grab the same row.
  */
-// SAFETY DEFAULT for signup-lane claims: filter to the classifier's auto-safe lane
-// (automation_policy='submit_free') UNLESS the caller explicitly opts into another
-// policy. So the external Hermes worker — which calls claim({n,type}) with no policy —
-// can never lease a row the classifier/runner parked as needs_account / pay_and_submit /
-// skip. Pass automationPolicy:'any' to deliberately bypass the filter. Outreach lane is
-// unaffected (it has no automation_policy). Pure → unit-testable without the DB.
-function effectiveAutomationPolicy(type, automationPolicy) {
-  if (type === 'outreach') return null;
-  if (automationPolicy == null) return 'submit_free';
-  if (automationPolicy === 'any') return null;
-  return automationPolicy;
-}
-
-async function claim({ n = 10, type = 'signup', requireContactEmail = false, automationPolicy = null, domains = null, preview = false, followUp = false } = {}) {
-  const types = type === 'outreach' ? OUTREACH_TYPES : SIGNUP_TYPES;
+async function claim({ n = 10, type = 'signup', requireContactEmail = false, automationPolicy = null, domains = null, preview = false, followUp = false, mode = type === 'outreach' ? 'draft' : 'acquire', provider = 'hermes' } = {}) {
+  const execution = mode === 'acquire';
+  const E = require('./link-execution-authority');
+  if (execution && (provider !== 'deterministic_runner' || type !== 'signup')) return [];
+  if (!execution && (mode !== 'draft' || type !== 'outreach')) return [];
+  if (!execution && !require('../../config/feature-gates').isEnabled('outreachDrafter')) return [];
+  const types = execution ? SIGNUP_TYPES : OUTREACH_TYPES;
   const limit = Math.min(Math.max(parseInt(n, 10) || 1, 1), 50);
   // the §6.4 follow-up lane: a DRAFT lease over sent conversations whose follow-up is due — its own predicate
-  if (followUp) return db.transaction((trx) => claimFollowUps(trx, { limit, preview }));
-  const effectivePolicy = effectiveAutomationPolicy(type, automationPolicy);
+  if (followUp) return execution ? [] : db.transaction((trx) => claimFollowUps(trx, { limit, preview, provider }));
+  const effectivePolicy = execution && automationPolicy !== 'any' ? automationPolicy : null;
   // Normalize the optional domain allowlist (lowercase, strip scheme/www) so it
   // matches the SQL-normalized target_domain below.
   const domainAllow = Array.isArray(domains)
@@ -98,18 +90,17 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // (below), and each batch excludes the candidates already consumed.
     const candidates = () => {
     let q = trx('seo_link_prospects')
-      .where({ status: 'prospect' })
+      .whereIn('status', execution ? ['prospect', 'contacted', 'negotiating'] : ['prospect', 'placed', 'live', 'indexed'])
       .whereIn('link_type', types)
       .whereNull('claimed_at')
       // Don't re-serve a prospect that already has a pending/sent/quarantined outreach
       // draft — a drafted prospect stays status='prospect' until the operator approves
       // the send (M3b); send_error rows await human reconciliation. Without this they'd
       // be re-claimed and re-drafted, reopening a possibly-sent message.
-      .whereRaw("COALESCE(outreach_status, 'none') NOT IN ('drafted', 'sending', 'sent', 'send_error')")
+      .whereRaw(execution ? "COALESCE(outreach_status, 'none') NOT IN ('sending', 'send_error')" : "COALESCE(outreach_status, 'none') NOT IN ('drafted', 'sending', 'sent', 'send_error')")
       // …nor one that already carries a sent stamp whatever its status
       // reads (locked outreach state — the registry refuses to move it and
       // no worker may re-serve it)
-      .whereNull('outreach_sent_at')
       // …and it must be LINKED to an acquisition path at all: a board row the
       // periodic catch-up has not yet linked (up to hours after insert) has
       // passed no confidence / completability / supersession check, so it is
@@ -136,10 +127,10 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // form-only prospects untouched (status='prospect') for manual handling rather
     // than claiming+skipping them every run. External callers (Hermes) omit this and
     // do their own recipient research.
+    if (execution) q = q.whereRaw("COALESCE(follow_up_status, 'none') NOT IN ('sending', 'send_error')");
+    if (!execution) q = q.whereNull('outreach_sent_at').where('outreach_draft_attempts', '<', MAX_ATTEMPTS);
     if (requireContactEmail) q = q.whereNotNull('contact_email');
-    // The citation runner (and, by the safety default above, the Hermes signup path)
-    // leases only prospects the classifier marked auto-safe — never account/payment/
-    // CAPTCHA-gated ones.
+    // An optional classifier filter narrows the batch; execution authority is always required.
     if (effectivePolicy) q = q.where('automation_policy', effectivePolicy);
     // Supervised-first: when a domain allowlist is supplied, claim ONLY those rows
     // (host-normalized match) so higher-ranked non-allowlisted rows aren't leased and
@@ -167,6 +158,7 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
       return q
         .orderByRaw("CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END")
         .orderBy('domain_rating', 'desc')
+        .orderBy('id')
         .limit(n2);
     };
 
@@ -193,13 +185,20 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
         if (batch.length === 0) break;
         for (const r of batch) seen.push(r.id);
         const batchPathIds = [...new Set(batch.map((r) => r.path_id).filter(Boolean))];
-        const batchPaths = batchPathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', batchPathIds).select('id', 'submission_url', 'link_type') : [];
+        const batchPaths = batchPathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', batchPathIds).select('*') : [];
         const liveUrlOf = new Map(batchPaths.map((p) => [p.id, p.submission_url]));
         const laneOf = new Map(batchPaths.map((p) => [p.id, p.link_type || null]));
         for (const r of batch) {
           const liveUrl = r.path_id ? liveUrlOf.get(r.path_id) : null;
           const lane = r.path_id ? laneOf.get(r.path_id) : null;
-          if (!(liveUrl && r.target_url !== liveUrl) && !(lane && lane !== r.link_type)) out.push({ ...r });
+          if ((liveUrl && r.target_url !== liveUrl) || (lane && lane !== r.link_type)) continue;
+          if (!execution && r.status !== 'prospect' && !require('./link-authority-policy').submitFirst(batchPaths.find((p) => p.id === r.path_id) || {})) continue;
+          if (execution) {
+            const path = batchPaths.find((p) => p.id === r.path_id);
+            const authority = await E.authorize(trx, r, path, provider, { lock: false });
+            if (!authority || !(await E.reserveSlot(trx, r, path, authority, null, new Date(), true, out.length))) continue;
+          }
+          out.push({ ...r });
         }
       }
       return out;
@@ -216,8 +215,13 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     const out = [];
     const consumed = [];
     const now = new Date();
+    // Acquire candidate domains before policy/row locks; later batches cannot invert that order.
+    const candidateRows = await candidates().select('id', 'target_domain');
+    const { lockProspectDomain, canonicalProspectDomain } = require('./prospect-domain-lock');
+    for (const domain of [...new Set(candidateRows.map((r) => canonicalProspectDomain(r.target_domain)))].sort()) await lockProspectDomain(trx, domain);
+    const candidateIds = candidateRows.map((r) => r.id);
     while (out.length < limit) {
-    let rows = await ranked(limit - out.length, consumed).forUpdate().skipLocked();
+    let rows = await ranked(limit - out.length, consumed).whereIn('id', candidateIds).forUpdate().skipLocked();
     if (rows.length === 0) break; // exhausted
     for (const r of rows) consumed.push(r.id);
     const ids = rows.map((r) => r.id);
@@ -250,7 +254,7 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // investigation superseding or revising one of them waits for this commit
     // (its settlement then finds the leased row's stamp) instead of the claim
     // handing Hermes a path/URL that changed between this read and the lease
-    const paths = pathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', pathIds).forUpdate().select('id', 'superseded_by', 'confidence', 'submission_url', 'revision', 'agent_completable', 'link_type') : [];
+    const paths = pathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', pathIds).forUpdate().select('*') : [];
     // …nor one the investigator marked NOT agent-completable: its contract
     // requires a human step (plan §6.3), and the outreach lane has no policy
     // filter that would otherwise stop Hermes from leasing it
@@ -265,6 +269,7 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // another lane is never handed to this lane's worker
     const laneOf = new Map(paths.map((p) => [p.id, p.link_type || null]));
     rows = rows.filter((r) => !blocked.has(r.path_id) && types.includes(r.link_type) && (laneOf.get(r.path_id) == null || laneOf.get(r.path_id) === r.link_type));
+    if (!execution) rows = rows.filter((r) => r.status === 'prospect' || require('./link-authority-policy').submitFirst(paths.find((p) => p.id === r.path_id) || {}));
     if (effectivePolicy) rows = rows.filter((r) => r.automation_policy === effectivePolicy);
     if (rows.length === 0) continue;
     // The LIVE path's submission_url is the execution truth: when the
@@ -295,18 +300,23 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
     // while the row is leased can be reconciled when the lease releases.
     const revisionOf = new Map(paths.map((p) => [p.id, p.revision == null ? null : Number(p.revision)]));
     for (const r of rows) {
+      if (execution) {
+        const path = paths.find((p) => p.id === r.path_id);
+        const authority = await E.authorize(trx, r, path, provider);
+        if (!authority || !(await E.reserveSlot(trx, r, path, authority, now.toISOString(), now))) continue;
+      }
       await trx('seo_link_prospects')
         .where({ id: r.id }).whereNull('claimed_at')
         .where((b) => b.whereNull('domain_id').orWhereNotIn('domain_id',
           trx('seo_link_domains').select('id').whereIn('agent_state', nonClaimableDomainStates())))
-        .update({ claimed_at: now, claimed_by: WORKER, leased_path_revision: r.path_id ? revisionOf.get(r.path_id) ?? null : null, updated_at: now });
+        .update({ claimed_at: now, claimed_by: provider, leased_provider: provider, lease_mode: mode, leased_path_revision: r.path_id ? revisionOf.get(r.path_id) ?? null : null, updated_at: now });
     }
     // only what the UPDATE actually leased is handed out
     const leased = await trx('seo_link_prospects').whereIn('id', leaseIds).where('claimed_at', now).select('id');
     const leasedIds = new Set((leased || []).map((l) => l.id));
     // lease_token = the claim timestamp; the worker echoes it back in /report so
     // a late report from a swept/reclaimed lease can't clobber a newer claim.
-    for (const r of rows) if (leasedIds.has(r.id)) out.push({ ...r, claimed_at: now, claimed_by: WORKER, lease_token: now.toISOString() });
+    for (const r of rows) if (leasedIds.has(r.id)) out.push({ ...r, claimed_at: now, claimed_by: provider, leased_provider: provider, lease_mode: mode, lease_token: now.toISOString() });
     }
     return out;
   });
@@ -321,7 +331,7 @@ async function claim({ n = 10, type = 'signup', requireContactEmail = false, aut
  * (→ follow_up_status 'drafted'), a 'failed' (back to due) or 'skipped' (→ skipped) report, or the stale sweep.
  * A sent row is outreach-locked (the mover refuses it), so no settlement runs here.
  */
-async function claimFollowUps(trx, { limit, preview }) {
+async function claimFollowUps(trx, { limit, preview, provider }) {
   const M = require('./link-outreach-mandate');
   const now = new Date();
   const widest = M.FOLLOW_UP_STATUSES_ANY;
@@ -342,7 +352,7 @@ async function claimFollowUps(trx, { limit, preview }) {
   const candidates = due.filter((r) => !r.domain_id || !blockedDomains.has(r.domain_id));
   if (!candidates.length) return [];
   const { isStandingConfidence } = require('./link-registry');
-  const { lockProspectDomain } = require('./prospect-domain-lock');
+  const { lockProspectDomain, canonicalProspectDomain } = require('./prospect-domain-lock');
   // a standing path; the retirement reader (followUpRetirement: the gate, the route, the lifecycle) is the rest
   const standing = (p) => Boolean(p) && !p.superseded_by && isStandingConfidence(p.confidence) && p.agent_completable !== false;
   if (preview) {
@@ -359,6 +369,7 @@ async function claimFollowUps(trx, { limit, preview }) {
   // the lifecycle and the follow-up state are read again under them, so a decision that committed between the
   // candidate read and this lease is honoured (nothing is leased, no draft is spent, against a stop)
   const out = [];
+  for (const domain of [...new Set(candidates.map((r) => canonicalProspectDomain(r.target_domain)))].sort()) await lockProspectDomain(trx, domain);
   for (const c of candidates) {
     if (out.length >= limit) break;
     await lockProspectDomain(trx, c.target_domain);
@@ -381,8 +392,8 @@ async function claimFollowUps(trx, { limit, preview }) {
     }
     if (!standing(p)) continue;
     const n = await trx('seo_link_prospects').where({ id: r.id, outreach_status: 'sent', status: r.status, path_id: r.path_id, link_type: r.link_type }).whereIn('follow_up_status', ['none', 'due']).whereNull('claimed_at')
-      .update({ claimed_at: now, claimed_by: WORKER, follow_up_status: 'due', leased_path_revision: p.revision == null ? null : Number(p.revision), updated_at: now });
-    if (n) out.push({ ...r, follow_up_status: 'due', claimed_at: now, claimed_by: WORKER, lease_token: now.toISOString() });
+      .update({ claimed_at: now, claimed_by: provider, leased_provider: provider, lease_mode: 'draft', follow_up_status: 'due', leased_path_revision: p.revision == null ? null : Number(p.revision), updated_at: now });
+    if (n) out.push({ ...r, follow_up_status: 'due', claimed_at: now, claimed_by: provider, leased_provider: provider, lease_mode: 'draft', lease_token: now.toISOString() });
   }
   return out;
 }
@@ -395,7 +406,7 @@ async function claimFollowUps(trx, { limit, preview }) {
  */
 function mapReportToPatch(outcome, body = {}, existingQuality = null) {
   const now = new Date();
-  const release = { claimed_at: null, claimed_by: null, updated_at: now };
+  const release = { claimed_at: null, claimed_by: null, leased_provider: null, lease_mode: null, updated_at: now };
 
   if (outcome === 'placed') {
     // Persist a paid-placement cost (e.g. sponsored post) for funnel ROI; only a
@@ -459,7 +470,7 @@ function mapReportToPatch(outcome, body = {}, existingQuality = null) {
   return { ...release, notes: body.notes || null };
 }
 
-async function report({ prospect_id, outcome, lease_token, ...body }) {
+async function report({ prospect_id, outcome, lease_token, provider = 'hermes', ...body }) {
   // A 'placed' report MUST carry a live_url — otherwise the row lands in 'placed'
   // with live_url=null, which the verifier skips and claim() never re-serves,
   // permanently stranding it. EXCEPTION: pending=true (slow-moderation submission)
@@ -474,6 +485,9 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
 
   const prospect = await db('seo_link_prospects').where({ id: prospect_id }).first();
   if (!prospect) return { ok: false, code: 'not_found', error: 'prospect not found' };
+  if (prospect.leased_provider && prospect.leased_provider !== provider) return { ok: false, code: 'stale_lease' };
+  if (prospect.lease_mode === 'draft' && !FOLLOW_UP_OUTCOMES.includes(outcome)) return { ok: false, code: followUpLease(prospect) ? 'not_follow_up_outcome' : 'invalid_outcome' };
+  if (prospect.lease_mode === 'acquire') return reportAcquisition({ prospect, outcome, leaseDate, provider, body });
   // a leased FOLLOW-UP (the §6.4 draft lease: follow_up_status 'due' under a lease on a sent conversation) settles
   // on its own columns — never the lifecycle, the attempt count or the draft of the initial pitch
   if (followUpLease(prospect)) return reportFollowUp({ prospect, outcome, leaseDate, body });
@@ -496,10 +510,16 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
     return { ok: false, code: 'outreach_locked', error: 'outreach already sent, in flight, or awaiting reconciliation' };
   }
 
-  const attempts = (prospect.attempts || 0) + 1;
+  const initialDraft = prospect.lease_mode === 'draft';
+  const attempts = (prospect.attempts || 0) + (initialDraft ? 0 : 1);
   const patch = mapReportToPatch(outcome, body, prospect.quality_signals);
   // Cap retries so a permanently-failing prospect doesn't churn forever.
-  if (outcome === 'failed' && attempts >= MAX_ATTEMPTS) patch.status = 'rejected';
+  if (initialDraft) {
+    // Communication failures cannot undo an acquired placement or spend acquisition retries.
+    delete patch.status;
+    patch.outreach_draft_attempts = outcome === 'skipped' ? MAX_ATTEMPTS
+      : outcome === 'failed' ? Math.min((prospect.outreach_draft_attempts || 0) + 1, MAX_ATTEMPTS) : 0;
+  } else if (outcome === 'failed' && attempts >= MAX_ATTEMPTS) patch.status = 'rejected';
 
   // Optimistic concurrency: only apply if THIS lease is still current. If the
   // claim was swept and re-claimed by another worker, claimed_at no longer
@@ -508,35 +528,11 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
     const n = await trx('seo_link_prospects')
       .where({ id: prospect_id })
       .where('claimed_at', leaseDate)
-      .update({ ...patch, attempts });
+      .update({ ...patch, ...(!initialDraft ? { attempts } : {}) });
     if (!n) return { updated: 0, moved: 0, reopened: false };
     // the lease is released — a superseded / changed path is followed in the
     // SAME transaction, even if this row is never claimed again
-    const settled = await settleReleasedPlacements([prospect_id], trx);
-    let reopenedRow = false;
-    // The retry lifecycle is PATH-specific: a failure (and the retry cap it
-    // may have exhausted) belongs to the predecessor. When settlement just
-    // moved the row onto a DIFFERENT path, the successor has had no attempt
-    // yet — reopen it with a fresh count rather than leaving it terminal.
-    // The same holds for a SAME-path revision that landed during the lease
-    // (working URL, gate, lane): the route the attempts were spent on is
-    // materially different now. A confidence-only disproof is not — a
-    // route declared gone stays closed. `skipped` is a route-specific
-    // decision too (no emailable contact on the OLD route, a duplicate on
-    // the OLD page): it reopens the same way when the route changed.
-    if (settled && (outcome === 'failed' || outcome === 'skipped')) {
-      const after = await trx('seo_link_prospects').where({ id: prospect_id }).first('path_id');
-      let reopen = false;
-      if (after && after.path_id && after.path_id !== prospect.path_id) reopen = true;
-      else if (after && after.path_id && prospect.leased_path_revision != null) {
-        const pathNow = await trx('seo_link_acquisition_paths').where({ id: after.path_id }).first('revision');
-        reopen = !!(pathNow && pathNow.revision != null && Number(pathNow.revision) > Number(prospect.leased_path_revision));
-      }
-      if (reopen) {
-        await trx('seo_link_prospects').where({ id: prospect_id }).whereNull('claimed_at').update({ status: 'prospect', attempts: 0, updated_at: new Date() });
-        reopenedRow = true;
-      }
-    }
+    const { settled, reopenedRow } = await settleReportRelease(trx, { prospect, outcome });
     return { updated: n, moved: settled, reopened: reopenedRow };
   });
 
@@ -557,6 +553,69 @@ async function report({ prospect_id, outcome, lease_token, ...body }) {
   }
   logger.info(`[link-worker] report ${prospect_id} outcome=${outcome} attempts=${attempts} -> ${patch.status || prospect.status}`);
   return { ok: true, status: patch.status || prospect.status, attempts };
+}
+
+async function settleReportRelease(trx, { prospect, outcome }) {
+  const prospect_id = prospect.id;
+    const settled = await settleReleasedPlacements([prospect_id], trx);
+    let reopenedRow = false;
+    // The retry lifecycle is PATH-specific: a failure (and the retry cap it
+    // may have exhausted) belongs to the predecessor. When settlement just
+    // moved the row onto a DIFFERENT path, the successor has had no attempt
+    // yet — reopen it with a fresh count rather than leaving it terminal.
+    // The same holds for a SAME-path revision that landed during the lease
+    // (working URL, gate, lane): the route the attempts were spent on is
+    // materially different now. A confidence-only disproof is not — a
+    // route declared gone stays closed. `skipped` is a route-specific
+    // decision too (no emailable contact on the OLD route, a duplicate on
+    // the OLD page): it reopens the same way when the route changed.
+    if (settled && prospect.lease_mode !== 'draft' && (outcome === 'failed' || outcome === 'skipped')) {
+      const after = await trx('seo_link_prospects').where({ id: prospect_id }).first('path_id');
+      let reopen = false;
+      if (after && after.path_id && after.path_id !== prospect.path_id) reopen = true;
+      else if (after && after.path_id && prospect.leased_path_revision != null) {
+        const pathNow = await trx('seo_link_acquisition_paths').where({ id: after.path_id }).first('revision');
+        reopen = !!(pathNow && pathNow.revision != null && Number(pathNow.revision) > Number(prospect.leased_path_revision));
+      }
+      if (reopen) {
+        await trx('seo_link_prospects').where({ id: prospect_id }).whereNull('claimed_at').update({ status: 'prospect', attempts: 0, updated_at: new Date() });
+        reopenedRow = true;
+      }
+    }
+  return { settled, reopenedRow };
+}
+
+async function reportAcquisition({ prospect, outcome, leaseDate, provider, body }) {
+  if (!['placed', 'failed', 'skipped'].includes(outcome)) return { ok: false, code: 'invalid_outcome' };
+  const { lockProspectDomain } = require('./prospect-domain-lock');
+  return db.transaction(async (trx) => {
+    await lockProspectDomain(trx, prospect.target_domain);
+    const row = await trx('seo_link_prospects').where({ id: prospect.id }).forUpdate().first();
+    if (!row?.claimed_at || new Date(row.claimed_at).getTime() !== leaseDate.getTime() || row.leased_provider !== provider || row.lease_mode !== 'acquire') return { ok: false, code: 'stale_lease' };
+    const slot = await trx('seo_link_attempts').where({ prospect_id: row.id, lease_token: leaseDate.toISOString(), action: 'submit' }).forUpdate().first();
+    if (!slot || !['slot_reserved', 'submitting'].includes(slot.outcome)) return { ok: false, code: 'stale_lease' };
+    if (outcome === 'placed' && slot.outcome !== 'submitting') return { ok: false, code: 'submit_not_started' };
+    const now = new Date();
+    const ambiguous = slot.outcome === 'submitting' && outcome !== 'placed';
+    await trx('seo_link_attempts').where({ id: slot.id }).update({ outcome: ambiguous ? 'submit_ambiguous' : outcome === 'placed' ? (body.pending ? 'pending' : 'placed') : outcome,
+      ...(!ambiguous && outcome !== 'placed' ? { idempotency_key: null } : {}),
+      detail: { ...parseQuality(slot.detail), error_code: body.error_code || null, notes: body.notes || null },
+      evidence_url: body.evidence_url || null, updated_at: now });
+    const release = { claimed_at: null, claimed_by: null, leased_provider: null, lease_mode: null, updated_at: now };
+    const patch = ambiguous ? {} : mapReportToPatch(outcome, { ...body, cost: 0 }, row.quality_signals);
+    const attempts = (row.attempts || 0) + 1;
+    if (!ambiguous && outcome === 'failed' && attempts >= MAX_ATTEMPTS) patch.status = 'rejected';
+    await trx('seo_link_prospects').where({ id: row.id }).update({ ...patch, ...release, attempts });
+    if (outcome === 'placed') {
+      const detail = parseQuality(slot.detail);
+      await trx('seo_link_placement_authorities').where({ id: detail.authority_id, prospect_id: row.id }).whereNull('satisfied_at')
+        .update({ satisfied_at: now, satisfied_reason: 'placed', updated_at: now });
+      if (detail.approval_id) await trx('seo_link_approvals').where({ id: detail.approval_id }).whereNull('consumed_at').update({ consumed_at: now, updated_at: now });
+    }
+    const { reopenedRow } = ambiguous ? { reopenedRow: false } : await settleReportRelease(trx, { prospect: row, outcome });
+    if (reopenedRow) return { ok: true, status: 'prospect', attempts: 0, reopened_on_successor: true };
+    return { ok: true, status: patch.status || row.status, attempts, ...(ambiguous ? { ambiguous: true } : {}) };
+  });
 }
 
 const followUpLease = (p) => p.follow_up_status === 'due' && p.outreach_status === 'sent';
@@ -591,7 +650,7 @@ async function reportFollowUp({ prospect, outcome, leaseDate, body }) {
   const blank = (v) => !String(v || '').trim(); // whitespace is no draft: the review would pass it and the dispatcher send it
   if (outcome === 'drafted' && (blank(body.outreach_subject) || blank(body.outreach_body))) return { ok: false, code: 'draft_incomplete', error: 'a drafted follow-up requires outreach_subject and outreach_body (the recipient is the thread\'s)' };
   const now = new Date();
-  const release = { claimed_at: null, claimed_by: null, updated_at: now };
+  const release = { claimed_at: null, claimed_by: null, leased_provider: null, lease_mode: null, updated_at: now };
   const note = body.notes || null;
   const { lockProspectDomain } = require('./prospect-domain-lock');
   // ONE transaction under the locks the lease was taken under (the per-domain advisory lock, the row FOR UPDATE,
@@ -678,17 +737,18 @@ async function sweepExpiredClaims(maxHours = 6) {
     const rows = await trx('seo_link_prospects')
       .whereNotNull('claimed_at')
       .where('claimed_at', '<', cutoff)
-      .where({ status: 'prospect' }) // only release ones still unworked
-      .update({ claimed_at: null, claimed_by: null, updated_at: new Date() })
+      .whereIn('status', ['prospect', 'contacted', 'negotiating', 'placed', 'live', 'indexed'])
+      .update({ claimed_at: null, claimed_by: null, leased_provider: null, lease_mode: null, updated_at: new Date() })
       .returning(['id']);
     const ids = (rows || []).map((r) => (r && typeof r === 'object' ? r.id : r)).filter(Boolean);
+    if (ids.length) await require('./link-execution-authority').releaseSlots(trx, ids);
     if (ids.length) await settleReleasedPlacements(ids, trx); // released AND settled, or neither
     // a stuck FOLLOW-UP draft lease (§6.4: a sent conversation leased at follow_up_status 'due') is released the same
     // way — the lifecycle is not `prospect` there and a sent row is never settled (outreach-locked)
     const followUps = await trx('seo_link_prospects')
       .whereNotNull('claimed_at').where('claimed_at', '<', cutoff)
       .where({ follow_up_status: 'due', outreach_status: 'sent' })
-      .update({ claimed_at: null, claimed_by: null, updated_at: new Date() });
+      .update({ claimed_at: null, claimed_by: null, leased_provider: null, lease_mode: null, updated_at: new Date() });
     return ids.length + (Number(followUps) || 0);
   });
   if (released) logger.info(`[link-worker] released ${released} stale claim(s)`);
@@ -711,8 +771,11 @@ async function releaseClaims(claims = []) {
       const n = await trx('seo_link_prospects')
         .where({ id: c.id })
         .where('claimed_at', leaseDate)
-        .update({ claimed_at: null, claimed_by: null, updated_at: new Date() });
-      if (n) await settleReleasedPlacements([c.id], trx); // released AND settled, or neither
+        .update({ claimed_at: null, claimed_by: null, leased_provider: null, lease_mode: null, updated_at: new Date() });
+      if (n) {
+        await require('./link-execution-authority').releaseSlots(trx, [c.id]);
+        await settleReleasedPlacements([c.id], trx);
+      }
       return n;
     });
   }
@@ -722,6 +785,5 @@ async function releaseClaims(claims = []) {
 module.exports = {
   claim, report, sweepExpiredClaims, releaseClaims, settleReleasedPlacements, mapReportToPatch, businessProfile, isValidEmail,
   FOLLOW_UP_OUTCOMES,
-  effectiveAutomationPolicy,
   WORKER, SIGNUP_TYPES, OUTREACH_TYPES, MAX_ATTEMPTS, nonClaimableDomainStates,
 };

@@ -97,11 +97,12 @@ describe('isRecurringPlanActive', () => {
   function fakeDb({ alert = null, subs = [] }) {
     return (table) => {
       if (table === 'recurring_plan_alerts') {
+        const predicates = {};
         return {
-          where: function () { return this; },
+          where: function (key, value) { predicates[key] = value; return this; },
           whereIn: function () { return this; },
           whereNull: function () { return this; },
-          first: async () => alert,
+          first: async () => alert && Object.entries(predicates).every(([key, value]) => ({ customer_id: 'c1', recurring_parent_id: 'p1', ...alert })[key] === value) ? alert : null,
         };
       }
       if (table === 'customer_subscriptions') {
@@ -123,10 +124,38 @@ describe('isRecurringPlanActive', () => {
     expect(r).toMatchObject({ active: false, reason_code: 'RECURRING_PLAN_INACTIVE' });
   });
 
+  test('a reassigned series is not blocked by the former owner’s lapse alert', async () => {
+    const result = await isRecurringPlanActive(svc({ recurring_parent_id: 'p1', customer_id: 'c2' }),
+      fakeDb({ alert: { id: 'a1', customer_id: 'c1', recurring_parent_id: 'p1', alert_type: 'plan_lapsed' } }));
+    expect(result.active).toBe(true);
+  });
+
+  test('a stale plan_ending reminder cannot block a live recurring visit', async () => {
+    const result = await isRecurringPlanActive(svc({ recurring_parent_id: 'p1' }), fakeDb({ alert: { id: 'a1', alert_type: 'plan_ending' } }));
+    expect(result).toMatchObject({ active: true });
+  });
+
   test('does NOT veto on legacy paused/cancelled customer_subscriptions', async () => {
     // active recurring plans are driven by scheduled_services; stale legacy subs
     // must not exclude an otherwise-valid recurring visit.
     const r = await isRecurringPlanActive(svc(), fakeDb({ subs: [{ status: 'paused' }, { status: 'cancelled' }] }));
     expect(r.active).toBe(true);
   });
+});
+
+
+test('a deferred visit can be placed inside the normal date lock, but staff locks still win', () => {
+  const row = svc({ scheduled_date: '2026-06-21', recurring_dispatch_due_date: '2026-06-21', window_start: null });
+  expect(isEligibleForAutoDispatch(row, CTX)).toMatchObject({ eligible: true });
+  expect(isEligibleForAutoDispatch(row, { ...CTX, routeTiers: { enabled: true, today: CTX.today } })).toMatchObject({ eligible: true });
+  expect(isEligibleForAutoDispatch({ ...row, auto_dispatch_locked: true }, CTX)).toMatchObject({ eligible: false, reason_code: 'MANUALLY_LOCKED' });
+  expect(isEligibleForAutoDispatch({ ...row, auto_dispatch_excluded: true }, CTX)).toMatchObject({ eligible: false, reason_code: 'AUTO_DISPATCH_EXCLUDED' });
+});
+
+
+test.each([null, '09:00'])('customer confirmation freezes a deferred occurrence with window %s', (windowStart) => {
+  expect(isEligibleForAutoDispatch(svc({
+    status: 'pending', scheduled_date: '2026-06-19', recurring_dispatch_due_date: '2026-06-19',
+    window_start: windowStart, customer_confirmed: true,
+  }), CTX)).toMatchObject({ eligible: false, reason_code: 'CUSTOMER_CONFIRMED' });
 });

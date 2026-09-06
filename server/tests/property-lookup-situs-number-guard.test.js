@@ -403,16 +403,16 @@ describe('AI web-record house-number guard', () => {
     }, '14384 Skipping Stone Lp')).toBe(true);
   });
 
-  test('a trusted primary source is never vetoed by a secondary comp citation (codex P2)', () => {
-    // Facts came from the county page; a neighbor listing cited beside it
-    // (comps, "similar homes") must not drop the record.
+  test('an unverified county or builder citation cannot override a different house number', () => {
+    // A model's county URL alone does not prove these facts belong to the
+    // requested property. A contradictory listing still rejects the claim.
     expect(aiRecordHouseNumberMismatch({
       _aiSourceUrl: 'https://www.manateepao.gov/parcel/?parid=497325009',
       _aiSources: [
         { provider: 'openai', url: 'https://www.manateepao.gov/parcel/?parid=497325009' },
         { provider: 'openai', url: 'https://www.realtor.com/realestateandhomes-detail/14375-Skipping-Stone-Loop_Parrish_FL_34219' },
       ],
-    }, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(false);
+    }, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(true);
     // Same for a builder floorplan primary in the new-construction case.
     expect(aiRecordHouseNumberMismatch({
       _aiSourceUrl: 'https://www.lennar.com/new-homes/florida/sarasota/parrish/canoe-creek/magnolia',
@@ -420,9 +420,8 @@ describe('AI web-record house-number guard', () => {
         { provider: 'claude', url: 'https://www.lennar.com/new-homes/florida/sarasota/parrish/canoe-creek/magnolia' },
         { provider: 'claude', url: 'https://www.zillow.com/homedetails/14380-Skipping-Stone-Loop-Parrish-FL-34219/222_zpid/' },
       ],
-    }, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(false);
-    // The trusted source can sit ANYWHERE in the citation set — providers
-    // don't reliably put the fact source first (codex P2).
+    }, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(true);
+    // Citation order does not establish property identity.
     expect(aiRecordHouseNumberMismatch({
       _aiSourceUrl: 'https://www.zillow.com/parrish-fl/',
       _aiSources: [
@@ -430,7 +429,7 @@ describe('AI web-record house-number guard', () => {
         { provider: 'openai', url: 'https://www.manateepao.gov/parcel/?parid=497325009' },
         { provider: 'openai', url: 'https://www.realtor.com/realestateandhomes-detail/14375-Skipping-Stone-Loop_Parrish_FL_34219' },
       ],
-    }, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(false);
+    }, '14384 Skipping Stone Lp, Parrish, FL 34219')).toBe(true);
   });
 
   test('confirmation requires the full slug identity — same number on a different street neither confirms nor drops alone (codex P2)', () => {

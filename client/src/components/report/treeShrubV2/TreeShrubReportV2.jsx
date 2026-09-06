@@ -156,7 +156,7 @@ export function ScoreRing({ value, size = 120, stroke = 10, status }) {
         />
       )}
       <text x="50%" y="50%" dominantBaseline="central" textAnchor="middle"
-            style={{ fontFamily: FONTS.heading, fontWeight: 800, fill: known ? TEXT : MUTED }}
+            style={{ fontFamily: FONTS.heading, fontWeight: 700, fill: known ? TEXT : MUTED }}
             fontSize={size * 0.3}>
         {known ? Math.round(shown) : '—'}
       </text>
@@ -175,7 +175,7 @@ export function StatusPill({ status, small = false }) {
       display: 'inline-flex', alignItems: 'center', gap: 7,
       padding: small ? '3px 9px' : '6px 12px', borderRadius: 999,
       background: CARD, border: `1px solid ${BORDER}`,
-      fontFamily: FONTS.heading, fontWeight: 700, fontSize: small ? 12 : 14, color: TEXT,
+      fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: TEXT,
     }}>
       {pulse ? (
         <style>{'@keyframes wavesPillPulse{0%,100%{opacity:1}50%{opacity:.25}}@media (prefers-reduced-motion: reduce){.waves-pill-pulse{animation:none !important}}'}</style>
@@ -211,7 +211,7 @@ function CardTitle({ children, sub }) {
 }
 function InsightLine({ label, value, strong }) {
   return (
-    <div style={{ fontSize: 13.5, lineHeight: 1.5, color: strong ? TEXT : BODY }}>
+    <div style={{ fontSize: 14, lineHeight: 1.5, color: strong ? TEXT : BODY }}>
       <span style={{ fontWeight: 700, color: COLORS.glassNavy }}>{label}: </span>
       {value}
     </div>
@@ -222,7 +222,7 @@ function KeyLine({ label, value, dot }) {
     <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
       <span style={{ width: 9, height: 9, borderRadius: 999, background: dot, flex: 'none', marginTop: 6 }} />
       <div>
-        <div data-gt="eyebrow" style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700 }}>{label}</div>
+        <div data-gt="eyebrow" style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700 }}>{label}</div>
         <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>{value}</div>
       </div>
     </div>
@@ -249,7 +249,7 @@ export function TreeShrubSnapshotHero({ snapshot = {} }) {
           <ScoreRing value={overallScore} status={status} size={116} />
         </div>
         <div style={{ flex: 1, minWidth: 220 }}>
-          <div data-gt="eyebrow" style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>
+          <div data-gt="eyebrow" style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.08em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>
             Overall Landscape Plant Health
           </div>
           <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontSize: 25, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
@@ -259,7 +259,7 @@ export function TreeShrubSnapshotHero({ snapshot = {} }) {
             <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{scoreExplanation}</p>
           ) : null}
           {todaysFocus.length ? (
-            <div style={{ fontSize: 13.5, color: MUTED, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 14, color: MUTED, lineHeight: 1.5 }}>
               <strong style={{ color: BODY }}>Today&apos;s focus:</strong> {todaysFocus.join(' · ')}
             </div>
           ) : null}
@@ -269,7 +269,7 @@ export function TreeShrubSnapshotHero({ snapshot = {} }) {
       {/* Peace of mind — the reassurance line that frames the whole report. */}
       {peaceOfMind ? (
         <div style={{ marginTop: 14, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
-          <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 12, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Peace of mind</div>
+          <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Peace of mind</div>
           <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{peaceOfMind}</div>
         </div>
       ) : null}
@@ -279,14 +279,14 @@ export function TreeShrubSnapshotHero({ snapshot = {} }) {
           not leave it to the product cards at the bottom of the page). */}
       {snapshot.treatmentSummary ? (
         <div style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
-          <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 12, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What we applied today</div>
+          <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What we applied today</div>
           <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{snapshot.treatmentSummary}</div>
         </div>
       ) : null}
 
       {watching.length ? (
         <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${BORDER}` }}>
-          <div data-gt="eyebrow" style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700, marginBottom: 8 }}>What we’re monitoring</div>
+          <div data-gt="eyebrow" style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.06em', color: MUTED, fontWeight: 700, marginBottom: 8 }}>What we’re monitoring</div>
           <ol style={{ margin: 0, padding: '0 0 0 20px', display: 'grid', gap: 5 }}>
             {watching.map((w, i) => (
               <li key={i} style={{ fontSize: 14.5, color: BODY, lineHeight: 1.45 }}>{w}</li>
@@ -340,7 +340,7 @@ export function TreeShrubInsightCards({ insights = [], limit = 3 }) {
                 {!it.customerAction && it.nextVisitPlan ? <InsightLine label="Next visit" value={it.nextVisitPlan} /> : null}
               </div>
               {it.confidence && INSIGHT_CONFIDENCE[it.confidence] ? (
-                <div style={{ marginTop: 8, fontSize: 11.5, color: MUTED, fontStyle: 'italic' }}>{INSIGHT_CONFIDENCE[it.confidence]}</div>
+                <div style={{ marginTop: 8, fontSize: 14, color: MUTED, fontStyle: 'italic' }}>{INSIGHT_CONFIDENCE[it.confidence]}</div>
               ) : null}
             </div>
           );
@@ -408,7 +408,7 @@ export function TreeShrubVisualDiagnosisBars({ categories = [] }) {
               </div>
               {detail ? (
                 <details open={print} style={{ borderTop: `1px solid ${BORDER}`, padding: '9px 14px' }}>
-                  <summary style={{ cursor: 'pointer', fontSize: 12.5, fontWeight: 700, color: MUTED, listStyle: 'none' }}>What this means</summary>
+                  <summary style={{ cursor: 'pointer', fontSize: 14, fontWeight: 700, color: MUTED, listStyle: 'none' }}>What this means</summary>
                   <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
                     {sawValue ? <InsightLine label="What we saw" value={sawValue} strong /> : null}
                     <InsightLine label="What this measures" value={detail.measures} />
@@ -440,7 +440,7 @@ export function PlantGroupStatusCards({ plantGroups = [] }) {
                 <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT }}>{g.label}</div>
                 <StatusPill status={g.status || 'stable'} small />
               </div>
-              {g.finding ? <div style={{ fontSize: 13.5, color: BODY, lineHeight: 1.5 }}>{g.finding}</div> : null}
+              {g.finding ? <div style={{ fontSize: 14, color: BODY, lineHeight: 1.5 }}>{g.finding}</div> : null}
               {g.wavesAction ? <div style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, marginTop: 5 }}><strong style={{ color: BODY }}>Waves:</strong> {g.wavesAction}</div> : null}
             </div>
           );
@@ -502,7 +502,7 @@ export function TreeShrubTreatmentCard({ treatment = {} }) {
       {focus.length ? (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: products.length ? 14 : 0 }}>
           {focus.map((f, i) => (
-            <span key={i} style={{ padding: '5px 11px', borderRadius: 999, background: TAN, border: `1px solid ${BORDER}`, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 12.5, color: TEXT }}>{f}</span>
+            <span key={i} style={{ padding: '5px 11px', borderRadius: 999, background: TAN, border: `1px solid ${BORDER}`, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: TEXT }}>{f}</span>
           ))}
         </div>
       ) : null}
@@ -514,11 +514,11 @@ export function TreeShrubTreatmentCard({ treatment = {} }) {
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14.5, color: TEXT }}>
                   {p.name}
-                  {p.activeIngredient ? <span style={{ fontWeight: 500, color: MUTED, fontSize: 12.5 }}> · {p.activeIngredient}</span> : null}
+                  {p.activeIngredient ? <span style={{ fontWeight: 500, color: MUTED, fontSize: 14 }}> · {p.activeIngredient}</span> : null}
                 </div>
-                {p.whatItDoes ? <div style={{ fontSize: 13.5, color: BODY, lineHeight: 1.5, marginTop: 2 }}>{p.whatItDoes}</div> : null}
+                {p.whatItDoes ? <div style={{ fontSize: 14, color: BODY, lineHeight: 1.5, marginTop: 2 }}>{p.whatItDoes}</div> : null}
                 {(p.targets && p.targets.length) || p.area ? (
-                  <div style={{ fontSize: 12, color: MUTED, marginTop: 4 }}>
+                  <div style={{ fontSize: 14, color: MUTED, marginTop: 4 }}>
                     {p.targets && p.targets.length ? `Targets: ${p.targets.join(', ')}` : ''}
                     {p.targets && p.targets.length && p.area ? ' · ' : ''}
                     {p.area ? `Area: ${p.area}` : ''}
@@ -579,7 +579,7 @@ function TrendChart({ title, sub, points = [], accent = COLORS.glassNavy, compac
   return (
     <Card style={compact ? { marginBottom: 0, padding: 16 } : undefined}>
       <CardTitle sub={compact ? undefined : sub}>{title}</CardTitle>
-      {compact ? <div style={{ fontSize: 12, color: MUTED, marginTop: -8, marginBottom: 8 }}>{sub}</div> : null}
+      {compact ? <div style={{ fontSize: 14, color: MUTED, marginTop: -8, marginBottom: 8 }}>{sub}</div> : null}
       {/* role="group", NOT "img": an img role makes every descendant
           presentational, which would strip the keyboard-focusable point
           buttons back out of the accessibility tree — the same fix the lawn
@@ -606,12 +606,12 @@ function TrendChart({ title, sub, points = [], accent = COLORS.glassNavy, compac
           </g>
         ))}
         {activePt ? (
-          <text x={labelX(active)} y={y(activePt.value) - 11} textAnchor="middle" style={{ fontFamily: FONTS.heading, fontWeight: 800, fill: accent }} fontSize="13">{Math.round(activePt.value)}</text>
+          <text x={labelX(active)} y={y(activePt.value) - 11} textAnchor="middle" style={{ fontFamily: FONTS.heading, fontWeight: 700, fill: accent }} fontSize="14">{Math.round(activePt.value)}</text>
         ) : (
-          <text x={x(pts.length - 1)} y={y(last.value) - 9} textAnchor="end" style={{ fontFamily: FONTS.heading, fontWeight: 800, fill: accent }} fontSize="13">{Math.round(last.value)}</text>
+          <text x={x(pts.length - 1)} y={y(last.value) - 9} textAnchor="end" style={{ fontFamily: FONTS.heading, fontWeight: 700, fill: accent }} fontSize="14">{Math.round(last.value)}</text>
         )}
         {pts.map((p, i) => (
-          <text key={i} x={x(i)} y={H - 6} textAnchor="middle" style={{ fontFamily: FONTS.body, fill: active === i ? TEXT : MUTED, fontWeight: active === i ? 700 : 400 }} fontSize="10.5">{p.label}</text>
+          <text key={i} x={x(i)} y={H - 6} textAnchor="middle" style={{ fontFamily: FONTS.body, fill: active === i ? TEXT : MUTED, fontWeight: active === i ? 700 : 400 }} fontSize="14">{p.label}</text>
         ))}
       </svg>
     </Card>

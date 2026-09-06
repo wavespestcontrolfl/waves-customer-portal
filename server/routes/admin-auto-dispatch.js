@@ -18,7 +18,8 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { runAutoDispatch } = require('../services/auto-dispatch');
-const { VALID_MODES, isApplyAllowed } = require('../services/auto-dispatch/config');
+const { VALID_MODES, isApplyAllowed, getAutoDispatchConfig } = require('../services/auto-dispatch/config');
+const { isEnabled } = require('../config/feature-gates');
 const { runExclusive } = require('../utils/cron-lock');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -30,7 +31,13 @@ router.get('/runs', async (req, res) => {
     const runs = await db('auto_dispatch_runs')
       .orderBy('started_at', 'desc')
       .limit(limit);
-    res.json({ runs });
+    res.json({
+      runs,
+      automation: {
+        scheduledEnabled: isEnabled('cronJobs') && isEnabled('autoDispatch'),
+        config: getAutoDispatchConfig(),
+      },
+    });
   } catch (err) {
     logger.error(`[auto-dispatch] GET /runs failed: ${err.message}`);
     res.status(500).json({ error: 'Failed to load runs' });
@@ -42,9 +49,17 @@ router.get('/runs/:id', async (req, res) => {
   try {
     const run = await db('auto_dispatch_runs').where({ id: req.params.id }).first();
     if (!run) return res.status(404).json({ error: 'Run not found' });
-    const logs = await db('auto_dispatch_audit_logs')
-      .where({ auto_dispatch_run_id: req.params.id })
-      .orderBy('created_at', 'asc');
+    // Keep the audit's before/after values intact. The joined fields describe
+    // the current visit so links and operator controls do not use old placement.
+    const logs = await db('auto_dispatch_audit_logs as audit')
+      .leftJoin('scheduled_services as visit', 'audit.scheduled_service_id', 'visit.id')
+      .leftJoin('customers as customer', 'audit.customer_id', 'customer.id')
+      .where('audit.auto_dispatch_run_id', req.params.id)
+      .select('audit.*', 'visit.id as current_visit_id', 'visit.service_type',
+        'visit.scheduled_date as current_scheduled_date',
+        'visit.auto_dispatch_locked', 'visit.auto_dispatch_excluded',
+        'customer.first_name as customer_first_name', 'customer.last_name as customer_last_name')
+      .orderBy('audit.created_at', 'asc');
     res.json({ run, logs });
   } catch (err) {
     logger.error(`[auto-dispatch] GET /runs/:id failed: ${err.message}`);
@@ -88,7 +103,7 @@ router.post('/run', async (req, res) => {
     if (result && result.skipped === true) {
       return res.status(409).json({ error: 'Another auto-dispatch run is already in progress', reason: result.reason });
     }
-    res.json({ ok: true, ...result });
+    res.json({ ...result, ok: result.status === 'completed' });
   } catch (err) {
     logger.error(`[auto-dispatch] manual run failed: ${err.message}`);
     res.status(500).json({ error: 'Run failed', detail: err.message });

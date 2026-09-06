@@ -277,7 +277,7 @@ async function registerAcceptedEstimateAppointmentReminder({
     `${date}T${scheduledTimeOnly(appointment.window_start)}`,
     serviceType || appointment.service_type || 'Pest Control',
     'estimate_accept_slot',
-    { sendConfirmation: false },
+    { sendConfirmation: false, fromCommittedRow: true },
   );
 }
 
@@ -4514,13 +4514,13 @@ function renderExpiredPage(estimate) {
   body{margin:0;font-family:Inter,system-ui,sans-serif;background:#FAF8F3;color:#1B2C5B;min-height:100vh;display:flex;flex-direction:column}
   .top-bar{background:#fff;border-bottom:1px solid #E7E2D7}
   .top-bar-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;padding:16px 24px}
-  .top-phone{color:#1B2C5B;font-size:15px;font-weight:500;text-decoration:none}
+  .top-phone{color:#1B2C5B;font-size:16px;font-weight:500;text-decoration:none}
   .top-logo{height:28px;display:block}
   .wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:40px 24px}
-  .box{max-width:560px;background:#fff;border-radius:8px;padding:40px;text-align:center;border:1px solid #E7E2D7}
+  .box{max-width:560px;background:#fff;border-radius:10px;padding:40px;text-align:center;border:1px solid #E7E2D7}
   h1{font-family:'Source Serif 4',Georgia,serif;font-weight:500;letter-spacing:0;font-size:32px;margin:0 0 12px;color:#1B2C5B}
   p{line-height:1.6;color:#3F4A65}
-  a.btn{display:inline-block;margin-top:16px;padding:12px 22px;background:#1B2C5B;color:#fff;text-decoration:none;border-radius:8px;font-weight:500}
+  a.btn{display:inline-block;margin-top:16px;padding:12px 22px;background:#1B2C5B;color:#fff;text-decoration:none;border-radius:10px;font-weight:500}
 </style>
 </head><body>
 ${shellTopBar()}
@@ -4540,13 +4540,13 @@ function renderEstimateNotFoundPage() {
   body{margin:0;font-family:Inter,system-ui,sans-serif;background:#FAF8F3;color:#1B2C5B;min-height:100vh;display:flex;flex-direction:column}
   .top-bar{background:#fff;border-bottom:1px solid #E7E2D7}
   .top-bar-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;padding:16px 24px}
-  .top-phone{color:#1B2C5B;font-size:15px;font-weight:500;text-decoration:none}
+  .top-phone{color:#1B2C5B;font-size:16px;font-weight:500;text-decoration:none}
   .top-logo{height:28px;display:block}
   .wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:40px 24px}
-  .box{max-width:520px;background:#fff;border-radius:8px;padding:40px;text-align:center;border:1px solid #E7E2D7}
+  .box{max-width:520px;background:#fff;border-radius:10px;padding:40px;text-align:center;border:1px solid #E7E2D7}
   h1{font-family:'Source Serif 4',Georgia,serif;font-weight:500;letter-spacing:0;font-size:32px;line-height:1.12;margin:0 0 12px;color:#1B2C5B}
   p{line-height:1.6;color:#3F4A65;margin:0}
-  a.btn{display:inline-block;margin-top:18px;padding:12px 22px;background:#1B2C5B;color:#fff;text-decoration:none;border-radius:8px;font-weight:700}
+  a.btn{display:inline-block;margin-top:18px;padding:12px 22px;background:#1B2C5B;color:#fff;text-decoration:none;border-radius:10px;font-weight:700}
 </style>
 </head><body>
 ${shellTopBar()}
@@ -5469,9 +5469,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
           ${rodentSetupDueToday > 0 ? `<div class="payment-summary-row"><span>Bait Station Setup</span><strong>${fmtMoney(rodentSetupDueToday)}</strong></div>` : ''}
           <div class="payment-summary-row payment-summary-total"><span>Prepay invoice total</span><strong data-prepay-invoice-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</strong></div>
         </div>
-        <p class="billing-small">${est.depositPolicy?.required
-          ? `A ${fmtMoney(est.depositPolicy.recurringAmount)} deposit is due at confirmation and is credited toward your annual prepay invoice, which totals <span data-prepay-copy-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</span>. Secure payment for the balance is available after confirmation.`
-          : `No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</span> and secure payment is available.`}</p>
+        <p class="billing-small">No payment is charged on this page. After confirmation, your annual prepay invoice totals <span data-prepay-copy-total ${prepayRefreshAttrs}>${fmtMoney(prepayInvoiceTotal)}</span> and secure payment is available.</p>
         ${showMembershipFee && !annualPrepayWaivesMembership ? `<p class="billing-small">The WaveGuard Membership is included with the 12-month plan invoice.</p>` : ''}
         <button type="button" class="payment-choice-cta primary" data-payment-setup="prepay_annual">Annual prepay</button>
         <p class="billing-small">Next: pick a time, then confirm. We send the invoice automatically and make secure payment available.</p>
@@ -5705,7 +5703,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     <table>${oneTimeRows}${manualOneTimeDiscountRowHtml}
       ${oneTimeSingleRowNoDiscount ? '' : `<tr><td><strong>${isOneTimeOnly ? 'Total' : 'One-time total'}</strong></td><td style="text-align:right"><strong>${fmtMoney(oneTimeRowsTotal)}</strong></td></tr>`}
     </table>
-    ${hasRealOneTime && !isOneTimeOnly ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off eligible one-time treatments.</p>` : ''}
+    ${hasRealOneTime && !isOneTimeOnly ? `<p style="font-size:14px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off eligible one-time treatments.</p>` : ''}
   </div>` : '';
 
   const perksHtml = (hasOnlyLawnCareServices
@@ -5752,7 +5750,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       ${showYourWork.qualityNote ? `<p class="ai-quality-note">${escapeHtml(showYourWork.qualityNote)}</p>` : ''}
     </div>` : '';
   const showYourWorkCss = showYourWork ? `
-  .ai-satellite-caption{margin:6px 0 0;font-size:12px;color:#475569;line-height:1.45}
+  .ai-satellite-caption{margin:6px 0 0;font-size:14px;color:#475569;line-height:1.45}
   .ai-show-work{display:grid;gap:10px;margin-top:14px;padding-top:14px;border-top:1px solid #E7E2D7}
   .ai-show-work-title{font-size:14px;color:#475569;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
   .ai-fact-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
@@ -6062,78 +6060,78 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   h2{font-size:clamp(22px,3vw,28px);line-height:1.2}
   h3{font-size:18px;font-weight:600}
   p{margin:0 0 12px}
-  .eyebrow{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:#475569;font-weight:600;margin-bottom:6px;font-family:Inter,system-ui,sans-serif}
+  .eyebrow{text-transform:uppercase;letter-spacing:.12em;font-size:14px;color:#475569;font-weight:600;margin-bottom:6px;font-family:Inter,system-ui,sans-serif}
   .hero-sub{font-size:16px;line-height:1.5;color:#3F4A65;margin:8px 0 12px;max-width:62ch}
   .top-bar{background:#fff;border-bottom:1px solid #E7E2D7}
   .top-bar-inner{max-width:960px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;padding:16px 24px}
-  .top-phone{color:#1B2C5B;font-size:15px;font-weight:500;text-decoration:none}
+  .top-phone{color:#1B2C5B;font-size:16px;font-weight:500;text-decoration:none}
   .top-phone:hover{color:${BRAND.blueDark}}
   .top-logo{height:28px;display:block}
   .wrap{flex:1;max-width:720px;width:100%;margin:0 auto;padding:32px 20px 110px}
   .hero{padding:10px 0 28px;max-width:900px}
-  .hero .addr{color:#3F4A65;font-size:17px;margin-top:8px}
-  .hero-contact{text-transform:uppercase;letter-spacing:.12em;font-size:11px;color:#475569;font-weight:600;margin-top:6px;font-family:Inter,system-ui,sans-serif}
+  .hero .addr{color:#3F4A65;font-size:18px;margin-top:8px}
+  .hero-contact{text-transform:uppercase;letter-spacing:.12em;font-size:14px;color:#475569;font-weight:600;margin-top:6px;font-family:Inter,system-ui,sans-serif}
   .service-price-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:28px;max-width:900px}
   .service-price-card{padding:18px 20px;border:1px solid #D9D3C4;border-radius:12px;background:#F2EEE0;box-shadow:0 6px 18px rgba(15,23,42,.10),0 2px 4px rgba(15,23,42,.06);display:flex;flex-direction:column}
-  .service-price-name{font-size:15px;font-weight:800;color:#1B2C5B;line-height:1.35}
-  .service-price-detail{font-size:12px;color:#475569;line-height:1.45;margin-top:2px;min-height:18px}
+  .service-price-name{font-size:16px;font-weight:700;color:#1B2C5B;line-height:1.35}
+  .service-price-detail{font-size:14px;color:#475569;line-height:1.45;margin-top:2px;min-height:18px}
   .big-price{display:flex;align-items:baseline;gap:12px 18px;margin-top:28px;flex-wrap:wrap}
   .service-big-price{margin-top:14px;gap:8px 12px;align-content:flex-start}
-  .big-price .anchor{font-family:'Source Serif 4',Georgia,serif;font-size:15px;color:#9CA3AF;text-decoration:line-through}
+  .big-price .anchor{font-family:'Source Serif 4',Georgia,serif;font-size:16px;color:#9CA3AF;text-decoration:line-through}
   .big-price .num{font-family:'Source Serif 4',Georgia,serif;font-weight:500;font-size:clamp(24px,10.5vw,40px);line-height:.92;color:#1B2C5B}
-  .service-big-price .anchor{font-size:15px;flex-basis:100%}
+  .service-big-price .anchor{font-size:16px;flex-basis:100%}
   .service-big-price .num{font-size:clamp(24px,10.5vw,40px)}
   .big-price .per{font-size:14px;color:#475569}
   .service-big-price .per{font-size:14px}
-  .big-price .tier-lbl{display:inline-block;padding:4px 10px;border-radius:6px;background:#EEF2FF;color:#1B2C5B;font-weight:600;font-size:12px;letter-spacing:.04em}
+  .big-price .tier-lbl{display:inline-block;padding:4px 10px;border-radius:10px;background:#EEF2FF;color:#1B2C5B;font-weight:600;font-size:14px;letter-spacing:.04em}
   .save-row{margin-top:10px;min-height:20px}
-  .save-pill{display:inline-block;color:${BRAND.green};font-size:13px;font-weight:600}
+  .save-pill{display:inline-block;color:${BRAND.green};font-size:14px;font-weight:600}
   .service-price-card>.day-price{padding-top:8px}
   .supplemental-service-list{display:grid;gap:8px;max-width:720px;margin:18px auto 0}
   .supplemental-service-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;align-items:center;padding:12px 14px;border:1px solid #E7E2D7;border-radius:10px;background:#fff;text-align:left}
-  .supplemental-service-name{font-size:14px;font-weight:800;color:#1B2C5B;line-height:1.35}
-  .supplemental-service-detail{font-size:12px;color:#475569;line-height:1.45;margin-top:2px}
+  .supplemental-service-name{font-size:14px;font-weight:700;color:#1B2C5B;line-height:1.35}
+  .supplemental-service-detail{font-size:14px;color:#475569;line-height:1.45;margin-top:2px}
   .supplemental-service-row strong{font-size:14px;line-height:1.25;color:#1B2C5B;white-space:nowrap}
   .day-price{margin-top:8px;font-size:14px;color:#475569}
   .setup-fee{margin-top:12px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;max-width:520px;padding:12px 14px;border:1px solid #D4CBB8;border-radius:10px;background:#fff}
   .setup-fee-title{font-size:14px;font-weight:700;color:#1B2C5B;line-height:1.35}
-  .setup-fee-sub{font-size:12px;color:#475569;margin-top:2px;line-height:1.45}
+  .setup-fee-sub{font-size:14px;color:#475569;margin-top:2px;line-height:1.45}
   .per-treatment{margin-top:14px;max-width:520px;padding:14px 16px;border:1px solid #E7E2D7;border-radius:10px;background:#fff;box-shadow:0 1px 3px rgba(15,23,42,.04)}
-  .per-treatment-title{font-size:12px;font-weight:700;color:#1B2C5B;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px}
+  .per-treatment-title{font-size:14px;font-weight:700;color:#1B2C5B;letter-spacing:.06em;text-transform:uppercase;margin-bottom:8px}
   .per-treatment-rows{display:grid;gap:8px}
   .pt-row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:baseline}
   .pt-label{font-size:14px;color:#1B2C5B;line-height:1.35}
-  .pt-cadence{font-size:12px;color:#475569;margin-left:2px}
+  .pt-cadence{font-size:14px;color:#475569;margin-left:2px}
   .pt-price{font-size:14px;font-weight:700;color:#1B2C5B;white-space:nowrap}
   .pt-price span,.pt-suffix{font-weight:500;color:#475569}
   .pt-total{border-top:1px solid #E7E2D7;padding-top:8px;margin-top:2px}
   .pt-total .pt-label{font-weight:700}
-  .mini-guarantee{margin-top:10px;font-size:13px;color:#1B2C5B}
+  .mini-guarantee{margin-top:10px;font-size:14px;color:#1B2C5B}
   .mini-guarantee[data-mode-only="one_time"]{margin-top:4px;font-size:14px;line-height:1.55;color:#3F4A65}
   .mode-toggle{display:inline-flex;gap:4px;margin-top:18px;padding:4px;background:#F8FCFE;border-radius:999px;border:1px solid #CFE7F5}
   .mode-btn{appearance:none;border:0;background:transparent;color:#475569;font:600 13px/1 Inter,system-ui,sans-serif;padding:10px 18px;border-radius:999px;cursor:pointer;letter-spacing:.02em;transition:background .15s,color .15s}
   .mode-btn.is-active{background:${ESTIMATE_BUTTON_BLUE};color:#fff;box-shadow:0 1px 4px rgba(15,23,42,.12)}
   .mode-btn:not(.is-active):hover{color:#1B2C5B}
   .choice-treatment{padding:14px 0 8px;max-width:720px}
-  .choice-treatment-name{font-size:15px;font-weight:800;color:#1B2C5B;line-height:1.35}
-  .choice-treatment-detail{font-size:13px;color:#475569;line-height:1.45;margin-top:2px}
+  .choice-treatment-name{font-size:16px;font-weight:700;color:#1B2C5B;line-height:1.35}
+  .choice-treatment-detail{font-size:14px;color:#475569;line-height:1.45;margin-top:2px}
   .choice-treatment-price{margin-top:14px}
   .choice-treatment .save-row{margin-top:8px}
   .choice-treatment .day-price{margin-top:8px}
   .onetime-note{margin-top:14px;font-size:14px;color:#3F4A65;line-height:1.55;max-width:640px}
   .proposal-building{margin-top:10px}
-  .proposal-building-name{font-size:15px;font-weight:800;color:#1B2C5B;margin-bottom:4px}
+  .proposal-building-name{font-size:16px;font-weight:700;color:#1B2C5B;margin-bottom:4px}
   .proposal-building-note{font-size:14px;color:#475569;margin-bottom:6px;line-height:1.5}
-  .proposal-line{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-bottom:1px solid #E2DCCB;font-size:15px;color:#3F4A65;line-height:1.45}
+  .proposal-line{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-bottom:1px solid #E2DCCB;font-size:16px;color:#3F4A65;line-height:1.45}
   .proposal-line-desc{min-width:0}
   .proposal-line-amt{font-weight:700;color:#1B2C5B;white-space:nowrap;font-variant-numeric:tabular-nums}
   .proposal-line-freq{font-weight:500;color:#6B7280}
   .proposal-totals{margin-top:14px}
-  .proposal-line-total{border-bottom:0;font-weight:800;color:#1B2C5B;font-size:16px}
+  .proposal-line-total{border-bottom:0;font-weight:700;color:#1B2C5B;font-size:16px}
   .proposal-line-total .proposal-line-amt{font-size:18px}
   .proposal-monthly-note{margin-top:4px;font-size:14px;color:#475569}
   .proposal-terms{margin-top:14px;font-size:14px;color:#3F4A65;line-height:1.55;white-space:pre-wrap}
-  .proposal-section-title{margin-top:14px;font-size:14px;font-weight:800;color:#1B2C5B}
+  .proposal-section-title{margin-top:14px;font-size:14px;font-weight:700;color:#1B2C5B}
   .proposal-work-includes{margin:2px 0 0;padding-left:20px}
   .proposal-work-includes li{font-size:14px;color:#475569;line-height:1.55}
   .proposal-structured-terms{margin-top:6px}
@@ -6142,7 +6140,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .proposal-term-label{flex:none;width:150px;color:#475569}
   .proposal-term-value{min-width:0;color:#3F4A65}
   .proposal-included{margin-top:16px}
-  .proposal-included-title{font-size:14px;font-weight:800;color:#1B2C5B;margin-bottom:6px}
+  .proposal-included-title{font-size:14px;font-weight:700;color:#1B2C5B;margin-bottom:6px}
   .proposal-included ul{margin:0;padding-left:20px}
   .proposal-included li{font-size:14px;color:#3F4A65;line-height:1.6}
   @media(max-width:760px){.service-price-list{grid-template-columns:1fr}.service-big-price .num{font-size:clamp(42px,14vw,56px)}.supplemental-service-row{grid-template-columns:1fr}.supplemental-service-row strong{white-space:normal}}
@@ -6154,7 +6152,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .waveguard-ai-card{display:grid;gap:14px}
   .intelligence-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
   .intelligence-header h2{margin-bottom:0}
-  .intelligence-badge{flex:none;align-self:flex-start;padding:6px 10px;border-radius:999px;background:#E3F5FD;color:#065A8C;font-size:12px;font-weight:800;line-height:1;letter-spacing:0;text-transform:uppercase}
+  .intelligence-badge{flex:none;align-self:flex-start;padding:6px 10px;border-radius:999px;background:#E3F5FD;color:#065A8C;font-size:14px;font-weight:700;line-height:1;letter-spacing:0;text-transform:uppercase}
   .ai-blurb{margin:0 0 14px;color:#3F4A65;font-size:14px;line-height:1.55}
   .ai-satellite{display:block;width:100%;max-height:320px;object-fit:cover;border-radius:10px;border:1px solid #E7E2D7;margin-top:0;background:#F7F5EE}${showYourWorkCss}
   .ai-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:14px}
@@ -6169,16 +6167,16 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .wg-member-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
   .wg-member-header h2{margin-bottom:0}
   @media(max-width:760px){.wg-member-header{display:grid}}
-  .wg-tier-badge{flex:none;align-self:flex-start;padding:6px 12px;border-radius:999px;font-size:13px;font-weight:800;line-height:1;letter-spacing:.04em;text-transform:uppercase;white-space:nowrap;border:1px solid #D9D3C4}
+  .wg-tier-badge{flex:none;align-self:flex-start;padding:6px 12px;border-radius:999px;font-size:14px;font-weight:700;line-height:1;letter-spacing:.04em;text-transform:uppercase;white-space:nowrap;border:1px solid #D9D3C4}
   .wg-tier-bronze{background:#F3E7D8;color:#8A5A21}
   .wg-tier-silver{background:#ECEEF1;color:#525B66}
   .wg-tier-gold{background:#FBF1D6;color:#8A6A12}
   .wg-tier-platinum{background:#EDEFF2;color:#2B3340}
-  .wg-upgrade{background:#fff;border:1px solid #E7E2D7;border-left:4px solid #009CDE;border-radius:10px;padding:12px 14px;color:#1B2C5B;font-size:15px;line-height:1.5}
+  .wg-upgrade{background:#fff;border:1px solid #E7E2D7;border-left:4px solid #009CDE;border-radius:10px;padding:12px 14px;color:#1B2C5B;font-size:16px;line-height:1.5}
   .wg-section{display:grid;gap:8px}
-  .wg-section-title{font-size:13px;color:#475569;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
+  .wg-section-title{font-size:14px;color:#475569;text-transform:uppercase;letter-spacing:.08em;font-weight:700}
   .wg-row{display:flex;align-items:baseline;justify-content:space-between;gap:12px;background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:10px 12px}
-  .wg-row-label{color:#1B2C5B;font-weight:600;font-size:15px}
+  .wg-row-label{color:#1B2C5B;font-weight:600;font-size:16px}
   .wg-row-val{color:#1F7A4D;font-size:14px;font-weight:600;text-align:right}
   .estimate-ask-card{display:grid;gap:12px}
   .estimate-ask-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
@@ -6197,52 +6195,52 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   @media(max-width:640px){.estimate-ask-form{grid-template-columns:1fr}.estimate-ask-form button{width:100%}}
   .billing-card{display:grid;gap:16px}
   .billing-card h2{margin-bottom:0}
-  .billing-lede{margin:0;color:#3F4A65;font-size:15px;line-height:1.6}
+  .billing-lede{margin:0;color:#3F4A65;font-size:16px;line-height:1.6}
   .payment-choice-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
   @media(max-width:760px){.payment-choice-grid{grid-template-columns:1fr}}
   .payment-choice{border:1px solid #E7E2D7;border-radius:10px;background:#fff;padding:18px;display:flex;flex-direction:column;gap:10px;box-shadow:0 3px 10px rgba(15,23,42,.08),0 1px 2px rgba(15,23,42,.05)}
   .payment-choice.is-selected{border-color:${ESTIMATE_BUTTON_BLUE};box-shadow:0 0 0 3px rgba(27,44,91,.08)}
   .payment-choice-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap}
-  .payment-choice h3{font-family:Inter,system-ui,sans-serif;font-size:16px;line-height:1.25;font-weight:800;letter-spacing:0;margin:0;color:#1B2C5B}
+  .payment-choice h3{font-family:Inter,system-ui,sans-serif;font-size:16px;line-height:1.25;font-weight:700;letter-spacing:0;margin:0;color:#1B2C5B}
   .payment-choice-badge{display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#F8FCFE;border:1px solid #CFE7F5;color:#1B2C5B;padding:5px 9px;font:800 11px/1 Inter,system-ui,sans-serif;text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
   .payment-choice-badge.primary{background:#ECFDF5;border-color:#BBF7D0;color:#166534}
-  .payment-choice p{margin:0;color:#475569;font-size:13px;line-height:1.5}
+  .payment-choice p{margin:0;color:#475569;font-size:14px;line-height:1.5}
   .payment-choice-body{min-height:39px}
   .payment-summary-list{display:grid;border-top:1px solid #E7E2D7;border-bottom:1px solid #E7E2D7;margin:2px 0}
   .payment-summary-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px 0;border-top:1px solid #F0ECE2}
   .payment-summary-row:first-child{border-top:0}
-  .payment-summary-row span{font-size:12px;color:#475569;font-weight:800;text-transform:uppercase;letter-spacing:.06em;line-height:1.35}
-  .payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:800;color:#1B2C5B;text-align:right;white-space:nowrap}
+  .payment-summary-row span{font-size:14px;color:#475569;font-weight:700;text-transform:uppercase;letter-spacing:.06em;line-height:1.35}
+  .payment-summary-row strong{font-size:14px;line-height:1.2;font-weight:700;color:#1B2C5B;text-align:right;white-space:nowrap}
   .payment-summary-row.discount strong,.payment-summary-row.discount span{color:${BRAND.green}}
   .payment-summary-row strong s{color:#9CA3AF;text-decoration-color:${BRAND.red};text-decoration-thickness:2px;margin-right:6px}
   .payment-summary-row.payment-summary-total{border-top:1px solid #1B2C5B;margin-top:4px;padding-top:12px}
   .payment-summary-row.payment-summary-total span{color:#1B2C5B}
-  .payment-summary-row.payment-summary-total strong{font-size:15px;color:#1B2C5B}
+  .payment-summary-row.payment-summary-total strong{font-size:16px;color:#1B2C5B}
   .plan-terms-card{display:grid;gap:14px}
   .plan-terms-card h2{margin-bottom:0}
   .plan-terms-list{display:grid;gap:10px;margin:0;padding:0;list-style:none}
   .plan-terms-item{display:grid;gap:3px;background:#fff;border:1px solid #E7E2D7;border-left:4px solid #1F7A4D;border-radius:10px;padding:12px 14px}
-  .plan-terms-term{font-size:15px;font-weight:800;color:#1B2C5B;line-height:1.3}
+  .plan-terms-term{font-size:16px;font-weight:700;color:#1B2C5B;line-height:1.3}
   .plan-terms-detail{font-size:14px;color:#3F4A65;line-height:1.5}
-  .manual-discount-row{display:flex;justify-content:space-between;gap:12px;align-items:center;margin:12px 0 0;padding:10px 12px;border:1px solid #DCFCE7;border-radius:10px;background:#F0FDF4;color:${BRAND.green};font-size:14px;font-weight:800}
+  .manual-discount-row{display:flex;justify-content:space-between;gap:12px;align-items:center;margin:12px 0 0;padding:10px 12px;border:1px solid #DCFCE7;border-radius:10px;background:#F0FDF4;color:${BRAND.green};font-size:14px;font-weight:700}
   .manual-discount-row strong{white-space:nowrap;font-size:14px}
-  .payment-choice-cta{margin-top:auto;width:100%;border:1px solid ${ESTIMATE_BUTTON_BLUE};background:${ESTIMATE_BUTTON_BLUE};color:#fff;border-radius:8px;padding:12px 14px;font:800 13px/1.2 Inter,system-ui,sans-serif;cursor:pointer;text-align:center;transition:background .15s,color .15s,border-color .15s}
+  .payment-choice-cta{margin-top:auto;width:100%;border:1px solid ${ESTIMATE_BUTTON_BLUE};background:${ESTIMATE_BUTTON_BLUE};color:#fff;border-radius:10px;padding:12px 14px;font:800 13px/1.2 Inter,system-ui,sans-serif;cursor:pointer;text-align:center;transition:background .15s,color .15s,border-color .15s}
   .payment-choice-cta:hover:not([disabled]),.payment-choice-cta[aria-pressed="true"]{background:#121E3D;border-color:#121E3D}
   .payment-choice-cta.primary{background:${ESTIMATE_BUTTON_BLUE};border-color:${ESTIMATE_BUTTON_BLUE};color:#fff}
   .payment-choice-cta.primary:hover:not([disabled]),.payment-choice-cta.primary[aria-pressed="true"]{background:#121E3D;border-color:#121E3D}
   .payment-choice-cta[disabled]{opacity:.55;cursor:not-allowed}
-  .billing-line{padding-top:8px;border-top:1px solid #F0ECE2;color:#1B2C5B;font-size:13px;font-weight:700;line-height:1.45}
+  .billing-line{padding-top:8px;border-top:1px solid #F0ECE2;color:#1B2C5B;font-size:14px;font-weight:700;line-height:1.45}
   .billing-line.discount{color:${BRAND.green}}
   .billing-total-row{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding-top:10px;border-top:1px solid #E7E2D7}
-  .billing-total-row span{font-size:13px;color:#475569;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+  .billing-total-row span{font-size:14px;color:#475569;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
   .billing-total-row strong{font-family:'Source Serif 4',Georgia,serif;font-size:28px;font-weight:600;color:#1B2C5B;white-space:nowrap}
-  .billing-small{font-size:12px!important;color:#475569!important;line-height:1.5!important}
+  .billing-small{font-size:14px!important;color:#475569!important;line-height:1.5!important}
   .payment-setup-summary{border:1px solid #D8E7F0;border-radius:12px;background:#F8FCFE;padding:14px 16px;margin:0 0 18px;display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
   .payment-setup-summary-main{min-width:0}
-  .payment-setup-summary-kicker{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.06em;color:#475569;margin-bottom:5px}
-  .payment-setup-summary-title{font-size:16px;font-weight:800;color:#1B2C5B;line-height:1.25;margin-bottom:4px}
-  .payment-setup-summary-body{font-size:13px;color:#3F4A65;line-height:1.5}
-  .payment-setup-summary-change{border:1px solid #CFE7F5;background:#fff;color:#1B2C5B;border-radius:8px;padding:8px 10px;font:800 12px/1 Inter,system-ui,sans-serif;cursor:pointer;white-space:nowrap}
+  .payment-setup-summary-kicker{font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#475569;margin-bottom:5px}
+  .payment-setup-summary-title{font-size:16px;font-weight:700;color:#1B2C5B;line-height:1.25;margin-bottom:4px}
+  .payment-setup-summary-body{font-size:14px;color:#3F4A65;line-height:1.5}
+  .payment-setup-summary-change{border:1px solid #CFE7F5;background:#fff;color:#1B2C5B;border-radius:10px;padding:8px 10px;font:800 12px/1 Inter,system-ui,sans-serif;cursor:pointer;white-space:nowrap}
   .payment-setup-summary-change:hover{border-color:${ESTIMATE_BUTTON_BLUE}}
   @media(max-width:560px){.payment-setup-summary{display:block}.payment-setup-summary-change{margin-top:12px;width:100%}}
   .prefs-card h2{margin-bottom:4px}
@@ -6251,12 +6249,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .pref-row.off{background:#F7F5EE;border-color:#D4CBB8}
   .pref-row .pref-label{flex:1;min-width:0}
   .pref-row .pref-title{font-weight:600;font-size:14px;color:#1B2C5B}
-  .pref-row .pref-desc{font-size:12px;color:#475569;margin-top:2px;line-height:1.5}
-  .pref-row .pref-savings{font-size:12px;color:${BRAND.green};font-weight:600;margin-top:4px}
+  .pref-row .pref-desc{font-size:14px;color:#475569;margin-top:2px;line-height:1.5}
+  .pref-row .pref-savings{font-size:14px;color:${BRAND.green};font-weight:600;margin-top:4px}
   .pref-row .pref-savings.none{color:#9CA3AF;font-weight:500}
   .switch{position:relative;display:inline-block;width:42px;height:24px;flex-shrink:0;margin-top:2px}
   .switch input{opacity:0;width:0;height:0}
-  .switch .slider{position:absolute;cursor:pointer;inset:0;background:#D4CBB8;border-radius:24px;transition:.2s}
+  .switch .slider{position:absolute;cursor:pointer;inset:0;background:#D4CBB8;border-radius:12px;transition:.2s}
   .switch .slider::before{content:'';position:absolute;height:18px;width:18px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s;box-shadow:0 1px 2px rgba(0,0,0,.15)}
   .switch input:checked+.slider{background:#1B2C5B}
   .switch input:checked+.slider::before{transform:translateX(18px)}
@@ -6264,18 +6262,18 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .booking-card h2{font-family:Inter,system-ui,sans-serif;font-size:22px;font-weight:600;letter-spacing:0;color:#1B2C5B;margin:0 0 8px;line-height:1.2}
   .booking-card .card-sub{font-size:14px;color:#475569;margin:0 0 20px;line-height:1.55}
   .existing-appt-card{border:1px solid #E2E8F0;border-radius:12px;background:#fff;padding:14px 16px;margin-bottom:18px}
-  .existing-appt-kicker{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#475569;margin-bottom:6px}
-  .existing-appt-title{font-size:18px;font-weight:800;color:#1B2C5B;line-height:1.3}
+  .existing-appt-kicker{font-size:14px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:#475569;margin-bottom:6px}
+  .existing-appt-title{font-size:18px;font-weight:700;color:#1B2C5B;line-height:1.3}
   .existing-appt-sub{font-size:14px;color:#3F4A65;margin-top:4px;line-height:1.4}
-  .booking-state{padding:14px;border:1px dashed #E7E2D7;border-radius:10px;background:#F7F5EE;font-size:13px;color:#475569;text-align:center}
+  .booking-state{padding:14px;border:1px dashed #E7E2D7;border-radius:10px;background:#F7F5EE;font-size:14px;color:#475569;text-align:center}
   .slot-list{display:grid;gap:10px}
   .date-finder{margin:0 0 16px;display:grid;gap:10px;padding:16px;border:1px solid #CFE7F5;border-radius:12px;background:#fff}
-  .date-finder-eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:#64748B}
+  .date-finder-eyebrow{font-size:14px;letter-spacing:.12em;text-transform:uppercase;font-weight:700;color:#64748B}
   .date-finder-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  .date-finder-row input[type=text]{flex:1;min-width:200px;min-height:44px;border:1px solid #CFE7F5;border-radius:10px;padding:10px 12px;font-size:15px;color:#1B2C5B;background:#F8FCFE;box-sizing:border-box}
+  .date-finder-row input[type=text]{flex:1;min-width:200px;min-height:44px;border:1px solid #CFE7F5;border-radius:10px;padding:10px 12px;font-size:16px;color:#1B2C5B;background:#F8FCFE;box-sizing:border-box}
   /* appearance/min-width/max-width: iOS WebKit sizes this control from its shadow DOM and the intrinsic width can exceed the row, so clamp it the way the client bundle does globally. */
-  .date-finder-row input[type=date]{min-height:44px;border:1px solid #CFE7F5;border-radius:10px;padding:10px 12px;font-size:15px;color:#1B2C5B;background:#fff;-webkit-appearance:none;appearance:none;min-width:0;max-width:100%;box-sizing:border-box}
-  .date-finder-label{font-size:13px;color:#64748B;font-weight:600}
+  .date-finder-row input[type=date]{min-height:44px;border:1px solid #CFE7F5;border-radius:10px;padding:10px 12px;font-size:16px;color:#1B2C5B;background:#fff;-webkit-appearance:none;appearance:none;min-width:0;max-width:100%;box-sizing:border-box}
+  .date-finder-label{font-size:14px;color:#64748B;font-weight:600}
   .date-finder-btn{min-height:44px;border:0;border-radius:10px;padding:0 18px;background:#1B2C5B;color:#fff;font-size:14px;font-weight:700;cursor:pointer}
   .date-finder-btn[disabled]{opacity:.6;cursor:not-allowed}
   .date-finder-summary{font-size:14px;line-height:1.5;color:#1B2C5B;background:#F0F7FC;border:1px solid #CFE7F5;border-radius:10px;padding:10px 12px}
@@ -6293,7 +6291,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .slot-btn .slot-day{display:block;font-size:14px;font-weight:600;color:#475569;margin-bottom:5px;line-height:1.25}
   .slot-btn .slot-time{display:block;font-size:20px;font-weight:700;margin-bottom:4px;line-height:1.2}
   .slot-btn .slot-reason{display:block;font-size:14px;color:#475569;line-height:1.35}
-  .slot-btn .slot-chip{display:inline-block;margin-top:6px;font-size:12px;font-weight:600;line-height:1.3;color:#B45309;background:#FFF7ED;border:1px solid #FED7AA;border-radius:999px;padding:2px 8px}
+  .slot-btn .slot-chip{display:inline-block;margin-top:6px;font-size:14px;font-weight:600;line-height:1.3;color:#B45309;background:#FFF7ED;border:1px solid #FED7AA;border-radius:999px;padding:2px 8px}
   .slot-btn.selected .slot-day{color:rgba(255,255,255,.82)}
   .slot-btn.selected .slot-reason{color:rgba(255,255,255,.86)}
   .slot-btn.selected .slot-chip{color:#FFEDD5;background:rgba(255,255,255,.14);border-color:rgba(255,255,255,.35)}
@@ -6305,29 +6303,26 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .pay-pref-btn:hover:not([disabled]){border-color:${BRAND.blueDark}}
   .pay-pref-btn[disabled]{opacity:.5;cursor:not-allowed}
   .pay-pref-btn .pay-pref-title{font-size:14px;font-weight:600;color:#1B2C5B}
-  .pay-pref-note{font-size:13px;color:#475569;line-height:1.45;padding:0 2px;text-align:center}
+  .pay-pref-note{font-size:14px;color:#475569;line-height:1.45;padding:0 2px;text-align:center}
   .pay-pref-choice[hidden]{display:none}
   .pay-pref-btn[hidden]+.pay-pref-note{display:none}
-  #deposit-overlay{position:fixed;inset:0;background:rgba(27,44,91,.55);display:flex;align-items:center;justify-content:center;z-index:1000;padding:16px}
-  #deposit-overlay .deposit-card{background:#fff;border:1px solid #E7E2D7;border-radius:14px;max-width:440px;width:100%;padding:22px;box-shadow:0 18px 50px rgba(0,0,0,.25);max-height:90vh;overflow:auto}
-  #deposit-overlay .deposit-error{color:#C8312F;font-size:14px;line-height:1.45;margin-top:10px}
   .pay-pref-btn[aria-pressed="true"]{box-shadow:0 0 0 3px rgba(27,44,91,.16)}
-  .pay-pref-btn .pay-pref-sub{font-size:12px;color:#475569;line-height:1.45}
+  .pay-pref-btn .pay-pref-sub{font-size:14px;color:#475569;line-height:1.45}
   .pay-pref-btn.primary{background:#1B2C5B;color:#fff;border-color:#1B2C5B}
   .pay-pref-btn.primary .pay-pref-title{color:#fff}
   .pay-pref-btn.primary .pay-pref-sub{color:rgba(255,255,255,.8)}
   .pay-pref-btn.prepay{background:${ESTIMATE_BUTTON_BLUE};color:#fff;border-color:${ESTIMATE_BUTTON_BLUE}}
   .pay-pref-btn.prepay .pay-pref-title{color:#fff}
   .pay-pref-btn.prepay .pay-pref-sub{color:rgba(255,255,255,.85)}
-  .reservation-banner{background:#ECFDF5;border:1px solid ${BRAND.green};color:#065F46;border-radius:10px;padding:12px 14px;font-size:13px;margin-top:12px;display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .reservation-banner{background:#ECFDF5;border:1px solid ${BRAND.green};color:#065F46;border-radius:10px;padding:12px 14px;font-size:14px;margin-top:12px;display:flex;align-items:center;justify-content:space-between;gap:10px}
   .review-payment-summary{font-size:14px;color:#374151;line-height:1.45;margin:12px 0 0;font-weight:600}
-  .reservation-banner .countdown{font-family:'Source Serif 4',Georgia,serif;font-weight:500;color:#065F46;font-size:15px}
+  .reservation-banner .countdown{font-family:'Source Serif 4',Georgia,serif;font-weight:500;color:#065F46;font-size:16px}
   table{width:100%;border-collapse:collapse}
   td{padding:10px 0;border-bottom:1px solid #E7E2D7;vertical-align:top;font-size:14px}
   tr:last-child td{border-bottom:0}
   td.val{text-align:right;font-weight:500;color:#1B2C5B}
-  .sub{font-size:12px;color:#475569;margin-top:2px}
-  .onetime-outcome{font-size:15px;font-weight:400;color:#3F4A65;margin-top:6px;line-height:1.5}
+  .sub{font-size:14px;color:#475569;margin-top:2px}
+  .onetime-outcome{font-size:16px;font-weight:400;color:#3F4A65;margin-top:6px;line-height:1.5}
   .onetime-includes-wrap{margin-top:8px}
   .onetime-includes-wrap summary{cursor:pointer;font-size:14px;font-weight:600;color:#0369a1;list-style:none;user-select:none}
   .onetime-includes-wrap summary::-webkit-details-marker{display:none}
@@ -6349,7 +6344,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .upsell.requested:disabled{opacity:1;cursor:default}
   .upsell .txt{flex:1;min-width:200px}
   .upsell h3{color:#1B2C5B;margin:0 0 4px}
-  .upsell-btn{background:#1B2C5B;color:#fff;padding:12px 20px;border-radius:8px;border:none;font-weight:500;cursor:pointer;font-size:14px;min-height:44px;pointer-events:none}
+  .upsell-btn{background:#1B2C5B;color:#fff;padding:12px 20px;border-radius:10px;border:none;font-weight:500;cursor:pointer;font-size:14px;min-height:44px;pointer-events:none}
   .upsell.requested .upsell-btn{background:#166534}
   .upsell-request-status{background:#ECFDF5;border:1px solid #86EFAC;color:#14532D;border-radius:10px;padding:12px 14px;margin:-4px 0 16px;font-size:14px;line-height:1.45}
   .upsell-request-status strong{display:block;color:#14532D;margin-bottom:2px}
@@ -6362,8 +6357,8 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   @media(max-width:560px){.app-shots{grid-template-columns:1fr 1fr;gap:18px}}
   @media(max-width:340px){.app-shots{grid-template-columns:1fr}}
   .app-shot{margin:0;display:flex;flex-direction:column}
-  .app-shot .phone{background:#1B2C5B;border-radius:22px;padding:5px;box-shadow:0 12px 26px rgba(15,23,42,.20),0 3px 8px rgba(15,23,42,.12)}
-  .app-shot .phone img{display:block;width:100%;height:auto;border-radius:17px;background:#fff}
+  .app-shot .phone{background:#1B2C5B;border-radius:12px;padding:5px;box-shadow:0 12px 26px rgba(15,23,42,.20),0 3px 8px rgba(15,23,42,.12)}
+  .app-shot .phone img{display:block;width:100%;height:auto;border-radius:12px;background:#fff}
   .app-shot figcaption{margin-top:11px}
   .app-shot figcaption strong{display:block;font:700 14px/1.2 Inter,system-ui,sans-serif;color:#1B2C5B}
   .app-shot figcaption span{display:block;margin-top:2px;font:500 12.5px/1.35 Inter,system-ui,sans-serif;color:#3F4A65}
@@ -6373,12 +6368,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .app-features{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:12px 0 14px}
   @media(max-width:560px){.app-features{grid-template-columns:repeat(2,1fr)}}
   .app-feature{display:flex;align-items:center;gap:9px;background:#fff;border:1px solid #DCEAF3;border-radius:10px;padding:10px 11px}
-  .af-ico{flex:0 0 auto;width:28px;height:28px;border-radius:7px;background:${BRAND.blueLight};color:${BRAND.blueDark};display:flex;align-items:center;justify-content:center}
+  .af-ico{flex:0 0 auto;width:28px;height:28px;border-radius:10px;background:${BRAND.blueLight};color:${BRAND.blueDark};display:flex;align-items:center;justify-content:center}
   .af-ico svg{width:17px;height:17px}
   .app-feature>span{font:600 12.5px/1.25 Inter,system-ui,sans-serif;color:#1B2C5B}
   .app-badges{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:2px}
   .app-badges.is-coming-soon{opacity:.92}
-  .app-badge{display:inline-flex;line-height:0;border-radius:7px}
+  .app-badge{display:inline-flex;line-height:0;border-radius:10px}
   .app-badge svg{display:block;height:40px;width:auto}
   .app-badge-caption{flex-basis:100%;margin-top:-2px;font:600 12px/1 Inter,system-ui,sans-serif;color:${BRAND.blueDark};letter-spacing:.02em}
   .review-carousel{background:transparent;border:0;padding:0;position:relative}
@@ -6386,43 +6381,43 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   @media(max-width:760px){.review-track{grid-template-columns:1fr}}
   .review-card{background:#fff;border:1px solid #E7E2D7;border-radius:10px;padding:16px;min-height:178px;display:flex;flex-direction:column}
   .review-card .stars{color:${BRAND.yellow};font-size:14px;margin-bottom:8px;letter-spacing:1px}
-  .review-card p{font-size:13px;margin:0 0 12px;font-style:italic;line-height:1.55;color:#3F4A65;flex:1}
+  .review-card p{font-size:14px;margin:0 0 12px;font-style:italic;line-height:1.55;color:#3F4A65;flex:1}
   .review-card.review-profile-card p{font-style:normal}
-  .rev-meta{font-size:12px;color:#475569}
-  .review-link{display:inline-flex;margin-top:10px;color:#1B2C5B;font-size:13px;font-weight:800;text-decoration:none}
+  .rev-meta{font-size:14px;color:#475569}
+  .review-link{display:inline-flex;margin-top:10px;color:#1B2C5B;font-size:14px;font-weight:700;text-decoration:none}
   .review-link:hover{text-decoration:underline}
   .review-dots{display:flex;justify-content:center;gap:6px;margin-top:14px}
   .review-dots button{width:7px;height:7px;border-radius:50%;border:none;background:#D4CBB8;cursor:pointer;padding:0;transition:all .2s}
-  .review-dots button.active{background:#1B2C5B;width:18px;border-radius:4px}
+  .review-dots button.active{background:#1B2C5B;width:18px;border-radius:10px}
   .review-track.fade{opacity:0}
-  .reviews-header{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:13px;color:#1B2C5B;font-weight:600}
+  .reviews-header{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:14px;color:#1B2C5B;font-weight:600}
   .reviews-header .stars{color:${BRAND.yellow};letter-spacing:1px;font-size:14px}
   .locs{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:14px}
   @media(max-width:560px){.locs{grid-template-columns:1fr}}
   .loc{background:#F7F5EE;border:1px solid #E7E2D7;border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:4px}
   .loc .loc-name{color:#1B2C5B;font-size:14px;font-weight:600;text-decoration:none}
   .loc .loc-name:hover{text-decoration:underline}
-  .loc .loc-addr{color:#3F4A65;font-size:12px;text-decoration:none;line-height:1.4}
+  .loc .loc-addr{color:#3F4A65;font-size:14px;text-decoration:none;line-height:1.4}
   .loc .loc-addr:hover{text-decoration:underline}
-  .loc .loc-phone{color:#1B2C5B;font-size:13px;font-weight:500;text-decoration:none}
+  .loc .loc-phone{color:#1B2C5B;font-size:14px;font-weight:500;text-decoration:none}
   .loc .loc-phone:hover{text-decoration:underline}
-  .loc .loc-hours{color:${BRAND.green};font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em}
-  .final{background:#1B2C5B;color:#fff;text-align:center;padding:32px 24px;border-radius:14px;border:1px solid #1B2C5B}
+  .loc .loc-hours{color:${BRAND.green};font-size:14px;font-weight:600;text-transform:uppercase;letter-spacing:.08em}
+  .final{background:#1B2C5B;color:#fff;text-align:center;padding:32px 24px;border-radius:12px;border:1px solid #1B2C5B}
   .final h2{color:#fff;margin:0 0 6px}
   .final-subhead{color:#fff;margin:0 0 10px;font-size:20px;font-weight:600}
   .final p{color:rgba(255,255,255,.8);font-size:14px}
   .accepted-banner{background:#ECFDF5;border:1px solid ${BRAND.green};color:${BRAND.green};text-align:center;padding:12px 16px;border-radius:10px;margin-bottom:16px;font-weight:500;font-size:14px}
   .quote-required-banner{background:#FFF7ED;border:1px solid #FDBA74;color:#9A3412;text-align:center;padding:12px 16px;border-radius:10px;margin-bottom:16px;font-weight:500;font-size:14px}
-  .site-footer{text-align:center;padding:40px 20px 32px;color:#475569;font-size:12px;border-top:1px solid #E7E2D7;background:#FAF8F3;margin:32px -20px -64px}
+  .site-footer{text-align:center;padding:40px 20px 32px;color:#475569;font-size:14px;border-top:1px solid #E7E2D7;background:#FAF8F3;margin:32px -20px -64px}
   .site-footer-socials{display:flex;justify-content:center;gap:12px;margin-bottom:16px}
   .site-footer-socials .soc{display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:50%;background:#F7F5EE;border:1px solid #E7E2D7;color:#1B2C5B;transition:all .15s}
   .site-footer-socials .soc:hover{background:#1B2C5B;color:#fff;border-color:#1B2C5B}
-  .site-footer-contact{margin-bottom:10px;font-size:13px;color:#3F4A65}
+  .site-footer-contact{margin-bottom:10px;font-size:14px;color:#3F4A65}
   .site-footer-contact a{color:#1B2C5B;text-decoration:none;font-weight:500;white-space:nowrap}
   .site-footer-contact a:hover{text-decoration:underline}
   .site-footer-contact .dot{margin:0 8px;color:#9CA3AF}
-  .site-footer-legal{font-size:11px;color:#475569}
-  #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1B2C5B;color:#fff;padding:12px 20px;border-radius:8px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:100}
+  .site-footer-legal{font-size:14px;color:#475569}
+  #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1B2C5B;color:#fff;padding:12px 20px;border-radius:10px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:100}
   #toast.show{opacity:1}
   .q-bar{display:none}
   .q-bar .q-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:48px;padding:10px 14px;border-radius:10px;font-size:14px;font-weight:600;text-decoration:none;line-height:1.2;transition:background .15s,color .15s}
@@ -6436,7 +6431,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     .q-bar{position:fixed;left:0;right:0;bottom:0;z-index:90;display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px 12px calc(10px + env(safe-area-inset-bottom,0));background:rgba(255,255,255,.96);backdrop-filter:saturate(140%) blur(8px);-webkit-backdrop-filter:saturate(140%) blur(8px);border-top:1px solid #E7E2D7;box-shadow:0 -2px 12px rgba(15,23,42,.06)}
     body{padding-bottom:calc(76px + env(safe-area-inset-bottom,0))}
   }
-  @media(max-width:480px){.q-bar .q-btn{font-size:13px;padding:10px}}
+  @media(max-width:480px){.q-bar .q-btn{font-size:14px;padding:10px}}
   /* Tabular digits at the money sites (estimate audit 2026-07-07, finding #8)
      so amount columns, totals, and discounts align — same sites the React
      page covers via fontVariantNumeric. */
@@ -6444,7 +6439,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   /* Print parity with the React estimate (estimate audit 2026-07-07): no
      fixed chrome over the pages, solid white background, cards kept whole. */
   @media print{
-    .q-bar,#toast,#deposit-overlay,.top-bar{display:none!important}
+    .q-bar,#toast,.top-bar{display:none!important}
     body{background:#fff;padding-bottom:0}
     .card,.service-price-card,.supplemental-service-row{break-inside:avoid;box-shadow:none}
   }
@@ -6616,7 +6611,6 @@ ${shellTopBar()}
         <button type="button" class="pay-pref-btn primary" id="confirm-book-btn"><span class="pay-pref-title" id="confirm-book-title">${existingAppointment ? '' : escapeHtml(pageCopy.cardConfirmTitle)}</span><span class="pay-pref-sub" id="confirm-book-sub">${existingAppointment ? '' : 'You will be taken to a secure Stripe page to add your card.'}</span></button>
         ${existingAppointment ? '' : '<button type="button" class="pay-pref-btn" id="change-booking-pick-btn"><span class="pay-pref-title">Change my pick</span><span class="pay-pref-sub">Release this slot and choose a different time or payment option.</span></button>'}
       </div>
-      <div class="pay-pref-note" id="deposit-due-note" style="display:none" aria-live="polite"></div>
     </div>
   </section>
   `}
@@ -6742,7 +6736,6 @@ ${shellQuestionsBar()}
 <script>
   const TOKEN = ${JSON.stringify(token)};
   const API = '/api/estimates/' + TOKEN;
-  const DEPOSIT_POLICY = ${JSON.stringify(est.depositPolicy || { enforced: false, required: false })};
   const ESTIMATE_ASK_TOKEN = ${JSON.stringify(estimateAskToken)};
   const DEFAULT_RECURRING_FREQUENCY = ${JSON.stringify(selectedRecurringFrequencyKey)};
   const INITIAL_SERVICE_MODE = ${JSON.stringify(isOneTimeOnly ? 'one_time' : 'recurring')};
@@ -7077,9 +7070,7 @@ ${shellQuestionsBar()}
     if (pref === 'prepay_annual') {
       if (bookingSubhead) bookingSubhead.textContent = 'Annual prepay is selected. Review the invoice setup, then choose a service window.';
       if (title) title.textContent = 'Annual prepay invoice';
-      if (body) body.textContent = DEPOSIT_POLICY.required
-        ? 'A ' + fmt(DEPOSIT_POLICY.recurringAmount) + ' deposit is due at confirmation and is credited toward your annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ', sent automatically after confirmation; choose a service window to continue.'
-        : 'No payment is charged here. Your annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' is sent automatically after confirmation; choose a service window to continue.';
+      if (body) body.textContent = 'No payment is charged here. Your annual prepay invoice for ' + currentAnnualPrepayInvoiceText() + ' is sent automatically after confirmation; choose a service window to continue.';
     } else {
       if (bookingSubhead) bookingSubhead.textContent = 'Pay per application is selected. Review the invoice setup, then choose a service window.';
       if (title) title.textContent = 'Pay per application';
@@ -7587,7 +7578,6 @@ ${shellQuestionsBar()}
         if (title) title.textContent = 'Confirm and book';
         if (sub) sub.textContent = (bookingState.selectedSlotLabel || 'Your slot') + ' · pay at the visit, no card needed now.';
       }
-      updateDepositNote();
       startReservationCountdown(body.expiresAt);
       reviewArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     } catch (e) {
@@ -7633,7 +7623,6 @@ ${shellQuestionsBar()}
       if (sub) sub.textContent = 'Your existing appointment stays scheduled. ' + CARD_CONFIRM_SUB;
       if (summary) summary.textContent = 'Selected invoice option: Pay per application.';
     }
-    updateDepositNote();
     if (reviewArea) reviewArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 
@@ -7755,326 +7744,6 @@ ${shellQuestionsBar()}
     toast('Booked! Payment is optional right now.');
   }
 
-  // ----- Acceptance deposit (flat $49 recurring / $99 one-time) -----
-  // DEPOSIT_POLICY.required gates the whole block: while the
-  // ESTIMATE_DEPOSIT_REQUIRED flag is dark, or this customer is exempt
-  // (existing plan customer), none of this runs and accept behaves as before.
-  let depositStripeJsPromise = null;
-  function loadStripeJs() {
-    if (window.Stripe) return Promise.resolve(window.Stripe);
-    if (depositStripeJsPromise) return depositStripeJsPromise;
-    depositStripeJsPromise = new Promise(function (resolve, reject) {
-      const s = document.createElement('script');
-      s.src = 'https://js.stripe.com/v3/';
-      s.async = true;
-      s.onload = function () { resolve(window.Stripe); };
-      s.onerror = function () { depositStripeJsPromise = null; reject(new Error('stripe.js failed to load')); };
-      document.head.appendChild(s);
-    });
-    return depositStripeJsPromise;
-  }
-
-  function depositAmountForMode() {
-    return bookingState.serviceMode === 'one_time'
-      ? DEPOSIT_POLICY.oneTimeAmount
-      : DEPOSIT_POLICY.recurringAmount;
-  }
-
-  function updateDepositNote() {
-    const note = document.getElementById('deposit-due-note');
-    if (!note) return;
-    if (!DEPOSIT_POLICY.required) {
-      note.style.display = 'none';
-      return;
-    }
-    // Prepay-annual owes the deposit too — it credits against the annual
-    // invoice minted at accept rather than a later first-visit invoice.
-    const creditTarget = bookingState.pickedPref === 'prepay_annual'
-      ? 'your annual prepay invoice'
-      : 'your first invoice';
-    note.textContent = bookingState.depositPaymentIntentId
-      ? 'Deposit received — it will be applied to ' + creditTarget + '.'
-      : 'A ' + fmt(depositAmountForMode()) + ' deposit is due today to hold your spot — it is applied to ' + creditTarget + '.';
-    note.style.display = '';
-  }
-
-  function closeDepositOverlay() {
-    const o = document.getElementById('deposit-overlay');
-    if (o && o.parentNode) o.parentNode.removeChild(o);
-  }
-
-  function showDepositOverlay(intent) {
-    return new Promise(function (resolve) {
-      closeDepositOverlay();
-      // Prepay-annual deposits credit the annual invoice minted at accept,
-      // not a later first-visit invoice — keep the modal copy honest.
-      const depositCreditTarget = bookingState.pickedPref === 'prepay_annual'
-        ? 'your annual prepay invoice'
-        : 'your first invoice';
-      const overlay = document.createElement('div');
-      overlay.id = 'deposit-overlay';
-      overlay.innerHTML = '<div class="deposit-card">'
-        + '<h3 style="margin:0 0 6px">Reserve your appointment</h3>'
-        + '<p class="card-sub" style="margin:0 0 14px">A ' + fmt(intent.amount) + ' deposit holds your spot. It is applied to ' + depositCreditTarget + '.'
-        + (Number(intent.receivedTotal) > 0 ? ' (' + fmt(intent.receivedTotal) + ' already received.)' : '')
-        + '</p>'
-        + '<div id="deposit-express-checkout"></div>'
-        + '<div id="deposit-express-divider" style="display:none;text-align:center;color:#8A97A5;font-size:13px;margin:10px 0">or pay by card</div>'
-        + '<div id="deposit-payment-element"></div>'
-        + '<div id="deposit-fee-note" class="card-sub" aria-live="polite" style="display:none;margin-top:8px"></div>'
-        + '<div id="deposit-error" class="deposit-error" role="alert" style="display:none"></div>'
-        + '<div class="pay-pref-grid" style="margin-top:14px">'
-        + '<button type="button" class="pay-pref-btn primary" id="deposit-pay-btn" disabled><span class="pay-pref-title">Pay ' + fmt(intent.amount) + ' deposit</span></button>'
-        + '<button type="button" class="pay-pref-btn" id="deposit-cancel-btn"><span class="pay-pref-title">Not now</span></button>'
-        + '</div>'
-        + '</div>';
-      document.body.appendChild(overlay);
-      const errEl = overlay.querySelector('#deposit-error');
-      const payBtn = overlay.querySelector('#deposit-pay-btn');
-      const payBtnTitle = payBtn.querySelector('.pay-pref-title');
-      const feeNote = overlay.querySelector('#deposit-fee-note');
-      const showError = function (message) {
-        if (errEl) { errEl.textContent = message; errEl.style.display = ''; }
-        if (payBtn) payBtn.disabled = false;
-      };
-      overlay.querySelector('#deposit-cancel-btn').addEventListener('click', function () {
-        closeDepositOverlay();
-        resolve({ ok: false, cancelled: true });
-      });
-      loadStripeJs().then(function (StripeCtor) {
-        const stripe = StripeCtor(intent.publishableKey);
-        const elements = stripe.elements({
-          clientSecret: intent.clientSecret,
-          // Required for the two-step card flow's createPaymentMethod (same
-          // as PayPageV2) — without it Stripe won't reliably create the PM
-          // before /deposit-quote (Codex #2705 P1).
-          paymentMethodCreation: 'manual',
-          appearance: { theme: 'stripe', variables: { borderRadius: '8px', fontFamily: 'Inter, system-ui, sans-serif' } },
-        });
-        // Accept-gate contract: ensureDepositSatisfied live-verifies the PI
-        // and only honors status === 'succeeded' — a processing PI would 402
-        // at accept. So only succeeded advances; processing shows a pending
-        // message, and re-taps re-check the PI status instead of
-        // re-confirming an in-flight intent.
-        const succeedWith = function (pi) {
-          if (!pi || pi.status !== 'succeeded') return false;
-          bookingState.depositPaymentIntentId = pi.id;
-          updateDepositNote();
-          closeDepositOverlay();
-          resolve({ ok: true });
-          return true;
-        };
-        const PROCESSING_MSG = 'Your payment is processing — give it a few seconds, then tap Pay again. You will not be charged twice.';
-        const proceedExempt = function () {
-          // Deposit gates changed mid-modal (kill switch off / already
-          // accepted) — nothing owed; close and continue to accept (the
-          // server accept gate re-verifies).
-          closeDepositOverlay();
-          resolve({ ok: true });
-        };
-
-        // ── Express Checkout — Apple Pay / Google Pay / Link one-tap.
-        // Wallets confirm the PI at FACE value: Phase-1 (same rule as the
-        // invoice pay page) puts no surcharge on Express Checkout, so the
-        // wallet sheet shows exactly the quoted deposit. Card surcharge
-        // applies only to the manual-entry path below.
-        const express = elements.create('expressCheckout', {
-          buttonTheme: { applePay: 'black', googlePay: 'black' },
-          buttonType: { applePay: 'buy', googlePay: 'buy' },
-          buttonHeight: 48,
-          paymentMethodOrder: ['applePay', 'googlePay', 'link'],
-          // 'auto' — let Stripe gate each wallet on real device/browser
-          // eligibility. Forcing googlePay 'always' renders its button on
-          // iOS where the popup flow is blocked and the tap dead-ends
-          // (same trap PayPageV2 hit — OR_BIBED_15).
-          paymentMethods: { googlePay: 'auto' },
-        });
-        express.on('ready', function (ev) {
-          // Only show the divider when a wallet button actually rendered —
-          // an empty ECE with a lone "or pay by card" divider reads broken.
-          if (ev && ev.availablePaymentMethods) {
-            overlay.querySelector('#deposit-express-divider').style.display = '';
-          }
-        });
-        express.on('confirm', function () {
-          if (errEl) errEl.style.display = 'none';
-          // Wallet PREFLIGHT (Codex #2705 r4) — obey the verdict: it
-          // re-checks the live deposit gates AND verifies the PI is at
-          // face value (a failed manual-card finalize can leave it at the
-          // surcharged total; wallets pay face). ok !== true = do NOT
-          // confirm.
-          fetch('/api/public/estimates/' + TOKEN + '/deposit-reset', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ paymentIntentId: intent.paymentIntentId }),
-          }).then(function (pre) {
-            return pre.json().catch(function () { return {}; }).then(function (preData) {
-              if (pre.status === 409 && preData.exemptReason) { proceedExempt(); return null; }
-              if (!pre.ok || preData.ok !== true) {
-                showError(preData.error || 'A card verification is still pending on this deposit — finish it, or wait a moment and try again.');
-                return null;
-              }
-              return stripe.confirmPayment({
-                elements: elements,
-                confirmParams: { return_url: window.location.href },
-                redirect: 'if_required',
-              }).then(function (result) {
-                if (result.error) {
-                  showError(result.error.message || 'Payment did not go through. Try another card.');
-                  return;
-                }
-                if (succeedWith(result.paymentIntent)) return;
-                showError(result.paymentIntent && result.paymentIntent.status === 'processing'
-                  ? PROCESSING_MSG
-                  : 'Payment is still pending. Try again in a moment.');
-              });
-            });
-          }).catch(function () {
-            showError('Payment did not go through. Try again.');
-          });
-        });
-        express.mount('#deposit-express-checkout');
-
-        // ── Manual card entry — two-step surcharge disclosure (owner ruling
-        // 2026-07-13: deposits are surcharged like invoices, credit funding
-        // only). First tap prices the entered card via /deposit-quote; when
-        // a fee applies the button relabels to the disclosed total and the
-        // SECOND tap confirms via /deposit-finalize (server-side confirm,
-        // never trusting client numbers). Debit/prepaid quote $0 and
-        // finalize on the same tap — nothing to disclose. Wallets are
-        // hidden here (they live in Express Checkout above).
-        const paymentElement = elements.create('payment', {
-          wallets: { applePay: 'never', googlePay: 'never' },
-        });
-        paymentElement.mount('#deposit-payment-element');
-        paymentElement.on('ready', function () { payBtn.disabled = false; });
-        let depositQuote = null;
-        const resetQuote = function () {
-          depositQuote = null;
-          if (feeNote) feeNote.style.display = 'none';
-          if (payBtnTitle) payBtnTitle.textContent = 'Pay ' + fmt(intent.amount) + ' deposit';
-        };
-        // Any edit invalidates the quote — the priced PaymentMethod is stale.
-        paymentElement.on('change', function () { resetQuote(); });
-
-        const finalizeQuoted = function (quote) {
-          return fetch('/api/public/estimates/' + TOKEN + '/deposit-finalize', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ quoteToken: quote.quoteToken }),
-          }).then(function (res) {
-            return res.json().catch(function () { return {}; }).then(function (data) {
-              if (res.status === 409 && data.exemptReason) { proceedExempt(); return; }
-              if (!res.ok) throw new Error(data.error || 'Payment did not go through. Try another card.');
-              if (data.requiresAction && data.clientSecret) {
-                return stripe.handleNextAction({ clientSecret: data.clientSecret }).then(function (action) {
-                  if (action.error) throw new Error(action.error.message || 'Card verification failed. Try another card.');
-                  if (succeedWith(action.paymentIntent)) return;
-                  throw new Error(action.paymentIntent && action.paymentIntent.status === 'processing'
-                    ? PROCESSING_MSG
-                    : 'Payment is still pending. Try again in a moment.');
-                });
-              }
-              if (succeedWith({ id: data.paymentIntentId, status: data.status })) return;
-              throw new Error(data.status === 'processing' ? PROCESSING_MSG : 'Payment is still pending. Try again in a moment.');
-            });
-          });
-        };
-
-        payBtn.addEventListener('click', function () {
-          payBtn.disabled = true;
-          if (errEl) errEl.style.display = 'none';
-          stripe.retrievePaymentIntent(intent.clientSecret).then(function (existing) {
-            if (existing && succeedWith(existing.paymentIntent)) return null;
-            if (existing && existing.paymentIntent && existing.paymentIntent.status === 'processing') {
-              showError(PROCESSING_MSG);
-              return null;
-            }
-            if (depositQuote) {
-              return finalizeQuoted(depositQuote).catch(function (err) {
-                resetQuote();
-                showError(err.message || 'Payment did not go through. Try again.');
-              });
-            }
-            // elements.submit() validates + collects the form BEFORE the PM
-            // is created — required for the manual-creation flow (PayPageV2
-            // parity).
-            return elements.submit().then(function (submitResult) {
-              if (submitResult && submitResult.error) {
-                showError(submitResult.error.message || 'Check your card details and try again.');
-                return null;
-              }
-              return stripe.createPaymentMethod({ elements: elements });
-            }).then(function (pmResult) {
-              if (!pmResult) return null;
-              if (pmResult.error) {
-                showError(pmResult.error.message || 'Check your card details and try again.');
-                return null;
-              }
-              return fetch('/api/public/estimates/' + TOKEN + '/deposit-quote', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ paymentIntentId: intent.paymentIntentId, paymentMethodId: pmResult.paymentMethod.id }),
-              }).then(function (res) {
-                return res.json().catch(function () { return {}; }).then(function (quote) {
-                  if (res.status === 409 && quote.exemptReason) { proceedExempt(); return null; }
-                  if (!res.ok) throw new Error(quote.error || 'Could not price the deposit payment. Please try again.');
-                  if (Number(quote.surcharge) > 0) {
-                    // Disclose, then require the second tap on the total.
-                    depositQuote = quote;
-                    if (feeNote) {
-                      feeNote.textContent = 'Credit card payments include a ' + fmt(quote.surcharge) + ' processing fee — total ' + fmt(quote.total) + '. Debit cards pay ' + fmt(quote.base) + '.';
-                      feeNote.style.display = '';
-                    }
-                    if (payBtnTitle) payBtnTitle.textContent = 'Pay ' + fmt(quote.total);
-                    payBtn.disabled = false;
-                    return null;
-                  }
-                  // No fee (debit/prepaid/unknown funding) — same amount the
-                  // button already shows; finalize on this tap.
-                  return finalizeQuoted(quote).catch(function (err) {
-                    resetQuote();
-                    showError(err.message || 'Payment did not go through. Try again.');
-                  });
-                });
-              });
-            });
-          }).catch(function (err) {
-            showError((err && err.message) || 'Payment did not go through. Try again.');
-          });
-        });
-      }).catch(function () {
-        showError('Could not load the secure payment form. Check your connection and try again.');
-      });
-    });
-  }
-
-  async function collectDepositIfNeeded() {
-    if (!DEPOSIT_POLICY.required) return { ok: true };
-    // Prepay-annual owes the deposit too (credited to the annual invoice at
-    // accept) — no preference skips the modal; the server gate re-verifies.
-    if (bookingState.depositPaymentIntentId) return { ok: true }; // collected this session or via 3DS return
-    let r;
-    let data = {};
-    try {
-      r = await fetch('/api/public/estimates/' + TOKEN + '/deposit-intent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          serviceMode: bookingState.serviceMode,
-          paymentMethodPreference: bookingState.pickedPref,
-        }),
-      });
-      data = await r.json().catch(function () { return {}; });
-    } catch (e) {
-      return { ok: false, message: 'Could not start the deposit. Check your connection and try again.' };
-    }
-    if (r.status === 409 && data.exemptReason) return { ok: true }; // policy says nothing owed
-    if (!r.ok) return { ok: false, message: data.error || 'Could not start the deposit. Please try again.' };
-    if (data.alreadySatisfied) return { ok: true }; // ledger already covers the policy amount
-    return showDepositOverlay(data);
-  }
-
   // 3DS redirect return: Stripe sends the customer back with
   // ?payment_intent=...&redirect_status=succeeded after a challenge. The
   // accept gate live-verifies the PI server-side (metadata pinned to this
@@ -8100,13 +7769,6 @@ ${shellQuestionsBar()}
     if (btn) btn.disabled = true;
     setBookingChoiceControlsDisabled(true);
     try {
-      const deposit = await collectDepositIfNeeded();
-      if (!deposit.ok) {
-        if (deposit.message) toast(deposit.message);
-        if (btn) btn.disabled = false;
-        setBookingChoiceControlsDisabled(false);
-        return;
-      }
       const payload = {
         slotId: bookingState.selectedSlotId,
         paymentMethodPreference: bookingState.pickedPref,
@@ -8129,11 +7791,20 @@ ${shellQuestionsBar()}
       });
       const data = await r.json();
       if (r.status === 402 && data.code === 'DEPOSIT_REQUIRED') {
-        // Ledger disagrees with what we collected (refund or partial under
-        // us) — drop the cached PI so the next confirm mints a fresh top-up.
+        // Retain the explicit error for an older accept server during deploy
+        // overlap; new pages never start another deposit collection.
         bookingState.depositPaymentIntentId = null;
-        updateDepositNote();
         toast(data.error || 'A deposit is required to confirm your booking.');
+        if (btn) btn.disabled = false;
+        setBookingChoiceControlsDisabled(false);
+        return;
+      }
+      if (r.status === 409 && data.code === 'ANNUAL_PREPAY_OVERLAP') {
+        // Fail-closed billing refusal (docs/public-route-contracts.md), not
+        // a scheduling conflict: nothing was booked and the office must
+        // adjust coverage. Keep the reservation and preference and show the
+        // server's billing explanation instead of a slot-taken retry.
+        toast(data.error || 'This account already has an active annual prepay plan. Please call or text us to adjust your coverage.');
         if (btn) btn.disabled = false;
         setBookingChoiceControlsDisabled(false);
         return;
@@ -8288,7 +7959,7 @@ ${shellQuestionsBar()}
     if (!/[?&]bundle_applied=1/.test(location.search)) return;
     var div = document.createElement('div');
     div.setAttribute('role', 'status');
-    div.style.cssText = 'background:#ECFDF5;border:1px solid #10B981;color:#064E3B;padding:12px 16px;border-radius:8px;margin:0 auto 16px;max-width:820px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:14px;';
+    div.style.cssText = 'background:#ECFDF5;border:1px solid #10B981;color:#064E3B;padding:12px 16px;border-radius:10px;margin:0 auto 16px;max-width:820px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:14px;';
     var params = new URLSearchParams(location.search);
     var tier = (params.get('bundle_tier') || 'updated').replace(/[^A-Za-z ]/g, '').slice(0, 24) || 'updated';
     var tierText = tier === 'updated' ? 'Updated bundle pricing' : tier + ' tier pricing';
@@ -10305,6 +9976,25 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         services: recurringSvcList,
       })
       : null;
+    // The per-row figures the reserved row's price is built from — the rows
+    // sameDayVisitTotal summed (WaveGuard-net, preference-adjusted), each
+    // netted by its own plan-credit slice when the first visit is (the same
+    // allocation firstApplicationInvoiceAmount applies below). Handed to the
+    // converter so a multi-program reserved accept can split the reserved
+    // row's price back into per-line follow-up prices from the SAME
+    // authority (codex #3938 r2/r4 P1: the converter can reconstruct
+    // neither a preference credit nor a plan-credit slice). Empty when the
+    // total came from a fallback with no per-row composition.
+    const firstApplicationRowAmounts = !treatAsOneTime && !selectedServiceTierBillsMonthly
+      ? (sameDayVisitRowAmounts(pricingVisitFrequency, { preferences: acceptPrefs, services: recurringSvcList }) || [])
+        .map(({ row, amount }, index) => ({
+          service: row?.service ?? row?.serviceKey ?? row?.service_key ?? row?.key ?? null,
+          name: row?.name ?? row?.label ?? row?.displayName ?? null,
+          amount: acceptPlanCreditSlice && sameDayVisitTotal
+            ? Math.round((amount - (Number(acceptPlanCreditSlice.rowSlices?.[index]) || 0)) * 100) / 100
+            : amount,
+        }))
+      : [];
     // The display flag is the accept's authorization to net the invoice — if
     // the customer was shown sliced section prices (flag true) but the
     // accept-time slice cannot be computed for their selection FOR ANY REASON
@@ -11490,10 +11180,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           );
         } catch (overlapErr) {
           if (overlapErr && overlapErr.annualPrepayOverlap) {
-            throw estimateAcceptError(
+            const conflict = estimateAcceptError(
               'This account already has an active annual prepay plan. Please call or text us to adjust or renew your coverage — accepting a second annual plan would double-bill the year.',
               409,
             );
+            conflict.code = 'ANNUAL_PREPAY_OVERLAP';
+            throw conflict;
           }
           throw overlapErr;
         }
@@ -11693,6 +11385,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         standardConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
           database: trx,
           billingTerm,
+          firstApplicationRowAmounts: firstApplicationRowAmounts.length ? firstApplicationRowAmounts : null,
           // The converter's own STANDARD draft-invoice branch runs on the
           // GLOBAL pool (its internal db.transaction + ledger reads), which
           // cannot see this transaction's uncommitted customer/appointment
@@ -22440,18 +22133,23 @@ function planCreditFirstVisitSlice(frequency = {}, { preferences = null, service
   let firstVisitSlice = 0;
   let annualSliceTotal = 0;
   let visitTotal = 0;
+  // Per-row slices, aligned to rowAmounts (0 for an ineligible row) — the
+  // converter nets the forwarded row amounts with the SAME allocation the
+  // first-visit invoice uses (codex #3938 r4 P1).
+  const rowSlices = [];
   for (const entry of rowAmounts) {
     const visits = treatmentVisitsForPricingRow(entry.row);
     if (!(visits > 0)) return null;
     const key = recurringServiceKey(entry.row);
     const eligible = (!eligibleList || manualDiscountServiceKeyMatches(eligibleList, key))
       && !manualDiscountServiceKeyMatches(md.excludedServices, key);
-    if (!eligible) continue;
+    if (!eligible) { rowSlices.push(0); continue; }
     // Slices price on the PRE-preference base (codex #3185 r1): the credit
     // object is preference-blind and the section stamper slices the same
     // unadjusted price — an opt-out earns its own preference credit AND the
     // full promised slice, never a shrunken one.
     const rowSlice = round2(entry.baseAmount * (pct / 100));
+    rowSlices.push(rowSlice);
     firstVisitSlice = round2(firstVisitSlice + rowSlice);
     annualSliceTotal = round2(annualSliceTotal + round2(rowSlice * visits));
     visitTotal += visits;
@@ -22492,7 +22190,7 @@ function planCreditFirstVisitSlice(frequency = {}, { preferences = null, service
   // never hide inside it.
   if (Math.abs(annualSliceTotal - recurringAnnual) > 0.005 * visitTotal + 0.02) return null;
   const label = String(md.label || 'Discount').trim() || 'Discount';
-  return { label, firstVisitSlice };
+  return { label, firstVisitSlice, rowSlices };
 }
 
 function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, services = []) {

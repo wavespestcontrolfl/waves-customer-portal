@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const dispatch = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
+const dispatch = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
 const migration = fs.readFileSync(
   path.join(__dirname, '..', 'models', 'migrations', '20260826010000_setup_fee_claims.js'),
   'utf8',
@@ -37,7 +37,7 @@ describe('immutable setup-fee claim record', () => {
   test('no admin route writes the claims table (server-mint only)', () => {
     const routesDir = path.join(__dirname, '..', 'routes');
     for (const f of fs.readdirSync(routesDir)) {
-      if (!f.endsWith('.js') || f === 'admin-dispatch.js') continue;
+      if (!f.endsWith('.js')) continue;
       const src = fs.readFileSync(path.join(routesDir, f), 'utf8');
       expect(src.includes("('setup_fee_claims')")).toBe(false);
     }

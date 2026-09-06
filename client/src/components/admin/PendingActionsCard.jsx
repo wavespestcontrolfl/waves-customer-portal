@@ -52,6 +52,11 @@ const KIND_ORDER = ["comms", "billing", "customer", "operational"];
 const RECEIPT_STATES = { completed: 'confirmed', partially_completed: 'partial', provider_accepted: 'accepted',
   failed: 'failed', blocked: 'failed', canceled: 'cancelled', expired: 'failed', awaiting_approval: undefined, outcome_unknown: 'unknown' };
 
+function receiptState(receipt) {
+  const outcome = receipt.outcome || (receipt.success === true ? 'completed' : receipt.success === false ? 'failed' : 'outcome_unknown');
+  return Object.hasOwn(RECEIPT_STATES, outcome) ? RECEIPT_STATES[outcome] : 'unknown';
+}
+
 function groupEffects(effects) {
   const groups = new Map();
   for (const e of effects || []) {
@@ -134,7 +139,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
   const [errorById, setErrorById] = useState({});
   const inFlightRef = useRef(new Set());
 
-  // New proposals replace the previous batch's local state. Countdown
+  // Preserve existing card outcomes and expiry across clarification turns. Countdown
   // deadlines anchor on RECEIPT TIME + the server-computed expiresInMs, so a
   // skewed device clock can't stale the card early or keep Confirm alive
   // past the server's TTL; raw expiresAt is only the fallback for older
@@ -147,7 +152,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
       for (const a of actions || []) {
         if (deadlines[a.id] !== undefined) continue;
         if (typeof a.expiresInMs === "number") {
-          deadlines[a.id] = received + a.expiresInMs;
+          deadlines[a.id] = (a.receivedAt ?? received) + a.expiresInMs;
         } else if (a.expiresAt) {
           const at = new Date(a.expiresAt).getTime();
           if (Number.isFinite(at)) deadlines[a.id] = at;
@@ -183,8 +188,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
   };
 
   const showReceipt = (action, body) => {
-    const outcome = body.outcome || (body.success === true ? "completed" : body.success === false ? "failed" : "outcome_unknown");
-    const state = Object.hasOwn(RECEIPT_STATES, outcome) ? RECEIPT_STATES[outcome] : "unknown";
+    const state = receiptState(body);
     const message = body.warning || body.result?.warning || body.result?.error || body.result?.message
       || (state === "unknown" ? "The outcome is not established. Check status before taking further action."
         : state === "failed" ? "The action could not be completed" : null);
@@ -255,9 +259,9 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
       className={dark ? undefined : "mt-2 mb-3 flex flex-col gap-2"}
     >
       {actions.map((action) => {
-        const status = statusById[action.id] || (action.receipt ? RECEIPT_STATES[action.receipt.outcome] || 'unknown' : undefined);
+        const status = statusById[action.id] || action.resolvedStatus || (action.receipt ? receiptState(action.receipt) : undefined);
         const receiptResult = action.receipt?.result;
-        const detail = errorById[action.id] || receiptResult?.warning || receiptResult?.error || receiptResult?.message
+        const detail = errorById[action.id] || action.resolvedWarning || receiptResult?.warning || receiptResult?.error || receiptResult?.message
           || (status === 'unknown' ? 'The outcome is not established. Check status before taking further action.' : null);
         const settled = ["confirmed", "cancelled", "failed", "accepted", "partial", "unknown"].includes(status);
         const busy = status === "confirming" || status === "cancelling";

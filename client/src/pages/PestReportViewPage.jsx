@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
-import { CUSTOMER_SURFACE } from '../theme-customer';
-import BrandFooter from '../components/BrandFooter';
+import { DOC_COLUMN_MAX, DOC_EYEBROW } from '../theme-doc';
+import { estimateCard, estimateInnerBox } from '../components/estimate/cardStyles';
 import { useGlassSurface } from '../glass/glass-engine';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
@@ -15,17 +15,17 @@ const BOOK_URL = 'https://wavespestcontrol.com/book?source=pest-report';
 
 // Warm-brand tokens — mirror LawnReportViewPage (customer surface, not admin).
 const BG = '#FAF8F3';
-const BORDER = '#E7E2D7';
+// Estimate grammar (owner 2026-09-03: the estimate is the template for every
+// customer-facing React page) — cards, inner boxes, eyebrow and body grey come
+// from the estimate's own tokens; only the page wash stays local.
 const TEXT = '#04395E';
 const BODY = '#3F4A65';
-const MUTED = CUSTOMER_SURFACE.muted;
-const CARD = COLORS.white;
-const TAN = '#F2EEE0';
 
-const URGENCY_PILL = {
-  high: { label: 'Worth addressing quickly', color: COLORS.red },
-  moderate: { label: 'Worth getting ahead of', color: COLORS.orange },
-  low: { label: 'No emergency', color: COLORS.green },
+// Urgency stays as plain text (no chip, owner 2026-09-04).
+const URGENCY_LABEL = {
+  high: 'Worth addressing quickly',
+  moderate: 'Worth getting ahead of',
+  low: 'No emergency',
 };
 
 const SAFETY_LABELS = [
@@ -37,7 +37,7 @@ const SAFETY_LABELS = [
 
 function Page({ children }) {
   return (
-    <div className="pest-report-page" style={{ minHeight: '100vh', background: BG, fontFamily: FONTS.body, color: BODY, display: 'flex', flexDirection: 'column' }}>
+    <div className="pest-report-page" style={{ flex: 1, background: BG, fontFamily: FONTS.body, color: BODY, display: 'flex', flexDirection: 'column' }}>
       {/* Liquid glass — same scoped reset as the lawn report so the non-glass
           render stays pixel-identical and printing yields the paper document. */}
       <style>{`
@@ -58,51 +58,31 @@ function Page({ children }) {
         }
       `}</style>
       {/* div, not <main> — WavesShell supplies the main landmark. */}
-      <div style={{ flex: 1, width: '100%', maxWidth: 792, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</div>
-      {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
-      <BrandFooter variant="light" appBadges={false} />
+      <div style={{ flex: 1, width: '100%', maxWidth: DOC_COLUMN_MAX, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</div>
     </div>
   );
 }
 
 function SectionCard({ children, style, ...rest }) {
   return (
-    <section data-glass="card" {...rest} style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12, padding: 20, marginBottom: 16, ...style }}>
+    <section data-glass="card" {...rest} style={estimateCard(style)}>
       {children}
     </section>
   );
 }
 
 function SectionTitle({ children }) {
-  return <h2 style={{ fontFamily: FONTS.serif, fontSize: 22, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 12px' }}>{children}</h2>;
-}
-
-function UrgencyPill({ urgency, notAPest }) {
-  if (notAPest) {
-    return (
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 12px', borderRadius: 999, background: COLORS.white, border: `1px solid ${BORDER}`, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: TEXT }}>
-        <span style={{ width: 10, height: 10, borderRadius: 999, background: COLORS.green, flex: 'none' }} />
-        Good news
-      </span>
-    );
-  }
-  const pill = URGENCY_PILL[urgency] || URGENCY_PILL.low;
-  return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 12px', borderRadius: 999, background: COLORS.white, border: `1px solid ${BORDER}`, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: TEXT }}>
-      <span style={{ width: 10, height: 10, borderRadius: 999, background: pill.color, flex: 'none' }} />
-      {pill.label}
-    </span>
-  );
+  return <h2 style={{ fontFamily: FONTS.serif, fontSize: 24, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 12px' }}>{children}</h2>;
 }
 
 function NotFoundCard() {
   return (
     <SectionCard role="alert" style={{ textAlign: 'center', marginTop: 40 }}>
       <SectionTitle>This pest report isn&apos;t available</SectionTitle>
-      <p style={{ margin: '0 0 16px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
+      <p style={{ margin: '0 0 16px', color: BODY, fontSize: 16, lineHeight: 1.55 }}>
         The link may have expired or is no longer active. Give us a call and we&apos;ll take a fresh look at what you&apos;re seeing.
       </p>
-      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
+      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>
         Call {WAVES_PHONE_DISPLAY}
       </a>
     </SectionCard>
@@ -120,9 +100,9 @@ function PricingCard({ pricing }) {
       <SectionTitle>{pricing.service_label || 'Your plan'}</SectionTitle>
       <div style={{ display: 'grid', gap: 10 }}>
         {tiers.map((tier, i) => (
-          <div key={`${tier.label}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', border: `1px solid ${tier.recommended ? COLORS.glassNavy : BORDER}`, borderRadius: 10, background: COLORS.white, padding: '12px 14px' }}>
+          <div key={`${tier.label}-${i}`} style={estimateInnerBox({ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', padding: '12px 14px', ...(tier.recommended ? { border: `1px solid ${COLORS.glassNavy}` } : {}) })}>
             <div>
-              <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT }}>
+              <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, color: TEXT }}>
                 {/* "Recommended", not "Most popular": the pest-identifier
                     snapshot hardcodes recommended on its (often only) tier —
                     a popularity claim would be fabricated (codex P2 #2824).
@@ -134,7 +114,7 @@ function PricingCard({ pricing }) {
                   "applications per year" — owner rule, and it matches the
                   lawn funnel's wording. */}
               {tier.visits ? (
-                <div style={{ fontSize: 14, color: MUTED }}>
+                <div style={{ fontSize: 14, color: BODY }}>
                   {tier.one_time != null ? `${tier.visits}-visit treatment` : `${tier.visits} applications per year`}
                 </div>
               ) : null}
@@ -146,15 +126,15 @@ function PricingCard({ pricing }) {
                   the per-application figure; /mo only survives as the
                   fallback when the tier has no visit count. */}
               {tier.monthly != null && tier.one_time == null ? (
-                <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 18, color: TEXT }}>
+                <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 18, color: TEXT }}>
                   {tierPerApplication(tier) != null
-                    ? <>${fmtCents(tierPerApplication(tier))}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}> / application</span></>
-                    : <span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>Priced per application</span>}
+                    ? <>${fmtCents(tierPerApplication(tier))}<span style={{ fontSize: 14, fontWeight: 600, color: BODY }}> / application</span></>
+                    : <span style={{ fontSize: 14, fontWeight: 600, color: BODY }}>Priced per application</span>}
                 </div>
               ) : null}
               {tier.one_time != null ? (
-                <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 18, color: TEXT }}>
-                  ${fmtCents(tier.one_time)}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}> one-time</span>
+                <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 18, color: TEXT }}>
+                  ${fmtCents(tier.one_time)}<span style={{ fontSize: 14, fontWeight: 600, color: BODY }}> one-time</span>
                 </div>
               ) : null}
             </div>
@@ -162,7 +142,7 @@ function PricingCard({ pricing }) {
         ))}
       </div>
       {pricing.basis_note ? (
-        <p style={{ margin: '12px 0 0', color: MUTED, fontSize: 14, lineHeight: 1.5 }}>{pricing.basis_note}</p>
+        <p style={{ margin: '12px 0 0', color: BODY, fontSize: 14, lineHeight: 1.5 }}>{pricing.basis_note}</p>
       ) : null}
     </SectionCard>
   );
@@ -199,7 +179,7 @@ export default function PestReportViewPage() {
   const [notFound, setNotFound] = useState(false);
   const [loadError, setLoadError] = useState(false);
 
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -244,14 +224,13 @@ export default function PestReportViewPage() {
   return (
     <Page>
       {/* Hero */}
-      <SectionCard style={{ background: TAN }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
-          <h1 style={{ fontFamily: FONTS.serif, fontSize: 26, fontWeight: 500, lineHeight: 1.18, color: TEXT, margin: 0 }}>
-            {greeting}&apos;s what we identified
-          </h1>
-          <UrgencyPill urgency={report.urgency} notAPest={report.not_a_pest} />
-        </div>
-        <p style={{ margin: 0, fontFamily: FONTS.heading, fontWeight: 800, fontSize: 20, lineHeight: 1.3, color: TEXT }}>
+      <SectionCard>
+        {/* Eyebrow → h1 → headline (owner 2026-09-04: no status chips on customer pages). */}
+        <div data-gt="eyebrow" style={DOC_EYEBROW}>Your pest report</div>
+        <h1 style={{ fontFamily: FONTS.serif, fontSize: 26, fontWeight: 500, lineHeight: 1.18, color: TEXT, margin: '0 0 10px' }}>
+          {greeting}&apos;s what we identified
+        </h1>
+        <p style={{ margin: 0, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 20, lineHeight: 1.3, color: TEXT }}>
           {/* Generic labels arrive lowercase ("an ant species") and read as a
               sentence; named labels ("Ghost Ants", "Likely Ghost Ants") stand
               alone as the headline. Inspection-first IDs (termite/rodent/
@@ -266,14 +245,15 @@ export default function PestReportViewPage() {
             return label;
           })()}
         </p>
+        <p style={{ margin: '12px 0 0', fontSize: 15, fontWeight: 600, color: TEXT, lineHeight: 1.5 }}>
+          {report.not_a_pest ? 'Good news' : (URGENCY_LABEL[report.urgency] || URGENCY_LABEL.low)}
+        </p>
+        {/* Safety flags stay as one plain line — the chips are gone (owner
+            2026-09-04) but "don't handle" must still be said. */}
         {safetyFlags.length ? (
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
-            {safetyFlags.map(([key, label]) => (
-              <span key={key} style={{ padding: '5px 10px', borderRadius: 999, background: '#FEF2F2', border: `1px solid ${COLORS.red}`, color: COLORS.red, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14 }}>
-                {label}
-              </span>
-            ))}
-          </div>
+          <p style={{ margin: '12px 0 0', fontSize: 16, fontWeight: 700, color: COLORS.red, lineHeight: 1.5 }}>
+            {safetyFlags.map(([, label]) => label).join(' · ')}
+          </p>
         ) : null}
       </SectionCard>
 
@@ -281,7 +261,7 @@ export default function PestReportViewPage() {
       {report.about ? (
         <SectionCard>
           <SectionTitle>{report.not_a_pest ? 'Why this one’s fine' : 'What you should know'}</SectionTitle>
-          <p style={{ margin: 0, color: BODY, fontSize: 15, lineHeight: 1.6 }}>{report.about}</p>
+          <p style={{ margin: 0, color: BODY, fontSize: 16, lineHeight: 1.6 }}>{report.about}</p>
         </SectionCard>
       ) : null}
 
@@ -289,15 +269,15 @@ export default function PestReportViewPage() {
       {recommendation ? (
         <SectionCard>
           <SectionTitle>Our recommendation</SectionTitle>
-          <p style={{ margin: '0 0 6px', fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT }}>
+          <p style={{ margin: '0 0 6px', fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, color: TEXT }}>
             {recommendation.service_label}
             {recommendation.inspection_required ? ' — starting with a free inspection' : ''}
           </p>
           {recommendation.note ? (
-            <p style={{ margin: 0, color: BODY, fontSize: 14, lineHeight: 1.55 }}>{recommendation.note}</p>
+            <p style={{ margin: 0, color: BODY, fontSize: 16, lineHeight: 1.55 }}>{recommendation.note}</p>
           ) : null}
           {report.next_step ? (
-            <p style={{ margin: '10px 0 0', color: BODY, fontSize: 15, lineHeight: 1.55 }}>{report.next_step}</p>
+            <p style={{ margin: '10px 0 0', color: BODY, fontSize: 16, lineHeight: 1.55 }}>{report.next_step}</p>
           ) : null}
         </SectionCard>
       ) : null}
@@ -307,15 +287,15 @@ export default function PestReportViewPage() {
 
       {/* CTA */}
       {!report.not_a_pest ? (
-        <SectionCard style={{ background: TAN }}>
+        <SectionCard>
           <SectionTitle>Ready when you are</SectionTitle>
-          <p style={{ margin: '0 0 14px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
+          <p style={{ margin: '0 0 14px', color: BODY, fontSize: 16, lineHeight: 1.55 }}>
             {recommendation?.inspection_required
               ? 'Book your free inspection online in about a minute, or call and a real person will help you right away.'
               : 'Book online in about a minute, or call and a real person will help you right away.'}
           </p>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-            <a data-glass-accent="" href={BOOK_URL} style={{ flex: '1 1 200px', textAlign: 'center', padding: '14px 18px', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontWeight: 800, fontSize: 16, textDecoration: 'none' }}>
+            <a data-glass-accent="" href={BOOK_URL} style={{ flex: '1 1 200px', textAlign: 'center', padding: '14px 18px', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>
               Book now
             </a>
             <a href={`tel:${WAVES_PHONE_TEL}`} style={{ flex: '1 1 200px', textAlign: 'center', padding: '14px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>
@@ -324,12 +304,12 @@ export default function PestReportViewPage() {
           </div>
         </SectionCard>
       ) : (
-        <SectionCard style={{ background: TAN }}>
+        <SectionCard>
           <SectionTitle>Seeing something else?</SectionTitle>
-          <p style={{ margin: '0 0 14px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
+          <p style={{ margin: '0 0 14px', color: BODY, fontSize: 16, lineHeight: 1.55 }}>
             If different bugs show up — or this one keeps coming back in numbers — we&apos;re happy to take a look.
           </p>
-          <a href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
+          <a href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>
             Call {WAVES_PHONE_DISPLAY}
           </a>
         </SectionCard>

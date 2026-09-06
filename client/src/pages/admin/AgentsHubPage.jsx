@@ -1,7 +1,9 @@
 /**
  * <AgentsHubPage> — unified agent oversight surface at /admin/agents.
  * Tabs rendered as one centered pill:
- *   - "Overview"           — AgentOpsPage (fleet health cards + task queue)
+ *   - "Overview"           — AgentOpsPage (fleet health cards + task queue),
+ *                            or the Control center once features.ledger is enabled
+ *   - "Dispatch"           — Auto-Dispatch run history and visit decisions
  *   - "Triage & Decisions" — AgentDecisionsPage (shadow decision review)
  *   - "Pending Drafts"     — PendingDraftsTab (owner-approval queue for
  *                            parked message_drafts; approve/revise sends)
@@ -42,7 +44,10 @@ import PendingDraftsTab from "./PendingDraftsTab";
 import DataHygienePage from "./DataHygienePage";
 import AgentActivityTab from "./AgentActivityTab";
 import AgentModelsTab from "./AgentModelsTab";
+import AgentControlCenterTab from "./agents/AgentControlCenterTab";
 import AgentQueueTab from "./AgentQueueTab";
+import AutoDispatchPage from "./AutoDispatchPage";
+import { getAdminUser } from "../../lib/adminAuth";
 import { adminFetch } from "../../utils/admin-fetch";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { useHubParams } from "./agents/hubParams";
@@ -51,6 +56,7 @@ const TAB_KEY = "tab";
 const TABS = {
   OVERVIEW: "overview",
   ACTIVITY: "activity",
+  DISPATCH: "dispatch",
   DECISIONS: "decisions",
   DRAFTS: "drafts",
   SHADOW: "shadow",
@@ -64,6 +70,7 @@ const TAB_LIST = [
   // working) — GATE_AGENT_ACTIVITY; the tab renders a "not enabled" note
   // while the gate is off (the endpoint answers { available: false }).
   { key: TABS.ACTIVITY, label: "Runs", Icon: Activity },
+  { key: TABS.DISPATCH, label: "Dispatch", Icon: Bot, adminOnly: true },
   { key: TABS.DECISIONS, label: "Triage & Decisions", Icon: ListChecks },
   { key: TABS.DRAFTS, label: "Pending Drafts", Icon: MailCheck },
   { key: TABS.SHADOW, label: "Shadow Drafts", Icon: MessageSquareDashed },
@@ -76,9 +83,19 @@ const TAB_LIST = [
 // gate is on (hub probe), so a dark gate renders nothing new.
 const QUEUE_TAB = { key: TABS.QUEUE, label: "Queue", Icon: Layers };
 // Tabs that read ?area= get the product-area strip under the tab row
-// (AdminCommandHeader's secondary row). Grows as the control-center tabs land.
+// (AdminCommandHeader's secondary row). Overview joins while it renders the
+// Control center (the old Overview does not read the area).
 const AREA_TABS = new Set([TABS.MODELS]);
 const ALL_AREAS = "all";
+function readsArea(tab, controlCenter) {
+  return AREA_TABS.has(tab) || (controlCenter && tab === TABS.OVERVIEW);
+}
+
+// Overview is the Control center once the ledger phase exists, else the
+// fleet-health page it has always been.
+function OverviewTab({ controlCenter, areas, setRefreshHandler }) {
+  return controlCenter ? <AgentControlCenterTab areas={areas} setRefreshHandler={setRefreshHandler} /> : <AgentOpsPage embedded setRefreshHandler={setRefreshHandler} />;
+}
 
 export default function AgentsHubPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -94,7 +111,10 @@ export default function AgentsHubPage() {
     return () => { disposed = true; };
   }, []);
   const queueAvailable = hub.features.queue === true;
-  const tabList = queueAvailable ? [...TAB_LIST, QUEUE_TAB] : TAB_LIST;
+  // Keep the gated Control center and admin-only Dispatch oversight together.
+  const controlCenter = hub.features.ledger === true;
+  const tabList = (queueAvailable ? [...TAB_LIST, QUEUE_TAB] : TAB_LIST)
+    .filter(({ adminOnly }) => !adminOnly || getAdminUser()?.role === "admin");
   const validTabs = tabList.map((t) => t.key);
   const paramTab = searchParams.get(TAB_KEY);
   const tab = validTabs.includes(paramTab) ? paramTab : TABS.OVERVIEW;
@@ -137,7 +157,7 @@ export default function AgentsHubPage() {
   }, []);
   const handleRefresh = () => refreshRef.current?.();
 
-  const showAreas = AREA_TABS.has(tab) && hub.areas.length > 0;
+  const showAreas = readsArea(tab, controlCenter) && hub.areas.length > 0;
   const areaSections = showAreas ? [{ key: ALL_AREAS, label: "All areas" }, ...hub.areas.map((a) => ({ key: a.key, label: a.label }))] : [];
   const activeArea = hub.areas.some((a) => a.key === area) ? area : ALL_AREAS;
 
@@ -150,7 +170,7 @@ export default function AgentsHubPage() {
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="Agents section"
-        navGridClassName={queueAvailable ? "grid-cols-2 md:grid-cols-4 lg:grid-cols-8" : "grid-cols-2 md:grid-cols-4 lg:grid-cols-7"}
+        navGridClassName={queueAvailable ? "grid-cols-2 md:grid-cols-4 xl:grid-cols-9" : "grid-cols-2 md:grid-cols-4 xl:grid-cols-8"}
         secondarySections={areaSections}
         secondaryActiveKey={activeArea}
         onSecondaryChange={(key) => setHubParams({ area: key === ALL_AREAS ? null : key })}
@@ -169,9 +189,11 @@ export default function AgentsHubPage() {
       />
       <div aria-label="Agents content" className="flex-1 min-h-0 flex flex-col">
         {tab === TABS.OVERVIEW ? (
-          <AgentOpsPage embedded setRefreshHandler={setRefreshHandler} />
+          <OverviewTab controlCenter={controlCenter} areas={hub.areas} setRefreshHandler={setRefreshHandler} />
         ) : tab === TABS.ACTIVITY ? (
           <AgentActivityTab />
+        ) : tab === TABS.DISPATCH ? (
+          <AutoDispatchPage embedded />
         ) : tab === TABS.DECISIONS ? (
           <AgentDecisionsPage embedded />
         ) : tab === TABS.DRAFTS ? (

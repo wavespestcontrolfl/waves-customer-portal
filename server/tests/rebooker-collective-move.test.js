@@ -47,6 +47,18 @@ const SIB1 = dayOffset(17);
 const SIB2 = dayOffset(24);
 const SIB3 = dayOffset(31);
 
+// An UPDATE result that resolves to the row count like knex AND answers
+// `.returning([...])` with the committed row (the reschedule writer reads the
+// committed technician_id off the CAS write).
+function updateResult(count, rows) {
+  const p = Promise.resolve(count);
+  return {
+    then: p.then.bind(p),
+    catch: p.catch.bind(p),
+    returning: jest.fn().mockResolvedValue(rows ?? (count ? [{ id: 'svc-1', technician_id: 'tech-1' }] : [])),
+  };
+}
+
 function chain(overrides = {}) {
   const builder = {};
   Object.assign(builder, {
@@ -64,7 +76,7 @@ function chain(overrides = {}) {
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(undefined),
-    update: jest.fn().mockResolvedValue(1),
+    update: jest.fn().mockImplementation(() => updateResult(1)),
     insert: jest.fn().mockResolvedValue(),
     count: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
@@ -330,7 +342,7 @@ describe('reschedule() choke point', () => {
 
 describe('single-path date exceptions', () => {
   function wireSingleMocks(svc) {
-    const trxScheduled = chain({ update: jest.fn().mockResolvedValue(1) });
+    const trxScheduled = chain({ update: jest.fn().mockImplementation(() => updateResult(1)) });
     const trx = jest.fn((table) => {
     if (table === 'property_preferences') return chain({ forShare: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) });
       if (table === 'scheduled_services') return trxScheduled;
@@ -1076,8 +1088,8 @@ describe('caller wiring (source)', () => {
     expect(rainOut).toContain('notifyRequested: notifyCustomer === true,');
     // r15: accepted overlaps ride on the operation (result.overlapDates, counted in conflict_count) and the shared card rings them; the anchor's reminder close precedes the Quick Move text's conclusion.
     expect(reb).toContain('overlapDates: [...overlapWarnDates].sort(),');
-    expect(reb).toContain('conflict_count: touched.filter((t) => t.conflicted).length + overlapWarnDates.size,');
-    expect(fx).toContain("if ((dueConflicts.length || (!cardOnly && overlapDates.length)) && !markers.conflict_card_at) {");
+    expect(reb).toContain('conflict_count: touched.filter((t) => t.conflicted).length + overlapWarnDates.size + preservedOccurrences.length,');
+    expect(fx).toContain("if ((dueConflicts.length || (!cardOnly && (overlapDates.length || preserved.length))) && !markers.conflict_card_at) {");
     expect(rainOut).not.toContain('Rain-out series shift overlaps other visits');
     // r16: a failed Quick Move reminder close records "text done, close owed" (customer_notified + notified_at NULL → the close-only branch); superseded rows keep cleanup debt; explicit tech unassign is presence-encoded; the preference row is serialized by the customer-scoped advisory lock the writer also takes (a missing row included); the backfill's optimizer-only rule needs the first nudge to start from cadence.
     expect(rainOut).toContain("update({ customer_notified: true, notified_at: null });");
@@ -1120,7 +1132,7 @@ describe('caller wiring (source)', () => {
 
   test('the IB reschedule tool refuses a gated cadence date move instead of moving one row (until its series path lands)', () => {
     const src = read('../services/intelligence-bar/tools.js');
-    const fn = src.indexOf('async function rescheduleAppointment(input)');
+    const fn = src.indexOf('async function rescheduleAppointment(');
     const refuse = src.indexOf("code: 'COLLECTIVE_MOVE_REQUIRED'", fn);
     const write = src.indexOf('scheduled_date: dateStr,', fn);
     expect(refuse).toBeGreaterThan(fn);

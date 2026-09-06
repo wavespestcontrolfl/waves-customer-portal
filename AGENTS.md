@@ -3,23 +3,31 @@
 Code-review rubric for the automated reviewers that audit diffs in the
 **waves-customer-portal** monorepo: the Codex pre-push hook, the `@codex`
 GitHub bot, and ultrareview. Every rule names the failure it prevents and
-the file it protects. Reviewers return JSON matching
+the file it protects. Automated review invocations return JSON matching
 `.github/codex-review-schema.json` and cite `file:line` for every finding.
+Other tasks use the user's requested response format. Coding agents follow
+the applicable invariants and Implementation defaults below.
 The pre-push hook (`scripts/hooks/pre-push`, wired via `core.hooksPath` by
 `npm prepare`) blocks a push on any P0 and warns on P1.
 
 **Budget: this file stays under 30 KB** — `npm run check:domain-rules`
-fails when it grows past that. Codex silently truncates AGENTS.md at
-32 KiB, so anything past that line is never read. Repo orientation lives
+fails when it grows past that. Codex limits automatically loaded project
+instructions to the configured project-document budget; the default is
+32 KiB across the loaded project instruction chain. Repo orientation lives
 in `CLAUDE.md`, procedures live in `.claude/skills/*`, and the per-route
 security contracts live in `docs/public-route-contracts.md`. Do not
 duplicate them here; point at them.
 
+For coding work, read `CLAUDE.md` before editing and load only the relevant
+skills and reference sections. For an audit or explanation, read applicable
+rules as evidence; do not execute the workflows they describe.
+
 ## Codex local database policy
 
 - Never point a Codex session at production. Use a Railway dev/preview
-  Postgres `DATABASE_URL`. With none set, `predev` runs `db:migrate` and
-  fails before `npm run dev` starts — verify frontend-only work with
+  Postgres `DATABASE_URL`. Managed `npm run dev` checks database readiness
+  without migrating; setup and explicit `dev:migrate` live in
+  `docs/development.md`. With no dev database, verify frontend-only work with
   `npm run dev:client` or `npm run build` and say in the PR summary that
   migrations were not run. Backend or migration work needs a real dev
   `DATABASE_URL` before claiming end-to-end DB verification.

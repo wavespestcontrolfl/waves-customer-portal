@@ -10,7 +10,7 @@
  *
  *   1. No customer/lead-facing SMS bypasses the policy chain.
  *   2. Suppression is checked before every customer/lead send.
- *   3. Customer-facing emoji fails closed.
+ *   3. SMS permits emoji for every audience.
  *   4. Sensitive purposes (payment_link, billing) require identity context.
  *   5. Segment count is computed and logged for audit/visibility.
  *   6. Internal BI keeps its emoji/3-segment behavior via audience='internal'.
@@ -25,7 +25,7 @@
  *   check_suppression                  — STOP/wrong-number list
  *   check_consent_for_purpose          — sms_enabled + per-purpose flag/marketing
  *   validate_identity_trust            — identityTrustLevel >= policy.minIdentityTrust
- *   validate_no_customer_emoji         — fail closed when audience in [customer, lead]
+ *   validate_no_customer_emoji         — enforce non-SMS emoji policy
  *   persist_audit_log                  — every attempt, blocked or sent
  *   send_via_provider                  — twilio for sms; email/portal_chat in follow-up
  *   persist_delivery_attempt           — fold provider outcome into audit row

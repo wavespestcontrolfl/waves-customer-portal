@@ -65,9 +65,11 @@ jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(() => P
 jest.mock('../services/payment-lifecycle-email', () => ({ sendChargeSuccess: jest.fn(), sendChargeFailed: jest.fn(), sendPaymentRetryNotice: jest.fn(() => Promise.resolve({ ok: true })) }));
 jest.mock('../services/account-membership-email', () => ({}));
 jest.mock('../services/billing-helpers', () => ({ isBillingDayMatch: jest.fn(() => true) }));
-jest.mock('../services/payment-router', () => ({ getServiceForCustomer: jest.fn() }));
+jest.mock('../services/stripe', () => ({
+  charge: jest.fn(), chargeOneTime: jest.fn(), chargeMonthly: jest.fn(),
+}));
 
-const PaymentRouter = require('../services/payment-router');
+const StripeService = require('../services/stripe');
 const { logAutopay } = require('../services/autopay-log');
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 const BillingCron = require('../services/billing-cron');
@@ -112,6 +114,9 @@ beforeEach(() => {
   mockCollectedRow = null;
   mockPaymentUpdates = [];
   jest.clearAllMocks();
+  StripeService.charge.mockReset();
+  StripeService.chargeOneTime.mockReset();
+  StripeService.chargeMonthly.mockReset();
   coveredSpy = jest
     .spyOn(AnnualPrepayRenewals, 'getActivelyCoveredCustomerIds')
     .mockResolvedValue(new Set());
@@ -132,7 +137,9 @@ describe('processPaymentRetries — suppression guards', () => {
 
     await BillingCron.processPaymentRetries();
 
-    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(StripeService.charge).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
     expect(mockPaymentUpdates).toHaveLength(1);
     const disarm = mockPaymentUpdates[0];
     expect(disarm.next_retry_at).toBeNull();
@@ -149,7 +156,9 @@ describe('processPaymentRetries — suppression guards', () => {
 
     await BillingCron.processPaymentRetries();
 
-    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(StripeService.charge).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
     expect(mockPaymentUpdates).toHaveLength(0);
     expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_paused',
       expect.objectContaining({ paymentId: 'pay-failed-1' }));
@@ -164,7 +173,9 @@ describe('processPaymentRetries — suppression guards', () => {
 
       await BillingCron.processPaymentRetries();
 
-      expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+      expect(StripeService.charge).not.toHaveBeenCalled();
+      expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+      expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
       expect(mockPaymentUpdates).toHaveLength(0);
       expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_paused',
         expect.objectContaining({ paymentId: 'pay-failed-1' }));
@@ -181,7 +192,9 @@ describe('processPaymentRetries — suppression guards', () => {
 
     // Coverage must be checked on the obligation's attempt date, not today.
     expect(coveredSpy).toHaveBeenCalledWith('2026-06-08');
-    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(StripeService.charge).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
     expect(mockPaymentUpdates).toHaveLength(1);
     const absorb = mockPaymentUpdates[0];
     expect(absorb.next_retry_at).toBeNull();
@@ -198,8 +211,7 @@ describe('processPaymentRetries — suppression guards', () => {
       dateKey >= '2026-07-01' ? new Set(['cust-1']) : new Set()
     ));
     mockFailedPayments = [monthlyFailedPayment()];
-    const charge = jest.fn(() => Promise.resolve({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({ charge });
+    const charge = StripeService.charge.mockResolvedValue({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' });
 
     await BillingCron.processPaymentRetries();
 
@@ -218,8 +230,7 @@ describe('processPaymentRetries — suppression guards', () => {
       description: 'Flea treatment add-on — FAILED',
       metadata: JSON.stringify({ base_amount: 33 }),
     })];
-    const chargeOneTime = jest.fn(() => Promise.resolve({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({ chargeOneTime });
+    const chargeOneTime = StripeService.chargeOneTime.mockResolvedValue({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' });
 
     await BillingCron.processPaymentRetries();
 
@@ -236,7 +247,9 @@ describe('processPaymentRetries — suppression guards', () => {
 
     await BillingCron.processPaymentRetries();
 
-    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(StripeService.charge).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
     expect(mockPaymentUpdates).toHaveLength(1);
     const resolved = mockPaymentUpdates[0];
     expect(resolved.next_retry_at).toBeNull();
@@ -259,7 +272,9 @@ describe('processPaymentRetries — suppression guards', () => {
 
     await BillingCron.processPaymentRetries();
 
-    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(StripeService.charge).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
     expect(mockPaymentUpdates).toHaveLength(1);
     expect(mockPaymentUpdates[0].superseded_by_payment_id).toBe('pay-collector');
     expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_already_paid', expect.anything());
@@ -268,8 +283,7 @@ describe('processPaymentRetries — suppression guards', () => {
 
   test('clean retry carries the failed row\'s billed_month stamp forward', async () => {
     mockFailedPayments = [monthlyFailedPayment()];
-    const charge = jest.fn(() => Promise.resolve({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({ charge });
+    const charge = StripeService.charge.mockResolvedValue({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' });
 
     await BillingCron.processPaymentRetries();
 
@@ -293,8 +307,7 @@ describe('processPaymentRetries — suppression guards', () => {
       failure_reason: 'The customer\'s bank account could not be debited. (R01)',
       stripe_payment_intent_id: 'pi_ach_bounce',
     })];
-    const charge = jest.fn(() => Promise.resolve({ id: 'pay-new', status: 'processing', amount: '33.00', metadata: '{}' }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({ charge });
+    const charge = StripeService.charge.mockResolvedValue({ id: 'pay-new', status: 'processing', amount: '33.00', metadata: '{}' });
 
     await BillingCron.processPaymentRetries();
 
@@ -312,8 +325,7 @@ describe('processPaymentRetries — suppression guards', () => {
       payment_date: '2026-05-28',
       metadata: JSON.stringify({ base_amount: 33 }),
     })];
-    const charge = jest.fn(() => Promise.resolve({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({ charge });
+    const charge = StripeService.charge.mockResolvedValue({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' });
 
     await BillingCron.processPaymentRetries();
 
@@ -343,7 +355,9 @@ describe('processPaymentRetries — billing_mode resolution guard', () => {
 
     await BillingCron.processPaymentRetries();
 
-    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(StripeService.charge).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
     expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_billing_mode',
       expect.objectContaining({
         paymentId: 'pay-failed-1',
@@ -355,12 +369,22 @@ describe('processPaymentRetries — billing_mode resolution guard', () => {
     mockCustomer.billing_mode = null; // Bronze tier + rate from the fixture
     mockFailedPayments = [monthlyFailedPayment()];
     mockCollectedRow = null;
-    const chargeMonthly = jest.fn(() => Promise.resolve({ id: 'pay-retried', amount: 33 }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({ chargeMonthly });
+    const charge = StripeService.charge.mockResolvedValue({ id: 'pay-retried', status: 'paid', amount: 33 });
 
     await BillingCron.processPaymentRetries();
 
-    expect(PaymentRouter.getServiceForCustomer).toHaveBeenCalledWith('cust-1');
+    expect(charge).toHaveBeenCalledTimes(1);
+    expect(charge).toHaveBeenCalledWith(
+      'cust-1', 33, 'Bronze WaveGuard Monthly — Test Retry',
+      { type: 'monthly_autopay', tier: 'Bronze', billed_month: '2026-06' },
+      'autopay_retry_pay-failed-1_1',
+    );
+    expect(charge.mock.contexts).toEqual([StripeService]);
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    expect(mockPaymentUpdates).toContainEqual(expect.objectContaining({
+      superseded_by_payment_id: 'pay-retried', next_retry_at: null,
+    }));
   });
 
   test('per_application customer (never paid monthly): ladder DISARMED but debt stays visible — no auto write-off (Codex round-6)', async () => {
@@ -370,7 +394,9 @@ describe('processPaymentRetries — billing_mode resolution guard', () => {
 
     await BillingCron.processPaymentRetries();
 
-    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(StripeService.charge).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
     expect(mockPaymentUpdates).toHaveLength(1);
     const disarmed = mockPaymentUpdates[0];
     expect(disarmed.next_retry_at).toBeNull();
@@ -389,13 +415,12 @@ describe('processPaymentRetries — billing_mode resolution guard', () => {
     mockCustomer.billing_mode = 'annual_prepay';
     mockFailedPayments = [monthlyFailedPayment()];
     // no coverage on the obligation date, no pending term → nothing suppresses
-    const charge = jest.fn(() => Promise.resolve({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({ charge });
+    const charge = StripeService.charge.mockResolvedValue({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' });
 
     await BillingCron.processPaymentRetries();
 
     expect(logAutopay).not.toHaveBeenCalledWith('cust-1', 'skipped_billing_mode', expect.anything());
-    expect(PaymentRouter.getServiceForCustomer).toHaveBeenCalledWith('cust-1');
+    expect(charge).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -414,7 +439,9 @@ describe('processPaymentRetries — parked, held, and missing-customer dispositi
 
     await BillingCron.processPaymentRetries();
 
-    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(StripeService.charge).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
     expect(mockPaymentUpdates).toHaveLength(1);
     const parked = mockPaymentUpdates[0];
     expect(parked.next_retry_at).toBeNull();
@@ -432,8 +459,7 @@ describe('processPaymentRetries — parked, held, and missing-customer dispositi
       stripe_payment_intent_id: null,
       metadata: JSON.stringify({ base_amount: 33, billed_month: '2026-06', ambiguous_outcome: false }),
     })];
-    const charge = jest.fn(() => Promise.resolve({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({ charge });
+    const charge = StripeService.charge.mockResolvedValue({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' });
 
     await BillingCron.processPaymentRetries();
 
@@ -448,7 +474,9 @@ describe('processPaymentRetries — parked, held, and missing-customer dispositi
 
     // The hold is evaluated as of the sweep day (no explicit as-of argument).
     expect(pendingSpy).toHaveBeenCalledWith();
-    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(StripeService.charge).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
     expect(mockPaymentUpdates).toHaveLength(0);
     expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_annual_prepay_pending',
       expect.objectContaining({ paymentId: 'pay-failed-1', details: expect.objectContaining({ source: 'autopay_retry' }) }));
@@ -460,8 +488,7 @@ describe('processPaymentRetries — parked, held, and missing-customer dispositi
       description: 'Flea treatment add-on — FAILED',
       metadata: JSON.stringify({ base_amount: 33 }),
     })];
-    const chargeOneTime = jest.fn(() => Promise.resolve({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({ chargeOneTime });
+    const chargeOneTime = StripeService.chargeOneTime.mockResolvedValue({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' });
 
     await BillingCron.processPaymentRetries();
 
@@ -475,7 +502,9 @@ describe('processPaymentRetries — parked, held, and missing-customer dispositi
 
     await BillingCron.processPaymentRetries();
 
-    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(StripeService.charge).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
     expect(mockPaymentUpdates).toHaveLength(0);
     expect(logAutopay).not.toHaveBeenCalled();
   });
@@ -486,7 +515,9 @@ describe('processPaymentRetries — parked, held, and missing-customer dispositi
 
     await BillingCron.processPaymentRetries();
 
-    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(StripeService.charge).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
     expect(mockPaymentUpdates).toHaveLength(0);
     expect(logAutopay).not.toHaveBeenCalled();
   });

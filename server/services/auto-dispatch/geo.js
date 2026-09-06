@@ -11,6 +11,7 @@
  * the constants here — see route-optimizer.js for the model and its
  * calibration.
  */
+const { stampedAddressDiverges } = require('../stamped-address');
 const { HQ, haversine, milesToDriveMinutes } = require('../route-optimizer');
 
 /**
@@ -34,8 +35,9 @@ function driveMin(a, b) {
  */
 function resolveGeo(row) {
   if (!row) return null;
-  const lat = row.lat ?? row.svc_lat ?? row.customer_latitude ?? row.cust_lat ?? null;
-  const lng = row.lng ?? row.svc_lng ?? row.customer_longitude ?? row.cust_lng ?? null;
+  const useCustomer = !stampedAddressDiverges(row);
+  const lat = row.lat ?? row.svc_lat ?? (useCustomer ? row.customer_latitude ?? row.cust_lat : null);
+  const lng = row.lng ?? row.svc_lng ?? (useCustomer ? row.customer_longitude ?? row.cust_lng : null);
   if (lat == null || lng == null) return null;
   const la = parseFloat(lat);
   const ln = parseFloat(lng);

@@ -1834,18 +1834,10 @@ describe('rain-out service', () => {
       expect(sanitize()('avoid watering for 24 hours')).toEqual({ note: 'avoid watering for 24 hours' });
     });
 
-    test('sanitizer: rejects emoji BEFORE the move (send layer would block the SMS after)', () => {
-      // sendCustomerMessage's EMOJI_FOR_CUSTOMER validator would otherwise
-      // fire after the reschedule committed — move done, customer silent.
-      expect(sanitize()('See you Friday 👍')).toEqual({ error: 'note_emoji_blocked' });
-      expect(sanitize()('Rain check ☔ sorry!')).toEqual({ error: 'note_emoji_blocked' });
-      // Flags (regional indicators) and keycaps are emoji too — neither is
-      // Extended_Pictographic, both now covered by the shared validator
-      // (codex r3 P1).
-      expect(sanitize()('See you 🇺🇸')).toEqual({ error: 'note_emoji_blocked' });
-      expect(sanitize()('Press 1️⃣ to confirm')).toEqual({ error: 'note_emoji_blocked' });
-      // Smart punctuation is NOT emoji — same line the voice validator draws.
-      expect(sanitize()('Friday — we’ll be there')).toEqual({ note: 'Friday — we’ll be there' });
+    test('sanitizer: preserves SMS emoji and smart punctuation', () => {
+      for (const note of ['See you Friday 👍', 'Rain check ☔ sorry!', 'See you 🇺🇸', 'Press 1️⃣ to confirm', 'Thanks 👍🏽 👨‍👩‍👧‍👦', 'Friday — we’ll be there']) {
+        expect(sanitize()(note)).toEqual({ note });
+      }
       expect(sanitize()(42)).toEqual({ error: 'note_invalid' });
       // "habit.ly" is a REAL registrable .ly host, so the no-URL rule now
       // correctly blocks it; dot-joined words off the TLD set still pass.
@@ -2002,7 +1994,7 @@ describe('rain-out service', () => {
         // Same exclusions the rebooker's commit gate enforces — the badge
         // must warn on exactly what commit would SLOT_TAKEN.
         expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({
-          excludeStatuses: ['cancelled', 'completed'],
+          excludeStatuses: ['cancelled', 'skipped', 'no_show', 'rescheduled', 'completed'],
         }));
         // ONE snapshot for the whole payload, not a query per option.
         expect(listOccupiedWindows).toHaveBeenCalledTimes(1);
@@ -2191,7 +2183,7 @@ describe('rain-out service', () => {
       expect(listOccupiedWindows).toHaveBeenCalledWith(expect.objectContaining({
         dateFrom: '2026-08-12',
         dateTo: '2026-08-12',
-        excludeStatuses: ['cancelled', 'completed'],
+        excludeStatuses: ['cancelled', 'skipped', 'no_show', 'rescheduled', 'completed'],
       }));
     });
 
@@ -2936,17 +2928,29 @@ describe('rain-out service', () => {
       expect(result.ok).toBe(true);
       expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
         'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'custom', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' },
+        // actorId = Quick Move's actorUserId: a tech moving their own visit gets no tech notice.
+        { allowLive: true, actorId: 'admin-7', overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' },
       );
       expect(renderSmsTemplate).not.toHaveBeenCalled();
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
+    test('gate on: emoji notes and template text reach the SMS send intact', async () => {
+      process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
+      renderSmsTemplate.mockImplementationOnce(async (key, vars) => `${vars.custom_message} ☔`);
+      wireSingle();
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'Back tomorrow 👍🏽' });
+      expect(result.ok).toBe(true);
+      expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+        channel: 'sms', body: 'Back tomorrow 👍🏽 ☔',
+      }));
+    });
+
     test('gate on: the standard note guards still screen the custom message pre-move', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       wireSingle();
-      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'Back tomorrow 👍' });
-      expect(result).toMatchObject({ ok: false, reason: 'note_emoji_blocked' });
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'Back tomorrow {missing}' });
+      expect(result).toMatchObject({ ok: false, reason: 'note_guard_blocked' });
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
     });
 
@@ -3156,12 +3160,12 @@ describe('rain-out service', () => {
       expect(result).toMatchObject({ ok: false, reason: 'custom_message_unavailable' });
     });
 
-    test('commit: template-static send blockers (emoji, guard markers) reject the move BEFORE it commits', async () => {
-      // codex r9 P2: an admin-saved emoji or a marker like '1970' in the
+    test('commit: template-static send blockers (guard markers) reject the move BEFORE it commits', async () => {
+      // A broken-render marker like '1970' in the
       // TEMPLATE's static text passes every note guard, renders truthy,
       // and would strand a committed move when the send layer blocks it.
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
-      for (const staticTail of [' See you! \u2614', ' Since 1970.']) {
+      for (const staticTail of [' Since 1970.']) {
         renderSmsTemplate.mockImplementationOnce(async (key, vars) => (
           `Hi Pat - ${vars.custom_message}\n\nWe've moved your ${vars.service_type} to ${vars.new_option}.${vars.link_clause}${staticTail}`
         ));
@@ -3289,6 +3293,7 @@ describe('rain-out service', () => {
 
     test('malformed dates and windows are refused before any query', async () => {
       for (const target of [
+        ...[{ serviceId: 'bad-id' }, { technicianId: 12 }, { durationMinutes: '60' }, { durationMinutes: -1 }].map(extra => ({ date: '2035-01-01', window: { start: '09:00', end: '10:00' }, ...extra })),
         { date: 'not-a-date', window: { start: '14:00', end: '15:00' } },
         { date: '2026-08-20', window: { start: 'nope', end: '15:00' } },
         { date: '2026-08-20', window: { start: '14:00' } },

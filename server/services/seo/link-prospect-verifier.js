@@ -24,9 +24,10 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString } = require('../../utils/datetime-et');
+const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { isEnabled } = require('../../config/feature-gates');
 const omega = require('./omega-indexer');
+const { canonicalProspectDomain, TARGET_DOMAIN_CANONICAL_SQL } = require('./prospect-domain-lock');
 
 const OUR_DOMAIN = 'wavespestcontrol.com';
 const OUR_HOMEPAGE = `https://${OUR_DOMAIN}`;
@@ -144,7 +145,7 @@ function comparableFirstSeen(row) {
 function placementFloorEt(submittedAt) {
   const t = Date.parse(submittedAt || '');
   if (Number.isNaN(t)) return null;
-  return etDateString(new Date(t + 24 * 60 * 60 * 1000));
+  return etDateString(addETDays(new Date(t), 1));
 }
 
 // True if this backlink was first seen on/after the placement floor. No floor (no usable
@@ -226,6 +227,147 @@ async function reconcileByDomain(prospect) {
     return rows.find((row) => firstSeenOnOrAfter(row, floor) && backlinkTargetsProspect(row, prospect)) || null;
   }
   return rows.find((row) => backlinkTargetsProspect(row, prospect)) || null;
+}
+
+// A publisher can post a link without a worker report. Match one placement, never all locations on a host.
+function outreachTargetMatches(link, placement) {
+  if (canonicalProspectDomain(link.source_domain) !== canonicalProspectDomain(placement.target_domain)) return false;
+  try {
+    const expected = new URL(expectedTargetUrl(placement), OUR_HOMEPAGE);
+    const actual = new URL(link.target_url);
+    return canonicalLinkUrl(`${expected.origin}${expected.pathname}`) === canonicalLinkUrl(`${actual.origin}${actual.pathname}`);
+  } catch { return false; }
+}
+
+function outreachMatch(link, placements) {
+  let source;
+  try { source = new URL(link.source_url); } catch { return { placement: null, ambiguous: [] }; }
+  if (!['http:', 'https:'].includes(source.protocol) || source.username || source.password || canonicalProspectDomain(source.hostname) !== canonicalProspectDomain(link.source_domain)) return { placement: null, ambiguous: [] };
+  const matches = placements.filter((p) => outreachTargetMatches(link, p));
+  const exact = matches.filter((p) => canonicalLinkUrl(p.live_url || p.target_url) === canonicalLinkUrl(link.source_url));
+  if (exact.length === 1) {
+    const p = exact[0];
+    const prior = p.live_url && (p.backlink_id || parseQuality(p.quality_signals).lost_recovery);
+    const floor = placementFloorEt(p.outreach_sent_at);
+    return { placement: prior || (floor && firstSeenOnOrAfter(link, floor)) ? p : null, ambiguous: [] };
+  }
+  if (matches.length !== 1) return { placement: null, ambiguous: matches.filter((p) => { const floor = placementFloorEt(p.outreach_sent_at); return floor && firstSeenOnOrAfter(link, floor); }) };
+  const p = matches[0];
+  // A different known profile cannot be replaced by a generic domain match.
+  if (p.live_url && !parseQuality(p.quality_signals).lost_recovery) return { placement: null, ambiguous: [] };
+  const floor = placementFloorEt(p.outreach_sent_at);
+  return { placement: floor && firstSeenOnOrAfter(link, floor) ? p : null, ambiguous: [] };
+}
+
+const outreachAwaitingPlacement = (p) => p.outreach_status === 'sent' && p.outreach_sent_at
+  && (['contacted', 'negotiating'].includes(p.status)
+    || (p.status === 'awaiting_owner' && ['contacted', 'negotiating'].includes(p.parked_from_status)));
+
+async function reconcileOutreach({ now = new Date(), ownerMatch = null } = {}) {
+  if (!isEnabled('linkAuthority') && !ownerMatch) return { matched: 0, ambiguous: 0 };
+  const { lockProspectDomain } = require('./prospect-domain-lock');
+  let pendingQuery = db('seo_link_prospects').where((q) => q.where((b) => b.where({ outreach_status: 'sent' })
+    .whereIn('status', ['contacted', 'negotiating', 'awaiting_owner'])).orWhereRaw("quality_signals->>'outreach_match_ambiguous' IS NOT NULL")).whereNotNull('domain_id');
+  if (ownerMatch) pendingQuery = pendingQuery.where({ id: ownerMatch.prospectId });
+  const pending = await pendingQuery;
+  const domains = [...new Set(pending.filter((p) => outreachAwaitingPlacement(p) || parseQuality(p.quality_signals).outreach_match_ambiguous).map((p) => canonicalProspectDomain(p.target_domain)))].sort();
+  const counts = { matched: 0, ambiguous: 0 };
+  for (const domain of domains) {
+    const result = await db.transaction(async (trx) => {
+      await lockProspectDomain(trx, domain);
+      if (ownerMatch) {
+        const selected = pending.find((p) => p.id === ownerMatch.prospectId);
+        const currentDomain = await trx('seo_link_domains').where({ id: selected.domain_id }).forUpdate().first();
+        if (!require('./link-authority-selection').BRIDGE_STATES.includes(currentDomain?.agent_state)) return { matched: 0, ambiguous: 0 };
+      }
+      const rows = await trx('seo_link_prospects')
+        .whereRaw(`${TARGET_DOMAIN_CANONICAL_SQL} = ?`, [domain])
+        .forUpdate();
+      const placements = rows.filter((p) => !['rejected', 'lost'].includes(p.status));
+      const links = (await trx('seo_backlinks').where({ status: 'active' }).where(scanTrackedOnly)
+        .whereRaw(`${TARGET_DOMAIN_CANONICAL_SQL.replaceAll('target_domain', 'source_domain')} = ?`, [domain]).orderBy('id'))
+        .map((link) => ({ link, exact: placements.some((p) => outreachTargetMatches(link, p) && canonicalLinkUrl(p.live_url || p.target_url) === canonicalLinkUrl(link.source_url)) }))
+        .sort((a, b) => Number(b.link.id === ownerMatch?.backlinkId) - Number(a.link.id === ownerMatch?.backlinkId) || Number(b.exact) - Number(a.exact)).map(({ link }) => link);
+      const ownership = new Map((await trx('seo_link_placement_backlinks')
+        .whereIn('backlink_id', links.map((link) => link.id)))
+        .map((mapping) => [mapping.backlink_id, mapping.prospect_id]));
+      // A queued choice is valid only while the same active evidence still has ambiguous identity.
+      for (const p of rows) {
+        const quality = parseQuality(p.quality_signals);
+        if (!quality.outreach_match_ambiguous) continue;
+        const link = links.find((b) => b.id === quality.outreach_match_ambiguous);
+        const eligible = link && outreachAwaitingPlacement(p) && !ownership.has(link.id) && !placements.some((other) => other.backlink_id === link.id)
+          && outreachMatch(link, placements).ambiguous.some((candidate) => candidate.id === p.id);
+        if (eligible) continue;
+        delete quality.outreach_match_ambiguous;
+        await trx('seo_link_prospects').where({ id: p.id }).update({ quality_signals: quality, updated_at: now });
+        p.quality_signals = quality;
+      }
+      let matched = 0, ambiguous = 0;
+      let ownerAssigned = false;
+      for (const link of links) {
+        if (ownerMatch && link.id !== ownerMatch.backlinkId && (!ownerAssigned || !isEnabled('linkAuthority'))) continue;
+        const ownerId = ownership.get(link.id);
+        // Existing ownership also identifies a recovery among same-target siblings.
+        const candidates = ownerId ? placements.filter((p) => p.id === ownerId) : placements;
+        const match = outreachMatch(link, candidates);
+        const explicitChoice = ownerMatch?.backlinkId === link.id;
+        if (explicitChoice) {
+          const chosen = candidates.find((p) => p.id === ownerMatch.prospectId && outreachTargetMatches(link, p));
+          if (!chosen || !outreachAwaitingPlacement(chosen)) continue;
+          if (match.placement?.id !== chosen.id && !match.ambiguous.some((p) => p.id === chosen.id)) continue;
+          match.placement = chosen; match.ambiguous = [];
+        }
+        if (placements.some((p) => p.backlink_id === link.id && p.id !== match.placement?.id)) continue;
+        const targets = match.ambiguous.filter(outreachAwaitingPlacement);
+        ambiguous += targets.length;
+        for (const p of targets) {
+          const quality = parseQuality(p.quality_signals);
+          if (quality.outreach_match_ambiguous === link.id) continue;
+          quality.outreach_match_ambiguous = link.id;
+          await trx('seo_link_prospects').where({ id: p.id }).update({ quality_signals: quality, updated_at: now });
+          p.quality_signals = quality;
+        }
+        const p = match.placement;
+        if (!p || !outreachAwaitingPlacement(p) || p.claimed_at || ['sending', 'send_error'].includes(p.follow_up_status)) continue;
+        // The unique backlink key is the final concurrency guard, including writers
+        // that do not take this publisher lock. Never update a prospect after losing it.
+        await trx('seo_link_placement_backlinks').insert({ prospect_id: p.id, backlink_id: link.id, created_at: now })
+          .onConflict('backlink_id').ignore();
+        const mapping = await trx('seo_link_placement_backlinks').where({ backlink_id: link.id }).forUpdate().first();
+        if (mapping.prospect_id !== p.id) continue;
+        ownership.set(link.id, p.id);
+        const quality = parseQuality(p.quality_signals);
+        delete quality.outreach_match_ambiguous;
+        const patch = { status: 'placed', live_url: link.source_url, backlink_id: link.id, parked_from_status: null, quality_signals: quality, updated_at: now };
+        if (p.live_url !== link.source_url) patch.indexing_status = 'not_checked';
+        await trx('seo_link_prospects').where({ id: p.id }).update(patch);
+        // The link supersedes an unsent follow-up, not an outstanding payment or execution obligation.
+        const followups = await trx('seo_link_placement_authorities').where({ prospect_id: p.id, dimension: 'communication', instance_kind: 'followup' }).whereNull('ended_at').whereNull('satisfied_at');
+        const approvals = followups.map((r) => r.approval_id).filter(Boolean);
+        if (approvals.length) await trx('seo_link_approvals').whereIn('id', approvals).whereNull('invalidated_at')
+          .update({ invalidated_at: now, invalidated_reason: 'superseded_by_placement', updated_at: now });
+        if (followups.length) await trx('seo_link_placement_authorities').whereIn('id', followups.map((r) => r.id))
+          .update({ ended_at: now, end_outcome: 'superseded', updated_at: now });
+        if (['none', 'due', 'drafted'].includes(p.follow_up_status)) await trx('seo_link_prospects').where({ id: p.id })
+          .update({ follow_up_status: 'skipped', follow_up_skipped_reason: 'superseded_by_placement' });
+        if (explicitChoice) await require('../audit-log').recordAuditEvent({ actor_type: 'technician', actor_id: ownerMatch.actorId || null, action: 'backlink.placement.match', resource_type: 'seo_link_prospect', resource_id: p.id, metadata: { backlink_id: link.id }, critical: true, trx });
+        if (explicitChoice) ownerAssigned = true;
+        Object.assign(p, patch);
+        for (const sibling of placements) {
+          const signals = parseQuality(sibling.quality_signals);
+          if (signals.outreach_match_ambiguous !== link.id) continue;
+          delete signals.outreach_match_ambiguous;
+          await trx('seo_link_prospects').where({ id: sibling.id }).update({ quality_signals: signals, updated_at: now });
+          sibling.quality_signals = signals;
+        }
+        matched++;
+      }
+      return { matched, ambiguous };
+    });
+    counts.matched += result.matched; counts.ambiguous += result.ambiguous;
+  }
+  return counts;
 }
 
 // After how many failed Omega attempts we stop retrying a single URL.
@@ -573,7 +715,7 @@ async function run({ limit = 200 } = {}) {
   return { checked: prospects.length, live, lost, pending, unverified };
 }
 
-module.exports = { run, verifyOne, crawlForLink, findLinkInHtml, matchesExactTargetUrl, classifyPageBody, crawlProvesAbsence, reconcileByDomain, pushForIndexing, markLive };
+module.exports = { run, verifyOne, crawlForLink, findLinkInHtml, matchesExactTargetUrl, classifyPageBody, crawlProvesAbsence, reconcileByDomain, reconcileOutreach, outreachMatch, pushForIndexing, markLive };
 module.exports._test = {
   backlinkTargetsProspect, matchesTargetUrl, normalizeComparableUrl, SOURCE_URL_COMPARABLE_SQL, comparableUrlSql, canonicalLinkUrl, canonicalLinkUrlSql,
   comparableDomain, parseQuality, expectedTargetUrl,

@@ -47,6 +47,24 @@ function isRelayAttached() {
 const WS_MAX_PAYLOAD_BYTES = 64 * 1024;
 const WS_IDLE_MS = 2 * 60 * 1000;        // no inbound frame for 2 min → drop
 const WS_MAX_SESSION_MS = 15 * 60 * 1000; // hard cap on a single call
+// The least a RESUMED socket gets of the call's remaining budget — enough for
+// the resumed greeting and one exchange, never a zero timer.
+const WS_RESUMED_MIN_SESSION_MS = 30 * 1000;
+
+/**
+ * A reconnected call's socket budget: the hard cap minus what the call has
+ * already used (from its call_log created_at), floored; a call that never
+ * reconnected, or a row without a start, keeps the full cap.
+ */
+function resumedSessionBudgetMs(row, { now = Date.now() } = {}) {
+  if (!row) return WS_MAX_SESSION_MS;
+  let meta = row.metadata;
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+  if (!(Number(meta && meta.relay_reconnects) > 0)) return WS_MAX_SESSION_MS;
+  const startedAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
+  if (!Number.isFinite(startedAt)) return WS_MAX_SESSION_MS;
+  return Math.max(WS_RESUMED_MIN_SESSION_MS, Math.min(WS_MAX_SESSION_MS, WS_MAX_SESSION_MS - (now - startedAt)));
+}
 
 // ⭐ ONE SESSION PER MINTED TOKEN — AND THE CLAIM LIVES IN SHARED STORAGE.
 //
@@ -199,12 +217,17 @@ function attachVoiceRelay(httpServer) {
       // envelope); the read is idempotent so the ordering is safe.
       let collectionsCall = false;
       let sandboxCall = false;
+      let sessionBudgetMs = WS_MAX_SESSION_MS;
       try {
         const db = require('../../models/db');
         const row = await db('call_log')
           .where({ twilio_call_sid: callSid })
-          .first('source');
+          .first('source', 'created_at', 'metadata');
         collectionsCall = Boolean(row && row.source === 'collections_voice');
+        // PR 2B (codex r4 P2): a RECONNECTED call's socket gets only what is
+        // left of the call's hard duration cap, measured from the call's own
+        // start — a reconnect never restarts the 15-minute budget.
+        sessionBudgetMs = resumedSessionBudgetMs(row);
         // The sandbox number's calls persist like any inbound call (their
         // transcript / latency record IS the bake-off); the session that
         // answers them must write nothing else — see RelayConversation.sandbox.
@@ -222,6 +245,7 @@ function attachVoiceRelay(httpServer) {
       }
       req.authenticatedCollectionsCall = collectionsCall;
       req.authenticatedSandboxCall = sandboxCall;
+      req.authenticatedSessionBudgetMs = sessionBudgetMs;
       // ⭐ THE AUTHENTICATED CallSid RIDES WITH THE SOCKET. The token was
       // verified against THIS CallSid, and the setup frame that follows is
       // unverified input: honouring the frame's own callSid would let a valid
@@ -292,10 +316,11 @@ function attachVoiceRelay(httpServer) {
       }, WS_IDLE_MS);
       idleTimer.unref?.(); // never let the backstop keep the process alive
     };
+    const sessionBudgetMs = (req && Number(req.authenticatedSessionBudgetMs)) || WS_MAX_SESSION_MS;
     sessionTimer = setTimeout(() => {
       logger.warn('[voice-relay] max session duration — terminating ws');
       teardown('ws_max_session');
-    }, WS_MAX_SESSION_MS);
+    }, sessionBudgetMs);
     sessionTimer.unref?.();
     bumpIdle();
 
@@ -313,13 +338,16 @@ function attachVoiceRelay(httpServer) {
 
     // End the ConversationRelay session (agent finished + lead captured) so the
     // caller isn't left in silence. Twilio closes the call after the end frame.
+    // Returns true when the end frame was handed to the socket (PR 2A: the
+    // transfer tool needs to know — an unsent frame means no transfer).
     const endSession = (handoffData) => {
-      if (ws.readyState === ws.OPEN) {
-        try {
-          ws.send(endFrame(handoffData));
-        } catch (e) {
-          logger.error(`[voice-relay] end frame send failed: ${e.message}`);
-        }
+      if (ws.readyState !== ws.OPEN) return false;
+      try {
+        ws.send(endFrame(handoffData));
+        return true;
+      } catch (e) {
+        logger.error(`[voice-relay] end frame send failed: ${e.message}`);
+        return false;
       }
     };
 
@@ -391,6 +419,7 @@ function attachVoiceRelay(httpServer) {
             callSid: authenticatedCallSid,
             sessionKey: relaySessionKey,
             sessionGeneration: relaySessionGeneration,
+            callTokenVerified: true, // verified and burned at upgrade, never setup-frame input
             from: msg.from || p.from || null,
             to: msg.to || p.to || null,
             language: msg.lang || p.lang || null,
@@ -400,6 +429,10 @@ function attachVoiceRelay(httpServer) {
             ttsVoice: typeof p.tts_voice === 'string' ? p.tts_voice : null,
             // Proven from the call_log row at upgrade — never the frame.
             sandbox: authenticatedSandboxCall,
+            // PR 2B: the reconnected leg's TwiML says so. A HINT only — the
+            // session re-proves it from the row's reconnect stamp before it
+            // seeds prior turns or skips its capture floor.
+            resumed: p.resumed === '1',
             send,
             endSession,
           });
@@ -478,4 +511,4 @@ function attachVoiceRelay(httpServer) {
   return wss;
 }
 
-module.exports = { attachVoiceRelay, isEnabled, isRelayAttached };
+module.exports = { attachVoiceRelay, isEnabled, isRelayAttached, resumedSessionBudgetMs, WS_MAX_SESSION_MS, WS_RESUMED_MIN_SESSION_MS };

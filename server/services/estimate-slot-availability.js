@@ -26,7 +26,9 @@
  * scheduled_services.lat/lng which IS real. Consolidate naming in a
  * dedicated surgical PR.
  */
+const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const db = require('../models/db');
+const { applyAssignable } = require('./technician-eligibility');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
@@ -342,12 +344,9 @@ function selectedGeneratedLawnFrequency(estimate = {}, estData = {}, selectedFre
 }
 
 function storedRecurringRowsForEstimate(estimate = {}, estData = {}) {
-  const lists = [
-    estData.result?.recurring?.services,
-    estData.recurring?.services,
-    Array.isArray(estData.services) ? estData.services.filter((svc) => svc.recurring || svc.frequency || svc.visitsPerYear || svc.visits) : null,
-  ];
-  const rows = lists.find((list) => Array.isArray(list) && list.length) || [];
+  // Use the acceptance reader so nested/engine rows and deduplicated aliases
+  // describe the same service mix here and during conversion.
+  const rows = require('./estimate-converter').recurringServicesFromEstimateData(estData);
   if (rows.length) return rows.map((row) => ({ ...row }));
 
   if (estimate.service_interest) {
@@ -429,11 +428,24 @@ function selectedPricingFrequency(estimate = {}, estData = {}, selectedFrequency
 
 function recurringRowsForEstimate(estimate = {}, estData = {}, selectedFrequency = '') {
   const frequency = selectedPricingFrequency(estimate, estData, selectedFrequency);
-  if (Array.isArray(frequency?.perServiceTreatments) && frequency.perServiceTreatments.length) {
-    return frequency.perServiceTreatments.map((row) => ({ ...row }));
+  const stored = storedRecurringRowsForEstimate(estimate, estData);
+  const selected = Array.isArray(frequency?.perServiceTreatments)
+    ? frequency.perServiceTreatments.map((row) => ({ ...row })) : [];
+  if (estimate.show_one_time_option || estimate.showOneTimeOption) {
+    const { shouldPersistPestOnlyRecurringChoice, isPestServiceName } = require('../routes/estimate-public');
+    if (shouldPersistPestOnlyRecurringChoice(estimate, estData)) {
+      return (selected.length ? selected : stored)
+        .filter((row) => isPestServiceName(row.name || row.label || row.service));
+    }
   }
+  if (!selected.length) return stored;
 
-  return storedRecurringRowsForEstimate(estimate, estData);
+  // A generated lawn tier describes only lawn. Apply its selected cadence
+  // without interpreting omitted companions as customer removals. Keep the
+  // converter's precise identities: bait, rental and bond are distinct rows.
+  const { recurringServiceKey } = require('./estimate-converter');
+  const selectedKeys = new Set(selected.map(recurringServiceKey));
+  return [...selected, ...stored.filter((row) => !selectedKeys.has(recurringServiceKey(row)))];
 }
 
 function compactServiceLabel(label) {
@@ -1000,90 +1012,8 @@ function slotWindowFitsDay(windowStart, windowEnd) {
   return endMin > startMin && endMin <= SLOT_DAY_END_MINUTES;
 }
 
-// Customer-facing window rotation for slots on sparse days. find-time
-// returns the earliest feasible start per (date, gap), so when a day has
-// no other stops every slot collapses to 8 AM (→ rounded to 9 AM). For
-// those days the technician is genuinely available 8a–5p, so we rotate
-// the displayed window across the working day to give customers real
-// choice. Route-optimal slots (placed adjacent to another customer for
-// drive-time savings) keep their original time — that's the whole point
-// of route optimization. Skips noon for lunch.
+// Synthetic capacity retains its feasible start; selection only changes order.
 const PREFERRED_WINDOWS = ['09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00'];
-
-function spreadWindowsAcrossDay(
-  slots,
-  durationMinutes = DEFAULT_OPTS.durationMinutes,
-  { now = new Date(), minimumLeadMinutes = DEFAULT_OPTS.minimumLeadMinutes } = {},
-) {
-  if (!Array.isArray(slots) || slots.length <= 1) return slots;
-  const fittingWindows = PREFERRED_WINDOWS.filter((win) =>
-    slotWindowFitsDay(win, addMinutesToHHMM(win, durationMinutes)));
-  if (!fittingWindows.length) return slots;
-  // Per-date rotation. On today's date, drop windows already past or inside
-  // the booking lead time so genuine same-day capacity re-packs onto the
-  // soonest bookable windows (e.g. 14:00/15:00) rather than being stamped to
-  // 09:00/10:00 — where the downstream past-slot filter would then discard it
-  // and same-day availability would vanish entirely.
-  const windowsForDate = (date) => {
-    const earliest = earliestBookableMinuteForDate(date, now, minimumLeadMinutes);
-    return earliest <= 0
-      ? fittingWindows
-      : fittingWindows.filter((win) => timeToMinutes(win) >= earliest);
-  };
-  // Track windows already taken per (date, tech) so a re-windowed ASAP slot
-  // never lands on a window a preserved route slot — or another ASAP slot —
-  // already holds for that tech. Without this, a route slot at the day's first
-  // bookable window collides with the ASAP slot assigned windows[0], producing
-  // a duplicate slotId (and silently dropping the later real option).
-  const occupiedByTechDate = new Map(); // `${date}|${techId}` -> Set(window)
-  const takenKey = (date, techId) => `${date}|${techId || 'unassigned'}`;
-  const noteTaken = (date, techId, win) => {
-    const k = takenKey(date, techId);
-    if (!occupiedByTechDate.has(k)) occupiedByTechDate.set(k, new Set());
-    occupiedByTechDate.get(k).add(win);
-  };
-  // Pre-seed with the windows held by preserved (non-ASAP) slots.
-  for (const s of slots) {
-    if (s.capacityType !== 'asap_open') noteTaken(s.date, s.techId, s.windowStart);
-  }
-  const idxByDate = new Map();
-  return slots.map((s) => {
-    // Only re-window synthetic open-capacity slots. They are not tied to a
-    // specific route gap (buildAsapCapacitySlots emits them at preferred
-    // windows purely from tech availability), so any bookable preferred window
-    // is equally valid. Route-derived slots from find-time — both route-optimal
-    // and not — keep their proven-feasible start: find-time only validated the
-    // original gap, and reserveSlot trusts the slotId time while checking only
-    // window overlap, so retiming them could surface a time no feasibility
-    // check ever validated. Inside-lead route slots are instead left for
-    // filterPastSlotsForToday to drop.
-    if (s.capacityType !== 'asap_open') return s;
-    const windows = windowsForDate(s.date);
-    if (!windows.length) return s; // no bookable window left today — past-filter drops it
-    const taken = occupiedByTechDate.get(takenKey(s.date, s.techId));
-    // Rotate per date for cross-tech variety, but skip windows already taken
-    // for this tech so we never produce a duplicate slotId.
-    let win = null;
-    let idx = idxByDate.get(s.date) || 0;
-    for (let i = 0; i < windows.length; i += 1) {
-      const candidate = windows[(idx + i) % windows.length];
-      if (!taken || !taken.has(candidate)) {
-        win = candidate;
-        idx += i + 1;
-        break;
-      }
-    }
-    idxByDate.set(s.date, idx);
-    if (!win) return s; // every window already taken for this tech — leave as-is; dedupe handles residuals
-    noteTaken(s.date, s.techId, win);
-    return {
-      ...s,
-      windowStart: win,
-      windowEnd: addMinutesToHHMM(win, durationMinutes),
-      slotId: `${s.date}_${win.replace(':', '-')}_${s.techId || 'unassigned'}`,
-    };
-  });
-}
 
 function splitSlotResults(slots, maxResults, expanderMaxResults) {
   const visibleCount = Math.max(0, Number(maxResults) || 0);
@@ -1160,12 +1090,9 @@ function buildAsapCapacitySlotsForTechs({
   durationMinutes,
   techs = [],
   includeWeekends = true,
-  maxCandidates = 36,
   minimumLeadMinutes = DEFAULT_OPTS.minimumLeadMinutes,
   now = new Date(),
-  // Dates removed BEFORE maxCandidates applies (owner blackout days) — a
-  // post-cap filter would let blackout days consume cap slots and leave the
-  // picker short even when later open days exist.
+  // Enumerate the bounded date horizon before collision filtering and selection.
   excludeDates = null,
 } = {}) {
   if (!techs.length) return [];
@@ -1196,26 +1123,17 @@ function buildAsapCapacitySlotsForTechs({
       groups.push(group);
     }
   }
-  const safeMax = Math.max(0, Number(maxCandidates) || 0);
-  const selected = [];
-  const maxGroupLength = groups.reduce((max, group) => Math.max(max, group.length), 0);
-  for (let techIndex = 0; techIndex < maxGroupLength && selected.length < safeMax; techIndex += 1) {
-    for (const group of groups) {
-      if (selected.length >= safeMax) break;
-      if (group[techIndex]) selected.push(group[techIndex]);
-    }
-  }
-  return selected.sort(compareCustomerFacingSlots);
+  return groups.flat().sort(compareCustomerFacingSlots);
 }
 
 async function buildAsapCapacitySlots(options = {}) {
-  const techs = await db('technicians')
-    .where({ active: true })
-    .select('id', 'name');
+  // Same pool as find-time: assignable staff only, so an office-only or
+  // prospective row never produces an offer that reserveSlot then rejects.
+  const techs = await applyAssignable(db('technicians'))
+    .select('technicians.id', 'technicians.name');
   // ASAP capacity enumerates its own dates (it deliberately skips the
   // route-aware find-time path), so owner blackout days are excluded here —
-  // BEFORE the maxCandidates cap, so a blocked stretch never eats cap slots
-  // and shorts the picker while later open days exist. Fail-open helper.
+  // selection happens after all dates have been checked. Fail-open helper.
   let excludeDates = null;
   if (options.dateFrom && options.dateTo) {
     const { getBlackoutDates } = require('./scheduling/blackout-dates');
@@ -1368,7 +1286,7 @@ function selectCustomerFacingSlots(slots, limit, { routeFirst = false } = {}) {
 // This filter must mirror reserveSlot's conflict checks; the shared zone
 // resolution lives in slot-zone.js so the two sides can't drift.
 //   3. (GATE_SLOT_TRAVEL_GAP) A window that merely TOUCHES a stop across a
-//      real drive — the ASAP capacity lane and spreadWindowsAcrossDay are
+//      real drive — the ASAP capacity lane is
 //      not route-aware, so a 9–10 AM Palmetto window was offered against a
 //      10–11 AM Bradenton stop 32 modeled minutes away (2026-09-03). The
 //      tech-blind travel-gap rule (scheduling/travel-gap.js) drops it here,
@@ -1380,7 +1298,7 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = nu
   const rows = await db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
-    .whereNotIn('scheduled_services.status', ['cancelled'])
+    .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
     .andWhere((q) => {
       q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
     })
@@ -1391,12 +1309,13 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = nu
       'scheduled_services.window_end',
       'scheduled_services.estimated_duration_minutes',
       'scheduled_services.zone',
+      'scheduled_services.customer_id',
+      'scheduled_services.reservation_expires_at',
       'customers.city as customer_city',
-      // Gate off → the legacy select, byte for byte (no coordinate raws).
-      // Gate on → guarded pin + the two columns that tell a live hold from a
-      // committed stop (a hold never shadows a committed neighbour).
+      // Coordinates are only needed for the optional travel-gap check.
+      // Hold identity above also serves the unconditional global overlap check.
       ...(travelGapEnabled()
-        ? [...guardedCoordSelects(db), 'scheduled_services.customer_id', 'scheduled_services.reservation_expires_at']
+        ? guardedCoordSelects(db)
         : []),
     );
   const candidatePin = { lat: coords?.lat ?? null, lng: coords?.lng ?? null };
@@ -1460,6 +1379,8 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = nu
     const techBusy = s.techId
       ? (byTechDate.get(`${s.techId}|${s.date}`) || [])
       : (allByDate.get(s.date) || []);
+    const committed = (allByDate.get(s.date) || []).filter((b) => !b.hold);
+    if (overlapsAny(committed, slotStart, slotEnd)) return false;
     if (overlapsAny(techBusy, slotStart, slotEnd)) return false;
     if (overlapsAny(zoneByDate.get(s.date) || [], slotStart, slotEnd)) return false;
     // Travel gap is tech-blind (one field tech) — every live row that day.
@@ -1494,7 +1415,7 @@ function filterTimeOfDay(slots, timeOfDay) {
 // Drop any candidate on today's Eastern date whose displayed window starts
 // before the earliest bookable minute (now + lead time). buildAsapCapacitySlots
 // already honors this when it generates ASAP windows, but route-aware slots
-// from find-time and windows reassigned by spreadWindowsAcrossDay can still
+// from find-time and synthetic capacity can still
 // land in the past — e.g. a 10 AM route window that is still shown at 11 AM.
 // Filtering here, just before the final customer-facing selection, covers
 // every slot source consistently.
@@ -1727,12 +1648,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       dateTo: segTo,
       durationMinutes: serviceProfile.durationMinutes,
       includeWeekends: opts.includeWeekends,
-      maxCandidates: Math.max(TARGET_TOTAL * 6, 24),
       minimumLeadMinutes: opts.minimumLeadMinutes,
     })))).flat();
     const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords });
-    const spread = dedupeSlots(spreadWindowsAcrossDay(asap.sort(compareCustomerFacingSlots), serviceProfile.durationMinutes, { minimumLeadMinutes: opts.minimumLeadMinutes }));
-    const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo, estimateZone, coords });
+    const filtered = dedupeSlots(asap).sort(compareCustomerFacingSlots);
     const bookable = filterSeasonalSlots(
       filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes }),
       serviceProfile,
@@ -1796,7 +1715,6 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       dateTo: segTo,
       durationMinutes: serviceProfile.durationMinutes,
       includeWeekends: opts.includeWeekends,
-      maxCandidates: Math.max(TARGET_TOTAL * 6, 24),
       minimumLeadMinutes: opts.minimumLeadMinutes,
     }))),
   ]);
@@ -1814,18 +1732,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // a per-slot badge/copy signal, not a reason to bury sooner dates.
   const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords });
   const sortedPool = dedupeSlots([...asap, ...classified]).sort(compareCustomerFacingSlots);
-  // Re-dedupe after spreading: a re-windowed ASAP slot can land on the same
-  // slotId as a preserved route slot; dedupeSlots keeps the route/nearby one.
-  const spread = dedupeSlots(spreadWindowsAcrossDay(sortedPool, serviceProfile.durationMinutes, { minimumLeadMinutes: opts.minimumLeadMinutes }));
-  // spreadWindowsAcrossDay re-assigns windowStart for non-route-optimal
-  // slots; that can land them on an existing booking, so re-filter once
-  // more before choosing the final customer-facing list.
-  const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo, estimateZone, coords });
-  // Trim any window that has already passed (or is inside the booking lead
-  // time) on today's date — covers route-aware and spread-reassigned slots
-  // that buildAsapCapacitySlots' own guard never saw.
+  // Preserve the collision-checked windows while choosing the displayed options.
   const bookable = filterSeasonalSlots(
-    filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes }),
+    filterPastSlotsForToday(sortedPool, { minimumLeadMinutes: opts.minimumLeadMinutes }),
     serviceProfile,
   );
   // Funnel AFTER the timeOfDay preference (a seed day must come from days
@@ -2104,7 +2013,6 @@ module.exports = {
     selectCustomerFacingSlots,
     diversifyByDay,
     compareCustomerFacingSlots,
-    spreadWindowsAcrossDay,
     resolveEstimateSlotProfile,
     addMinutesToHHMM,
     slotWindowFitsDay,

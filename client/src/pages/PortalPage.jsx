@@ -291,74 +291,42 @@ function WavesAiBar({ tab, onAsk }) {
     setQuestion('');
     onAsk(q);
   };
+  // The estimate's Ask Waves card (owner 2026-09-03/05): eyebrow, quiet
+  // 48px input + one gold Ask, and the suggestions as stacked rows — not a
+  // second row of gold bars competing with the page's real action.
   return (
-    <section data-glass="card" aria-label="Ask Waves AI" style={{
-      ...PORTAL_CARD_STYLE,
-      padding: 14,
-      marginBottom: 16,
-    }}>
-      <div style={{
-        fontSize: 12,
-        fontWeight: 850,
-        color: B.glassNavy,
-        textTransform: 'uppercase',
-        letterSpacing: 0,
-        fontFamily: FONTS.heading,
-        marginBottom: 8,
-      }}>
+    // The shared sheet owns the card's margin (a top-only shorthand), so the
+    // gap to the tab content below lives on this wrapper.
+    <div style={{ marginBottom: 16 }}>
+    <section className="waves-ask-card" data-glass="card" aria-label="Ask Waves AI" style={PORTAL_CARD_STYLE}>
+      <div className="waves-ask-eyebrow" data-gt="eyebrow" style={{ color: PORTAL_SHELL.muted, fontSize: 14, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
         Waves AI
       </div>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-        <ShellIconTile icon="bot" size={36} />
+      <form className="waves-ask-form" onSubmit={(e) => { e.preventDefault(); submit(); }}>
         <input
           type="text"
           value={question}
           onChange={(e) => setQuestion(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && submit()}
           placeholder={placeholder}
           aria-label="Ask Waves AI"
           className="waves-focus-ring"
-          style={{
-            flex: 1,
-            minWidth: 0,
-            minHeight: 40,
-            padding: '9px 12px',
-            borderRadius: 10,
-            border: `1px solid ${PORTAL_SHELL.borderStrong}`,
-            fontSize: 14,
-            fontFamily: FONTS.body,
-            color: PORTAL_SHELL.text,
-            background: PORTAL_SHELL.surface,
-          }}
         />
-        <button type="button" onClick={submit} disabled={!question.trim()} data-glass-accent="" style={{
-          ...PORTAL_PRIMARY_ACTION,
-          minHeight: 40,
-          padding: '9px 16px',
-          position: 'relative',
-          opacity: question.trim() ? 1 : 0.6,
-        }}>
+        <button type="submit" disabled={!question.trim()} data-glass-accent="" style={{ opacity: question.trim() ? 1 : 0.6 }}>
           Ask
         </button>
-      </div>
-      <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
-        {pills.map((pill) => (
-          <button key={pill} type="button" onClick={() => onAsk(pill)} data-glass-accent="" style={{
-            padding: '6px 11px',
-            borderRadius: 999,
-            border: `1px solid ${PORTAL_SHELL.border}`,
-            background: PORTAL_SHELL.surface,
-            color: PORTAL_SHELL.text,
-            fontSize: 12,
-            fontWeight: 800,
-            fontFamily: FONTS.body,
-            cursor: 'pointer',
-          }}>
-            {pill}
-          </button>
+      </form>
+      <div className="waves-ask-list" data-glass="soft" role="list">
+        {pills.map((pill, i) => (
+          <div role="listitem" key={pill}>
+            <button type="button" className="waves-ask-row" data-first={i === 0 ? '' : undefined} onClick={() => onAsk(pill)}>
+              <span>{pill}</span>
+              <span aria-hidden="true" className="waves-ask-go">Ask ›</span>
+            </button>
+          </div>
         ))}
       </div>
     </section>
+    </div>
   );
 }
 
@@ -419,7 +387,7 @@ function annualPrepayTermLine(term) {
 // SECTION HEADING HELPER
 // =========================================================================
 function SectionHeading({ children }) {
-  return <div style={{ fontSize: 24, fontWeight: 500, color: ESTIMATE_TEXT, fontFamily: FONTS.serif, letterSpacing: 0, lineHeight: 1.15 }}>{children}</div>;
+  return <div style={{ fontSize: 24, fontWeight: 500, color: ESTIMATE_TEXT, letterSpacing: 0, lineHeight: 1.15 }}>{children}</div>;
 }
 
 const ESTIMATE_BG = CUSTOMER_SURFACE.page;
@@ -521,10 +489,11 @@ const PORTAL_SECONDARY_ACTION = {
   border: `1px solid ${PORTAL_SHELL.borderStrong}`,
   borderRadius: 10,
   boxShadow: 'none',
-  padding: '11px 15px',
+  minHeight: 44,
+  padding: '10px 15px',
   fontSize: 14,
   fontFamily: FONTS.body,
-  fontWeight: 800,
+  fontWeight: 700,
 };
 
 const PORTAL_PRIMARY_ACTION = {
@@ -560,12 +529,11 @@ function PortalStatePanel({
       {eyebrow && (
         <div style={{
           marginTop: 14,
-          fontSize: 12,
-          fontWeight: 850,
+          fontSize: 14,
+          fontWeight: 700,
           color: PORTAL_SHELL.muted,
           textTransform: 'uppercase',
           letterSpacing: 0,
-          fontFamily: FONTS.heading,
         }}>
           {eyebrow}
         </div>
@@ -573,9 +541,8 @@ function PortalStatePanel({
       <TitleTag style={{
         margin: `${eyebrow ? 5 : 14}px 0 0`,
         fontSize: 20,
-        fontWeight: 850,
+        fontWeight: 700,
         color: PORTAL_SHELL.text,
-        fontFamily: FONTS.heading,
         lineHeight: 1.2,
       }}>
         {title}
@@ -617,7 +584,7 @@ function PortalInlineState({ icon = 'document', title, message, tone = 'brand', 
     }}>
       <ShellIconTile icon={icon} tone={tone} size={34} />
       <div>
-        <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading }}>{title}</div>
+        <div style={{ fontSize: 14, fontWeight: 700, color: PORTAL_SHELL.text }}>{title}</div>
         {message && <div style={{ marginTop: 3, fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.45 }}>{message}</div>}
         {actionLabel && onAction && (
           <button data-glass-accent=""
@@ -626,7 +593,7 @@ function PortalInlineState({ icon = 'document', title, message, tone = 'brand', 
             style={{
               marginTop: 8, padding: '7px 12px', borderRadius: 8,
               border: `1px solid ${B.glassNavy}`, background: 'none',
-              color: B.glassNavy, fontSize: 14, fontWeight: 850,
+              color: B.glassNavy, fontSize: 14, fontWeight: 700,
               cursor: 'pointer', fontFamily: FONTS.body,
             }}
           >
@@ -805,11 +772,11 @@ function BeforeAfterSlider({ beforeAfter }) {
           background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
           borderRadius: 10, padding: '8px 14px', textAlign: 'center',
         }}>
-          <div style={{ color: '#fff', fontWeight: 800, fontSize: 14, fontFamily: FONTS.heading }}>
+          <div style={{ color: '#fff', fontWeight: 700, fontSize: 14 }}>
             BEFORE {beforeDate ? `— ${fmtDate(beforeDate, { month: 'short', day: 'numeric' })}` : ''}
           </div>
           {beforeAfter?.before?.overallScore != null && (
-            <div style={{ color: B.yellow, fontSize: 12, fontWeight: 700, marginTop: 2 }}>
+            <div style={{ color: B.yellow, fontSize: 14, fontWeight: 700, marginTop: 2 }}>
               Score: {beforeAfter.before.overallScore}%
             </div>
           )}
@@ -829,11 +796,11 @@ function BeforeAfterSlider({ beforeAfter }) {
           background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
           borderRadius: 10, padding: '8px 14px', textAlign: 'center',
         }}>
-          <div style={{ color: '#fff', fontWeight: 800, fontSize: 14, fontFamily: FONTS.heading }}>
+          <div style={{ color: '#fff', fontWeight: 700, fontSize: 14 }}>
             AFTER {afterDate ? `— ${fmtDate(afterDate, { month: 'short', day: 'numeric' })}` : ''}
           </div>
           {beforeAfter?.after?.overallScore != null && (
-            <div style={{ color: B.glassNavy, fontSize: 12, fontWeight: 700, marginTop: 2 }}>
+            <div style={{ color: B.glassNavy, fontSize: 14, fontWeight: 700, marginTop: 2 }}>
               Score: {beforeAfter.after.overallScore}%
             </div>
           )}
@@ -890,10 +857,10 @@ function ScoreRing({ score, size = 90, stroke = 7, label }) {
         position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
         alignItems: 'center', justifyContent: 'center',
       }}>
-        <div style={{ fontSize: size * 0.28, fontWeight: 800, color: B.navy, fontFamily: FONTS.heading, lineHeight: 1 }}>
+        <div style={{ fontSize: size * 0.28, fontWeight: 700, color: B.navy, lineHeight: 1 }}>
           {score || 0}
         </div>
-        {label && <div style={{ fontSize: 9, color: PORTAL_SHELL.muted, marginTop: 2, fontWeight: 600 }}>{label}</div>}
+        {label && <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 2, fontWeight: 600 }}>{label}</div>}
       </div>
     </div>
   );
@@ -923,7 +890,7 @@ function PropertyScoreCard({ data, compact }) {
   const card = { ...PORTAL_CARD_STYLE, position: 'relative' };
   const muted = PORTAL_SHELL.muted;
   const labelStyle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
   };
   const TONES = {
     good: { background: GLASS_SUBTLE, border: '#E7E2D7', color: B.glassNavy },
@@ -982,7 +949,7 @@ function PropertyScoreCard({ data, compact }) {
               background: GLASS_SUBTLE, border: `1px solid ${PORTAL_SHELL.border}`,
             }}>
               <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>{c.label}</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>{c.label}</div>
                 {c.reason && <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.4 }}>{c.reason}</div>}
                 {c.asOf && (
                   <div style={{ marginTop: 2, fontSize: 14, color: muted }}>As of {formatScoreDate(c.asOf)}</div>
@@ -991,7 +958,7 @@ function PropertyScoreCard({ data, compact }) {
               <div style={{
                 flexShrink: 0, padding: '3px 10px', borderRadius: 999,
                 background: tone.background, border: `1px solid ${tone.border}`, color: tone.color,
-                fontSize: 14, fontWeight: 850, fontFamily: FONTS.heading, whiteSpace: 'nowrap',
+                fontSize: 14, fontWeight: 700, whiteSpace: 'nowrap',
               }}>
                 {chip.text}
               </div>
@@ -1149,11 +1116,11 @@ function RecommendationsCard({ data, customer }) {
   return (
     <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 20 }}>
       <div style={{
-        display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
+        display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
       }}>
         <Icon name="sparkles" size={14} strokeWidth={2} />Recommendations
       </div>
-      <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>For your property</div>
+      <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>For your property</div>
       <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.45 }}>Services that fit this property and your current plan.</div>
       <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
         {visibleCards.map((card) => {
@@ -1169,7 +1136,7 @@ function RecommendationsCard({ data, customer }) {
               <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
                 <div style={{ display: 'flex', gap: 10, alignItems: 'center', minWidth: 0 }}>
                   <ShellIconTile icon={icon} size={34} />
-                  <div style={{ fontSize: 16, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>{card.title}</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{card.title}</div>
                 </div>
                 {/* Owner ruling 08-13: offer cards carry no priority chip —
                     the section header already says "Recommended for your
@@ -1180,7 +1147,7 @@ function RecommendationsCard({ data, customer }) {
                   <div style={{
                     flexShrink: 0, padding: '3px 10px', borderRadius: 999,
                     background: chip.background, border: `1px solid ${chip.border}`, color: chip.color,
-                    fontSize: 14, fontWeight: 850, fontFamily: FONTS.heading, whiteSpace: 'nowrap',
+                    fontSize: 14, fontWeight: 700, whiteSpace: 'nowrap',
                   }}>
                     {chip.text}
                   </div>
@@ -1193,7 +1160,7 @@ function RecommendationsCard({ data, customer }) {
                   to the WaveGuard tier instead — Bronze → Silver = 10% off
                   both services, and so on up the ladder. */}
               {card.kind === 'offer' && tierLineFor(card) && (
-                <div style={{ marginTop: 8, fontSize: 14, fontWeight: 800, color: B.glassNavy, lineHeight: 1.45 }}>{tierLineFor(card)}</div>
+                <div style={{ marginTop: 8, fontSize: 14, fontWeight: 700, color: B.glassNavy, lineHeight: 1.45 }}>{tierLineFor(card)}</div>
               )}
               {(card.kind === 'offer' || card.kind === 'ask') && (
                 <div style={{ marginTop: 10 }}>
@@ -1581,7 +1548,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
   const summaryRow = (label, value) => (
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 15 }}>
       <span style={{ color: muted }}>{label}</span>
-      <span style={{ fontWeight: 800, color: B.glassNavy, textAlign: 'right' }}>{value}</span>
+      <span style={{ fontWeight: 700, color: B.glassNavy, textAlign: 'right' }}>{value}</span>
     </div>
   );
 
@@ -1634,7 +1601,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
             <ShellIconTile icon="sparkles" size={34} />
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 18, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading, lineHeight: 1.2 }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2 }}>
                 {step === 'done' ? 'You are booked' : `Add ${init?.label || String(card?.title || 'service').replace(/^Add\s+/i, '')}`}
               </div>
               {step !== 'done' && init && (
@@ -1650,7 +1617,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
         <div style={{ flex: 1, overflowY: 'auto', padding: compact ? 16 : 20, display: 'grid', gap: 14, alignContent: 'start' }}>
           {initError === 'stale' ? (
             <div style={softBox}>
-              <div style={{ fontSize: 16, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>This offer changed</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>This offer changed</div>
               <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.5 }}>
                 The offer was updated since this page loaded, so nothing was purchased. Refresh to see the latest.
               </div>
@@ -1673,7 +1640,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
                 {init.cadenceLabel ? (<><div style={{ height: 6 }} />{summaryRow('Visits', init.cadenceLabel)}</>) : null}
               </div>
               <div style={softBox}>
-                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10, }}>
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10, }}>
                   <Icon name="clipboard" size={14} strokeWidth={2} />Terms
                 </div>
                 <div style={{ marginTop: 8, fontSize: 14, color: PORTAL_SHELL.body, lineHeight: 1.55, whiteSpace: 'pre-line' }}>
@@ -1686,7 +1653,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
             </>
           ) : step === 'time' ? (
             <>
-              <div style={{ fontSize: 16, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>
                 Choose your first visit
               </div>
               {stepError && <div style={{ fontSize: 14, color: '#9A3412' }}>{stepError}</div>}
@@ -1697,7 +1664,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
               )}
               {slotGroups.map((group) => (
                 <div key={group.date}>
-                  <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, marginBottom: 6 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, marginBottom: 6 }}>
                     {oneTapDayLabel(group.date)}
                   </div>
                   <div style={{ display: 'grid', gap: 8 }}>
@@ -1719,12 +1686,12 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
                           flexWrap: 'wrap',
                         }}
                       >
-                        <span style={{ fontSize: 15, fontWeight: 800, color: B.glassNavy }}>
+                        <span style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy }}>
                           Arrival {oneTapTime12(slot.windowStart)}–{oneTapTime12(slot.windowEnd)}
                         </span>
                         {slot.routeOptimal && (
                           <span style={{
-                            fontSize: 14, fontWeight: 800, color: B.glassNavy,
+                            fontSize: 14, fontWeight: 700, color: B.glassNavy,
                             background: GLASS_SUBTLE, border: '1px solid #E7E2D7',
                             padding: '3px 10px', borderRadius: 999, whiteSpace: 'nowrap',
                           }}>
@@ -1759,14 +1726,14 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
                   type="button"
                   disabled={confirming}
                   onClick={() => { if (confirming) return; setStep('time'); setStepError(''); }}
-                  style={{ background: 'none', border: 'none', padding: 0, color: B.glassNavy, fontWeight: 800, fontSize: 14, cursor: confirming ? 'default' : 'pointer', textDecoration: 'underline', opacity: confirming ? 0.55 : 1 }}
+                  style={{ background: 'none', border: 'none', padding: 0, color: B.glassNavy, fontWeight: 700, fontSize: 14, cursor: confirming ? 'default' : 'pointer', textDecoration: 'underline', opacity: confirming ? 0.55 : 1 }}
                 >
                   Change time
                 </button>
               </div>
               {mustCollectCard && (
                 <div style={softBox}>
-                  <div style={{ fontSize: 15, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy }}>
                     Add a payment method
                   </div>
                   <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.5 }}>
@@ -1807,7 +1774,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
                   <Icon name="check" size={28} strokeWidth={2.2} />
                 </span>
               </div>
-              <div style={{ textAlign: 'center', fontSize: 18, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
+              <div style={{ textAlign: 'center', fontSize: 18, fontWeight: 700, color: B.glassNavy }}>
                 {result?.label || init.label} is confirmed
               </div>
               <div style={softBox}>
@@ -1863,11 +1830,11 @@ function PropertyAlertsCard({ data }) {
     <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 20 }}>
       <div>
         <div style={{
-          display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
+          display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
         }}>
           <Icon name="cloudRain" size={14} strokeWidth={2} />Property Alerts
         </div>
-        <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>What to watch this week</div>
+        <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>What to watch this week</div>
         <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Based on weather and your visit history.</div>
       </div>
       <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
@@ -1880,7 +1847,7 @@ function PropertyAlertsCard({ data }) {
             <ShellIconTile icon={PROPERTY_ALERT_ICONS[alert.ruleKey] || 'bell'} size={36} />
             <div style={{ minWidth: 0, flex: 1 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' }}>
-                <div style={{ fontSize: 16, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>{alert.title}</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{alert.title}</div>
                 <div style={{ fontSize: 14, color: muted, whiteSpace: 'nowrap' }}>{formatAlertWhen(alert.firedAt)}</div>
               </div>
               <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.5 }}>{alert.body}</div>
@@ -1968,14 +1935,14 @@ function PhotoGallery({ photos }) {
             {p.isBest && (
               <div style={{
                 position: 'absolute', top: 6, left: 6, background: B.teal, color: '#fff',
-                fontSize: 9, fontWeight: 700, padding: '2px 6px', borderRadius: 4,
+                fontSize: 14, fontWeight: 700, padding: '2px 6px', borderRadius: 4,
               }}>BEST</div>
             )}
             {p.type && p.type !== 'general' && (
               <div style={{
                 position: 'absolute', bottom: 0, left: 0, right: 0,
                 background: 'linear-gradient(transparent, rgba(0,0,0,0.6))',
-                color: '#fff', fontSize: 10, fontWeight: 600, padding: '12px 8px 6px',
+                color: '#fff', fontSize: 14, fontWeight: 600, padding: '12px 8px 6px',
                 textTransform: 'capitalize',
               }}>
                 {p.type.replace(/_/g, ' ')}
@@ -1990,7 +1957,7 @@ function PhotoGallery({ photos }) {
         <div style={{
           marginTop: 8, padding: '10px 14px', background: `${B.teal}08`,
           borderRadius: 10, border: `1px solid ${B.teal}15`,
-          display: 'flex', gap: 16, fontSize: 12,
+          display: 'flex', gap: 16, fontSize: 14,
         }}>
           {visiblePhotos[selected].scores.turfDensity != null && (
             <div><span style={{ color: PORTAL_SHELL.muted }}>Density:</span> <span style={{ fontWeight: 700, color: B.navy }}>{visiblePhotos[selected].scores.turfDensity}%</span></div>
@@ -2022,16 +1989,16 @@ function PortalMowingHeight({ mowing }) {
   return (
     <div style={{ marginBottom: 16 }}>
       <div style={{
-        display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10, marginBottom: 8,
+        display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10, marginBottom: 8,
       }}>
         Mowing height
       </div>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
-        <span style={{ fontFamily: FONTS.serif, fontSize: 30, lineHeight: 1, color: B.navy }}>{mowing.heightIn}&Prime;</span>
+        <span style={{ fontSize: 30, lineHeight: 1, color: B.navy }}>{mowing.heightIn}&Prime;</span>
         {meta.pill && (
           <span style={{
             fontSize: 14, fontWeight: 700, color: '#fff', background: meta.color, borderRadius: 999,
-            padding: '3px 10px', fontFamily: FONTS.heading, textTransform: 'uppercase', letterSpacing: '0.03em',
+            padding: '3px 10px', textTransform: 'uppercase', letterSpacing: '0.03em',
           }}>{meta.pill}</span>
         )}
         <span style={{ fontSize: 14, color: B.textCaption, fontFamily: FONTS.body }}>Ideal {mowing.bandLabel}</span>
@@ -2085,21 +2052,21 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
         <ScoreRing score={overallScore} size={80} label="OVERALL" />
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>
+          <div style={{ fontSize: 16, fontWeight: 700, color: B.navy }}>
             Lawn Health Progress
           </div>
           {scores.aiSummary ? (
-            <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, lineHeight: 1.5, marginTop: 4 }}>
+            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.5, marginTop: 4 }}>
               {scores.aiSummary}
             </div>
           ) : (
-            <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 4 }}>
+            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 4 }}>
               Your lawn's journey since starting the program.
             </div>
           )}
           {overallDelta !== 0 && (
             <div style={{
-              display: 'inline-block', marginTop: 6, fontSize: 12, fontWeight: 700,
+              display: 'inline-block', marginTop: 6, fontSize: 14, fontWeight: 700,
               color: overallDelta > 0 ? B.green : B.red,
               background: overallDelta > 0 ? `${B.green}12` : `${B.red}12`,
               padding: '3px 8px', borderRadius: 6,
@@ -2114,7 +2081,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
       {photos?.length > 0 && (
         <div style={{ marginBottom: 16 }}>
           <div style={{
-            display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10, marginBottom: 8,
+            display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10, marginBottom: 8,
           }}>
             Latest Visit — {scores.assessmentDate ? fmtDate(scores.assessmentDate, { month: 'short', day: 'numeric', year: 'numeric' }) : 'Recent'}
           </div>
@@ -2134,18 +2101,18 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
           return (
             <div key={m.key}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
-                <span style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.body }}>{m.label}</span>
-                <span style={{ fontSize: 12, fontFamily: FONTS.ui }}>
+                <span style={{ fontSize: 14, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.body }}>{m.label}</span>
+                <span style={{ fontSize: 14, fontFamily: FONTS.ui }}>
                   <span style={{ fontWeight: 700, color: current >= 75 ? B.green : current >= 50 ? B.orange : B.red }}>{current}%</span>
                   {delta !== 0 && (
                     <span style={{
-                      fontSize: 10, marginLeft: 6, fontWeight: 700,
+                      fontSize: 14, marginLeft: 6, fontWeight: 700,
                       color: delta > 0 ? B.green : B.red,
                     }}>
                       {delta > 0 ? '+' : ''}{delta}
                     </span>
                   )}
-                  <span style={{ color: PORTAL_SHELL.muted, fontSize: 10, marginLeft: 4 }}>from {initial}%</span>
+                  <span style={{ color: PORTAL_SHELL.muted, fontSize: 14, marginLeft: 4 }}>from {initial}%</span>
                 </span>
               </div>
               <div style={{
@@ -2184,10 +2151,10 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
               textAlign: 'left',
             }}
           >
-            <div style={{ fontSize: 12, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.ui, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: B.grayDark, fontFamily: FONTS.ui, textTransform: 'uppercase', letterSpacing: 0 }}>
               Progress Over Time ({trend.length} visits)
             </div>
-            <span style={{ fontSize: 12, color: B.teal, fontWeight: 600 }}>{showTrend ? '▾ Hide' : '▸ Show'}</span>
+            <span style={{ fontSize: 14, color: B.teal, fontWeight: 600 }}>{showTrend ? '▾ Hide' : '▸ Show'}</span>
           </button>
           {showTrend && (
             <div style={{
@@ -2195,7 +2162,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
               border: `1px solid ${B.teal}12`,
             }}>
               <TrendSparkline trend={trend} height={70} />
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 10, color: PORTAL_SHELL.muted }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontSize: 14, color: PORTAL_SHELL.muted }}>
                 <span>{fmtDate(trend[0].date, { month: 'short', year: '2-digit' })}</span>
                 <span>{fmtDate(trend[trend.length - 1].date, { month: 'short', year: '2-digit' })}</span>
               </div>
@@ -2212,7 +2179,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
               padding: '12px 16px', borderRadius: 8,
               background: `${B.teal}08`, border: `1px solid ${B.teal}20`,
             }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: B.teal, marginBottom: 4 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: B.teal, marginBottom: 4 }}>
                 Between-Visit Tip
               </div>
               <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.6 }}>
@@ -2225,7 +2192,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
               marginTop: 8, padding: '12px 16px', borderRadius: 8,
               background: `${B.green}08`, border: `1px solid ${B.green}20`,
             }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: B.glassNavy, marginBottom: 4 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, marginBottom: 4 }}>
                 Next Visit Focus
               </div>
               <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.6 }}>
@@ -2242,7 +2209,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
           marginTop: 16, padding: '12px 16px', borderRadius: 8,
           background: `${B.teal}08`, border: `1px solid ${B.teal}20`,
         }}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: B.teal, marginBottom: 4 }}>What's Next</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: B.teal, marginBottom: 4 }}>What's Next</div>
           <div style={{ fontSize: 16, color: B.grayDark, lineHeight: 1.6 }}>
             Next visit we'll focus on strengthening turf density and applying preventive fungicide.
           </div>
@@ -2253,13 +2220,13 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
       {beforeAfter && (
         <div style={{ marginTop: 18 }}>
           <div style={{
-            padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10, marginBottom: 8,
+            padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10, marginBottom: 8,
             display: 'flex', justifyContent: 'space-between', alignItems: 'center',
           }}>
             <span>Before &amp; After</span>
             {beforeAfter.improvement?.overall != null && beforeAfter.improvement.overall > 0 && (
               <span style={{
-                fontSize: 12, fontWeight: 700, color: B.glassNavy,
+                fontSize: 14, fontWeight: 700, color: B.glassNavy,
                 background: `${B.green}12`, padding: '2px 8px', borderRadius: 6,
               }}>
                 +{beforeAfter.improvement.overall} pts improvement
@@ -2268,7 +2235,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
           </div>
           <BeforeAfterSlider beforeAfter={beforeAfter} />
           {beforeAfter.improvement?.daysSinceStart > 0 && (
-            <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 6, textAlign: 'center' }}>
+            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 6, textAlign: 'center' }}>
               {beforeAfter.improvement.daysSinceStart} days of progress
             </div>
           )}
@@ -2305,12 +2272,12 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
             {neighborBenchmark.percentile.includes('top 25') ? '' : neighborBenchmark.percentile.includes('top 50') ? '⭐' : ''}
           </div>
           <div>
-            <div style={{ fontSize: 12, fontWeight: 700, color: B.navy }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.navy }}>
               {neighborBenchmark.percentile === 'top 25%' ? 'Top 25% in your area!'
                 : neighborBenchmark.percentile === 'top 50%' ? 'Above average for your area'
                 : 'Growing toward the neighborhood average'}
             </div>
-            <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2, lineHeight: 1.4 }}>
+            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 2, lineHeight: 1.4 }}>
               Your score of {neighborBenchmark.customerScore}% vs {neighborBenchmark.neighborhoodAvg}% neighborhood avg
               {neighborBenchmark.customerCount > 5 && ` across ${neighborBenchmark.customerCount} properties`}
             </div>
@@ -2321,7 +2288,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
       {/* Seasonal context — FAWN weather powered */}
       <div style={{
         marginTop: 10, padding: '10px 12px', borderRadius: 8,
-        background: `${B.wavesBlue}08`, fontSize: 12, color: PORTAL_SHELL.muted, lineHeight: 1.5,
+        background: `${B.wavesBlue}08`, fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.5,
       }}>
         {seasonalContext ? (
           <>
@@ -2344,7 +2311,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
         <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {seasonalContext.pressureSignals.filter(s => s.level === 'high' || s.level === 'regulatory').slice(0, 3).map((s, i) => (
             <span key={i} style={{
-              fontSize: 10, padding: '3px 8px', borderRadius: 6,
+              fontSize: 14, padding: '3px 8px', borderRadius: 6,
               background: s.level === 'regulatory' ? `${B.red}15` : `${B.orange}15`,
               color: s.level === 'regulatory' ? B.red : B.orange,
               fontWeight: 600,
@@ -2476,7 +2443,7 @@ function SharePostButton({ url, title }) {
         aria-expanded={open}
         style={{
           border: 'none', background: 'none', padding: 0, cursor: 'pointer',
-          fontSize: 12, fontWeight: 800, fontFamily: FONTS.heading,
+          fontSize: 14, fontWeight: 700,
           color: open ? B.glassNavy : PORTAL_SHELL.muted, whiteSpace: 'nowrap',
         }}
       >
@@ -2506,7 +2473,7 @@ function SharePostButton({ url, title }) {
                 display: 'flex', alignItems: 'center', gap: 10, width: '100%',
                 border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left',
                 padding: '10px 12px', minHeight: 42, borderRadius: 8,
-                fontSize: 14, fontWeight: 800, color: B.glassNavy, fontFamily: FONTS.heading,
+                fontSize: 14, fontWeight: 700, color: B.glassNavy,
               }}
             >
               <span style={{ display: 'inline-flex', width: 18, justifyContent: 'center', flexShrink: 0 }}>{opt.icon}</span>
@@ -2556,7 +2523,7 @@ function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
     <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: compact ? 14 : 18 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, marginBottom: compact ? 10 : 14 }}>
         {iconTile}
-        <div style={{ fontSize: 16, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>{title}</div>
+        <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{title}</div>
       </div>
       <div style={{
         display: 'flex', gap: 12, overflowX: 'auto', scrollSnapType: 'x mandatory',
@@ -2599,13 +2566,13 @@ function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
             </a>
             <div style={{ padding: compact ? '8px 10px 10px' : '10px 12px 12px', display: 'flex', flexDirection: 'column', gap: compact ? 5 : 6, flex: 1 }}>
               {formatPostDate(post.date) && (
-                <div style={{ fontSize: 12, color: PORTAL_SHELL.muted }}>
+                <div style={{ fontSize: 14, color: PORTAL_SHELL.muted }}>
                   {formatPostDate(post.date)}
                 </div>
               )}
               {post.title && (
                 <div style={{
-                  fontSize: 14, fontWeight: 850, color: B.glassNavy, lineHeight: 1.3,
+                  fontSize: 14, fontWeight: 700, color: B.glassNavy, lineHeight: 1.3,
                   display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
                 }}>{post.title}</div>
               )}
@@ -2620,7 +2587,7 @@ function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
                   href={post.url}
                   target={post.external ? '_blank' : undefined}
                   rel={post.external ? 'noopener noreferrer' : undefined}
-                  style={{ fontSize: 12, fontWeight: 800, color: B.glassNavy, fontFamily: FONTS.heading, textDecoration: 'none' }}
+                  style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, textDecoration: 'none' }}
                 >
                   {ctaLabel} →
                 </a>
@@ -2802,13 +2769,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
       .catch(() => {});
   }, []);
 
-  const formatTime = (t) => {
-    if (!t) return 'TBD';
-    const [h, m] = t.split(':').map(Number);
-    const ampm = h >= 12 ? 'PM' : 'AM';
-    return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${ampm}`;
-  };
-
   const handleSatRating = async (rating) => {
     setSatRating(rating);
     setSatError('');
@@ -2879,7 +2839,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   // read as the old theme on the glass scene (portal is glass-only).
   const subtle = GLASS_SUBTLE;
   const dashboardLabel = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
   };
   const dashboardActionCard = {
     border: `1px solid ${PORTAL_SHELL.border}`,
@@ -2970,33 +2930,23 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                 const activeTierName = resolveActiveTierName(customer);
                 if (!activeTierName) return null;
                 return (
-                  <div style={{
+                  <div data-gt="eyebrow" style={{
                     display: 'inline-flex', alignItems: 'center', gap: 8,
-                    padding: '6px 10px',
-                    borderRadius: 8,
-                    background: PORTAL_SHELL.soft,
-                    border: `1px solid ${PORTAL_SHELL.softBorder}`,
-                    color: B.glassNavy,
-                    fontSize: 12,
-                    fontWeight: 850,
-                    fontFamily: FONTS.heading,
+                    color: PORTAL_SHELL.muted, fontSize: 14, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase',
                   }}>
                     <Icon name="shield" size={14} strokeWidth={2} />
                     WaveGuard {activeTierName}
                   </div>
                 );
               })()}
+              {/* The eyebrow role forces the sheet grey; pending prepay keeps its
+                  warning colour, so the role is dropped there (the inline styles
+                  already spell out the eyebrow type). */}
               {annualPrepay && (
-                <div style={{
+                <div data-gt={annualPrepay.status === 'payment_pending' ? undefined : 'eyebrow'} style={{
                   display: 'inline-flex', alignItems: 'center', gap: 8,
-                  padding: '6px 10px',
-                  borderRadius: 8,
-                  background: annualPrepay.status === 'payment_pending' ? '#FFF7ED' : GLASS_SUBTLE,
-                  border: `1px solid ${annualPrepay.status === 'payment_pending' ? '#FED7AA' : '#E7E2D7'}`,
-                  color: annualPrepay.status === 'payment_pending' ? '#9A3412' : B.glassNavy,
-                  fontSize: 12,
-                  fontWeight: 850,
-                  fontFamily: FONTS.heading,
+                  color: annualPrepay.status === 'payment_pending' ? '#9A3412' : PORTAL_SHELL.muted,
+                  fontSize: 14, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase',
                 }}>
                   <Icon name="card" size={14} strokeWidth={2} />
                   {annualPrepayLabel}
@@ -3006,7 +2956,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
             <h1 style={{
               margin: '12px 0 8px',
               color: B.glassNavy,
-              fontFamily: FONTS.heading,
               fontSize: compact ? 28 : 34,
               lineHeight: 1.1,
               letterSpacing: 0,
@@ -3024,10 +2973,10 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
             textAlign: 'left',
             fontFamily: FONTS.body,
           }}>
-            <div style={{ fontSize: 12, color: balanceReady ? (hasBalance ? '#9A3412' : B.glassNavy) : muted, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <div style={{ fontSize: 14, color: balanceReady ? (hasBalance ? '#9A3412' : B.glassNavy) : muted, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>
               {balanceLabel}
             </div>
-            <div style={{ marginTop: 3, fontSize: 24, fontWeight: 800, color: B.glassNavy }}>
+            <div style={{ marginTop: 3, fontSize: 24, fontWeight: 700, color: B.glassNavy }}>
               {balanceValue}
             </div>
           </button>
@@ -3039,8 +2988,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
           {quickActions.map((item) => (
             <button key={item.label} type="button" onClick={item.action} data-glass="chip" style={dashboardActionCard}>
               <ShellIconTile icon={item.icon} size={compact ? 30 : 34} />
-              <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, lineHeight: 1.15 }}>{item.label}</div>
-              {!compact && <div style={{ marginTop: 2, fontSize: 12, color: muted }}>{item.sub}</div>}
+              <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, lineHeight: 1.15 }}>{item.label}</div>
+              {!compact && <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{item.sub}</div>}
             </button>
           ))}
         </div>
@@ -3061,7 +3010,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                   <ShellIconTile icon="star" tone="success" size={38} />
                   <div style={{ minWidth: 0 }}>
                     <div style={dashboardLabel}><Icon name="star" size={14} strokeWidth={2} />Visit Feedback</div>
-                    <div style={{ marginTop: 4, fontSize: 17, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>How was your visit?</div>
+                    <div style={{ marginTop: 4, fontSize: 17, fontWeight: 700, color: B.glassNavy }}>How was your visit?</div>
                     <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.45 }}>
                       {pendingSatisfaction.service_type || pendingSatisfaction.serviceType}
                       {pendingSatisfaction.technician_name || pendingSatisfaction.technicianName ? ` · ${pendingSatisfaction.technician_name || pendingSatisfaction.technicianName}` : ''}
@@ -3079,7 +3028,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                       minWidth: 0, height: 38, borderRadius: 8, border: 'none',
                       background: active ? color : GLASS_SUBTLE,
                       color: active ? '#fff' : B.grayMid,
-                      fontWeight: 800, cursor: satSubmitting ? 'wait' : 'pointer',
+                      fontWeight: 700, cursor: satSubmitting ? 'wait' : 'pointer',
                     }}>{n}</button>
                   );
                 })}
@@ -3093,7 +3042,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
           )}
           {satPhase === 'review' && (
             <div style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: 18, fontWeight: 800, color: B.glassNavy }}>Thanks for the {satRating}/10.</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy }}>Thanks for the {satRating}/10.</div>
               <div style={{ marginTop: 6, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
                 {satReviewLink
                   ? <>A quick Google review helps neighbors find the {satOfficeName || 'Waves'} team.</>
@@ -3118,7 +3067,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
           )}
           {satPhase === 'feedback' && (
             <div>
-              <div style={{ fontSize: 16, fontWeight: 800, color: B.glassNavy }}>Thanks for the feedback.</div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Thanks for the feedback.</div>
               <textarea
                 value={satFeedback}
                 onChange={e => setSatFeedback(e.target.value)}
@@ -3142,7 +3091,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
             </div>
           )}
           {satPhase === 'thanks' && (
-            <div style={{ textAlign: 'center', color: B.glassNavy, fontWeight: 800 }}>
+            <div style={{ textAlign: 'center', color: B.glassNavy, fontWeight: 700 }}>
               Thank you. We appreciate the note.
             </div>
           )}
@@ -3155,7 +3104,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
               <div style={{ minWidth: 0 }}>
                 <div style={dashboardLabel}><Icon name="calendar" size={14} strokeWidth={2} />Next Visit</div>
-                <div style={{ marginTop: 8, fontSize: 26, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>{nextDateLabel}</div>
+                <div style={{ marginTop: 8, fontSize: 26, fontWeight: 700, color: B.glassNavy }}>{nextDateLabel}</div>
                 <div style={{ marginTop: 6, fontSize: 15, fontWeight: 700, color: B.navy }}>
                   {nextService?.serviceType || 'Request service when you need us.'}
                 </div>
@@ -3168,10 +3117,10 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
             </div>
             {daysUntilNextService != null && (
               <div style={{ textAlign: 'center', minWidth: 76 }}>
-                <div style={{ fontSize: 34, fontWeight: 850, color: B.glassNavy, lineHeight: 1 }}>
+                <div style={{ fontSize: 34, fontWeight: 700, color: B.glassNavy, lineHeight: 1 }}>
                   {daysUntilNextService}
                 </div>
-                <div style={{ marginTop: 4, fontSize: 12, color: muted, fontWeight: 800, textTransform: 'uppercase', letterSpacing: 0 }}>days</div>
+                <div style={{ marginTop: 4, fontSize: 14, color: muted, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>days</div>
               </div>
             )}
           </div>
@@ -3199,7 +3148,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
               ) : (
                 <span style={{
                   padding: '11px 18px', borderRadius: 8, background: GLASS_SUBTLE,
-                  color: B.glassNavy, fontSize: 14, fontWeight: 800,
+                  color: B.glassNavy, fontSize: 14, fontWeight: 700,
                 }}>Confirmed</span>
               )}
               {/* Self-serve first: the visit's tokenized reschedule page
@@ -3281,9 +3230,9 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
               <div key={item.label} style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'baseline', borderBottom: '1px solid #E7E2D7', paddingBottom: 10 }}>
                 <div>
                   <div style={{ fontSize: 14, color: muted }}>{item.label}</div>
-                  <div style={{ fontSize: 12, color: '#475569', marginTop: 1 }}>{item.sub}</div>
+                  <div style={{ fontSize: 14, color: '#475569', marginTop: 1 }}>{item.sub}</div>
                 </div>
-                <div style={{ fontSize: 18, fontWeight: 850, color: B.glassNavy }}>{item.value}</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy }}>{item.value}</div>
               </div>
             ))}
           </div>
@@ -3313,7 +3262,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
               <div style={{ minWidth: 0 }}>
                 <div style={dashboardLabel}><Icon name="clock" size={14} strokeWidth={2} />Last Visit</div>
-                <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>{lastService.type || lastService.serviceType}</div>
+                <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>{lastService.type || lastService.serviceType}</div>
                 <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
                   {fmtDate(lastService.date, { weekday: 'short', month: 'short', day: 'numeric' })}
                 </div>
@@ -3358,7 +3307,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
               <ScoreRing score={lawnScore} size={56} stroke={5} />
               <div style={{ minWidth: 0, flex: 1 }}>
                 <div style={dashboardLabel}><Icon name="leaf" size={14} strokeWidth={2} />Lawn Health</div>
-                <div style={{ marginTop: 6, fontSize: 17, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
+                <div style={{ marginTop: 6, fontSize: 17, fontWeight: 700, color: B.glassNavy }}>
                   {lawnScore}% overall
                 </div>
                 <div style={{ marginTop: 2, fontSize: 14, fontWeight: 700, color: lawnScore >= lawnInitial ? B.green : B.orange }}>
@@ -3448,7 +3397,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
           <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
             <ShellIconTile icon="smartphone" size={38} />
             <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 16, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>
                 The Waves app
               </div>
               <div style={{ marginTop: 5, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
@@ -3567,7 +3516,7 @@ function ServicesTab() {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
   };
 
   if (loading) {
@@ -3619,7 +3568,7 @@ function ServicesTab() {
     };
     const st = styles[status] || styles.Completed;
     return (
-      <span style={{ fontSize: 12, padding: '5px 9px', borderRadius: 8, background: st.bg, color: st.color, border: `1px solid ${st.border}`, fontWeight: 850, whiteSpace: 'nowrap' }}>
+      <span style={{ fontSize: 14, padding: '5px 9px', borderRadius: 8, background: st.bg, color: st.color, border: `1px solid ${st.border}`, fontWeight: 700, whiteSpace: 'nowrap' }}>
         {status}
       </span>
     );
@@ -3682,7 +3631,7 @@ function ServicesTab() {
   // bordered strips.
   const detailCard = { padding: 14, borderRadius: 8, background: '#fff', border: '1px solid #E7E2D7', boxShadow: '0 4px 14px rgba(4, 57, 94, 0.08)' };
 
-  const filterLabel = { fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6 };
+  const filterLabel = { fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6 };
   const filterControl = {
     width: '100%', minHeight: 44, padding: '10px 12px', borderRadius: 8,
     border: '1px solid #D8D0C0', background: '#fff', color: B.glassNavy,
@@ -3695,7 +3644,7 @@ function ServicesTab() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 24 }}>
         <div style={sectionTitle}><Icon name="checkCircle" size={14} strokeWidth={2} />Completed Visits</div>
-        <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
+        <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
           Visit history
         </div>
         <div style={{ marginTop: 4, fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>
@@ -3709,8 +3658,8 @@ function ServicesTab() {
             { val: avgMinutes > 0 ? `${avgMinutes} min` : 'N/A', label: 'Avg visit' },
           ].map((stat) => (
             <div key={stat.label} style={{ padding: 12, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7', minHeight: compact ? 0 : 70 }}>
-              <div style={{ fontSize: 18, fontWeight: 850, color: B.glassNavy, lineHeight: 1.1 }}>{stat.val}</div>
-              <div style={{ marginTop: 5, fontSize: 12, color: muted, fontWeight: 800 }}>{stat.label}</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy, lineHeight: 1.1 }}>{stat.val}</div>
+              <div style={{ marginTop: 5, fontSize: 14, color: muted, fontWeight: 700 }}>{stat.label}</div>
             </div>
           ))}
         </div>
@@ -3775,7 +3724,7 @@ function ServicesTab() {
         return (
           <div key={monthKey} style={{ marginBottom: 6 }}>
             {/* Month header */}
-            <div style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: 0, padding: '6px 0 10px' }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: 0, padding: '6px 0 10px' }}>
               {monthLabel}
             </div>
 
@@ -3801,15 +3750,15 @@ function ServicesTab() {
                           display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
                           flexShrink: 0,
                         }}>
-                          <div style={{ fontSize: 18, fontWeight: 850, color: B.glassNavy, lineHeight: 1 }}>
+                          <div style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy, lineHeight: 1 }}>
                             {parseDate(s.date).getDate()}
                           </div>
-                          <div style={{ fontSize: 10, fontWeight: 850, color: muted, textTransform: 'uppercase', marginTop: 2 }}>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', marginTop: 2 }}>
                             {parseDate(s.date).toLocaleDateString('en-US', { month: 'short' })}
                           </div>
                         </div>
                         <div style={{ minWidth: 0 }}>
-                          <div style={{ fontSize: 15, fontWeight: 850, color: B.glassNavy, lineHeight: 1.25 }}>
+                          <div style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy, lineHeight: 1.25 }}>
                             {s.type}
                             {s._visitNum && <span style={{ fontSize: 14, fontWeight: 700, color: PORTAL_SHELL.muted, marginLeft: 8, whiteSpace: 'nowrap' }}>#{s._visitNum}{s._visitTotal ? ` of ${s._visitTotal}` : ''}</span>}
                           </div>
@@ -3885,7 +3834,7 @@ function ServicesTab() {
                               ) : (
                                 <div style={{ padding: 18 }}>
                                   <div style={sectionTitle}><Icon name="document" size={14} strokeWidth={2} />Service Report</div>
-                                  <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>{s.type}</div>
+                                  <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>{s.type}</div>
                                   <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
                                     {parseDate(s.date).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
                                   </div>
@@ -3931,7 +3880,7 @@ function ServicesTab() {
           >
             {loadingMore ? 'Loading...' : 'Load More Visits'}
           </button>
-          <div style={{ fontSize: 12, color: muted, fontWeight: 700 }}>
+          <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>
             Showing {services.length} of {totalServices} visits
           </div>
         </div>
@@ -3960,7 +3909,7 @@ function ServicesTab() {
                 {lightbox.caption}
               </div>
             )}
-            <button type="button" aria-label="Close photo" onClick={() => setLightbox(null)}
+            <button type="button" aria-label="Close photo" data-glass-pill="" onClick={() => setLightbox(null)}
               style={{
                 position: 'absolute', top: -10, right: -10, width: 36, height: 36, borderRadius: '50%',
                 border: 'none', background: B.white, color: B.navy, fontSize: 18, fontWeight: 700, cursor: 'pointer',
@@ -4049,12 +3998,198 @@ const APPOINTMENT_CHANNEL_KEYS = [
   'serviceReminder72hChannel',
   'serviceReminder24hChannel',
   'enRouteChannel',
-  // techArrivedChannel intentionally absent: the arrival alert is SMS-only
-  // (the appointment.tech_arrived email twin was retired 2026-08-06), so the
-  // bulk "updates by email" shortcut must not claim to route it to email.
+  'techArrivedChannel',
 ];
 
-function ScheduleTab({ customer, properties = [], onRequestVisit }) {
+// Gold on/off switch — the ONE toggle idiom for customer notification rows
+// (owner 2026-08-28: keep the gold on/off look; 2026-09-06: switches, never
+// pill buttons). 44x44 hit target around the 44x24 track. `locked` renders
+// the always-on state without a handler.
+function GoldSwitch({ on, onChange, label, disabled = false, locked = false }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      disabled={disabled || locked}
+      onClick={locked ? undefined : onChange}
+      style={{
+        width: 44, height: 44, border: 'none', padding: 0,
+        background: 'transparent',
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        cursor: locked ? 'default' : disabled ? 'wait' : 'pointer',
+        opacity: locked ? 0.85 : disabled ? 0.6 : 1,
+        flexShrink: 0,
+      }}
+    >
+      <span aria-hidden="true" style={{
+        width: 44, height: 24, borderRadius: 12, flexShrink: 0,
+        // Gold = on, pale gold = off (owner 2026-08-28)
+        background: on ? B.yellow : `${B.yellow}55`,
+        position: 'relative', display: 'inline-block', transition: 'background 0.3s',
+      }}>
+        <span style={{
+          position: 'absolute', top: 2, width: 20, height: 20,
+          borderRadius: '50%', background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
+          left: on ? 22 : 2, transition: 'left 0.3s',
+        }} />
+      </span>
+    </button>
+  );
+}
+
+// Square glass icon tile — the one icon treatment on the Visits tab.
+function GlassTile({ name, size = 36, color = B.glassNavy, background = GLASS_SUBTLE, border = '#E7E2D7' }) {
+  return (
+    <span className="glass-tile" style={{
+      width: size, height: size, borderRadius: 8, background,
+      border: `1px solid ${border}`, color, display: 'inline-flex',
+      alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+    }}>
+      <Icon name={name} size={Math.round(size / 2)} strokeWidth={1.75} />
+    </span>
+  );
+}
+
+// "9:00 AM" from a Postgres time-of-day string — shared by the Visits tab's
+// cards and the account-wide next-visit chips.
+function formatTime(t) {
+  if (!t) return 'TBD';
+  const [h, m] = t.split(':').map(Number);
+  return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+}
+
+// "Thu, Sep 10 · 9:00 AM – 11:00 AM" for an account-next row, or the empty copy.
+function nextVisitLabel(next) {
+  if (!next) return 'No visit scheduled';
+  const day = parseDate(next.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  const time = next.windowStart ? `${formatTime(next.windowStart)} – ${formatTime(arrivalWindowEnd(next.windowStart))}` : 'Time TBD';
+  return `${day} · ${time}`;
+}
+
+// Glass property picker for accounts with more than one property. It is the
+// account-menu "Service Property" switcher surfaced where the customer is
+// looking: choosing a property calls the same selectProperty → switchProperty
+// path, so every tab re-scopes. The listbox is portalled to <body> — rendered
+// inside a [data-glass="card"] it is clipped by the card and the glass theme
+// forces its surface translucent.
+function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId, nextById, compact = false }) {
+  const [open, setOpen] = useState(false);
+  const [rect, setRect] = useState(null);
+  const ref = useRef(null);
+  const popRef = useRef(null);
+  const current = properties.find((p) => p.id === currentId) || properties[0];
+  const place = useCallback(() => { if (ref.current) setRect(ref.current.getBoundingClientRect()); }, []);
+  useEffect(() => {
+    if (!open) return undefined;
+    place();
+    const onDoc = (e) => { if (!ref.current?.contains(e.target) && !popRef.current?.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('touchstart', onDoc);
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('touchstart', onDoc);
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('resize', place);
+    };
+  }, [open, place]);
+  if (!current) return null;
+  const label = (p) => p.profileLabel || (p.isPrimaryProfile ? 'Primary' : 'Property');
+  const busy = !!switchingId;
+  return (
+    <div ref={ref} style={{ position: 'relative', minWidth: 0 }}>
+      <button
+        id={id}
+        type="button"
+        data-glass="chip"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label="Choose which property you are viewing"
+        disabled={busy}
+        onClick={() => setOpen((o) => !o)}
+        className="waves-focus-ring"
+        style={{
+          width: '100%', display: 'flex', alignItems: 'center', gap: 12,
+          padding: compact ? '10px 12px' : '12px 14px', minHeight: 56,
+          borderRadius: 12, border: `1px solid ${open ? B.yellow : '#E7E2D7'}`,
+          background: GLASS_SUBTLE, cursor: busy ? 'wait' : 'pointer', textAlign: 'left',
+          fontFamily: FONTS.body, color: B.glassNavy, opacity: busy ? 0.7 : 1,
+        }}
+      >
+        <GlassTile name={current.isPrimaryProfile ? 'home' : 'building'} />
+        {/* The glass theme flattens every weight inside a button to 600, so the
+            hierarchy here is size + colour only — same scale as the visit
+            cards (16 navy name, 14 muted detail). */}
+        <span style={{ minWidth: 0, flex: 1 }}>
+          <span style={{ display: 'block', fontSize: 16, fontWeight: 700, lineHeight: 1.25 }}>
+            {busy ? 'Switching…' : label(current)}
+          </span>
+          <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {current.isPrimaryProfile ? 'Primary residence · ' : ''}{formatPropertyAddress(current) || 'No address on file'}
+          </span>
+        </span>
+        <span style={{ display: 'inline-flex', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }}>
+          <Icon name="chevronDown" size={20} strokeWidth={2} />
+        </span>
+      </button>
+      {open && rect && createPortal(
+        <div
+          ref={popRef}
+          role="listbox"
+          aria-label="Your properties"
+          style={{
+            position: 'fixed', zIndex: 9999, top: rect.bottom + 8, left: rect.left, width: rect.width,
+            background: 'rgba(255,255,255,0.96)',
+            backdropFilter: 'blur(24px) saturate(160%)', WebkitBackdropFilter: 'blur(24px) saturate(160%)',
+            border: '1px solid #E7E2D7', borderRadius: 14, boxShadow: '0 18px 45px rgba(4,57,94,0.18)',
+            padding: 6, display: 'grid', gap: 4, fontFamily: FONTS.body,
+          }}
+        >
+          {properties.map((p) => {
+            const active = p.id === currentId;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                role="option"
+                aria-selected={active}
+                onClick={() => { setOpen(false); if (!active) onSelect(p.id); }}
+                className="waves-focus-ring"
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 12, width: '100%', padding: '10px 12px',
+                  borderRadius: 10, border: `1px solid ${active ? B.yellow : 'transparent'}`,
+                  background: active ? `${B.yellow}33` : 'transparent', cursor: active ? 'default' : 'pointer',
+                  textAlign: 'left', fontFamily: 'inherit', color: B.glassNavy,
+                }}
+              >
+                <GlassTile name={p.isPrimaryProfile ? 'home' : 'building'} />
+                <span style={{ minWidth: 0, flex: 1 }}>
+                  <span style={{ display: 'block', fontSize: 16, fontWeight: 700, lineHeight: 1.25 }}>{label(p)}</span>
+                  <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 3 }}>{p.isPrimaryProfile ? 'Primary residence · ' : ''}{formatPropertyAddress(p) || 'No address on file'}</span>
+                  {nextById && (
+                    <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 2 }}>
+                      {nextById[p.id] ? `Next visit ${nextVisitLabel(nextById[p.id])}` : 'No visit scheduled'}
+                    </span>
+                  )}
+                </span>
+                {active && <span style={{ display: 'inline-flex' }}><Icon name="check" size={20} strokeWidth={2.25} /></span>}
+              </button>
+            );
+          })}
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+}
+
+function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProperty, switchingPropertyId }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   // C4: a cancelled account keeps the schedule READS; every notification /
@@ -4066,6 +4201,11 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   // when GATE_RESERVICE_SELF_SERVE is on AND the customer's live plan grants
   // a lane — absent, the CTA card below simply doesn't render.
   const [reservice, setReservice] = useState(null);
+  // Does this property have a plan at all (recurring series, upcoming rows,
+  // monthly billing or a live prepay term — the schedule payload's
+  // hasCancellableWork)? A property with none gets no "request a visit"
+  // empty state (owner 2026-09-06: only recurring customers see it).
+  const [hasPlanWork, setHasPlanWork] = useState(true);
   const [prefs, setPrefs] = useState(null);
   const [prefsError, setPrefsError] = useState(false);
   const [propertyPrefs, setPropertyPrefs] = useState([]);
@@ -4078,6 +4218,29 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   // Per-property attestation that listed on-location contacts agreed to
   // receive service texts. Re-attested on every contact save.
   const [contactConsent, setContactConsent] = useState({});
+  // Multi-property accounts: every property's next visit for the picker and
+  // the "next visit at each property" chips. Independent of the schedule
+  // load so a failure here never blanks the tab; null = still loading.
+  const multiProperty = properties.length > 1;
+  // null = loading, [] / rows = loaded; a failed read is tracked separately
+  // so it renders as "unavailable + retry", never as "Checking…" forever or
+  // as "no visit scheduled" (pre-push codex P1).
+  const [accountNext, setAccountNext] = useState(null);
+  const [accountNextFailed, setAccountNextFailed] = useState(false);
+  const [accountNextAttempt, setAccountNextAttempt] = useState(0);
+  useEffect(() => {
+    if (!multiProperty) { setAccountNext(null); setAccountNextFailed(false); return undefined; }
+    let alive = true;
+    setAccountNext(null);
+    setAccountNextFailed(false);
+    api.getAccountUpcoming()
+      .then((res) => { if (alive) setAccountNext(Array.isArray(res?.properties) ? res.properties : []); })
+      .catch((err) => { console.error(err); if (alive) setAccountNextFailed(true); });
+    return () => { alive = false; };
+  }, [multiProperty, customer?.id, accountNextAttempt]);
+  const nextById = multiProperty && accountNext
+    ? Object.fromEntries(properties.map((p) => [p.id, accountNext.find((row) => row.id === p.id)?.next || null]))
+    : null;
 
   const loadSchedule = useCallback(() => {
     setLoading(true);
@@ -4103,6 +4266,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     ]).then(([schedData, prefsResult, propertyPrefsData]) => {
       setUpcoming(schedData.upcoming || []);
       setReservice(schedData.reservice || null);
+      setHasPlanWork(schedData.hasCancellableWork !== false);
       setPrefsError(prefsResult.failed);
       if (prefsResult.data) setPrefs(prefsResult.data);
       // A failed refresh must not keep rendering stale interactive settings
@@ -4315,12 +4479,6 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     }
   };
 
-  const formatTime = (t) => {
-    if (!t) return 'TBD';
-    const [h, m] = t.split(':').map(Number);
-    return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
-  };
-
   const formatConfirmTs = (ts) => {
     if (!ts) return '';
     return ts.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' at ' +
@@ -4337,7 +4495,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
   };
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
@@ -4348,7 +4506,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     boxShadow: 'none',
     padding: '10px 16px',
     fontSize: 14,
-    minHeight: 40,
+    minHeight: 44,
     position: 'relative',
   };
   const secondaryButton = {
@@ -4359,7 +4517,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     borderRadius: 10,
     boxShadow: 'none',
     padding: '10px 14px',
-    fontSize: 14, minHeight: 40,
+    fontSize: 14, minHeight: 44,
   };
 
   if (loading) {
@@ -4417,14 +4575,18 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const pulsingDotCss = `@keyframes schedPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.3); } }
 @media (prefers-reduced-motion: reduce) {
   [data-sched-pulse] { animation: none !important; }
-}`;
+}
+  /* GlassTile inside a gold accent chip: the theme's [data-glass-accent] *
+     rule fills every svg shape navy — keep the lucide strokes as strokes. */
+  [data-glass-accent] .glass-tile svg * { fill: none !important; }
+`;
 
   // Time TBD note helper
   const renderTimeTBD = (s) => {
     if (s.windowStart) return null;
     const prefTime = customer?.preferredTimeWindow;
     return (
-      <div style={{ fontSize: 12, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
+      <div style={{ fontSize: 14, color: '#92400E', marginTop: 8, padding: '8px 10px', borderRadius: 8, background: '#FFFBEB', border: '1px solid #FDE68A' }}>
         {prefTime
           ? `We'll aim for your preferred ${prefTime.toLowerCase()} window`
           : "We'll confirm your time window 72 hours before this visit"}
@@ -4439,9 +4601,9 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       return (
         <span style={{
           flex: compact ? undefined : 1,
-          padding: compact ? '7px 12px' : '10px 14px',
+          padding: compact ? '9px 14px' : '10px 14px',
           borderRadius: 8, background: GLASS_SUBTLE,
-          color: B.glassNavy, border: '1px solid #E7E2D7', fontSize: 12, fontWeight: 850, textAlign: 'center',
+          color: B.glassNavy, border: '1px solid #E7E2D7', fontSize: 14, fontWeight: 700, textAlign: 'center',
           display: 'inline-flex', alignItems: 'center', gap: 4,
         }}>
           <Icon name="check" size={16} strokeWidth={1.75} /> Confirmed{ts ? ` ${formatConfirmTs(ts)}` : ''}
@@ -4455,8 +4617,8 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     const busy = !!confirmingIds[s.id];
     return (
       <button type="button" onClick={() => handleConfirm(s.id)} disabled={busy} data-glass-accent="" style={{
-        ...primaryButton, padding: compact ? '7px 12px' : '10px 14px', flex: compact ? undefined : 1,
-        fontSize: 12,
+        ...primaryButton, padding: compact ? '9px 14px' : '10px 14px', flex: compact ? undefined : 1,
+        fontSize: 14,
         opacity: busy ? 0.6 : 1, cursor: busy ? 'wait' : 'pointer',
       }}>{busy ? 'Confirming...' : 'Confirm'}</button>
     );
@@ -4492,24 +4654,24 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               <Icon name={isGreen ? 'truck' : isOrange ? 'clock' : 'calendar'} size={18} strokeWidth={1.9} />
             </span>
             <div>
-              <div style={{ fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0, color: toneColor }}>
+              <div style={{ fontSize: 14, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0, color: toneColor }}>
                 {isGreen ? 'Service Today' : isOrange ? 'Service Tomorrow' : 'Next Up'}
               </div>
-              <div style={{ marginTop: 3, fontSize: 18, fontWeight: 850, fontFamily: FONTS.heading, color: B.glassNavy }}>
+              <div style={{ marginTop: 3, fontSize: 18, fontWeight: 700, color: B.glassNavy }}>
                 {s.svcDate.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}
               </div>
             </div>
           </div>
           {!isGreen && (
             <div style={{ textAlign: 'right' }}>
-              <div style={{ fontSize: 24, fontWeight: 850, fontFamily: FONTS.ui, color: B.glassNavy }}>{s.daysUntil}</div>
-              <div style={{ fontSize: 12, color: muted, textTransform: 'uppercase', letterSpacing: 0, fontWeight: 850 }}>{s.daysUntil === 1 ? 'day' : 'days'}</div>
+              <div style={{ fontSize: 24, fontWeight: 700, fontFamily: FONTS.ui, color: B.glassNavy }}>{s.daysUntil}</div>
+              <div style={{ fontSize: 14, color: muted, textTransform: 'uppercase', letterSpacing: 0, fontWeight: 700 }}>{s.daysUntil === 1 ? 'day' : 'days'}</div>
             </div>
           )}
         </div>
 
         <div style={{ padding: '16px 18px' }}>
-          <div style={{ fontSize: 16, fontWeight: 850, color: B.glassNavy }}>{s.serviceType}</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{s.serviceType}</div>
           <div style={{ fontSize: 14, color: muted, marginTop: 3 }}>
             {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : 'Time TBD'}
           </div>
@@ -4534,24 +4696,26 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               You'll hear from us
             </div>
             {[
-              { enabled: prefs?.serviceReminder72h !== false, icon: 'smartphone', label: `72-hour ${prefs?.serviceReminder72hChannel === 'email' ? 'email' : prefs?.serviceReminder72hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: '3 days before your visit', done: s.diffHrs <= 72 },
-              { enabled: prefs?.serviceReminder24h !== false, icon: 'smartphone', label: `24-hour ${prefs?.serviceReminder24hChannel === 'email' ? 'email' : prefs?.serviceReminder24hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: 'Day before your visit', done: s.diffHrs <= 24 },
+              { enabled: prefs?.serviceReminder72h !== false, icon: 'clock', label: `72-hour ${prefs?.serviceReminder72hChannel === 'email' ? 'email' : prefs?.serviceReminder72hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: '3 days before your visit', done: s.diffHrs <= 72 },
+              { enabled: prefs?.serviceReminder24h !== false, icon: 'bell', label: `24-hour ${prefs?.serviceReminder24hChannel === 'email' ? 'email' : prefs?.serviceReminder24hChannel === 'both' ? 'text + email' : 'text'} reminder`, time: 'Day before your visit', done: s.diffHrs <= 24 },
               { icon: 'truck', label: 'Tech en route', time: '~1 hour before arrival - live GPS', done: false, active: s.isToday },
-              { icon: 'checkCircle', label: 'Service complete report', time: 'Products used + tech notes delivered using your saved contact preferences', done: false },
+              { icon: 'document', label: 'Service complete report', time: 'Products used + tech notes delivered using your saved contact preferences', done: false },
             ].filter((step) => step.enabled !== false).map((step, i, steps) => (
-              <div key={step.label} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginBottom: i < steps.length - 1 ? 8 : 0 }}>
-                <div style={{
-                  width: 24, height: 24, borderRadius: '50%', flexShrink: 0,
-                  background: step.done ? GLASS_SUBTLE : step.active ? '#FFF7ED' : '#fff',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  color: step.done ? B.green : step.active ? B.orange : muted,
-                  border: `1px solid ${step.done ? '#E7E2D7' : step.active ? '#FED7AA' : '#E7E2D7'}`,
-                }}><Icon name={step.icon} size={12} strokeWidth={2} /></div>
-                <div>
-                  <div style={{ fontSize: 12, fontWeight: 850, color: step.done ? B.green : step.active ? B.orange : B.glassNavy }}>
-                    {step.label} {step.done && ''}
+              // One icon per step, the shared square tile, 16/14 text — the
+              // same row idiom as the notification lists (owner 2026-09-06).
+              <div key={step.label} style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: i < steps.length - 1 ? 10 : 0 }}>
+                <GlassTile
+                  name={step.icon}
+                  size={32}
+                  color={step.done ? B.green : step.active ? B.orange : B.glassNavy}
+                  background={step.active ? '#FFF7ED' : GLASS_SUBTLE}
+                  border={step.active ? '#FED7AA' : '#E7E2D7'}
+                />
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: step.done ? B.green : step.active ? B.orange : B.glassNavy }}>
+                    {step.label}
                   </div>
-                  <div style={{ fontSize: 12, color: muted }}>{step.time}</div>
+                  <div style={{ fontSize: 14, color: muted, marginTop: 1 }}>{step.time}</div>
                 </div>
               </div>
             ))}
@@ -4566,7 +4730,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
             {!cancelledAccount && (
               <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
                 ...secondaryButton, padding: '10px 14px', flex: 1, textDecoration: 'none',
-                fontSize: 12, position: 'relative',
+                fontSize: 14, position: 'relative',
               }}>Reschedule</a>
             )}
           </div>
@@ -4588,30 +4752,31 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         background: subtle, border: '1px solid #E7E2D7',
         display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
       }}>
-        <div style={{ fontSize: 18, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui, lineHeight: 1 }}>
+        <div style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy, fontFamily: FONTS.ui, lineHeight: 1 }}>
           {s.svcDate.getDate()}
         </div>
-        <div style={{ fontSize: 10, fontWeight: 850, color: muted, textTransform: 'uppercase', marginTop: 2 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', marginTop: 2 }}>
           {s.svcDate.toLocaleDateString('en-US', { month: 'short' })}
         </div>
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 15, fontWeight: 850, color: B.glassNavy }}>{s.serviceType}</div>
+        <div style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy }}>{s.serviceType}</div>
         <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
           {s.windowStart ? `${formatTime(s.windowStart)} - ${formatTime(arrivalWindowEnd(s.windowStart))}` : 'Time TBD'}
         </div>
-        <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           Visit #{s.visitNum} — {s.description}
         </div>
         {renderTimeTBD(s)}
-        <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 12, color: muted, fontWeight: 800 }}>In {s.daysUntil} {s.daysUntil === 1 ? 'day' : 'days'}</span>
+        {/* Actions only — the "In N days" countdown is gone (owner 2026-09-06:
+            the date tile already says when). */}
+        <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           {renderConfirmBtn(s, true)}
           {/* C4: no Reschedule mutation control for a cancelled session. */}
           {!cancelledAccount && (
             <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
-              ...secondaryButton, padding: '7px 12px', textDecoration: 'none',
-              fontSize: 12, position: 'relative',
+              ...secondaryButton, padding: '9px 14px', textDecoration: 'none',
+              fontSize: 14, position: 'relative',
             }}>Reschedule</a>
           )}
         </div>
@@ -4627,27 +4792,97 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0, flex: compact ? '1 1 100%' : '1 1 auto' }}>
             <div style={sectionTitle}><Icon name="calendar" size={14} strokeWidth={2} />Upcoming Visits</div>
-            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
-              {upcomingOnly.length ? `${upcomingOnly.length} scheduled` : 'Schedule status'}
+            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
+              {upcomingOnly.length
+                ? `${upcomingOnly.length} ${upcomingOnly.length === 1 ? 'visit' : 'visits'} scheduled${multiProperty ? ` at ${customer.profileLabel || 'this property'}` : ''}`
+                : multiProperty ? `Nothing scheduled at ${customer.profileLabel || 'this property'}` : 'Schedule status'}
             </div>
-            <div style={{ marginTop: 5, fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>
-              Appointment timing, confirmation status, reminders, and reschedule options.
+            <div style={{ marginTop: 5, fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
+              {multiProperty
+                ? 'Pick a property below to see its visits, reminders and text settings.'
+                : 'Appointment timing, confirmation status, reminders, and reschedule options.'}
             </div>
           </div>
           {/* Requests create work — a cancelled account (C4) passes no
               handler and gets no button. */}
           {onRequestVisit && (
-            <button type="button" onClick={onRequestVisit} data-glass-accent="" style={{ ...primaryButton, minHeight: 40, flexShrink: 0, ...(compact ? { width: '100%' } : {}) }}>
+            <button type="button" onClick={onRequestVisit} data-glass-accent="" style={{ ...primaryButton, minHeight: 44, flexShrink: 0, ...(compact ? { width: '100%' } : {}) }}>
               Request Visit
             </button>
           )}
         </div>
+        {/* More than one property on the account: the picker (the account-menu
+            Service Property switcher, surfaced here) and each property's next
+            visit. Choosing one re-scopes the whole portal to that property. */}
+        {multiProperty && (
+          <div style={{ marginTop: 18, display: 'grid', gap: 14 }}>
+            <div style={{ display: 'grid', gap: 6 }}>
+              <span data-gt="eyebrow" style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: '0.11em' }}>You're viewing</span>
+              <PropertyScopeSelect
+                id="visits-property-scope"
+                properties={properties}
+                currentId={customer.id}
+                onSelect={onSelectProperty}
+                switchingId={switchingPropertyId}
+                nextById={nextById}
+                compact={compact}
+              />
+            </div>
+            <div style={{ display: 'grid', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                <span data-gt="eyebrow" style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: '0.11em' }}>Next visit at each property</span>
+                {accountNextFailed && (
+                  <span role="alert" style={{ display: 'inline-flex', alignItems: 'center', gap: 10, fontSize: 14, color: muted }}>
+                    Next visits couldn&rsquo;t be loaded.
+                    <button type="button" onClick={() => setAccountNextAttempt((n) => n + 1)} className="waves-focus-ring" style={{ border: 'none', background: 'none', color: B.wavesBlue, fontWeight: 700, fontSize: 14, cursor: 'pointer', padding: '8px 4px', fontFamily: 'inherit' }}>Try again</button>
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10 }}>
+                {properties.map((p) => {
+                  const active = p.id === customer.id;
+                  const n = nextById ? nextById[p.id] : undefined;
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      // The glass theme owns a chip's surface colour, so the
+                      // current property uses the theme's gold accent surface
+                      // instead of an inline background it would override.
+                      {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })}
+                      aria-current={active ? 'true' : undefined}
+                      disabled={!!switchingPropertyId}
+                      onClick={() => !active && onSelectProperty && onSelectProperty(p.id)}
+                      className="waves-focus-ring"
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', borderRadius: 12,
+                        border: `1px solid ${active ? B.yellow : '#E7E2D7'}`, background: active ? B.yellow : subtle,
+                        cursor: active ? 'default' : 'pointer', textAlign: 'left', color: B.glassNavy,
+                      }}
+                    >
+                      <GlassTile name="calendar" />
+                      <span style={{ minWidth: 0 }}>
+                        <span style={{ display: 'block', fontSize: 15, fontWeight: 700, lineHeight: 1.25 }}>{p.profileLabel || (p.isPrimaryProfile ? 'Primary' : 'Property')}</span>
+                        <span style={{ display: 'block', fontSize: 14, fontWeight: 600, color: n || active ? B.glassNavy : muted, marginTop: 4 }}>
+                          {n === undefined ? (accountNextFailed ? 'Next visit unavailable' : 'Checking…') : nextVisitLabel(n)}
+                        </span>
+                        {n?.serviceType && <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: active ? B.glassNavy : muted, marginTop: 2 }}>{n.serviceType}</span>}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
       </section>
 
       {/* Empty state — the schedule API is the only source of truth; never
           invent a next-treatment month or mosquito restart the customer's
           plan may not include (tranche-1 truth fix) */}
-      {upcomingOnly.length === 0 && (
+      {/* resolveActiveTierName, not raw tier truthiness: 'One-Time' / 'Commercial'
+          are non-member tiers and must not resurrect the panel (codex P2). */}
+      {upcomingOnly.length === 0 && (hasPlanWork || !!resolveActiveTierName(customer)) && (
         // A cancelled account (C4) can't create requests — every
         // request-creation route is blocked for this session, so the copy
         // must not instruct an impossible action (codex GH r14 P2).
@@ -4683,7 +4918,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               copy into a 3-word column next to a full-width CTA (08-28). */}
           <div style={{ display: 'flex', flexDirection: compact ? 'column' : 'row', justifyContent: 'space-between', gap: compact ? 14 : 16, alignItems: compact ? 'stretch' : 'center' }}>
             <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 15, fontWeight: 850, color: B.glassNavy }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy }}>
                 {reservice.lanes?.includes('lawn') && !reservice.lanes?.includes('pest')
                   ? 'Lawn trouble between visits?'
                   : 'Pests back between visits?'}
@@ -4716,12 +4951,12 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                    <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{s.serviceType}</div>
-                    <div style={{ fontSize: 12, color: muted }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>{s.serviceType}</div>
+                    <div style={{ fontSize: 14, color: muted }}>
                       {sDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                     </div>
                   </div>
-                  <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>
+                  <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
                     {s.technician}{s.productsApplied ? ` · ${s.productsApplied}` : ''}
                   </div>
                 </div>
@@ -4747,7 +4982,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
         <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
             <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
-            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Service notifications</div>
+            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Service notifications</div>
             <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
               Texts to {formatPhoneDisplay(customer.phone)}{customer.email ? ` · Emails to ${customer.email}` : ''}
             </div>
@@ -4756,6 +4991,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               const anySaving = APPOINTMENT_CHANNEL_KEYS.some(k => !!prefsLocked[k]);
               return (
                 <button
+                  data-glass-pill=""
                   onClick={() => handleAllAppointmentChannels(allEmail ? 'sms' : 'email')}
                   disabled={anySaving}
                   style={{
@@ -4763,7 +4999,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                     border: `1px solid ${allEmail ? B.yellow : '#D8D0C0'}`,
                     background: allEmail ? B.yellow : '#fff',
                     color: B.glassNavy,
-                    fontSize: 14, fontWeight: 800, cursor: anySaving ? 'wait' : 'pointer',
+                    fontSize: 14, fontWeight: 700, cursor: anySaving ? 'wait' : 'pointer',
                     opacity: anySaving ? 0.6 : 1,
                     display: 'inline-flex', alignItems: 'center', gap: 6,
                   }}
@@ -4773,7 +5009,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 </button>
               );
             })() : (
-              <div style={{ marginTop: 8, fontSize: 12, color: muted }}>
+              <div style={{ marginTop: 8, fontSize: 14, color: muted }}>
                 Add an email to your profile to receive notifications by email.
               </div>
             )}
@@ -4781,17 +5017,16 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           <div style={{ padding: '4px 18px 12px' }}>
             {(() => {
               const items = [
-                { key: 'appointmentConfirmation', channelKey: 'appointmentConfirmationChannel', label: 'New Appointment Confirmation', desc: 'Heads-up when a new visit is booked', icon: 'checkCircle', locked: false, defaultOn: true },
-                { key: 'serviceReminder72h', channelKey: 'serviceReminder72hChannel', label: '72-Hour Appointment Reminder', desc: 'A reminder 3 days before every visit', icon: 'smartphone', locked: false, defaultOn: true },
-                { key: 'serviceReminder24h', channelKey: 'serviceReminder24hChannel', label: '24-Hour Service Reminder', desc: 'A reminder the day before every visit', icon: 'smartphone', locked: false, defaultOn: true },
+                { key: 'appointmentConfirmation', channelKey: 'appointmentConfirmationChannel', label: 'New Appointment Confirmation', desc: 'Heads-up when a new visit is booked', icon: 'calendar', locked: false, defaultOn: true },
+                { key: 'serviceReminder72h', channelKey: 'serviceReminder72hChannel', label: '72-Hour Appointment Reminder', desc: 'A reminder 3 days before every visit', icon: 'clock', locked: false, defaultOn: true },
+                { key: 'serviceReminder24h', channelKey: 'serviceReminder24hChannel', label: '24-Hour Service Reminder', desc: 'A reminder the day before every visit', icon: 'bell', locked: false, defaultOn: true },
                 { key: 'techEnRoute', channelKey: 'enRouteChannel', label: 'Tech En Route Alert', desc: 'Know exactly when your tech is headed over — live GPS', icon: 'truck', locked: false, defaultOn: true },
                 // Arrival alert — fires when the tracker flips to on-site, the
                 // moment the tech reaches the property. Independent of the
                 // en-route text so a customer can keep one and mute the other.
-                // SMS-only (no channelKey): the arrival email twin was
-                // retired 2026-08-06 — offering Email/Both here would show a
-                // choice the server no longer honors.
-                { key: 'techArrived', label: 'Tech Arrived Alert', desc: 'A text the moment your tech reaches your property', icon: 'checkCircle', locked: false, defaultOn: true },
+                // Text / Email / Both: the arrival email twin (retired
+                // 2026-08-06) is back on the owner's 2026-09-06 go.
+                { key: 'techArrived', channelKey: 'techArrivedChannel', label: 'Tech Arrived Alert', desc: 'The moment your tech reaches your property', icon: 'door', locked: false, defaultOn: true },
                 // Weather & property advisories (portal roadmap bet 6, owner
                 // ruling 2026-08-13: push + bell). A NEW alert type must ship
                 // with its self-service opt-out on the live settings surface
@@ -4799,7 +5034,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                 // extension of the 2026-07-09 "stops at appointment alerts"
                 // ruling, which predates this lane. No channelKey: these are
                 // app/bell advisories only — never SMS or email.
-                { key: 'weatherAlerts', label: 'Weather & Property Alerts', desc: 'Rain and lawn advisories for your property in the app', icon: 'checkCircle', locked: false, defaultOn: true },
+                { key: 'weatherAlerts', label: 'Weather & Property Alerts', desc: 'Rain and lawn advisories for your property in the app', icon: 'cloudRain', locked: false, defaultOn: true },
                 // Owner ruling 2026-07-09: the list stops at the appointment
                 // alerts. Auto En Route from GPS (internal detail of the
                 // en-route alert above), Service Complete Report (locked
@@ -4833,10 +5068,12 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       <Icon name={p.icon} size={18} strokeWidth={1.75} />
                     </span>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: 14, color: B.glassNavy, fontWeight: 850 }}>{p.label}</div>
-                      <div style={{ fontSize: 12, color: muted, whiteSpace: 'normal' }}>{p.desc}</div>
+                      {/* 16/14 — the same scale as the per-property rows below
+                          (owner 2026-09-06: one size for both lists, not 14/12). */}
+                      <div style={{ fontSize: 16, color: B.glassNavy, fontWeight: 700 }}>{p.label}</div>
+                      <div style={{ fontSize: 14, color: muted, whiteSpace: 'normal', marginTop: 1 }}>{p.desc}</div>
                       {p.locked && (
-                        <div style={{ fontSize: 12, color: B.orange, marginTop: 2, fontWeight: 800 }}>Required for service coordination</div>
+                        <div style={{ fontSize: 14, color: B.orange, marginTop: 2, fontWeight: 700 }}>Required for service coordination</div>
                       )}
                     </div>
                   </div>
@@ -4868,7 +5105,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                         disabled={!selectable || !!prefsLocked[p.channelKey]}
                         aria-label={`Delivery method for ${p.label}`}
                         style={{
-                          fontSize: 16, fontWeight: 800, color: B.glassNavy,
+                          fontSize: 16, fontWeight: 700, color: B.glassNavy,
                           border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 44,
                           background: '#fff', fontFamily: 'inherit', flexShrink: 0,
                           cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
@@ -4881,38 +5118,9 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, flexShrink: 0 }}>
                     {/* Real switch semantics: the old plain div was invisible
                         to keyboards and screen readers. */}
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={isOn}
-                      aria-label={p.label}
-                      disabled={p.locked}
-                      onClick={p.locked ? undefined : () => handleToggle(p.key)}
-                      style={{
-                        // 44x44 hit target; the gold 44x24 track is the inner
-                        // visual (owner 2026-08-28: keep the gold on/off look).
-                        width: 44, height: 44, border: 'none', padding: 0,
-                        background: 'transparent',
-                        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                        cursor: p.locked ? 'default' : 'pointer',
-                        opacity: p.locked ? 0.85 : 1,
-                      }}
-                    >
-                      <span aria-hidden="true" style={{
-                        width: 44, height: 24, borderRadius: 12, flexShrink: 0,
-                        // Gold = on, pale gold = off (owner 2026-08-28)
-                        background: isOn ? B.yellow : `${B.yellow}55`,
-                        position: 'relative', display: 'inline-block', transition: 'background 0.3s',
-                      }}>
-                        <span style={{
-                          position: 'absolute', top: 2, width: 20, height: 20,
-                          borderRadius: '50%', background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
-                          left: isOn ? 22 : 2, transition: 'left 0.3s',
-                        }} />
-                      </span>
-                    </button>
+                    <GoldSwitch on={isOn} onChange={() => handleToggle(p.key)} label={p.label} locked={p.locked} />
                     {p.locked && (
-                      <span style={{ fontSize: 10, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Locked</span>
+                      <span style={{ fontSize: 14, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Locked</span>
                     )}
                   </div>
                   </div>
@@ -4926,7 +5134,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 
       {propertyPrefsError && (
         <section role="alert" data-glass="card" style={{ ...card, padding: 20 }}>
-          <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Property contacts couldn&rsquo;t be loaded</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Property contacts couldn&rsquo;t be loaded</div>
           <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>Your schedule is still available. Try again to manage notification recipients for each property.</div>
           <button data-glass-accent="" type="button" onClick={loadSchedule} style={{ ...secondaryButton, marginTop: 10 }}>Try again</button>
         </section>
@@ -4938,15 +5146,28 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
             {propertyPrefs.length > 1 ? (
               <>
                 <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Property Notifications</div>
-                <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Notifications by property</div>
-                <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
-                  Choose which service texts each property receives.
+                <div style={{ marginTop: 6, fontSize: 22, fontWeight: 700, color: B.glassNavy }}>Appointment texts</div>
+                <div style={{ marginTop: 12 }}>
+                  <PropertyScopeSelect
+                    id="notifications-property-scope"
+                    properties={properties}
+                    currentId={customer.id}
+                    onSelect={onSelectProperty}
+                    switchingId={switchingPropertyId}
+                    nextById={nextById}
+                    compact
+                  />
+                </div>
+                <div style={{ fontSize: 15, color: muted, marginTop: 10 }}>
+                  {customer.isPrimaryProfile
+                    ? 'Your primary residence gets every alert unless you turn one off.'
+                    : 'Other properties start quiet. Turn on what you want to hear about here.'}
                 </div>
               </>
             ) : (
               <>
                 <div style={sectionTitle}><Icon name="smartphone" size={14} strokeWidth={2} />Contacts</div>
-                <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>On-location contacts</div>
+                <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>On-location contacts</div>
                 <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
                   Add anyone who should get appointment texts for this property — a spouse, partner, tenant, or property manager.
                 </div>
@@ -4954,17 +5175,20 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
             )}
           </div>
           <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {propertyPrefs.map((property) => {
+            {(propertyPrefs.length > 1 ? propertyPrefs.filter((p) => p.id === customer.id) : propertyPrefs).map((property) => {
               const label = property.profileLabel || 'Service property';
               const address = formatPropertyAddress(property);
+              // One distinct icon per alert (2026-09-06: no repeats, one tile style).
               const options = [
-                { key: 'appointmentConfirmation', label: 'New appt' },
-                { key: 'serviceReminder72h', label: '72 hr' },
-                { key: 'serviceReminder24h', label: '24 hr' },
-                { key: 'techEnRoute', label: 'En route' },
-                { key: 'techArrived', label: 'Arrived' },
-                { key: 'appointmentNotifyPrimary', label: 'Me too' },
+                { key: 'appointmentConfirmation', label: 'New appointment', desc: 'Heads-up when a visit is booked', icon: 'calendar' },
+                { key: 'serviceReminder72h', label: '72-hour reminder', desc: '3 days before a visit', icon: 'clock' },
+                { key: 'serviceReminder24h', label: '24-hour reminder', desc: 'The day before a visit', icon: 'bell' },
+                { key: 'techEnRoute', label: 'Tech en route', desc: 'Live GPS, about an hour out', icon: 'truck' },
+                { key: 'techArrived', label: 'Tech arrived', desc: 'The moment we reach the property', icon: 'door' },
+                { key: 'appointmentNotifyPrimary', label: 'Send these to me too', desc: 'Copy this property\'s texts to your phone as well as the on-location contacts', icon: 'smartphone' },
               ];
+              const onCount = options.filter((o) => o.key !== 'appointmentNotifyPrimary' && property.preferences?.[o.key] !== false).length;
+              const alertCount = options.length - 1;
               const contacts = displayContacts(property);
               const contactLockKey = `${property.id}:contact`;
               const multiProperty = propertyPrefs.length > 1;
@@ -4975,45 +5199,36 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                   padding: 14,
                   background: property.id === customer.id ? '#F8FCFE' : subtle,
                 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', marginBottom: 10 }}>
-                    <div>
-                      <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{label}</div>
-                      <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>{address || 'No address on file'}</div>
+                  {!multiProperty && (
+                    <div style={{ marginBottom: 10 }}>
+                      <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{label}</div>
+                      <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>{address || 'No address on file'}</div>
                     </div>
-                    {property.id === customer.id && multiProperty && (
-                      <span style={{
-                        fontSize: 10, fontWeight: 850, color: B.wavesBlue,
-                        background: '#fff', border: `1px solid ${B.wavesBlue}22`,
-                        borderRadius: 8, padding: '4px 8px', whiteSpace: 'nowrap',
-                      }}>Current</span>
-                    )}
-                  </div>
+                  )}
                   {multiProperty && (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(86px, 1fr))', gap: 8 }}>
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', paddingBottom: 6 }}>
+                        <span style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy, background: onCount ? B.yellow : `${B.yellow}55`, borderRadius: 999, padding: '8px 14px', whiteSpace: 'nowrap' }}>
+                          {onCount === alertCount ? 'All alerts on' : onCount ? `${onCount} ${onCount === 1 ? 'alert' : 'alerts'} on` : 'All alerts off'}
+                        </span>
+                      </div>
                       {options.map((option) => {
                         const on = property.preferences?.[option.key] !== false;
                         const lockKey = `${property.id}:${option.key}`;
                         return (
-                          <button data-glass-accent={on ? '' : undefined}
-                            key={option.key}
-                            type="button"
-                            disabled={!!prefsLocked[lockKey]}
-                            onClick={() => handlePropertyPrefToggle(property.id, option.key)}
-                            style={{
-                              border: `1px solid ${on ? B.yellow : '#D8D0C0'}`,
-                              borderRadius: 8,
-                              padding: '9px 6px',
-                              background: on ? '#fff' : B.white,
-                              color: on ? B.glassNavy : muted,
-                              fontSize: 14,
-                              fontWeight: 850,
-                              cursor: prefsLocked[lockKey] ? 'wait' : 'pointer',
-                              opacity: prefsLocked[lockKey] ? 0.6 : 1,
-                            }}
-                          >
-                            {option.label}
-                            <div style={{ fontSize: 12, marginTop: 2, color: on ? B.glassNavy : muted }}>{on ? 'On' : 'Off'}</div>
-                          </button>
+                          <div key={option.key} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 0', borderTop: '1px solid #E7E2D7' }}>
+                            <GlassTile name={option.icon} />
+                            <span style={{ flex: 1, minWidth: 0 }}>
+                              <span style={{ display: 'block', fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{option.label}</span>
+                              <span style={{ display: 'block', fontSize: 14, color: muted, marginTop: 1 }}>{option.desc}</span>
+                            </span>
+                            <GoldSwitch
+                              on={on}
+                              disabled={!!prefsLocked[lockKey]}
+                              onChange={() => handlePropertyPrefToggle(property.id, option.key)}
+                              label={`${option.label} for ${label}`}
+                            />
+                          </div>
                         );
                       })}
                     </div>
@@ -5022,7 +5237,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                     ? { marginTop: 14, paddingTop: 14, borderTop: '1px solid #E7E2D7' }
                     : undefined}>
                     {(multiProperty || contacts.length > 1) && (
-                      <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, marginBottom: 8 }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, marginBottom: 8 }}>
                         On-location contacts{contacts.length > 1 ? ` (${contacts.length} of ${MAX_PROPERTY_CONTACTS})` : ''}
                       </div>
                     )}
@@ -5030,7 +5245,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       <div key={idx} style={{ marginBottom: 10 }}>
                         {contacts.length > 1 && (
                           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                            <div style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase' }}>Contact {idx + 1}</div>
+                            <div style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase' }}>Contact {idx + 1}</div>
                             <button
                               type="button"
                               onClick={() => handlePropertyContactRemove(property.id, idx)}
@@ -5038,7 +5253,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                               className="waves-focus-ring"
                               style={{
                                 border: 'none', background: 'none', cursor: 'pointer', padding: '12px 10px',
-                                fontSize: 14, fontWeight: 850, color: B.orange, fontFamily: FONTS.body,
+                                fontSize: 14, fontWeight: 700, color: B.orange, fontFamily: FONTS.body,
                               }}
                             >
                               Remove
@@ -5047,7 +5262,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                         )}
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, marginBottom: 8 }}>
                           <label htmlFor={`svc-contact-${property.id}-${idx}-first`} style={{ display: 'grid', gap: 4 }}>
-                            <span style={{ fontSize: 14, fontWeight: 850, color: muted }}>First name</span>
+                            <span style={{ fontSize: 14, fontWeight: 700, color: muted }}>First name</span>
                             <input
                               id={`svc-contact-${property.id}-${idx}-first`}
                               value={contact.firstName || ''}
@@ -5060,7 +5275,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                             />
                           </label>
                           <label htmlFor={`svc-contact-${property.id}-${idx}-last`} style={{ display: 'grid', gap: 4 }}>
-                            <span style={{ fontSize: 14, fontWeight: 850, color: muted }}>Last name</span>
+                            <span style={{ fontSize: 14, fontWeight: 700, color: muted }}>Last name</span>
                             <input
                               id={`svc-contact-${property.id}-${idx}-last`}
                               value={contact.lastName || ''}
@@ -5075,7 +5290,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                         </div>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8 }}>
                           <label htmlFor={`svc-contact-${property.id}-${idx}-phone`} style={{ display: 'grid', gap: 4 }}>
-                            <span style={{ fontSize: 14, fontWeight: 850, color: muted }}>Phone number</span>
+                            <span style={{ fontSize: 14, fontWeight: 700, color: muted }}>Phone number</span>
                             <input
                               id={`svc-contact-${property.id}-${idx}-phone`}
                               value={contact.phone || ''}
@@ -5089,7 +5304,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                             />
                           </label>
                           <label htmlFor={`svc-contact-${property.id}-${idx}-email`} style={{ display: 'grid', gap: 4 }}>
-                            <span style={{ fontSize: 14, fontWeight: 850, color: muted }}>Email address</span>
+                            <span style={{ fontSize: 14, fontWeight: 700, color: muted }}>Email address</span>
                             <input
                               id={`svc-contact-${property.id}-${idx}-email`}
                               value={contact.email || ''}
@@ -5635,7 +5850,7 @@ function BillingTab({ customer, refreshCustomer }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
   };
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
@@ -5646,7 +5861,7 @@ function BillingTab({ customer, refreshCustomer }) {
     boxShadow: 'none',
     padding: '10px 16px',
     fontSize: 14,
-    minHeight: 40,
+    minHeight: 44,
     position: 'relative',
   };
   const secondaryButton = {
@@ -5657,7 +5872,7 @@ function BillingTab({ customer, refreshCustomer }) {
     borderRadius: 10,
     boxShadow: 'none',
     padding: '10px 14px',
-    fontSize: 14, minHeight: 40,
+    fontSize: 14, minHeight: 44,
   };
   const money = (n, digits = 2) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
   const methodLast4 = (method) => method?.lastFour || method?.last4 || '';
@@ -5968,8 +6183,7 @@ function BillingTab({ customer, refreshCustomer }) {
     background: B.glassNavy,
     color: '#fff',
     fontSize: 14,
-    fontWeight: 850,
-    fontFamily: FONTS.heading,
+    fontWeight: 700,
     textDecoration: 'none',
     whiteSpace: 'nowrap',
   };
@@ -6027,17 +6241,9 @@ function BillingTab({ customer, refreshCustomer }) {
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0 }}>
-            <div style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '6px 10px',
-              borderRadius: 8,
-              background: PORTAL_SHELL.soft,
-              border: `1px solid ${PORTAL_SHELL.softBorder}`,
-              color: B.glassNavy,
-              fontSize: 12,
-              fontWeight: 850,
+            <div data-gt="eyebrow" style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              color: PORTAL_SHELL.muted, fontSize: 14, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase',
             }}>
               <Icon name="card" size={14} strokeWidth={2} />
               Billing & Payments
@@ -6045,7 +6251,6 @@ function BillingTab({ customer, refreshCustomer }) {
             <h1 style={{
               margin: '12px 0 8px',
               color: B.glassNavy,
-              fontFamily: FONTS.heading,
               fontSize: compact ? 28 : 34,
               lineHeight: 1.1,
               letterSpacing: 0,
@@ -6064,13 +6269,13 @@ function BillingTab({ customer, refreshCustomer }) {
             border: `1px solid ${currentBalance > 0 ? `${B.orange}33` : '#E7E2D7'}`,
             boxSizing: 'border-box',
           }}>
-            <div style={{ fontSize: 12, color: balanceTone, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <div style={{ fontSize: 14, color: balanceTone, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>
               {balanceState}
             </div>
-            <div style={{ marginTop: 3, fontSize: 24, fontWeight: 850, color: B.glassNavy }}>
+            <div style={{ marginTop: 3, fontSize: 24, fontWeight: 700, color: B.glassNavy }}>
               {money(currentBalance)}
             </div>
-            <div style={{ marginTop: 2, fontSize: 12, color: muted }}>
+            <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
               {dueDate && currentBalance > 0 ? `Due ${dueDateLabel}` : 'Account balance'}
             </div>
             {primaryOpenInvoice && (
@@ -6089,7 +6294,7 @@ function BillingTab({ customer, refreshCustomer }) {
                       background: '#fff',
                       color: B.glassNavy,
                       border: '1px solid #E7E2D7',
-                      fontWeight: 800,
+                      fontWeight: 700,
                     }}
                   >
                     {inv.invoiceNumber ? `${inv.invoiceNumber} · ` : ''}Pay {money(inv.amountDue)}
@@ -6133,9 +6338,9 @@ function BillingTab({ customer, refreshCustomer }) {
               padding: 14,
               minHeight: compact ? 0 : 74,
             }}>
-              <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
-              <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 16, fontWeight: 850, lineHeight: 1.15 }}>{item.value}</div>
-              <div style={{ marginTop: 3, color: muted, fontSize: 12 }}>{item.sub}</div>
+              <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>{item.label}</div>
+              <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 16, fontWeight: 700, lineHeight: 1.15 }}>{item.value}</div>
+              <div style={{ marginTop: 3, color: muted, fontSize: 14 }}>{item.sub}</div>
             </div>
           ))}
         </div>
@@ -6168,10 +6373,10 @@ function BillingTab({ customer, refreshCustomer }) {
           <Icon name={bannerConfig.icon} size={18} strokeWidth={2} />
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 12, color: bannerConfig.titleColor, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
+          <div style={{ fontSize: 14, color: bannerConfig.titleColor, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>
             {bannerConfig.badge}
           </div>
-          <div style={{ marginTop: 3, fontSize: 15, fontWeight: 850, color: B.glassNavy, lineHeight: 1.3 }}>
+          <div style={{ marginTop: 3, fontSize: 15, fontWeight: 700, color: B.glassNavy, lineHeight: 1.3 }}>
             {bannerConfig.title}
           </div>
           <div style={{ fontSize: 14, color: bannerConfig.subtitleColor, marginTop: 3, lineHeight: 1.45 }}>
@@ -6195,7 +6400,7 @@ function BillingTab({ customer, refreshCustomer }) {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
           <div>
             <div style={sectionTitle}><Icon name="card" size={14} strokeWidth={2} />Plan Charges</div>
-            <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 850 }}>
+            <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 700 }}>
               {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
             </div>
             {/* Rate framing follows the REAL billing mode (owner 2026-07-11):
@@ -6232,7 +6437,7 @@ function BillingTab({ customer, refreshCustomer }) {
           ))}
         </div>
         {discount > 0 && (
-          <div style={{ marginTop: 12, padding: '10px 12px', background: GLASS_SUBTLE, border: '1px solid #E7E2D7', borderRadius: 8, fontSize: 14, color: B.glassNavy, fontWeight: 850 }}>
+          <div style={{ marginTop: 12, padding: '10px 12px', background: GLASS_SUBTLE, border: '1px solid #E7E2D7', borderRadius: 8, fontSize: 14, color: B.glassNavy, fontWeight: 700 }}>
             Saving {Math.round(discount * 100)}% on every service with your {tierName} bundle
           </div>
         )}
@@ -6258,7 +6463,7 @@ function BillingTab({ customer, refreshCustomer }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', marginBottom: 14, flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0, flex: '1 1 100%' }}>
             <div style={sectionTitle}><Icon name="card" size={14} strokeWidth={2} />Payment Methods</div>
-            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Saved methods</div>
+            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Saved methods</div>
             <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Cards and bank accounts on file for Auto Pay and invoices.</div>
           </div>
         </div>
@@ -6282,36 +6487,36 @@ function BillingTab({ customer, refreshCustomer }) {
                 width: 48, height: 32, borderRadius: 6,
                 background: B.glassNavy,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                color: '#fff', fontSize: 10, fontWeight: 800, letterSpacing: 0, fontFamily: FONTS.ui,
+                color: '#fff', fontSize: 14, fontWeight: 700, letterSpacing: 0, fontFamily: FONTS.ui,
               }}>{(c.brand || (isBankMethod(c.methodType) ? 'BANK' : 'CARD')).toUpperCase().slice(0, 6)}</div>
             )}
             <div style={{ flex: 1, minWidth: 180 }}>
-              <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{methodLabel(c)}</div>
-              {c.expMonth && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Expires {c.expMonth}/{c.expYear}</div>}
+              <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>{methodLabel(c)}</div>
+              {c.expMonth && <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Expires {c.expMonth}/{c.expYear}</div>}
               {/* Status reads as text under the label, so the action area
                   holds ONLY buttons — status chips styled like the buttons
                   read as four buttons in a row (owner eyeball 2026-08-27). */}
               {(c.isDefault || isAutopayRow(c)) && (
-                <div style={{ fontSize: 12, fontWeight: 850, color: B.glassNavy, marginTop: 4 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, marginTop: 4 }}>
                   {[c.isDefault ? 'Default' : null, isAutopayRow(c) ? 'Auto Pay method' : null].filter(Boolean).join(' · ')}
                 </div>
               )}
-              {isBankMethod(c.methodType) && c.bankName && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>{c.bankName}</div>}
+              {isBankMethod(c.methodType) && c.bankName && <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>{c.bankName}</div>}
               {isBankMethod(c.methodType) && c.achStatus === 'pending_verification' && (
-                <div style={{ fontSize: 12, fontWeight: 850, color: B.glassNavy, marginTop: 2 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, marginTop: 2 }}>
                   Verification pending — watch for two small deposits.
                   {' '}
                   <button data-glass-accent=""
                     type="button"
                     onClick={() => handleResumeBankVerification(c.id)}
-                    style={{ background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontSize: 12, fontWeight: 850, color: B.glassNavy, textDecoration: 'underline' }}
+                    style={{ background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontSize: 14, fontWeight: 700, color: B.glassNavy, textDecoration: 'underline' }}
                   >
                     Confirm deposits
                   </button>
                 </div>
               )}
               {isBankMethod(c.methodType) && c.achStatus === 'verification_failed' && (
-                <div style={{ fontSize: 12, fontWeight: 850, color: B.red, marginTop: 2 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: B.red, marginTop: 2 }}>
                   Verification failed — remove this account and add it again
                 </div>
               )}
@@ -6328,15 +6533,15 @@ function BillingTab({ customer, refreshCustomer }) {
                 // dead-end button.
                 null
               ) : (
-                <button type="button" onClick={() => handleSetDefault(c.id)} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 14, minHeight: 40, position: 'relative', flex: compact ? 1 : '0 0 150px', minWidth: 0, justifyContent: 'center' }}>Set default</button>
+                <button type="button" onClick={() => handleSetDefault(c.id)} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 14, minHeight: 44, position: 'relative', flex: compact ? 1 : '0 0 150px', minWidth: 0, justifyContent: 'center' }}>Set default</button>
               )}
               {isAutopayRow(c) ? (
                 <>
-                  <button type="button" onClick={handleReplaceCard} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 14, minHeight: 40, position: 'relative', flex: compact ? 1 : '0 0 150px', minWidth: 0, justifyContent: 'center' }}>Replace card</button>
-                  <button type="button" onClick={handleTurnOffAutopay} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 14, minHeight: 40, position: 'relative', flex: compact ? 1 : '0 0 150px', minWidth: 0, justifyContent: 'center' }}>Turn off</button>
+                  <button type="button" onClick={handleReplaceCard} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 14, minHeight: 44, position: 'relative', flex: compact ? 1 : '0 0 150px', minWidth: 0, justifyContent: 'center' }}>Replace card</button>
+                  <button type="button" onClick={handleTurnOffAutopay} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 14, minHeight: 44, position: 'relative', flex: compact ? 1 : '0 0 150px', minWidth: 0, justifyContent: 'center' }}>Turn off</button>
                 </>
               ) : (
-                <button type="button" onClick={() => handleRemoveCard(c.id)} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 14, minHeight: 40, position: 'relative', flex: compact ? 1 : '0 0 150px', minWidth: 0, justifyContent: 'center' }}>Remove</button>
+                <button type="button" onClick={() => handleRemoveCard(c.id)} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 14, minHeight: 44, position: 'relative', flex: compact ? 1 : '0 0 150px', minWidth: 0, justifyContent: 'center' }}>Remove</button>
               )}
             </div>
           </div>
@@ -6361,7 +6566,7 @@ function BillingTab({ customer, refreshCustomer }) {
             {bankPendingVerifyUrl && (
               <>
                 {' '}
-                <a href={bankPendingVerifyUrl} target="_blank" rel="noopener noreferrer" style={{ color: B.glassNavy, fontWeight: 850 }}>
+                <a href={bankPendingVerifyUrl} target="_blank" rel="noopener noreferrer" style={{ color: B.glassNavy, fontWeight: 700 }}>
                   Confirm the deposits here
                 </a>
                 {' '}once they arrive.
@@ -6405,7 +6610,7 @@ function BillingTab({ customer, refreshCustomer }) {
             border: '1px solid #E7E2D7',
           }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-              <div style={{ fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>Authorize Auto Pay</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Authorize Auto Pay</div>
               <button type="button" aria-label="Close" onClick={() => setDefaultConsentPrompt(null)} style={{
                 background: 'transparent', border: 'none', cursor: 'pointer', color: muted, lineHeight: 1,
                 width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
@@ -6450,7 +6655,7 @@ function BillingTab({ customer, refreshCustomer }) {
             border: '1px solid #E7E2D7',
           }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-              <div style={{ fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>Add Payment Method</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Add Payment Method</div>
               <button type="button" aria-label="Close" onClick={() => { setShowAddCard(false); paymentElementRef.current = null; elementsRef.current = null; }} style={{
                 background: 'transparent', border: 'none', cursor: 'pointer', color: muted, lineHeight: 1,
                 width: 36, height: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
@@ -6483,7 +6688,7 @@ function BillingTab({ customer, refreshCustomer }) {
               opacity: stripeLoading ? 0.6 : 1,
               cursor: stripeLoading || !stripeReady ? 'not-allowed' : 'pointer',
             }}>{stripeLoading ? 'Saving...' : (addMethodType === 'us_bank_account' ? 'Save Bank Account' : 'Save Card')}</button>
-            <div style={{ fontSize: 12, color: muted, marginTop: 10, textAlign: 'center' }}>
+            <div style={{ fontSize: 14, color: muted, marginTop: 10, textAlign: 'center' }}>
               Secured by Stripe. We never store your {addMethodType === 'us_bank_account' ? 'bank' : 'card'} details directly.
             </div>
           </div>
@@ -6493,7 +6698,7 @@ function BillingTab({ customer, refreshCustomer }) {
       {(totalCredits > 0 || credits.length > 0 || autoApplyCredit) && (
         <div data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={sectionTitle}><Icon name="coins" size={14} strokeWidth={2} />Credits</div>
-          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Adjustments</div>
+          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Adjustments</div>
           <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45, marginBottom: 14 }}>Referral, service, and promo credits on your account.</div>
           {totalCredits > 0 && (
             <div style={{
@@ -6503,7 +6708,7 @@ function BillingTab({ customer, refreshCustomer }) {
               borderRadius: 8,
               marginBottom: 12,
               fontSize: 14,
-              fontWeight: 850,
+              fontWeight: 700,
               color: B.glassNavy,
               display: 'flex',
               justifyContent: 'space-between',
@@ -6522,8 +6727,8 @@ function BillingTab({ customer, refreshCustomer }) {
               }}
             >
               <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Apply my credit to invoices automatically</div>
-                <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Apply my credit to invoices automatically</div>
+                <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
                   {autoApplyCredit
                     ? 'Your credit is applied to your open and future invoices before anything is charged.'
                     : 'Off — your credit stays on your account until you turn this on.'}
@@ -6543,7 +6748,7 @@ function BillingTab({ customer, refreshCustomer }) {
             { label: 'Promo Credits', items: promoCredits, icon: 'party' },
           ].filter(g => g.items.length > 0).map(group => (
             <div key={group.label} style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
                 <Icon name={group.icon} size={12} strokeWidth={2} /> {group.label}
               </div>
               {group.items.map((cr, i) => (
@@ -6552,7 +6757,7 @@ function BillingTab({ customer, refreshCustomer }) {
                   padding: '10px 12px', background: subtle, borderRadius: 8, marginBottom: 4, border: '1px solid #E7E2D7',
                 }}>
                   <span style={{ fontSize: 14, color: B.grayDark }}>{cr.description || group.label}</span>
-                  <span style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>{money(cr.amount || 0)}</span>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, fontFamily: FONTS.ui }}>{money(cr.amount || 0)}</span>
                 </div>
               ))}
             </div>
@@ -6565,7 +6770,7 @@ function BillingTab({ customer, refreshCustomer }) {
 
       <div data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}><Icon name="chart" size={14} strokeWidth={2} />{currentYear} Summary</div>
-        <div style={{ marginTop: 8, fontSize: 28, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>
+        <div style={{ marginTop: 8, fontSize: 28, fontWeight: 700, color: B.glassNavy, fontFamily: FONTS.ui }}>
           {money(ytdTotal)}
         </div>
         <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
@@ -6574,14 +6779,14 @@ function BillingTab({ customer, refreshCustomer }) {
         <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Everything you have paid this year, plan visits and one-time work.</div>
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 10, marginTop: 14 }}>
           <div style={{ padding: 12, background: subtle, border: '1px solid #E7E2D7', borderRadius: 8 }}>
-            <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>
+            <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>
               {activeTierName ? `WaveGuard ${tierName}` : 'No active plan'}
             </div>
-            <div style={{ marginTop: 5, color: B.glassNavy, fontSize: 18, fontWeight: 850 }}>{money(ytdRecurring)}</div>
+            <div style={{ marginTop: 5, color: B.glassNavy, fontSize: 18, fontWeight: 700 }}>{money(ytdRecurring)}</div>
           </div>
           <div style={{ padding: 12, background: subtle, border: '1px solid #E7E2D7', borderRadius: 8 }}>
-            <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>One-time services</div>
-            <div style={{ marginTop: 5, color: B.glassNavy, fontSize: 18, fontWeight: 850 }}>{money(ytdOneTime)}</div>
+            <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>One-time services</div>
+            <div style={{ marginTop: 5, color: B.glassNavy, fontSize: 18, fontWeight: 700 }}>{money(ytdOneTime)}</div>
           </div>
         </div>
       </div>
@@ -6590,7 +6795,7 @@ function BillingTab({ customer, refreshCustomer }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
           <div>
             <div style={sectionTitle}><Icon name="clock" size={14} strokeWidth={2} />Payment History</div>
-            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>{historyDescription}</div>
+            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>{historyDescription}</div>
             <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Every payment and receipt, newest first.</div>
           </div>
         </div>
@@ -6603,7 +6808,7 @@ function BillingTab({ customer, refreshCustomer }) {
             { key: 'type', label: 'Type', value: typeFilter, set: setTypeFilter, options: ['All', 'Recurring', 'One-Time'].map(t => ({ value: t, label: t === 'All' ? 'All types' : t })) },
           ].map(f => (
             <label key={f.key} style={{ display: 'block', minWidth: 0 }}>
-              <div style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6 }}>{f.label}</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6 }}>{f.label}</div>
               <select value={f.value} onChange={e => f.set(e.target.value)} className="waves-focus-ring" style={{
                 width: '100%', minHeight: 44, padding: '10px 12px', borderRadius: 8,
                 border: '1px solid #D8D0C0', background: '#fff', color: B.glassNavy,
@@ -6632,8 +6837,8 @@ function BillingTab({ customer, refreshCustomer }) {
             <div style={{ minWidth: 0 }}>
               {/* The billing-mode suffix ("— per application") is noise on
                   a receipt row (owner 08-28). */}
-              <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{String(p.description || '').replace(/\s+[—-]\s+per (application|visit)\s*$/i, '')}</div>
-              <div style={{ fontSize: 12, color: muted, marginTop: 3 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>{String(p.description || '').replace(/\s+[—-]\s+per (application|visit)\s*$/i, '')}</div>
+              <div style={{ fontSize: 14, color: muted, marginTop: 3 }}>
                 {parseDate(p.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                 {/* ACH rows store card_brand null — label by methodType so a
                     bank payment never reads "Card ending in …". */}
@@ -6642,7 +6847,7 @@ function BillingTab({ customer, refreshCustomer }) {
               {p.status === 'failed' && (
                 <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                   {primaryOpenInvoice && (
-                    <a data-glass-accent="" href={primaryOpenInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 36, fontSize: 12 }}>
+                    <a data-glass-accent="" href={primaryOpenInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
                       Pay {money(primaryOpenInvoice.amountDue)} now
                     </a>
                   )}
@@ -6655,17 +6860,17 @@ function BillingTab({ customer, refreshCustomer }) {
                     document.getElementById('billing-payment-methods')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
                     handleAddCard();
                   }} style={{
-                    minHeight: 36, padding: '7px 10px', borderRadius: 8, border: `1px solid ${B.red}`,
-                    background: '#fff', color: B.red, fontSize: 12, fontWeight: 800, cursor: 'pointer',
+                    minHeight: 44, padding: '7px 10px', borderRadius: 8, border: `1px solid ${B.red}`,
+                    background: '#fff', color: B.red, fontSize: 14, fontWeight: 700, cursor: 'pointer',
                   }}>Update Payment Method</button>
                   )}
                 </div>
               )}
             </div>
             <div style={{ textAlign: 'right', flexShrink: 0 }}>
-              <div style={{ fontSize: 15, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>{money(p.amount)}</div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy, fontFamily: FONTS.ui }}>{money(p.amount)}</div>
               {p.refundAmount > 0 && p.status === 'paid' && (
-                <div style={{ fontSize: 12, color: muted, marginTop: 2, fontWeight: 700 }}>
+                <div style={{ fontSize: 14, color: muted, marginTop: 2, fontWeight: 700 }}>
                   −{money(p.refundAmount)} refunded
                 </div>
               )}
@@ -6673,7 +6878,7 @@ function BillingTab({ customer, refreshCustomer }) {
                 display: 'inline-flex',
                 marginTop: 5,
                 fontSize: 14,
-                fontWeight: 850,
+                fontWeight: 700,
                 textTransform: 'uppercase',
                 letterSpacing: 0,
                 padding: '4px 8px',
@@ -6717,7 +6922,7 @@ function BillingTab({ customer, refreshCustomer }) {
       {!cancelledAccount && (
       <div data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}><Icon name="mail" size={14} strokeWidth={2} />Billing Preferences</div>
-        <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Recipients</div>
+        <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Recipients</div>
         <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45, marginBottom: 14 }}>Where invoices, receipts, and reminders go.</div>
 
         {billingPrefsLoadError && (
@@ -6735,7 +6940,7 @@ function BillingTab({ customer, refreshCustomer }) {
             removes it, and the field disappears. */}
         {String(billingEmail || '').trim() && (
           <div style={{ marginBottom: 14 }}>
-            <label htmlFor="portal-billing-email" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <label htmlFor="portal-billing-email" style={{ fontSize: 14, fontWeight: 700, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
               Billing recipient email
             </label>
             <div style={{ display: 'flex', gap: 10 }}>
@@ -6773,8 +6978,8 @@ function BillingTab({ customer, refreshCustomer }) {
               receipts. Only the delivery method is a choice; STOP remains
               the master kill switch. */}
           <div style={{ minWidth: 0, flex: '1 1 160px' }}>
-            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Billing reminders</div>
-            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>How you receive reminders for upcoming or overdue billing items.</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Billing reminders</div>
+            <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>How you receive reminders for upcoming or overdue billing items.</div>
           </div>
           <div style={{
             display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0,
@@ -6792,7 +6997,7 @@ function BillingTab({ customer, refreshCustomer }) {
                 disabled={!selectable}
                 aria-label="Delivery method for billing reminders"
                 style={{
-                  fontSize: 16, fontWeight: 800, color: B.glassNavy,
+                  fontSize: 16, fontWeight: 700, color: B.glassNavy,
                   border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 44,
                   background: '#fff', fontFamily: 'inherit', flexShrink: 0,
                   cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
@@ -6814,7 +7019,7 @@ function BillingTab({ customer, refreshCustomer }) {
             {/* Channel-aware copy: the dropdown beside this row offers
                 Text / Email / Text & Email, so hardcoded "texts" copy read as
                 false the moment a customer picked Email. */}
-            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>
               {(() => {
                 // The toggle beside this row turns the TEXT leg off on its own,
                 // for any channel — copy must never promise a text the customer
@@ -6832,7 +7037,7 @@ function BillingTab({ customer, refreshCustomer }) {
                 return 'Payment confirmations';
               })()}
             </div>
-            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>
+            <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
               {/* The toggle beside this row can switch the text leg off while
                   the channel stays Text & Email — the copy must not keep
                   promising a text the customer just disabled (codex r1 P2). */}
@@ -6864,7 +7069,7 @@ function BillingTab({ customer, refreshCustomer }) {
                 disabled={!selectable}
                 aria-label="Delivery method for payment confirmations"
                 style={{
-                  fontSize: 16, fontWeight: 800, color: B.glassNavy,
+                  fontSize: 16, fontWeight: 700, color: B.glassNavy,
                   border: '1px solid #D8D0C0', borderRadius: 8, padding: '7px 10px', minHeight: 44,
                   background: '#fff', fontFamily: 'inherit', flexShrink: 0,
                   cursor: selectable ? 'pointer' : 'not-allowed', opacity: selectable ? 1 : 0.4,
@@ -6897,7 +7102,7 @@ function BillingTab({ customer, refreshCustomer }) {
           width: '100%',
           cursor: billingPrefsSaving ? 'wait' : 'pointer',
         }}>
-          {billingPrefsSaving ? 'Saving...' : billingPrefsStatus === 'saved' ? 'Saved' : 'Save Billing Preferences'}
+          {billingPrefsSaving ? 'Saving...' : billingPrefsStatus === 'saved' ? 'Saved' : 'Save billing preferences'}
         </button>
         </>}
       </div>
@@ -6953,7 +7158,7 @@ function PropertySection({ title, icon = 'document', summary, defaultOpen, child
             <Icon name={icon} size={17} strokeWidth={2} />
           </span>
           <span style={{ minWidth: 0 }}>
-            <span style={{ display: 'block', fontSize: 15, fontWeight: 850, color: B.glassNavy }}>{title}</span>
+            <span style={{ display: 'block', fontSize: 15, fontWeight: 700, color: B.glassNavy }}>{title}</span>
             {summary && <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: '#475569', lineHeight: 1.35 }}>{summary}</span>}
           </span>
         </span>
@@ -6972,7 +7177,7 @@ function PasswordField({ value, onChange, placeholder, label }) {
   const inputLabel = label || placeholder || 'Secure field';
   return (
     <div>
-      {label && <label style={{ fontSize: 12, fontWeight: 850, color: '#475569', marginBottom: 8, display: 'block', textTransform: 'uppercase', letterSpacing: 0 }}>{label}</label>}
+      {label && <label style={{ fontSize: 14, fontWeight: 700, color: '#475569', marginBottom: 8, display: 'block', textTransform: 'uppercase', letterSpacing: 0 }}>{label}</label>}
       <div style={{ position: 'relative' }}>
         <input
           type={show ? 'text' : 'password'}
@@ -7024,9 +7229,11 @@ function PillSelector({ options, value, onChange, multiple = false }) {
       {options.map(o => {
         const active = isActive(o.value);
         return (
-          <button data-glass-accent={active ? '' : undefined} key={o.value} type="button" onClick={() => handleClick(o.value)} aria-pressed={active} style={{
+          // Active = gold accent surface; inactive = glass chip (the theme owns
+          // both surfaces, so the inline background is the non-glass fallback).
+          <button {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })} className="pill-chip" key={o.value} type="button" onClick={() => handleClick(o.value)} aria-pressed={active} style={{
             ...PORTAL_BUTTON_BASE,
-            minHeight: 36,
+            minHeight: 44,
             padding: '8px 12px',
             fontSize: 14,
             borderRadius: 8,
@@ -7051,7 +7258,7 @@ function NumberStepper({ value, onChange, min = 0, max = 99, label = 'Value' }) 
         background: '#fff', cursor: 'pointer', color: B.glassNavy,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}><Icon name="minus" size={16} strokeWidth={2} /></button>
-      <span style={{ fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui, minWidth: 28, textAlign: 'center' }}>{v}</span>
+      <span style={{ fontSize: 20, fontWeight: 700, color: B.glassNavy, fontFamily: FONTS.ui, minWidth: 28, textAlign: 'center' }}>{v}</span>
       <button type="button" onClick={() => onChange(Math.min(max, v + 1))} aria-label={`Increase ${label}`} style={{
         width: 38, height: 38, borderRadius: 8, border: '1px solid #D8D0C0',
         background: '#fff', cursor: 'pointer', color: B.glassNavy,
@@ -7068,6 +7275,7 @@ function ToggleSwitch({ checked, onChange, disabled, label }) {
       role="switch"
       aria-checked={!!checked}
       aria-label={label}
+      data-glass-pill=""
       onClick={onChange}
       disabled={disabled}
       style={{
@@ -7213,7 +7421,7 @@ function ServicePrefsSection() {
                 <Icon name={r.icon} size={17} strokeWidth={2} />
               </span>
               <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{r.title}</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>{r.title}</div>
                 <div style={{ fontSize: 14, color: '#475569', marginTop: 2, lineHeight: 1.45 }}>{desc}</div>
               </div>
             </div>
@@ -7226,7 +7434,7 @@ function ServicePrefsSection() {
           </div>
         );
       })}
-      {error && <div style={{ fontSize: 12, color: B.red || '#c8102e', marginTop: 8 }}>{error}</div>}
+      {error && <div style={{ fontSize: 14, color: B.red || '#c8102e', marginTop: 8 }}>{error}</div>}
     </PropertySection>
   );
 }
@@ -7410,11 +7618,11 @@ function PropertyTab({ customer }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
   };
   const labelStyle = {
-    fontSize: 12,
-    fontWeight: 850,
+    fontSize: 14,
+    fontWeight: 700,
     color: muted,
     marginBottom: 8,
     display: 'block',
@@ -7542,7 +7750,7 @@ function PropertyTab({ customer }) {
           transform: 'translateY(-50%)',
           color: muted,
           fontSize: 14,
-          fontWeight: 800,
+          fontWeight: 700,
         }}>in</span>
       </div>
     </div>
@@ -7584,7 +7792,7 @@ function PropertyTab({ customer }) {
           transform: 'translateY(-50%)',
           color: muted,
           fontSize: 14,
-          fontWeight: 800,
+          fontWeight: 700,
         }}>min</span>
       </div>
     </div>
@@ -7714,7 +7922,7 @@ function PropertyTab({ customer }) {
           background: saveStatus === 'error' ? `${B.red}10` : GLASS_SUBTLE,
           color: saveStatus === 'error' ? B.red : B.green,
           fontSize: 14,
-          fontWeight: 800,
+          fontWeight: 700,
         }}>
           {saveStatus === 'saving' ? 'Saving property details...' : saveStatus === 'error' ? 'Could not save. Please check your connection and try again.' : 'Property details saved.'}
         </div>
@@ -7734,17 +7942,9 @@ function PropertyTab({ customer }) {
         <div style={{ padding: compact ? 20 : 28 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
             <div style={{ minWidth: 0, flex: '1 1 300px' }}>
-              <div style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 8,
-                padding: '6px 10px',
-                borderRadius: 8,
-                background: PORTAL_SHELL.soft,
-                border: `1px solid ${PORTAL_SHELL.softBorder}`,
-                color: B.glassNavy,
-                fontSize: 12,
-                fontWeight: 850,
+              <div data-gt="eyebrow" style={{
+                display: 'inline-flex', alignItems: 'center', gap: 8,
+                color: PORTAL_SHELL.muted, fontSize: 14, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase',
               }}>
                 <Icon name="house" size={14} strokeWidth={2} />
                 Property Profile
@@ -7752,7 +7952,6 @@ function PropertyTab({ customer }) {
               <h1 style={{
                 margin: '12px 0 8px',
                 color: B.glassNavy,
-                fontFamily: FONTS.heading,
                 fontSize: compact ? 28 : 34,
                 lineHeight: 1.1,
                 letterSpacing: 0,
@@ -7773,10 +7972,10 @@ function PropertyTab({ customer }) {
               boxSizing: 'border-box',
             }}>
               <div style={{ ...sectionTitle, color: saveColor }}><Icon name="checkCircle" size={14} strokeWidth={2} />Status</div>
-              <div style={{ marginTop: 3, fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>
+              <div style={{ marginTop: 3, fontSize: 20, fontWeight: 700, color: B.glassNavy, fontFamily: FONTS.ui }}>
                 {saveText}
               </div>
-              <div style={{ marginTop: 2, fontSize: 12, color: muted }}>
+              <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
                 {updatedAt || 'Ready for updates'}
               </div>
             </div>
@@ -7802,19 +8001,19 @@ function PropertyTab({ customer }) {
                 minHeight: compact ? 0 : 78,
                 boxSizing: 'border-box',
               }}>
-                <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
+                <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>{item.label}</div>
                 <div style={{
                   marginTop: 6,
                   color: B.glassNavy,
                   fontSize: 16,
-                  fontWeight: 850,
+                  fontWeight: 700,
                   lineHeight: 1.2,
                   fontFamily: FONTS.ui,
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   whiteSpace: 'nowrap',
                 }}>{item.value}</div>
-                <div style={{ marginTop: 3, color: muted, fontSize: 12 }}>{item.sub}</div>
+                <div style={{ marginTop: 3, color: muted, fontSize: 14 }}>{item.sub}</div>
               </div>
             ))}
           </div>
@@ -7827,7 +8026,7 @@ function PropertyTab({ customer }) {
         title="Access"
         icon="key"
         summary={accessReady ? 'Technician access details are on file.' : 'Add gate or parking details before the next visit.'}
-        aside={<span style={{ fontSize: 12, fontWeight: 850, color: accessReady ? B.glassNavy : muted }}>{accessReady ? 'Ready' : 'Needs details'}</span>}
+        aside={<span style={{ fontSize: 14, fontWeight: 700, color: accessReady ? B.glassNavy : muted }}>{accessReady ? 'Ready' : 'Needs details'}</span>}
       >
         <div style={fieldGrid}>
           <PasswordField
@@ -7860,7 +8059,7 @@ function PropertyTab({ customer }) {
           <label style={labelStyle}>Parking Notes</label>
           {textArea('parkingNotes', 'e.g., Park in driveway, HOA enforces no street parking')}
         </div>
-        <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'flex-start', color: muted, fontSize: 12, lineHeight: 1.45 }}>
+        <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'flex-start', color: muted, fontSize: 14, lineHeight: 1.45 }}>
           <Icon name="lock" size={15} strokeWidth={2} style={{ marginTop: 1 }} />
           <span>Access codes are only shown to the assigned technician on service day.</span>
         </div>
@@ -7869,7 +8068,7 @@ function PropertyTab({ customer }) {
       <PropertySection title="Pets" icon="paw" summary={petSummary}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 14, padding: 14, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7', marginBottom: 14 }}>
           <div>
-            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Pets at this property</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Pets at this property</div>
             <div style={{ marginTop: 2, fontSize: 14, color: muted }}>Helps technicians plan safe entry and treatment timing.</div>
           </div>
           <NumberStepper value={prefs.petCount} onChange={v => {
@@ -7897,15 +8096,18 @@ function PropertyTab({ customer }) {
                 updateField('petsStructured', arr);
               };
               return (
-                <div key={idx} style={{
+                // Glass sub-panel, not a flat white box inside a glass card
+                // (owner 2026-09-06: the pet cards were "not glass UI").
+                <div key={idx} data-glass="soft" style={{
                   marginBottom: 14,
-                  padding: 14,
-                  borderRadius: 8,
-                  background: '#fff',
+                  padding: 16,
+                  borderRadius: 12,
+                  background: subtle,
                   border: '1px solid #E7E2D7',
                 }}>
-                  <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, marginBottom: 12 }}>
-                    Pet {idx + 1}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                    <GlassTile name="paw" size={32} />
+                    <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Pet {idx + 1}</div>
                   </div>
                   <div style={fieldGrid}>
                     <div>
@@ -7943,7 +8145,7 @@ function PropertyTab({ customer }) {
                       <PillSelector value={pet.type} onChange={v => updatePet('type', v)} options={['Dog', 'Cat', 'Other'].map(t => ({ value: t, label: t }))} />
                     </div>
                     <div>
-                      <label style={labelStyle}><Icon name="map" size={14} strokeWidth={2} />Location</label>
+                      <label style={labelStyle}><Icon name="map" size={14} strokeWidth={2} style={{ marginRight: 6 }} />Location</label>
                       <PillSelector value={pet.indoor} onChange={v => updatePet('indoor', v)} options={['Indoor', 'Outdoor', 'Both'].map(t => ({ value: t, label: t }))} />
                     </div>
                     <div>
@@ -7996,7 +8198,7 @@ function PropertyTab({ customer }) {
             the fields are always available. The server stamps
             irrigation_system=true on any irrigation write. */}
         <div style={{ marginBottom: 16 }}>
-          <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Irrigation system</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Irrigation system</div>
           <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
             {hasLawnCare
               ? 'Watering volume and timing let your lawn reports compare what the lawn gets to what it needs.'
@@ -8015,19 +8217,19 @@ function PropertyTab({ customer }) {
         {/* Lawn customers only — the copy references the Weekly Inches
             field, which is gated on hasLawnCare just above. */}
         {hasLawnCare && irrigationSuppressedNote && (
-          <div style={{ marginTop: 6, fontSize: 12, color: B.glassNavy, fontWeight: 650, lineHeight: 1.45 }} data-testid="irrigation-suppressed-note">
+          <div style={{ marginTop: 6, fontSize: 14, color: B.glassNavy, fontWeight: 600, lineHeight: 1.45 }} data-testid="irrigation-suppressed-note">
             {irrigationSuppressedNote}
           </div>
         )}
         {/* While suppressed the note above is the only word on the figure —
             a derived line ("is what we'll use") would contradict it. */}
         {hasLawnCare && derivedIrrigationLine && !irrigationSuppressed && (
-          <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }} data-testid="irrigation-derived-line">
+          <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }} data-testid="irrigation-derived-line">
             {derivedIrrigationLine}
           </div>
         )}
         {hasLawnCare && (
-          <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }}>
+          <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
             Enter the estimated total irrigation applied to the lawn each week. Most St. Augustine lawns are evaluated against about 1 inch per week, adjusted for rainfall and site conditions.
           </div>
         )}
@@ -8046,7 +8248,8 @@ function PropertyTab({ customer }) {
                 .filter(Boolean);
               const active = days.includes(day);
               return (
-                <button data-glass-accent={active ? '' : undefined} key={day} type="button" aria-pressed={active} onClick={() => {
+                // Same surfaces as PillSelector: gold accent when active, glass chip otherwise.
+                <button {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })} className="pill-chip" key={day} type="button" aria-pressed={active} onClick={() => {
                   const next = active ? days.filter(d => d !== day) : [...days, day];
                   updateField('wateringDays', CANONICAL_DAYS.filter(d => next.includes(d)));
                 }} style={{
@@ -8084,12 +8287,12 @@ function PropertyTab({ customer }) {
                 { value: 'rotor', label: 'Rotor' },
               ]}
             />
-            <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }}>
+            <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
               Select all that apply — many properties mix spray, drip, and rotor zones.
             </div>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '10px 12px', border: '1px solid #E7E2D7', borderRadius: 8, background: subtle }}>
-            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Rain sensor</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Rain sensor</div>
             <ToggleSwitch checked={!!prefs.rainSensor} onChange={() => updateField('rainSensor', !prefs.rainSensor)} label="Rain sensor installed" />
           </div>
         </div>
@@ -8136,7 +8339,7 @@ function PropertyTab({ customer }) {
                 { value: 'varies', label: 'Varies' },
               ]}
             />
-            <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }}>
+            <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
               Tap the selected time again to clear it.
             </div>
           </div>
@@ -8329,13 +8532,13 @@ function WeatherPestWidget({ customer, nextService }) {
             borderRadius: 8,
             background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`,
             color: B.glassNavy,
-            fontSize: 12,
-            fontWeight: 850,
+            fontSize: 14,
+            fontWeight: 700,
           }}>
             <Icon name="sun" size={14} strokeWidth={2} />
             Local Conditions
           </div>
-          <div style={{ marginTop: 10, fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
+          <div style={{ marginTop: 10, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
             {localizedLocation}
           </div>
           <div style={{ marginTop: 3, fontSize: 14, color: muted, lineHeight: 1.45 }}>
@@ -8354,10 +8557,10 @@ function WeatherPestWidget({ customer, nextService }) {
             ? { flex: '1 1 100%', display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }
             : { minWidth: 152, textAlign: 'right' }),
         }}>
-          <div style={{ fontSize: 40, lineHeight: 1, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>
+          <div style={{ fontSize: 40, lineHeight: 1, fontWeight: 700, color: B.glassNavy, fontFamily: FONTS.ui }}>
             {weather.temp}°
           </div>
-          <div style={{ marginTop: compact ? 0 : 4, fontSize: 12, color: muted, textAlign: 'right' }}>
+          <div style={{ marginTop: compact ? 0 : 4, fontSize: 14, color: muted, textAlign: 'right' }}>
             Tonight {weather.nightTemp}° · {weather.humidity}% humidity
           </div>
         </div>
@@ -8383,11 +8586,11 @@ function WeatherPestWidget({ customer, nextService }) {
               boxSizing: 'border-box',
             }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginBottom: 8 }}>
-                <span style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+                <span style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, display: 'inline-flex', alignItems: 'center', gap: 7 }}>
                   <Icon name={p.icon} size={15} strokeWidth={2} /> {p.label}
                 </span>
                 <span style={{
-                  fontSize: 12, fontWeight: 800, letterSpacing: 0,
+                  fontSize: 14, fontWeight: 700, letterSpacing: 0,
                   padding: '3px 7px', borderRadius: 8,
                   background: `${p.color}33`, color: p.color,
                 }}>{p.level}</span>
@@ -8400,7 +8603,7 @@ function WeatherPestWidget({ customer, nextService }) {
                 }} />
               </div>
               {action && (
-                <div style={{ fontSize: 12, color: muted, marginTop: 8, lineHeight: 1.45 }}>
+                <div style={{ fontSize: 14, color: muted, marginTop: 8, lineHeight: 1.45 }}>
                   {action}
                 </div>
               )}
@@ -8432,7 +8635,7 @@ function WeatherPestWidget({ customer, nextService }) {
           <Icon name="droplet" size={18} strokeWidth={2} />
         </span>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>
             Irrigation: {irrigationAmount}" recommended
           </div>
           <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.4 }}>{irrigation.note || 'Adjust watering around rainfall and local restrictions.'}</div>
@@ -8454,7 +8657,7 @@ function FeedSection({ title, icon, fetchFn, emptyMsg }) {
   }, []);
 
   if (loading) return (
-    <div style={{ padding: 20, textAlign: 'center', color: PORTAL_SHELL.muted, fontSize: 12 }}>Loading {title.toLowerCase()}...</div>
+    <div style={{ padding: 20, textAlign: 'center', color: PORTAL_SHELL.muted, fontSize: 14 }}>Loading {title.toLowerCase()}...</div>
   );
   if (!posts.length) return null;
 
@@ -8462,7 +8665,7 @@ function FeedSection({ title, icon, fetchFn, emptyMsg }) {
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
         <span style={{ fontSize: 20 }}>{icon}</span>
-        <div style={{ fontSize: 15, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>{title}</div>
+        <div style={{ fontSize: 15, fontWeight: 700, color: B.navy }}>{title}</div>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {posts.map((p, i) => {
@@ -8475,11 +8678,11 @@ function FeedSection({ title, icon, fetchFn, emptyMsg }) {
             }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: B.navy, lineHeight: 1.4 }}>{p.title}</div>
               {p.description && (
-                <div style={{ fontSize: 12, color: B.grayDark, marginTop: 4, lineHeight: 1.5 }}>
+                <div style={{ fontSize: 14, color: B.grayDark, marginTop: 4, lineHeight: 1.5 }}>
                   {p.description}{p.description.length >= 200 ? '...' : ''}
                 </div>
               )}
-              <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 6 }}>
+              <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 6 }}>
                 {pubDate && !isNaN(pubDate) ? pubDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : ''}
                 {p.category ? ` · ${p.category}` : ''}
               </div>
@@ -8590,8 +8793,8 @@ function ContentCard({ post, large, compact }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 7, flexWrap: 'wrap' }}>
             <span style={{
-              fontSize: 12,
-              fontWeight: 850,
+              fontSize: 14,
+              fontWeight: 700,
               padding: '4px 7px',
               borderRadius: 8,
               background: `${srcColor}18`,
@@ -8604,14 +8807,14 @@ function ContentCard({ post, large, compact }) {
               {sourceLabel}
             </span>
             {pubDate && !isNaN(pubDate) && (
-              <span style={{ fontSize: 12, color: '#475569' }}>
+              <span style={{ fontSize: 14, color: '#475569' }}>
                 {pubDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
               </span>
             )}
           </div>
           <div style={{
             fontSize: large ? 17 : 14,
-            fontWeight: 850,
+            fontWeight: 700,
             color: B.glassNavy,
             lineHeight: 1.35,
             overflow: 'hidden',
@@ -8631,7 +8834,7 @@ function ContentCard({ post, large, compact }) {
               WebkitBoxOrient: 'vertical',
             }}>{post.description}</div>
           )}
-          <div style={{ marginTop: 10, fontSize: 12, color: B.glassNavy, fontWeight: 850, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+          <div style={{ marginTop: 10, fontSize: 14, color: B.glassNavy, fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: 5 }}>
             Read article
           </div>
         </div>
@@ -8676,7 +8879,7 @@ function LearnTab({ customer }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
   };
   const secondaryButton = {
     ...PORTAL_BUTTON_BASE,
@@ -8686,7 +8889,7 @@ function LearnTab({ customer }) {
     borderRadius: 10,
     boxShadow: 'none',
     padding: '10px 14px',
-    fontSize: 14, minHeight: 40,
+    fontSize: 14, minHeight: 44,
     letterSpacing: 0,
   };
   const iconTile = {
@@ -8760,7 +8963,7 @@ function LearnTab({ customer }) {
     <section data-glass="card" style={{ ...card, padding: 20, minWidth: 0 }}>
       <div style={{ marginBottom: 14 }}>
         <div style={sectionTitle}><Icon name="newspaper" size={14} strokeWidth={2} />{title}</div>
-        <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>{FEED_HEADS[title]?.[0] || 'Latest'}</div>
+        <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>{FEED_HEADS[title]?.[0] || 'Latest'}</div>
         <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>{FEED_HEADS[title]?.[1] || `${posts.length} item${posts.length === 1 ? '' : 's'}.`}</div>
       </div>
       {posts.length ? (
@@ -8786,17 +8989,9 @@ function LearnTab({ customer }) {
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0, flex: '1 1 320px' }}>
-            <div style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '6px 10px',
-              borderRadius: 8,
-              background: PORTAL_SHELL.soft,
-              border: `1px solid ${PORTAL_SHELL.softBorder}`,
-              color: B.glassNavy,
-              fontSize: 12,
-              fontWeight: 850,
+            <div data-gt="eyebrow" style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              color: PORTAL_SHELL.muted, fontSize: 14, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase',
             }}>
               <Icon name="bulb" size={14} strokeWidth={2} />
               Learning Center
@@ -8804,7 +8999,6 @@ function LearnTab({ customer }) {
             <h1 style={{
               margin: '12px 0 8px',
               color: B.glassNavy,
-              fontFamily: FONTS.heading,
               fontSize: compact ? 28 : 34,
               lineHeight: 1.1,
               letterSpacing: 0,
@@ -8826,7 +9020,7 @@ function LearnTab({ customer }) {
             boxSizing: 'border-box',
           }}>
             <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Your Plan</div>
-            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
+            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
               {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
             </div>
             <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
@@ -8870,19 +9064,19 @@ function LearnTab({ customer }) {
               minWidth: 0,
               boxSizing: 'border-box',
             }}>
-              <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
+              <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>{item.label}</div>
               <div style={{
                 marginTop: 6,
                 color: B.glassNavy,
                 fontSize: typeof item.value === 'number' ? 20 : 16,
-                fontWeight: 850,
+                fontWeight: 700,
                 lineHeight: 1.2,
                 fontFamily: FONTS.ui,
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
               }}>{item.value}</div>
-              <div style={{ marginTop: 3, color: muted, fontSize: 12, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <div style={{ marginTop: 3, color: muted, fontSize: 14, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {item.sub}
               </div>
             </div>
@@ -8920,7 +9114,7 @@ function LearnTab({ customer }) {
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
                   <Icon name={a.type === 'urgent' ? 'warning' : a.type === 'seasonal' ? 'sun' : 'bell'} size={16} strokeWidth={2} style={{ color: alertColors[a.type] || B.wavesBlue }} />
-                  <span style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{a.title}</span>
+                  <span style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>{a.title}</span>
                 </div>
                 <div style={{ fontSize: 14, color: muted, lineHeight: 1.45 }}>{a.desc}</div>
               </div>
@@ -8934,7 +9128,7 @@ function LearnTab({ customer }) {
           <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
             <div style={{ minWidth: 0, flex: 1 }}>
               <div style={sectionTitle}><Icon name="bulb" size={14} strokeWidth={2} />{monthlyTip.month} Homeowner Tip</div>
-              <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, lineHeight: 1.25 }}>
+              <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy, lineHeight: 1.25 }}>
                 {monthlyTip.title}
               </div>
               <div style={{ marginTop: 7, fontSize: 14, color: B.grayDark, lineHeight: 1.6 }}>
@@ -8964,7 +9158,7 @@ function LearnTab({ customer }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: compact ? '1 1 100%' : '1 1 auto', minWidth: 0 }}>
             <div>
               <div style={sectionTitle}><Icon name="newspaper" size={14} strokeWidth={2} />Waves Pest Control Blog</div>
-              <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Latest articles</div>
+              <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Latest articles</div>
               <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Seasonal tips and how-tos from the Waves team.</div>
             </div>
           </div>
@@ -9071,7 +9265,7 @@ function LearnTab({ customer }) {
 
           {filteredFaq.map(cat => (
             <div key={cat.category} style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span style={{ ...iconTile, width: 30, height: 30 }}>
                   <Icon name={faqIconFor(cat.category)} size={15} strokeWidth={2} />
                 </span>
@@ -9106,7 +9300,7 @@ function LearnTab({ customer }) {
                         fontFamily: FONTS.body,
                       }}
                     >
-                      <span style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, flex: 1 }}>{q.q}</span>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, flex: 1 }}>{q.q}</span>
                       <Icon name="chevronDown" size={18} strokeWidth={2} style={{ color: muted, transform: isOpen ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.2s ease' }} />
                     </button>
                     {isOpen && (
@@ -9305,7 +9499,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'flex-start', flexWrap: 'wrap' }}>
         <div style={{ minWidth: 0 }}>
           <div style={sectionTitle}><Icon name="sparkles" size={14} strokeWidth={2} />WAVES AI</div>
-          <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 850 }}>Property-aware pricing</div>
+          <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 700 }}>Property-aware pricing</div>
           <div style={{ marginTop: 4, color: '#475569', fontSize: 14, lineHeight: 1.5 }}>
             Pricing is calculated from this property profile and your current Waves services.
           </div>
@@ -9319,8 +9513,8 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                 border: '1px solid #CFE7F5',
                 background: '#F8FCFE',
                 color: B.glassNavy,
-                fontSize: 12,
-                fontWeight: 800,
+                fontSize: 14,
+                fontWeight: 700,
               }}>
                 {service}
               </span>
@@ -9381,7 +9575,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
             key={chip.label}
             type="button"
             onClick={() => runPricing(chip.prompt)}
-            style={{ ...secondaryButton, padding: '8px 10px', fontSize: 14, minHeight: 40, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+            style={{ ...secondaryButton, padding: '8px 10px', fontSize: 14, minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
           >
             <Icon name={chip.icon} size={14} strokeWidth={1.8} />
             {chip.label}
@@ -9418,7 +9612,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
           }}>
             <strong style={{ color: B.glassNavy }}>{result.ok ? 'WAVES AI:' : 'Review needed:'}</strong> {result.message}
             {result.property?.homeSqFt || result.property?.lotSqFt ? (
-              <div style={{ marginTop: 6, color: '#475569', fontSize: 12 }}>
+              <div style={{ marginTop: 6, color: '#475569', fontSize: 14 }}>
                 Property basis: {[
                   result.property.homeSqFt ? `${Number(result.property.homeSqFt).toLocaleString()} sq ft home` : null,
                   result.property.lotSqFt ? `${Number(result.property.lotSqFt).toLocaleString()} sq ft lot` : null,
@@ -9431,7 +9625,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
           {options.length > 0 && (
             <>
               <label style={{ display: 'grid', gap: 6 }}>
-                <span style={{ fontSize: 12, color: '#475569', fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Pricing option</span>
+                <span style={{ fontSize: 14, color: '#475569', fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>Pricing option</span>
                 <select
                   value={selected?.id || ''}
                   onChange={(e) => {
@@ -9469,14 +9663,14 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
                     <div>
-                      <div style={{ fontSize: 16, color: B.glassNavy, fontWeight: 850 }}>{selected.label}</div>
+                      <div style={{ fontSize: 16, color: B.glassNavy, fontWeight: 700 }}>{selected.label}</div>
                       <div style={{ marginTop: 3, color: '#475569', fontSize: 14 }}>{selected.cadence}</div>
                     </div>
                     <div style={{ textAlign: compact ? 'left' : 'right' }}>
-                      <div style={{ fontSize: 24, color: B.glassNavy, fontWeight: 850, lineHeight: 1 }}>
+                      <div style={{ fontSize: 24, color: B.glassNavy, fontWeight: 700, lineHeight: 1 }}>
                         {selected.perVisit ? `${money(selected.perVisit)}/application` : selected.serviceKey === 'waveguard_tier' ? 'Member per-visit pricing' : selected.monthly ? 'Priced per application' : money(selected.oneTime || selected.dueAtStart)}
                       </div>
-                      <div style={{ marginTop: 4, color: '#475569', fontSize: 12 }}>
+                      <div style={{ marginTop: 4, color: '#475569', fontSize: 14 }}>
                         {selected.confidence ? `${selected.confidence} confidence` : 'pricing estimate'}
                       </div>
                     </div>
@@ -9492,8 +9686,8 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                       selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
                     ].filter(Boolean).slice(0, 3).map((item) => (
                       <div key={item.label} style={{ padding: 10, borderRadius: 8, background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)' }}>
-                        <div style={{ color: '#475569', fontSize: 14, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>{item.label}</div>
-                        <div style={{ marginTop: 4, color: B.glassNavy, fontSize: 15, fontWeight: 850 }}>{item.value}</div>
+                        <div style={{ color: '#475569', fontSize: 14, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>{item.label}</div>
+                        <div style={{ marginTop: 4, color: B.glassNavy, fontSize: 15, fontWeight: 700 }}>{item.value}</div>
                       </div>
                     ))}
                   </div>
@@ -9505,7 +9699,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                   ) : null}
 
                   {requested ? (
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: B.glassNavy, fontSize: 14, fontWeight: 850 }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: B.glassNavy, fontSize: 14, fontWeight: 700 }}>
                       <Icon name="check" size={15} strokeWidth={2} /> Request sent
                     </span>
                   ) : (
@@ -9646,10 +9840,10 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start' }}>
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>
               WaveGuard tiers
             </div>
-            <div style={{ marginTop: 5, color: B.glassNavy, fontSize: compact ? 22 : 26, fontWeight: 850, fontFamily: FONTS.heading, lineHeight: 1.15 }}>
+            <div style={{ marginTop: 5, color: B.glassNavy, fontSize: compact ? 22 : 26, fontWeight: 700, lineHeight: 1.15 }}>
               Explore plan upgrades
             </div>
             <div style={{ marginTop: 5, color: B.grayDark, fontSize: 14, lineHeight: 1.5 }}>
@@ -9669,8 +9863,8 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
             <div>
-              <div style={{ color: PORTAL_SHELL.muted, fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Current plan</div>
-              <div style={{ marginTop: 4, color: B.glassNavy, fontSize: 18, fontWeight: 850 }}>WaveGuard {currentTier}</div>
+              <div style={{ color: PORTAL_SHELL.muted, fontSize: 14, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>Current plan</div>
+              <div style={{ marginTop: 4, color: B.glassNavy, fontSize: 18, fontWeight: 700 }}>WaveGuard {currentTier}</div>
             </div>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: compact ? 'flex-start' : 'flex-end' }}>
               {currentServices.map(service => (
@@ -9680,8 +9874,8 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                   border: '1px solid #CFE7F5',
                   background: '#F8FCFE',
                   color: B.glassNavy,
-                  fontSize: 12,
-                  fontWeight: 800,
+                  fontSize: 14,
+                  fontWeight: 700,
                 }}>{service.replace(/ Program| Barrier Treatment/g, '')}</span>
               ))}
             </div>
@@ -9722,10 +9916,10 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                 }}
               >
                 <span style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
-                  <span style={{ fontSize: 16, color: B.glassNavy, fontWeight: 850 }}>WaveGuard {tierName}</span>
-                  {isCurrent && <span style={{ color: B.glassNavy, fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Current</span>}
+                  <span style={{ fontSize: 16, color: B.glassNavy, fontWeight: 700 }}>WaveGuard {tierName}</span>
+                  {isCurrent && <span style={{ color: B.glassNavy, fontSize: 14, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>Current</span>}
                 </span>
-                <span style={{ display: 'block', marginTop: 6, color: disc > 0 ? B.glassNavy : PORTAL_SHELL.muted, fontSize: 14, fontWeight: 850 }}>
+                <span style={{ display: 'block', marginTop: 6, color: disc > 0 ? B.glassNavy : PORTAL_SHELL.muted, fontSize: 14, fontWeight: 700 }}>
                   {disc > 0 ? `${Math.round(disc * 100)}% bundle discount` : 'Base plan'}
                 </span>
                 <span style={{ display: 'grid', gap: 5, marginTop: 10 }}>
@@ -9753,7 +9947,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
             <div>
-              <div style={{ color: B.glassNavy, fontSize: 16, fontWeight: 850 }}>Selected: WaveGuard {selectedTier}</div>
+              <div style={{ color: B.glassNavy, fontSize: 16, fontWeight: 700 }}>Selected: WaveGuard {selectedTier}</div>
               <div style={{ marginTop: 3, color: PORTAL_SHELL.muted, fontSize: 14 }}>
                 {canPriceTier
                   ? `Adds ${formatList(addedServices)}.`
@@ -9812,7 +10006,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
               {options.length > 0 ? (
                 <>
                   <label style={{ display: 'grid', gap: 6 }}>
-                    <span style={{ fontSize: 12, color: PORTAL_SHELL.muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Pricing option</span>
+                    <span style={{ fontSize: 14, color: PORTAL_SHELL.muted, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>Pricing option</span>
                     <select
                       value={selected?.id || ''}
                       onChange={(e) => {
@@ -9844,14 +10038,14 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                     <div style={{ border: '1px solid #E7E2D7', borderRadius: 8, background: '#fff', padding: 14, display: 'grid', gap: 12 }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
                         <div>
-                          <div style={{ fontSize: 16, color: B.glassNavy, fontWeight: 850 }}>{selected.label}</div>
+                          <div style={{ fontSize: 16, color: B.glassNavy, fontWeight: 700 }}>{selected.label}</div>
                           <div style={{ marginTop: 3, color: PORTAL_SHELL.muted, fontSize: 14, lineHeight: 1.45 }}>{selected.cadence}</div>
                         </div>
                         <div style={{ textAlign: compact ? 'left' : 'right' }}>
-                          <div style={{ fontSize: 24, color: B.glassNavy, fontWeight: 850, lineHeight: 1 }}>
+                          <div style={{ fontSize: 24, color: B.glassNavy, fontWeight: 700, lineHeight: 1 }}>
                             {selected.perVisit ? `${money(selected.perVisit)}/application` : selected.serviceKey === 'waveguard_tier' ? 'Member per-visit pricing' : selected.monthly ? 'Priced per application' : money(selected.oneTime || selected.dueAtStart)}
                           </div>
-                          <div style={{ marginTop: 4, color: PORTAL_SHELL.muted, fontSize: 12 }}>
+                          <div style={{ marginTop: 4, color: PORTAL_SHELL.muted, fontSize: 14 }}>
                             {selected.confidence ? `${selected.confidence} confidence` : 'pricing estimate'}
                           </div>
                         </div>
@@ -9863,8 +10057,8 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                           selected.waveguardTier ? { label: 'Tier', value: selected.waveguardTier } : null,
                         ].filter(Boolean).map(item => (
                           <div key={item.label} style={{ padding: 10, borderRadius: 8, background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)' }}>
-                            <div style={{ color: PORTAL_SHELL.muted, fontSize: 12, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>{item.label}</div>
-                            <div style={{ marginTop: 4, color: B.glassNavy, fontSize: 15, fontWeight: 850 }}>{item.value}</div>
+                            <div style={{ color: PORTAL_SHELL.muted, fontSize: 14, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>{item.label}</div>
+                            <div style={{ marginTop: 4, color: B.glassNavy, fontSize: 15, fontWeight: 700 }}>{item.value}</div>
                           </div>
                         ))}
                       </div>
@@ -9874,7 +10068,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                       ) : null}
 
                       {requested ? (
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: B.glassNavy, fontSize: 14, fontWeight: 850 }}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, color: B.glassNavy, fontSize: 14, fontWeight: 700 }}>
                           <Icon name="check" size={15} strokeWidth={2} /> Request sent
                         </span>
                       ) : (
@@ -9956,7 +10150,7 @@ function PlanStationMap({ map }) {
           color: B.glassNavy,
           fontFamily: FONTS.body,
           fontSize: 14,
-          fontWeight: 800,
+          fontWeight: 700,
           cursor: 'pointer',
           textAlign: 'left',
         }}
@@ -10373,7 +10567,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
   };
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
@@ -10384,7 +10578,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
     boxShadow: 'none',
     padding: '10px 16px',
     fontSize: 14,
-    minHeight: 40,
+    minHeight: 44,
     position: 'relative',
   };
   const secondaryButton = {
@@ -10395,20 +10589,20 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
     borderRadius: 10,
     boxShadow: 'none',
     padding: '10px 14px',
-    fontSize: 14, minHeight: 40,
+    fontSize: 14, minHeight: 44,
   };
   const smallLinkButton = {
     border: 'none',
     background: 'transparent',
     color: muted,
     cursor: 'pointer',
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: 700,
     fontFamily: FONTS.body,
     textDecoration: 'underline',
     textUnderlineOffset: 3,
     padding: '8px 10px',
-    minHeight: 36,
+    minHeight: 44,
   };
   const iconName = (name) => (typeof name === 'string' && /^[a-z]/i.test(name) ? name : 'shield');
 
@@ -10427,7 +10621,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
   if (planStatus !== 'ready') {
     return (
       <section role={planStatus === 'error' ? 'alert' : undefined} data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
-        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
+        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
           {planStatus === 'loading' ? 'Loading your plan…' : 'We couldn’t load your plan'}
         </h1>
         {planStatus === 'error' && (
@@ -10447,11 +10641,9 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
           <div style={{ minWidth: 0 }}>
             {/* Same hero pill as Billing & Payments (owner 08-28) — the
                 tier-tinted pill was the one hero that didn't match. */}
-            <div style={{
+            <div data-gt="eyebrow" style={{
               display: 'inline-flex', alignItems: 'center', gap: 8,
-              padding: '6px 10px', borderRadius: 8,
-              background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`,
-              color: B.glassNavy, fontSize: 12, fontWeight: 850,
+              color: PORTAL_SHELL.muted, fontSize: 14, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase',
             }}>
               <Icon name="shield" size={14} strokeWidth={2} />
               {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
@@ -10459,7 +10651,6 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
             <h1 style={{
               margin: '12px 0 8px',
               color: B.glassNavy,
-              fontFamily: FONTS.heading,
               fontSize: compact ? 28 : 34,
               lineHeight: 1.1,
               letterSpacing: 0,
@@ -10485,13 +10676,13 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
             border: `1px solid ${activeTierName ? '#E7E2D7' : '#E2E8F0'}`,
             boxSizing: 'border-box',
           }}>
-            <div style={{ fontSize: 12, color: activeTierName ? B.glassNavy : muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <div style={{ fontSize: 14, color: activeTierName ? B.glassNavy : muted, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>
               {planBillingLabel}
             </div>
-            <div style={{ marginTop: 3, fontSize: 24, fontWeight: 850, color: B.glassNavy }}>
+            <div style={{ marginTop: 3, fontSize: 24, fontWeight: 700, color: B.glassNavy }}>
               {planBillingValue}
             </div>
-            <div style={{ marginTop: 2, fontSize: 12, color: muted }}>{planBillingSub}</div>
+            <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{planBillingSub}</div>
           </div>
         </div>
 
@@ -10522,9 +10713,9 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
               // half-width tile (owner 08-28) — the last one spans the row.
               gridColumn: compact && arr.length % 2 === 1 && idx === arr.length - 1 ? '1 / -1' : 'auto',
             }}>
-              <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
-              <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 18, fontWeight: 850, lineHeight: 1.1 }}>{item.value}</div>
-              <div style={{ marginTop: 3, color: muted, fontSize: 12 }}>{item.sub}</div>
+              <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>{item.label}</div>
+              <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 18, fontWeight: 700, lineHeight: 1.1 }}>{item.value}</div>
+              <div style={{ marginTop: 3, color: muted, fontSize: 14 }}>{item.sub}</div>
             </div>
           ))}
         </div>
@@ -10540,7 +10731,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
           <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
             <div style={{ padding: 20, borderBottom: '1px solid #E7E2D7' }}>
               <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Included Services</div>
-              <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 850 }}>
+              <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 700 }}>
                 {activeTierName
                   ? `${numServices} recurring service${numServices > 1 ? 's' : ''}`
                   : displayedServices.length
@@ -10596,14 +10787,14 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
                             <Icon name={iconName(svc.icon)} size={20} strokeWidth={1.8} />
                           </span>
                           <span style={{ minWidth: 0 }}>
-                            <span style={{ display: 'block', fontSize: 16, fontWeight: 850, color: B.glassNavy }}>{detectedServiceNames[svc.id] || svc.name}</span>
+                            <span style={{ display: 'block', fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{detectedServiceNames[svc.id] || svc.name}</span>
                             <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: muted }}>{svc.frequencies[0]}</span>
                             {svc.id === 'lawn_care' && !lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
                               const avg = Math.round(lawnHealth.scores.overallScore);
                               const initialAvg = Math.round(lawnHealth.initialScores.overallScore);
                               const improving = avg >= initialAvg;
                               return (
-                                <span style={{ display: 'block', marginTop: 3, fontSize: 12, color: improving ? B.green : B.orange, fontWeight: 800 }}>
+                                <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: improving ? B.green : B.orange, fontWeight: 700 }}>
                                   Lawn health {avg}% {improving ? `(up from ${initialAvg}%)` : `(from ${initialAvg}%)`}
                                 </span>
                               );
@@ -10614,7 +10805,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
                           {/* "applications" not "visits" — matches the "4 Apps"
                               frequency label beside it (owner rule 07-12:
                               per-application wording everywhere). */}
-                          <div style={{ fontSize: 12, color: muted }}>{completedVisits}/{totalVisits || 0} applications</div>
+                          <div style={{ fontSize: 14, color: muted }}>{completedVisits}/{totalVisits || 0} applications</div>
                           {/* Percentage framing only — the old $/yr figures were
                               static catalog basePrice math, not real billing
                               (owner 2026-07-11: no per-year totals). Rodent bait
@@ -10627,7 +10818,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
                               percentage it may never have received (codex
                               #3591 r10 P2). */}
                           {discount > 0 && svc.id !== 'rodent_bait' ? (
-                            <div style={{ marginTop: 4, fontSize: 14, color: B.glassNavy, fontWeight: 850 }}>
+                            <div style={{ marginTop: 4, fontSize: 14, color: B.glassNavy, fontWeight: 700 }}>
                               WaveGuard {tierName}
                             </div>
                           ) : null}
@@ -10649,7 +10840,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
                         <div style={{ fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>{svc.description}</div>
                         {coverage && (
                           <div style={{ marginTop: 12, padding: 12, borderRadius: 8, background: subtle, border: '1px solid #E7E2D7' }}>
-                            <div style={{ fontSize: 14, color: B.glassNavy, fontWeight: 850 }}>{coverage.summary}</div>
+                            <div style={{ fontSize: 14, color: B.glassNavy, fontWeight: 700 }}>{coverage.summary}</div>
                             <div style={{ display: 'grid', gap: 6, marginTop: 8 }}>
                               {coverage.details.map((detail) => (
                                 <div key={detail} style={{ display: 'flex', gap: 8, color: B.grayDark, fontSize: 14, lineHeight: 1.45 }}>
@@ -10668,7 +10859,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
                                 borderRadius: 999,
                                 background: '#F8FCFE',
                                 color: B.glassNavy,
-                                fontSize: 12,
+                                fontSize: 14,
                                 fontWeight: 700,
                               }}>{product}</span>
                             ))}
@@ -10768,7 +10959,7 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
         <aside style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}><Icon name="calendar" size={14} strokeWidth={2} />Year At A Glance</div>
-            <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 850 }}>{currentYear} service calendar</div>
+            <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 700 }}>{currentYear} service calendar</div>
             <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Scheduled, completed, and overdue visits by month.</div>
             <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
               {displayedServices.map((svc) => {
@@ -10855,8 +11046,8 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
                                 textAlign: 'left',
                                 pointerEvents: 'none',
                               }}>
-                                <div style={{ fontSize: 12, fontWeight: 850, lineHeight: 1.25 }}>{detail.type}</div>
-                                <div style={{ marginTop: 6, display: 'grid', gap: 3, fontSize: 12, color: 'rgba(255,255,255,0.86)', lineHeight: 1.35 }}>
+                                <div style={{ fontSize: 14, fontWeight: 700, lineHeight: 1.25 }}>{detail.type}</div>
+                                <div style={{ marginTop: 6, display: 'grid', gap: 3, fontSize: 14, color: 'rgba(255,255,255,0.86)', lineHeight: 1.35 }}>
                                   <span>Date: {detail.date}</span>
                                   <span>Time: {detail.time}</span>
                                   <span>Status: {detail.status}</span>
@@ -10864,8 +11055,8 @@ function MyPlanTab({ customer, focusService, onOpenRequest, refreshCustomer }) {
                               </div>
                             )}
                             <div style={{
-                              fontSize: 10,
-                              fontWeight: isCurrentMonth ? 800 : 600,
+                              fontSize: 14,
+                              fontWeight: isCurrentMonth ? 700 : 600,
                               letterSpacing: '0.02em',
                               color: isCurrentMonth ? B.wavesBlue : 'rgba(4,57,94,0.5)',
                             }}>{month[0]}</div>
@@ -11190,7 +11381,7 @@ function StopsAheadHero({ stopsAhead, routeProgress, techFirst, techApprox, cust
                 <div style={{
                   width: 20, height: 20, borderRadius: '50%', flexShrink: 0,
                   border: `1.5px solid ${B.grayLight}`, color: B.textCaption,
-                  fontSize: 12, fontWeight: 700, display: 'flex',
+                  fontSize: 14, fontWeight: 700, display: 'flex',
                   alignItems: 'center', justifyContent: 'center',
                 }}>
                   {s}
@@ -11371,7 +11562,7 @@ function ServiceTracker() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <div style={{
           display: 'inline-block',
-          fontSize: 12, fontWeight: 700,
+          fontSize: 14, fontWeight: 700,
           letterSpacing: 0, textTransform: 'uppercase',
           color: status.color, background: `${status.color}1A`,
           padding: '6px 12px', borderRadius: 8,
@@ -11395,7 +11586,7 @@ function ServiceTracker() {
                 {tracker.rainChance}% chance of rain — your tech may adjust timing if needed
               </div>
             ) : weather?.forecast?.toLowerCase().includes('rain') && (
-              <div style={{ fontSize: 12, color: B.textCaption, marginTop: 2 }}>Rain possible — tech may adjust timing</div>
+              <div style={{ fontSize: 14, color: B.textCaption, marginTop: 2 }}>Rain possible — tech may adjust timing</div>
             )}
           </div>
         )}
@@ -11410,7 +11601,7 @@ function ServiceTracker() {
         {step <= 2 && (
           <>
             <div style={{
-              fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700,
+              fontSize: 22, fontWeight: 700,
               lineHeight: 1.25, color: B.glassNavy,
             }}>
               Your {svcType.toLowerCase()} is {step === 2 ? 'confirmed' : 'booked'}{tracker.service?.windowStart ? ` for ${window}` : ''}.
@@ -11491,7 +11682,7 @@ function ServiceTracker() {
         {step >= 4 && step < 7 && (
           <>
             <div style={{
-              fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700,
+              fontSize: 22, fontWeight: 700,
               lineHeight: 1.25, color: B.glassNavy,
             }}>
               {techName} is {step === 6 ? 'wrapping up' : step === 5 ? 'servicing your property' : 'on your property'}.
@@ -11509,7 +11700,7 @@ function ServiceTracker() {
         {step === 7 && tracker.state === 'no_show' && (
           <>
             <div style={{
-              fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700,
+              fontSize: 22, fontWeight: 700,
               lineHeight: 1.25, color: B.glassNavy,
             }}>
               We missed you.
@@ -11525,7 +11716,7 @@ function ServiceTracker() {
         {step === 7 && tracker.state === 'cancelled' && (
           <>
             <div style={{
-              fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700,
+              fontSize: 22, fontWeight: 700,
               lineHeight: 1.25, color: B.glassNavy,
             }}>
               This visit was cancelled.
@@ -11540,7 +11731,7 @@ function ServiceTracker() {
         {step === 7 && tracker.state !== 'no_show' && tracker.state !== 'cancelled' && (
           <>
             <div style={{
-              fontFamily: FONTS.heading, fontSize: 22, fontWeight: 700,
+              fontSize: 22, fontWeight: 700,
               lineHeight: 1.25, color: B.glassNavy,
             }}>
               Thanks for choosing Waves.
@@ -11573,7 +11764,7 @@ function ServiceTracker() {
                 width: 56, height: 56, borderRadius: '50%',
                 background: B.glassNavy, color: '#fff',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, flexShrink: 0,
+                fontSize: 22, fontWeight: 700, flexShrink: 0,
               }}>{techInitials}</div>
             )}
             <div>
@@ -11683,7 +11874,7 @@ function ServiceTracker() {
       {notes.length > 0 && (
         <div data-glass="soft" style={subCardBase}>
           <div style={{
-            fontSize: 12, fontWeight: 700, letterSpacing: 0,
+            fontSize: 14, fontWeight: 700, letterSpacing: 0,
             textTransform: 'uppercase', color: B.wavesBlue, marginBottom: 8,
           }}>Live updates</div>
           {notes.map((n, i) => (
@@ -11727,7 +11918,7 @@ function ServiceTracker() {
           any summary data would describe work that didn't happen */}
       {step === 7 && tracker.state !== 'cancelled' && summary && (
         <div data-glass="soft" style={{ ...subCardBase, background: GLASS_SUBTLE, borderColor: '#E7E2D7' }}>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10, marginBottom: 8 }}><Icon name="clipboard" size={14} strokeWidth={2} />Service summary</div>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10, marginBottom: 8 }}><Icon name="clipboard" size={14} strokeWidth={2} />Service summary</div>
           {summary.productsApplied?.length > 0 && (
             <div style={{ marginBottom: 10 }}>
               <div style={{ fontSize: 14, color: B.textBody, fontWeight: 600, marginBottom: 6 }}>Products</div>
@@ -11892,7 +12083,7 @@ function ReferTab({ customer, onSwitchTab }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
   };
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
@@ -11903,7 +12094,7 @@ function ReferTab({ customer, onSwitchTab }) {
     boxShadow: 'none',
     padding: '10px 16px',
     fontSize: 14,
-    minHeight: 40,
+    minHeight: 44,
     position: 'relative',
   };
   const secondaryButton = {
@@ -11914,7 +12105,7 @@ function ReferTab({ customer, onSwitchTab }) {
     borderRadius: 10,
     boxShadow: 'none',
     padding: '10px 14px',
-    fontSize: 14, minHeight: 40,
+    fontSize: 14, minHeight: 44,
   };
   const money = (n, digits = 0) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
   const cents = (n, digits = 0) => money(Number(n || 0) / 100, digits);
@@ -12037,7 +12228,7 @@ function ReferTab({ customer, onSwitchTab }) {
           background: notice.type === 'error' ? `${B.red}10` : GLASS_SUBTLE,
           color: notice.type === 'error' ? B.red : B.green,
           fontSize: 14,
-          fontWeight: 800,
+          fontWeight: 700,
         }}>
           {notice.text}
         </div>
@@ -12046,17 +12237,9 @@ function ReferTab({ customer, onSwitchTab }) {
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0, flex: '1 1 300px' }}>
-            <div style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '6px 10px',
-              borderRadius: 8,
-              background: PORTAL_SHELL.soft,
-              border: `1px solid ${PORTAL_SHELL.softBorder}`,
-              color: B.glassNavy,
-              fontSize: 12,
-              fontWeight: 850,
+            <div data-gt="eyebrow" style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              color: PORTAL_SHELL.muted, fontSize: 14, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase',
             }}>
               <Icon name="gift" size={14} strokeWidth={2} />
               Referral Program
@@ -12064,7 +12247,6 @@ function ReferTab({ customer, onSwitchTab }) {
             <h1 style={{
               margin: '12px 0 8px',
               color: B.glassNavy,
-              fontFamily: FONTS.heading,
               fontSize: compact ? 28 : 34,
               lineHeight: 1.1,
               letterSpacing: 0,
@@ -12085,13 +12267,13 @@ function ReferTab({ customer, onSwitchTab }) {
             border: `1px solid ${availableBalance > 0 ? '#E7E2D7' : '#E7E2D7'}`,
             boxSizing: 'border-box',
           }}>
-            <div style={{ fontSize: 12, color: B.glassNavy, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <div style={{ fontSize: 14, color: B.glassNavy, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>
               Available credit
             </div>
-            <div style={{ marginTop: 3, fontSize: 24, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>
+            <div style={{ marginTop: 3, fontSize: 24, fontWeight: 700, color: B.glassNavy, fontFamily: FONTS.ui }}>
               {money(availableBalance)}
             </div>
-            <div style={{ marginTop: 2, fontSize: 12, color: muted }}>
+            <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
               {money(lifetimeEarned)} earned all time
             </div>
           </div>
@@ -12117,9 +12299,9 @@ function ReferTab({ customer, onSwitchTab }) {
               minHeight: compact ? 0 : 74,
               boxSizing: 'border-box',
             }}>
-              <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
-              <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 17, fontWeight: 850, lineHeight: 1.15, fontFamily: FONTS.ui }}>{item.value}</div>
-              <div style={{ marginTop: 3, color: muted, fontSize: 12 }}>{item.sub}</div>
+              <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>{item.label}</div>
+              <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 17, fontWeight: 700, lineHeight: 1.15, fontFamily: FONTS.ui }}>{item.value}</div>
+              <div style={{ marginTop: 3, color: muted, fontSize: 14 }}>{item.sub}</div>
             </div>
           ))}
         </div>
@@ -12128,7 +12310,7 @@ function ReferTab({ customer, onSwitchTab }) {
       <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16, alignItems: 'stretch' }}>
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={sectionTitle}><Icon name="share" size={14} strokeWidth={2} />Share Link</div>
-          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Your referral code</div>
+          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Your referral code</div>
           <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
             Send the link directly or copy it into your own message.
           </div>
@@ -12143,8 +12325,8 @@ function ReferTab({ customer, onSwitchTab }) {
             border: '1px solid #E7E2D7',
           }}>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>Code</div>
-              <div style={{ marginTop: 3, fontSize: 18, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>Code</div>
+              <div style={{ marginTop: 3, fontSize: 18, fontWeight: 700, color: B.glassNavy, fontFamily: FONTS.ui, overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 {referralCode || 'Auto-assigned'}
               </div>
             </div>
@@ -12162,7 +12344,7 @@ function ReferTab({ customer, onSwitchTab }) {
             borderRadius: 8,
             border: '1px solid #E7E2D7',
             color: muted,
-            fontSize: 12,
+            fontSize: 14,
             lineHeight: 1.45,
             overflowWrap: 'anywhere',
           }}>
@@ -12180,12 +12362,12 @@ function ReferTab({ customer, onSwitchTab }) {
 
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={sectionTitle}><Icon name="smartphone" size={14} strokeWidth={2} />Send SMS Invite</div>
-          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Text a friend</div>
+          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Text a friend</div>
           <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
             We will send a short referral text from {customerFirstName}.
           </div>
           <form onSubmit={handleSubmit} style={{ marginTop: 16 }}>
-            <label htmlFor="portal-referral-name" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <label htmlFor="portal-referral-name" style={{ fontSize: 14, fontWeight: 700, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
               Friend's Name
             </label>
             <input
@@ -12210,7 +12392,7 @@ function ReferTab({ customer, onSwitchTab }) {
                 marginBottom: 12,
               }}
             />
-            <label htmlFor="portal-referral-phone" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <label htmlFor="portal-referral-phone" style={{ fontSize: 14, fontWeight: 700, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
               Phone Number
             </label>
             <input
@@ -12250,12 +12432,12 @@ function ReferTab({ customer, onSwitchTab }) {
 
       <section data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}><Icon name="mail" size={14} strokeWidth={2} />Send Email Invite</div>
-        <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Email a friend</div>
+        <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Email a friend</div>
         <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
           We will send a branded referral email from Waves with your link and their new-customer offer.
         </div>
         <form onSubmit={handleEmailSubmit} style={{ marginTop: 16 }}>
-          <label htmlFor="portal-referral-email-name" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
+          <label htmlFor="portal-referral-email-name" style={{ fontSize: 14, fontWeight: 700, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
             Friend's Name
           </label>
           <input
@@ -12280,7 +12462,7 @@ function ReferTab({ customer, onSwitchTab }) {
               marginBottom: 12,
             }}
           />
-          <label htmlFor="portal-referral-email" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
+          <label htmlFor="portal-referral-email" style={{ fontSize: 14, fontWeight: 700, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
             Email Address
           </label>
           <input
@@ -12321,17 +12503,17 @@ function ReferTab({ customer, onSwitchTab }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
           <div>
             <div style={sectionTitle}><Icon name="trophy" size={14} strokeWidth={2} />Milestone</div>
-            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
+            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
               {milestoneMeta[currentMilestone]?.label || 'Getting started'}
             </div>
           </div>
           {nextMilestone ? (
             <div style={{ color: muted, fontSize: 14, lineHeight: 1.4, textAlign: compact ? 'left' : 'right' }}>
               {milestoneRemaining} more converted referral{milestoneRemaining === 1 ? '' : 's'} to {milestoneMeta[nextMilestone.level]?.label || 'the next level'}
-              {nextMilestone.bonus ? <div style={{ color: B.glassNavy, fontWeight: 850 }}>Bonus {cents(nextMilestone.bonus)}</div> : null}
+              {nextMilestone.bonus ? <div style={{ color: B.glassNavy, fontWeight: 700 }}>Bonus {cents(nextMilestone.bonus)}</div> : null}
             </div>
           ) : (
-            <div style={{ color: B.glassNavy, fontSize: 14, fontWeight: 850 }}>Top referral level reached</div>
+            <div style={{ color: B.glassNavy, fontSize: 14, fontWeight: 700 }}>Top referral level reached</div>
           )}
         </div>
         <div style={{ height: 8, borderRadius: 999, background: subtle, overflow: 'hidden', border: '1px solid #E7E2D7' }}>
@@ -12343,7 +12525,7 @@ function ReferTab({ customer, onSwitchTab }) {
             transition: 'width 0.4s ease',
           }} />
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 7, color: muted, fontSize: 12 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 7, color: muted, fontSize: 14 }}>
           <span>{converted} converted</span>
           <span>{milestoneThreshold ? `${milestoneThreshold} target` : 'Complete'}</span>
         </div>
@@ -12353,7 +12535,7 @@ function ReferTab({ customer, onSwitchTab }) {
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
           <div>
             <div style={sectionTitle}><Icon name="gift" size={14} strokeWidth={2} />Referral Activity</div>
-            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
+            <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
               {referrals.length ? `${referrals.length} referral${referrals.length === 1 ? '' : 's'}` : 'No referrals yet'}
             </div>
             <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Where each referral stands.</div>
@@ -12384,7 +12566,7 @@ function ReferTab({ customer, onSwitchTab }) {
               <Icon name="gift" size={18} strokeWidth={2} />
             </span>
             <div>
-              <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Start with one neighbor</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Start with one neighbor</div>
               <div style={{ marginTop: 3, fontSize: 14, color: muted, lineHeight: 1.45 }}>
                 Copy your link or send an invite above. New referrals will appear here as they move through the signup process.
               </div>
@@ -12408,21 +12590,21 @@ function ReferTab({ customer, onSwitchTab }) {
                   alignItems: 'flex-start',
                 }}>
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{nameLabel}</div>
-                    <div style={{ marginTop: 3, fontSize: 12, color: muted }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>{nameLabel}</div>
+                    <div style={{ marginTop: 3, fontSize: 14, color: muted }}>
                       {/* No phone number here (owner 08-28) — the referred neighbor's contact isn't the referrer's to see. */}
                       {created && !isNaN(created) ? created.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : ''}
                     </div>
                     {rewardEarned && reward > 0 && (
-                      <div style={{ marginTop: 6, fontSize: 12, color: B.glassNavy, fontWeight: 850 }}>
+                      <div style={{ marginTop: 6, fontSize: 14, color: B.glassNavy, fontWeight: 700 }}>
                         {money(reward)} credit earned
                       </div>
                     )}
                   </div>
                   <span style={{
                     flexShrink: 0,
-                    fontSize: 12,
-                    fontWeight: 850,
+                    fontSize: 14,
+                    fontWeight: 700,
                     padding: '5px 9px',
                     borderRadius: 8,
                     background: s.bg,
@@ -12438,7 +12620,7 @@ function ReferTab({ customer, onSwitchTab }) {
 
       <section data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}><Icon name="bulb" size={14} strokeWidth={2} />How It Works</div>
-        <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Share, they start, you earn</div>
+        <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Share, they start, you earn</div>
         <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Three steps from share to credit.</div>
         <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: compact ? '1fr' : `repeat(${rewardPerReferral > 0 ? 3 : 2}, 1fr)`, gap: 10 }}>
           {[
@@ -12466,7 +12648,7 @@ function ReferTab({ customer, onSwitchTab }) {
               }}>
                 <Icon name={item.icon} size={17} strokeWidth={2} />
               </span>
-              <div style={{ marginTop: 10, fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{item.title}</div>
+              <div style={{ marginTop: 10, fontSize: 14, fontWeight: 700, color: B.glassNavy }}>{item.title}</div>
               <div style={{ marginTop: 3, fontSize: 14, color: muted, lineHeight: 1.45 }}>{item.text}</div>
             </div>
           ))}
@@ -12490,7 +12672,7 @@ function TermiteBondCard({ bonds, compact, card, sectionTitle, primaryButton, se
   return (
     <section data-glass="card" style={{ ...card, padding: 20 }}>
       <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Termite Bond</div>
-      <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>{termLabel}</div>
+      <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>{termLabel}</div>
       <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Your bond term and renewal date.</div>
       {bonds.map((bond, index) => {
         const renewalDiff = etDayDiff(bond.renewsAt);
@@ -12519,8 +12701,8 @@ function TermiteBondCard({ bonds, compact, card, sectionTitle, primaryButton, se
                 padding: 14,
                 gridColumn: compact && arr.length % 2 === 1 && idx === arr.length - 1 ? '1 / -1' : 'auto',
               }}>
-                <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
-                <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 18, fontWeight: 850, lineHeight: 1.1 }}>{item.value}</div>
+                <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>{item.label}</div>
+                <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 18, fontWeight: 700, lineHeight: 1.1 }}>{item.value}</div>
               </div>
             ))}
           </div>
@@ -12572,7 +12754,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
   };
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
@@ -12581,7 +12763,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
     border: 'none',
     borderRadius: 10,
     boxShadow: 'none',
-    padding: '10px 16px', minHeight: 40,
+    padding: '10px 16px', minHeight: 44,
     fontSize: 14,
     position: 'relative',
     letterSpacing: 0,
@@ -12594,7 +12776,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
     borderRadius: 10,
     boxShadow: 'none',
     padding: '10px 14px',
-    fontSize: 14, minHeight: 40,
+    fontSize: 14, minHeight: 44,
     letterSpacing: 0,
   };
 
@@ -12882,7 +13064,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
           background: notice.type === 'error' ? `${B.red}10` : GLASS_SUBTLE,
           color: notice.type === 'error' ? B.red : B.green,
           fontSize: 14,
-          fontWeight: 800,
+          fontWeight: 700,
         }}>
           {notice.text}
         </div>
@@ -12891,17 +13073,9 @@ function DocumentsTab({ customer, onSwitchTab }) {
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0, flex: '1 1 300px' }}>
-            <div style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '6px 10px',
-              borderRadius: 8,
-              background: PORTAL_SHELL.soft,
-              border: `1px solid ${PORTAL_SHELL.softBorder}`,
-              color: B.glassNavy,
-              fontSize: 12,
-              fontWeight: 850,
+            <div data-gt="eyebrow" style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              color: PORTAL_SHELL.muted, fontSize: 14, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase',
             }}>
               <Icon name="document" size={14} strokeWidth={2} />
               Document Center
@@ -12909,7 +13083,6 @@ function DocumentsTab({ customer, onSwitchTab }) {
             <h1 style={{
               margin: '12px 0 8px',
               color: B.glassNavy,
-              fontFamily: FONTS.heading,
               fontSize: compact ? 28 : 34,
               lineHeight: 1.1,
               letterSpacing: 0,
@@ -12928,13 +13101,13 @@ function DocumentsTab({ customer, onSwitchTab }) {
             border: '1px solid #E7E2D7',
             boxSizing: 'border-box',
           }}>
-            <div style={{ fontSize: 12, color: muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>
+            <div style={{ fontSize: 14, color: muted, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>
               On file
             </div>
-            <div style={{ marginTop: 3, fontSize: 24, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>
+            <div style={{ marginTop: 3, fontSize: 24, fontWeight: 700, color: B.glassNavy, fontFamily: FONTS.ui }}>
               {currentTotal}
             </div>
-            <div style={{ marginTop: 2, fontSize: 12, color: muted }}>
+            <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
               {totalDocs > currentTotal ? `${totalDocs} total on file` : 'Customer documents'}
             </div>
           </div>
@@ -12960,19 +13133,19 @@ function DocumentsTab({ customer, onSwitchTab }) {
               minHeight: compact ? 0 : 78,
               boxSizing: 'border-box',
             }}>
-              <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
+              <div style={{ fontSize: 14, color: muted, fontWeight: 700 }}>{item.label}</div>
               <div style={{
                 marginTop: 6,
                 color: B.glassNavy,
                 fontSize: typeof item.value === 'number' ? 18 : 14,
-                fontWeight: 850,
+                fontWeight: 700,
                 lineHeight: 1.2,
                 fontFamily: FONTS.ui,
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
               }}>{item.value}</div>
-              <div style={{ marginTop: 3, color: muted, fontSize: 12, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.sub}</div>
+              <div style={{ marginTop: 3, color: muted, fontSize: 14, lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.sub}</div>
             </div>
           ))}
         </div>
@@ -12983,7 +13156,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
             Visits / Payment History filters (owner 08-28). */}
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '2fr 1fr', gap: 10 }}>
           <label style={{ display: 'block', minWidth: 0 }}>
-            <div style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6 }}>Search</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6 }}>Search</div>
             <input
               id="portal-document-search"
               name="documentSearch"
@@ -13001,7 +13174,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
             />
           </label>
           <label style={{ display: 'block', minWidth: 0 }}>
-            <div style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6 }}>Type</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6 }}>Type</div>
             <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)} aria-label="Document type" className="waves-focus-ring" style={{
               width: '100%', minHeight: 44, padding: '10px 12px', borderRadius: 8,
               border: '1px solid #D8D0C0', background: '#fff', color: B.glassNavy,
@@ -13012,7 +13185,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
           </label>
         </div>
         {hasActiveFilter && (
-          <div style={{ marginTop: 10, fontSize: 12, color: muted }}>
+          <div style={{ marginTop: 10, fontSize: 14, color: muted }}>
             Showing {resultCount} matching document{resultCount === 1 ? '' : 's'}.
           </div>
         )}
@@ -13029,7 +13202,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
       }}>
         <div style={{ minWidth: 0, flex: '1 1 100%' }}>
           <div style={sectionTitle}><Icon name="clipboard" size={14} strokeWidth={2} />Service Reports</div>
-          <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Recent service reports</div>
+          <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Recent service reports</div>
           <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Every completed visit’s report is here and under Visits → Completed.</div>
         </div>
         <button type="button" onClick={() => onSwitchTab?.('services')} data-glass-accent="" style={{ ...secondaryButton, position: 'relative', width: '100%', minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -13080,7 +13253,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
       }}>
         <div style={{ minWidth: 0, flex: '1 1 100%' }}>
           <div style={sectionTitle}><Icon name="money" size={14} strokeWidth={2} />Invoices</div>
-          <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Invoices and receipts</div>
+          <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Invoices and receipts</div>
           <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Every invoice and receipt lives in Billing.</div>
         </div>
         <button type="button" onClick={() => onSwitchTab?.('billing')} data-glass-accent="" style={{ ...secondaryButton, position: 'relative', width: '100%', minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -13100,7 +13273,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
       }}>
         <div style={{ minWidth: 0, flex: '1 1 100%' }}>
           <div style={sectionTitle}><Icon name="document" size={14} strokeWidth={2} />Document Request</div>
-          <div style={{ marginTop: 6, fontSize: 20, color: B.glassNavy, fontWeight: 850 }}>Request paperwork from Waves</div>
+          <div style={{ marginTop: 6, fontSize: 20, color: B.glassNavy, fontWeight: 700 }}>Request paperwork from Waves</div>
           <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>
             Tell us what you need and we will upload it to your portal.
           </div>
@@ -13158,7 +13331,7 @@ function DocumentPreviewOverlay({ preview, onClose, onError }) {
     boxShadow: 'none',
     padding: '8px 12px',
     fontSize: 14,
-    minHeight: 38,
+    minHeight: 44,
     letterSpacing: 0,
   };
 
@@ -13176,7 +13349,7 @@ function DocumentPreviewOverlay({ preview, onClose, onError }) {
         background: B.white, borderBottom: '1px solid #E7E2D7', flexShrink: 0,
         position: 'relative',
       }}>
-        <div style={{ flex: 1, minWidth: 0, fontSize: 15, fontWeight: 850, color: B.glassNavy, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        <div style={{ flex: 1, minWidth: 0, fontSize: 15, fontWeight: 700, color: B.glassNavy, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
           {doc.title || 'Document'}
         </div>
         {canSave && (
@@ -13212,7 +13385,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
   };
   const actionButton = {
     ...PORTAL_BUTTON_BASE,
@@ -13223,7 +13396,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
     boxShadow: 'none',
     padding: '8px 12px',
     fontSize: 14,
-    minHeight: 40,
+    minHeight: 44,
     letterSpacing: 0,
   };
 
@@ -13270,7 +13443,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
           </span>
           <span>
             <span style={sectionTitle}><Icon name="document" size={14} strokeWidth={2} />{section.label}</span>
-            <span style={{ display: 'block', marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
+            <span style={{ display: 'block', marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
               {items.length} document{items.length === 1 ? '' : 's'}
             </span>
           </span>
@@ -13328,12 +13501,12 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                   )}
                   <div style={{ padding: '10px 12px 12px' }}>
                     <div style={{
-                      fontSize: 14, fontWeight: 850, color: B.glassNavy, lineHeight: 1.3,
+                      fontSize: 14, fontWeight: 700, color: B.glassNavy, lineHeight: 1.3,
                       overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                     }}>
                       {(doc.title || '').replace(/^Visit Report — /, '')}
                     </div>
-                    <div style={{ marginTop: 3, fontSize: 12, color: muted }}>{formatDate(doc)}</div>
+                    <div style={{ marginTop: 3, fontSize: 14, color: muted }}>{formatDate(doc)}</div>
                   </div>
                 </button>
               ))}
@@ -13394,7 +13567,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{
                         fontSize: 15,
-                        fontWeight: 850,
+                        fontWeight: 700,
                         color: B.glassNavy,
                         lineHeight: 1.25,
                       }}>{doc.title}</div>
@@ -13403,14 +13576,14 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                           {doc.description}
                         </div>
                       )}
-                      <div style={{ fontSize: 12, color: muted, marginTop: 5, fontWeight: 700 }}>
+                      <div style={{ fontSize: 14, color: muted, marginTop: 5, fontWeight: 700 }}>
                         {meta.join(' - ')}
                       </div>
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
                         {expBadge && (
                           <span style={{
-                            fontSize: 12,
-                            fontWeight: 850,
+                            fontSize: 14,
+                            fontWeight: 700,
                             padding: '4px 8px',
                             borderRadius: 8,
                             background: expBadge.bg,
@@ -13419,8 +13592,8 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                         )}
                         {doc.isSharedWithThirdParty && (
                           <span style={{
-                            fontSize: 12,
-                            fontWeight: 850,
+                            fontSize: 14,
+                            fontWeight: 700,
                             padding: '4px 8px',
                             borderRadius: 8,
                             background: '#F8FCFE',
@@ -13429,8 +13602,8 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                         )}
                         {isInsurance && (doc.licenseNumber || customer?.licenseNumber) && (
                           <span style={{
-                            fontSize: 12,
-                            fontWeight: 850,
+                            fontSize: 14,
+                            fontWeight: 700,
                             padding: '4px 8px',
                             borderRadius: 8,
                             background: subtle,
@@ -13489,7 +13662,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
                         )}
                       </div>
                     ) : (
-                      <span style={{ fontSize: 12, color: muted, fontWeight: 700, flexShrink: 0, alignSelf: 'center' }}>
+                      <span style={{ fontSize: 14, color: muted, fontWeight: 700, flexShrink: 0, alignSelf: 'center' }}>
                         Not available online
                       </span>
                     )}
@@ -13634,7 +13807,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     position: 'relative',
   };
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
   };
   const helperText = {
     marginTop: 4,
@@ -13654,14 +13827,13 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     flexShrink: 0,
   };
   const secondaryAction = {
-    minHeight: 40,
+    minHeight: 44,
     borderRadius: 8,
     border: `1px solid ${PORTAL_SHELL.borderStrong}`,
     background: PORTAL_SHELL.surface,
     color: PORTAL_SHELL.text,
-    fontFamily: FONTS.heading,
     fontSize: 14,
-    fontWeight: 850,
+    fontWeight: 700,
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -13871,7 +14043,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
               <Icon name="wrench" size={17} strokeWidth={2} />
             </span>
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 20, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading, lineHeight: 1.2 }}>New Request</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2 }}>New Request</div>
               <div style={{ fontSize: 14, color: muted, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 Service, scheduling, and account help
               </div>
@@ -13903,7 +14075,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                   <Icon name="check" size={30} strokeWidth={2.2} />
                 </span>
               </div>
-              <div style={{ fontSize: 22, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, marginTop: 16 }}>Request sent</div>
+              <div style={{ fontSize: 22, fontWeight: 700, color: B.glassNavy, marginTop: 16 }}>Request sent</div>
               <div style={{ fontSize: 15, color: B.textBody, marginTop: 8, lineHeight: 1.55 }}>
                 Waves will review this and follow up directly.
                 {urgency === 'urgent' && isProblemCategory ? ' Urgent requests are prioritized for the next available response.' : ''}
@@ -13936,11 +14108,11 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
                       <span style={iconTile}><Icon name="house" size={16} strokeWidth={2} /></span>
                       <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>
                           {customerName || 'Waves customer'}
                         </div>
                         {propertyAddress && (
-                          <div style={{ fontSize: 12, color: muted, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          <div style={{ fontSize: 14, color: muted, marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                             {propertyAddress}
                           </div>
                         )}
@@ -13953,13 +14125,13 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     }}>
                       <div style={{ background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)', borderRadius: 8, padding: 10 }}>
                         <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Plan</div>
-                        <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>
+                        <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 700 }}>
                           {activeTierName ? `WaveGuard ${tierName}` : 'No active plan'}
                         </div>
                       </div>
                       <div style={{ background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)', borderRadius: 8, padding: 10 }}>
                         <div style={sectionTitle}><Icon name="clock" size={14} strokeWidth={2} />Last service</div>
-                        <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>{lastServiceDateStr || 'Checking...'}</div>
+                        <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 700 }}>{lastServiceDateStr || 'Checking...'}</div>
                       </div>
                     </div>
                   </div>
@@ -14007,8 +14179,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                           <Icon name={c.icon} size={16} strokeWidth={2} />
                         </span>
                         <span>
-                          <span style={{ display: 'block', fontSize: 14, fontWeight: 850, fontFamily: FONTS.heading }}>{compact ? c.shortLabel : c.label}</span>
-                          {!compact && <span style={{ display: 'block', marginTop: 3, fontSize: 12, color: muted, lineHeight: 1.35 }}>{c.description}</span>}
+                          <span style={{ display: 'block', fontSize: 14, fontWeight: 700 }}>{compact ? c.shortLabel : c.label}</span>
+                          {!compact && <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: muted, lineHeight: 1.35 }}>{c.description}</span>}
                         </span>
                       </button>
                     );
@@ -14026,7 +14198,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                   <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
                     <span style={{ ...iconTile, background: B.greenLight, color: B.glassNavy }}><Icon name="checkCircle" size={16} strokeWidth={2} /></span>
                     <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.successText }}>Covered — book your free re-service</div>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: PORTAL_SHELL.successText }}>Covered — book your free re-service</div>
                       <div style={{ marginTop: 2, fontSize: 14, color: PORTAL_SHELL.successText, lineHeight: 1.45 }}>
                         {activeTierName
                           ? `Re-services are included with your WaveGuard ${tierName} plan.`
@@ -14057,8 +14229,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     {reschedulableVisits.map(v => (
                       <div key={v.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
                         <div style={{ minWidth: 0 }}>
-                          <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{v.serviceType || 'Service visit'}</div>
-                          <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>{fmtDate(v.date, { weekday: 'short', month: 'short', day: 'numeric' })}</div>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>{v.serviceType || 'Service visit'}</div>
+                          <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>{fmtDate(v.date, { weekday: 'short', month: 'short', day: 'numeric' })}</div>
                         </div>
                         <a href={v.rescheduleUrl} data-glass-accent="" style={{ ...secondaryAction, padding: '0 12px', flexShrink: 0 }}>
                           Reschedule
@@ -14083,7 +14255,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     }}>
                       <span style={{ ...iconTile, background: B.greenLight, color: B.glassNavy }}><Icon name="checkCircle" size={16} strokeWidth={2} /></span>
                       <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.successText }}>Covered callback</div>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: PORTAL_SHELL.successText }}>Covered callback</div>
                         <div style={{ marginTop: 2, fontSize: 14, color: PORTAL_SHELL.successText, lineHeight: 1.4 }}>
                           {activeTierName
                             ? `Callbacks are included with your WaveGuard ${tierName} plan when an issue returns soon after service.`
@@ -14104,7 +14276,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     }}>
                       <span style={iconTile}><Icon name="calendar" size={16} strokeWidth={2} /></span>
                       <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.text }}>Upcoming visit</div>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: PORTAL_SHELL.text }}>Upcoming visit</div>
                         <div style={{ marginTop: 2, fontSize: 14, color: PORTAL_SHELL.text, lineHeight: 1.4 }}>
                           Your next visit is {nextServiceDateStr}. Tell us if this can wait for that visit or needs a separate stop.
                         </div>
@@ -14148,8 +14320,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                             <Icon name={u.icon} size={16} strokeWidth={2} />
                           </span>
                           <span style={{ minWidth: 0 }}>
-                            <span style={{ display: 'block', fontSize: 14, fontWeight: 850, color: active ? u.color : B.glassNavy }}>{u.label}</span>
-                            <span style={{ display: 'block', marginTop: 2, fontSize: 12, color: muted, lineHeight: 1.35 }}>{u.desc}</span>
+                            <span style={{ display: 'block', fontSize: 14, fontWeight: 700, color: active ? u.color : B.glassNavy }}>{u.label}</span>
+                            <span style={{ display: 'block', marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.35 }}>{u.desc}</span>
                           </span>
                         </button>
                       );
@@ -14198,7 +14370,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                   display: 'flex',
                   justifyContent: 'space-between',
                   gap: 10,
-                  fontSize: 12,
+                  fontSize: 14,
                   color: description.length > 450 ? B.red : muted,
                 }}>
                   <span>{description.trim() ? 'Enough detail helps dispatch route this quickly.' : 'A short description is required.'}</span>
@@ -14221,16 +14393,15 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                           aria-pressed={active}
                           onClick={() => toggleLocation(l.value)}
                           style={{
-                            minHeight: 36,
+                            minHeight: 44,
                             padding: '8px 10px',
                             borderRadius: 8,
                             border: `1px solid ${active ? B.yellow : '#D8D0C0'}`,
                             background: active ? '#F8FCFE' : '#fff',
                             color: active ? B.glassNavy : B.textBody,
                             cursor: 'pointer',
-                            fontSize: 12,
-                            fontWeight: 850,
-                            fontFamily: FONTS.heading,
+                            fontSize: 14,
+                            fontWeight: 700,
                           }}
                         >
                           {l.label}
@@ -14248,7 +14419,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                     <div style={sectionTitle}><Icon name="camera" size={14} strokeWidth={2} />Photos</div>
                     <div style={helperText}>Optional, up to {photoLimit}. Photos help the technician identify the issue before arrival.</div>
                   </div>
-                  <div style={{ fontSize: 12, color: muted, fontWeight: 850, whiteSpace: 'nowrap' }}>{photos.length}/{photoLimit}</div>
+                  <div style={{ fontSize: 14, color: muted, fontWeight: 700, whiteSpace: 'nowrap' }}>{photos.length}/{photoLimit}</div>
                 </div>
                 <input
                   ref={fileRef}
@@ -14279,14 +14450,13 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                         alignItems: 'center',
                         justifyContent: 'center',
                         gap: 6,
-                        fontFamily: FONTS.heading,
-                        fontWeight: 850,
+                        fontWeight: 700,
                         opacity: photoProcessing ? 0.6 : 1,
                       }}
                     >
                       <Icon name="camera" size={22} strokeWidth={2} />
                       <span style={{ fontSize: 14 }}>{photoProcessing ? 'Adding…' : 'Add photos'}</span>
-                      <span style={{ fontSize: 12, color: muted, fontWeight: 700 }}>{photosRemaining} remaining</span>
+                      <span style={{ fontSize: 14, color: muted, fontWeight: 700 }}>{photosRemaining} remaining</span>
                     </button>
                   )}
                   <div style={{
@@ -14402,8 +14572,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                   background: B.glassNavy,
                   color: '#fff',
                   fontSize: 14,
-                  fontWeight: 850,
-                  fontFamily: FONTS.heading,
+                  fontWeight: 700,
                   cursor: 'pointer',
                   textDecoration: 'none',
                   display: 'inline-flex',
@@ -14423,8 +14592,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                 background: canSubmit ? B.glassNavy : '#D8D0C0',
                 color: '#fff',
                 fontSize: 14,
-                fontWeight: 850,
-                fontFamily: FONTS.heading,
+                fontWeight: 700,
                 cursor: canSubmit ? 'pointer' : 'not-allowed',
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -14474,8 +14642,8 @@ function MyRequestsCard() {
         background: B.white, borderRadius: 8, padding: 16,
         border: '1px solid #E7E2D7', boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
       }}>
-        <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Recent requests couldn&rsquo;t be loaded</div>
-        <div style={{ fontSize: 12, color: '#475569', marginTop: 4 }}>A submitted request is not affected. Retry to view its receipt.</div>
+        <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Recent requests couldn&rsquo;t be loaded</div>
+        <div style={{ fontSize: 14, color: '#475569', marginTop: 4 }}>A submitted request is not affected. Retry to view its receipt.</div>
         <button data-glass-accent="" type="button" onClick={loadRequests} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, padding: '8px 12px' }}>Try again</button>
       </section>
     );
@@ -14517,7 +14685,7 @@ function MyRequestsCard() {
           <Icon name="clipboard" size={18} strokeWidth={2} />
         </span>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>My Requests</div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: B.glassNavy }}>My Requests</div>
           <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>We've got your recent requests — our team will follow up directly.</div>
         </div>
       </div>
@@ -14534,14 +14702,14 @@ function MyRequestsCard() {
             }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy, lineHeight: 1.35 }}>{r.subject}</div>
-                  <div style={{ fontSize: 12, color: muted, marginTop: 4 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy, lineHeight: 1.35 }}>{r.subject}</div>
+                  <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
                     {r.category?.replace(/_/g, ' ')} · {created.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                   </div>
                 </div>
                 <span style={{
-                  fontSize: 12,
-                  fontWeight: 850,
+                  fontSize: 14,
+                  fontWeight: 700,
                   padding: '5px 8px',
                   borderRadius: 8,
                   background: GLASS_SUBTLE,
@@ -14551,7 +14719,7 @@ function MyRequestsCard() {
                 }}>Received</span>
               </div>
               {r.urgency === 'urgent' && (
-                <div style={{ marginTop: 8, fontSize: 12, color: B.red, fontWeight: 850, display: 'flex', alignItems: 'center', gap: 5 }}>
+                <div style={{ marginTop: 8, fontSize: 14, color: B.red, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 5 }}>
                   <Icon name="warning" size={13} strokeWidth={2} /> Urgent priority
                 </div>
               )}
@@ -14598,7 +14766,7 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, tabs = PRIMARY
         justifyContent: 'center', gap: 4, padding: '7px 2px', border: 'none',
         background: 'transparent', cursor: 'pointer', minHeight: 58,
         color: isActive ? PORTAL_SHELL.text : PORTAL_SHELL.muted,
-        fontFamily: FONTS.heading, transition: 'color 0.15s ease',
+        transition: 'color 0.15s ease',
         position: 'relative',
       }}
     >
@@ -14611,10 +14779,10 @@ function BottomNav({ activeTab, onSelect, onOpenMore, moreActive, tabs = PRIMARY
         background: B.yellow,
       }} />}
       <Icon name={t.icon} size={21} strokeWidth={isActive ? 2.25 : 1.75} />
-      {/* 12px is the ceiling that keeps "Billing"/"Visits" fitting 5-across
-          on 320px — tab captions only, never body copy. */}
+      {/* 14px label floor (owner 2026-09-03); the ellipsis below is the
+          fallback if a caption ever outgrows its sixth of a 320px bar. */}
       <span style={{
-        fontSize: 12, fontWeight: isActive ? 850 : 700, letterSpacing: 0,
+        fontSize: 14, fontWeight: isActive ? 700 : 600, letterSpacing: 0,
         maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis',
         whiteSpace: 'nowrap', lineHeight: 1.2,
       }}>{t.label}</span>
@@ -14671,9 +14839,8 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, tabs = MOR
     border: `1px solid ${PORTAL_SHELL.borderStrong}`,
     background: PORTAL_SHELL.surface,
     color: PORTAL_SHELL.text,
-    fontFamily: FONTS.heading,
     fontSize: 14,
-    fontWeight: 850,
+    fontWeight: 700,
     display: 'inline-flex',
     alignItems: 'center',
     justifyContent: 'center',
@@ -14717,7 +14884,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, tabs = MOR
         }} />
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, marginBottom: 12 }}>
           <div>
-            <div style={{ fontSize: 20, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading, lineHeight: 1.15 }}>Your Account</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.15 }}>Your Account</div>
             <div style={{ marginTop: 3, fontSize: 14, color: muted }}>Documents, your property, and help when you need it.</div>
           </div>
           <ShellCloseButton onClick={onClose} label="Close more menu" />
@@ -14745,8 +14912,8 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, tabs = MOR
                   <Icon name={t.icon} size={18} strokeWidth={2} />
                 </span>
                 <span style={{ minWidth: 0, flex: 1 }}>
-                  <span style={{ display: 'block', fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.text }}>{t.label}</span>
-                  <span style={{ display: 'block', marginTop: 2, fontSize: 12, color: muted, lineHeight: 1.35 }}>{t.description}</span>
+                  <span style={{ display: 'block', fontSize: 14, fontWeight: 700, color: PORTAL_SHELL.text }}>{t.label}</span>
+                  <span style={{ display: 'block', marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.35 }}>{t.description}</span>
                 </span>
                 <Icon name="chevronRight" size={17} strokeWidth={2} style={{ color: muted }} />
               </button>
@@ -14758,8 +14925,8 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, tabs = MOR
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={iconTile}><Icon name="sos" size={18} strokeWidth={2} /></span>
             <div>
-              <div style={{ fontSize: 12, color: muted, fontWeight: 850, textTransform: 'uppercase', letterSpacing: 0 }}>Support</div>
-              <div style={{ marginTop: 2, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>Need help with service?</div>
+              <div style={{ fontSize: 14, color: muted, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0 }}>Support</div>
+              <div style={{ marginTop: 2, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 700 }}>Need help with service?</div>
             </div>
           </div>
           <div style={{
@@ -14792,7 +14959,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, tabs = MOR
 // Wraps ScheduleTab (upcoming) + ServicesTab (completed) behind a single
 // "Visits" surface — a visit is one object moving from upcoming → completed,
 // so customers shouldn't have to know which tab holds which state.
-function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onRequestVisit }) {
+function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onRequestVisit, onSelectProperty, switchingPropertyId }) {
   const compact = useIsMobile(760);
   const active = subTab === 'completed' ? 'completed' : 'upcoming';
   const card = {
@@ -14812,11 +14979,10 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
         onClick={() => onSubTabChange(id)}
         style={{
           flex: 1, padding: '9px 14px', borderRadius: 8, border: `1px solid ${isActive ? B.yellow : 'transparent'}`,
-          cursor: 'pointer', fontSize: 14, fontWeight: 850,
-          fontFamily: FONTS.heading,
+          cursor: 'pointer', fontSize: 14, fontWeight: 700,
           background: isActive ? '#F8FCFE' : 'transparent',
           color: isActive ? B.glassNavy : muted,
-          minHeight: 38,
+          minHeight: 44,
         }}
       >{label}</button>
     );
@@ -14826,17 +14992,9 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 28 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0 }}>
-            <div style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '6px 10px',
-              borderRadius: 8,
-              background: PORTAL_SHELL.soft,
-              border: `1px solid ${PORTAL_SHELL.softBorder}`,
-              color: B.glassNavy,
-              fontSize: 12,
-              fontWeight: 850,
+            <div data-gt="eyebrow" style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              color: PORTAL_SHELL.muted, fontSize: 14, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase',
             }}>
               <Icon name="calendar" size={14} strokeWidth={2} />
               Service Schedule
@@ -14844,7 +15002,6 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
             <h1 style={{
               margin: '12px 0 8px',
               color: B.glassNavy,
-              fontFamily: FONTS.heading,
               fontSize: compact ? 28 : 34,
               lineHeight: 1.1,
               letterSpacing: 0,
@@ -14869,7 +15026,7 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
           </div>
         </div>
       </section>
-      {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} onRequestVisit={onRequestVisit} /> : <ServicesTab />}
+      {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} onRequestVisit={onRequestVisit} onSelectProperty={onSelectProperty} switchingPropertyId={switchingPropertyId} /> : <ServicesTab />}
     </div>
   );
 }
@@ -15017,8 +15174,8 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <img src="/waves-logo.png" alt="Waves" style={{ height: 40, width: 'auto', display: 'block', flexShrink: 0 }} />
             <div>
-              <div style={{ fontSize: 15, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading }}>Waves Assistant</div>
-              <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2 }}>Usually replies instantly</div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: PORTAL_SHELL.text }}>Waves Assistant</div>
+              <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 2 }}>Usually replies instantly</div>
             </div>
           </div>
           <ShellCloseButton onClick={onClose} label="Close chat" />
@@ -15049,7 +15206,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
                 ...(msg.role === 'user' ? {
                   background: B.glassNavy, color: '#fff',
                 } : msg.role === 'system' ? {
-                  background: PORTAL_SHELL.soft, color: PORTAL_SHELL.text, fontSize: 12, fontWeight: 700,
+                  background: PORTAL_SHELL.soft, color: PORTAL_SHELL.text, fontSize: 14, fontWeight: 700,
                   border: `1px solid ${PORTAL_SHELL.softBorder}`,
                 } : {
                   background: PORTAL_SHELL.surface, color: PORTAL_SHELL.text,
@@ -15060,7 +15217,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
               </div>
               {msg.reportable && (
                 reportState[i] === 'done' ? (
-                  <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, fontFamily: FONTS.body, marginTop: 4, paddingLeft: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, fontFamily: FONTS.body, marginTop: 4, paddingLeft: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
                     <Icon name="check" size={12} strokeWidth={2} /> Reported — our team will review this response.
                   </div>
                 ) : (
@@ -15071,7 +15228,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
                     aria-label="Report this AI response as inappropriate"
                     style={{
                       border: 'none', background: 'transparent', cursor: 'pointer',
-                      fontSize: 12, fontFamily: FONTS.body, color: PORTAL_SHELL.muted,
+                      fontSize: 14, fontFamily: FONTS.body, color: PORTAL_SHELL.muted,
                       textDecoration: 'underline', padding: '2px 4px', marginTop: 2,
                     }}
                   >
@@ -15283,7 +15440,7 @@ export default function PortalPage() {
         style={{
           border: `1px solid ${isActive ? PORTAL_SHELL.softBorder : 'transparent'}`,
           borderRadius: 8,
-          minHeight: 40,
+          minHeight: 44,
           padding: '8px 8px',
           display: 'inline-flex',
           alignItems: 'center',
@@ -15294,8 +15451,8 @@ export default function PortalPage() {
           background: isActive ? PORTAL_SHELL.surface : 'transparent',
           color: isActive ? PORTAL_SHELL.text : PORTAL_SHELL.muted,
           fontFamily: FONTS.body,
-          fontSize: 12,
-          fontWeight: 800,
+          fontSize: 14,
+          fontWeight: 700,
           cursor: 'pointer',
           boxShadow: isActive ? PORTAL_SHELL.shadowSoft : 'none',
         }}
@@ -15327,7 +15484,7 @@ export default function PortalPage() {
   const menuRef = useRef(null);
   // Home is the hero surface (full scene with orbs). Glass is the unconditional
   // portal theme now, so the scene always mounts.
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
 
   // Close menu on outside click
   useEffect(() => {
@@ -15357,7 +15514,9 @@ export default function PortalPage() {
   const portalProperties = Array.isArray(properties) ? properties : [];
   const canSwitchProperties = portalProperties.length > 1;
   const propertyRenderKey = `${customer.id}:${requestRefreshKey}`;
-  const selectProperty = async (propertyId) => {
+  // `stayOnVisits`: the Visits-tab picker keeps the customer on Visits after
+  // the switch instead of the default hop to Home.
+  const selectProperty = async (propertyId, { stayOnVisits = false } = {}) => {
     if (!propertyId || propertyId === customer.id || switchingPropertyId) return;
     setSwitchingPropertyId(propertyId);
     // Flush PropertyTab's debounced edits BEFORE switchProperty replaces the
@@ -15376,11 +15535,12 @@ export default function PortalPage() {
     const switched = await switchProperty(propertyId);
     setSwitchingPropertyId(null);
     if (switched) {
-      setActiveTab('dashboard');
+      setActiveTab(stayOnVisits ? 'visits' : 'dashboard');
       // Replace, not push: the prior tab history belongs to the PREVIOUS
       // property's session — Back must not restore a stale tab context
       // against the newly selected property.
-      if (window.location.pathname + window.location.search !== '/') navigate('/', { replace: true });
+      const target = stayOnVisits ? '/?tab=schedule' : '/';
+      if (window.location.pathname + window.location.search !== target) navigate(target, { replace: true });
       setVisitsSubTab('upcoming');
       setShowMenu(false);
       setShowMoreSheet(false);
@@ -15428,7 +15588,7 @@ export default function PortalPage() {
     }
     window.open(/Android/i.test(navigator.userAgent || '') ? PLAY_STORE_URL : writeReviewUrl, '_blank', 'noopener,noreferrer');
   };
-  const shellMaxWidth = 1040;
+  const shellMaxWidth = 760; // the document column (owner 2026-09-05, Customer Glass Contract D5)
   const customerName = [customer.firstName, customer.lastName].filter(Boolean).join(' ') || 'Account';
 
   return (
@@ -15459,7 +15619,7 @@ export default function PortalPage() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '0 0 auto' }}>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto', display: 'block' }} />
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 15, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading, lineHeight: 1.2 }}>Customer Portal</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2 }}>Customer Portal</div>
           </div>
         </div>
         {/* Desktop tab nav moved out of this bar (owner 2026-07-09) — it now
@@ -15474,7 +15634,7 @@ export default function PortalPage() {
               onClick={() => setShowReportIssue(true)}
               data-glass-accent=""
               style={{
-                minHeight: 38,
+                minHeight: 44,
                 borderRadius: 10,
                 border: 'none',
                 background: PORTAL_SHELL.text,
@@ -15486,7 +15646,7 @@ export default function PortalPage() {
                 gap: 7,
                 padding: '0 12px',
                 fontSize: 14,
-                fontWeight: 800,
+                fontWeight: 700,
                 fontFamily: FONTS.body,
                 cursor: 'pointer',
               }}
@@ -15508,8 +15668,8 @@ export default function PortalPage() {
               aria-expanded={showMenu}
               data-glass="chip"
               style={{
-                minHeight: 38,
-                width: isMobileShell ? 38 : 'auto',
+                minHeight: 44,
+                width: isMobileShell ? 44 : 'auto',
                 borderRadius: 10,
                 background: PORTAL_SHELL.surface,
                 border: `1px solid ${PORTAL_SHELL.borderStrong}`,
@@ -15521,7 +15681,7 @@ export default function PortalPage() {
                 gap: 8,
                 color: PORTAL_SHELL.text,
                 fontSize: 14,
-                fontWeight: 800,
+                fontWeight: 700,
                 cursor: 'pointer',
                 fontFamily: FONTS.body,
                 boxShadow: showMenu ? '0 0 0 3px rgba(0,156,222,0.14)' : PORTAL_SHELL.shadowSoft,
@@ -15536,8 +15696,8 @@ export default function PortalPage() {
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                fontSize: 12,
-                fontWeight: 850,
+                fontSize: 14,
+                fontWeight: 700,
                 flexShrink: 0,
               }}>{initials}</span>
               {!isMobileShell && (
@@ -15569,7 +15729,7 @@ export default function PortalPage() {
                 zIndex: 200,
               }}>
                 <div style={{ padding: 14, background: PORTAL_SHELL.surface, borderBottom: `1px solid ${PORTAL_SHELL.border}` }}>
-                  <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, fontWeight: 850, letterSpacing: 0, textTransform: 'uppercase', marginBottom: 10 }}>
+                  <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, fontWeight: 700, letterSpacing: 0, textTransform: 'uppercase', marginBottom: 10 }}>
                     Account
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -15583,17 +15743,16 @@ export default function PortalPage() {
                       alignItems: 'center',
                       justifyContent: 'center',
                       fontSize: 15,
-                      fontWeight: 850,
-                      fontFamily: FONTS.heading,
+                      fontWeight: 700,
                       flexShrink: 0,
                     }}>{initials}</span>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: 15, fontWeight: 850, color: PORTAL_SHELL.text, fontFamily: FONTS.heading }}>
+                      <div style={{ fontSize: 15, fontWeight: 700, color: PORTAL_SHELL.text }}>
                         {customerName}
                       </div>
-                      <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2 }}>{formatPhoneDisplay(customer.phone)}</div>
+                      <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 2 }}>{formatPhoneDisplay(customer.phone)}</div>
                       {activePropertyAddress && (
-                        <div style={{ fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <div style={{ fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {activePropertyAddress}
                         </div>
                       )}
@@ -15609,9 +15768,9 @@ export default function PortalPage() {
                 {canSwitchProperties && (
                   <div style={{ padding: 12, borderBottom: `1px solid ${PORTAL_SHELL.border}` }}>
                     <div style={{
-                      fontSize: 12,
+                      fontSize: 14,
                       color: PORTAL_SHELL.muted,
-                      fontWeight: 850,
+                      fontWeight: 700,
                       letterSpacing: 0,
                       textTransform: 'uppercase',
                       padding: '0 2px 8px',
@@ -15641,15 +15800,15 @@ export default function PortalPage() {
                             }}
                           >
                             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                              <span style={{ fontSize: 14, fontWeight: 800, minWidth: 0 }}>
+                              <span style={{ fontSize: 14, fontWeight: 700, minWidth: 0 }}>
                                 {property.profileLabel || (property.isPrimaryProfile ? 'Primary' : 'Property')}
                               </span>
-                              {active && <span style={{ fontSize: 12, color: B.glassNavy, fontWeight: 850 }}>Current</span>}
-                              {switchingPropertyId === property.id && <span style={{ fontSize: 12, color: PORTAL_SHELL.muted, fontWeight: 850 }}>Switching</span>}
+                              {active && <span style={{ fontSize: 14, color: B.glassNavy, fontWeight: 700 }}>Current</span>}
+                              {switchingPropertyId === property.id && <span style={{ fontSize: 14, color: PORTAL_SHELL.muted, fontWeight: 700 }}>Switching</span>}
                             </div>
                             {address && (
                               <div style={{
-                                fontSize: 12, color: PORTAL_SHELL.muted, marginTop: 2,
+                                fontSize: 14, color: PORTAL_SHELL.muted, marginTop: 2,
                                 overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                               }}>
                                 {address}
@@ -15663,9 +15822,9 @@ export default function PortalPage() {
                 )}
                 <div style={{ padding: 12, borderBottom: `1px solid ${PORTAL_SHELL.border}` }}>
                   <div style={{
-                    fontSize: 12,
+                    fontSize: 14,
                     color: PORTAL_SHELL.muted,
-                    fontWeight: 850,
+                    fontWeight: 700,
                     textTransform: 'uppercase',
                     letterSpacing: 0,
                     padding: '0 2px 8px',
@@ -15683,9 +15842,8 @@ export default function PortalPage() {
                         alignItems: 'center',
                         justifyContent: 'center',
                         gap: 5,
-                        fontFamily: FONTS.heading,
-                        fontSize: 12,
-                        fontWeight: 850,
+                        fontSize: 14,
+                        fontWeight: 700,
                         textDecoration: 'none',
                         cursor: 'pointer',
                       };
@@ -15751,8 +15909,8 @@ export default function PortalPage() {
                           <Icon name={item.icon} size={16} strokeWidth={2} />
                         </span>
                         <span style={{ minWidth: 0, flex: 1 }}>
-                          <span style={{ display: 'block', fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.text }}>{item.label}</span>
-                          <span style={{ display: 'block', marginTop: 1, fontSize: 12, color: PORTAL_SHELL.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.sub}</span>
+                          <span style={{ display: 'block', fontSize: 14, fontWeight: 700, color: PORTAL_SHELL.text }}>{item.label}</span>
+                          <span style={{ display: 'block', marginTop: 1, fontSize: 14, color: PORTAL_SHELL.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.sub}</span>
                         </span>
                         {isActive && <Icon name="check" size={15} strokeWidth={2.2} style={{ color: B.glassNavy }} />}
                       </button>
@@ -15789,8 +15947,8 @@ export default function PortalPage() {
                       <Icon name="star" size={16} strokeWidth={2} />
                     </span>
                     <span style={{ minWidth: 0, flex: 1 }}>
-                      <span style={{ display: 'block', fontSize: 14, fontWeight: 850, color: PORTAL_SHELL.text }}>Rate the Waves App</span>
-                      <span style={{ display: 'block', marginTop: 1, fontSize: 12, color: PORTAL_SHELL.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Love the app? Leave a quick review</span>
+                      <span style={{ display: 'block', fontSize: 14, fontWeight: 700, color: PORTAL_SHELL.text }}>Rate the Waves App</span>
+                      <span style={{ display: 'block', marginTop: 1, fontSize: 14, color: PORTAL_SHELL.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Love the app? Leave a quick review</span>
                     </span>
                   </button>
                   <button
@@ -15835,7 +15993,7 @@ export default function PortalPage() {
                     }}>
                       <Icon name="door" size={16} strokeWidth={2} />
                     </span>
-                    <span style={{ fontSize: 14, fontWeight: 850 }}>Sign Out</span>
+                    <span style={{ fontSize: 14, fontWeight: 700 }}>Sign Out</span>
                   </button>
                   <button
                     type="button"
@@ -15881,7 +16039,7 @@ export default function PortalPage() {
                     }}>
                       <Icon name="warning" size={16} strokeWidth={2} />
                     </span>
-                    <span style={{ fontSize: 14, fontWeight: 850 }}>Delete Account</span>
+                    <span style={{ fontSize: 14, fontWeight: 700 }}>Delete Account</span>
                   </button>
                 </div>
               </div>
@@ -15897,7 +16055,7 @@ export default function PortalPage() {
       {/* Mobile bottom padding budgets the floating nav (minHeight 58 + 8px
           float) plus the iOS home-indicator inset — a flat 92px left the last
           card underneath the bar on notched phones. */}
-      <main id="portal-main" tabIndex={-1} style={{ padding: isMobileShell ? '24px 16px calc(108px + env(safe-area-inset-bottom, 0px))' : '24px 16px 32px', maxWidth: shellMaxWidth, margin: '0 auto', outline: 'none' }}>
+      <main id="portal-main" tabIndex={-1} style={{ padding: isMobileShell ? '24px 16px calc(108px + env(safe-area-inset-bottom, 0px))' : '24px 16px 32px', maxWidth: shellMaxWidth, margin: '0 auto', outline: 'none'  }}>
         {/* No shell-level h1: every non-dashboard tab renders its own visible
             h1, and doubling it here exposed two h1s to assistive tech. */}
         {/* Desktop tab nav (owner 2026-07-09): the portal's section nav —
@@ -15936,7 +16094,7 @@ export default function PortalPage() {
           // same sub-tab; replace (not push) so pill toggles don't stack
           // history entries.
           navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
-        }} onRequestVisit={cancelledAccount ? null : () => setShowReportIssue(true)} />}
+        }} onRequestVisit={cancelledAccount ? null : () => setShowReportIssue(true)} onSelectProperty={(id) => selectProperty(id, { stayOnVisits: true })} switchingPropertyId={switchingPropertyId} />}
         {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}

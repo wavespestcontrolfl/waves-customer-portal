@@ -2,6 +2,7 @@ const express = require('express');
 const Joi = require('joi');
 const router = express.Router();
 const db = require('../models/db');
+const { assertAssignableTechnician } = require('../services/technician-eligibility');
 const { FORMER_CUSTOMER_STAGES } = require('../services/customer-stages');
 const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 // Shared admin window validator (on the hour, >= 08:00, end <= 20:00). The
@@ -1075,9 +1076,13 @@ router.put('/:id', async (req, res, next) => {
 
     // Manual status edits (Kanban drags / detail-pane changes) mirror onto the
     // lead's ad_service_attribution funnel row. Monotonic + best-effort; a
-    // status with no funnel meaning no-ops inside the bridge.
+    // status with no funnel meaning no-ops inside the bridge. A manual WON is
+    // a conversion: it runs the shared settlement (bridge + wizard-repeat
+    // settlement) like the book route, so a repeat's win lands on its root's
+    // row instead of on the row /calculate deleted (codex #3834 r34 P1).
     if (updates.status && updates.status !== existingLead.status) {
-      await bridgeLeadFunnelStage(req.params.id, updates.status);
+      if (updates.status === 'won') await leadAttribution.settleWonFunnelRow(req.params.id, lead.customer_id || null);
+      else await bridgeLeadFunnelStage(req.params.id, updates.status);
     }
 
     await db('lead_activities').insert({
@@ -1609,6 +1614,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       }
       // ---- end slot-overlap guard part 2
 
+      await assertAssignableTechnician(technicianId || null, { conn: trx });
       const insertData = {
         customer_id: customerId,
         technician_id: technicianId || null,
@@ -1699,6 +1705,15 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       return { appt };
     });
 
+    // Tech-facing notice (tech-visit-notifications.js): a lead booked straight
+    // onto a tech's route is a "new visit" to them. Post-commit, gate-dark,
+    // never awaited, silent when the booker IS the tech.
+    if (appt?.technician_id) {
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: appt.id, kind: 'assigned', technicianId: appt.technician_id, actorId: req.technicianId || null,
+        snapshot: { date: appt.scheduled_date, windowStart: appt.window_start, windowEnd: appt.window_end },
+      });
+    }
     logger.info(`[leads] Lead ${req.params.id} booked appointment ${appt.id} (customer ${customerId})`);
 
     // Fast path only — durable evidence was written in-transaction above.
@@ -1727,10 +1742,12 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       logger.warn(`[leads] booking pre-draft hook unavailable: ${predraftErr.message}`);
     }
 
-    // Funnel-row mirror for the in-transaction 'won' conversion above.
-    // Post-commit deliberately: the bridge must never abort the booking
-    // transaction, and it is monotonic + idempotent on its own.
-    await bridgeLeadFunnelStage(req.params.id, 'won');
+    // Funnel-row mirror for the in-transaction 'won' conversion above — the
+    // same settlement markConverted runs (a booked wizard repeat lands on its
+    // root's row or its own rebuilt one, codex #3834 r32 P1). Post-commit
+    // deliberately: it must never abort the booking transaction, and it is
+    // monotonic + idempotent on its own.
+    await leadAttribution.settleWonFunnelRow(req.params.id, customerId);
 
     const updated = await db('leads').where('id', req.params.id).first();
     res.json({

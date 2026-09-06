@@ -126,15 +126,15 @@ mycontext: 'My Page Name',
 mycontext: D.teal,  // or D.purple, D.green, D.amber, '#3b82f6'
 ```
 
-## Step 4 (optional): Add embedded bar to the page
+## Client entry points
 
-⌘K already covers every admin page. Only add an embedded bar if the page is data-rich and frequently used.
+`AdminLayoutV2` mounts `GlobalCommandPalette` for admin pages. Use the route
+mapping above to expose a context through the existing ⌘K / Ctrl+K and
+Ask AI entry points. The former page-level admin embeds were retired;
+adding a context does not require another embedded bar.
 
-```jsx
-import SEOIntelligenceBar from '../../components/admin/SEOIntelligenceBar';
-
-// After the header, before the main content:
-<SEOIntelligenceBar context="mycontext" />
-```
-
-`SEOIntelligenceBar` is the generic reusable wrapper — pass a `context` prop. Only build a custom wrapper if you need to inject page-specific React state as `pageData`.
+`AgentEstimatePage` has a dedicated workflow using `useIntelligenceBar`
+with `buildPageData` for its live lead and draft context. It also imports
+the named `AttachIcon` export from `IntelligenceBarShell`; keep that shared
+module and hook. The separate `TechIntelligenceBar` and `WdoIntelligenceBar`
+surfaces remain in use.

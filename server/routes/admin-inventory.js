@@ -8,9 +8,8 @@ const { findLiveRestockRequest } = require('../services/procurement/live-restock
 const { AUTO_REORDER_SOURCE } = require('../services/procurement/auto-reorder');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
-const { buildPlanForService } = require('../services/waveguard-plan-engine');
+const { buildWaveGuardInventoryForecast } = require('../services/waveguard-inventory-forecast');
 const { passwordWriteAction, vendorCredentialKey, encryptedPasswordRaw } = require('../services/vendor-credentials');
-const { etDateString, addETDays } = require('../utils/datetime-et');
 const {
   describeInventoryConversion,
   normalizeInventoryUnit,
@@ -21,7 +20,9 @@ const {
   calcLandedCost,
   convertToOz,
   costLineFromUsage,
+  countUnitsCompatible,
   normalizeQuantityToOz,
+  parsePackCount,
   parsePackSize,
   unitPriceBreakdown,
 } = require('../services/product-costing');
@@ -45,6 +46,9 @@ const STAFF_INVENTORY_REQUEST = (req) => {
     // protocol reference.
     return p === '/' || p === '/stats' || p === '/waveguard-forecast'
       || p === '/unit-review' || p === '/restock-requests';
+    // NOTE: /restock-requests/:id/order-evidence (adapter checkout
+    // screenshots — billing account, totals) is owner-only, like every
+    // other cost-bearing read here; the tab shows its button to admins only.
   }
   // NOTE: /service-usage MUTATIONS are protocol CONFIG (products +
   // application rates that drive COGS/pricing) — owner-only. Per-job usage
@@ -59,6 +63,42 @@ router.use((req, res, next) => (
 ));
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Label review remains owner-only under STAFF_INVENTORY_REQUEST above.
+// Opening a product validates any active EPA source; only explicit extract calls AI.
+const { gateEnvValue } = require('../config/feature-gates');
+const labelReview = require('../services/product-label-review');
+const labelExtractLimiter = require('express-rate-limit')({
+  windowMs: 10 * 60 * 1000, limit: 5, standardHeaders: 'draft-7', legacyHeaders: false,
+  keyGenerator: (req) => String(req.technicianId),
+  message: { error: 'Too many label reads. Try again in ten minutes.' },
+});
+router.get('/label-pipeline', (req, res) => res.json({ enabled: gateEnvValue('GATE_LABEL_PIPELINE') }));
+router.use('/:id/label-review', (req, res, next) => {
+  if (!gateEnvValue('GATE_LABEL_PIPELINE')) return res.status(404).json({ enabled: false, error: 'Label pipeline is unavailable.' });
+  if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid product id.' });
+  next();
+});
+router.get('/:id/label-review', async (req, res, next) => {
+  try { res.json(await labelReview.getLabelReview(req.params.id)); } catch (err) { next(err); }
+});
+router.post('/:id/label-review/extract', labelExtractLimiter, async (req, res, next) => {
+  try { res.json(await labelReview.extractLabelReview(req.params.id, req.technicianId)); } catch (err) { next(err); }
+});
+router.post('/:id/label-review/decision', async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.body.candidateId || '') || !['approve', 'reject'].includes(req.body.decision)) {
+      return res.status(400).json({ error: 'A candidate id and review decision are required.' });
+    }
+    res.json(await labelReview.decideLabelReview(req.params.id, req.technicianId, req.body));
+  } catch (err) { next(err); }
+});
+router.post('/:id/label-review/revoke', async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.body.reviewId || '')) return res.status(400).json({ error: 'A review id is required.' });
+    res.json(await labelReview.revokeLabelReview(req.params.id, req.technicianId, req.body.reviewId));
+  } catch (err) { next(err); }
+});
 
 // Robust quantity → total oz: normalizeQuantityToOz handles simple "128 oz"
 // forms; parsePackSize additionally handles supported multipack/fraction
@@ -95,6 +135,17 @@ function approvedPerOzFields(price, quantity) {
     // an approval, so clear it; ranking falls back to the fresh sticker
     // per-oz until a price-sync snapshot re-supplies the landed cost.
     landed_unit_price: null,
+    // …and the pack-level landed total for the same reason (Codex #3974 r2
+    // P1): count-based ranking must never read a total built on the OLD price.
+    landed_cost: null,
+    // …and the shipping / tax INPUTS themselves (Codex #3974 r3 P1): the
+    // count-based ranking rebuilds its landed total from them against the
+    // current price, so an obsolete $20 shipping charge left beside a newly
+    // approved price would still decide the vendor. An approval carries no
+    // shipping data; a later manual entry or price-sync snapshot re-supplies it.
+    shipping_cost: null,
+    tax_rate: null,
+    shipping_estimate: null,
     // These writes ARE approvals; without this a new insert keeps the
     // column default approval_status='pending' and recalcBestPrice
     // (which only trusts approved rows) would never see it.
@@ -106,6 +157,42 @@ function approvedPerOzFields(price, quantity) {
     // invisible to the recalculation (or invalidate the whole catalog
     // entry when it was the only vendor).
     expires_at: null,
+  };
+}
+
+// The vendor_pricing fields an APPLIED price snapshot replaces, verbatim —
+// INCLUDING clearing them when the snapshot has none — so a price-only report
+// can't leave a stale unit cost behind that then wins best-price ordering
+// (COALESCE landed → normalized → price), or a stale quantity that makes the
+// per-unit price display recompute the new price against the old pack size.
+// The unit the normalized/landed figures are DENOMINATED in moves with them
+// (r23-push P1): the scorer divides through unit_normalized, so an 'oz'
+// snapshot over a row previously normalized in pounds would rank ~16x cheap.
+// Expiry follows the applied snapshot (codex GH r3 P1). The shipping / tax
+// INPUTS are cleared too (Codex #3974 r4 P1): a snapshot carries no
+// shipping_cost / tax_rate / landed_cost, and the count-based ranking rebuilds
+// its landed total from them, so an obsolete charge left beside the new
+// price would still decide the vendor; shipping_estimate follows the snapshot.
+const snapshotCountUnit = (uom) => (uom && parsePackCount(`1 ${String(uom).trim()}`) ? String(uom).trim().toLowerCase() : null);
+function snapshotPricingFields(snapshot) {
+  return {
+    normalized_unit_price: snapshot.normalized_unit_price ?? null,
+    landed_unit_price: snapshot.landed_unit_price ?? null,
+    // price_per_oz is the last per-oz fallback vendorRowPricePerOz reads
+    // (Codex #3974 r5 P1): left over from a measured pack, it would keep a
+    // row that the snapshot moved to a count pack in 'oz' mode.
+    price_per_oz: null,
+    quantity: snapshot.quantity ?? null,
+    // The price-sync worker stores a COUNT offer's unit in price_snapshots.uom
+    // ("each"), not normalized_unit (Codex #3974 r6 P1): a count uom is
+    // carried into unit_normalized so scoreVendorRows can honor the row's
+    // per-item landed_unit_price; a measured uom stays with normalized_unit.
+    unit_normalized: snapshot.normalized_unit ?? snapshotCountUnit(snapshot.uom),
+    expires_at: snapshot.expires_at ?? null,
+    shipping_cost: null,
+    tax_rate: null,
+    landed_cost: null,
+    shipping_estimate: snapshot.shipping_estimate ?? null,
   };
 }
 
@@ -774,242 +861,6 @@ function protocolTemplateCounts() {
     mosquito: (protocols.mosquito?.visits || []).length,
     rodent: (protocols.rodent?.visits || []).length,
     tree_shrub: (protocols.tree_shrub?.visits || []).length,
-  };
-}
-
-async function syncLawnReadinessAfterRestock() {
-  if (!(await db.schema.hasTable('admin_alerts'))) return null;
-
-  const { buildReadinessQueue } = require('../services/lawn-protocol-readiness-cron');
-  const queue = await buildReadinessQueue({ days: 14, limit: 100 });
-  const blocked = Number(queue.statusCounts?.blocked || 0);
-  const warning = Number(queue.statusCounts?.warning || 0);
-  const appointmentCount = queue.appointments?.length || 0;
-  const now = new Date();
-  const metadata = {
-    source: 'inventory_restock_receive_recheck',
-    recheckedAt: now.toISOString(),
-    scanStartDate: queue.startDate,
-    scanEndDate: queue.endDate,
-    days: queue.days,
-    statusCounts: queue.statusCounts,
-  };
-
-  if (blocked === 0) {
-    const resolvedAlerts = await db('admin_alerts')
-      .where({ type: 'lawn_protocol_readiness', status: 'open' })
-      .update({
-        status: 'resolved',
-        resolved_at: now,
-        last_seen_at: now,
-        description: 'Resolved after inventory restock readiness recheck.',
-        metadata: JSON.stringify(metadata),
-        updated_at: now,
-      });
-    return {
-      alertStatus: 'resolved',
-      blocked,
-      warning,
-      appointmentCount,
-      resolvedAlerts,
-      updatedAlerts: 0,
-    };
-  }
-
-  const updatedAlerts = await db('admin_alerts')
-    .where({ type: 'lawn_protocol_readiness', status: 'open' })
-    .update({
-      severity: blocked >= 5 ? 'critical' : 'high',
-      title: `WaveGuard readiness: ${blocked} blocked appointment${blocked === 1 ? '' : 's'}`,
-      description: `${blocked} of ${appointmentCount} upcoming WaveGuard lawn appointment${appointmentCount === 1 ? '' : 's'} remain blocked after inventory restock recheck. ${warning} appointment${warning === 1 ? '' : 's'} have warnings.`,
-      href: '/admin/lawn-protocol?tab=readiness',
-      last_seen_at: now,
-      metadata: JSON.stringify(metadata),
-      updated_at: now,
-    });
-
-  return {
-    alertStatus: updatedAlerts > 0 ? 'still_blocked' : 'no_open_alert',
-    blocked,
-    warning,
-    appointmentCount,
-    resolvedAlerts: 0,
-    updatedAlerts,
-  };
-}
-
-function summarizeForecastStatus(row) {
-  if (row.unitMismatchCount > 0) return 'unit_mismatch';
-  if (row.onHand == null) return 'not_tracked';
-  if (row.committedDemand <= 0) return 'ok';
-  if (row.onHand < row.committedDemand) return 'short';
-  if (row.lowStockThreshold != null && row.projectedRemaining <= row.lowStockThreshold) return 'warning';
-  return 'ok';
-}
-
-function forecastPriority(status, firstShortDate) {
-  if (status === 'short') return firstShortDate ? 'urgent' : 'high';
-  if (status === 'warning') return 'high';
-  if (status === 'unit_mismatch' || status === 'not_tracked') return 'normal';
-  return 'low';
-}
-
-async function buildWaveGuardInventoryForecast({ days = 14, limit = 150 } = {}) {
-  const safeDays = Math.max(1, Math.min(90, Number(days || 14)));
-  const safeLimit = Math.max(1, Math.min(300, Number(limit || 150)));
-  const startDate = etDateString();
-  const endDate = etDateString(addETDays(new Date(), safeDays));
-  const services = await db('scheduled_services as ss')
-    .leftJoin('customers as c', 'ss.customer_id', 'c.id')
-    .leftJoin('technicians as t', 'ss.technician_id', 't.id')
-    .whereBetween('ss.scheduled_date', [startDate, endDate])
-    .whereNotIn('ss.status', ['completed', 'cancelled', 'canceled', 'void'])
-    // Real WaveGuard members only — exclude the flat non-member 'Commercial' tier.
-    .whereIn('c.waveguard_tier', ['Bronze', 'Silver', 'Gold', 'Platinum'])
-    .where(function lawnService() {
-      this.whereILike('ss.service_type', '%lawn%')
-        .orWhereILike('ss.service_type', '%fertiliz%')
-        .orWhereILike('ss.service_type', '%turf%');
-    })
-    .select(
-      'ss.id',
-      'ss.customer_id',
-      'ss.service_type',
-      'ss.scheduled_date',
-      'ss.window_start',
-      'c.first_name',
-      'c.last_name',
-      'c.address_line1',
-      'c.city',
-      'c.waveguard_tier',
-      't.name as technician_name',
-    )
-    .orderBy('ss.scheduled_date', 'asc')
-    .orderBy('ss.window_start', 'asc')
-    .limit(safeLimit);
-
-  const productMap = new Map();
-  const errors = [];
-
-  function ensureRow(product, inventory, demandUnit) {
-    const key = String(product.id);
-    if (!productMap.has(key)) {
-      productMap.set(key, {
-        productId: product.id,
-        productName: product.name,
-        category: product.category || null,
-        inventoryUnit: inventory?.unit || null,
-        demandUnit: demandUnit || inventory?.unit || null,
-        onHand: inventory?.onHand != null ? Number(inventory.onHand) : null,
-        lowStockThreshold: inventory?.lowStockThreshold != null ? Number(inventory.lowStockThreshold) : null,
-        committedDemand: 0,
-        unconvertedDemand: 0,
-        unitMismatchCount: 0,
-        conversionConfidence: 'exact_unit',
-        appointments: [],
-        mismatchAppointments: [],
-        firstShortDate: null,
-      });
-    }
-    return productMap.get(key);
-  }
-
-  for (const service of services) {
-    try {
-      const plan = await buildPlanForService(service.id, { db });
-      const customerName = `${service.first_name || ''} ${service.last_name || ''}`.trim() || 'Customer';
-      for (const item of plan?.mixCalculator?.items || []) {
-        if (!item?.product?.id) continue;
-        const amount = numberOrNull(item.mix?.amount);
-        if (!amount || amount <= 0) continue;
-        const inventory = item.product.inventory || {};
-        const amountUnit = item.mix?.amountUnit || item.mix?.rateUnit || inventory.unit || null;
-        const row = ensureRow(item.product, inventory, amountUnit);
-        const appointment = {
-          serviceId: service.id,
-          customerId: service.customer_id,
-          customerName,
-          serviceType: service.service_type,
-          scheduledDate: service.scheduled_date,
-          city: service.city,
-          waveguardTier: service.waveguard_tier,
-          protocolWindowTitle: plan?.protocol?.structured?.window?.title || plan?.closeout?.protocolWindowTitle || null,
-          amount,
-          unit: amountUnit,
-          inventoryUnit: row.inventoryUnit || amountUnit,
-          substitution: item.substitution || null,
-        };
-        const conversion = describeInventoryConversion(amount, amountUnit, row.inventoryUnit || amountUnit);
-        appointment.inventoryAmount = conversion.amount;
-        appointment.conversionConfidence = conversion.confidence;
-        if (conversion.convertible && conversion.amount != null) {
-          row.committedDemand = Number((row.committedDemand + conversion.amount).toFixed(4));
-          if (conversion.confidence !== 'exact_unit') row.conversionConfidence = conversion.confidence;
-          row.appointments.push(appointment);
-        } else {
-          row.unconvertedDemand = Number((row.unconvertedDemand + amount).toFixed(4));
-          row.unitMismatchCount += 1;
-          row.conversionConfidence = 'needs_review';
-          row.mismatchAppointments.push(appointment);
-        }
-      }
-    } catch (err) {
-      errors.push({
-        serviceId: service.id,
-        scheduledDate: service.scheduled_date,
-        customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim() || 'Customer',
-        message: err.message || 'Forecast plan failed',
-      });
-    }
-  }
-
-  const products = Array.from(productMap.values()).map((row) => {
-    row.projectedRemaining = row.onHand != null
-      ? Number((row.onHand - row.committedDemand).toFixed(4))
-      : null;
-    let runningDemand = 0;
-    for (const appointment of row.appointments.slice().sort((a, b) => String(a.scheduledDate).localeCompare(String(b.scheduledDate)))) {
-      runningDemand = Number((runningDemand + Number(appointment.inventoryAmount || appointment.amount || 0)).toFixed(4));
-      if (row.onHand != null && runningDemand > row.onHand) {
-        row.firstShortDate = appointment.scheduledDate;
-        break;
-      }
-    }
-    row.status = summarizeForecastStatus(row);
-    row.shortfall = row.onHand != null
-      ? Math.max(0, Number((row.committedDemand - row.onHand).toFixed(4)))
-      : null;
-    const targetBuffer = row.lowStockThreshold != null
-      ? row.lowStockThreshold
-      : Number((row.committedDemand * 0.25).toFixed(4));
-    row.targetStock = Number((row.committedDemand + targetBuffer).toFixed(4));
-    row.recommendedOrderQuantity = row.onHand != null
-      ? Math.max(0, Number((row.targetStock - row.onHand).toFixed(4)))
-      : Number((row.committedDemand || row.targetStock || 0).toFixed(4));
-    row.priority = forecastPriority(row.status, row.firstShortDate);
-    return row;
-  }).sort((a, b) => {
-    const rank = { short: 0, warning: 1, unit_mismatch: 2, not_tracked: 3, ok: 4 };
-    return (rank[a.status] ?? 9) - (rank[b.status] ?? 9)
-      || String(a.firstShortDate || a.appointments[0]?.scheduledDate || '').localeCompare(String(b.firstShortDate || b.appointments[0]?.scheduledDate || ''))
-      || a.productName.localeCompare(b.productName);
-  });
-
-  const statusCounts = products.reduce((acc, product) => {
-    acc[product.status] = (acc[product.status] || 0) + 1;
-    return acc;
-  }, { ok: 0, warning: 0, short: 0, unit_mismatch: 0, not_tracked: 0 });
-
-  return {
-    startDate,
-    endDate,
-    days: safeDays,
-    serviceCount: services.length,
-    productCount: products.length,
-    statusCounts,
-    products,
-    errors,
-    generatedAt: new Date().toISOString(),
   };
 }
 
@@ -2223,20 +2074,7 @@ router.post('/price-sync/review-queue/:id/approve', async (req, res, next) => {
         // landed → normalized → price), or a stale quantity that makes the per-unit
         // price display recompute the new price against the old pack size. Only when
         // a snapshot is actually being applied.
-        if (snapshot) {
-          pricingUpdate.normalized_unit_price = snapshot.normalized_unit_price ?? null;
-          pricingUpdate.landed_unit_price = snapshot.landed_unit_price ?? null;
-          pricingUpdate.quantity = snapshot.quantity ?? null;
-          // The unit the normalized/landed figures are DENOMINATED in must
-          // move with them (r23-push P1): the scorer divides through
-          // unit_normalized, so an 'oz' snapshot over a row previously
-          // normalized in pounds would rank ~16x cheap.
-          pricingUpdate.unit_normalized = snapshot.normalized_unit ?? null;
-          // Expiry follows the APPLIED snapshot (codex GH r3 P1): a stale
-          // expires_at from a prior scrape would immediately hide the
-          // freshly approved price from the eligibility predicate.
-          pricingUpdate.expires_at = snapshot.expires_at ?? null;
-        }
+        if (snapshot) Object.assign(pricingUpdate, snapshotPricingFields(snapshot));
         if (snapshot?.source_type) pricingUpdate.source_type = snapshot.source_type;
         if (snapshot?.price_type) pricingUpdate.price_type = snapshot.price_type;
         if (snapshot?.price_confidence != null) pricingUpdate.price_confidence = snapshot.price_confidence;
@@ -3103,17 +2941,20 @@ router.post('/waveguard-forecast/:productId/restock-request', async (req, res, n
     const body = req.body || {};
     const actor = req.technicianId || req.technician?.id || null;
     const actorName = req.technician?.name || req.technician?.email || null;
-    // One transaction, product row LOCKED before the insert, then the SHARED
-    // any-source live-request check under that lock: every restock creator
-    // (this route, the readiness route, the Intelligence Bar tool, the
-    // auto-reorder sweep) runs the same read under the same row lock, so a
-    // writer that resumes after a concurrent commit hands back the request
-    // that already exists instead of raising its twin (Codex r8 P1, r9 P1).
+    // One transaction, product row LOCKED before the insert, then — under
+    // that lock — the dispatcher's live-order check (409 while an automatic
+    // order is placing/placed: the Restock tab carries the order line,
+    // pre-push P0) and the SHARED any-source live-request check every
+    // restock creator runs (this route, the readiness route, the
+    // Intelligence Bar tool, the auto-reorder sweep), so a writer that
+    // resumes after a concurrent commit hands back the request that already
+    // exists instead of raising its twin (Codex r8 P1, r9 P1).
     // allowDuplicate lets staff stack a second STAFF request on purpose; it
     // never stacks one on the sweep's automatic request.
     const outcome = await db.transaction(async (trx) => {
       const product = await trx('products_catalog').where({ id: req.params.productId }).forUpdate().first();
       if (!product) return { status: 404, body: { error: 'Product not found' } };
+      await require('../services/procurement/order-dispatch').assertNoLiveAutoOrder(trx, product.id);
       const requestedQuantity = numberOrNull(body.requestedQuantity);
       const unit = String(body.unit || product.inventory_unit || product.rate_unit || '').trim();
       if (!requestedQuantity || requestedQuantity <= 0 || !unit) {
@@ -3223,12 +3064,35 @@ function restockMeta(raw) {
 }
 
 // GET /restock-requests — product restock request queue.
+// GET /restock-requests/:id/order-evidence — presigned URLs for the
+// screenshots an order adapter uploaded (dry run, refusal, confirmation), so
+// the owner can validate a dry run and staff can diagnose a parked request
+// without S3 access (Codex #3853 r3 P2). Read-only; keys never leave the row.
+router.get('/restock-requests/:id/order-evidence', async (req, res, next) => {
+  try {
+    if (!(await db.schema.hasTable('vendor_orders'))) return res.json({ screenshots: [] });
+    const order = await db('vendor_orders').where({ restock_request_id: req.params.id }).orderBy('created_at', 'desc').first('id', 'status', 'evidence');
+    const shots = restockMeta(order?.evidence).screenshots || {};
+    const { getEvidenceUrl } = require('../services/seo/signup-evidence');
+    const screenshots = [];
+    for (const [label, key] of Object.entries(shots)) {
+      if (!key) continue;
+      const url = await getEvidenceUrl(key, { expiresIn: 3600 }).catch(() => null);
+      if (url) screenshots.push({ label, url });
+    }
+    res.json({ orderId: order?.id || null, orderStatus: order?.status || null, screenshots });
+  } catch (err) { next(err); }
+});
+
 router.get('/restock-requests', async (req, res, next) => {
   try {
     if (!(await db.schema.hasTable('product_restock_requests'))) {
       return res.json({ requests: [] });
     }
     const status = String(req.query.status || 'open').toLowerCase();
+    // vendor_orders (PR 2 ledger) is one row per request at most; absent
+    // table (older schema) → no order columns.
+    const hasOrders = await db.schema.hasTable('vendor_orders');
     let query = db('product_restock_requests as prr')
       .leftJoin('products_catalog as pc', 'prr.product_id', 'pc.id')
       .leftJoin('scheduled_services as ss', 'prr.scheduled_service_id', 'ss.id')
@@ -3246,13 +3110,23 @@ router.get('/restock-requests', async (req, res, next) => {
         'c.last_name',
         'c.address_line1',
         'c.city',
+        ...(hasOrders ? ['vo.status as order_status', 'vo.external_order_number as order_number', 'vo.amount_cents as order_amount_cents', 'vo.error as order_error', 'vo.placed_at as order_placed_at', 'vo.adapter as order_adapter', db.raw("vo.evidence->>'revokedAt' as order_revoked_at"), db.raw("vo.evidence->>'landedAfterReceive' as order_landed_after_receive"), db.raw("vo.request_payload->>'orderedQuantity' as order_ordered_quantity")] : []),
       )
+      .modify((q) => { if (hasOrders) q.leftJoin('vendor_orders as vo', 'vo.restock_request_id', 'prr.id'); })
       .orderByRaw("case prr.priority when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end")
       .orderByRaw('prr.needed_by asc nulls last')
       .orderBy('prr.created_at', 'desc')
       .limit(Math.max(1, Math.min(200, Number(req.query.limit || 100))));
-    if (status !== 'all') query = query.whereIn('prr.status', status === 'active' ? ['open', 'ordered'] : [status]);
+    // Active includes a received request whose automatic order landed after
+    // that receipt (evidence.landedAfterReceive): it still needs the second
+    // Receive or a revoke, and its bell links here (Codex r29 P2).
+    if (status === 'active' && hasOrders) query = query.where((q) => q.whereIn('prr.status', ['open', 'ordered']).orWhereRaw("(prr.status = 'received' AND NULLIF(vo.evidence->>'landedAfterReceive', '') IS NOT NULL)"));
+    else if (status !== 'all') query = query.whereIn('prr.status', status === 'active' ? ['open', 'ordered'] : [status]);
     const rows = await query;
+    // Technicians see the order outcome (placed / needs review), never the
+    // spend: a single-product order total IS the unit cost — owner-only,
+    // like every other cost field on this router (Codex r1 P2).
+    const showSpend = req.techRole === 'admin';
     res.json({
       requests: rows.map((row) => ({
         id: row.id,
@@ -3272,6 +3146,10 @@ router.get('/restock-requests', async (req, res, next) => {
         // metadata; the tab renders them as the order link (Codex r3 P2).
         vendorSku: restockMeta(row.metadata).vendorSku || null,
         vendorProductUrl: restockMeta(row.metadata).vendorProductUrl || null,
+        // Automatic order outcome (null = never dispatched): placing | placed
+        // | failed | needs_review, with the vendor number, total and the
+        // parked reason so the tab explains why a request still needs a hand.
+        order: hasOrders ? restockOrderView(row, showSpend) : null,
         neededBy: row.needed_by,
         reason: row.reason,
         source: row.source,
@@ -3288,6 +3166,33 @@ router.get('/restock-requests', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The automatic-order outcome on a Restock row (null = never dispatched):
+// placing | placed | failed | needs_review with the vendor number, total
+// and the parked reason so the tab explains why a request still needs a
+// hand. Spend is owner-only: a single-product order total IS the unit
+// cost, so a technician gets the reason code and no amount (Codex r1 P2).
+// Its own stage, separate from the base row mapping (Codex r10 P2).
+function restockOrderView(row, showSpend) {
+  if (!row.order_status) return null;
+  return {
+    status: row.order_status,
+    adapter: row.order_adapter,
+    externalOrderNumber: row.order_number || null,
+    amountCents: showSpend && row.order_amount_cents != null ? Number(row.order_amount_cents) : null,
+    // The parked message can quote the total (cap wording): techs get the
+    // reason code only.
+    error: !row.order_error ? null : showSpend ? row.order_error : String(row.order_error).split(':')[0],
+    placedAt: row.order_placed_at || null,
+    revokedAt: row.order_revoked_at || null,
+    // What the order actually bought, in the request's unit (packages round
+    // up) — the tab's receive default; a revoked order is not what arrives.
+    orderedQuantity: row.order_placed_at && !row.order_revoked_at && row.order_ordered_quantity != null ? Number(row.order_ordered_quantity) : null,
+    // The order landed after the request was received by hand: the tab
+    // offers one more receive (the late order's own) on the received row.
+    landedAfterReceive: !!row.order_landed_after_receive,
+  };
+}
+
 // POST /restock-requests/:id/action — update request status and optionally receive stock.
 router.post('/restock-requests/:id/action', async (req, res, next) => {
   try {
@@ -3296,6 +3201,10 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
     if (!['mark_ordered', 'receive', 'cancel'].includes(action)) return res.status(400).json({ error: 'Invalid action' });
     const actor = req.technicianId || req.technician?.id || null;
     const result = await db.transaction(async (trx) => {
+      // LOCK ORDER: the request's ledger row first, then the request — the
+      // order the dispatcher's record transaction and the revoke CLI use, so
+      // a receive racing a revoke waits instead of deadlocking (hook r27 P1).
+      await trx('vendor_orders').where({ restock_request_id: req.params.id }).forUpdate().first('id');
       // Lock the request row so a double-click / stale tab cannot receive the
       // same request twice (double stock + duplicate restock movement).
       const request = await trx('product_restock_requests').where({ id: req.params.id }).forUpdate().first();
@@ -3304,8 +3213,18 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
         err.statusCode = 404;
         throw err;
       }
+      // Automatic-order guard (pre-push P0s): 409 for every action while the
+      // order is placing; 409 for cancel while a dispatched order is not yet
+      // received or revoked (the next sweep would order again).
+      const dispatch = require('../services/procurement/order-dispatch');
+      const guard = await dispatch.assertManualActionAllowed(trx, request.id, action);
       const status = String(request.status || '').toLowerCase();
-      if (action === 'receive' && !['open', 'ordered'].includes(status)) {
+      // ONE more receive on a received request whose automatic order landed
+      // after that receipt (ledger evidence.landedAfterReceive — Codex r27
+      // P1): this receipt is the late order's own; the marker that kept the
+      // live-order guards closed comes off in the same transaction.
+      const secondReceive = action === 'receive' && status === 'received' && !!guard.landedAfterReceive;
+      if (action === 'receive' && !['open', 'ordered'].includes(status) && !secondReceive) {
         const err = new Error(`Restock request is already ${status}; refresh the list`);
         err.statusCode = 409;
         throw err;
@@ -3323,6 +3242,9 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
         err.statusCode = 409;
         throw err;
       }
+      // The action resolves the request's ledger bell ("order manually" /
+      // "receive or revoke"): retired here so no one follows it (Codex r28 P2).
+      await dispatch.settleRequestLedgerBells(trx, request.id);
       if (action === 'mark_ordered') {
         const [updated] = await trx('product_restock_requests')
           .where({ id: request.id })
@@ -3343,7 +3265,10 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
         err.statusCode = 404;
         throw err;
       }
-      const quantity = numberOrNull(req.body?.quantity) ?? numberOrNull(request.requested_quantity);
+      // Default = what the automatic order actually bought (packages round
+      // up), else the requested figure (Codex r2 P1).
+      const orderedQuantity = await dispatch.orderedQuantityFor(trx, request.id);
+      const quantity = numberOrNull(req.body?.quantity) ?? orderedQuantity ?? numberOrNull(request.requested_quantity);
       const unit = String(req.body?.unit || request.unit || product.inventory_unit || '').trim();
       if (!quantity || quantity <= 0 || !unit) {
         const err = new Error('Receive quantity and unit are required');
@@ -3379,24 +3304,17 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
           enteredQuantity: quantity,
           enteredUnit: unit,
           conversionConfidence: received.confidence,
+          ...(secondReceive ? { secondReceive: true } : {}),
         },
       }).returning('*');
+      if (secondReceive) await dispatch.settleLandedAfterReceive(trx, request.id);
       const [updated] = await trx('product_restock_requests')
         .where({ id: request.id })
         .update({ status: 'received', closed_by: actor, closed_at: new Date(), updated_at: new Date() })
         .returning('*');
       return { request: updated, movement };
     });
-    let readinessRecheck = null;
-    if (action === 'receive') {
-      try {
-        readinessRecheck = await syncLawnReadinessAfterRestock();
-      } catch (recheckErr) {
-        logger.warn(`[admin-inventory] restock readiness recheck failed: ${recheckErr.message}`);
-        readinessRecheck = { error: recheckErr.message };
-      }
-    }
-    res.json({ success: true, ...result, readinessRecheck });
+    res.json({ success: true, ...result });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);
@@ -3431,6 +3349,86 @@ function vendorRowPricePerOz(row) {
   // row's unit_normalized (r22-push P0).
   return storedUnitCostPerOz(row.normalized_unit_price, row.unit_normalized)
     ?? (numberOrNull(row.price_per_oz) > 0 ? numberOrNull(row.price_per_oz) : null);
+}
+
+// COGS whose unit contradicts the catalog's COMMITTED size semantics is
+// invalid on EVERY path out of the recalculation (Codex #3974 r5 P1), not
+// only after a successful measured scoring: costLineFromUsage and the plan
+// engine read cost_per_unit first without checking needs_pricing, so a
+// per-station figure left on a product now measured in ounces (or an $/oz
+// figure on a product now counted) would be multiplied as usage cost. The
+// reset keys on what the catalog says the product IS — measured
+// (unit_size_oz or a measurable container) vs counted (a count container) —
+// and leaves a product whose semantics are unknown (null container) alone.
+// Returns the update fragment: { cost_per_unit: null, cost_unit: null } or {}.
+function cogsResetFor(product, unitSizeOz) {
+  const catalogIsMeasured = unitSizeOz > 0 || (quantityToOz(product?.container_size) || 0) > 0;
+  const catalogIsCount = !catalogIsMeasured && !!parsePackCount(product?.container_size);
+  const costUnit = product?.cost_unit ? String(product.cost_unit) : null;
+  const costUnitIsCount = !!costUnit && parsePackCount(`1 ${costUnit}`) != null;
+  const costUnitIsMeasured = !!costUnit && !costUnitIsCount && convertToOz(1, costUnit) != null;
+  const contradicts = (catalogIsMeasured && costUnitIsCount) || (catalogIsCount && costUnitIsMeasured);
+  return contradicts ? { cost_per_unit: null, cost_unit: null } : {};
+}
+
+// ── Shared vendor-row scoring (the ONE ranking basis) ──
+// Used by recalcBestPrice (the canonical writer) AND the Intelligence Bar's
+// compare_vendor_pricing / find_cheapest_vendor (Codex #3974 r1 P1: the IB
+// fell back to raw pack price where this writer ranked per unit, so the two
+// could name different winners). Three modes, chosen for the product:
+//   'oz'    — any row has a per-oz basis: rank by landed per-oz, else sticker
+//             per-oz (the r22 / landed contracts unchanged);
+//   'count' — no measured row, the catalog container reads as a count, and a
+//             row's count noun is compatible with it: rank by landed per-UNIT
+//             (landed total rebuilt from shipping/tax on the current price,
+//             else price, / pack count — a $10/10 pack with $20
+//             shipping must not beat a delivered $20/10 pack), persist the
+//             sticker per-unit;
+//   'raw'   — nothing scalable: rank by raw price (the r19 guard decides).
+// `ranked` = the pool first, then the unrankable rows by raw price; each entry
+// carries `rank` on the mode's basis (null when unrankable) for callers that
+// report spreads.
+function scoreVendorRows(rows, product) {
+  const unitSizeOz = numberOrNull(product?.unit_size_oz);
+  const catalog = unitSizeOz > 0 ? null : parsePackCount(product?.container_size);
+  const scored = rows.map((row) => {
+    const landedPerOz = storedUnitCostPerOz(row.landed_unit_price, row.unit_normalized);
+    const perOz = vendorRowPricePerOz(row);
+    const price = numberOrNull(row.price_amount) ?? numberOrNull(row.price);
+    const pack = perOz == null ? parsePackCount(row.quantity) : null;
+    const countable = !!(pack && catalog && price != null && countUnitsCompatible(pack.unit, catalog.unit));
+    // Landed total for a count row is REBUILT from the row's shipping / tax
+    // components against the CURRENT price (Codex #3974 r2 P1): the stored
+    // landed_cost can outlive the price it was computed from (approvals and
+    // imports replace price + pack without it), and a stale total would rank
+    // the wrong vendor and persist the wrong best_price / cost_per_unit.
+    const hasLandedParts = row.shipping_cost != null || row.tax_rate != null;
+    const landedTotal = countable && hasLandedParts ? calcLandedCost(price, row.shipping_cost, row.tax_rate) : null;
+    // The price-sync worker carries landed cost as a PER-UNIT figure
+    // (landed_unit_price, denominated in unit_normalized), not as shipping /
+    // tax columns (Codex #3974 r5 P1): for a count row it is honored when
+    // its unit is a count unit ('each' / a counted noun) — the denominator
+    // is then one item; a measured or absent unit cannot be read per item.
+    const rowUnitIsCount = !!row.unit_normalized && parsePackCount(`1 ${row.unit_normalized}`) != null;
+    const perItemLanded = countable && rowUnitIsCount && numberOrNull(row.landed_unit_price) > 0 ? numberOrNull(row.landed_unit_price) : null;
+    return {
+      row,
+      perOz,
+      rankPerOz: landedPerOz ?? perOz,
+      perUnit: countable ? price / pack.count : null,
+      rankPerUnit: countable ? (landedTotal > 0 ? landedTotal / pack.count : perItemLanded ?? price / pack.count) : null,
+      price,
+    };
+  });
+  const sized = scored.filter((s) => s.perOz != null);
+  const counted = sized.length ? [] : scored.filter((s) => s.perUnit != null);
+  const mode = sized.length ? 'oz' : counted.length ? 'count' : 'raw';
+  const pool = mode === 'oz' ? sized : mode === 'count' ? counted : scored.slice();
+  const basis = mode === 'oz' ? 'rankPerOz' : mode === 'count' ? 'rankPerUnit' : 'price';
+  pool.sort((a, b) => (a[basis] - b[basis]) || (a.price - b.price));
+  for (const s of scored) s.rank = mode === 'raw' ? null : s[basis];
+  const rest = scored.filter((s) => !pool.includes(s)).sort((a, b) => a.price - b.price);
+  return { mode, pool, ranked: [...pool, ...rest], catalogCount: catalog ? catalog.count : null, catalogUnit: catalog && catalog.unit !== 'each' ? catalog.unit : null, unitSizeOz };
 }
 
 // ── Helper: recalculate best price for a product ──
@@ -3471,6 +3469,9 @@ async function recalcBestPriceLocked(productId, dbc) {
   const rows = await eligibleVendorPricing(dbc('vendor_pricing').where({ product_id: productId }))
     .join('vendors', 'vendor_pricing.vendor_id', 'vendors.id')
     .select('vendor_pricing.*', 'vendors.name as vendor_name');
+  const product = await dbc('products_catalog').where({ id: productId }).select('unit_size_oz', 'best_price', 'container_size', 'cost_unit').first();
+  const unitSizeOz = numberOrNull(product?.unit_size_oz);
+  const cogsReset = cogsResetFor(product, unitSizeOz);
   if (!rows || !rows.length) {
     // No eligible (active, approved, unexpired) vendor price remains — the
     // previous winner must not keep feeding costing as if it were current.
@@ -3483,39 +3484,15 @@ async function recalcBestPriceLocked(productId, dbc) {
       best_price_updated_at: new Date(),
       best_price_status: 'no_valid_price',
       needs_pricing: true,
+      ...cogsReset,
     });
     await dbc('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
     return;
   }
-
-  const product = await dbc('products_catalog').where({ id: productId }).select('unit_size_oz', 'best_price').first();
-  const unitSizeOz = numberOrNull(product?.unit_size_oz);
-  const scored = rows.map((row) => {
-    // Landed cost converts through the row's unit too (r22-push P0).
-    const landedPerOz = storedUnitCostPerOz(row.landed_unit_price, row.unit_normalized);
-    const perOz = vendorRowPricePerOz(row);
-    return {
-      row,
-      perOz,
-      // Landed per-oz cost (incl. shipping/fees) drives ORDERING when
-      // present — the price-sync contract (integrations-vendor-price-
-      // worker.js: COALESCE(landed_unit_price, normalized per-oz) ASC).
-      // A $50 pack with $30 shipping must not beat a delivered $60 pack.
-      // Persistence keeps the sticker-per-oz canonical-container contract.
-      rankPerOz: landedPerOz ?? perOz,
-      price: numberOrNull(row.price_amount) ?? numberOrNull(row.price),
-    };
-  });
-  // Sized = a derivable STICKER per-oz only (codex r3 P1): a landed-only
-  // row (landed_unit_price with no quantity/normalized price — allowed by
-  // the report contract) has nothing to scale to the catalog container, so
-  // letting it win the sized pool would persist its raw pack price as
-  // best_price and corrupt per-oz costing downstream.
-  const sized = scored.filter((s) => s.perOz != null);
-  const pool = sized.length ? sized : scored;
-  pool.sort((a, b) => (sized.length ? a.rankPerOz - b.rankPerOz : a.price - b.price) || a.price - b.price);
+  const { mode, pool, catalogCount } = scoreVendorRows(rows, product);
   const best = pool[0];
-  const scalable = best.perOz != null && unitSizeOz > 0;
+  const countScalable = mode === 'count';
+  const scalable = (best.perOz != null && unitSizeOz > 0) || countScalable;
   // COUNT-BASED / unscalable products (codex r19-push P0, the HexPro 10x
   // COGS bug): when neither the winner nor the product yields a per-oz
   // conversion, the raw PACK price cannot be reconciled to the catalog's
@@ -3533,13 +3510,29 @@ async function recalcBestPriceLocked(productId, dbc) {
       best_price_status: 'stale',
       needs_pricing: true,
       best_price_updated_at: new Date(),
+      ...cogsReset,
     });
     await dbc('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
     return;
   }
-  const bestPrice = scalable
-    ? Math.round(best.perOz * unitSizeOz * 100) / 100
-    : best.price;
+  const bestPrice = countScalable
+    ? Math.round(best.perUnit * catalogCount * 100) / 100
+    : scalable
+      ? Math.round(best.perOz * unitSizeOz * 100) / 100
+      : best.price;
+  // Count-based COGS (Codex #3974 r1 P1): costLineFromUsage reads
+  // cost_per_unit FIRST and its best_price fallback needs unit_size_oz, so a
+  // count product's job/estimate cost would keep a seeded figure ($26.88/20)
+  // beside a current best price. The winning STICKER per-unit is written with
+  // the price, in the CANONICAL count unit 'each' (Codex #3974 r5 P1): the
+  // inventory conversion contract (inventory-units.js) carries count stock
+  // only as 'each', and the movement-driven COGS consumers
+  // (calculateInventoryCost, supplies-consumption) require an exact unit
+  // match — a 'station' / 'tablet' cost unit would record null actual COGS.
+  // Any other path resets COGS whose unit contradicts the catalog (above).
+  const countCost = countScalable
+    ? { cost_per_unit: Math.round(best.perUnit * 10000) / 10000, cost_unit: 'each' }
+    : cogsReset;
 
   // Update the control-layer backing/cache fields atomically with the winner:
   // the pricing-engine DB bridge only trusts best_price when
@@ -3558,6 +3551,7 @@ async function recalcBestPriceLocked(productId, dbc) {
     best_price_updated_at: new Date(),
     best_price_status: 'current',
     needs_pricing: false,
+    ...countCost,
   });
   await dbc('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
   await dbc('vendor_pricing').where({ id: best.row.id }).update({ is_best_price: true });
@@ -3735,6 +3729,12 @@ router.put('/:id', async (req, res, next) => {
     for (const [camel, snake] of Object.entries(allowed)) {
       if (req.body[camel] !== undefined) upd[snake] = req.body[camel];
     }
+    // The inline editor sends containerSize alone, and scoreVendorRows treats
+    // a positive unit_size_oz as authoritative (Codex #3974 r3 P1): a
+    // container edit without an explicit unitSizeOz re-derives it from the
+    // new size — the ounces of a measurable size, null for a count size, so
+    // "64 oz" → "32 oz" scales to 32 and "12 count" enters count mode.
+    if (upd.container_size !== undefined && req.body.unitSizeOz === undefined) upd.unit_size_oz = quantityToOz(upd.container_size);
     const nextStock = req.body.inventoryOnHand !== undefined
       ? numberOrNull(req.body.inventoryOnHand)
       : numberOrNull(product.inventory_on_hand);
@@ -3754,7 +3754,16 @@ router.put('/:id', async (req, res, next) => {
 
     Object.assign(upd, await autoReorderPatch(req.body));
 
+    const sizeInPayload = upd.container_size !== undefined || upd.unit_size_oz !== undefined;
     const updated = await db.transaction(async (trx) => {
+      // A size edit recalculates INSIDE this transaction (Codex #3974 r4 P1):
+      // a recalculation that failed after the size committed would leave
+      // best_price scaled to the old size, and a retry of the same edit sees
+      // no change. The product-scoped advisory lock is taken BEFORE the row
+      // lock — the same order the pricing writers use (advisory → row) — so
+      // the two cannot deadlock; recalcBestPrice re-takes it on this
+      // connection (xact advisory locks are re-entrant).
+      if (sizeInPayload) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['inventory.best_price', String(req.params.id)]);
       const locked = await trx('products_catalog').where({ id: req.params.id }).forUpdate().first();
       if (!locked) {
         const err = new Error('Product not found');
@@ -3781,6 +3790,12 @@ router.put('/:id', async (req, res, next) => {
         upd.inventory_unit = nextUnit;
       }
 
+      // The size decision is taken on the row this write actually replaces
+      // (Codex #3974 r2 P1): two overlapping edits each compared against
+      // their own pre-transaction snapshot could skip the recalculation for
+      // a change that did commit.
+      const lockedSizeChanged = (upd.container_size !== undefined && (upd.container_size || null) !== (locked.container_size || null))
+        || (upd.unit_size_oz !== undefined && numberOrNull(upd.unit_size_oz) !== numberOrNull(locked.unit_size_oz));
       await trx('products_catalog').where({ id: req.params.id }).update(upd);
       if (stockChanged) {
         const before = stockBefore || 0;
@@ -3800,6 +3815,10 @@ router.put('/:id', async (req, res, next) => {
           },
         });
       }
+      // A changed catalog size changes how vendor rows scale (per-oz size or
+      // count) — recalculate so the fix lands without an operator re-saving
+      // a vendor price (Codex #3974 r1 P2), in this transaction (r4 P1).
+      if (lockedSizeChanged) await recalcBestPrice(req.params.id, trx);
       return trx('products_catalog').where({ id: req.params.id }).first();
     });
     res.json({ success: true, product: updated });
@@ -3990,11 +4009,11 @@ router._test = {
   vendorNeedsLoginDiscovery,
   recalcBestPrice,
   vendorRowPricePerOz,
+  approvedPerOzFields,
+  scoreVendorRows,
+  snapshotPricingFields,
 };
 
-// Shared with the Intelligence Bar stock tools (update_restock_request
-// receive) so both receive paths run the same WaveGuard readiness recheck.
-router.syncLawnReadinessAfterRestock = syncLawnReadinessAfterRestock;
 // The ONE best-price writer (codex #3465 r2 P1): every approval surface —
 // review queue, legacy approvals, Intelligence Bar — must recalculate the
 // catalog through this instead of writing best_price by hand.
@@ -4007,6 +4026,7 @@ router.applyPriceApproval = applyPriceApproval;
 // Per-oz ranking primitives for read-side consumers (IB comparisons must
 // use the same normalized/landed basis the recalculation ranks by).
 router.vendorRowPricePerOz = vendorRowPricePerOz;
+router.scoreVendorRows = scoreVendorRows;
 router.storedUnitCostPerOz = storedUnitCostPerOz;
 router.quantityToOz = quantityToOz;
 

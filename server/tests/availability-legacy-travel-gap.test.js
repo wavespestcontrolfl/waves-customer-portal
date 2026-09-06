@@ -56,8 +56,10 @@ function arrayChain(rowsArr) {
   const b = {
     where: () => b,
     whereNot: () => b,
+    whereNotExists: () => { rowsArr = rowsArr.filter(row => !row.linkedVisit); return b; },
     whereIn: () => b,
     whereNotIn: () => b,
+    whereNotNull: () => b,
     whereRaw: () => b,
     count: () => { counting = true; return b; },
     first: () => Promise.resolve(counting ? { count: 0 } : (rowsArr[0] || null)),
@@ -170,4 +172,15 @@ test('findGaps advances an hour at a time inside a rejected gap (r5 P2)', () => 
   expect(slots.map((g) => g.start / 60)).toEqual([12, 16]);
   // Without a predicate the legacy shape is unchanged: one slot per gap.
   expect(engine.findGaps(occupied, 8 * 60, 18 * 60, 60, 0).map((g) => g.start / 60)).toEqual([9, 16]);
+});
+
+test('a linked booking copy cannot retain the old window after its visit stops occupying it', async () => {
+  const t = tables();
+  const copy = { id: 'old-copy', start_time: '08:00', end_time: '17:00' };
+  let linkedVisit = false;
+  t.self_booked_appointments = () => arrayChain([{ ...copy, linkedVisit }]);
+  db.mockImplementation(table => t[table]());
+  expect((await engine.getAvailableSlots('Palmetto')).days).toHaveLength(0);
+  linkedVisit = true;
+  expect(startsOf(await engine.getAvailableSlots('Palmetto'))).toContain('09:00');
 });

@@ -36,7 +36,9 @@ async function adminAuthenticate(req, res, next) {
     if (decoded.scope === 'terminal') return res.status(401).json({ error: 'Terminal-scoped token not accepted here' });
 
     const tech = await db('technicians').where({ id: decoded.technicianId }).first();
-    if (!tech || !tech.active) return res.status(401).json({ error: 'Account not found or inactive' });
+    // Sign-in follows employment_status alone (prospective = not started,
+    // inactive = offboarded); field eligibility is a separate question.
+    if (!tech || tech.employment_status !== 'active') return res.status(401).json({ error: 'Account not found or inactive' });
     if (!['admin', 'technician'].includes(tech.role)) {
       return res.status(401).json({ error: 'Account not found or inactive' });
     }
@@ -83,7 +85,7 @@ async function verifyStaffBearer(req) {
     if (!decoded.technicianId) return null;
     if (decoded.scope === 'terminal') return null;
     const tech = await db('technicians').where({ id: decoded.technicianId }).first();
-    if (!tech || !tech.active) return null;
+    if (!tech || tech.employment_status !== 'active') return null;
     if (!['admin', 'technician'].includes(tech.role)) return null;
     if (!staffTokenVersionMatches(decoded, tech)) return null;
     if (tech.must_change_password) return null;

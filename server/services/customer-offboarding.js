@@ -299,6 +299,10 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
       // fire-and-forget hook claim could land after a compensating revert
       // (codex r3).
       notifyCustomer: 'caller_suppress',
+      // The tech notice waits for the live-state check below: a cancel the
+      // tech raced by going en route is reverted, and must never have told
+      // them their visit was cancelled.
+      suppressTechNotice: true,
     });
   });
   // The flip's atomic guard covers only `status` — a tech can tap En route
@@ -325,6 +329,14 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
     });
     throw new Error(`visit went ${wentLive} mid-cancel — reverted, left for dispatch`);
   }
+  // The cancel stands — now the assigned tech hears it (post-commit,
+  // best-effort, gate-dark; recipient read from the row; silent for the
+  // actor's own cancel). A row that was ALREADY cancelled when re-read
+  // (another cancellation won after the preview) is a same-status repair:
+  // its tech heard from that cancel, so no second card.
+  if (String(fresh.status) !== 'cancelled') {
+    void require('./tech-visit-notifications').notifyVisitCancelled({ visitId: visit.id, actorId: actorId || null, previousStatus: fresh.status });
+  }
   // No per-visit customer notice — the flow sends ONE combined
   // cancellation + refund email (owner ruling 2026-07-15); this also keeps
   // refund-skipped runs silent toward the customer. handleCancellation
@@ -342,7 +354,7 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
   }
   try {
     const { cancelCallFollowUpsForParentCancel } = require('./call-booking-catalog');
-    await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: visit.id });
+    await cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: visit.id, actorId: actorId || null });
   } catch (e) {
     logger.error(`[customer-offboarding] call follow-up cascade failed for ${visit.id}: ${e.message}`);
   }
@@ -431,9 +443,14 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
   // 2. Stop any recurring series BEFORE sweeping visits (mirrors
   // cancellation-processor): a racing completion reads recurring_ongoing
   // and would otherwise mint a fresh pending visit behind the sweep.
-  await db('scheduled_services')
-    .where({ customer_id: customerId, recurring_ongoing: true })
-    .update({ recurring_ongoing: false, updated_at: db.fn.now() });
+  await db.transaction(async trx => {
+    const rows = await trx('scheduled_services').where({ customer_id: customerId, is_recurring: true })
+      .select('id', 'recurring_parent_id', 'customer_id', 'recurring_pattern');
+    await require('./recurring-plan-decisions').recordRecurringSeriesStops(trx, rows, actorId);
+    await trx('scheduled_services')
+      .where({ customer_id: customerId, recurring_ongoing: true })
+      .update({ recurring_ongoing: false, updated_at: trx.fn.now() });
+  });
 
   // Cancel every cancellable visit. Per-visit failure isolation (mirrors
   // schedule bulk-cancel); failures and invoices the void sweep could not

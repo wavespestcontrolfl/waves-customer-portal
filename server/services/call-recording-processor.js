@@ -13,6 +13,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
+const { applyAssignable, isAssignable, assertAssignableTechnician } = require('./technician-eligibility');
 const MODELS = require('../config/models');
 const twilio = require('twilio');
 
@@ -28,6 +29,20 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { isLikelyE164 } = require('../utils/phone');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { resolveLocation } = require('../config/locations');
+const { composeRelaySegment } = require('./voice-agent/relay-transfer');
+const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
+
+/**
+ * PR 2A: the RECORDED part of a stored transcript. A composite a prior pass
+ * wrote is "[AI segment]\n…\n\n[Staff|Voicemail segment]\n<recorded>"; a
+ * bare AI segment (no recorded part) is not a recording transcript at all.
+ */
+function recordedPartOfComposite(text) {
+  const t = String(text || '');
+  if (!t.startsWith('[AI segment]')) return t || null;
+  const m = t.match(/\n\n\[(?:Staff|Voicemail) segment\]\n([\s\S]*)$/);
+  return m && m[1].trim() ? m[1] : null;
+}
 const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
 const { normalizeCallExtraction, applyContactNormalization } = require('../utils/intake-normalize');
@@ -4595,33 +4610,22 @@ async function resolveDefaultCallBookingTechnician(conn = db) {
     if (!UUID_RE.test(configuredId)) {
       logger.warn(`[call-proc] CALL_BOOKING_DEFAULT_TECHNICIAN_ID is not a valid UUID: ${configuredId}`);
     } else {
-      const configuredTech = await conn('technicians')
-        .where({ id: configuredId })
-        .where(function () {
-          this.where({ active: true }).orWhereNull('active');
-        })
-        .first('id', 'name');
+      const configuredTech = await applyAssignable(conn('technicians').where({ 'technicians.id': configuredId }))
+        .first('technicians.id', 'technicians.name');
       if (configuredTech?.id) return { id: configuredTech.id, name: configuredTech.name || null };
       logger.warn(`[call-proc] CALL_BOOKING_DEFAULT_TECHNICIAN_ID did not match an active technician: ${configuredId}`);
     }
   }
 
-  const tech = await conn('technicians')
-    .whereRaw('LOWER(TRIM(name)) = LOWER(TRIM(?))', [DEFAULT_CALL_BOOKING_TECHNICIAN_NAME])
-    .where(function () {
-      this.where({ active: true }).orWhereNull('active');
-    })
-    .first('id', 'name');
+  const tech = await applyAssignable(conn('technicians')
+    .whereRaw('LOWER(TRIM(technicians.name)) = LOWER(TRIM(?))', [DEFAULT_CALL_BOOKING_TECHNICIAN_NAME]))
+    .first('technicians.id', 'technicians.name');
   if (tech?.id) return { id: tech.id, name: tech.name || DEFAULT_CALL_BOOKING_TECHNICIAN_NAME };
 
   // Name mismatch (e.g. the row is "Adam", not "Adam B.") used to silently
   // book with no technician. When exactly one active technician exists there
   // is no ambiguity — assign them and say so.
-  const activeTechs = await conn('technicians')
-    .where(function () {
-      this.where({ active: true }).orWhereNull('active');
-    })
-    .select('id', 'name');
+  const activeTechs = await applyAssignable(conn('technicians')).select('technicians.id', 'technicians.name');
   if (activeTechs.length === 1) {
     logger.info(`[call-proc] Default call-booking technician name "${DEFAULT_CALL_BOOKING_TECHNICIAN_NAME}" not found; using sole active technician ${activeTechs[0].name}`);
     return { id: activeTechs[0].id, name: activeTechs[0].name || null };
@@ -6712,6 +6716,119 @@ const CallRecordingProcessor = {
     // fallback is also missing/implausible.
     let primaryTranscriptRejected = false;
     let rejectedPrimaryChars = 0; // provenance for the discarded primary (audit/tuning)
+    let recordedSegmentText = null; // PR 2A: the recorded leg of a composite (AI + recorded) transcript
+    const isUsableFallback = (t) => t && t !== TRANSCRIPTION_REJECTED_SENTINEL;
+    // PR 2A, provider-aware (hook P1): a transferred call's cached column
+    // may be the relay's OWN played-text transcript (provider
+    // conversation_relay — never the recording's), or a composite a prior
+    // pass stored. Only the RECORDED part is a usable fallback for the
+    // recording; the AI segment is re-attached from the row by composeRelay.
+    const recordedFallbackOf = (row) => {
+      if (!row || !isUsableFallback(row.transcription)) return null;
+      if (row.transcription_provider === RELAY_TRANSCRIPTION_PROVIDER) return null;
+      // The sentinel check runs on the RECORDED part: a composite whose
+      // recorded leg was already rejected carries the sentinel there.
+      const recorded = recordedPartOfComposite(row.transcription);
+      return isUsableFallback(recorded) ? recorded : null;
+    };
+    // The row's CURRENT relay state, not the claim-time snapshot (hook P1):
+    // end()'s relay_transcript stash can land during the minutes-long
+    // transcription — the stash side prepends the AI segment only onto a
+    // recorded-only column that already exists, so this side must see a
+    // stash that landed before its write. Read failure ⇒ the snapshot.
+    const currentRelayState = async () => {
+      let row = call;
+      try {
+        const fresh = await db('call_log').where({ id: call.id }).first('metadata', 'call_outcome', 'transcription', 'transcription_provider', 'transcription_metadata');
+        if (fresh) row = { ...call, ...fresh };
+      } catch (err) {
+        logger.warn(`[call-proc] relay-state re-read failed for ${maskSid(callSid)}: ${err.message} — using the snapshot`);
+      }
+      let meta = row.metadata;
+      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+      // A reconnect attempt alone may have been compensated without any AI
+      // session. Preserve a pending relay segment only with text or proof
+      // that a resumed socket claimed the call.
+      const segment = composeRelaySegment(row);
+      const resumedClaim = Number(meta?.relay_reconnect_ms) > 0 && Number(meta?.relay_session_claim_gen) >= Number(meta.relay_reconnect_ms);
+      const reconnected = Number(meta?.relay_reconnects) > 0 && Boolean(segment || resumedClaim);
+      const transferred = Boolean(meta && typeof meta === 'object' && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || meta.relay_transfer_ring_at)) || reconnected || (Array.isArray(meta?.relay_segment_owners) && Boolean(segment)) || row.call_outcome === 'ai_transferred';
+      return { row, segment, transferred, reconnected, label: row.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff' };
+    };
+    // Registering claims and appending closes share the call-row lock with
+    // this barrier. Do not transcribe, reject, extract or route a partial set.
+    const initialRelayState = await currentRelayState();
+    const initialRelayMeta = typeof initialRelayState.row.metadata === 'string'
+      ? JSON.parse(initialRelayState.row.metadata) : (initialRelayState.row.metadata || {});
+    if (process.env.GATE_VOICE_RELAY_RECOVERY === 'true' || Array.isArray(initialRelayMeta.relay_segment_owners)) {
+      const sealed = await require('./voice-agent/relay-segments').sealSegmentsForExtraction(db, call.id, procToken);
+      if (sealed.status === 'ownership_lost') return abandonToPeer('the relay completion barrier');
+      if (sealed.status === 'ready') call.metadata = sealed.row.metadata;
+      if (sealed.status !== 'ready') {
+        // Use the existing bounded extraction retry/triage mechanism. A
+        // crashed socket cannot be retried forever or silently treated as
+        // complete: after the normal cap, the office reviews the recording.
+        throw new Error('Relay close records are missing; if the socket was abandoned, inspect the recording and resolve intake manually.');
+      }
+    }
+    // Transfer-marked row whose relay text had NOT landed at compose time:
+    // the transcript write below then composes INSIDE the UPDATE from the
+    // row's metadata, so a stash landing between the read and the write is
+    // still composed (hook P1) — and the written value is read back so
+    // extraction sees what the row holds.
+    let relayPending = false;
+    // The relay text the row holds RIGHT NOW: the stash, else the segments
+    // (PR 2B — a silent resumed leg wrote no stash, but every earlier socket
+    // appended its segment). Composed inside the UPDATE, never from a read.
+    const relayTextSql = () => db.raw(
+      "COALESCE(NULLIF(metadata->'relay_transcript'->>'text', ''), ?, CASE WHEN transcription_provider = ? THEN NULLIF(transcription, '') END)",
+      [require('./voice-agent/relay-segments').composeSegmentsSql(db), RELAY_TRANSCRIPTION_PROVIDER],
+    );
+    const STASH_SQL = '? IS NOT NULL';
+    const composeInSql = (text) => db.raw(
+      `CASE WHEN ? IS NOT NULL THEN '[AI segment]' || E'\\n' || ? || E'\\n\\n[' || CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END || E' segment]' || E'\\n' || ?::text ELSE ?::text END`,
+      [relayTextSql(), relayTextSql(), text, text],
+    );
+    const writeTranscript = async (query, patch) => {
+      if (!relayPending) return Number(await query.update(patch)) || 0;
+      const hasStructured = Object.prototype.hasOwnProperty.call(patch, 'transcript_structured');
+      // Preserve a legacy column-backed AI segment before this same UPDATE
+      // assigns the column to the recording provider. Retries retain the AI leg.
+      const relayStash = db.raw(
+        "CASE WHEN NULLIF(metadata->'relay_transcript'->>'text', '') IS NULL AND ? IS NOT NULL THEN COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_transcript', jsonb_build_object('text', ?::text, 'metadata', jsonb_build_object('provider', ?::text))) ELSE metadata END",
+        [relayTextSql(), relayTextSql(), RELAY_TRANSCRIPTION_PROVIDER],
+      );
+      // The RECORDED text is what the row composes around — never an
+      // in-memory composite (a reconnected call may already have composed
+      // one at read time; the UPDATE re-composes from current metadata).
+      const recorded = recordedSegmentText || patch.transcription;
+      const rows = await query.update({
+        ...patch,
+        transcription: composeInSql(recorded),
+        metadata: relayStash,
+        transcript_structured: hasStructured
+          ? db.raw(`CASE WHEN ${STASH_SQL} THEN NULL ELSE ?::jsonb END`, [relayTextSql(), patch.transcript_structured == null ? null : patch.transcript_structured])
+          : db.raw(`CASE WHEN ${STASH_SQL} THEN NULL ELSE transcript_structured END`, [relayTextSql()]),
+      }, ['transcription']);
+      const n = Array.isArray(rows) ? rows.length : Number(rows) || 0;
+      const written = Array.isArray(rows) && rows[0] ? rows[0].transcription : null;
+      if (n > 0 && typeof written === 'string' && written.startsWith('[AI segment]')) {
+        recordedSegmentText = recorded;
+        transcription = written;
+        logger.info(`[call-proc] relay stash landed during transcription for ${maskSid(callSid)} — composite written in the UPDATE`);
+      }
+      return n;
+    };
+    const composeRelay = async (text, provenance) => {
+      const { segment, label, transferred } = await currentRelayState();
+      // Every transfer or reconnect composes from the current row inside
+      // the write, preserving column-backed relay text across provider changes.
+      relayPending = transferred;
+      if (!segment) return text;
+      recordedSegmentText = text; // the hallucination guard below measures THIS against the recording, never the composite
+      provenance.metadata.relay = segment.metadata;
+      return `${segment.text}\n\n[${label} segment]\n${text}`;
+    };
     // Twilio CDN hasn't finished propagating the MP3 (404 or truncated
     // buffer for the known duration) — release the claim untouched instead
     // of stamping no_transcription, so the next timer/cron attempt retries
@@ -6776,6 +6893,14 @@ const CallRecordingProcessor = {
             recording_url_present: !!call.recording_url,
           },
         };
+        // Sandy PR 2A: a transferred call's recording is the STAFF leg (the
+        // <Dial> records from answer) or, when nobody accepted, the voicemail.
+        // The relay's own played-text transcript already sits on the row —
+        // keep it ahead of the recorded segment and its provenance under
+        // transcription_metadata.relay, instead of letting the recording's
+        // transcript replace it. Qualified on the persisted handoff packet.
+        transcription = await composeRelay(transcription, transcriptionProvenance);
+        const relaySegment = Boolean(recordedSegmentText);
         const transcriptUpdate = {
           transcription,
           transcription_status: 'completed',
@@ -6791,7 +6916,12 @@ const CallRecordingProcessor = {
         if (!result.structuredSegments && !contactPassTranscript) {
           transcriptUpdate.transcript_structured = null;
         }
-        if (result.structuredSegments || contactPassTranscript) {
+        // A composite (AI + recorded segment) has no structured form: the
+        // synced view would render the recorded segment alone and hide the
+        // AI conversation (codex r1 P2) — the flat transcript is the view.
+        if (relaySegment) {
+          transcriptUpdate.transcript_structured = null;
+        } else if (result.structuredSegments || contactPassTranscript) {
           transcriptUpdate.transcript_structured = JSON.stringify({
             provider: result.provider,
             model: result.model || OPENAI_TRANSCRIPTION_MODEL,
@@ -6805,10 +6935,10 @@ const CallRecordingProcessor = {
         // multi-minute provider await, by which time a peer may have
         // reclaimed the row. Writing by id alone let a superseded pass
         // overwrite the replacement's transcript (codex P1).
-        const wroteTranscript = await db('call_log')
-          .where({ id: call.id })
-          .where('processing_token', procToken)
-          .update(transcriptUpdate);
+        const wroteTranscript = await writeTranscript(
+          db('call_log').where({ id: call.id }).where('processing_token', procToken),
+          transcriptUpdate,
+        );
         if (!wroteTranscript) {
           // STOP, do not merely skip the write. A zero-row fence here proves
           // a peer owns the call, and everything after this point —
@@ -6858,16 +6988,16 @@ const CallRecordingProcessor = {
     // The rejection sentinel is NOT a usable transcript — on an admin
     // force-reprocess of an already-rejected call it's what's stored in
     // call_log.transcription, so treat it (and cached copies of it) as no fallback.
-    const isUsableFallback = (t) => t && t !== TRANSCRIPTION_REJECTED_SENTINEL;
     if (!transcription) {
-      const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription', 'transcript_structured').first();
-      if (isUsableFallback(freshCall?.transcription)) {
+      const freshCall = await db('call_log').where('twilio_call_sid', callSid).select('transcription', 'transcript_structured', 'transcription_provider').first();
+      const freshRecorded = recordedFallbackOf(freshCall);
+      if (freshRecorded) {
         // Rows written before the PAN guard deployed (or by an unscrubbed
         // legacy path) re-enter the live pipeline here — scrub on read so
         // the LLM consumers downstream never see a stored PAN, and heal the
         // sibling transcript_structured artifact in the same touch (its
         // segments/contact-pass may carry the same pre-guard PAN).
-        const fallbackScrub = scrubPansDetailed(freshCall.transcription);
+        const fallbackScrub = scrubPansDetailed(freshRecorded);
         const structuredScrub = scrubStructuredTranscript(freshCall.transcript_structured);
         transcription = fallbackScrub.text;
         transcriptionProvenance = {
@@ -6880,9 +7010,10 @@ const CallRecordingProcessor = {
             source: 'fresh_call_log',
           },
         };
+        transcription = await composeRelay(transcription, transcriptionProvenance);
         // Token-fenced (post-transcription awaits): the pass that now owns
         // the call scrubs, stamps and quarantines for itself.
-        const fallbackStored = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
+        const fallbackStored = await writeTranscript(db('call_log').where({ id: call.id }).where('processing_token', procToken), {
           // Persist the scrubbed text, not just the local copy — a legacy
           // PAN-bearing row would otherwise stay exposed to every
           // persisted-row consumer (Codex #2676 round-1 P1). Detection is
@@ -6890,7 +7021,8 @@ const CallRecordingProcessor = {
           // quarantine below must not leave a masked transcript with no
           // durable signal that the audio still needs deleting.
           transcription,
-          ...(structuredScrub.count > 0 ? { transcript_structured: structuredScrub.json } : {}),
+          // A composite has no structured form (see the primary path).
+          ...(recordedSegmentText ? { transcript_structured: null } : (structuredScrub.count > 0 ? { transcript_structured: structuredScrub.json } : {})),
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
           transcription_metadata: transcriptionMetadataWrite({
@@ -6907,8 +7039,8 @@ const CallRecordingProcessor = {
           call.recording_url = null;
         }
         logger.info(`[call-proc] OpenAI/Gemini unavailable - falling back to Twilio transcription: ${transcription.length} chars`);
-      } else if (isUsableFallback(call.transcription)) {
-        const cachedScrub = scrubPansDetailed(call.transcription);
+      } else if (recordedFallbackOf(call)) {
+        const cachedScrub = scrubPansDetailed(recordedFallbackOf(call));
         const cachedStructuredScrub = scrubStructuredTranscript(call.transcript_structured);
         transcription = cachedScrub.text;
         transcriptionProvenance = {
@@ -6921,9 +7053,10 @@ const CallRecordingProcessor = {
             source: 'cached_call_log',
           },
         };
-        const cachedStored = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
+        transcription = await composeRelay(transcription, transcriptionProvenance);
+        const cachedStored = await writeTranscript(db('call_log').where({ id: call.id }).where('processing_token', procToken), {
           transcription, // scrubbed — see the fresh-row twin above
-          ...(cachedStructuredScrub.count > 0 ? { transcript_structured: cachedStructuredScrub.json } : {}),
+          ...(recordedSegmentText ? { transcript_structured: null } : (cachedStructuredScrub.count > 0 ? { transcript_structured: cachedStructuredScrub.json } : {})),
           transcription_provider: transcriptionProvenance.provider,
           transcription_model: null,
           transcription_metadata: transcriptionMetadataWrite({
@@ -6949,7 +7082,53 @@ const CallRecordingProcessor = {
     // looser fallback. Terminal 'voicemail' so the retry sweep won't re-run it
     // (a re-transcribe would just hallucinate again).
     const recordingSeconds = Number(call.recording_duration_seconds) || Number(call.duration_seconds) || null;
-    const fallbackImplausible = transcription && isImplausibleTranscript(transcription, recordingSeconds);
+    // A transferred call's composite carries the AI segment ahead of the
+    // recorded one; only the RECORDED text was spoken into this recording
+    // (hook P1 — a long Sandy conversation before a short voicemail is not
+    // a hallucination).
+    const gateText = recordedSegmentText || transcription;
+    let fallbackImplausible = transcription && isImplausibleTranscript(gateText, recordingSeconds);
+    // A TRANSFERRED call (hook P1): the recorded leg may be a hallucination,
+    // Sandy's leg is not — its lead (capture_lead / the capture floor) and
+    // its transcript are real. Reject the RECORDED SEGMENT ONLY: the AI
+    // segment stays as the transcript with the rejection noted in its place,
+    // and the whole-call rejection below (voicemail sentinel, triage
+    // dismissal, lead retirement keyed by CallSid) never runs.
+    const recordedRejected = fallbackImplausible || (!transcription && primaryTranscriptRejected);
+    // Decided on the row's CURRENT state (hook P1): the stash may have landed
+    // during transcription. Transfer evidence WITHOUT relay text yet (the
+    // close has not stashed) still keeps the whole-call rejection out — the
+    // recorded-only sentinel is written under the segment header, and the
+    // late stash prepends the AI segment onto it.
+    const relayState = recordedRejected ? await currentRelayState() : null;
+    const relayOnly = relayState && relayState.segment;
+    if (relayOnly || (relayState && relayState.transferred)) {
+      const rejectedChars = fallbackImplausible ? spokenCharCount(gateText) : rejectedPrimaryChars;
+      logger.warn(`[call-proc] Rejecting the RECORDED segment of transferred call ${maskSid(callSid)} (${rejectedChars} chars / ${recordingSeconds}s) — keeping the AI segment${relayOnly ? '' : ' (pending)'}`);
+      // With the relay text still pending, the BARE sentinel is written:
+      // composition (in the UPDATE now, or the late stash) adds the segment
+      // header exactly once, and a bare sentinel stays a rejected fallback.
+      // A RECONNECTED call composes inside the UPDATE from the row's current
+      // metadata (a later segment can land between the read and this write,
+      // hook P1): the bare sentinel is the recorded text it composes around.
+      // The write also preserves any column-backed relay text.
+      transcription = TRANSCRIPTION_REJECTED_SENTINEL;
+      transcriptionProvenance = transcriptionProvenance || { provider: null, model: null, metadata: {} };
+      transcriptionProvenance.metadata = { ...(transcriptionProvenance.metadata || {}), ...(relayOnly ? { relay: relayOnly.metadata } : {}), recorded_segment_rejected: { reason: fallbackImplausible ? 'implausible_length' : 'primary_hallucinated_no_fallback', raw_chars: rejectedChars, recording_seconds: recordingSeconds } };
+      // Through the same SQL-time composition as every other transcript write
+      // (hook P1): when the AI text was still pending here, a stash landing
+      // before this UPDATE is composed ahead of the rejected segment.
+      relayPending = true;
+      recordedSegmentText = null; // the write composes around the BARE sentinel, never the rejected text
+      const wroteRelayOnly = await writeTranscript(
+        db('call_log').where({ id: call.id }).where('processing_token', procToken),
+        { transcription, transcription_status: 'completed', transcription_provider: transcriptionProvenance.provider, transcription_model: transcriptionProvenance.model, transcript_structured: null, transcription_metadata: transcriptionMetadataWrite(transcriptionProvenance.metadata), updated_at: new Date() },
+      );
+      if (!wroteRelayOnly) return abandonToPeer('the relay-only transcript write');
+      recordedSegmentText = null;
+      fallbackImplausible = false;
+      primaryTranscriptRejected = false;
+    }
     // Two terminal-rejection cases: (a) the Twilio fallback ALSO produced an
     // implausible transcript; (b) the primary was implausible and no usable
     // fallback exists. Both finalize as an empty voicemail — NOT no_transcription
@@ -6960,7 +7139,7 @@ const CallRecordingProcessor = {
       // nulled, so use the char count captured before discarding it.
       const rawChars = transcription ? transcription.length : rejectedPrimaryChars;
       const cps = recordingSeconds && rawChars
-        ? Math.round((fallbackImplausible ? spokenCharCount(transcription) : rawChars) / recordingSeconds)
+        ? Math.round((fallbackImplausible ? spokenCharCount(gateText) : rawChars) / recordingSeconds)
         : null;
       logger.warn(`[call-proc] Rejecting implausible transcription for ${maskSid(callSid)}: ${fallbackImplausible ? `fallback ${rawChars} chars / ${recordingSeconds}s (~${cps} c/s)` : 'primary hallucinated, no usable fallback'} — empty voicemail, no extraction`);
       let priorMeta = {};
@@ -7048,6 +7227,29 @@ const CallRecordingProcessor = {
       return { success: true, skipped: true, reason: 'transcription_rejected_implausible' };
     }
 
+    if (!transcription) {
+      const relay = await currentRelayState();
+      if (relay.segment && !call.recording_url) {
+        // With no recording to retrieve, the durable AI conversation remains
+        // usable. A provider failure for an existing recording must retain
+        // no_transcription so the normal sweep retries that recorded leg.
+        // A silent/unavailable recording does not erase the caller's durable
+        // AI conversation. Store the plain relay representation and retain
+        // the AI label for extraction; there is no recorded half to invent.
+        transcription = relay.segment.text;
+        transcriptionProvenance = { provider: RELAY_TRANSCRIPTION_PROVIDER, model: null,
+          metadata: { relay: relay.segment.metadata, recording_transcription_unavailable: true } };
+        const wrote = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
+          transcription: db.raw('COALESCE(?, ?)', [relayTextSql(), transcription.slice('[AI segment]\n'.length)]),
+          transcription_provider: RELAY_TRANSCRIPTION_PROVIDER, transcription_status: 'completed',
+          transcription_model: null, transcript_structured: null,
+          transcription_metadata: transcriptionMetadataWrite(transcriptionProvenance.metadata), updated_at: new Date(),
+        });
+        if (!wrote) return abandonToPeer('the relay-only transcript write');
+        relayPending = true;
+      }
+    }
+
     if (transcription) {
       await updateUnifiedVoiceMessage(
         { ...call, transcription },
@@ -7133,6 +7335,21 @@ const CallRecordingProcessor = {
     // Catalog-aware provenance: the catalog block is part of the rendered
     // V2 prompt, so every stamp for this call must carry its hash.
     const v2PromptVersion = extractionPromptVersion(bookableServiceNames);
+
+    if (relayPending) {
+      // The registered set is sealed before transcription. Refresh the
+      // processor's own composed write while retaining its claim fence.
+      const fresh = await db('call_log').where({ id: call.id })
+        .where('processing_token', procToken).first('transcription', 'transcription_provider');
+      if (!fresh) return abandonToPeer('the relay transcript refresh');
+      const relayText = fresh.transcription_provider === RELAY_TRANSCRIPTION_PROVIDER
+        ? `[AI segment]\n${fresh.transcription || ''}` : fresh.transcription;
+      if (relayText?.startsWith('[AI segment]') && relayText !== transcription) {
+        transcription = relayText;
+        recordedSegmentText = recordedPartOfComposite(transcription);
+        await updateUnifiedVoiceMessage({ ...call, transcription }, { body: transcription });
+      }
+    }
 
     let extracted;
     try {
@@ -8487,6 +8704,7 @@ const CallRecordingProcessor = {
           .update({
             ai_extraction: JSON.stringify(extracted),
             call_summary: extracted.call_summary || null,
+            transcription_metadata: trx.raw("COALESCE(transcription_metadata, '{}'::jsonb) || jsonb_build_object('summary_source', 'model')"),
             sentiment: extracted.sentiment || null,
             lead_quality: extracted.lead_quality || null,
             processing_status: extracted.is_spam ? 'spam' : 'processed',
@@ -9650,6 +9868,7 @@ const CallRecordingProcessor = {
       } : {}),
       ai_extraction: JSON.stringify(extracted),
       call_summary: extracted.call_summary || null,
+      transcription_metadata: db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || jsonb_build_object('summary_source', 'model')"),
       sentiment: extracted.sentiment || null,
       lead_quality: extracted.lead_quality || null,
       updated_at: new Date(),
@@ -12588,6 +12807,10 @@ const CallRecordingProcessor = {
                   parentWindowStart: windowStart || '09:00',
                 });
               let reusedExistingSchedule = false;
+              // The reuse branch below may assign the default tech to an
+              // unassigned reused row — that row was never announced (it had
+              // no tech at insert), so it is "new" to them now.
+              let reuseAssignedTechId = null;
               // Set when the call was ATTACHED to a live booking made by a
               // human through another channel (see the attach guard below):
               // the id drives the distinct log line, and the skipped-plan
@@ -12722,6 +12945,18 @@ const CallRecordingProcessor = {
                   const fuEndH = fuH >= 23 ? 23 : fuH + 1;
                   try {
                     return await trx.transaction(async (sp) => {
+                      // The follow-up inherits the primary's tech; if that tech
+                      // is no longer assignable (offboarded since the primary
+                      // was booked) seed it unassigned rather than onto them.
+                      let followUpTechId = primaryRow.technician_id || defaultTechnicianId || null;
+                      if (followUpTechId) {
+                        const fuTech = await sp('technicians').where({ id: followUpTechId }).forShare()
+                          .first('id', 'employment_status', 'field_dispatchable');
+                        if (!isAssignable(fuTech)) {
+                          logger.warn(`[call-proc] follow-up technician ${followUpTechId} is not assignable; seeding unassigned`);
+                          followUpTechId = null;
+                        }
+                      }
                       const [fuRow] = await sp('scheduled_services')
                         .insert({
                           customer_id: customerId,
@@ -12733,7 +12968,7 @@ const CallRecordingProcessor = {
                           // the named payer. Always matches the parent (a fresh
                           // primary already carries callBookingPayerId here).
                           payer_id: primaryRow.payer_id || null,
-                          technician_id: primaryRow.technician_id || defaultTechnicianId,
+                          technician_id: followUpTechId,
                           // Visit 2 treats the same property as visit 1 —
                           // coordinates included, or the stamped child would
                           // render the right address with no map pin.
@@ -12852,10 +13087,24 @@ const CallRecordingProcessor = {
                         { techId: defaultTechnicianId, date: dayRow.day },
                       ]);
                     }
-                    const [updatedExisting] = await trx('scheduled_services')
-                      .where({ id: existing.id })
-                      .update({ technician_id: defaultTechnicianId, route_order: null, updated_at: new Date() })
-                      .returning('*');
+                    // Re-checked FOR SHARE on the writing trx: the default tech was
+                    // resolved before this transaction opened. If eligibility
+                    // changed, leave the reused row unassigned rather than assign.
+                    let reuseTechId = defaultTechnicianId;
+                    try {
+                      await assertAssignableTechnician(reuseTechId, { conn: trx });
+                    } catch (eligErr) {
+                      if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
+                      logger.warn(`[call-proc] default technician ${reuseTechId} is no longer assignable; leaving reused booking unassigned`);
+                      reuseTechId = null;
+                    }
+                    const [updatedExisting] = reuseTechId
+                      ? await trx('scheduled_services')
+                        .where({ id: existing.id })
+                        .update({ technician_id: reuseTechId, route_order: null, updated_at: new Date() })
+                        .returning('*')
+                      : [existing];
+                    if (reuseTechId && updatedExisting) reuseAssignedTechId = reuseTechId;
                     primaryRow = updatedExisting || existing;
                     // Visit-group seam (visit-group-scope.md §2; codex #3590
                     // r12): this direct assignment bypasses assignDispatchJob,
@@ -13309,6 +13558,27 @@ const CallRecordingProcessor = {
                     addressHash: computeAddressHash({ street_line_1: customer.address_line1, city: customer.city, postal_code: customer.zip }),
                   }),
                 };
+                // The default tech was resolved before this trx opened; re-check
+                // FOR SHARE here so an offboarding cannot commit in between. If
+                // it did, book unassigned — the visit is still created and the
+                // triage note already says who was auto-assigned (or nobody).
+                if (insertData.technician_id) {
+                  try {
+                    await assertAssignableTechnician(insertData.technician_id, { conn: trx });
+                  } catch (eligErr) {
+                    if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
+                    logger.warn(`[call-proc] default technician ${insertData.technician_id} is no longer assignable; booking unassigned`);
+                    insertData.technician_id = null;
+                    // The staff-visible note was built before this recheck; an
+                    // unassigned visit must not claim a technician owns it.
+                    if (defaultTechnicianName && typeof insertData.notes === 'string') {
+                      insertData.notes = insertData.notes
+                        .replace(`Auto-assigned technician: ${defaultTechnicianName}.`, '')
+                        .replace(/\s{2,}/g, ' ')
+                        .trim();
+                    }
+                  }
+                }
                 const [created] = await trx('scheduled_services')
                   .insert(insertData)
                   .onConflict('idempotency_key')
@@ -13444,6 +13714,27 @@ const CallRecordingProcessor = {
                 }
               }
               scheduledServiceId = svc.id;
+              // Tech-facing "new visit" cards (tech-visit-notifications.js):
+              // a phone booking inserts its assigned rows directly, bypassing
+              // assignDispatchJob, so it tells the tech itself — the fresh
+              // primary (never a reused row: the original insert already
+              // announced it) and a fresh follow-up child. Post-commit,
+              // best-effort, never awaited; gate-dark; system actor.
+              {
+                const techNotices = require('./tech-visit-notifications');
+                const freshRows = [
+                  // A reused row that this run ASSIGNED is new to that tech too.
+                  ...(!reusedExistingSchedule || (reuseAssignedTechId && String(svc.technician_id) === String(reuseAssignedTechId)) ? [svc] : []),
+                  ...(followUpCreated && followUpCreated.id ? [followUpCreated] : []),
+                ];
+                for (const row of freshRows) {
+                  if (!row.technician_id) continue;
+                  void techNotices.notifyTechVisitChange({
+                    visitId: row.id, kind: 'assigned', technicianId: row.technician_id, actorId: null,
+                    snapshot: { date: row.scheduled_date, windowStart: row.window_start || null, windowEnd: row.window_end || null },
+                  });
+                }
+              }
               if (scheduleWasReused) {
                 // The reused row can be a LEGACY outbound-review booking
                 // (created pending before the 2026-08-11 hold removal): the
@@ -15029,7 +15320,12 @@ const CallRecordingProcessor = {
     // skipping scoring and carrying on into the finalization work — a
     // superseded pass has no business doing either (codex #3677 P1).
     if (!(await stillOwnsClaim())) return abandonToPeer('CSR scoring and finalization');
-    if (transcription && transcription.length > 50) {
+    // A transferred call is scored on its HUMAN leg only — and not at all
+    // when that leg was rejected as implausible (the sentinel sits under the
+    // staff segment; scoring it would persist a meaningless CSR score and
+    // could file a bogus follow-up, codex r5 P1).
+    const csrTranscript = recordedPartOfComposite(transcription) || transcription;
+    if (csrTranscript && csrTranscript.length > 50 && csrTranscript !== TRANSCRIPTION_REJECTED_SENTINEL) {
       try {
         const callMeta = typeof call.metadata === 'string'
           ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()
@@ -15044,7 +15340,11 @@ const CallRecordingProcessor = {
           customerId: customerId || null,
           callDirection: 'inbound',
           callSource: call.to_phone || 'unknown',
-          transcript: transcription,
+          // A transferred call's composite carries Sandy's leg ahead of the
+          // staff leg: the CSR is scored on the HUMAN leg only (Sandy's
+          // greeting / empathy / closing must not be awarded to the employee,
+          // codex r4 P1). The composite stays the call record.
+          transcript: csrTranscript,
           metadata: {
             callSid,
             duration: call.duration_seconds,
@@ -16490,6 +16790,7 @@ const LEAD_UNIT_MAX_LENGTH = 100;
 const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
 
 CallRecordingProcessor._test = {
+  recordedPartOfComposite,
   summarizeBatch,
   noteSharedPhoneSibling,
   leadFirstContactAt,

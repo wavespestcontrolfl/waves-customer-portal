@@ -372,8 +372,12 @@ test('churn facts follow the row AS LOCKED: a reactivation that landed after the
   seedCustomer();
   Object.assign(db.__tables.customers[0], { pipeline_stage: 'churned', active: false, churned_at: '2026-08-01', churn_episode_id: 'ep-old' });
   const orig = db.transaction;
+  let reactivated = false;
   db.transaction = async (fn) => {
-    Object.assign(db.__tables.customers[0], { pipeline_stage: 'active_customer', active: true, churned_at: null, churn_reason: null, churn_episode_id: null });
+    if (!reactivated) {
+      reactivated = true;
+      Object.assign(db.__tables.customers[0], { pipeline_stage: 'active_customer', active: true, churned_at: null, churn_reason: null, churn_episode_id: null });
+    }
     return orig(fn);
   };
   try {

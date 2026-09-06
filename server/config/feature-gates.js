@@ -42,6 +42,8 @@
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
  *   GATE_LLM_CALL_TRACES=true   (redacted prompt / response bodies in llm_call_traces for lanes whose runtime policy opts in; needs GATE_LLM_CALL_LEDGER; dark in dev AND prod)
+ *   GATE_AGENT_CONTROL_READ=true (Agents hub Control center reads: /api/admin/agents/control/areas + /control/lanes over the call ledger, features.ledger on the hub probe; off = 404 + probe says no ledger; dark in dev AND prod)
+ *   GATE_AGENT_RUNS=true      (agent run ledger WRITES — services/agent-control/runs.js records work_items / agent_runs / steps / events for lanes that call it; off = every handle is inert; the /control/runs reads stay on GATE_AGENT_CONTROL_READ; dark in dev AND prod)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
  *   GATE_STICKY_CANCEL_WINDOW=true (sticky cancel window — a customer reschedule inside the fee window keeps a later cancel chargeable)
@@ -59,6 +61,8 @@
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
+ *   GATE_JOB_CARD=true (Service Protocol drawer "Job card" tab: customer paragraph (FAST-tier rewrite of portal fields, template fallback, cached on scheduled_services.job_card), per-product spray check from NWS hourly at the property, tank mix search; read at call time; unset = tab hidden, endpoint answers {enabled:false})
+ *   GATE_VAN_SCENE=true (the "look for this van" scene under the appointment header card and on the booking confirmation step; dev-open (every non-production NODE_ENV renders it regardless), prod dark; prod kill = unset)
  *   GATE_SLOT_TRAVEL_GAP=true (every customer-facing picker + commit gate requires modeled drive time + SLOT_TRAVEL_BUFFER_MINUTES (default 15) between consecutive stops; read at call time; unset = pure-overlap legacy)
  *   GATE_ESTIMATE_SERVICE_OPT_OUT=true (customer drops one recurring service line on a sent estimate; canonical engine re-price behind a dryRun preflight, no comms, no bell — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SERVICE_ADD=true (priced add-a-service on the opt-out rail — pest/lawn/mosquito join a sent estimate behind the same dryRun preflight; STRICT opt-in, needs the opt-out gate)
@@ -69,7 +73,7 @@
  *   GATE_IB_TOOL_ACTIVITY=true (Intelligence Bar answers carry a toolActivity list — one operator-facing line per tool the exchange ran: label, done/error/proposed, duration — rendered above the answer in the ⌘K palette; off = response byte-identical to today)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
- *   GATE_ESTIMATE_LAWN_CALENDAR=true (season timeline under the lawn price card — four SWFL turf seasons from the current month, one-line focus each, cadence + projected months per frequency from the scheduling catalog on /data; dev-open, prod dark)
+ *   GATE_ESTIMATE_LAWN_CALENDAR=true ("Your program" block under the lawn price card — annual application count + four plain season rows behind a toggle; count from the scheduling catalog on /data; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
@@ -89,6 +93,8 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
+  customerRecurringDispatch: gateEnvValue('GATE_CUSTOMER_RECURRING_DISPATCH'),
   // Payer Phase 2 — NET-terms consolidated statements (accrual core).
   // OFF unless explicitly enabled, in dev AND prod (unlike the dev-open gates
   // below): flipping it on changes invoice behaviour for net15/net30 payers
@@ -165,11 +171,12 @@ const gates = {
   // switch for every tokenized capture, judged at mint AND completion),
   // instant bank verification only, same save → consent → enroll tail as
   // every other save surface. Operator-initiated only (Customers page
-  // action: copy link, or text it via the card_request purpose with the
+  // action: copy link, text it via the card_request purpose with the
   // autopay_setup_link template, seeded inactive — and the text ALSO needs
   // GATE_AUTOPAY_CUSTOMER_SMS, since the message type classifies as an
   // Auto Pay customer SMS; the action reports autopay_sms_gate_off
-  // otherwise). Gate off: the admin
+  // otherwise — or email it via the payment.autopay_setup_link email
+  // template through the template library). Gate off: the admin
   // action reports gate_off and mints nothing; already-minted links keep
   // working (the gate governs new links). Customer-facing money surface —
   // fail-closed ==='true' in every environment.
@@ -457,6 +464,7 @@ const gates = {
   // silently ignoring one (an ignored count reads to the office as a plan they
   // capped). Kill switch: unset or any non-'true' value; visits already added
   // or cancelled are not reversed when it flips.
+  editApptAddress: process.env.GATE_EDIT_APPT_ADDRESS === 'true',
   editApptVisitCount: process.env.GATE_EDIT_APPT_VISIT_COUNT === 'true',
 
   // Applying a PRICE or primary-SERVICE change from Edit appointment to "this
@@ -663,6 +671,29 @@ const gates = {
   // this entry is the status/log listing. Kill switch: unset.
   voiceRelayInterruptContext: gateEnvValue('GATE_VOICE_RELAY_INTERRUPT_CONTEXT'),
 
+  // Sandy PR 2A — human handoff. On, and ONLY while the office is open right
+  // now, the relay registers `transfer_to_office`: the caller is handed to
+  // the staff simul-ring (press-1 screen, ≤20-word whisper after accept)
+  // with a server-built handoff packet on call_log.metadata.relay_handoff
+  // and call_outcome='ai_transferred'. After hours the tool is absent and
+  // the prompt offers a callback via capture_lead. Off ⇒ no tool, prompt and
+  // /relay-complete byte-identical to today. Read at CALL time
+  // (services/voice-agent/relay-transfer.js, exact 'true'); this entry is the
+  // status/log listing. Kill switch: unset.
+  voiceRelayTransfer: process.env.GATE_VOICE_RELAY_TRANSFER === 'true',
+
+  // Sandy PR 2B — voice-session recovery. On, a relay socket that fails
+  // mid-call is reconnected ONCE (/relay-complete re-renders the relay with
+  // a resumed greeting; the new socket takes the claim), every socket's
+  // transcript lands as a segment (metadata.relay_segments) and the owning
+  // close composes the whole call; a second failure hands the caller to the
+  // office (transfer gate, office open) or voicemail; a second consecutive
+  // model / tool failure hands off instead of re-prompting. Off ⇒
+  // /relay-complete and the close-time writes are byte-identical to today.
+  // Read at CALL time (services/voice-agent/relay-recovery.js, exact
+  // 'true'); this entry is the status/log listing. Kill switch: unset.
+  voiceRelayRecovery: process.env.GATE_VOICE_RELAY_RECOVERY === 'true',
+
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
 
@@ -789,7 +820,7 @@ const gates = {
   aiBlogWriter: isProd ? process.env.GATE_AI_BLOG_WRITER === 'true' : true,
 
   // Cron Jobs — automated scheduled tasks (reminders, billing, intelligence)
-  cronJobs: isProd ? process.env.GATE_CRON_JOBS === 'true' : true,
+  cronJobs: isProd ? process.env.GATE_CRON_JOBS === 'true' : process.env.GATE_CRON_JOBS !== 'false',
 
   // Weekly lawn pricing invariant sweep — re-runs the pricing engine across the
   // full track×size×tier grid against LIVE DB config and raises an admin alert
@@ -1386,6 +1417,15 @@ const gates = {
   // the office's manual match flow; already-made links keep their
   // link_source='click_auto' stamp for audit.
   reviewClickAutoLink: process.env.GATE_REVIEW_CLICK_AUTOLINK === 'true',
+  // The surname rung of that matcher (click_name: the ONE in-window clicker
+  // whose complete last name is the reviewer's; see
+  // findConfidentClickMatch). Ships DARK on its own switch because its
+  // ambiguity semantics were still converging at review time (#3822 r6):
+  // off, the rung never links and its inverse-location scan never runs —
+  // sole_click and click_near stay on reviewClickAutoLink alone; the
+  // surname still ranks SUGGESTIONS. Needs reviewClickAutoLink too. Kill:
+  // unset.
+  reviewClickAutoLinkSurname: process.env.GATE_REVIEW_CLICK_AUTOLINK_SURNAME === 'true',
 
   // Event → Automations-tab sequence wirings (all explicit opt-in in EVERY
   // environment, same rationale as treatmentAutomationEnroll; each kill =
@@ -1454,19 +1494,9 @@ const gates = {
   // unset.
   blogBodyImages: process.env.GATE_BLOG_BODY_IMAGES === 'true',
 
-  // Named-competitor drafts that PASS every comparison/quality gate publish
-  // autonomously instead of parking at named_competitor_review (owner
-  // directive 2026-08-26: the intercept lane runs with no human review queue,
-  // matching the brief set's standing "fully autonomous — no UAT hold"
-  // override of 2026-06-11). Gate failures (disparagement, unsourced facts,
-  // unknown competitor, …) still block exactly as before — this flag only
-  // removes the review park on CLEAN drafts. Consumers require
-  // namedCompetitorComparison to ALSO be on (enforced at both read sites —
-  // this flag alone never lifts a park). OFF in EVERY environment
-  // unless set to exactly 'true' (same posture as GATE_COMPLIANCE — a
-  // policy flag, not a dev feature, so dev/test keep the review-park
-  // default); kill switch = unset GATE_NAMED_COMPETITOR_AUTOPUBLISH.
-  namedCompetitorAutopublish: process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH === 'true',
+  // Owner-authorized unattended blog publishing. Explicit false disables
+  // competitor autopublishing; comparison/content checks remain mandatory.
+  namedCompetitorAutopublish: process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH == null || process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH === 'true',
 
   // Affiliate links in blog bodies (owner monetization pilot 2026-08-31).
   // When ON, content-guardrails resolves <AffiliateLink product="…"> tags
@@ -1673,12 +1703,13 @@ const gates = {
   // Enable with GATE_SEND_REQUIRES_SERVER_PRICING=true; unset = revoke.
   sendRequiresServerPricing: process.env.GATE_SEND_REQUIRES_SERVER_PRICING === 'true',
   // Lawn program seasons on the estimate page: under the lawn price card,
-  // the four SWFL turf seasons in order from the current month, each with a
-  // one-line focus and the number of the selected frequency's applications
-  // the scheduling catalog puts there. Gates the /data `lawnCalendar` block
-  // ({ programs: { [frequencyKey]: { visitsPerYear, cadence, months } } },
-  // projected by describeLawnProgramCadence). No product, step, or
-  // fertilizer names (owner-owned business logic). Dev-open, prod dark.
+  // the program's annual application count and four plain season rows
+  // (what each SWFL turf season is for) behind a toggle — education, not a
+  // schedule (owner 2026-09-05: no per-season counts, month ranges, or
+  // interval line). Gates the /data `lawnCalendar` block ({ programs: {
+  // [frequencyKey]: { visitsPerYear, cadence, months } } }, projected by
+  // describeLawnProgramCadence). No product, step, or fertilizer names
+  // (owner-owned business logic). Dev-open, prod dark.
   // Enable with GATE_ESTIMATE_LAWN_CALENDAR=true.
   estimateLawnCalendar: isProd ? process.env.GATE_ESTIMATE_LAWN_CALENDAR === 'true' : true,
 
@@ -1876,6 +1907,27 @@ const gates = {
   // so a flip needs no redeploy; kill switch: unset GATE_SLOT_TRAVEL_GAP.
   slotTravelGap: gateEnvValue('GATE_SLOT_TRAVEL_GAP'),
 
+  // JOB CARD tab in the Service Protocol drawer (Tech Resource Drawer PR 2):
+  // one GET assembles the customer strip, a 1–3 sentence paragraph written
+  // from portal fields (FAST tier, deterministic template fallback, cached
+  // per visit), a per-product spray check against NWS hourly at the
+  // property, and the 110/1-gal tank mix helper. Read-only apart from the
+  // paragraph cache; no comms. Consumers read gateEnvValue at CALL time
+  // (services/job-card.js) so a flip needs no redeploy; kill switch: unset
+  // GATE_JOB_CARD — the endpoint answers {enabled:false} and the tab hides.
+  jobCard: gateEnvValue('GATE_JOB_CARD'),
+  // Current-visit procedure and readable SOP sheet inside the Job Card drawer.
+  // Uses the same visit resolver; unset restores the legacy protocol tabs.
+  protocolSop: gateEnvValue('GATE_PROTOCOL_SOP'),
+  // Schedule day-view exceptions from the Job Card; no paragraph generation
+  // or cache writes. Requires GATE_JOB_CARD too; unset removes the strips.
+  dispatchReadiness: gateEnvValue('GATE_DISPATCH_READINESS'),
+  // The wrapped-van scene on the appointment page + booking step 4 (owner
+  // 2026-09-03). Rides the existing page payloads (appointment `vanScene`,
+  // booking config `van_scene`) — no extra client fetch. Kill switch: unset
+  // GATE_VAN_SCENE.
+  vanScene: isProd ? process.env.GATE_VAN_SCENE === 'true' : true,
+
   // Vision Delta Scoring — one VISION-tier call per treatment outcome's best
   // before/after photo pair (server/services/vision-delta.js); the verdict
   // feeds the agronomic wiki as photo-verified visual change. Paid vision
@@ -1898,6 +1950,18 @@ const gates = {
   // switch = unset. No order is ever placed by this gate — that is PR 2's
   // GATE_AUTO_ORDER.
   autoReorder: gateEnvValue('GATE_AUTO_REORDER'),
+
+  // Vendor order dispatch (runs right after the 6:10 ET reorder sweep): an
+  // open auto_reorder request whose vendor has an adapter is ORDERED —
+  // Sticker Mule reorder API, SiteOne browser bot — under the env spend caps
+  // (AUTO_ORDER_MAX_PER_ORDER_CENTS + AUTO_ORDER_MAX_MONTHLY_CENTS, both
+  // required). Master gate AND the per-vendor gate must be true; all three
+  // are read at CALL time (gateEnvValue), kill = unset any one. Revoke a
+  // placed order: ops/agents/auto-order-revoke.js. Off → the sweep bells
+  // "order manually" exactly as before.
+  autoOrder: gateEnvValue('GATE_AUTO_ORDER'),
+  autoOrderStickerMule: gateEnvValue('GATE_AUTO_ORDER_STICKERMULE'),
+  autoOrderSiteOne: gateEnvValue('GATE_AUTO_ORDER_SITEONE'),
 
   // Auto property-lookup on call-pipeline property creation — each NEWLY
   // created customer_properties row from a call fires one full property
@@ -2006,6 +2070,11 @@ const gates = {
   // or sent. The mint/credit/send building blocks (Charge-now, send-receipt)
   // stay individually available regardless of this gate.
   prepaidInvoiceReceipt: isProd ? process.env.GATE_PREPAID_INVOICE === 'true' : true,
+
+  // Record collected annual prepay: commit a receipt job with the payment,
+  // then deliver through the standard receipt queue. Customer communications
+  // stay off in every environment until explicitly enabled.
+  recordedAnnualPrepayReceipt: process.env.GATE_RECORDED_ANNUAL_PREPAY_RECEIPT === 'true',
 
   // Zelle payment-notice reconciler — the Gmail sync recognises Capital One
   // "Someone sent you money with Zelle" notices (forwarded from the owner's
@@ -2198,6 +2267,12 @@ const gates = {
   // with no slots and every picker renders exactly as today.
   bestTimeHints: gateEnvValue('GATE_BEST_TIME_HINTS'),
 
+  // Staff existing-visit picker + save checks use complete-route arrival
+  // simulation within the existing two-hour customer promises. Advisory;
+  // never changes neighbours' promises or sends notifications. Call-time
+  // kill switch in scheduling/arrival-route.js; off in every environment.
+  adminArrivalWindows: gateEnvValue('GATE_ADMIN_ARRIVAL_WINDOWS'),
+
   // Call property-role classification (2026-08-15): the extraction classifies
   // each property a call discusses (occupancy + which one is the caller's
   // primary residence); the pipeline fills only-unknown occupancies directly
@@ -2305,7 +2380,6 @@ const gates = {
   // Read at CALL time so a flip needs no redeploy.
   techDictationUpload: gateEnvValue('GATE_TECH_DICTATION_UPLOAD'),
 
-
   // Agent Activity feed — the Activity tab in /admin/agents: one read-only
   // timeline built from autonomous_runs, content_email_approvals,
   // message_drafts and job_health (server/services/agent-activity.js). OFF
@@ -2335,6 +2409,26 @@ const gates = {
   // CALL time via gateEnvValue.
   llmCallTraces: gateEnvValue('GATE_LLM_CALL_TRACES'),
 
+  // Agent-control hub read — routes/admin-agents.js /control/areas +
+  // /control/lanes via services/agent-control/hub-read.js. ON: the Control
+  // center reads per-lane calls, ok / fallback rates, latency, tokens and
+  // attention status from the llm_dispatch_log call ledger, and the hub
+  // probe reports features.ledger = true. OFF (default, dev AND prod): both
+  // routes 404 and the probe says no ledger, so the client renders nothing
+  // new. Read-only either way. Kill switch: unset. This entry is for
+  // logGateStatus; the route reads gateEnvValue at CALL time.
+  agentControlRead: gateEnvValue('GATE_AGENT_CONTROL_READ'),
+
+  // Agent run ledger writes — services/agent-control/runs.js. ON: startRun /
+  // runManaged record work_items, agent_runs, agent_attempts, agent_run_steps,
+  // run_artifacts and run_events (migration 20260905000010) for every lane
+  // that calls them, and the hub probe reports features.runs = true. OFF
+  // (default, dev AND prod): every handle is inert — the wrapped work runs
+  // exactly as before and nothing is written. The /control/runs reads are
+  // gated by GATE_AGENT_CONTROL_READ, not this. Kill switch: unset. This
+  // entry is for logGateStatus; the writer reads gateEnvValue at CALL time.
+  agentRuns: gateEnvValue('GATE_AGENT_RUNS'),
+
   // Ops digests in-app — server/services/ops-digest.js deliverOpsDigest.
   // ON: the FIX:/ACT:/FIRST: watcher + digest emails (15 senders) become
   // ops_digest bell rows the Activity feed lists, and the email is skipped
@@ -2344,6 +2438,15 @@ const gates = {
   // The reply-to-approve flows and the stripe-webhook-health / llm-dispatch
   // FIX alerts are not routed here. Kill switch: unset. This entry is for
   // logGateStatus; the helper reads both env vars at CALL time.
+  // Tech visit notifications (Field Team Program Phase 0 item 2,
+  // services/tech-visit-notifications.js): the assigned field technician gets
+  // a tech-home card + a one-line push when a visit is assigned to them, taken
+  // off them, moved, or cancelled. Staff-only — never a customer channel.
+  // OFF unless set, dev AND prod; unset is the kill switch. The service reads
+  // gateEnvValue at CALL time, so a flip needs no redeploy; this entry is for
+  // logGateStatus.
+  techVisitNotifications: gateEnvValue('GATE_TECH_VISIT_NOTIFICATIONS'),
+
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 
   // Closeout money + comms alerts — services/closeout-alerts.js maps three
@@ -2358,6 +2461,9 @@ const gates = {
   // (default, dev AND prod): the pre-gate five-fact mapping, byte-identical.
   // Read-only, no comms, no bell-policy change. Kill switch: unset. This
   // entry is for logGateStatus; the service reads gateEnvValue at CALL time.
+  // EPA label weather review; request-time checks use gateEnvValue.
+  labelPipeline: gateEnvValue('GATE_LABEL_PIPELINE'),
+
   closeoutMoneyCommsAlerts: gateEnvValue('GATE_CLOSEOUT_MONEY_COMMS_ALERTS'),
 };
 

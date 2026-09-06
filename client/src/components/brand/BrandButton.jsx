@@ -18,7 +18,7 @@ export default function BrandButton({
   const [active, setActive] = useState(false);
 
   const base = {
-    minHeight: 46,
+    minHeight: 48,
     padding: '0 20px',
     borderRadius: 'var(--radius-md)',
     fontFamily: "'Inter', system-ui, sans-serif",

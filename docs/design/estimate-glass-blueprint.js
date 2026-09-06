@@ -1,3 +1,6 @@
+/* HISTORICAL (2026-07-04 prototype). Not the spec any more: the customer type sheet and
+   glass geometry live in client/src/glass/glass-theme.css (owner rulings 2026-09-03/04,
+   DECISIONS.md). Kept for the scene / extras / copy record only. */
 /* Waves Liquid Glass preview — full pipeline v2 (scene, glass, type, offer repositioning, extras).
    Idempotent: safe to inject repeatedly; self-heals via MutationObserver. */
 (function () {

@@ -1,5 +1,11 @@
 # Estimate Glass Redesign — Implementation Plan
 
+> **Superseded 2026-09-03/04.** The type values below (h1 2.4–3.3rem, eyebrows 12/700/.11em,
+> fine print 11.5, blueprint radii 26–28) were the July prototype. The live sheet is the one
+> in `client/src/glass/glass-theme.css` (h1 32–40, h2 26, h3 20, eyebrow 14/600/.06em, 14px
+> floor, radii 12/10/999) — see `docs/design/DECISIONS.md` 2026-09-04 and
+> `customer-doc-style-guide.md`. Kept for the history of the scene, extras and copy work.
+
 Owner-approved 2026-07-04 (live preview session against a real estimate; customer anonymized here).
 The complete approved behavior is codified in `estimate-glass-blueprint.js` (DOM-injection
 prototype run against prod data via dev proxy). This plan splits it into three PRs per the

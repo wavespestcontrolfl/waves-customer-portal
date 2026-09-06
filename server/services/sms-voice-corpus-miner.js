@@ -257,7 +257,10 @@ function eligibleCallTranscriptsQuery({ since }) {
     // = 'conversation_relay'` is the discriminator the relay already stamps.
     // NULL-safe: the column post-dates most rows, and a bare whereNot would
     // evaluate UNKNOWN on NULL and silently drop every legacy human call.
-    .where((q) => q.whereNull('transcription_provider').orWhereNot('transcription_provider', 'conversation_relay'));
+    .where((q) => q.whereNull('transcription_provider').orWhereNot('transcription_provider', 'conversation_relay'))
+    // …and a TRANSFERRED call's composite (Sandy PR 2A): stored under the
+    // recording's provider, but it opens with the relay's "[AI segment]".
+    .whereRaw("COALESCE(transcription, '') NOT LIKE '[AI segment]%'");
 }
 
 async function mineCallTranscripts({ since, skipped }) {

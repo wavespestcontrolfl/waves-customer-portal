@@ -45,6 +45,7 @@ router.post('/group', async (req, res, next) => {
     const { visit, moved } = await combineRows({
       serviceIds,
       createdBy: `admin:${(req.technician && req.technician.id) || 'unknown'}`,
+      actorId: req.technicianId || null,
     });
     // Other dispatch boards patch window_start/window_end from
     // dispatch:job_update (useDispatchBoard) — the same broadcast the

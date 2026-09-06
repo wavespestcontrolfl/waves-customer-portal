@@ -8,12 +8,12 @@
  * raced by the next claim. In-memory knex-shaped store, real
  * link-registry.settleRetiredPlacements.
  */
-const mockStore = { seo_link_prospects: [], seo_link_acquisition_paths: [], seo_link_domains: [] };
+const mockStore = { seo_link_attempts: [], seo_link_prospects: [], seo_link_acquisition_paths: [], seo_link_domains: [] };
 jest.mock('../models/db', () => {
   const builder = (table) => {
     const preds = [];
     let limitN = null;
-    const get = (row, col) => row[String(col).includes('.') ? String(col).split('.')[1] : col];
+    const get = (row, col) => col === 'outreach_draft_attempts' ? (row[col] ?? 0) : row[String(col).includes('.') ? String(col).split('.')[1] : col];
     const rows = () => { const r = mockStore[table].filter((row) => preds.every((p) => p(row))); return limitN == null ? r : r.slice(0, limitN); };
     const eq = (l, r) => (l instanceof Date && r instanceof Date ? l.getTime() === r.getTime() : l === r);
     const cmp = (op, l, r) => (op === '<' || op === '<=' ? (l == null || r == null ? false : op === '<' ? l < r : l <= r) : eq(l, r)); // SQL semantics: a NULL never satisfies a comparison
@@ -59,14 +59,18 @@ jest.mock('../models/db', () => {
   };
   const db = (t) => builder(t);
   db.transaction = async (cb) => cb(db);
+  db.raw = async () => ({});
   return db;
 });
 
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 const { isEnabled } = require('../config/feature-gates');
-const worker = require('../services/seo/link-prospect-worker');
+// These tests isolate path settlement; the authority/cap boundary has its own integration suite.
+jest.mock('../services/seo/link-execution-authority', () => ({ authorize: jest.fn(async () => ({})), reserveSlot: jest.fn(async (_trx, p, path, _auth, token, _now, preview) => { if (!preview) mockStore.seo_link_attempts.push({ id: p.id, prospect_id: p.id, path_id: path.id, action: 'submit', outcome: 'slot_reserved', lease_token: token }); return {}; }), releaseSlots: jest.fn(async () => {}) }));
+const realWorker = require('../services/seo/link-prospect-worker');
+const worker = { ...realWorker, claim: (opts) => realWorker.claim({ automationPolicy: opts.type === 'signup' ? 'submit_free' : null, ...opts, provider: 'deterministic_runner' }), report: (opts) => realWorker.report({ ...opts, provider: 'deterministic_runner' }) };
 
-beforeEach(() => { mockStore.seo_link_prospects.length = 0; mockStore.seo_link_acquisition_paths.length = 0; mockStore.seo_link_domains.length = 0; });
+beforeEach(() => { isEnabled.mockImplementation((key) => key === 'outreachDrafter'); mockStore.seo_link_attempts.length = 0; mockStore.seo_link_prospects.length = 0; mockStore.seo_link_acquisition_paths.length = 0; mockStore.seo_link_domains.length = 0; });
 
 test('claim hands out a placement on its LIVE successor path, moving the execution URL, atomically with the lease', async () => {
   const old = { id: 'p-old', domain_id: 'd1', submission_url: 'https://example.com/old-join', superseded_by: 'p-mid' };
@@ -414,7 +418,7 @@ test('a terminal failure released after a same-path REVISION reopens with a fres
   expect(onDead).toMatchObject({ status: 'rejected', attempts: worker.MAX_ATTEMPTS, automation_policy: null }); // closed for good; the transition still unclassified it
 });
 
-test('a skipped report on a path that changed during the lease reopens the placement on the new route (Codex #3720 r3 P1)', async () => {
+test('a skipped draft on a changed path clears its communication retry cap on the new route (Codex #3720 r3 P1)', async () => {
   const old = { id: 'p-old', domain_id: 'd1', submission_url: null, superseded_by: null, link_type: 'editorial', confidence: 0.7, revision: 1 };
   const next = { id: 'p-new', domain_id: 'd1', submission_url: null, superseded_by: null, link_type: 'editorial', confidence: 0.7, revision: 1 };
   mockStore.seo_link_acquisition_paths.push(old, next);
@@ -423,8 +427,8 @@ test('a skipped report on a path that changed during the lease reopens the place
   const [claimed] = await worker.claim({ n: 5, type: 'outreach' });
   old.superseded_by = 'p-new'; // the route changed while the drafter decided to skip the OLD one
   const rep = await worker.report({ prospect_id: 'r1', outcome: 'skipped', lease_token: claimed.lease_token });
-  expect(rep).toMatchObject({ ok: true, status: 'prospect', attempts: 0, reopened_on_successor: true });
-  expect(row).toMatchObject({ path_id: 'p-new', status: 'prospect', attempts: 0, claimed_at: null });
+  expect(rep).toMatchObject({ ok: true, status: 'prospect', attempts: 0 });
+  expect(row).toMatchObject({ path_id: 'p-new', status: 'prospect', attempts: 0, outreach_draft_attempts: 0, claimed_at: null });
 });
 
 test('a board row the catch-up has not linked to a path yet is never leased or previewed (Codex #3720 r4 P1)', async () => {
@@ -452,3 +456,25 @@ test('claim keeps batching past any number of retired-path rows until a live one
   expect(mockStore.seo_link_prospects.filter((r) => r.id.startsWith('r-old-')).every((r) => r.path_id.startsWith('p-new-') && r.claimed_at == null)).toBe(true); // all twelve settled, none leased
 });
 
+
+test.each(['placed', 'live', 'indexed'])('initial drafting failures preserve %s lifecycle and acquisition attempts', async (status) => {
+  const path = { id: 'p-draft', domain_id: 'd1', submission_url: null, superseded_by: null, link_type: 'editorial', confidence: 0.9, revision: 1, acquisition_type: 'content_submission', execution_after_send: false };
+  mockStore.seo_link_acquisition_paths.push(path);
+  const row = { id: 'r-draft', path_id: path.id, status, link_type: 'editorial', claimed_at: null, attempts: 2, outreach_draft_attempts: 0, target_domain: 'example.com', outreach_status: 'none', outreach_sent_at: null };
+  mockStore.seo_link_prospects.push(row);
+  for (let i = 1; i <= worker.MAX_ATTEMPTS; i++) {
+    const [lease] = await worker.claim({ n: 1, type: 'outreach' });
+    expect(lease).toBeDefined();
+    expect(await worker.report({ prospect_id: row.id, outcome: 'failed', lease_token: lease.lease_token })).toMatchObject({ ok: true, status, attempts: 2 });
+    expect(row).toMatchObject({ status, attempts: 2, outreach_draft_attempts: i, claimed_at: null });
+  }
+  expect(await worker.claim({ n: 1, type: 'outreach' })).toEqual([]);
+});
+
+test('skipping a late initial draft preserves the live placement and stops automatic drafting', async () => {
+  const lease = new Date();
+  const row = { id: 'r-skip', status: 'live', link_type: 'editorial', attempts: 2, outreach_draft_attempts: 0, lease_mode: 'draft', leased_provider: 'deterministic_runner', claimed_at: lease };
+  mockStore.seo_link_prospects.push(row);
+  expect(await worker.report({ prospect_id: row.id, outcome: 'skipped', lease_token: lease.toISOString() })).toMatchObject({ ok: true, status: 'live', attempts: 2 });
+  expect(row).toMatchObject({ status: 'live', attempts: 2, outreach_draft_attempts: worker.MAX_ATTEMPTS, claimed_at: null });
+});

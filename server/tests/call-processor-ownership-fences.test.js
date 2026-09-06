@@ -166,7 +166,7 @@ describe('processRecording call_log writes are ownership-fenced', () => {
 
   test('every provenance write goes through the SQL-side quarantine carry; the read-merge-write helper is gone (codex #3736 gh-r15 P1)', () => {
     expect(source).not.toContain('withPanStamps');
-    expect((source.match(/transcription_metadata: transcriptionMetadataWrite\(/g) || []).length).toBe(3);
+    expect((source.match(/transcription_metadata: transcriptionMetadataWrite\(/g) || []).length).toBe(5); // Includes both rejected-recording and absent-recording relay rewrites.
     expect(source).toContain('const rejectionMeta = transcriptionMetadataWrite({ ...priorMeta, transcription_rejected: true');
     const webhook = fs.readFileSync(require.resolve('../routes/twilio-voice-webhook'), 'utf8');
     expect(webhook).not.toContain('withPanStamps');

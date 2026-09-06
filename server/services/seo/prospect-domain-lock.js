@@ -83,7 +83,8 @@ function targetPageOf(url) {
 function targetPageVariants(url) {
   const path = targetPathOf(url);
   const bare = path.replace(/\/$/, '');
-  const out = new Set();
+  // Board edits also accept relative page paths; they represent the same placement.
+  const out = new Set([path, bare || '/']);
   for (const host of ['https://wavespestcontrol.com', 'https://www.wavespestcontrol.com', 'http://wavespestcontrol.com', 'http://www.wavespestcontrol.com']) {
     out.add(`${host}${path}`);
     if (bare) out.add(`${host}${bare}`);
@@ -157,14 +158,14 @@ async function claimProspectDomain(trx, domain, { statuses = ACTIVE_OUTREACH_STA
 // skipped, so no writer admits a second placement (and a second recipient) beside it
 async function followUpOwedRow(trx, key, lanes) {
   const M = require('./link-outreach-mandate');
-  let qb = byDomain(trx('seo_link_prospects'), key).whereIn('status', [...M.FOLLOW_UP_JUDGE_STATUSES]).where({ outreach_status: 'sent' }).whereIn('follow_up_status', ['none', 'due', 'drafted', ...M.AMBIGUOUS_SEND_STATUSES]);
+  let qb = byDomain(trx('seo_link_prospects'), key).whereIn('status', [...M.FOLLOW_UP_JUDGE_STATUSES]);
   if (lanes === 'outreach') qb = qb.whereRaw(`COALESCE(link_type, '') NOT IN (${SIGNUP_TYPES.map(() => '?').join(', ')})`, [...SIGNUP_TYPES]);
-  const rows = (await qb.select('id', 'status', 'target_page', 'path_id', 'outreach_status', 'follow_up_status', 'follow_up_due_at')) || [];
+  const rows = (await qb.select('id', 'status', 'target_page', 'path_id', 'outreach_status', 'outreach_sent_at', 'follow_up_status', 'follow_up_due_at')) || [];
   if (!rows.length) return null;
   const pathIds = [...new Set(rows.map((r) => r.path_id).filter(Boolean))];
   const paths = pathIds.length ? await trx('seo_link_acquisition_paths').whereIn('id', pathIds).select('id', 'execution_after_send', 'acquisition_type', 'account_required') : [];
   const pathById = new Map(paths.map((p) => [p.id, p]));
-  const owed = rows.find((r) => M.AMBIGUOUS_SEND_STATUSES.includes(r.follow_up_status) || M.followUpOwed(r, pathById.get(r.path_id) || null));
+  const owed = rows.find((r) => M.AMBIGUOUS_SEND_STATUSES.includes(r.outreach_status) || M.AMBIGUOUS_SEND_STATUSES.includes(r.follow_up_status) || M.initialSendOwed(r, pathById.get(r.path_id) || null) || M.followUpOwed(r, pathById.get(r.path_id) || null));
   return owed ? { id: owed.id, status: owed.status, target_page: owed.target_page } : null;
 }
 

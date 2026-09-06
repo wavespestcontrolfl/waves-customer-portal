@@ -1076,7 +1076,30 @@ async function resolveFulfillment(conn, commitment, call) {
       // promise.
       const estQ = handedOffWithin(conn("estimates"), after, until);
       if (customerId) {
-        estQ.where("customer_id", customerId);
+        // A lead can acquire its customer before its estimate does. Reuse the
+        // precise FK / lead-id mirror, never contact matching. This remains
+        // an association; conflicting or unknown live-lead ownership blocks
+        // the unowned-estimate fallback in either linkage direction.
+        // Uncorrelated membership sets avoid rescanning leads per estimate.
+        // Exclude NULL FK values so NOT IN does not reject unrelated rows.
+        estQ.whereRaw(`(estimates.customer_id = ? OR (
+          estimates.customer_id IS NULL
+          AND (estimates.id IN (
+            SELECT l.estimate_id FROM leads l
+            WHERE l.deleted_at IS NULL AND l.customer_id = ? AND l.estimate_id IS NOT NULL
+          ) OR estimates.estimate_data ->> 'lead_id' IN (
+            SELECT l.id::text FROM leads l
+            WHERE l.deleted_at IS NULL AND l.customer_id = ?
+          ))
+          AND estimates.id NOT IN (
+            SELECT l.estimate_id FROM leads l
+            WHERE l.deleted_at IS NULL AND l.customer_id IS DISTINCT FROM ? AND l.estimate_id IS NOT NULL
+          )
+          AND COALESCE(estimates.estimate_data ->> 'lead_id', '') NOT IN (
+            SELECT l.id::text FROM leads l
+            WHERE l.deleted_at IS NULL AND l.customer_id IS DISTINCT FROM ?
+          )
+        ))`, [customerId, customerId, customerId, customerId, customerId]);
       } else if (phone) {
         estQ.whereNull("customer_id").modify((b) => phoneWhere(b, "customer_phone", phone));
       } else {
@@ -1538,8 +1561,8 @@ function deriveRelayCommitments({ transcript = '', estimateQueued = null, estima
 }
 
 // Called from the relay session's end() after its reconcile UPDATE landed.
-// No claim fence: relay rows never carry processing_token, and the session
-// that owns the record is the only writer at close. Never throws.
+// Relay rows have no processing_token; the session-owner fence below
+// protects their commitment transaction. Never throws.
 function relayClaimOwner(metadata) {
   try {
     const meta = typeof metadata === 'string' ? JSON.parse(metadata) : (metadata || {});
@@ -1562,7 +1585,7 @@ async function recordRelayCommitments(conn, { callSid, transcript, estimateQueue
   try {
     if (!callSid) return summary;
     return await conn.transaction(async (trx) => {
-      const call = await trx('call_log').where({ twilio_call_sid: callSid }).forUpdate().first('id', 'metadata', 'source');
+      const call = await trx('call_log').where({ twilio_call_sid: callSid }).forUpdate().first('id', 'metadata', 'source', 'call_outcome');
       if (!call) return summary;
       // A voice-agent sandbox call is a test: a promise Sandy makes on it
       // must never become office work in the Owed queue.
@@ -1570,6 +1593,23 @@ async function recordRelayCommitments(conn, { callSid, transcript, estimateQueue
       if (sessionKey) {
         const owner = relayClaimOwner(call.metadata);
         if (owner && owner !== String(sessionKey)) return { ...summary, superseded: true };
+      }
+      // Segment-backed calls must derive evidence from this locked snapshot.
+      // A late socket may have read an earlier expectation under the SAME
+      // owner; ownership alone does not make that pre-read current.
+      const metadata = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+      if (Array.isArray(metadata.relay_segments) && metadata.relay_segments.length) {
+        // A late append must have the same durable eligibility as normal
+        // finalization: handled calls, or a real transfer/reconnect salvage.
+        const eligible = ['ai_handled', 'ai_transferred'].includes(call.call_outcome)
+          || (call.call_outcome === 'voicemail' && (metadata.relay_handoff || Number(metadata.relay_reconnects) > 0));
+        if (!eligible) return summary;
+        const { segmentsText, latestPromises } = require('./voice-agent/relay-segments');
+        transcript = segmentsText(metadata.relay_segments);
+        const estimate = latestPromises(metadata.relay_segments).find((p) => p.kind === 'send_estimate');
+        estimateQueued = estimate ? estimate.verdict : null;
+        estimateExpectation = estimate?.expectation || null;
+        estimatePromisedAt = estimate?.at || null;
       }
       const items = deriveRelayCommitments({ transcript, estimateQueued, estimateExpectation, estimatePromisedAt })
         .map((item) => ({ ...item, evidence: anchorEvidence(item.evidence, { transcript }) }));

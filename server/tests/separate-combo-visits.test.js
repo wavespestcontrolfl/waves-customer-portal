@@ -293,7 +293,10 @@ describe('combineRecurringServicesForScheduling under GATE_SEPARATE_COMBO_VISITS
     // T&S promotion + pre-pass reject conflicted/invalid counts.
     expect(src).toContain('RETIRED_COMBINED_CATALOG_KEYS.has(reservedKey)');
     expect(src.match(/visitCountFieldsConflict\((line|svc)\) \|\| visitCountFieldsInvalid\((line|svc)\)/g).length).toBeGreaterThanOrEqual(2);
-    expect(src.match(/PEST_CADENCE_CATALOG_KEYS\[/g)).toHaveLength(2); // promotion + lock pre-pass
+    // Both protected paths must use the shared identity map; other callers
+    // may also use it when linking a directly accepted pest program.
+    expect(src).toContain('await addUnit(svcName, PEST_CADENCE_CATALOG_KEYS[pestPattern] || null)');
+    expect(src).toContain('catalogServiceKey: PEST_CADENCE_CATALOG_KEYS[pattern] || null');
     expect(src).toContain('prePassRetiredPestPair');
   });
 

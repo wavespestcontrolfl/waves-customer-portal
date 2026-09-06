@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import ReschedulePage from './ReschedulePage';
+import ScheduleFlowPage from './ScheduleFlowPage';
 
 vi.mock('../components/brand', () => ({
   WavesShell: ({ children }) => <div>{children}</div>,
@@ -52,11 +52,11 @@ function reschedulablePayload(overrides = {}) {
   };
 }
 
-function renderPage({ classic = false } = {}) {
+function renderPage() {
   return render(
-    <MemoryRouter initialEntries={[classic ? '/reschedule/deadbeef?classic=1' : '/reschedule/deadbeef']}>
+    <MemoryRouter initialEntries={['/reschedule/deadbeef']}>
       <Routes>
-        <Route path="/reschedule/:token" element={<ReschedulePage />} />
+        <Route path="/reschedule/:token" element={<ScheduleFlowPage flow="reschedule" />} />
       </Routes>
     </MemoryRouter>
   );
@@ -109,7 +109,7 @@ describe('ReschedulePage arrival windows', () => {
   it('shows the current visit as a 2-hour arrival window, not the job block', async () => {
     stubFetch();
 
-    renderPage({ classic: true });
+    renderPage();
 
     // window_start 09:00 with job-block window_end 10:00 → the promise is
     // 9:00–11:00 AM, never 9:00–10:00 AM.
@@ -129,10 +129,10 @@ describe('ReschedulePage arrival windows', () => {
       }),
     });
 
-    renderPage({ classic: true });
+    renderPage();
 
-    fireEvent.click(await screen.findByRole('button', { name: '1:00 PM' }));
-    fireEvent.click(screen.getByRole('button', { name: /Move to Sunday, July 12/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
 
     await waitFor(() => {
       expect(screen.getByText('You\'re all set')).toBeInTheDocument();
@@ -175,7 +175,7 @@ describe('ReschedulePage Waves AI search', () => {
       }),
     });
 
-    renderPage({ classic: true });
+    renderPage();
 
     const input = await screen.findByLabelText('Search for a service date or time');
     fireEvent.change(input, { target: { value: 'tuesday afternoon' } });
@@ -193,7 +193,7 @@ describe('ReschedulePage Waves AI search', () => {
     expect(screen.queryByText('Two openings Tuesday afternoon.')).not.toBeInTheDocument();
   });
 
-  it('v2: tap a time, confirm inline, land on success — no bottom CTA', async () => {
+  it('tap a time, confirm inline, land on success — no bottom CTA', async () => {
     stubFetch({
       post: jsonResponse({
         success: true,
@@ -208,9 +208,9 @@ describe('ReschedulePage Waves AI search', () => {
     renderPage();
 
     // Day grid renders the day as a selectable option; its times panel shows
-    // the slot chip. The legacy bottom CTA must not exist on v2.
+    // the slot chip. Confirm lives in the picked row — there is no bottom CTA.
     expect(await screen.findByRole('option', { name: /Sunday, July 12/ })).toBeInTheDocument();
-    expect(screen.queryByText('Pick a time above')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Confirm/ })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
     fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
@@ -221,7 +221,7 @@ describe('ReschedulePage Waves AI search', () => {
     expect(screen.getByText('1:00 PM–3:00 PM')).toBeInTheDocument();
   });
 
-  it('v2: a SERIES_PROJECTION 409 steers to another time or day — never the "just taken" retry loop', async () => {
+  it('a SERIES_PROJECTION 409 steers to another time or day — never the "just taken" retry loop', async () => {
     // The commit refused the chosen WINDOW (a shifted future occurrence of
     // the plan would double-book at that time) — retrying the same slot can
     // only refuse again, so the generic "just taken" copy would loop the
@@ -246,7 +246,7 @@ describe('ReschedulePage Waves AI search', () => {
     expect(screen.queryByText(/just taken/)).not.toBeInTheDocument();
   });
 
-  it('v2: best-times strip surfaces the ranked pick and pre-selects it', async () => {
+  it('best-times strip surfaces the ranked pick and pre-selects it', async () => {
     const payload = reschedulablePayload();
     payload.availability.slots = [
       {
@@ -287,32 +287,7 @@ describe('ReschedulePage Waves AI search', () => {
     expect(await screen.findByRole('button', { name: /Confirm/ })).toBeInTheDocument();
   });
 
-  it('flip gate: V2 is the default, ?classic=1 is the exact-match kill switch, stale ?v2 params are harmless', async () => {
-    stubFetch();
-    // Exactly ?classic=1 → legacy (bottom CTA exists only on the old page).
-    const classic = render(
-      <MemoryRouter initialEntries={['/reschedule/deadbeef?classic=1']}>
-        <Routes>
-          <Route path="/reschedule/:token" element={<ReschedulePage />} />
-        </Routes>
-      </MemoryRouter>
-    );
-    expect(await screen.findByText('Pick a time above')).toBeInTheDocument();
-    classic.unmount();
-    // A stale preview link carrying ?v2=1 (or a false-valued classic) still
-    // renders the new default layout.
-    render(
-      <MemoryRouter initialEntries={['/reschedule/deadbeef?v2=1&classic=0']}>
-        <Routes>
-          <Route path="/reschedule/:token" element={<ReschedulePage />} />
-        </Routes>
-      </MemoryRouter>
-    );
-    expect(await screen.findByRole('option', { name: /Sunday, July 12/ })).toBeInTheDocument();
-    expect(screen.queryByText('Pick a time above')).not.toBeInTheDocument();
-  });
-
-  it('v2: floating bar search filters the grid and the reset restores it', async () => {
+  it('Ask card search filters the grid and the reset restores it', async () => {
     stubFetch({
       findSlots: jsonResponse({
         summary: 'Two openings Tuesday afternoon.',
@@ -348,7 +323,7 @@ describe('ReschedulePage Waves AI search', () => {
     expect(screen.queryByText('Two openings Tuesday afternoon.')).not.toBeInTheDocument();
   });
 
-  it('v2: missed visit renders the "missed each other" rebook framing with slots', async () => {
+  it('missed visit renders the "missed each other" rebook framing with slots', async () => {
     const payload = reschedulablePayload({
       missed: true,
       current: { date: '2026-07-06', windowStart: '11:00', windowEnd: '12:00' },
@@ -368,9 +343,10 @@ describe('ReschedulePage Waves AI search', () => {
     expect(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ })).toBeInTheDocument();
   });
 
-  it('v2: big pull-forward on a recurring visit warns before Confirm and reports the series shift after', async () => {
+  it.each([null, 3])('recurring move discloses future placement (%s days) before and after confirming', async (futurePlacementDays) => {
     const payload = reschedulablePayload({
       isRecurring: true,
+      futurePlacementDays,
       reanchorPullForwardDays: 14,
       current: { date: '2026-08-13', windowStart: '12:00', windowEnd: '13:00' },
     });
@@ -386,6 +362,7 @@ describe('ReschedulePage Waves AI search', () => {
           startLabel: '1:00 PM',
           endLabel: '2:00 PM',
           seriesShifted: true,
+          futurePlacementDays,
           occurrencesRescheduled: 3,
         }));
       }
@@ -400,16 +377,20 @@ describe('ReschedulePage Waves AI search', () => {
 
     // …picking a slot 32 days earlier than the visit shows the heads-up.
     fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
-    expect(screen.getByText(/shifts your whole plan/)).toBeInTheDocument();
+    expect(screen.getByText(futurePlacementDays === 3
+      ? /We’ll arrange later visits within 3 days/ : /shifts your whole plan/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
     await waitFor(() => {
       expect(screen.getByText('You\'re all set')).toBeInTheDocument();
     });
-    expect(screen.getByText(/shifted your upcoming visits to follow the new date/)).toBeInTheDocument();
+    expect(screen.getByText(futurePlacementDays === 3
+      ? /Existing appointment commitments stay unchanged until our team reviews them with you/ : /shifted your upcoming visits to follow the new date/)).toBeInTheDocument();
+    const post = fetch.mock.calls.find(([, opts]) => opts?.method === 'POST');
+    expect(JSON.parse(post[1].body).disclosed_future_placement_days).toBe(futurePlacementDays);
   });
 
-  it('v2: a small move on a recurring visit shows no series warning', async () => {
+  it('a small move on a recurring visit shows no series warning', async () => {
     const payload = reschedulablePayload({
       isRecurring: true,
       reanchorPullForwardDays: 14,
@@ -458,7 +439,7 @@ describe('ReschedulePage Waves AI search', () => {
       return Promise.resolve(jsonResponse({ error: 'unexpected POST' }, 500));
     }));
 
-    renderPage({ classic: true });
+    renderPage();
 
     const input = await screen.findByLabelText('Search for a service date or time');
     fireEvent.change(input, { target: { value: 'tuesday afternoon' } });
@@ -489,8 +470,9 @@ describe('ReschedulePage weather-move banner', () => {
 
     renderPage();
 
-    expect(await screen.findByText('Moved for weather')).toBeInTheDocument();
-    expect(screen.getByText(/Hi Pat — rain moved your pest control to a dry window/)).toBeInTheDocument();
+    expect(await screen.findByText(/Hi Pat — rain moved your pest control to a dry window/)).toBeInTheDocument();
+    // The classification stays as the eyebrow (no chip).
+    expect(screen.getByText('Moved for weather')).toBeInTheDocument();
     // Matched Was/Now rows with the day-level rain chances.
     expect(screen.getByText('Was')).toBeInTheDocument();
     expect(screen.getByText('Now')).toBeInTheDocument();
@@ -512,6 +494,7 @@ describe('ReschedulePage weather-move banner', () => {
     renderPage();
 
     await screen.findByText(/Hey Pat/);
+    expect(screen.queryByText('Was')).not.toBeInTheDocument();
     expect(screen.queryByText('Moved for weather')).not.toBeInTheDocument();
     expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
   });
@@ -556,7 +539,7 @@ describe('ReschedulePage weather-move banner', () => {
 
     renderPage();
 
-    expect(await screen.findByText('Moved for weather')).toBeInTheDocument();
+    expect(await screen.findByText('Now')).toBeInTheDocument();
     expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
   });
 
@@ -569,20 +552,11 @@ describe('ReschedulePage weather-move banner', () => {
 
       renderPage();
 
-      expect(await screen.findByText('Moved for weather')).toBeInTheDocument();
+      expect(await screen.findByText('Now')).toBeInTheDocument();
       expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
       expect(screen.queryByText(/microencapsulated/)).not.toBeInTheDocument();
       cleanup();
     }
-  });
-
-  it('shows the banner on the classic layout too', async () => {
-    stubFetch({ get: jsonResponse(reschedulablePayload({ weatherMove })) });
-
-    renderPage({ classic: true });
-
-    expect(await screen.findByText('Moved for weather')).toBeInTheDocument();
-    expect(screen.getByText('Want a different time instead?')).toBeInTheDocument();
   });
 
   it('running_late moves get the schedule pill and heading — no weather claims, no chips, no explainer', async () => {
@@ -594,10 +568,11 @@ describe('ReschedulePage weather-move banner', () => {
 
     renderPage();
 
-    expect(await screen.findByText('Schedule update')).toBeInTheDocument();
     // Date-neutral: the banner can be read days after the move, so no "today".
-    expect(screen.getByText(/Hi Pat — our schedule ran behind, so we moved your pest control to a new window/)).toBeInTheDocument();
+    expect(await screen.findByText(/Hi Pat — our schedule ran behind, so we moved your pest control to a new window/)).toBeInTheDocument();
+    expect(screen.getByText('Schedule update')).toBeInTheDocument();
     expect(screen.queryByText('Moved for weather')).not.toBeInTheDocument();
+    expect(screen.queryByText(/dry window|better window/)).not.toBeInTheDocument();
     // The was/now story still tells the move.
     expect(screen.getByText('Was')).toBeInTheDocument();
     expect(screen.getByText('Now')).toBeInTheDocument();
@@ -625,9 +600,8 @@ describe('ReschedulePage weather-move banner', () => {
 
       renderPage();
 
-      expect(await screen.findByText('Schedule update')).toBeInTheDocument();
-      expect(screen.getByText(heading)).toBeInTheDocument();
-      expect(screen.queryByText('Moved for weather')).not.toBeInTheDocument();
+      expect(await screen.findByText(heading)).toBeInTheDocument();
+      expect(screen.queryByText(/dry window|better window/)).not.toBeInTheDocument();
       expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
       cleanup();
     }
@@ -642,13 +616,13 @@ describe('ReschedulePage collective anchoring', () => {
       })),
     });
 
-    renderPage({ classic: true });
+    renderPage();
 
     expect(await screen.findByText(/your schedule always follows your last treatment/)).toBeInTheDocument();
     expect(screen.queryByText(/Only this visit will move/)).not.toBeInTheDocument();
     // Selecting any slot must NOT surface the legacy re-anchor warning —
     // the steady note already explains the collective behavior.
-    fireEvent.click(await screen.findByRole('button', { name: '1:00 PM' }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on/ }));
     expect(screen.queryByText(/moving this far up shifts your whole plan/)).not.toBeInTheDocument();
   });
 
@@ -667,10 +641,10 @@ describe('ReschedulePage collective anchoring', () => {
       })),
     });
 
-    renderPage({ classic: true });
+    renderPage();
 
     expect(await screen.findByText(/your schedule always follows your last treatment/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '1:00 PM' }));
+    fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on/ }));
     expect(screen.getByText(/a same-day time change doesn't shift the rest of your plan/)).toBeInTheDocument();
     expect(screen.queryByText(/your schedule always follows your last treatment/)).not.toBeInTheDocument();
   });
@@ -684,10 +658,10 @@ describe('ReschedulePage collective anchoring', () => {
       }),
     });
 
-    renderPage({ classic: true });
+    renderPage();
 
-    fireEvent.click(await screen.findByRole('button', { name: '1:00 PM' }));
-    fireEvent.click(screen.getByRole('button', { name: /Move to Sunday, July 12/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /Choose 1:00 PM on/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
 
     await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
     const postCall = fetchMock.mock.calls.find(([, opts]) => opts?.method === 'POST');
@@ -699,7 +673,7 @@ describe('ReschedulePage collective anchoring', () => {
   it('keeps the legacy conditional note when collectiveAnchor is absent', async () => {
     stubFetch({ get: jsonResponse(reschedulablePayload({ isRecurring: true })) });
 
-    renderPage({ classic: true });
+    renderPage();
 
     expect(await screen.findByText(/Only this visit will move/)).toBeInTheDocument();
   });

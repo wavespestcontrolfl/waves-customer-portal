@@ -45,7 +45,7 @@
  *     for the next tick. A network error NEVER fails a run.
  *
  * Env:
- *   AUTONOMOUS_BLOG_AUTO_MERGE                 default OFF — ship dark;
+ *   AUTONOMOUS_BLOG_AUTO_MERGE                 default ON; false disables;
  *     merged/closed reconciliation runs regardless of this flag.
  *   AUTONOMOUS_PR_MAX_AUTO_MERGES_PER_POLL     default 1.
  *
@@ -71,8 +71,8 @@ const CLOSED_SKIP_REASONS = {
 const SUPERSEDED_SKIP_REASON = 'superseded_by_review_queue_action';
 const PR_URL_NUMBER = /\/pull\/(\d+)(?:[/?#]|$)/;
 
-function autoMergeEnabled() {
-  return /^(1|true|yes|on)$/i.test(String(process.env.AUTONOMOUS_BLOG_AUTO_MERGE || '').trim());
+function autoMergeEnabled(actionType) {
+  return /^(1|true|yes|on)$/i.test(String(process.env.AUTONOMOUS_BLOG_AUTO_MERGE ?? (actionType === 'new_supporting_blog' ? 'true' : 'false')).trim());
 }
 
 // Kill switch for the deterministic post-merge social share. Defaults ON:
@@ -292,13 +292,8 @@ async function recheckTopicTargeting(run, pr, gh) {
   }
 }
 
-// Affiliate belt (owner ruling 2026-08-31): a head whose blog file carries
-// <AffiliateLink> auto-merges ONLY if the run carries the owner's approval
-// stamp (trust_build_approved_by — set by approve-autonomous-run.js on an
-// affiliate_review park). A run that somehow reached astro_pr_pending_merge
-// without it (or whose file gained the component on the branch) is
-// withheld, never merged. Pure: the head content comes from the topic
-// recheck's fetch. An unreadable head (no content) fails closed.
+// Affiliate contract: autonomous blogs need current-head validation against
+// the live registry, not owner approval. Unreadable content fails closed.
 // Head blog file content for lanes that don't run the topic recheck
 // (refresh PRs): same candidate-path probe as recheckTopicTargeting, null
 // when unreadable (the belt then fails closed).
@@ -334,7 +329,7 @@ async function headRefreshFileContent(run, pr) {
 // referenced, so a branch push after approval cannot add products.
 async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null) {
   const content = typeof head === 'string' ? head : (head && typeof head.content === 'string' ? head.content : null);
-  if (content === null) return { ok: false, reason: 'head blog file unavailable for the affiliate belt' };
+  if (content === null) return { ok: false, transient: true, reason: 'head blog file unavailable for the affiliate belt' };
   // Frontmatter is parsed FIRST and every affiliate scan runs on the BODY:
   // tag-shaped text in YAML (a comment documenting <AffiliateLink>) is not
   // rendered affiliate material and must not withhold an affiliate-free PR
@@ -361,29 +356,33 @@ async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null) {
   // GATE_AFFILIATE_LINKS was unset (exact 'true', same call-time read as
   // content-guardrails).
   if (process.env.GATE_AFFILIATE_LINKS !== 'true') {
-    return { ok: false, reason: 'head carries <AffiliateLink> but GATE_AFFILIATE_LINKS is not "true" — the affiliate lane is dark; auto-merge withheld' };
+    return { ok: false, paused: true, reason: 'head carries <AffiliateLink> but GATE_AFFILIATE_LINKS is not "true" — the affiliate lane is dark; auto-merge withheld' };
   }
-  if (!run?.trust_build_approved_by) {
-    return { ok: false, reason: 'head carries <AffiliateLink> but the run has no owner approval (affiliate_review) — approve with approve-autonomous-run.js or dismiss' };
+  // Owner approval is no longer required for autonomous blogs. Current-head
+  // pinning, Codex review, and the live registry contract authorize the merge.
+  if (run.action_type !== 'new_supporting_blog') {
+    if (!run?.trust_build_approved_by) {
+      return { ok: false, reason: 'head carries <AffiliateLink> but the run has no owner approval (affiliate_review) — approve with approve-autonomous-run.js or dismiss' };
+    }
+    const dp = parseJsonObject(run.draft_payload);
+    // The approval is bound to the exact COMMIT the approved publish created
+    // (draft_payload.trust_build_approved_head_sha, same binding the named-
+    // competitor merge gate uses). A head that moved afterwards is never
+    // auto-merged and there is deliberately no "re-approve" path (the run has
+    // left affiliate_review): like the named-competitor lane, the PR waits
+    // for a HUMAN merge after review (merged-by-human reconciliation
+    // finalizes it) or a dismiss. Absent SHA fails closed the same way.
+    const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
+    if (!approvedSha || !prHeadSha || approvedSha !== String(prHeadSha).toLowerCase()) {
+      return { ok: false, reason: `affiliate approval is bound to head ${approvedSha ? approvedSha.slice(0, 7) : '(none)'} but the PR head is ${prHeadSha ? String(prHeadSha).slice(0, 7) : '(unknown)'} — auto-merge withheld; review the new head and merge by hand (or dismiss)` };
+    }
+    let ids;
+    try { ({ affiliateProductIdsIn: ids } = require('./content-guardrails')); } catch (_) { return { ok: false, reason: 'content-guardrails unavailable for the affiliate belt' }; }
+    const approved = new Set(ids(dp?.body || ''));
+    const headIds = ids(bodyHead);
+    const extra = headIds.filter((id) => !approved.has(id));
+    if (extra.length) return { ok: false, reason: `head references affiliate product(s) the approved draft did not: ${extra.join(', ')}` };
   }
-  const dp = parseJsonObject(run.draft_payload);
-  // The approval is bound to the exact COMMIT the approved publish created
-  // (draft_payload.trust_build_approved_head_sha, same binding the named-
-  // competitor merge gate uses). A head that moved afterwards is never
-  // auto-merged and there is deliberately no "re-approve" path (the run has
-  // left affiliate_review): like the named-competitor lane, the PR waits
-  // for a HUMAN merge after review (merged-by-human reconciliation
-  // finalizes it) or a dismiss. Absent SHA fails closed the same way.
-  const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
-  if (!approvedSha || !prHeadSha || approvedSha !== String(prHeadSha).toLowerCase()) {
-    return { ok: false, reason: `affiliate approval is bound to head ${approvedSha ? approvedSha.slice(0, 7) : '(none)'} but the PR head is ${prHeadSha ? String(prHeadSha).slice(0, 7) : '(unknown)'} — auto-merge withheld; review the new head and merge by hand (or dismiss)` };
-  }
-  let ids;
-  try { ({ affiliateProductIdsIn: ids } = require('./content-guardrails')); } catch (_) { return { ok: false, reason: 'content-guardrails unavailable for the affiliate belt' }; }
-  const approved = new Set(ids(dp?.body || ''));
-  const headIds = ids(bodyHead);
-  const extra = headIds.filter((id) => !approved.has(id));
-  if (extra.length) return { ok: false, reason: `head references affiliate product(s) the approved draft did not: ${extra.join(', ')}` };
   // The FULL affiliate guardrail contract is re-run on the HEAD file at
   // MERGE time (not a partial state check): registration, risk-class/label
   // currency, page-type eligibility, and placement against the LIVE
@@ -408,19 +407,19 @@ async function affiliateBeltVerdict(run, head, prHeadSha = null, gh = null) {
       : null;
   } catch (_) { registryBaseSha = null; }
   if (!registryBaseSha) {
-    return { ok: false, reason: 'cannot pin the astro base for the registry read — auto-merge withheld (fail closed)' };
+    return { ok: false, transient: true, reason: 'cannot pin the astro base for the registry read — auto-merge withheld (fail closed)' };
   }
   try {
     const f = await gh.getFile('packages/affiliate-registry/registry.json', registryBaseSha);
     if (f && typeof f.content === 'string') liveRegistry = JSON.parse(f.content);
   } catch (_) { liveRegistry = null; }
   if (!liveRegistry || typeof liveRegistry !== 'object') {
-    return { ok: false, reason: 'authoritative astro registry unreadable at merge time — auto-merge withheld (fail closed)' };
+    return { ok: false, transient: true, reason: 'authoritative astro registry unreadable at merge time — auto-merge withheld (fail closed)' };
   }
   let guard;
   try {
     guard = require('./content-guardrails');
-  } catch (_) { return { ok: false, reason: 'guardrails unavailable for the merge-time affiliate recheck' }; }
+  } catch (_) { return { ok: false, transient: true, reason: 'guardrails unavailable for the merge-time affiliate recheck' }; }
   const hard = guard._internals
     .affiliateComponentFindings(bodyHead, '', fmHead, { targetIsBlog: true, registry: liveRegistry })
     .filter((f) => f.severity === 'P0');
@@ -444,6 +443,7 @@ const TOPIC_BLOCKED_SKIP_REASON = 'topic_targeting_blocked';
 // Stamped on a parked run once its closed PR's terminal bookkeeping is done
 // (reconciliation then stops re-reading it); cleared by un-park.
 const TOPIC_BLOCK_PR_RETIRED = 'topic_block_pr_retired';
+const HISTORICAL_PR_MERGED = 'historical_pr_merged';
 // A deterministic merge-time topic block cannot clear by polling: park the
 // run out of the pending set (CAS on the exact pending state, like
 // supersedeRun) with the verdict in reviewer_notes, and stamp the parked
@@ -453,6 +453,12 @@ const TOPIC_BLOCK_PR_RETIRED = 'topic_block_pr_retired';
 // queueRowParkedState's rule, usable inside a transaction: the opportunity's
 // lifecycle belongs to its NEWEST run — a newer sibling means this run is
 // stale and the queue row is not ours to change.
+// Legacy NULL identities match only other legacy rows; a new claim or an
+// explicit requeue must never be finalized by a different owning run.
+function sameQueueClaim(row, run) {
+  return !!row && (row.claim_id ?? null) === (run.queue_claim_id ?? null);
+}
+
 async function newerSiblingRun(q, run) {
   if (!run.opportunity_id) return null;
   // Fail closed: a run whose age is unknown cannot prove it is the newest.
@@ -471,7 +477,7 @@ async function newerSiblingRun(q, run) {
 async function parkTopicBlockedRun(run, pr, reason, trx, gh) {
   const q = trx || db;
   const pendingReason = pendingSkipReasonForRun(run);
-  const note = `Auto-merge parked by autonomous-pr-poller: topic-targeting gate no longer clear against the live corpus on PR #${pr.number} head ${String(pr.head?.sha || '').slice(0, 7)} — ${reason}. PR #${pr.number} is retired (closed, branch deleted; reconciled each tick until it is); requeue re-drives the lane with a fresh draft, or dismiss.`;
+  const note = `Auto-merge parked by autonomous-pr-poller: topic-targeting gate no longer clear against the live corpus on PR #${pr.number} head ${String(pr.head?.sha || '').slice(0, 7)} — ${reason}. PR #${pr.number} is retired (closed, branch deleted; reconciled each tick until it is); the rejected draft is recorded as skipped after retirement.`;
   const lost = (what) => { const e = new Error(`topic-block park lost its ${what} CAS (operator action landed) — nothing changed`); e.code = 'TOPIC_PARK_LOST'; return e; };
   // Lock order = the review-decision path's (lockCurrentRun: queue row
   // FIRST, then the run) so an operator requeue/dismiss racing this tick
@@ -480,8 +486,8 @@ async function parkTopicBlockedRun(run, pr, reason, trx, gh) {
     // Lock the queue row FIRST (FOR UPDATE), validate its exact parked state,
     // THEN look for a newer sibling — a requeue racing this tick cannot
     // create + park a replacement between the check and the write.
-    const row = await q('opportunity_queue').where('id', run.opportunity_id).forUpdate().first('id', 'status', 'skip_reason');
-    if (!row || row.status !== 'pending_review' || row.skip_reason !== pendingReason) throw lost('queue');
+    const row = await q('opportunity_queue').where('id', run.opportunity_id).forUpdate().first('id', 'status', 'skip_reason', 'claim_id');
+    if (!row || !sameQueueClaim(row, run) || row.status !== 'pending_review' || row.skip_reason !== pendingReason) throw lost('queue');
     if (await newerSiblingRun(q, run)) throw lost('newer-sibling');
     const queueRows = await q('opportunity_queue')
       .where('id', run.opportunity_id)
@@ -566,10 +572,10 @@ async function reconcileTopicBlockedPrs(gh) {
       // Rows whose closed PR finished its terminal bookkeeping leave the set
       // (marker below); random rotation so a persistently failing retire
       // cannot starve rows past the limit.
-      .where((q) => q.whereNull('poll_pending_reason').orWhereNot('poll_pending_reason', TOPIC_BLOCK_PR_RETIRED))
+      .where((q) => q.whereNull('poll_pending_reason').orWhereNot('poll_pending_reason', TOPIC_BLOCK_PR_RETIRED).orWhere('action_type', 'new_supporting_blog'))
       .orderByRaw('random()')
       .limit(25)
-      .select('id', 'opportunity_id', 'action_type', 'astro_pr_url', 'skip_reason', 'outcome', 'reviewer_notes', 'created_at');
+      .select('id', 'opportunity_id', 'queue_claim_id', 'action_type', 'astro_pr_url', 'skip_reason', 'outcome', 'reviewer_notes', 'created_at');
   } catch (err) {
     logger.warn(`[autonomous-pr-poller] topic-blocked reconcile query failed: ${err.message}`);
     return { count: 0 };
@@ -611,11 +617,23 @@ async function reconcileTopicBlockedPrs(gh) {
         if (o === 'superseded') superseded++;
         continue;
       }
+      if (!after || after.state !== 'closed' || after.head?.ref !== pr.head?.ref || after.head?.sha !== pr.head?.sha) continue;
       if (!await stampTerminal(prNumber, 'closed', run)) continue;
-      await db('autonomous_runs')
-        .where('id', run.id)
-        .where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)
-        .update({ poll_pending_reason: TOPIC_BLOCK_PR_RETIRED, updated_at: new Date() });
+      await db.transaction(async (trx) => {
+        if (run.action_type === 'new_supporting_blog' && run.opportunity_id) {
+          const row = await trx('opportunity_queue').where('id', run.opportunity_id).forUpdate().first();
+          if (sameQueueClaim(row, run)
+            && row?.status === 'pending_review' && row.skip_reason === TOPIC_BLOCKED_SKIP_REASON
+            && !(await newerSiblingRun(trx, run))) {
+            await trx('opportunity_queue').where('id', run.opportunity_id)
+              .update({ status: 'skipped', completed_at: new Date(), updated_at: new Date() });
+          }
+        }
+        await trx('autonomous_runs').where('id', run.id).where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)
+          .where('outcome', PENDING_OUTCOME)
+          .update({ poll_pending_reason: TOPIC_BLOCK_PR_RETIRED, astro_pr_retired_at: new Date(), updated_at: new Date(),
+            ...(run.action_type === 'new_supporting_blog' ? { outcome: 'skipped' } : {}) });
+      });
     } catch (err) { logger.warn(`[autonomous-pr-poller] terminal bookkeeping for closed topic-blocked PR #${prNumber} failed: ${err.message} (retried next tick)`); }
   }
   return { count: rows.length, retired, unparked, superseded };
@@ -651,8 +669,8 @@ async function settleMergedTopicBlockedRun(run, prNumber) {
 // sibling run owns it). A run without an opportunity cannot move on.
 async function topicBlockedOpportunityMovedOn(run) {
   if (!run.opportunity_id) return null;
-  const row = await db('opportunity_queue').where('id', run.opportunity_id).first('id', 'status', 'skip_reason');
-  if (!row || row.status !== 'pending_review' || row.skip_reason !== TOPIC_BLOCKED_SKIP_REASON) {
+  const row = await db('opportunity_queue').where('id', run.opportunity_id).first('id', 'status', 'skip_reason', 'claim_id');
+  if (!row || !sameQueueClaim(row, run) || row.status !== 'pending_review' || row.skip_reason !== TOPIC_BLOCKED_SKIP_REASON) {
     return { reason: row ? `queue row now status='${row.status}'${row.skip_reason ? ` skip_reason='${row.skip_reason}'` : ''}` : 'queue row missing', row };
   }
   if (await newerSiblingRun(db, run)) return { reason: 'a newer run owns the opportunity', row };
@@ -674,8 +692,8 @@ async function unparkTopicBlockedRun(run, prNumber) {
       if (run.opportunity_id) {
         // Same protocol as the park: lock the queue row, validate, then the
         // newer-sibling check, then the writes.
-        const row = await trx('opportunity_queue').where('id', run.opportunity_id).forUpdate().first('id', 'status', 'skip_reason');
-        if (!row || row.status !== 'pending_review' || row.skip_reason !== TOPIC_BLOCKED_SKIP_REASON) throw new Error('queue row left the parked state');
+        const row = await trx('opportunity_queue').where('id', run.opportunity_id).forUpdate().first('id', 'status', 'skip_reason', 'claim_id');
+        if (!row || !sameQueueClaim(row, run) || row.status !== 'pending_review' || row.skip_reason !== TOPIC_BLOCKED_SKIP_REASON) throw new Error('queue row left the parked state');
         if (await newerSiblingRun(trx, run)) throw new Error('a newer run owns this opportunity — stale run, queue row left alone');
         const q = await trx('opportunity_queue')
           .where('id', run.opportunity_id)
@@ -776,8 +794,9 @@ async function resolveTargetForRun(run) {
 async function queueRowStillParkedLocked(run, trx) {
   if (!run.opportunity_id) return true;
   try {
-    const row = await trx('opportunity_queue').where('id', run.opportunity_id).forUpdate().first('id', 'status', 'skip_reason');
-    if (!row || row.status !== 'pending_review' || row.skip_reason !== pendingSkipReasonForRun(run)) return false;
+    const row = await trx('opportunity_queue').where('id', run.opportunity_id).forUpdate().first('id', 'status', 'skip_reason', 'claim_id');
+    if (!row || !sameQueueClaim(row, run)
+      || row.status !== 'pending_review' || row.skip_reason !== pendingSkipReasonForRun(run)) return false;
     if (await newerSiblingRun(trx, run)) return false;
     return true;
   } catch (err) {
@@ -790,8 +809,9 @@ async function queueRowParkedState(run) {
   if (!run.opportunity_id) return { parked: true, row: null };
   const row = await db('opportunity_queue')
     .where('id', run.opportunity_id)
-    .first('id', 'status', 'skip_reason');
+    .first('id', 'status', 'skip_reason', 'claim_id');
   const parked = !!row
+    && sameQueueClaim(row, run)
     && row.status === 'pending_review'
     && row.skip_reason === pendingSkipReasonForRun(run);
   // status + skip_reason alone are ambiguous across requeue cycles: an
@@ -830,6 +850,7 @@ async function reconcileQueueRow(run, { merged }) {
       .where('id', run.opportunity_id)
       .where('status', 'pending_review')
       .where('skip_reason', pendingSkipReasonForRun(run))
+      .where('claim_id', run.queue_claim_id || null)
       .update(merged
         ? { status: 'done', completed_at: new Date(), updated_at: new Date() }
         : { status: 'skipped', skip_reason: closedSkipReasonForRun(run), completed_at: new Date(), updated_at: new Date() });
@@ -1173,7 +1194,7 @@ async function finalizeClosed(run, prNumber) {
     .update({
       outcome: 'failed',
       skip_reason: closedSkipReasonForRun(run),
-      failure_message: `Astro ${isMetadataLane(run) ? 'metadata ' : ''}PR #${prNumber} was closed without merging; the draft was rejected and will not be retried.`,
+      failure_message: `Astro ${isMetadataLane(run) ? 'metadata ' : ''}PR #${prNumber} was closed without merging; the draft will not be retried.${run.poll_pending_reason ? ` Last blocker: ${run.poll_pending_reason}.` : ''}`,
       poll_pending_reason: null,
       poll_pending_since: null,
       poll_pending_annotated_at: null,
@@ -1199,7 +1220,8 @@ async function maybeAutoMerge(run, pr) {
   // 1. Cloudflare preview build for the PR branch must be green.
   const { latestDeploymentForBranch, extractStatus, deploymentCommitSha } = require('../content-astro/pages-poll');
   const deploy = await latestDeploymentForBranch(branch);
-  if (!deploy) return { pending: true, reason: 'preview_build_pending' };
+  // The bounded deployment search may miss an older successful preview.
+  if (!deploy) return { pending: true, transient: true, reason: 'preview_build_pending' };
   const { status } = extractStatus(deploy);
   if (status !== 'success') return { pending: true, reason: `preview_build_${status || 'pending'}` };
 
@@ -1273,12 +1295,13 @@ async function maybeAutoMerge(run, pr) {
 
      
     async function remediateAndWait() {
+      let transient = false;
       // Codex left findings → try to auto-fix them on the PR branch so the
       // post can merge without a human. No-op unless AUTONOMOUS_CODEX_REMEDIATION
       // is on; never merges (that still needs a genuine Codex-clean signal).
       try {
         const { maybeRemediateAutonomousPr, remediationEnabled } = require('./codex-remediation');
-        if (remediationEnabled()) {
+        if (remediationEnabled(run.action_type)) {
           // Fresh queue re-check, same as the merge path's last-instant guard
           // below: remediation MUTATES the PR branch, so an operator requeue/
           // dismiss that landed after tick-start validation must block it the
@@ -1299,8 +1322,12 @@ async function maybeAutoMerge(run, pr) {
             const rem = await maybeRemediateAutonomousPr(pr, run, {
               prePushCheck: () => queueRowStillParked(run),
             });
+            transient = rem?.transient === true;
             if (rem?.remediated) {
               logger.info(`[autonomous-pr-poller] codex remediation round ${rem.round} pushed for run ${run.id} PR #${pr.number} (${rem.findings} finding(s))`);
+              // A fresh head gets a fresh review window, even if the prior
+              // head spent two days waiting on Codex.
+              return { pending: true, reason: 'remediation_review_pending' };
             } else if (rem?.parked) {
               logger.warn(`[autonomous-pr-poller] codex remediation parked run ${run.id} PR #${pr.number}: ${rem.reason}`);
             }
@@ -1308,8 +1335,9 @@ async function maybeAutoMerge(run, pr) {
         }
       } catch (remErr) {
         logger.warn(`[autonomous-pr-poller] codex remediation error for PR #${pr.number}: ${remErr.message}`);
+        transient = true;
       }
-      return { pending: true, reason: `codex_review_pending: ${err.message}${err.p2BarReason ? ` (p2 bar: ${err.p2BarReason})` : ''}` };
+      return { pending: true, transient, reason: `codex_review_pending: ${err.message}${err.p2BarReason ? ` (p2 bar: ${err.p2BarReason})` : ''}` };
     }
   }
 
@@ -1420,7 +1448,7 @@ async function maybeAutoMerge(run, pr) {
         briefId = fresh.brief_id || null;
       }
     } catch (_) {
-      verdictFlagged = true; pinnedShaOk = false; approvedShaOk = false;
+      return { pending: true, transient: true, reason: 'publisher_head_pin_failed' };
     }
     // The SHA pin is UNIVERSAL on these lanes (PR r14 P1): even a
     // competitor-free run's head could gain named-competitor content
@@ -1493,11 +1521,11 @@ async function maybeAutoMerge(run, pr) {
         filePath: draftForImages?.file_path || null,
       });
     } catch (err) {
-      bodyImages = { ok: false, reason: `body-image check failed: ${err.message}` };
+      bodyImages = { ok: false, transient: true, reason: `body-image check failed: ${err.message}` };
     }
     if (!bodyImages.ok) {
       logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: body images — ${bodyImages.reason}`);
-      return { pending: true, reason: `body_images_required: ${bodyImages.reason}` };
+      return { pending: true, reason: `body_images_required: ${bodyImages.reason}`, transient: bodyImages.transient === true };
     }
     bodyImagesBaseSha = bodyImages.baseSha || null;
   }
@@ -1558,7 +1586,7 @@ async function maybeAutoMerge(run, pr) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: topic-targeting gate not clear against the live corpus — ${topic.reason}`);
           // Deterministic → park on this transaction (commits with the lock).
           if (topic.deterministic) await parkTopicBlockedRun(run, pr, topic.reason, trx);
-          withheld = { pending: true, reason: `topic_targeting_blocked: ${topic.reason}`, ...(topic.deterministic ? { parked: true } : {}) };
+          withheld = { pending: true, reason: `topic_targeting_blocked: ${topic.reason}`, ...(topic.deterministic ? { parked: true } : { transient: true }) };
           return null;
         }
         // 3.8a Affiliate belt — see recheckAffiliateApproval. Withheld (not
@@ -1567,7 +1595,7 @@ async function maybeAutoMerge(run, pr) {
         const aff = await affiliateBeltVerdict(run, topic.content, pr.head?.sha, gh);
         if (!aff.ok) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
-          withheld = { pending: true, reason: `affiliate_approval_required: ${aff.reason}` };
+          withheld = { pending: true, reason: aff.paused ? 'affiliate_autopublish_disabled' : `affiliate_contract_blocked: ${aff.reason}`, transient: aff.transient === true };
           return null;
         }
         // 3.8 The recheck above was more async work (GitHub + corpus reads):
@@ -1613,7 +1641,7 @@ async function maybeAutoMerge(run, pr) {
         const aff = await affiliateBeltVerdict(run, await headRefreshFileContent(run, pr), pr.head?.sha, gh);
         if (!aff.ok) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: affiliate belt — ${aff.reason}`);
-          withheld = { pending: true, reason: `affiliate_approval_required: ${aff.reason}` };
+          withheld = { pending: true, reason: aff.paused ? 'affiliate_autopublish_disabled' : `affiliate_contract_blocked: ${aff.reason}`, transient: aff.transient === true };
           return null;
         }
         if (!(await queueRowStillParkedLocked(run, trx))) {
@@ -1630,7 +1658,7 @@ async function maybeAutoMerge(run, pr) {
   } catch (err) {
     if (err?.code === 'TOPIC_MERGE_LOCK_BUSY') {
       logger.info(`[autonomous-pr-poller] auto-merge deferred for run ${run.id}: ${err.message}`);
-      return { pending: true, reason: 'topic_merge_lock_busy' };
+      return { pending: true, transient: true, reason: 'topic_merge_lock_busy' };
     }
     if (err?.code === 'TOPIC_PARK_LOST') {
       logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: ${err.message}`);
@@ -1671,6 +1699,21 @@ async function maybeAutoMerge(run, pr) {
   return { ...finalized, autoMerged: true };
 }
 
+// A historical PR is releasable only after a fresh closed/unmerged read,
+// verified branch deletion, and a second read of the same head. The receipt
+// does not transfer queue ownership or reinterpret a published URL.
+async function verifyClosedPrRetirement(run, pr, gh) {
+  if (pr.state !== 'closed' || pr.merged || pr.merged_at) return null;
+  if (!pr.head?.ref || !pr.head?.sha || !await gh.retireBranch(pr.head.ref)) return null;
+  const current = await gh.getPr(pr.number);
+  if (current?.merged || current?.merged_at) return { retired: false, pr: current };
+  if (!current || current.state !== 'closed'
+    || current.head?.ref !== pr.head.ref || current.head?.sha !== pr.head.sha) return { retired: false, reason: 'retirement_state_changed' };
+  const updated = await db('autonomous_runs').where('id', run.id).where('astro_pr_url', run.astro_pr_url)
+    .whereNot('outcome', 'completed_published').whereNull('published_url').update({ astro_pr_retired_at: new Date(), updated_at: new Date() });
+  return updated ? { retired: true, pr: current } : null;
+}
+
 async function pollRun(run, { allowMerge = true } = {}) {
   const prNumber = prNumberFromUrl(run.astro_pr_url);
   if (!prNumber) {
@@ -1695,9 +1738,18 @@ async function pollRun(run, { allowMerge = true } = {}) {
         mergedAt: pr.merged_at || null,
       });
     }
-    if (pr.state !== 'open') return await finalizeClosed(run, prNumber);
+    if (pr.state !== 'open') {
+      if (run.action_type === 'new_supporting_blog') {
+        const result = await verifyClosedPrRetirement(run, { ...pr, number: prNumber }, gh);
+        if (!result || result.reason) return { pending: true, transient: true, reason: result?.reason || 'branch_retirement_pending' };
+        if (!result.retired) return await finalizeMerged(run, prNumber, {
+          autoMerged: false, mergeSha: result.pr.merge_commit_sha || null, mergedAt: result.pr.merged_at || null,
+        });
+      }
+      return await finalizeClosed(run, prNumber);
+    }
 
-    if (!autoMergeEnabled()) return { pending: true, reason: 'awaiting_human_merge' };
+    if (!autoMergeEnabled(run.action_type)) return { pending: true, reason: 'auto_merge_disabled' };
     if (isMetadataLane(run)) {
       // Conservative reading of AUTONOMOUS_BLOG_AUTO_MERGE: the flag is
       // named for — and was trust-ramped on — the blog publish lane.
@@ -1713,7 +1765,28 @@ async function pollRun(run, { allowMerge = true } = {}) {
       logger.info(`[autonomous-pr-poller] auto-merge deferred for run ${run.id} (per-poll cap reached); retries next tick`);
       return { pending: true, mergeDeferred: true };
     }
-    return await maybeAutoMerge(run, pr);
+    const verdict = await maybeAutoMerge(run, pr);
+    // Bounded unattended recovery: a blog PR stuck on the same blocker for
+    // two days is closed, then the existing closed-PR reconciler records the
+    // failure. Never discard a merged PR or a deliberate budget/gate hold.
+    const blockedSince = Date.parse(run.poll_pending_since || '');
+    if (verdict.pending && !verdict.transient && pendingReasonKey(verdict.reason) === run.poll_pending_reason
+      && run.action_type === 'new_supporting_blog' && Number.isFinite(blockedSince)
+      && Date.now() - blockedSince >= 48 * 60 * 60 * 1000
+      && run.poll_pending_reason && !PENDING_ANNOTATION_EXPECTED.has(run.poll_pending_reason)) {
+      const retired = await db.transaction(async (trx) => {
+        if (!(await queueRowStillParkedLocked(run, trx))) return false;
+        const current = await gh.getPr(prNumber);
+        if (current?.state !== 'open' || current.merged || current.merged_at || current.head?.sha !== pr.head?.sha) return false;
+        await gh.closePr(prNumber);
+        return true;
+      });
+      // Re-read on the next tick: a concurrent external merge wins over
+      // retirement and must still complete deployment/impact bookkeeping.
+      return retired ? { pending: true, transient: true, reason: 'automatic_retirement_pending' }
+        : { pending: true, reason: 'retirement_state_changed' };
+    }
+    return verdict;
   } catch (err) {
     // Transient (network / GitHub 5xx / Cloudflare blip): leave the row for
     // the next tick. NEVER mark a run failed on an infrastructure error.
@@ -1738,6 +1811,10 @@ async function pollRun(run, { allowMerge = true } = {}) {
 // (fleet lag ~30–45 min), so 2h means something is wedged; everything else
 // (codex_review_pending, pr_not_found, …) gets a generous day.
 const PENDING_ANNOTATION_EXPECTED = new Set([
+  'auto_merge_disabled',
+  'spoke_blog_network_disabled',
+  'named_competitor_autopublish_revoked',
+  'affiliate_autopublish_disabled',
   'awaiting_human_merge',
   'awaiting_human_merge_metadata_lane',
   'daily_publish_cap_reached',
@@ -1814,12 +1891,51 @@ async function trackPendingReason(run, result) {
   }
 }
 
+// Historical and newly superseded runs can release only their own external
+// PR fence. They never finalize, publish, or change the current queue row.
+async function reconcileSupersededPr(run) {
+  try {
+    const number = prNumberFromUrl(run.astro_pr_url);
+    if (!number) return { retired: false };
+    const gh = require('../content-astro/github-client');
+    const pr = await gh.getPr(number);
+    if (!pr || pr.state === 'open') return { retired: false };
+    const merged = !!(pr.merged || pr.merged_at);
+    if (!await stampTerminal(number, merged ? 'merged' : 'closed', run)) return { retired: false };
+    if (merged) {
+      // Leave the publication fence intact, but stop inspecting this terminal
+      // PR only after its remediation tombstone has been persisted.
+      await db('autonomous_runs').where('id', run.id).where('astro_pr_url', run.astro_pr_url).update({
+        poll_pending_reason: HISTORICAL_PR_MERGED, poll_pending_since: null,
+        poll_pending_annotated_at: null, updated_at: new Date(),
+      });
+      return { retired: false };
+    }
+    if (run.action_type !== 'new_supporting_blog') return { retired: false };
+    const result = await verifyClosedPrRetirement(run, { ...pr, number }, gh);
+    return { retired: !!result?.retired };
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] historical PR verification failed for run ${run.id}: ${err.message}`);
+    return { retired: false };
+  }
+}
+
 async function pollPending() {
   let rows;
   try {
+    await require('./opportunity-queue').reconcilePublishedClaims();
     rows = await db('autonomous_runs')
-      .where('outcome', PENDING_OUTCOME)
-      .whereIn('skip_reason', PENDING_SKIP_REASONS)
+      .where(function pollable() {
+        this.where({ outcome: PENDING_OUTCOME }).whereIn('skip_reason', PENDING_SKIP_REASONS)
+          .orWhere(function historical() {
+            this.where('action_type', 'new_supporting_blog')
+              .where(function terminal() { this.whereIn('outcome', ['failed', 'skipped']).orWhere('skip_reason', SUPERSEDED_SKIP_REASON); })
+              .whereNull('astro_pr_retired_at').whereNull('published_url')
+              .where((q) => q.whereNull('poll_pending_reason').orWhereNot('poll_pending_reason', HISTORICAL_PR_MERGED))
+              .whereRaw(`EXISTS (SELECT 1 FROM opportunity_queue q WHERE q.id = autonomous_runs.opportunity_id
+                AND q.status IN ('pending', 'pending_review'))`);
+          });
+      })
       .whereNotNull('astro_pr_url')
       // Random order, NOT claimed_at asc: parked runs (Codex-blocked, red
       // build, awaiting a human) stay in this set indefinitely, so a fixed
@@ -1832,7 +1948,7 @@ async function pollPending() {
       .orderByRaw('random()')
       .limit(25)
       .select(
-        'id', 'opportunity_id', 'brief_id', 'action_type', 'skip_reason', 'astro_pr_url',
+        'id', 'opportunity_id', 'queue_claim_id', 'outcome', 'brief_id', 'action_type', 'skip_reason', 'astro_pr_url',
         'draft_payload', 'reviewer_notes', 'created_at',
         'poll_pending_reason', 'poll_pending_since', 'poll_pending_annotated_at',
         // the affiliate belt's approval stamp (Codex PR3 r6: without these the
@@ -1863,7 +1979,7 @@ async function pollPending() {
     try {
       const queueRows = await db('opportunity_queue')
         .whereIn('id', oppIds)
-        .select('id', 'status', 'skip_reason');
+        .select('id', 'status', 'skip_reason', 'claim_id');
       queueById = new Map(queueRows.map((q) => [q.id, q]));
     } catch (err) {
       logger.warn(`[autonomous-pr-poller] opportunity_queue state query failed: ${err.message}`);
@@ -1875,31 +1991,19 @@ async function pollPending() {
   const results = [];
   let autoMerges = 0;
   for (const run of rows) {
+    if (['failed', 'skipped'].includes(run.outcome) || run.skip_reason === SUPERSEDED_SKIP_REASON) {
+      results.push({ id: run.id, ...await reconcileSupersededPr(run) });
+      continue;
+    }
     if (run.opportunity_id) {
       const queueRow = queueById.get(run.opportunity_id) || null;
       const stillParked = !!queueRow
+        && sameQueueClaim(queueRow, run)
         && queueRow.status === 'pending_review'
         && queueRow.skip_reason === pendingSkipReasonForRun(run);
       if (!stillParked) {
         const r = await supersedeRun(run, queueRow);
-        // This run leaves the poller's selection WITHOUT ever fetching its
-        // PR — if that PR already merged/closed, no finalize path will ever
-        // stamp its remediation row. Best-effort: observe the PR state once
-        // and retire the row; an OPEN PR is deliberately left alone (a
-        // stamp would be a lie — nothing has terminated it yet).
-        try {
-          const prNumber = prNumberFromUrl(run.astro_pr_url);
-          if (prNumber) {
-            const gh = require('../content-astro/github-client');
-            const pr = await gh.getPr(prNumber);
-            if (pr && (pr.merged || pr.merged_at || pr.state !== 'open')) {
-              const { markPrTerminal } = require('./codex-remediation');
-              await markPrTerminal(prNumber, (pr.merged || pr.merged_at) ? 'merged' : 'closed');
-            }
-          }
-        } catch (err) {
-          logger.warn(`[autonomous-pr-poller] terminal stamp on supersede failed for run ${run.id}: ${err.message}`);
-        }
+        await reconcileSupersededPr(run);
         results.push({ id: run.id, pr_url: run.astro_pr_url, ...r });
         continue;
       }

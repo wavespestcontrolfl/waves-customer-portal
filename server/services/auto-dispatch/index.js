@@ -20,7 +20,8 @@ const { getCustomerSchedulingPreferences } = require('./preferences');
 const { findValidCandidateSlots } = require('./candidate-slots');
 const { scoreAppointmentPlacement } = require('./scoring');
 const { applyAutoDispatchMove, revalidatePlacement, unitMoveSize } = require('./apply');
-const { toDateStr } = require('./dates');
+const { toDateStr, shiftDateStr } = require('./dates');
+const { stampedAddressDiverges } = require('../stamped-address');
 const { ensureCustomerGeocoded } = require('../geocoder');
 const audit = require('./audit');
 const routeTiers = require('./route-tiers');
@@ -71,7 +72,7 @@ function makeCapabilityFn(map) {
   };
 }
 
-function loadEligibleServices(lockBoundary, lookaheadEnd) {
+function loadEligibleServices(lockBoundary, lookaheadEnd, today) {
   return db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     // is_recurring=true only — booster-month rows carry a recurring_parent_id but
@@ -84,7 +85,14 @@ function loadEligibleServices(lockBoundary, lookaheadEnd) {
     // so filter it here like the reminder/billing crons do.
     .whereNull('customers.deleted_at')
     .whereIn('scheduled_services.status', ['pending', 'confirmed'])
-    .where('scheduled_services.scheduled_date', '>', lockBoundary)
+    .where(function () {
+      this.where('scheduled_services.scheduled_date', '>', lockBoundary)
+        .orWhere(function () {
+          this.whereNotNull('scheduled_services.recurring_dispatch_due_date')
+            .whereNull('scheduled_services.window_start')
+            .where('scheduled_services.recurring_dispatch_due_date', '>=', shiftDateStr(today, -3));
+        });
+    })
     .where('scheduled_services.scheduled_date', '<=', lookaheadEnd)
     .where(function () {
       this.where('scheduled_services.auto_dispatch_locked', false)
@@ -97,12 +105,16 @@ function loadEligibleServices(lockBoundary, lookaheadEnd) {
     .select(
       'scheduled_services.*',
       'customers.active as customer_active',
+      'customers.address_line1 as customer_address_line1',
+      'customers.city as customer_city',
+      'customers.zip as customer_zip',
       'customers.latitude as customer_latitude',
       'customers.longitude as customer_longitude',
       'customers.phone as customer_phone',
       'customers.first_name',
       'customers.last_name',
     )
+    .orderByRaw('(scheduled_services.recurring_dispatch_due_date IS NOT NULL AND scheduled_services.window_start IS NULL) DESC')
     .orderBy('scheduled_services.scheduled_date', 'asc')
     .limit(5000);
 }
@@ -178,7 +190,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   };
   const auditCtx = { newPlacement, scores, prefsSnapshot, routeMetrics, constraints };
 
-  if (improvement < threshold) {
+  if (!(service.recurring_dispatch_due_date && !service.window_start) && improvement < threshold) {
     return { kind: 'no_change', reason_code: 'NO_SCORE_IMPROVEMENT', reason_description: `Best improvement ${improvement} < threshold ${threshold}`, audit: auditCtx };
   }
   return { kind: 'move', improvement, best, threshold, audit: auditCtx };
@@ -215,7 +227,7 @@ async function runAutoDispatch(opts = {}) {
     const loadBoundary = tiersOn
       ? etDateString(addETDays(nowDate, routeTiers.TIER2_MIN_DAYS_OUT - 1))
       : lockBoundary;
-    const services = await loadEligibleServices(loadBoundary, lookaheadEnd);
+    const services = await loadEligibleServices(loadBoundary, lookaheadEnd, today);
 
     // Tier-mode bulk context: reminder-freeze + drift anchors, one query each.
     // Both FAIL CLOSED — a failed read freezes/anchors-unknowns every visit
@@ -252,7 +264,7 @@ async function runAutoDispatch(opts = {}) {
         // plan-active gate (don't spend the geocode budget on a lapsed plan we'd
         // skip anyway) and deduped per customer (a customer's later visits would
         // just read the coords the first row saved, so they must not re-attempt).
-        if (!elig.eligible && elig.reason_code === 'MISSING_GEO') {
+        if (!elig.eligible && elig.reason_code === 'MISSING_GEO' && !stampedAddressDiverges(service)) {
           planCheck = await isRecurringPlanActive(service, db);
           if (!planCheck.active) {
             totals.skipped++;
@@ -285,7 +297,7 @@ async function runAutoDispatch(opts = {}) {
         // ── ROUTE-TIERS guards (only when GATE_ROUTE_TIERS is on) ──
         let tierWindow = null;
         let tierMeta = null;
-        if (tiersOn) {
+        if (tiersOn && !(service.recurring_dispatch_due_date && !service.window_start)) {
           // Reminder freeze — the 72h reminder is the HARD gate. Unreadable
           // status freezes everything (fail closed).
           if (!reminderFreeze || reminderFreeze.failed) {
@@ -372,10 +384,10 @@ async function runAutoDispatch(opts = {}) {
       }
     }
 
-    // ── Pass 2 (apply mode): apply the collected moves BEST-IMPROVEMENT-FIRST ──
-    // The cap bounds how many moves a run applies, so it must fund the LARGEST
-    // route gains: apply in descending pass-1 improvement instead of first-by-
-    // scheduled_date. Each move is RE-EVALUATED ONCE against the now-live schedule
+    // ── Pass 2 (apply mode): due deadlines first, then route improvement ──
+    // Fund the earliest unplaced due dates before their placement window closes.
+    // Equal deadlines and ordinary optimization keep descending route gains.
+    // Each move is RE-EVALUATED ONCE against the now-live schedule
     // right before the apply/cap decision, so a move whose gain an earlier apply
     // already captured is dropped (no_change), the cap-held backlog reflects
     // current value, and a failed apply logs the actually-attempted placement.
@@ -388,7 +400,13 @@ async function runAutoDispatch(opts = {}) {
     // that actually apply under a binding cap — they are the top-ranked ones,
     // applied earliest, where the pass-1 estimate has diverged least from live.
     if (config.mode !== 'dry_run' && plannedMoves.length) {
-      plannedMoves.sort((a, b) => b.result.improvement - a.result.improvement);
+      plannedMoves.sort((a, b) => {
+        const aDue = !a.service.window_start ? toDateStr(a.service.recurring_dispatch_due_date) : null;
+        const bDue = !b.service.window_start ? toDateStr(b.service.recurring_dispatch_due_date) : null;
+        return Number(!!bDue) - Number(!!aDue)
+          || (aDue && bDue ? aDue.localeCompare(bDue) : 0)
+          || b.result.improvement - a.result.improvement;
+      });
       // Stragglers of a PARTIAL grouped move (codex #3609 r31 P1): the
       // failed member sits at its original placement and passes
       // revalidatePlacement (which never compares visit_id), so its own
@@ -425,7 +443,7 @@ async function runAutoDispatch(opts = {}) {
           // `expect` (it pins the ORIGINAL scheduled_date; a visit whose date
           // slipped near enough for a 72h reminder to fire has necessarily
           // changed date and 409s). Fail closed on an unreadable re-check.
-          if (tiersOn) {
+          if (tiersOn && !(pm.service.recurring_dispatch_due_date && !pm.service.window_start)) {
             const applyFreeze = await routeTiers.loadReminderFreeze(db, [pm.service.id], new Date());
             if (applyFreeze.failed) {
               guardReadDegraded = true;
@@ -515,6 +533,15 @@ async function runAutoDispatch(opts = {}) {
     logger.error(`[auto-dispatch] run ${runId} fatal: ${fatal.message}`);
   }
 
+  // Existing handoffs still need office escalation while placement is paused.
+  // This audit only maintains staff alerts; it never moves appointments.
+  try {
+    await audit.flagUnplacedVisits(config);
+  } catch (err) {
+    totals.failed++;
+    if (runStatus === 'completed') runStatus = 'completed_with_errors';
+    logger.error(`[auto-dispatch] unplaced visit escalation failed: ${err.message}`);
+  }
   await audit.completeRun(runId, { status: runStatus, totals, error: runError });
   logger.info(`[auto-dispatch] run ${runId} ${runStatus} evaluated=${totals.evaluated} skipped=${totals.skipped} recommended=${totals.recommended} changed=${totals.changed} failed=${totals.failed} geocoded=${geocoded}/${geocodeAttempts}`);
   return { runId, status: runStatus, geocoded, geocode_attempts: geocodeAttempts, ...totals };

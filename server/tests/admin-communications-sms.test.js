@@ -98,6 +98,7 @@ jest.mock('../services/review-request', () => ({
   inlineClaimStillHeld: jest.fn(async () => true),
   releaseInlineClaim: jest.fn(async () => {}),
   markInlineDelivered: jest.fn(async () => {}),
+  sendInlineEmailCopy: jest.fn(async () => ({ sent: true })),
   reviewSmsAllowedNow: jest.fn(async () => ({ allowed: true })),
   checkUnscheduledAskGates: jest.fn(async () => ({ allowed: true })),
 }));
@@ -106,6 +107,7 @@ jest.mock('../services/review-request', () => ({
 // (skipped: no_connection), so run the body inline here.
 jest.mock('../utils/cron-lock', () => ({
   runExclusive: jest.fn(async (_key, fn) => fn()),
+  wasLockSkipped: (r) => !!(r && r.skipped === true),
 }));
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async (url) => url),
@@ -653,6 +655,46 @@ describe('admin communications SMS route', () => {
       });
     });
 
+    test('schedule-sms refuses a body carrying a review link — the ask rides the immediate send only', async () => {
+      await withServer(async (baseUrl) => {
+        for (const body of ['Review us: portal.wavespestcontrol.com/rate/tok-abc123', 'https://portal.wavespestcontrol.com/api/rate/tok-abc123/go']) {
+          const res = await fetch(`${baseUrl}/admin/communications/schedule-sms`, {
+            method: 'POST',
+            headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ to: '+15551234567', body, messageType: 'manual', scheduledFor: '2099-01-01T10:00' }),
+          });
+          expect(res.status).toBe(400);
+          expect((await res.json()).error).toMatch(/immediate send/);
+        }
+      });
+    });
+
+    test('schedule-sms resolves a branded /l/:code short link through short_codes.kind', async () => {
+      const shortCodes = {
+        whereIn: jest.fn(function () { return this; }),
+        where: jest.fn(function () { return this; }),
+        select: jest.fn(async () => [{ code: 'abcde' }]),
+      };
+      db.mockImplementation((table) => {
+        if (table === 'short_codes') return shortCodes;
+        throw new Error(`unexpected table ${table}`);
+      });
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/admin/communications/schedule-sms`, {
+          method: 'POST',
+          headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+          // A legacy five-character code and a current ten-character one.
+          // A legacy five-character code (pasted with capitals — the public
+          // resolver lowercases, so must the fence) and a current ten-character one.
+          body: JSON.stringify({ to: '+15551234567', body: 'Review us: wavespestcontrol.com/L/AbCdE or wavespestcontrol.com/l/abc123xyz9', messageType: 'manual', scheduledFor: '2099-01-01T10:00' }),
+        });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toMatch(/immediate send/);
+        expect(shortCodes.whereIn).toHaveBeenCalledWith('code', ['abcde', 'abc123xyz9']);
+        expect(shortCodes.where).toHaveBeenCalledWith({ kind: 'review' });
+      });
+    });
+
     test('/sms refuses a contract signing link whose token matches no live contract (rotated or expired) — fail closed before sending', async () => {
       wireAutopayDb({ row: null });
       await withServer(async (baseUrl) => {
@@ -660,6 +702,174 @@ describe('admin communications SMS route', () => {
         expect(res.status).toBe(409);
         expect((await res.json()).error).toMatch(/contract signing link is expired or no longer live/);
         expect(sendCustomerMessage).not.toHaveBeenCalled();
+      });
+    });
+
+    // A composer-carried project report link: the project send flow's own
+    // delivery claim is taken before the provider call and handed back once
+    // the provider has answered, so a resend that starts meanwhile 409s on
+    // its claim instead of texting the same report twice (GH Codex #3893
+    // r11 P1).
+    describe('project report link in the body', () => {
+      const REPORT_BODY = `Your report: portal.wavespestcontrol.com/report/project/${'f'.repeat(32)}`;
+      const REPORTS = [{ id: 'p1', deliveryStatus: 'sent' }];
+      const CLAIM = { projects: [{ id: 'p1', token: 't1', previousStatus: 'sent' }] };
+      const ccl = () => require('../services/composer-customer-links');
+      let bearerSpy;
+      let claimSpy;
+      let releaseSpy;
+      beforeEach(() => {
+        bearerSpy = jest.spyOn(ccl(), 'bearerLinkSendCheck').mockResolvedValue({ ok: true, projectReports: REPORTS });
+        claimSpy = jest.spyOn(ccl(), 'claimProjectReportSends').mockResolvedValue({ ok: true, claim: CLAIM });
+        releaseSpy = jest.spyOn(ccl(), 'releaseProjectReportSends').mockResolvedValue(undefined);
+        db.mockImplementation((table) => {
+          const first = jest.fn();
+          if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+          return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1), del: jest.fn(async () => 1) };
+        });
+      });
+      afterEach(() => {
+        bearerSpy.mockRestore();
+        claimSpy.mockRestore();
+        releaseSpy.mockRestore();
+      });
+
+      test('a real send: the claim is taken BEFORE the provider call and handed back AFTER it', async () => {
+        sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM9', provider: 'twilio' });
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: REPORT_BODY });
+          expect(res.status).toBe(200);
+          expect(claimSpy).toHaveBeenCalledWith(REPORTS);
+          expect(claimSpy.mock.invocationCallOrder[0]).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+          expect(releaseSpy).toHaveBeenCalledWith(CLAIM);
+          expect(releaseSpy.mock.invocationCallOrder[0]).toBeGreaterThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+        });
+      });
+
+      test('an AMBIGUOUS provider outcome (retryable / deferred) keeps the claim — the provider may still hold the text (GH Codex #3893 r12 P1)', async () => {
+        sendCustomerMessage.mockResolvedValue({ sent: false, blocked: false, retryable: true, code: 'PROVIDER_TIMEOUT', reason: 'timed out' });
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: REPORT_BODY });
+          expect(res.status).toBe(422);
+          expect(claimSpy).toHaveBeenCalledWith(REPORTS);
+          expect(releaseSpy).not.toHaveBeenCalled();
+        });
+      });
+
+      test('a blocked send hands the claim back; a lost claim (the flow is sending) refuses before the provider', async () => {
+        sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'SMS_OPTED_OUT', reason: 'opted out' });
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: REPORT_BODY });
+          expect(res.status).toBe(422);
+          expect(releaseSpy).toHaveBeenCalledWith(CLAIM);
+        });
+        sendCustomerMessage.mockClear();
+        releaseSpy.mockClear();
+        claimSpy.mockResolvedValue({ ok: false, error: 'This project report is being re-sent right now — give it a moment, then send again.' });
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: REPORT_BODY });
+          expect(res.status).toBe(409);
+          expect((await res.json()).error).toMatch(/being re-sent right now/);
+          expect(sendCustomerMessage).not.toHaveBeenCalled();
+          expect(releaseSpy).not.toHaveBeenCalled();
+        });
+      });
+    });
+
+    // A composer-carried prep guide link: the provider call and the tagger's
+    // replay marker run under the manual prep sender's per-customer lock, so
+    // a manual send of another guide cannot re-key the page's token while
+    // this text is in flight (GH Codex #3856 r22 P0).
+    describe('prep guide link in the body', () => {
+      const PREP_BODY = `Your prep guide: portal.wavespestcontrol.com/prep/${'a'.repeat(32)}`;
+      const PREPS = [{ customerId: 'cust-A', pestType: 'flea', templateKey: 'prep.flea' }];
+      // What the same page renders once the lock is ours (a released
+      // provisional page re-claimed for another guide keeps its token).
+      const FRESH_PREPS = [{ customerId: 'cust-A', pestType: 'bed_bug', templateKey: 'prep.bed_bug' }];
+      const ccl = () => require('../services/composer-customer-links');
+      const { runExclusive } = require('../utils/cron-lock');
+      let bearerSpy;
+      let markSpy;
+      let recheckSpy;
+      beforeEach(() => {
+        bearerSpy = jest.spyOn(ccl(), 'bearerLinkSendCheck').mockResolvedValue({ ok: true, preps: PREPS });
+        markSpy = jest.spyOn(ccl(), 'markPrepGuidesSent').mockResolvedValue(undefined);
+        recheckSpy = jest.spyOn(ccl(), 'recheckPrepLinks').mockResolvedValue({ ok: true, preps: FRESH_PREPS });
+        db.mockImplementation((table) => {
+          const first = jest.fn();
+          if (table === 'customers') first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+          return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
+        });
+      });
+      afterEach(() => {
+        bearerSpy.mockRestore();
+        markSpy.mockRestore();
+        recheckSpy.mockRestore();
+        runExclusive.mockImplementation(async (_key, fn) => fn());
+      });
+
+      test('a real send: the provider call AND the replay marker run inside the prep-send lock', async () => {
+        sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM9', provider: 'twilio' });
+        const lockReleased = jest.fn();
+        runExclusive.mockImplementation(async (key, fn) => {
+          const out = await fn();
+          if (key.startsWith('prep-send:')) lockReleased(key);
+          return out;
+        });
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: PREP_BODY });
+          expect(res.status).toBe(200);
+          expect(runExclusive).toHaveBeenCalledWith('prep-send:cust-A', expect.any(Function), { recordHealth: false, waitForSlot: false });
+          const lockTaken = runExclusive.mock.invocationCallOrder[runExclusive.mock.calls.findIndex(([key]) => key === 'prep-send:cust-A')];
+          expect(lockTaken).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+          // …and the marker uses the entries the in-lock recheck resolved,
+          // not the pre-lock ones (pre-push Codex P1 on e8b68e9cc).
+          expect(markSpy).toHaveBeenCalledWith(FRESH_PREPS, expect.anything());
+          expect(markSpy).not.toHaveBeenCalledWith(PREPS, expect.anything());
+          expect(markSpy.mock.invocationCallOrder[0]).toBeLessThan(lockReleased.mock.invocationCallOrder[0]);
+          // The prep links are re-validated INSIDE the lock, before the provider.
+          expect(recheckSpy).toHaveBeenCalledWith(PREP_BODY, '5551234567', { trustedCustomerId: 'cust-A', usDestination: true });
+          expect(recheckSpy.mock.invocationCallOrder[0]).toBeGreaterThan(lockTaken);
+          expect(recheckSpy.mock.invocationCallOrder[0]).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+        });
+      });
+
+      test('a prep link that stopped resolving between the pre-lock check and the lock (a released provisional page) refuses as not-sent — nothing dispatched, no marker (pre-push Codex P1 on 7f82e7564)', async () => {
+        recheckSpy.mockResolvedValue({ ok: false, error: 'This prep guide link has expired — remove it and insert a fresh one.' });
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: PREP_BODY });
+          expect(res.status).toBe(422);
+          expect((await res.json()).error).toMatch(/prep guide link has expired/);
+          expect(sendCustomerMessage).not.toHaveBeenCalled();
+          expect(markSpy).not.toHaveBeenCalled();
+        });
+      });
+
+      test('a held lease (a manual prep send mid-flight) refuses as not-sent — nothing dispatched, no marker', async () => {
+        runExclusive.mockImplementation(async (key, fn) => (key.startsWith('prep-send:') ? { skipped: true, reason: 'locked' } : fn()));
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: PREP_BODY });
+          expect(res.status).toBe(422);
+          expect((await res.json()).error).toMatch(/prep guide is being sent to this customer right now/);
+          expect(sendCustomerMessage).not.toHaveBeenCalled();
+          expect(markSpy).not.toHaveBeenCalled();
+        });
+      });
+
+      test('a throw the provider ACCEPTED still writes the marker; one it did not accept writes nothing', async () => {
+        sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit write failed'), { providerOutcome: { sent: true } }));
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: PREP_BODY });
+          expect(res.status).toBe(500);
+          expect(markSpy).toHaveBeenCalledWith(FRESH_PREPS, expect.anything());
+        });
+        markSpy.mockClear();
+        sendCustomerMessage.mockRejectedValueOnce(new Error('provider down'));
+        await withServer(async (baseUrl) => {
+          const res = await send(baseUrl, { customerId: 'cust-A', body: PREP_BODY });
+          expect(res.status).toBe(500);
+          expect(markSpy).not.toHaveBeenCalled();
+        });
       });
     });
 
@@ -1117,7 +1327,7 @@ describe('admin communications SMS route', () => {
       });
 
       expect(res.status).toBe(200);
-      expect(ReviewService.claimInlineForSend).toHaveBeenCalledWith('rr-1');
+      expect(ReviewService.claimInlineForSend).toHaveBeenCalledWith('rr-1', { emailRequested: false });
     });
   });
 
@@ -1218,8 +1428,113 @@ describe('admin communications SMS route', () => {
       });
 
       expect(res.status).toBe(200);
-      expect(ReviewService.claimInlineForSend).toHaveBeenCalledWith('rr-1');
+      expect(ReviewService.claimInlineForSend).toHaveBeenCalledWith('rr-1', { emailRequested: false });
       expect(ReviewService.markInlineDelivered).toHaveBeenCalledWith('rr-1', expect.any(Date));
+    });
+  });
+
+  // Quick Links "Both" (owner ruling 2026-09-03): the same ask is emailed
+  // only after the text REALLY sent — never on a released claim.
+  describe('reviewRequestEmail (Both channel)', () => {
+    const wireInlineRow = () => {
+      db.mockImplementation((table) => {
+        const first = jest.fn();
+        if (table === 'review_requests') {
+          first.mockResolvedValue({
+            id: 'rr-1', customer_id: 'cust-A', status: 'pending',
+            sms_sent_at: null, triggered_by: 'auto_inline', token: 'tok-abc123',
+          });
+        } else if (table === 'customers') {
+          first.mockResolvedValue({ id: 'cust-A', phone: '+15551234567' });
+        }
+        return { where: jest.fn(function () { return this; }), first };
+      });
+    };
+    const send = (baseUrl, extra) => fetch(`${baseUrl}/admin/communications/sms`, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        to: '+15551234567',
+        body: 'Review us: portal.wavespestcontrol.com/rate/tok-abc123',
+        messageType: 'manual',
+        reviewRequestId: 'rr-1',
+        ...extra,
+      }),
+    });
+
+    test('emails the same ask after a real send and reports the outcome', async () => {
+      const ReviewService = require('../services/review-request');
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM999' });
+      wireInlineRow();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { reviewRequestEmail: true });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ reviewEmail: { sent: true } });
+        expect(ReviewService.markInlineDelivered).toHaveBeenCalledWith('rr-1', expect.any(Date));
+        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-1');
+        // Both stamps the owed email leg on the claim — the Quick Links
+        // retry path's persisted evidence this ask asked for an email.
+        expect(ReviewService.claimInlineForSend).toHaveBeenCalledWith('rr-1', { emailRequested: true });
+      });
+    });
+
+    test('a throw after provider acceptance still emails the Both copy and says so', async () => {
+      const ReviewService = require('../services/review-request');
+      const accepted = new Error('audit write failed');
+      accepted.providerOutcome = { sent: true };
+      sendCustomerMessage.mockRejectedValue(accepted);
+      // The error path fires the async Twilio failure alert (a promise).
+      require('../services/twilio-failure-alerts').alertTwilioFailure.mockResolvedValue(undefined);
+      ReviewService.sendInlineEmailCopy.mockResolvedValue({ sent: true });
+      wireInlineRow();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { reviewRequestEmail: true });
+        expect(res.status).toBe(500);
+        expect((await res.json()).error).toMatch(/text was accepted; the review email was sent too/);
+        expect(ReviewService.markInlineDelivered).toHaveBeenCalledWith('rr-1', expect.any(Date));
+        expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-1');
+        expect(ReviewService.releaseInlineClaim).not.toHaveBeenCalled();
+      });
+    });
+
+    test('a real send whose delivery stamp throws twice reports the withheld email', async () => {
+      const ReviewService = require('../services/review-request');
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM999' });
+      ReviewService.markInlineDelivered.mockRejectedValue(new Error('db down'));
+      wireInlineRow();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { reviewRequestEmail: true });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ reviewEmail: { sent: false, reason: 'email_not_attempted' } });
+        expect(ReviewService.markInlineDelivered).toHaveBeenCalledTimes(2);
+        expect(ReviewService.sendInlineEmailCopy).not.toHaveBeenCalled();
+      });
+    });
+
+    test('never emails when the text did not really send (claim released)', async () => {
+      const ReviewService = require('../services/review-request');
+      // sent:true without a providerMessageId = a suppression sentinel, not a real send.
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false });
+      wireInlineRow();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { reviewRequestEmail: true });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ reviewEmail: { sent: false, reason: 'text_not_sent' } });
+        expect(ReviewService.releaseInlineClaim).toHaveBeenCalledWith('rr-1', expect.any(Date));
+        expect(ReviewService.sendInlineEmailCopy).not.toHaveBeenCalled();
+      });
+    });
+
+    test('a Text-only send never emails', async () => {
+      const ReviewService = require('../services/review-request');
+      sendCustomerMessage.mockResolvedValue({ sent: true, blocked: false, providerMessageId: 'SM999' });
+      wireInlineRow();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, {});
+        expect(res.status).toBe(200);
+        expect((await res.json()).reviewEmail).toBeUndefined();
+        expect(ReviewService.sendInlineEmailCopy).not.toHaveBeenCalled();
+      });
     });
   });
 

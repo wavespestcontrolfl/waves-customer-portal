@@ -34,7 +34,9 @@ describe('parseChain', () => {
     // Image-native Nano Banana fallbacks (config/models.js) after the full
     // OpenAI ladder (gpt-image-1 stays as the last OpenAI fallback); the
     // legacy 'gemini' text-model slug is env-only.
-    expect(parseChain(undefined)).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1', 'gemini-image-best', 'gemini-image']);
+    // Bake-off 2026-09-05: Nano Banana Pro second (fast, cheaper, close on
+    // photo/cartoon); gpt-image-1 stays the last fallback.
+    expect(parseChain(undefined)).toEqual(['gpt-image-2', 'gemini-image-pro', 'gpt-image-1.5', 'gemini-image-best', 'gemini-image', 'gpt-image-1']);
   });
   test('respects env override', () => {
     expect(parseChain('gemini,gpt-image-2')).toEqual(['gemini', 'gpt-image-2']);
@@ -137,6 +139,31 @@ describe('ImageGenerator: chain success on first provider', () => {
     expect(r.model).toBe('gpt-image-2');
     expect(r.dataUrl).toMatch(/^data:image\/png;base64,AAAA$/);
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ImageGenerator: one deadline for the whole chain (Codex r5 P2 on #3964)', () => {
+  test('a leg with less than the floor remaining is skipped as budget-exhausted instead of getting a fresh 180 s', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    process.env.GEMINI_API_KEY = 'gem-test';
+    const { IMAGE_LEG_FLOOR_MS, legTimeoutMs, IMAGE_REQUEST_TIMEOUT_MS } = require('../services/content/image-generator')._internals;
+    let clock = 1_000_000;
+    // The first leg burns the whole budget (a hang that only the abort ends).
+    const mockFetch = jest.fn().mockImplementation(() => { clock += 200_000; return Promise.resolve(err(500, 'upstream hang')); });
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini,gpt-image-1', fetchFn: mockFetch, chainBudgetMs: 200_000, now: () => clock });
+    await expect(gen.generate({ title: 'Test' })).rejects.toMatchObject({
+      attempts: [
+        expect.objectContaining({ provider: 'gpt-image-2' }),
+        // Budget exhaustion is a timing condition → retryable, so the runner retries rather than parks (Codex r10 P2).
+        expect.objectContaining({ provider: 'gemini', result: expect.objectContaining({ skipped: true, retryable: true, reason: expect.stringMatching(/chain budget exhausted/) }) }),
+        expect.objectContaining({ provider: 'gpt-image-1', result: expect.objectContaining({ skipped: true }) }),
+      ],
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    // The primary keeps its full allowance; a later leg gets only what is left.
+    expect(legTimeoutMs(clock + 400_000, clock)).toBe(IMAGE_REQUEST_TIMEOUT_MS);
+    expect(legTimeoutMs(clock + 30_000, clock)).toBe(30_000);
+    expect(legTimeoutMs(clock + IMAGE_LEG_FLOOR_MS - 1, clock)).toBeNull();
   });
 });
 

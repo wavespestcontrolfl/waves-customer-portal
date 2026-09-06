@@ -41,6 +41,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [selected, setSelected] = useState(new Set());
   // Scheduling metadata for every selected id, captured at selection time —
   // the selection survives pagination/filter changes while `services` only
@@ -106,6 +107,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
   const fetchList = useCallback(async (editedId = null) => {
     const seq = ++fetchSeqRef.current;
     setLoading(true);
+    setLoadError(false);
     const params = new URLSearchParams();
     if (filterFrom) params.set('from', filterFrom);
     if (filterTo) params.set('to', filterTo);
@@ -116,10 +118,11 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
     if (filterSearch) params.set('search', filterSearch);
     params.set('page', page);
     params.set('limit', 50);
-    // A failed fetch commits an empty page (existing behaviour), which
-    // also makes the saved-row check below fail closed (Codex #3868 r4).
+    // Failed rows remain unverifiable for saved-row selection cleanup,
+    // but the rendered error must stay distinct from successful zero matches.
     const data = await adminFetch(`/admin/schedule/list?${params}`).catch(() => null);
     if (seq !== fetchSeqRef.current) return;
+    setLoadError(data === null);
     const rows = data?.services || [];
     setServices(rows);
     setTotal(data?.total || 0);
@@ -194,9 +197,13 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
     });
   };
 
+  const allVisibleSelected = sorted.length > 0 && sorted.every(s => selected.has(s.id));
+  const someVisibleSelected = sorted.some(s => selected.has(s.id));
+
   const toggleAll = () => {
-    if (selected.size === sorted.length) setSelected(new Set());
+    if (allVisibleSelected) setSelected(new Set());
     else {
+      selectedMetaRef.current.clear();
       sorted.forEach(rememberSelectedMeta);
       setSelected(new Set(sorted.map(s => s.id)));
     }
@@ -379,7 +386,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
             className="text-12 px-2 py-1.5 border-hairline border-zinc-300 rounded-sm w-36" />
         </label>
         <div className="flex-1" />
-        <span className="text-12 text-zinc-500 u-nums self-end pb-1.5">{total} results</span>
+        {!loading && !loadError && <span className="text-12 text-zinc-500 u-nums self-end pb-1.5">{total} results</span>}
       </div>
 
       {/* Bulk actions toolbar */}
@@ -451,7 +458,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
               onClick={executeBulkAction}
               // loading: a bulk action must not read selection meta while
               // the save-driven refresh is still in flight (Codex #3868 r4).
-              disabled={bulkBusy || loading || (bulkAction === 'reschedule' && !bulkDate) || (bulkAction === 'mark_prepaid' && !bulkPrepaidAmount)}
+              disabled={bulkBusy || loading || loadError || (bulkAction === 'reschedule' && !bulkDate) || (bulkAction === 'mark_prepaid' && !bulkPrepaidAmount)}
               className="rounded-sm"
             >
               {bulkBusy ? 'Applying…' : 'Apply'}
@@ -482,7 +489,10 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
           <thead>
             <tr>
               <th className={cn(thClass, 'w-8')}>
-                <input type="checkbox" checked={selected.size > 0 && selected.size === sorted.length}
+                <input type="checkbox" checked={allVisibleSelected}
+                  aria-label="Select all visible appointments"
+                  ref={node => { if (node) node.indeterminate = someVisibleSelected && !allVisibleSelected; }}
+                  disabled={loading || loadError || sorted.length === 0}
                   onChange={toggleAll}
                   className="w-4 h-4" style={{ accentColor: '#18181B' }} />
               </th>
@@ -500,7 +510,13 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
             {loading && (
               <tr><td colSpan={9} className="px-3 py-8 text-center text-zinc-400 text-13">Loading…</td></tr>
             )}
-            {!loading && sorted.length === 0 && (
+            {!loading && loadError && (
+              <tr><td colSpan={9} className="px-3 py-8 text-center text-14">
+                <div role="alert" className="text-alert-fg mb-3">Failed to load appointments</div>
+                <Button onClick={() => fetchList(pendingSaveRef.current)}>Retry</Button>
+              </td></tr>
+            )}
+            {!loading && !loadError && sorted.length === 0 && (
               <tr><td colSpan={9} className="px-3 py-8 text-center text-zinc-400 text-13">No appointments match your filters</td></tr>
             )}
             {!loading && sorted.map(s => {

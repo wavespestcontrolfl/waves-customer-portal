@@ -8,7 +8,6 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import { DOC_COLUMN_MAX, DOC_EYEBROW, DOC_FONT, FS } from '../theme-doc';
 import Icon from '../components/Icon';
 import PublicLoadError from '../components/PublicLoadError';
-import BrandFooter from '../components/BrandFooter';
 import DocumentActionBar from '../components/DocumentActionBar';
 import { ProjectAskWaves, ProjectReviewAsk } from '../components/report/ProjectReportEngage';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -384,7 +383,7 @@ export default function ProjectReportViewPage() {
   const isCertificate = data?.projectType === 'pre_treatment_termite_certificate';
   const isPaperDocument = isCertificate || data?.projectType === 'wdo_inspection';
   const glassActive = !isPaperDocument;
-  useGlassSurface(glassActive, 'full');
+  useGlassSurface(glassActive);
 
   useEffect(() => {
     setLoading(true);
@@ -445,7 +444,7 @@ export default function ProjectReportViewPage() {
         <h1 style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: ESTIMATE_TEXT, margin: '8px 0 0' }}>
           Your {data.reportTypeLabel || 'inspection'} report is ready
         </h1>
-        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
           {data.payerBilled
             ? 'This inspection is billed directly to the requesting party. As soon as their invoice is paid, your official report is emailed automatically and unlocks right here.'
             : data.paymentProcessing
@@ -472,7 +471,7 @@ export default function ProjectReportViewPage() {
       <div style={{ ...cardStyle, maxWidth: 420, textAlign: 'center' }}>
         <div style={{ color: ESTIMATE_MUTED }}><Icon name="document" size={32} strokeWidth={1.75} /></div>
         <h1 style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: ESTIMATE_TEXT, margin: '8px 0 0' }}>Report unavailable</h1>
-        <div style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
+        <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
           This link may have expired or is not valid.
         </div>
         <a href={`tel:${WAVES_PHONE_TEL}`} style={{
@@ -553,7 +552,7 @@ export default function ProjectReportViewPage() {
 
   return (
     <div className="project-report-page" style={{
-      minHeight: '100vh',
+      flex: 1,
       background: ESTIMATE_BG,
       fontFamily: FONT_BODY,
       color: ESTIMATE_TEXT,
@@ -661,7 +660,7 @@ export default function ProjectReportViewPage() {
                         </div>
                       ) : (
                         <>
-                          <div style={{ fontSize: 12, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 3 }}>{humanizeKey(key)}</div>
+                          <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 3 }}>{humanizeKey(key)}</div>
                           <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{formattedValue}</div>
                         </>
                       )}
@@ -673,7 +672,7 @@ export default function ProjectReportViewPage() {
                       )}
                       {showRoofRatPhoto && (
                         <details style={{ marginTop: 8 }}>
-                          <summary style={{ fontSize: 14, fontWeight: 800, color: ESTIMATE_TEXT, cursor: 'pointer' }}>
+                          <summary style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_TEXT, cursor: 'pointer' }}>
                             Learn more about roof rats
                           </summary>
                           <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
@@ -699,7 +698,7 @@ export default function ProjectReportViewPage() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 {complianceEntries.map(([label, value]) => (
                   <div key={label} style={{ padding: '12px 16px', borderRadius: 10, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 3 }}>{label}</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_TEXT, marginBottom: 3 }}>{label}</div>
                     <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
                   </div>
                 ))}
@@ -775,7 +774,7 @@ export default function ProjectReportViewPage() {
               <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {Object.entries(data.followupFindings).filter(([, v]) => v).map(([key, value]) => (
                   <div key={key} style={{ padding: '12px 12px', borderRadius: 8, background: ESTIMATE_INPUT_BG, border: `1px solid ${ESTIMATE_INPUT_BORDER}` }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: ESTIMATE_TEXT }}>{humanizeKey(key)}</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_TEXT }}>{humanizeKey(key)}</div>
                     <div style={{ fontSize: 14, color: ESTIMATE_BODY, whiteSpace: 'pre-wrap' }}>{String(value)}</div>
                   </div>
                 ))}
@@ -797,9 +796,6 @@ export default function ProjectReportViewPage() {
         </footer>
 
       </div>
-      {/* Newsletter signup lives only on the newsletter pages (owner
-          2026-07-09, supersedes the 2026-07-08 glass-views ruling). */}
-      <BrandFooter variant={isCertificate ? 'contact' : undefined} appBadges={false} />
     </div>
   );
 }
@@ -813,7 +809,7 @@ function AtAGlance({ rows }) {
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(120px, 0.45fr) 1fr', gap: '8px 12px' }}>
         {rows.map(([label, value]) => (
           <div key={label} style={{ display: 'contents' }}>
-            <div style={{ fontSize: 14, fontWeight: 800, color: ESTIMATE_TEXT }}>{label}</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_TEXT }}>{label}</div>
             <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.35 }}>{value}</div>
           </div>
         ))}
@@ -1017,7 +1013,7 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
       {/* Property + customer header */}
       <div style={{ padding: '16px 24px 0', display: 'flex', flexDirection: 'column', gap: 4 }}>
         {customerName && (
-          <div style={{ fontSize: 14, fontWeight: 800, color: ESTIMATE_TEXT }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_TEXT }}>
             Issued to: {customerName}
           </div>
         )}
@@ -1061,7 +1057,7 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
       {/* FBC required compliance statement (exact wording per 1816.1.7) */}
       <div style={{ padding: '16px 24px 4px' }}>
         <div style={{
-          fontSize: 15,
+          fontSize: 16,
           color: ESTIMATE_BODY,
           lineHeight: 1.5,
           textAlign: 'center',
@@ -1134,7 +1130,7 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
             color: ESTIMATE_TEXT,
             lineHeight: 1.5,
           }}>
-            <span style={{ color: B.green, fontWeight: 800, marginRight: 6 }}>Signed by</span>
+            <span style={{ color: B.green, fontWeight: 700, marginRight: 6 }}>Signed by</span>
             <span style={{ fontWeight: 700 }}>{f.applicator_name || technicianName}</span>
             {f.applicator_fdacs_id ? ` · FDACS ID ${f.applicator_fdacs_id}` : ''}
             {(f.treatment_date || projectDateLabel) ? (
@@ -1158,8 +1154,8 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
       }}>
         <div style={{
           fontFamily: FONT_BODY,
-          fontSize: 15,
-          fontWeight: 800,
+          fontSize: 16,
+          fontWeight: 700,
           color: B.white,
           textTransform: 'uppercase',
           letterSpacing: 0.5,
@@ -1186,7 +1182,7 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
           }}>wavespestcontrol.com/register</a>
         </div>
         <div style={{
-          fontSize: FS.micro,
+          fontSize: FS.body,
           color: B.white,
           opacity: 0.85,
           marginTop: 8,
@@ -1200,7 +1196,7 @@ function CertificateOfCompliance({ findings, customerName, technicianName, proje
         position: 'absolute',
         bottom: 7,
         right: 10,
-        fontSize: FS.micro,
+        fontSize: FS.body,
         color: ESTIMATE_MUTED,
         opacity: 0.8,
         letterSpacing: 0.5,
@@ -1273,7 +1269,7 @@ function PhotoGrid({ title, photos, noCard }) {
                 </div>
               )}
               <div style={{ padding: '8px 8px' }}>
-                <div style={{ fontSize: 14, fontWeight: 800, color: ESTIMATE_TEXT, lineHeight: 1.35, textTransform: 'capitalize' }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_TEXT, lineHeight: 1.35, textTransform: 'capitalize' }}>
                   {label}
                 </div>
               </div>

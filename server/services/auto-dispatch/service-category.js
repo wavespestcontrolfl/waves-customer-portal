@@ -33,6 +33,12 @@ const CATEGORY_PATTERNS = [
 
 const LAWN_FAMILY = new Set(['lawn']);
 
+// The technician_capabilities category vocabulary — every value
+// classifyServiceCategory can return. The Team tab editor, the new-hire seed,
+// and the CHECK constraint on technician_capabilities.service_category all
+// derive from this list; a new category is a migration, not just a regex.
+const CAPABILITY_CATEGORIES = ['general', 'mosquito', 'lawn', 'rodent', 'termite'];
+
 function classifyServiceCategory(serviceType) {
   const s = String(serviceType || '').toLowerCase();
   for (const [cat, re] of CATEGORY_PATTERNS) {
@@ -58,6 +64,7 @@ function timeWindowForPreferenceKey(key) {
 
 module.exports = {
   TIME_WINDOWS,
+  CAPABILITY_CATEGORIES,
   classifyServiceCategory,
   defaultTimeWindow,
   timeWindowForPreferenceKey,

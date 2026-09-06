@@ -7,11 +7,13 @@
 // functions. Keeps all the per-service math in service-pricing.js.
 // ============================================================
 
+const { etParts } = require('../../utils/datetime-et');
+
 // ── Year built → age-based pressure bump ─────────────────────
 // Older homes = more entry points, harborage, termite history.
 function pestAgeAdj(yearBuilt) {
   if (!yearBuilt) return 0;
-  const age = new Date().getFullYear() - Number(yearBuilt);
+  const age = etParts().year - Number(yearBuilt);
   if (age >= 60) return 8;
   if (age >= 40) return 5;
   if (age >= 20) return 2;
@@ -62,7 +64,7 @@ function mosquitoWaterMult(nearWater) {
 // ── WDO inspection time (new construction vs old) ────────────
 function wdoTimeMult(yearBuilt) {
   if (!yearBuilt) return 1.0;
-  const age = new Date().getFullYear() - Number(yearBuilt);
+  const age = etParts().year - Number(yearBuilt);
   if (age >= 40) return 1.25;
   if (age >= 20) return 1.10;
   return 1.0;

@@ -23,7 +23,9 @@ jest.mock('../models/db', () => {
   return fn;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/payment-router', () => ({ getServiceForCustomer: jest.fn() }));
+jest.mock('../services/stripe', () => ({
+  charge: jest.fn(), chargeOneTime: jest.fn(), chargeMonthly: jest.fn(),
+}));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(async () => ({ sent: true })),
 }));
@@ -42,7 +44,7 @@ jest.mock('../middleware/admin-auth', () => ({
 
 const express = require('express');
 const db = require('../models/db');
-const PaymentRouter = require('../services/payment-router');
+const StripeService = require('../services/stripe');
 const { MONTHLY_LANE_SQL } = require('../services/billing-lane');
 const router = require('../routes/admin-billing-health');
 
@@ -109,12 +111,11 @@ describe('POST /customers/:id/charge-now fails closed off the monthly lane', () 
 
   beforeEach(() => {
     jest.clearAllMocks();
-    chargeMock = jest.fn(async () => ({ id: 'pay-new', metadata: null }));
-    chargeOneTimeMock = jest.fn(async () => ({ id: 'pay-new', metadata: null }));
-    PaymentRouter.getServiceForCustomer.mockResolvedValue({
-      charge: chargeMock,
-      chargeOneTime: chargeOneTimeMock,
-    });
+    StripeService.charge.mockReset();
+    StripeService.chargeOneTime.mockReset();
+    StripeService.chargeMonthly.mockReset();
+    chargeMock = StripeService.charge.mockResolvedValue({ id: 'pay-new', metadata: null });
+    chargeOneTimeMock = StripeService.chargeOneTime.mockResolvedValue({ id: 'pay-new', metadata: null });
     db.mockImplementation((table) => {
       if (table === 'customers') return makeRecorder({ first: customer });
       if (table === 'payments') return makeRecorder({ first: null });
@@ -144,8 +145,7 @@ describe('POST /customers/:id/charge-now fails closed off the monthly lane', () 
       expect(body.error).toMatch(/explicit amount/);
       expect(chargeMock).not.toHaveBeenCalled();
       expect(chargeOneTimeMock).not.toHaveBeenCalled();
-      // Fails closed BEFORE the payment service is even resolved.
-      expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+      expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
     });
   });
 
@@ -178,6 +178,9 @@ describe('billing-health population queries select the monthly LANE', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    StripeService.charge.mockReset();
+    StripeService.chargeOneTime.mockReset();
+    StripeService.chargeMonthly.mockReset();
     customersRecorders = [];
     db.mockImplementation((table) => {
       const rec = makeRecorder();

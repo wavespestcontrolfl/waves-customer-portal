@@ -36,7 +36,9 @@ const PDF_SPACE = {
   xxl: 32,
 };
 
-// Fixed type scale (Helvetica built-ins; no embedded fonts).
+// Fixed type scale (Helvetica built-ins; no embedded fonts). A print scale
+// in points: it does NOT track the screen FS in client/src/theme-doc.js
+// (h1 40 / h2 26 there is a screen-legibility call; paper stays 20 / 14).
 const PDF_TYPE = {
   micro: 8,
   caption: 9,

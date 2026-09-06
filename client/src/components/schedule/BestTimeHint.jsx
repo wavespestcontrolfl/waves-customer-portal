@@ -17,7 +17,8 @@ function fmtTime(hhmm) {
 
 export function bestTimeLabel(slot) {
   const detour = Math.round(Number(slot.detourMinutes) || 0);
-  const base = `${fmtTime(slot.start)} · ${detour > 0 ? `+${detour} min drive` : 'no detour'}`;
+  const arrival = slot.estimatedArrival ? ` · arrive ~${fmtTime(slot.estimatedArrival)}` : '';
+  const base = `${fmtTime(slot.start)}${arrival} · ${detour > 0 ? `+${detour} min drive` : 'no detour'}`;
   // Present only on unscoped (all-tech) searches: the detour is that
   // technician's, and picking the chip changes the time alone — the name
   // tells the operator whose route made it cheap.
@@ -30,7 +31,7 @@ export default function BestTimeHint({ bestTimes, onPick, currentStart, currentT
   return (
     <div style={{
       display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6,
-      fontSize: 12, color: '#71717A',
+      fontSize: 14, color: '#71717A',
       ...style,
     }}>
       <span>Best times this day:</span>
@@ -44,7 +45,7 @@ export default function BestTimeHint({ bestTimes, onPick, currentStart, currentT
         const techMatches = !slot.technicianId
           || String(slot.technicianId) === String(currentTechnicianId ?? '');
         const chipStyle = {
-          padding: '3px 8px', borderRadius: 6, fontSize: 12,
+          padding: '3px 8px', borderRadius: 6, fontSize: 14,
           border: `1px solid ${current ? '#A1A1AA' : '#D4D4D8'}`,
           background: current ? '#F4F4F5' : 'transparent',
           color: current ? '#18181B' : '#52525B',
@@ -67,6 +68,11 @@ export default function BestTimeHint({ bestTimes, onPick, currentStart, currentT
           </button>
         );
       })}
+      {bestTimes.some(slot => slot.arrivalWindows) && (
+        <span style={{ flexBasis: '100%' }}>
+          Accounts for driving and full service time; arrivals stay within each customer's 2-hour window.
+        </span>
+      )}
     </div>
   );
 }

@@ -46,12 +46,27 @@ const { resolveLeadSource } = require('../services/lead-source-resolver');
 // are recorded per column so the bulk form's lead_id whereIn and the stage
 // predicate's funnel_stage whereIn stay distinguishable.
 function makeCaptureDb({ updatedRows = 1, throwOnUpdate = false } = {}) {
-  const captured = { table: null, where: null, whereInByCol: {}, whereNotIn: null, orWhereNull: null, patch: null };
+  const captured = { table: null, where: null, whereInByCol: {}, whereNotIn: null, orWhereNull: null, patch: null, whereExists: null };
   const database = (table) => {
     captured.table = table;
     const q = {
       where(arg) {
         if (typeof arg === 'function') { arg(q); } else { captured.where = arg; }
+        return q;
+      },
+      // The callback-form EXISTS subquery (`onlyIfLead`): record what the
+      // sub-builder selected and filtered on.
+      whereExists(fn) {
+        const sub = { select: null, from: null, whereRaw: null, where: null, whereNull: null };
+        const b = {
+          select(v) { sub.select = v; return b; },
+          from(t) { sub.from = t; return b; },
+          whereRaw(s) { sub.whereRaw = s; return b; },
+          where(c) { sub.where = c; return b; },
+          whereNull(c) { sub.whereNull = c; return b; },
+        };
+        fn.call(b);
+        captured.whereExists = sub;
         return q;
       },
       whereIn(col, list) { captured.whereInByCol[col] = list; return q; },
@@ -318,6 +333,24 @@ describe('bridgeLeadFunnelStage — no-ops and failure containment', () => {
     expect(res).toEqual({ updated: 0, reason: 'error' });
   });
 
+  test('onlyIfLead conditions the advance IN THE SAME STATEMENT on the lead row still matching the validated identity / status / link (codex #3834 r29 P1)', async () => {
+    const database = makeCaptureDb();
+    const onlyIfLead = { customer_id: 'c1', phone: '9415550142', email: null, estimate_id: null, status: 'contacted' };
+    const res = await bridgeLeadFunnelStage('L-root', 'won', database, { onlyIfLead });
+    expect(res).toEqual({ updated: 1, stage: 'booked' });
+    const c = database._captured;
+    expect(c.where).toEqual({ lead_id: 'L-root' });
+    expect(c.whereExists).toEqual({ select: 1, from: 'leads', whereRaw: 'leads.id = ad_service_attribution.lead_id', where: onlyIfLead, whereNull: 'deleted_at' });
+    // The stage predicate is unchanged by the claim.
+    expect(c.whereInByCol.funnel_stage).toEqual(['lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'lost']);
+  });
+
+  test('without onlyIfLead no EXISTS clause is added', async () => {
+    const database = makeCaptureDb();
+    await bridgeLeadFunnelStage('L1', 'won', database);
+    expect(database._captured.whereExists).toBeNull();
+  });
+
   test('reports the row count the update touched (0 when the lead has no funnel row)', async () => {
     const database = makeCaptureDb({ updatedRows: 0 });
     const res = await bridgeLeadFunnelStage('L-none', 'won', database);
@@ -379,13 +412,13 @@ describe('stampLeadFunnelRow — the one row a lead row\'s own intake would have
     expect(database._captured.insert.service_line).toBe(inferServiceLine('Lawn Care'));
   });
 
-  test("the row's own customer beats the fallback", async () => {
+  test("the row's own customer beats the fallback, and a stage override lands as given (the booked winner still reads 'duplicate')", async () => {
     const database = makeStampDb();
-    await stampLeadFunnelRow(database, { ...stored, customer_id: 'c-own', status: 'new' }, { customerId: 'c-9' });
-    expect(database._captured.insert).toEqual(expect.objectContaining({ customer_id: 'c-own', funnel_stage: 'lead' }));
+    await stampLeadFunnelRow(database, { ...stored, customer_id: 'c-own', status: 'duplicate' }, { customerId: 'c-9', funnelStage: 'booked' });
+    expect(database._captured.insert).toEqual(expect.objectContaining({ customer_id: 'c-own', funnel_stage: 'booked' }));
   });
 
-  test("the row starts at the stage the lead's CURRENT status maps to — a root that already advanced is not reset to 'lead' (codex r15 P2)", async () => {
+  test("without an override the row starts at the stage the lead's CURRENT status maps to — a root that already advanced is not reset to 'lead' (codex r15 P2)", async () => {
     for (const [status, stage] of [['new', 'lead'], ['contacted', 'contacted'], ['estimate_sent', 'estimate_sent'], ['estimate_viewed', 'estimate_viewed'], ['won', 'booked'], [undefined, 'lead']]) {
       const database = makeStampDb();
       await stampLeadFunnelRow(database, { ...stored, status });

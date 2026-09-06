@@ -1,11 +1,11 @@
 // Mobile-only Service Library views. Rendered from ServiceLibraryPage when
 // viewport < 768px. The menu exposes three drill-in views plus the parent
-// Services hub's Protocol & Readiness workspace:
+// Services hub's Treatment Plans workspace:
 //   - Categories       — services grouped by `category`, item counts + subcategory counts
 //   - Discounts        — list from GET /admin/discounts with % / $ suffix
 //   - All Services     — flat list from GET /admin/services (+ Create Service CTA)
 //
-// Protocol & Readiness delegates to ServiceLibraryPage so desktop and mobile
+// Treatment Plans delegates to ServiceLibraryPage so desktop and mobile
 // use the same URL-addressable workflow.
 
 import { useState, useEffect, useCallback, useMemo } from "react";
@@ -166,8 +166,8 @@ function MenuView({ onNav, onOpenProtocols }) {
     },
     {
       key: "protocols",
-      label: "Protocol & Readiness",
-      hint: "Lawn protocol publishing and route readiness",
+      label: "Treatment Plans",
+      hint: "Seasonal treatment products and instructions",
     },
   ];
   return (

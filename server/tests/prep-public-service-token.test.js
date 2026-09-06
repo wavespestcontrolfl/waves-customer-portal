@@ -22,12 +22,24 @@ function projectsQuery(row) {
   return q;
 }
 
+// The service read is read-only; the page handler stamps the view via
+// source.stampView() after render (fenced on the rendered key). Unknown,
+// expired or keyless tokens match nothing.
+let lastServicesQuery = null;
 function servicesQuery(row) {
+  const usable = row && row.prep_template_key && !(row.prep_expires_at && new Date(row.prep_expires_at) < new Date());
   const q = {
-    leftJoin: jest.fn(() => q),
     where: jest.fn(() => q),
-    first: jest.fn(async () => row),
+    whereNotNull: jest.fn(() => q),
+    first: jest.fn(async () => (usable ? row : undefined)),
+    update: jest.fn(async () => 1),
   };
+  lastServicesQuery = q;
+  return q;
+}
+
+function techniciansQuery(row) {
+  const q = { where: jest.fn(() => q), first: jest.fn(async () => (row?.tech_name ? { name: row.tech_name } : null)) };
   return q;
 }
 
@@ -42,9 +54,11 @@ const CUSTOMER = {
 };
 
 function installDb({ project = null, service = null, customer = CUSTOMER } = {}) {
+  mockDb.raw = jest.fn((sql) => sql);
   mockDb.mockImplementation((table) => {
     if (table === 'projects') return projectsQuery(project);
-    if (table === 'scheduled_services as s') return servicesQuery(service);
+    if (table === 'scheduled_services') return servicesQuery(service);
+    if (table === 'technicians') return techniciansQuery(service);
     if (table === 'customers') return customersQuery(customer);
     return customersQuery(null);
   });
@@ -58,6 +72,7 @@ function serviceRow(overrides = {}) {
     scheduled_date: '2026-08-01',
     prep_template_key: 'prep.flea',
     prep_expires_at: null,
+    technician_id: 'tech-1',
     service_address_line1: null,
     service_address_city: null,
     service_address_state: null,
@@ -84,6 +99,17 @@ describe('resolvePrepSource — scheduled-service tokens', () => {
     expect(source.familyType).toBe('flea');
     expect(source.techName).toBe('Adam Benetti');
     expect(source.viewRow).toEqual({ scheduled_service_id: 'svc-1' });
+  });
+
+  test('the read writes nothing; stampView() stamps the view fenced on the rendered key', async () => {
+    installDb({ service: serviceRow() });
+    const source = await resolvePrepSource(TOKEN);
+    expect(source).not.toBeNull();
+    expect(lastServicesQuery.update).not.toHaveBeenCalled();
+    expect(await source.stampView()).toBe(1);
+    expect(lastServicesQuery.where).toHaveBeenCalledWith({ id: 'svc-1', prep_template_key: 'prep.flea' });
+    expect(lastServicesQuery.update).toHaveBeenCalledWith(expect.objectContaining({ prep_view_count: expect.anything(), prep_first_viewed_at: expect.anything() }));
+    expect(source.countView).toBeUndefined();
   });
 
   test('projects win the token lookup over scheduled_services', async () => {

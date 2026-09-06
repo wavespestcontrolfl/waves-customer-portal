@@ -3,6 +3,7 @@
  */
 const db = require('../../models/db');
 const { UUID_RE } = require('./tasks');
+const { normalizeEmail } = require('../../utils/contact-normalize');
 
 const CUSTOMER_FIELDS = ['id', 'first_name', 'last_name', 'address_line1', 'city', 'phone', 'updated_at', 'deleted_at'];
 const RECORDS = {
@@ -168,6 +169,7 @@ async function resolve({ prompt, pageData, selectedTarget }) {
     selection = { target, targets: [target], ambiguous: false };
   }
   return { page, candidates, ...selection, requestPhrase: normalizeName(prompt),
+    explicitEmails: (targetClause(prompt).match(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+/gi) || []).map(normalizeEmail),
     explicitPhones: (prompt.match(/\+?[\d() .-]{10,}/g) || []).map(p => p.replace(/\D/g, '').slice(-10)) };
 }
 
@@ -175,15 +177,17 @@ function unlinkedRecordIsReferenced(record, context) {
   if (record.customer_id) return true;
   if (!['lead_id', 'email_id', 'estimate_id'].includes(record.kind)) return true;
   if (context.page?.ids?.[record.kind] === record.id) return true;
+  if (record.kind === 'email_id') return context.explicitEmails?.includes(normalizeEmail(record.from_address)) || false;
   const name = normalizeName(record.customer_name || [record.first_name, record.last_name].filter(Boolean).join(' '));
   return ['lead_id', 'estimate_id'].includes(record.kind) && name && ` ${context.requestPhrase} `.includes(` ${name} `);
 }
 
-function relationshipFailure(records, params) {
+function relationshipFailure(records, params, toolName) {
   const intendedCustomer = params.customer_id || params.customerId;
   const intendedProperty = params.property_id || params.propertyId;
   const crossCustomer = records.some(r => r.customer_id && intendedCustomer && r.customer_id !== intendedCustomer);
-  const crossProperty = records.some(r => r.property_id && intendedProperty && r.property_id !== intendedProperty);
+  const crossProperty = records.some(r => r.property_id && intendedProperty && r.property_id !== intendedProperty
+    && !(toolName === 'switch_appointment_property' && r.kind === 'appointment_id'));
   if (crossCustomer || crossProperty) return { error: 'The referenced record belongs to a different customer or service property', code: 'target_relationship_mismatch' };
   return null;
 }
@@ -194,9 +198,14 @@ async function validateMutationTarget(params, context = {}, { toolName } = {}) {
   const resolved = await readReferences(references);
   if (resolved.error) return resolved;
   const { records } = resolved;
-  const relationship = relationshipFailure(records, params);
+  const relationship = relationshipFailure(records, params, toolName);
   if (relationship) return relationship;
   const permitted = new Set((context.targets || []).map(t => t.customer_id));
+  if (toolName === 'send_email_reply') {
+    for (const record of records) {
+      if (record.kind === 'email_id' && context.explicitEmails?.includes(normalizeEmail(record.from_address))) permitted.add(record.customer_id);
+    }
+  }
   const missingTarget = customerIds(records).some(id => !permitted.has(id));
   const unlinkedTarget = records.some(r => !unlinkedRecordIsReferenced(r, context));
   if (missingTarget || unlinkedTarget) return {

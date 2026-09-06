@@ -34,19 +34,23 @@ export default function TechMatchPanelV2() {
   const [category, setCategory] = useState('recurring');
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
 
   async function simulate() {
     setLoading(true);
+    setError(false);
+    setResult(null);
     try {
       const res = await fetch('/api/dispatch/match/simulate', {
         method: 'POST',
         headers: authHeader(),
         body: JSON.stringify({ serviceType: service, zip: zip.split(' ')[0], jobCategory: category }),
       });
+      if (!res.ok) throw new Error('Failed to run match');
       const data = await res.json();
       setResult(data);
     } catch {
-      setResult(null);
+      setError(true);
     }
     setLoading(false);
   }
@@ -108,12 +112,13 @@ export default function TechMatchPanelV2() {
                 </select>
               </div>
             </div>
+            {error && <div role="alert" className="text-14 text-alert-fg mb-3">Failed to run match. Try again.</div>}
             <button
               onClick={simulate}
               disabled={loading}
               className="w-full h-9 bg-zinc-900 text-white text-11 uppercase tracking-label font-medium rounded-sm hover:bg-zinc-800 disabled:opacity-50 u-focus-ring transition-colors"
             >
-              {loading ? 'Matching…' : 'Run match'}
+              {loading ? 'Matching…' : error ? 'Retry match' : 'Run match'}
             </button>
           </CardBody>
         </Card>

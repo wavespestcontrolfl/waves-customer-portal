@@ -43,6 +43,7 @@
  */
 
 const logger = require('../logger');
+const { assertAssignableTechnician } = require('../technician-eligibility');
 
 const EARLIEST_START_MINUTES = 8 * 60; // house rule: no client appointments before 8am ET
 
@@ -385,6 +386,7 @@ async function commitVoiceBooking({
       // pending office-review booking (voice_agent source_action), which
       // maybeGroupRow refuses; its grouping moment is office confirm via
       // the transitionJobStatus pending→confirmed seam (job-status.js).
+      await assertAssignableTechnician(insertRow.technician_id || null, { conn: trx });
       const [created] = await trx('scheduled_services').insert(insertRow).returning('*');
       // Surface the pending request in the existing admin confirm queue — the
       // same outbound_booking_review card the office already works. Only
@@ -661,6 +663,7 @@ async function requestBookingText(input = {}, ctx = {}) {
       .first()
       .then((r) => parseInt((r && r.count) || 0, 10))
       .catch((err) => {
+        ctx.toolFailed = true;
         logger.error(`[voice-relay-booking] property count failed for ${customerId} — refusing the booking: ${err.message}`);
         return -1;
       });
@@ -699,6 +702,7 @@ async function requestBookingText(input = {}, ctx = {}) {
     // may use the on-file address, and a failed COUNT already refused above.
     logger.warn(`[voice-relay-booking] property linkage unavailable for ${customerId}: ${err.message}`);
     if (linkageAttemptedWithProperties) {
+      ctx.toolFailed = true;
       return 'I could not confirm the service address on this account, so nothing was booked. Capture the lead '
         + 'with the address they mean and their preferred time; a Waves team member will call to confirm.';
     }
@@ -733,7 +737,7 @@ async function requestBookingText(input = {}, ctx = {}) {
       address: [customer.address_line1, customer.city, customer.state, customer.zip]
         .filter(Boolean).join(', ') || null,
       city: customer.city || null,
-    }).catch(() => ({}));
+    }).catch(() => { ctx.toolFailed = true; return {}; });
   if (!bookingCoords || !bookingCoords.lat || !bookingCoords.lng) {
     return 'Could not verify the service location for this account, so no booking request was placed. '
       + 'Capture the lead with the preferred time; a team member will call to schedule.';
@@ -799,6 +803,7 @@ async function requestBookingText(input = {}, ctx = {}) {
       }
       callLogId = (callRow && callRow.id) || null;
     } catch (lookupErr) {
+      ctx.toolFailed = true;
       // ⭐ FAIL CLOSED ON AN UNANSWERABLE LOOKUP. A row with no card lands on
       // the dispatch calendar invisible to the office confirm queue — the one
       // thing that makes a pending voice booking real (see the one-per-call
@@ -934,6 +939,7 @@ async function requestBookingText(input = {}, ctx = {}) {
     callSid: ctx.callSid || null, sessionKey: ctx.sessionKey || null,
     coords: (bookingCoords && bookingCoords.lat && bookingCoords.lng) ? bookingCoords : null,
   });
+  if (commit.status === 'error') ctx.toolFailed = true;
   if (commit.status === 'superseded') {
     return 'This session was superseded by a reconnect — NOTHING was booked. Do NOT call any more '
       + 'tools and do not answer account questions; say goodbye briefly.';

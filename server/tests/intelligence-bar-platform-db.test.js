@@ -42,6 +42,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     process.env.GATE_IB_THREADS = 'false';
     process.env.GATE_IB_TOOL_ACTIVITY = 'true';
     process.env.GATE_IB_WRITES_DISABLED = 'false';
+    process.env.GATE_EDIT_APPT_ADDRESS = 'true';
     db = require('../models/db');
     if (!(await db.schema.hasTable('ib_tasks'))) throw new Error('Apply the IB task migration to the isolated database first');
     actor = crypto.randomUUID(); customerA = crypto.randomUUID(); customerB = crypto.randomUUID();
@@ -132,6 +133,77 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     const confirmed = await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash });
     expect(confirmed.body).toMatchObject({ success: false, outcome: 'failed', result: { preview_changed: true } });
     expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe('Newer operator edit');
+  }, 30000);
+
+  test('a saved visit may switch properties within its customer, never to another customer', async () => {
+    const propertyA = crypto.randomUUID(), destination = crypto.randomUUID(), foreignProperty = crypto.randomUUID();
+    const appointment = crypto.randomUUID();
+    await db('customer_properties').insert([
+      { id: propertyA, customer_id: customerA, address_line1: '100 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201', address_key: propertyA },
+      { id: destination, customer_id: customerA, address_line1: '300 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201', address_key: destination },
+      { id: foreignProperty, customer_id: customerB, address_line1: '400 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201', address_key: foreignProperty },
+    ]);
+    const { addETDays, etDateString } = require('../utils/datetime-et');
+    const date = etDateString(addETDays(new Date(), 10));
+    await db('scheduled_services').insert({ id: appointment, customer_id: customerA, property_id: propertyA,
+      scheduled_date: date, service_type: 'General Pest Control', status: 'pending', window_start: '09:00:00', window_end: '10:00:00' });
+    const propose = propertyId => {
+      mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'switch appointment property' }, 'discover'))
+        .mockResolvedValueOnce(tools('switch_appointment_property', { appointment_id: appointment, property_id: propertyId }, 'switch'))
+        .mockResolvedValueOnce(answer('The visit destination is ready for confirmation.'));
+      return api('/query', request(`Change the appointment property for ${nameA} to the saved Example Grove property`));
+    };
+    const refused = await propose(foreignProperty);
+    expect(refused.body.pendingActions).toHaveLength(0);
+    const proposed = await propose(destination);
+    expect(proposed.body.pendingActions).toHaveLength(1);
+    const card = proposed.body.pendingActions[0];
+    const confirmed = await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash });
+    expect(confirmed.body).toMatchObject({ success: true, outcome: 'completed' });
+    expect(await db('scheduled_services').where('id', appointment).first('property_id', 'service_address_line1'))
+      .toEqual({ property_id: destination, service_address_line1: '300 Example Grove' });
+    expect((await db('customers').where('id', customerA).first('address_line1')).address_line1).toBe('100 Example Grove');
+  }, 30000);
+
+  test('resume includes committed receipts even when the worker died before its first checkpoint', async () => {
+    proposeNote(customerA, 'Recovered pre-checkpoint note');
+    const proposed = await api('/query', request(`Add a note for ${nameA}: Recovered pre-checkpoint note`));
+    const card = proposed.body.pendingActions[0];
+    const confirmed = await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash });
+    expect(confirmed.body.success).toBe(true);
+    await db('ib_tasks').where('id', proposed.body.taskId).update({ checkpoint: '[]' });
+    mockModel.mockClear();
+    mockModel.mockResolvedValueOnce(answer('The saved note is complete.'));
+    const resumed = await api(`/tasks/${proposed.body.taskId}/resume`, { session_id: sessionId });
+    expect(resumed.status).toBe(200);
+    const modelInput = JSON.stringify(mockModel.mock.calls[0][0].messages);
+    expect(modelInput).toContain('server-verified step outcomes');
+    expect(modelInput).toContain('Recovered pre-checkpoint note');
+    expect(modelInput).not.toContain(card.id);
+    expect(await db('ib_pending_actions').where('task_id', proposed.body.taskId).count('* as count').first()).toEqual({ count: '1' });
+  }, 30000);
+
+  test('an explicitly addressed inbox sender can receive a reply preview without a customer link', async () => {
+    const vendorEmail = crypto.randomUUID(), otherEmail = crypto.randomUUID();
+    await db('emails').insert([
+      { id: vendorEmail, gmail_id: vendorEmail, gmail_thread_id: vendorEmail, from_address: 'fixture-supplier@vendor.example', received_at: new Date(), subject: 'Synthetic supply inquiry' },
+      { id: otherEmail, gmail_id: otherEmail, gmail_thread_id: otherEmail, from_address: 'another-supplier@vendor.example', received_at: new Date(), subject: 'Unrelated inquiry' },
+    ]);
+    const propose = emailId => {
+      mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'send email reply' }, 'discover'))
+        .mockResolvedValueOnce(tools('send_email_reply', { email_id: emailId, body: 'Thank you for the information.' }, 'reply'))
+        .mockResolvedValueOnce(answer('The reply is awaiting confirmation.'));
+      return api('/query', request('Reply to fixture-supplier@vendor.example with thanks'));
+    };
+    expect((await propose(otherEmail)).body.pendingActions).toHaveLength(0);
+    const valid = await propose(vendorEmail);
+    expect(valid.body.pendingActions).toHaveLength(1);
+    expect(valid.body.pendingActions[0].contract.pinned_recipient.email_masked).toBe('f***@vendor.example');
+    expect((await db('ib_pending_actions').where('id', valid.body.pendingActions[0].id).first('params')).params.email_id).toBe(vendorEmail);
+    const pending = valid.body.pendingActions[0];
+    expect((await api('/cancel-action', { pending_action_id: pending.id })).body)
+      .toMatchObject({ success: true, cancelled: true, outcome: 'canceled' });
+    expect((await api(`/actions/${pending.id}`)).body.outcome).toBe('canceled');
   }, 30000);
 
   test('duplicate first names and an unrecognized spoken name require clarification before writing', async () => {

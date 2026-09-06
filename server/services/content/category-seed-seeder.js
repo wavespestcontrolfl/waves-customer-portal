@@ -331,6 +331,8 @@ async function seedAll({ file = DEFAULT_MANIFEST_PATH, dryRun = false, now = new
        ON CONFLICT (dedupe_key) DO UPDATE
          SET score = EXCLUDED.score,
              score_breakdown = EXCLUDED.score_breakdown,
+             claim_id = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review')
+                             THEN opportunity_queue.claim_id ELSE NULL END,
              signal_metadata = EXCLUDED.signal_metadata,
              mined_at = EXCLUDED.mined_at,
              expires_at = EXCLUDED.expires_at,
@@ -468,6 +470,11 @@ function buildCategoryOverlay({ opportunity, pageType, requiredSections = [], sc
     // registry at gate time and the runner parks the draft as
     // affiliate_review for the owner.
     affiliate_products: affiliateProductsFor(payload),
+    // "Must not depict" lines for the post's generated images (hero + body):
+    // the image generator appends them to its standing no-logo / no-invented-
+    // label guards (e.g. "irrigation repair scenes" on a guide that says Waves
+    // does not repair irrigation).
+    image_avoid: (Array.isArray(payload.image_avoid) ? payload.image_avoid : []).map((v) => String(v || '').trim()).filter(Boolean),
     binding_instructions: buildBindingInstructions({ payload, byline, ctaDirectives, requiredSources, sourceNotes, globalRules: meta.manifest_notes, faqBlocked, payloadSchema }),
   };
 

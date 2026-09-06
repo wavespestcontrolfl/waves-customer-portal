@@ -48,6 +48,11 @@ describe('1. brand-voice corpus (sms-voice-corpus-miner)', () => {
     expect(sql).not.toMatch(/and not "transcription_provider" = \?\s*(and|$)/);
   });
 
+  test('a transferred call\'s COMPOSITE (recording provider, "[AI segment]" first) is excluded too (PR 2A)', () => {
+    const { sql } = eligibleCallTranscriptsQuery({ since: new Date('2026-08-01T00:00:00Z') }).toSQL();
+    expect(sql).toContain("COALESCE(transcription, '') NOT LIKE '[AI segment]%'");
+  });
+
   test('an AI-agent transcript passes every OTHER filter — the exclusion is the only thing stopping it', () => {
     const { hasAgentCallerLabels } = require('../services/sms-voice-corpus-miner');
     const relayTranscript = 'Caller: my ants are back\nAgent: I can get someone out to you.';
@@ -68,6 +73,12 @@ describe('2. call research (call-research-miner)', () => {
     const { sql } = eligibleCallsQuery({ onlyUnmined: false }).toSQL();
     expect(sql).toContain('"transcription_provider" is null or not "transcription_provider" =');
   });
+
+  test('a transferred call\'s COMPOSITE is excluded too (PR 2A)', () => {
+    for (const opts of [undefined, { onlyUnmined: false }]) {
+      expect(eligibleCallsQuery(opts).toSQL().sql).toContain("COALESCE(transcription, '') NOT LIKE '[AI segment]%'");
+    }
+  });
 });
 
 describe('3. content insights (content/customer-insights-miner)', () => {
@@ -80,6 +91,13 @@ describe('3. content insights (content/customer-insights-miner)', () => {
 
   test('an AI-agent call is refused, with its own run-summary reason', () => {
     const gate = gateCallRecord({ ...base, transcription_provider: 'conversation_relay' }, { consentColumnPresent: true });
+    expect(gate.ok).toBe(false);
+    expect(gate.reason).toBe('ai_agent_call');
+  });
+
+  test('a transferred call\'s COMPOSITE is refused with the same reason (PR 2A)', () => {
+    const composite = '[AI segment]\nAgent: Transferring you now.\n\n[Staff segment]\nAdam: Waves, this is Adam.';
+    const gate = gateCallRecord({ ...base, transcription: composite, transcription_provider: 'openai' }, { consentColumnPresent: true });
     expect(gate.ok).toBe(false);
     expect(gate.reason).toBe('ai_agent_call');
   });

@@ -1,3 +1,4 @@
+import { useIntelligenceBarPageData } from '../../hooks/useIntelligenceBarPageData';
 /**
  * Global Command Palette (⌘K / mobile bottom sheet)
  * client/src/components/admin/GlobalCommandPalette.jsx
@@ -357,6 +358,7 @@ function GlobalCommandPalette(_props, ref) {
   // key handlers, so no onEscape is passed here.
   const paletteRef = useModalFocus(open);
 
+  const ibPageData = useIntelligenceBarPageData();
   const context = detectContext(location.pathname, location.search);
   const accentColor = CONTEXT_COLORS[context] || D.teal;
   const contextLabel = CONTEXT_LABELS[context] || "Admin";
@@ -446,7 +448,7 @@ function GlobalCommandPalette(_props, ref) {
       threadSeqRef.current = null;
     }
     resetAttachments();
-  }, [location.pathname, location.search, context, resetAttachments]);
+  }, [location.pathname, location.search, context, ibPageData?.customer_id, ibPageData?.appointment_id, ibPageData?.viewed_date, resetAttachments]);
 
   // Load a server thread into the palette (resume-on-open and the picker
   // share this). Shows the thread's last reply — otherwise the palette
@@ -563,7 +565,7 @@ function GlobalCommandPalette(_props, ref) {
                   ...(Number.isInteger(threadSeqRef.current) ? { thread_seq: threadSeqRef.current } : {}),
                 }
               : {}),
-            pageData: { route: location.pathname, search: location.search },
+            pageData: { ...ibPageData, route: location.pathname, search: location.search },
             ...(attachments.length
               ? { images: attachments.map(({ mediaType, data: d }) => ({ mediaType, data: d })) }
               : {}),
@@ -573,7 +575,7 @@ function GlobalCommandPalette(_props, ref) {
         // drop the stale response instead of restoring the cleared thread.
         if (threadEpochRef.current === epoch) {
           setResponse(data.response);
-          setPendingActions(previous => [...new Map([...previous, ...(data.pendingActions || [])].map(a => [a.id, a])).values()]);
+          setPendingActions(previous => [...previous, ...(data.pendingActions || []).filter(action => !previous.some(old => old.id === action.id)).map(action => ({ ...action, receivedAt: Date.now() }))]);
           setActiveTask(data.taskId ? data : null);
           setToolActivity(Array.isArray(data.toolActivity) ? data.toolActivity : []);
           setConversationHistory(data.conversationHistory || []);
@@ -611,7 +613,7 @@ function GlobalCommandPalette(_props, ref) {
         resetAttachments();
       }
     },
-    [prompt, loading, conversationHistory, context, threadId, location.pathname, location.search, attachments, resetAttachments],
+    [prompt, loading, conversationHistory, context, threadId, location.pathname, location.search, attachments, resetAttachments, ibPageData],
   );
 
   const refreshTask = async (id = activeTask?.taskId, operation = null, candidate = null) => {
@@ -640,9 +642,12 @@ function GlobalCommandPalette(_props, ref) {
     }
   };
 
-  const onActionResolved = () => {
-    if (!activeTask) return;
-    void refreshTask();
+  const actionEpoch = threadEpochRef.current;
+  const onActionResolved = (action, decision, body) => {
+    if (threadEpochRef.current !== actionEpoch) return;
+    setPendingActions(previous => previous.map(item => item.id === action.id
+      ? { ...item, receipt: body, resolvedStatus: decision === 'cancel' && body.cancelled ? 'cancelled' : undefined } : item));
+    if (activeTask) void refreshTask();
   };
   const taskCard = <IntelligenceTaskCard task={activeTask}
     onSelectTarget={candidate => refreshTask(activeTask?.taskId, 'select-target', candidate)}

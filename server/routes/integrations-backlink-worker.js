@@ -20,13 +20,21 @@ router.use(linkWorkerAuth((req) => (req.method === 'GET' ? 'claim' : 'report')))
 router.get('/claim', async (req, res, next) => {
   try {
     const type = req.query.type === 'outreach' ? 'outreach' : 'signup';
-    // Outreach stays approval-gated: don't hand outreach prospects to the worker
-    // until linkProspectOutreach is enabled (M3b).
-    if (type === 'outreach' && !isEnabled('linkProspectOutreach')) {
-      await finalizeWorkerRequest(req, 'empty_claim');
-      return res.json({ prospects: [], note: 'outreach is approval-gated (linkProspectOutreach off)' });
+    const mode = req.query.mode || (type === 'outreach' ? 'draft' : 'acquire');
+    if (!['draft', 'acquire'].includes(mode)) {
+      await finalizeWorkerRequest(req, 'report_rejected');
+      return res.status(400).json({ error: 'mode must be draft or acquire' });
     }
-    const prospects = await worker.claim({ n: req.query.n, type });
+    // Acquisition is in-process only; external credentials retain their empty signup response.
+    if (mode === 'acquire') {
+      await finalizeWorkerRequest(req, 'empty_claim');
+      return res.json({ prospects: [], note: 'acquisition runs through the in-process signup runner' });
+    }
+    if (mode === 'draft' && !isEnabled('outreachDrafter')) {
+      await finalizeWorkerRequest(req, 'empty_claim');
+      return res.json({ prospects: [], note: 'outreach drafting is disabled' });
+    }
+    const prospects = await worker.claim({ n: req.query.n, type, mode, provider: req.linkWorker.provider });
     await finalizeWorkerRequest(req, prospects.length ? 'leased' : 'empty_claim');
     res.json({ prospects, business_profile: worker.businessProfile() });
   } catch (err) { next(err); }
@@ -67,7 +75,7 @@ router.post('/report', async (req, res, next) => {
       return res.status(400).json({ error: "outcome must be 'placed', 'failed', 'skipped', or 'drafted'" });
     }
     // Sanitize: pass ONLY the allowlisted external fields, never the runner-internal flags.
-    const result = await worker.report(sanitizeReportBody(req.body));
+    const result = await worker.report({ ...sanitizeReportBody(req.body), provider: req.linkWorker.provider });
     if (!result.ok) {
       const status = { not_found: 404, stale_lease: 409 }[result.code] || 400;
       await finalizeWorkerRequest(req, 'report_rejected', { prospect_id });

@@ -19,9 +19,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
+import { FLOW_COLUMN_MAX } from '../theme-doc';
 import { WavesShell } from '../components/brand';
-import BrandFooter from '../components/BrandFooter';
 import Icon from '../components/Icon';
+import VanScene from '../components/VanScene';
 import { useGlassSurface } from '../glass/glass-engine';
 import {
   WAVES_SUPPORT_PHONE_DISPLAY,
@@ -59,8 +60,8 @@ const PRIMARY_CTA = {
   border: `1px solid ${COLORS.glassNavy}`,
   borderRadius: 8,
   fontFamily: FONTS.ui,
-  fontWeight: 800,
-  fontSize: 15,
+  fontWeight: 700,
+  fontSize: 16,
   cursor: 'pointer',
   textDecoration: 'none',
 };
@@ -68,9 +69,8 @@ const PRIMARY_CTA = {
 function Page({ children }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div data-glass-clear="" style={{ flex: 1, padding: '24px 16px 40px', maxWidth: 640, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: S.text }}>
+      <div data-glass-clear="" style={{ flex: 1, padding: '24px 16px 40px', maxWidth: FLOW_COLUMN_MAX, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: S.text }}>
         {children}
-        <BrandFooter />
       </div>
     </WavesShell>
   );
@@ -126,10 +126,10 @@ function SkeletonCard() {
 function MessageCard({ title, body, action }) {
   return (
     <Card>
-      <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 8 }}>
+      <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, marginBottom: 8 }}>
         {title}
       </div>
-      <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>{body}</div>
+      <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>{body}</div>
       {action ? (
         <a href={action.href} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
           {action.label}
@@ -159,27 +159,13 @@ const STATE_COPY = {
   not_available: { title: "We can't show this appointment", body: 'This link may be out of date. Text or call and our team will help.' },
 };
 
-function StatusPill({ label }) {
-  return (
-    <div data-glass="chip" data-glass-pill="" style={{
-      display: 'inline-block', fontSize: 12, fontWeight: 700, textTransform: 'uppercase',
-      color: WEATHER_BLUE, background: `${WEATHER_BLUE}1A`, padding: '6px 12px', borderRadius: 9999,
-    }}>
-      <span style={{
-        display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
-        background: WEATHER_BLUE, marginRight: 8, verticalAlign: 'middle',
-      }} />
-      {label}
-    </div>
-  );
-}
 
 function WeatherChip({ weather }) {
   if (!weather || weather.rainChance == null) return null;
   return (
     <span data-glass="chip" data-glass-pill="" style={{
       display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0, whiteSpace: 'nowrap',
-      fontSize: 12, fontWeight: 700, color: WEATHER_BLUE, background: `${WEATHER_BLUE}1A`,
+      fontSize: 14, fontWeight: 700, color: WEATHER_BLUE, background: `${WEATHER_BLUE}1A`,
       padding: '4px 10px', borderRadius: 9999,
     }}>
       <Icon name={weather.stormy ? 'cloudRain' : 'sun'} size={12} style={{ verticalAlign: '-2px' }} />
@@ -273,7 +259,7 @@ function PlanNote({ plan, grouped }) {
 
 export default function AppointmentPage() {
   const { token } = useParams();
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
@@ -377,16 +363,16 @@ export default function AppointmentPage() {
     return (
       <Page>
         <Card>
-          <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 8 }}>
+          <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, marginBottom: 8 }}>
             We couldn't load that appointment
           </div>
-          <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
+          <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
             This looks temporary. Your link is still valid—try again in a moment.
           </div>
           <button
             type="button"
             onClick={load}
-            style={{ marginTop: 16, border: 0, borderRadius: 8, padding: '11px 16px', background: COLORS.glassNavy, color: '#fff', font: 'inherit', fontWeight: 800, cursor: 'pointer' }}
+            style={{ marginTop: 16, border: 0, borderRadius: 8, padding: '11px 16px', background: COLORS.glassNavy, color: '#fff', font: 'inherit', fontWeight: 700, cursor: 'pointer' }}
           >
             Try again
           </button>
@@ -423,8 +409,7 @@ export default function AppointmentPage() {
   return (
     <Page>
       <Card style={{ borderTop: `3px solid ${WEATHER_BLUE}` }}>
-        <StatusPill label={data.confirmed ? 'Confirmed' : (isTomorrow ? 'Tomorrow' : 'Upcoming')} />
-        <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginTop: 14, lineHeight: 1.3 }}>
+        <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, lineHeight: 1.3 }}>
           {/* No greeting by name. The token is per-VISIT, not per-recipient:
               appointment notifications fan out to a spouse, tenant, buyer or
               other service contact, each SMS personalized to THAT contact,
@@ -433,6 +418,14 @@ export default function AppointmentPage() {
               The text carrying the link already greets the right person. */}
           Your {serviceLabel} is {isTomorrow ? 'tomorrow' : 'booked'}.
         </div>
+        {/* Plain-text confirmation (no chip, owner 2026-09-04): mounts when
+            the Confirm POST flips `confirmed`, so the tap has visible and
+            announced feedback instead of a button that just disappears. */}
+        {data.confirmed ? (
+          <div role="status" data-testid="appointment-confirmed" style={{ marginTop: 8, fontSize: 14, lineHeight: 1.5, color: S.muted }}>
+            Confirmed. We&apos;ll see you then.
+          </div>
+        ) : null}
         {Array.isArray(data.service?.visit?.services) && data.service.visit.services.length > 1 && (
           /* Visit group: one link covers every service at this stop. */
           <div data-testid="visit-services" style={{ marginTop: 8, fontSize: 14, lineHeight: 1.5 }}>
@@ -459,7 +452,7 @@ export default function AppointmentPage() {
             the canonical helper returns null for a missing or malformed
             start, and the sentence dangles without a range above it. */}
         {appt.arrivalWindow ? (
-          <div style={{ fontSize: 15, color: S.body, lineHeight: 1.5, marginTop: 12 }}>
+          <div style={{ fontSize: 16, color: S.body, lineHeight: 1.5, marginTop: 12 }}>
             Your technician arrives any time inside this 2-hour window — no waiting on a whole morning.
           </div>
         ) : null}
@@ -520,7 +513,7 @@ export default function AppointmentPage() {
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
               marginTop: 12, padding: '12px 16px', borderRadius: 8,
               background: S.soft, border: `1px solid ${S.softBorder}`,
-              fontSize: 15, fontWeight: 600, color: S.text, textDecoration: 'none',
+              fontSize: 16, fontWeight: 600, color: S.text, textDecoration: 'none',
             }}
           >
             <Icon name="calendar" size={16} />
@@ -529,12 +522,21 @@ export default function AppointmentPage() {
         ) : null}
       </Card>
 
+      {/* GATE_VAN_SCENE: the van to look for, under the header card. The
+          technician block above already names the tech, so no tech pill. */}
+      {data.vanScene ? (
+        <VanScene
+          title={`${data.tech?.firstName || 'Your technician'} will be there ${formatDateLabel(appt.date)}`}
+          stamp={appt.arrivalWindow || null}
+        />
+      ) : null}
+
       {data.rescheduleToken ? (
         <Card>
-          <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 8 }}>
+          <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, marginBottom: 8 }}>
             Need a different time?
           </div>
-          <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
+          <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
             Open times near your route, one tap to move — no call needed.
           </div>
           <a href={`/reschedule/${data.rescheduleToken}`} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
@@ -545,20 +547,20 @@ export default function AppointmentPage() {
         /* Grouped visit: self-serve moves are staff-only for now (#3609) —
            say so here instead of offering a slot picker that would refuse. */
         <Card>
-          <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 8 }}>
+          <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, marginBottom: 8 }}>
             Need a different time?
           </div>
-          <div data-testid="visit-grouped-reschedule" style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
+          <div data-testid="visit-grouped-reschedule" style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
             This visit includes more than one service, so we'll move the whole visit together for you — just text or call.
           </div>
         </Card>
       ) : null}
 
       <Card>
-        <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 8 }}>
+        <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, marginBottom: 8 }}>
           Questions?
         </div>
-        <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
+        <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
           Text or call {WAVES_SUPPORT_PHONE_DISPLAY} and our team will help.
         </div>
         <ContactRow />

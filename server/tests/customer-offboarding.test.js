@@ -37,6 +37,10 @@ const mockTransition = jest.fn(async ({ jobId }) => { callOrder.push(`cancel:${j
 jest.mock('../services/job-status', () => ({
   transitionJobStatus: (...args) => mockTransition(...args),
 }));
+const mockNotifyVisitCancelled = jest.fn();
+jest.mock('../services/tech-visit-notifications', () => ({
+  notifyVisitCancelled: (...args) => mockNotifyVisitCancelled(...args),
+}));
 const mockHandleCancellation = jest.fn(async () => {});
 jest.mock('../services/appointment-reminders', () => ({
   handleCancellation: (...args) => mockHandleCancellation(...args),
@@ -87,6 +91,7 @@ function chain({ rows = [], first = undefined, update = 1 } = {}) {
   });
   c.first = jest.fn(async () => first);
   c.update = jest.fn(async () => update);
+  c.insert = jest.fn(async () => [1]);
   c.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
   return c;
 }
@@ -303,7 +308,9 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
   ];
   function executeQueues({ ledgerRefunded = '49.00', stragglers = [], unresolved = [], lingering = [] } = {}) {
     const q = previewQueues();
+    q.recurring_plan_alerts = [chain(), chain()];
     q.scheduled_services.push(
+      chain({ rows: [{ id: 'v-1', customer_id: 'cust-1', recurring_pattern: 'quarterly' }] }), // recurring series ledger evidence
       chain({ update: 1 }), // recurring_ongoing flip
       ...visitChains('pending', null), // v-1
       ...visitChains('confirmed', 'scheduled'), // v-2
@@ -331,6 +338,16 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
     return q;
   }
 
+  it('records an explicit signup series stop in the recurrence transaction', async () => {
+    const queues = executeQueues();
+    const ledger = queues.recurring_plan_alerts[1];
+    setDbQueues(queues);
+    await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(ledger.insert).toHaveBeenCalledWith(expect.objectContaining({
+      recurring_parent_id: 'v-1', customer_id: 'cust-1', resolved_action: 'cancel_series',
+    }));
+  });
+
   it('voids first, cancels visits, clears tier, refunds face-only, then emails the ledger total', async () => {
     setDbQueues(executeQueues());
     const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1', { actorId: 'tech-1' });
@@ -339,6 +356,15 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
     expect(callOrder[0]).toBe('void:inv-1');
     expect(callOrder[callOrder.length - 1]).toBe('refund');
     expect(callOrder).toEqual(['void:inv-1', 'cancel:v-1', 'cancel:v-2', 'refund']);
+    // The shared status writer's tech notice is suppressed; this caller
+    // sends it itself once the post-flip live check says the cancel stands.
+    for (const call of mockTransition.mock.calls.filter((c) => c[0].toStatus === 'cancelled')) {
+      expect(call[0]).toMatchObject({ suppressTechNotice: true });
+    }
+    expect(mockNotifyVisitCancelled.mock.calls.map((c) => c[0])).toEqual([
+      { visitId: 'v-1', actorId: 'tech-1', previousStatus: 'pending' },
+      { visitId: 'v-2', actorId: 'tech-1', previousStatus: 'confirmed' },
+    ]);
 
     expect(mockRefundUnconsumed).toHaveBeenCalledWith({
       estimateId: 'est-1',
@@ -429,6 +455,7 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
   function gatedQueues({ v1Fresh }) {
     const q = previewQueues();
     q.scheduled_services.push(
+      chain({ rows: [] }), // recurring series ledger evidence
       chain({ update: 1 }), // flip
       chain({ first: v1Fresh }), // v-1 fresh (fails before further chains)
       ...visitChains('confirmed', 'scheduled'), // v-2
@@ -467,6 +494,7 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
   it('a tracker that goes live BETWEEN the fresh read and the flip reverts the cancel', async () => {
     const q = previewQueues();
     q.scheduled_services.push(
+      chain({ rows: [] }), // recurring series ledger evidence
       chain({ update: 1 }), // flip
       chain({ first: { status: 'pending', track_state: null } }), // v-1 fresh: clean
       chain({ first: { track_state: 'en_route' } }), // v-1 post-flip: went live
@@ -483,6 +511,8 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
     expect(result.visitFailures).toEqual([{ id: 'v-1', reason: expect.stringMatching(/went en_route mid-cancel/) }]);
     // v-1: cancel + compensating revert; v-2: cancel.
     expect(mockTransition).toHaveBeenCalledTimes(3);
+    // The reverted cancel never told v-1's tech; v-2's stands and does.
+    expect(mockNotifyVisitCancelled.mock.calls.map((c) => c[0].visitId)).toEqual(['v-2']);
     expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({
       jobId: 'v-1',
       fromStatus: 'cancelled',
@@ -548,6 +578,7 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
     // chains), so this run's queue is hand-built.
     const q = previewQueues();
     q.scheduled_services.push(
+      chain({ rows: [] }), // recurring series ledger evidence
       chain({ update: 1 }), // flip
       chain({ first: { status: 'pending', track_state: null } }), // v-1 fresh
       chain({ first: { track_state: null } }), // v-1 post-flip

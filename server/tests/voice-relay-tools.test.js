@@ -208,6 +208,22 @@ describe('find_slots', () => {
 });
 
 describe('capture_lead (Phase 0 floor, unchanged)', () => {
+  test('capture preserves the claimed-session linkage when recovery is off', async () => {
+    const saved = process.env.GATE_VOICE_RELAY_RECOVERY;
+    delete process.env.GATE_VOICE_RELAY_RECOVERY;
+    const linkage = jest.spyOn(require('../services/voice-agent/relay-context'), 'stampCallLeadLinkage').mockResolvedValue(true);
+    try {
+      createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-fixture', created: true });
+      await executeTool('capture_lead', { call_summary: 'Caller requested assistance.' }, {
+        from: '+19415550123', callSid: 'CA-linkage-fixture', sessionKey: 'session-owner', callerVerified: true,
+      });
+      expect(linkage).toHaveBeenCalledWith('CA-linkage-fixture', 'lead-fixture', { sessionKey: 'session-owner' });
+    } finally {
+      linkage.mockRestore();
+      if (saved === undefined) delete process.env.GATE_VOICE_RELAY_RECOVERY; else process.env.GATE_VOICE_RELAY_RECOVERY = saved;
+    }
+  });
+
   // ⭐ SCRUBBED AT THE SOURCE. The free-text capture fields persist on durable
   // lead rows (transcript_summary, extracted_data, lead_activities.metadata)
   // — a spoken card number relayed by the model must be redacted BEFORE

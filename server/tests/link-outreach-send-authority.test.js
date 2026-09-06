@@ -13,6 +13,7 @@
  * at the cap; the queue's Send action routes to the sender with its refusals
  * mapped.
  */
+jest.mock('../services/seo/link-prospect-verifier', () => ({ reconcileOutreach: jest.fn(async () => ({ matched: 0, ambiguous: 0 })) }));
 let mockStore = null;
 jest.mock('../models/db', () => { const fn = (t) => mockStore(t); fn.transaction = (cb) => mockStore.transaction(cb); fn.raw = (...a) => mockStore.raw(...a); return fn; });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -1686,4 +1687,24 @@ describe('Codex r3 on #3854', () => {
     expect(await Outreach.closeSilentConversations({ now: new Date(Date.now() + 60 * DAY) })).toEqual({ scanned: 0, closed: 0, open: 0, failed: 0 });
     expect(placement(t.db).conversation_closed_at).toBeFalsy();
   });
+});
+
+
+test.each(['slot_reserved', 'submitting'])('a follow-up cannot clear an acquisition lease with a %s slot', async (outcome) => {
+  const s = await conversation({ path: { acquisition_type: 'content_submission', submission_url: 'https://example.org/submit' }, policy: { ...AUTO_POLICY, auto_free_acquisition: true, auto_submission_daily_cap: 5, preferred_provider: 'deterministic_runner' } });
+  const now = new Date();
+  const lease = Object.assign(placement(s.db), { claimed_at: now, lease_token: now.toISOString(), leased_provider: 'deterministic_runner', lease_mode: 'acquire', leased_path_revision: 1 });
+  const E = require('../services/seo/link-execution-authority');
+  const authority = await E.authorize(s.db, lease, storedPath(s.db), 'deterministic_runner');
+  expect(authority).toBeTruthy();
+  expect(await E.reserveSlot(s.db, lease, storedPath(s.db), authority, lease.lease_token, now)).toBeTruthy();
+  const attempt = s.db._tables.seo_link_attempts.find(a => a.prospect_id === lease.id);
+  if (outcome === 'submitting') expect(await require('../services/seo/link-execution-authority').beginSubmission(s.db, { prospectId: lease.id, leaseToken: lease.lease_token, citation: { website: 'https://wavespestcontrol.com', location: 'sarasota' } })).toBe(true);
+  expect(attempt.outcome).toBe(outcome);
+  expect(await Outreach.sendOutreach({ prospectId: lease.id, mode: 'auto', followUp: true, now: LATER })).toMatchObject({ ok: false, code: 'acquisition_in_progress' });
+  expect(gmail.sendMessage).not.toHaveBeenCalled();
+  expect(placement(s.db).claimed_at).toEqual(lease.claimed_at);
+  expect(attempt.outcome).toBe(outcome);
+  await worker.releaseClaims([{ id: lease.id, lease_token: lease.lease_token }]);
+  expect(attempt.outcome).toBe(outcome === 'submitting' ? 'submit_ambiguous' : 'slot_released');
 });

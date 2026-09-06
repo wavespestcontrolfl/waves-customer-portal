@@ -1,3 +1,4 @@
+const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-due');
 const db = require('../models/db');
 const logger = require('./logger');
 const { tryLockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
@@ -1240,7 +1241,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     ? Number(adoptedPromisedRow.estimated_duration_minutes)
     : baseDuration;
   const retimeAdoptedRow = async (trx) => {
-    const row = adoptedPromisedRow;
+    let row = adoptedPromisedRow;
     let windowStart = firstVisitWindowStart;
     let staleAdoption = false;
     let overlapConflict = null;
@@ -1264,6 +1265,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
           staleAdoption = true;
           return;
         }
+        row = fresh;
         const conflict = await findVisitWindowConflict(sp, {
           scheduledDate: promisedTarget,
           windowStart,
@@ -1302,7 +1304,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     // surface recomputes from window_start.
     if (cols.time_window) updates.time_window = null;
     if (cols.window_display) updates.window_display = null;
-    await trx('scheduled_services').where({ id: row.id }).update(updates);
+    await trx('scheduled_services').where({ id: row.id }).update({ ...updates, ...recurringDispatchDuePatch(row, updates) });
     // Filed only once the retime is written (same rule as the seed path):
     // the notice claims the visit WAS retimed, so it must never outlive a
     // failed update.
@@ -1609,6 +1611,16 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
   const slices = splitCoverageAmount(totalAmount, coverageVisitCount);
   const now = new Date();
   let stampedCount = 0;
+  // Rows read as eligible whose stamp UPDATE then matched nothing — the
+  // status moved in between (#3878 r5). Classified below by re-reading the
+  // row: a never-ran status (cancelled / no_show / skipped) is a shortfall
+  // the operator must hear about (the earlier coverage_shortfall check runs
+  // on target dates and cannot see this race); a COMPLETED-in-between row
+  // is a pending-window completion whose invoice may not exist yet when
+  // reconcilePendingWindowCompletions runs right after this, so it files
+  // its own exception (Codex r2 P1) — the daily sweep settles it, the alert
+  // covers the window in which the visit could be paid twice.
+  const unmatchedRowIds = [];
 
   for (let index = 0; index < rows.length; index++) {
     const row = rows[index];
@@ -1641,11 +1653,43 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
     if (cols.annual_prepay_term_id) updates.annual_prepay_term_id = term.id;
     if (cols.updated_at) updates.updated_at = now;
 
+    // The status skip above read a pre-transaction row; re-assert it IN the
+    // UPDATE so a visit cancelled between that read and this write (a
+    // series cancel committing mid-activation, #3878 r5) is never stamped.
+    // A NULL status is a live visit (service-cadence convention) — a bare
+    // NOT IN would evaluate unknown and skip it (Codex r2 P1).
     const updated = await conn('scheduled_services')
       .where({ id: row.id })
+      .where((q) => q.whereNull('status').orWhereNotIn('status', [...PREPAID_UPDATE_EXCLUDED_STATUSES]))
       .update(updates)
       .returning(['id']);
     if (Array.isArray(updated) ? updated.length > 0 : updated) stampedCount++;
+    else unmatchedRowIds.push(row.id);
+  }
+
+  let racedRowIds = [];
+  let completedRaceIds = [];
+  if (unmatchedRowIds.length > 0) {
+    const current = await conn('scheduled_services').whereIn('id', unmatchedRowIds).select('id', 'status');
+    const statusById = new Map(current.map((r) => [r.id, String(r.status || '').toLowerCase()]));
+    racedRowIds = unmatchedRowIds.filter((id) => COVERAGE_EXCLUDED_STATUSES.has(statusById.get(id)) || !statusById.has(id));
+    completedRaceIds = unmatchedRowIds.filter((id) => statusById.get(id) === 'completed');
+  }
+  if (completedRaceIds.length > 0) {
+    logger.warn(`[annual-prepay] term ${term.id}: ${completedRaceIds.length} covered visit(s) completed while the prepaid stamp ran (${completedRaceIds.join(', ')}) — left unstamped for pending-window reconciliation`);
+    await fileCoverageExceptionAfterCommit(conn, term, 'stamp_raced_completion',
+      `${completedRaceIds.length} paid visit(s) completed while the annual prepay was being applied and are not yet marked as covered. If a completion invoice was issued for that visit, it bills the customer separately until the coverage sweep settles it — check the invoice and settle it as covered or void it.`);
+  }
+  if (racedRowIds.length > 0) {
+    // Durable operator exception (Codex #3882 r1 P1): callers discard this
+    // result, so the shortfall must be filed HERE. Same dedupe + bell as the
+    // other coverage exceptions; the operator schedules the replacement
+    // visit(s) — nothing is re-seeded automatically on a cancelled slot.
+    // Filed after the caller's transaction commits (hook P1): a rollback must
+    // not leave a false alert that also dedupes the retry's real one for 7d.
+    logger.warn(`[annual-prepay] term ${term.id}: ${racedRowIds.length} covered visit(s) were cancelled while the prepaid stamp ran (${racedRowIds.join(', ')}) — ${stampedCount} of ${coverageVisitCount} sold visits stamped; needs replacement scheduling`);
+    await fileCoverageExceptionAfterCommit(conn, term, 'stamp_raced_cancel',
+      `${racedRowIds.length} paid visit(s) were cancelled while the annual prepay was being applied, so only ${stampedCount} of ${coverageVisitCount} sold visits are covered on the calendar. Schedule the replacement visit(s) or adjust the term.`);
   }
 
   return {
@@ -1653,6 +1697,7 @@ async function applyPrepaidCoverageForTerm(term, conn = db) {
     matchedCount: rows.length,
     expectedVisitCount: coverageVisitCount,
     perVisitAmount: slices[0] || 0,
+    racedRowIds,
   };
 }
 

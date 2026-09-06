@@ -1,3 +1,13 @@
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../middleware/admin-auth', () => ({
+  adminAuthenticate: jest.fn(), requireAdmin: jest.fn(), requireTechOrAdmin: jest.fn(),
+}));
+jest.mock('../config/protocols.json', () => ({
+  lawn: { st_augustine: { name: 'Fixture lawn track', visits: [] } },
+}));
+
+const db = require('../models/db');
+const protocols = require('../config/protocols.json');
 const adminProtocolsRouter = require('../routes/admin-protocols');
 const {
   parseProtocolLines,
@@ -41,68 +51,147 @@ const CATALOG = [
   },
 ];
 
-// Mirrors the lawn-mix endpoint: planned factor treats the line as if its
-// trigger fired (rescue selected, premium taken) without disturbing the
-// real selection state.
-function plannedFactor(item) {
-  return item.selected
-    ? effectiveAreaFactor(item, {})
-    : effectiveAreaFactor({ ...item, selected: true }, { includePremiumOnly: true });
+// This suite runs the real handler and plan engine. Only stored protocol,
+// catalog and calibration inputs are fixtures; no database or provider runs.
+const lawnMixHandler = adminProtocolsRouter.stack.find((layer) => (
+  layer.route?.path === '/lawn-mix' && layer.route.methods.get
+)).route.stack[0].handle;
+
+function readQuery(rows) {
+  const query = {};
+  for (const method of ['where', 'orWhereNull', 'whereIn', 'join', 'select', 'orderByRaw', 'orderBy']) {
+    query[method] = jest.fn(() => query);
+  }
+  query.first = jest.fn(async () => rows[0] || null);
+  query.catch = (onRejected) => Promise.resolve(rows).catch(onRejected);
+  return query;
 }
 
-describe('lawn-mix planned mix for unselected conditionals', () => {
-  test('unselected conditional rescue line gets a full planned factor while its live factor stays zero', () => {
-    const lines = parseProtocolLines(
-      '★ If Talstar failed Jun: Arena 50 WDG (Group 4A) ($5.20)',
-      'conditional',
-    );
-    const [item] = resolveProtocolItems(lines, CATALOG, {}, {});
+async function lawnMix(query = {}) {
+  const res = { json: jest.fn(), status: jest.fn() };
+  res.status.mockReturnValue(res);
+  const next = jest.fn();
+  await lawnMixHandler({ query: { track: 'A_St_Aug_Sun', month: '7', lawnSqft: '10000', ...query } }, res, next);
+  expect(next).not.toHaveBeenCalled();
+  expect(res.status).not.toHaveBeenCalled();
+  expect(res.json).toHaveBeenCalledTimes(1);
+  // Assert the serialized response, including nulls and absent fields.
+  return JSON.parse(JSON.stringify(res.json.mock.calls[0][0]));
+}
 
-    expect(item.selected).toBe(false);
-    expect(effectiveAreaFactor(item, {})).toBe(0);
-    expect(plannedFactor(item)).toBe(1);
+let calibration;
+let visit;
 
-    const planned = calculateProductAmount({
-      product: item.product,
-      lawnSqft: 10000,
-      carrierGalPer1000: 2,
-      areaFactor: plannedFactor(item),
+beforeEach(() => {
+  jest.clearAllMocks();
+  jest.useFakeTimers().setSystemTime(new Date('2030-07-15T16:00:00Z'));
+  calibration = {
+    id: 'calibration-fixture', equipment_system_id: 'tank-fixture',
+    system_name: 'Fixture tank', system_type: 'tank',
+    carrier_gal_per_1000: 2, tank_capacity_gal: 40,
+    expires_at: '2030-07-16T16:00:00Z',
+  };
+  visit = {
+    month: 'Jul', visit: 7, notes: '',
+    primary: 'BLACKOUT — K-Flow 0-0-25 ($2.18)',
+    secondary: '★ If Talstar failed Jun: Arena 50 WDG (Group 4A) ($5.20)\nHydretain drought prep Premium ($10.59)',
+  };
+  protocols.lawn.st_augustine.visits = [visit];
+  db.mockImplementation((table) => {
+    if (table === 'equipment_calibrations as ec') return readQuery(calibration ? [calibration] : []);
+    if (table === 'products_catalog') return readQuery(CATALOG);
+    if (table === 'product_aliases') return readQuery(CATALOG.flatMap((product) => (
+      product.aliases.map((alias_name) => ({ product_id: product.id, alias_name }))
+    )));
+    throw new Error(`Unexpected table: ${table}`);
+  });
+});
+
+afterEach(() => jest.useRealTimers());
+
+describe('lawn-mix response for optional products', () => {
+  test('unselected rescue and premium products retain previews without entering actual costs', async () => {
+    const body = await lawnMix();
+    expect(body.items).toHaveLength(3);
+    const [base, rescue, premium] = body.items;
+    expect(base).toMatchObject({
+      selected: true, product: { id: 'kflow' },
+      jobMix: { amount: 30, materialCost: 3.6 },
+      plannedMix: { amount: 30, materialCost: 3.6 },
     });
-    expect(planned.amount).toBe(2.9);
-    expect(planned.ratePer1000).toBe(0.29);
-    expect(planned.materialCost).toBe(15.08);
+    expect(rescue).toMatchObject({
+      selected: false, scope: 'CONDITIONAL_RESCUE', product: { id: 'arena' },
+      jobMix: null, fullTankMix: null,
+      plannedMix: { amount: 2.9, amountUnit: 'oz', ratePer1000: 0.29, carrierGallons: 20, materialCost: 15.08 },
+      plannedFullTankMix: { amount: 5.8, carrierGallons: 40 },
+    });
+    expect(premium).toMatchObject({
+      selected: false, scope: 'PREMIUM_ONLY', product: { id: 'hydretain' },
+      jobMix: null, fullTankMix: null,
+      plannedMix: { amount: 90, amountUnit: 'fl_oz', materialCost: 11.7 },
+      plannedFullTankMix: { amount: 180, carrierGallons: 40 },
+    });
+    expect(body.selectedItems.map((item) => item.product.id)).toEqual(['kflow']);
+    expect(body.materialCostSummary).toMatchObject({ total: 3.6, pricedLineCount: 1, selectedLineCount: 1 });
+    expect(body.warnings).toEqual([]);
   });
 
-  test('inspection-only SKIP lines keep a zero planned factor — no product math on a skip instruction', () => {
-    const lines = parseProtocolLines(
-      '★ IF soil K >80 ppm: SKIP K-Flow → micros only',
-      'base',
-    );
-    const [item] = resolveProtocolItems(lines, CATALOG, {}, {});
-
-    expect(item.scope).toBe('INSPECTION_ONLY');
-    expect(plannedFactor(item)).toBe(0);
+  test.each([
+    ['rescue', { selectedConditionalProductIds: 'arena' }, 'arena', 2.9, 18.68],
+    ['premium', { includePremiumOnly: 'true' }, 'hydretain', 90, 15.3],
+  ])('selecting the %s moves its quantity and cost into the actual mix', async (_label, query, id, amount, total) => {
+    const body = await lawnMix(query);
+    const item = body.items.find((row) => row.product?.id === id);
+    expect(item).toMatchObject({ selected: true, jobMix: { amount }, plannedMix: { amount } });
+    expect(body.selectedItems.map((row) => row.product.id)).toEqual(['kflow', id]);
+    expect(body.materialCostSummary).toMatchObject({ total, pricedLineCount: 2, selectedLineCount: 2 });
   });
 
-  test('premium-only add-on shows planned math without a premium plan selected', () => {
-    const lines = parseProtocolLines(
-      'Hydretain drought prep Premium ($10.59)',
-      'conditional',
-    );
-    const [item] = resolveProtocolItems(lines, CATALOG, {}, {});
+  test('SKIP instructions expose no product mix even when their product is matched', async () => {
+    visit.primary = '★ IF soil K >80 ppm: SKIP K-Flow → micros only';
+    visit.secondary = '';
+    const body = await lawnMix();
+    expect(body.items).toHaveLength(1);
+    expect(body.items[0]).toMatchObject({
+      scope: 'INSPECTION_ONLY', matched: true, product: { id: 'kflow' }, selected: false,
+      jobMix: null, fullTankMix: null, plannedMix: null, plannedFullTankMix: null,
+    });
+    expect(body.selectedItems).toEqual([]);
+    expect(body.materialCostSummary).toMatchObject({ total: 0, pricedLineCount: 0 });
+  });
 
-    expect(item.scope).toBe('PREMIUM_ONLY');
+  test('calibration expiry does not withhold mix amounts when inputs exist', async () => {
+    calibration.expires_at = '2000-01-01T00:00:00Z';
+    const body = await lawnMix();
+    expect(body.items.find(item => item.product?.id === 'kflow').jobMix.amount).toBeGreaterThan(0);
+    expect(body.warnings).toEqual([]);
+  });
+
+  test.each([
+    ['missing', null, 'missing_calibration'],
+    ['zero carrier', { carrier_gal_per_1000: 0 }, null],
+    ['nonnumeric carrier', { carrier_gal_per_1000: 'unavailable' }, null],
+  ])('%s calibration withholds all actual and preview amounts', async (_label, overrides, warning) => {
+    calibration = overrides === null ? null : { ...calibration, ...overrides };
+    const body = await lawnMix();
+    expect(body.items).toHaveLength(3);
+    for (const item of body.items) {
+      expect(item).toMatchObject({ jobMix: null, fullTankMix: null, plannedMix: null, plannedFullTankMix: null });
+    }
+    expect(body.materialCostSummary).toMatchObject({ total: 0, pricedLineCount: 0 });
+    if (warning) expect(body.warnings).toEqual([expect.objectContaining({ code: warning })]);
+  });
+});
+
+describe('rescue engine quantity and selection', () => {
+  test('unselected rescue has no live area; full-area calculation keeps its literal quantity and cost', () => {
+    const lines = parseProtocolLines('★ If Talstar failed Jun: Arena 50 WDG (Group 4A) ($5.20)', 'conditional');
+    const [item] = resolveProtocolItems(lines, CATALOG, {}, {});
     expect(item.selected).toBe(false);
     expect(effectiveAreaFactor(item, {})).toBe(0);
-    expect(plannedFactor(item)).toBe(1);
-  });
-
-  test('selected base lines keep their live factor as the planned factor', () => {
-    const lines = parseProtocolLines('BLACKOUT — K-Flow 0-0-25 ($2.18)', 'base');
-    const [item] = resolveProtocolItems(lines, CATALOG, {}, {});
-
-    expect(item.selected).toBe(true);
-    expect(plannedFactor(item)).toBe(effectiveAreaFactor(item, {}));
+    expect(calculateProductAmount({
+      product: item.product, lawnSqft: 10000, carrierGalPer1000: 2, areaFactor: 1,
+    })).toMatchObject({ amount: 2.9, ratePer1000: 0.29, materialCost: 15.08 });
   });
 });
 

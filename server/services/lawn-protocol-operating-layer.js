@@ -1,5 +1,59 @@
 const db = require('../models/db');
 const { etParts } = require('../utils/datetime-et');
+const { isDeepStrictEqual } = require('node:util');
+
+// The checked-in field reference and plan matcher are released with protocol
+// product/rate/gate changes. Portal publication may update DB-owned SOP and
+// closeout fields, but must never activate a divergent treatment definition.
+async function protocolTreatmentSnapshot(knex, protocolId) {
+  const windows = await knex('lawn_protocol_windows')
+    .where({ lawn_protocol_id: protocolId })
+    .select('window_key', 'month', 'title', 'visit_type', 'goal', 'default_carrier_gal_per_1000', 'production_mode', 'main_tank', 'spot_work', 'conditional_triggers')
+    .orderBy('window_key');
+  const products = await knex('lawn_protocol_products as p')
+    .join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id')
+    .where('w.lawn_protocol_id', protocolId)
+    .select('w.window_key', 'p.product_id', 'p.product_name', 'p.role', 'p.application_mode', 'p.rate_per_1000', 'p.rate_unit', 'p.carrier_gal_per_1000', 'p.default_in_plan', 'p.gates', 'p.annual_counter', 'p.mixing', 'p.sort_order')
+    .orderBy('w.window_key').orderBy('p.sort_order').orderBy('p.product_name').orderBy('p.product_id').orderBy('p.role');
+  const gates = await knex('lawn_protocol_gates')
+    .where({ lawn_protocol_id: protocolId })
+    .select('gate_key', 'gate_type', 'severity', 'title', 'rule_text', 'logic')
+    .orderBy('gate_key');
+  return { windows, products, gates };
+}
+
+async function protocolReferenceSyncIssues(knex, protocol) {
+  if (protocol.status !== 'draft') return [];
+  const active = await knex('lawn_protocols')
+    .where({ protocol_key: protocol.protocol_key, status: 'active' }).first();
+  if (!active) return [{ severity: 'block', code: 'reference_baseline_missing', message: 'The active protocol is unavailable. Publication requires its reviewed treatment baseline.', metadata: {} }];
+  const [baseline, proposed] = await Promise.all([
+    protocolTreatmentSnapshot(knex, active.id), protocolTreatmentSnapshot(knex, protocol.id),
+  ]);
+  return Object.keys(baseline).filter((section) => !isDeepStrictEqual(baseline[section], proposed[section])).map((section) => {
+    const fields = new Set();
+    const rows = [...baseline[section], ...proposed[section]];
+    for (const field of new Set(rows.flatMap((row) => Object.keys(row)))) {
+      if (!isDeepStrictEqual(baseline[section].map((row) => row[field]), proposed[section].map((row) => row[field]))) fields.add(field);
+    }
+    return {
+      severity: 'block', code: 'reference_sync_required',
+      message: `Treatment ${section} changed (${[...fields].join(', ')}). Update the field reference, protocol data and catalog together in a reviewed release before publishing this draft. SOP links and closeout tasks can be published here.`,
+      metadata: { section, changedFields: [...fields], activeProtocolId: active.id },
+    };
+  });
+}
+
+async function lockDraftProtocol(knex, protocolId) {
+  const protocol = await knex('lawn_protocols').where({ id: protocolId }).forUpdate().first();
+  if (protocol?.status !== 'draft') {
+    const error = new Error('This protocol is no longer an editable draft. Reload before making changes.');
+    error.statusCode = 409;
+    error.isOperational = true;
+    throw error;
+  }
+  return protocol;
+}
 
 function parseJson(value, fallback) {
   if (value == null) return fallback;
@@ -227,6 +281,8 @@ function summarizeProtocolContext(context) {
 }
 
 module.exports = {
+  protocolReferenceSyncIssues,
+  lockDraftProtocol,
   getActiveLawnProtocol,
   getLawnProtocolById,
   getProtocolWindowContext,

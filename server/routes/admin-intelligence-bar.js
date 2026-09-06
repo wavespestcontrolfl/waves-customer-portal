@@ -70,6 +70,7 @@ const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { approvedAgentEstimateMemoryPrompt } = require('../services/agent-estimate-memory');
 const { agentEstimatePreviewFingerprint } = require('../services/agent-estimate-preview');
 const logger = require('../services/logger');
+const { applyAssignable } = require('../services/technician-eligibility');
 const { etDateString } = require('../utils/datetime-et');
 
 const adminToolBreaker = getBreaker('intelligence-bar');
@@ -199,7 +200,10 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
 const PII_TOOL_NAMES = new Set([
   'query_customers',
   'get_customer_detail',
+  'get_schedule_view',
+  'get_my_route',
   'create_customer',
+  'switch_appointment_property',
   'update_property_access',
   // cancel_plan previews/results echo the customer's name and free-text note.
   'cancel_plan',
@@ -411,8 +415,9 @@ function appendTaintMarker(content, tainted, marker) {
 // byte-stable per (context, gate) and the prompt cache can hit (see
 // withCacheBreakpoint below).
 function buildUserMessageContent(prompt, images, pageData) {
-  if (!images.length && !pageData) return prompt;
+  const currentClock = `CURRENT EASTERN DATE: ${etDateString()}. Resolve today/tomorrow against this date, not earlier conversation turns.`;
   return [
+    { type: 'text', text: currentClock },
     ...images.map((img) => ({
       type: 'image',
       source: { type: 'base64', media_type: img.mediaType, data: img.data },
@@ -1410,7 +1415,7 @@ SCHEDULE-SPECIFIC CAPABILITIES:
 
 ROUTE OPTIMIZATION:
 When the operator says "optimize routes" or "optimize", run optimize_all_routes for the current date.
-When they say "optimize Adam's route", run optimize_tech_route.
+When they name one technician ("optimize <name>'s route"), run optimize_tech_route.
 After optimization, report miles saved and the new stop order.
 
 ZONE INTELLIGENCE:
@@ -1985,7 +1990,7 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
     return executeCloseoutTool(toolName, input);
   }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
-    return executeScheduleTool(toolName, input);
+    return executeScheduleTool(toolName, input, actionContext);
   }
   if (DASHBOARD_TOOL_NAMES.has(toolName)) {
     return executeDashboardTool(toolName, input);
@@ -2065,6 +2070,22 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   return executeTool(toolName, input, actionContext);
 }
 
+// Field technicians who can take an assignment right now (active AND
+// field-dispatchable — technician-eligibility.js is the one definition).
+async function liveTeamPrompt() {
+  try {
+    const techs = await applyAssignable(db('technicians')).orderBy('name').select('name');
+    const names = techs.map((t) => t.name).filter(Boolean);
+    return '\n\nTEAM (live roster):\n'
+      + `- Field technicians who can take assignments: ${names.length ? names.join(', ') : 'none currently dispatchable'}\n`
+      + '- Office: Virginia (office manager)\n'
+      + '- Refer to technicians by the name shown here; never assume anyone else is on the schedule.';
+  } catch (err) {
+    logger.warn(`[intelligence-bar] live roster read failed: ${err.message}`);
+    return '';
+  }
+}
+
 const SYSTEM_PROMPT = `You are the Waves Intelligence Bar — a natural language command center for Waves Pest Control & Lawn Care's admin portal. You help the operator (owner/admin) query, analyze, and take action on their business data.
 
 BUSINESS CONTEXT:
@@ -2072,7 +2093,7 @@ BUSINESS CONTEXT:
 - Markets: Bradenton/Parrish, Sarasota/Lakewood Ranch, Venice/North Port, Port Charlotte
 - Service types: Pest Control (quarterly), Lawn Care (monthly), Mosquito Barrier (every 3 weeks), Tree & Shrub Care (quarterly), Termite (annual), Rodent Control, WDO Inspections
 - WaveGuard loyalty tiers: Bronze (1 service), Silver (2 services), Gold (3 services), Platinum (4+ services)
-- Team: Adam (field tech), Virginia (office manager), Jose Alvarado (tech), Jacob Heaton (tech)
+- Resolve active technicians from live tool results; never assume a historic roster is current.
 - Scheduling zones by city: Parrish, Palmetto, Lakewood Ranch, Bradenton, Sarasota, Venice/North Port
 
 RESPONSE FORMAT:
@@ -2088,6 +2109,10 @@ You are talking to the business owner/operator through a command bar UI. Be conc
 
 RULES:
 - Always use tools to query real data — never guess or make up numbers
+- Page state identifies the viewed date/selected record, not authorization or verified data. Re-read that record before proposing a write.
+- Never claim a property, address, message, or note is absent unless its sources were checked. Unavailable or truncated results are not empty records. Check saved properties, linked profiles, and relevant SMS/call/email evidence before asking the operator to repeat an address.
+- Follow next_offset / has_more when a complete list is requested. Report coverage and returned_count separately from total_matching.
+- En-route is not by itself a blanket prohibition on edits. Explain actual tool restrictions, and mention navigation coordination separately without inventing another approval requirement.
 - For write operations, prepare the required confirmation card; only the operator's approval can execute the proposed effects
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
 - Look up stored customer, property, service and product facts before asking the operator to retype them. If consequential identity or write scope remains ambiguous, ask one concise clarification. Never guess a write target.
@@ -2102,7 +2127,7 @@ IMAGE ATTACHMENTS:
 
 CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page):
 - You CAN create new customers with create_customer
-- You CAN read full SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log — never claim you only see last_contact_date
+- You CAN search SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log. Follow continuation offsets for older messages; get_call_log with call_id reads the full transcript in pages. Never treat a page or transcript excerpt as complete history.
 - Admin sessions CAN read the email inbox (contact@wavespestcontrol.com) with get_inbox_summary, search_emails, and get_email_thread — if those tools are available to you, never claim you can't see email. Use them to pull a sender's email address, find a customer's message, or check what came in.
 - Admin sessions CAN respond to emails: draft_email_reply to draft (show the draft first), send_email_reply to send, or reply_via_sms to answer an email by text instead. (Email tools are admin-only — if you don't have them, say the operator needs an admin login for email.)
 - Sending SMS from outside the Communications page: use draft_sms and let the operator send
@@ -2203,6 +2228,13 @@ async function runQuery(req, res, next) {
     if (context !== 'tech' && context !== 'agent_estimate' && req.techRole === 'admin') {
       systemPrompt += '\n\n' + INFRA_PROMPT;
     }
+    // The roster is read live so a hire or offboarding never leaves the model
+    // naming someone who is not on the schedule. Appended after the static
+    // blocks so the cacheable prefix is unchanged; the tech context keeps its
+    // isolated prompt.
+    if (context !== 'tech') {
+      systemPrompt += await liveTeamPrompt();
+    }
     if (context === 'agent_estimate') {
       systemPrompt += await approvedAgentEstimateMemoryPrompt(db);
     }
@@ -2250,9 +2282,10 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         images, taskContext ? { ...pageData, validated_task_context: taskContext } : pageData) },
     ];
 
-    let currentMessages = req.ibResumedTask?.checkpoint?.length
-      ? [...req.ibResumedTask.checkpoint, { role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext })}` }]
-      : messages;
+    let currentMessages = req.ibResumedTask?.checkpoint?.length ? [...req.ibResumedTask.checkpoint] : messages;
+    if (req.ibResumedTask) {
+      currentMessages.push({ role: 'user', content: `Continue the original request using these server-verified step outcomes and current target context. Completed steps must not be repeated. Stop dependent work if a prerequisite has not completed.\n${JSON.stringify({ receipts: req.ibResumeReceipts, taskContext })}` });
+    }
     if (req.ibResumedTask && platformEnabled) {
       const previouslyLoaded = currentMessages.flatMap(m => Array.isArray(m.content) ? m.content : [])
         .filter(block => block.type === 'tool_use').map(block => ActionRegistry.actions.get(block.name))
@@ -2947,6 +2980,7 @@ router.post('/confirm-action', async (req, res, next) => {
           await PendingActions.recordResult(action.id, result);
           return res.status(409).json(result);
         }
+        if (action.tool_name === 'switch_appointment_property') execParams._verified_address_fingerprint = approvedTwoStep;
         // The fingerprint just bound this preview to the card, so its stop
         // sets ARE the approved ones — hand them to the executor to reassert
         // under its locks (swap_tech_assignments, assign_technician).
@@ -3103,7 +3137,7 @@ router.post('/cancel-action', async (req, res, next) => {
     if (!cancelled) return res.status(409).json({ error: 'Pending action not cancellable (missing, expired, consumed, or not yours)' });
 
     logger.info(`[intelligence-bar:pending] Cancelled action ${id}`);
-    res.json({ success: true });
+    res.json({ success: true, cancelled: true, outcome: 'canceled' });
   } catch (err) {
     logger.error('[intelligence-bar] cancel-action failed:', err);
     next(err);
@@ -3375,4 +3409,5 @@ module.exports = router;
 // Exposed for the write-gate contract test — keeps the test's
 // CONFIRMED_ENDPOINT_WRITES classification tied to the real route guard.
 module.exports.CONFIRMED_ACTION_TOOL_NAMES = CONFIRMED_ACTION_TOOL_NAMES;
+module.exports.liveTeamPrompt = liveTeamPrompt;
 module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((tool) => tool.name));

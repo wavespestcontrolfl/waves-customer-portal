@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, expect, it, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import PendingActionsCard from './PendingActionsCard';
 
 const action = { id: '11111111-1111-4111-8111-111111111111', tool: 'create_restock_request', summary: 'Save synthetic restock request', expiresInMs: 600000 };
 const response = (body) => ({ ok: true, json: async () => body });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 it('renders a blocked domain result as failed, never Done', async () => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ success: false, outcome: 'blocked', result: { blocked: true, message: 'Duplicate request' } })));
@@ -58,4 +58,22 @@ it('restores failed receipt details and accepted-provider warnings after reload'
   expect(screen.getByText('Saved validation failure')).toBeInTheDocument();
   expect(screen.getByText('Accepted; delivery has not been established')).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
+});
+
+test('remounting after clarification keeps the original expiration deadline', () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(1000000);
+  const first = render(<PendingActionsCard actions={[{ ...action, receivedAt: 1000000 }]} variant="light" />);
+  expect(screen.getByText('Expires in 10:00')).toBeTruthy();
+  first.unmount();
+  vi.setSystemTime(1600001);
+  render(<PendingActionsCard actions={[{ ...action, receivedAt: 1000000 }]} variant="light" />);
+  expect(screen.queryByRole('button', { name: 'Confirm' })?.disabled ?? true).toBe(true);
+  expect(screen.queryByText('Expires in 10:00')).toBeNull();
+});
+
+test('resolved cards do not offer another confirmation after a follow-up', () => {
+  render(<PendingActionsCard actions={[{ ...action, resolvedStatus: 'confirmed' }]} variant="light" />);
+  expect(screen.getByText('✓ Done')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
 });

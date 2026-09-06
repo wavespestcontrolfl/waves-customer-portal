@@ -47,7 +47,7 @@ afterAll(() => {
 
 function chain(result) {
   const c = {};
-  ['where', 'whereBetween', 'whereIn', 'whereNotIn', 'leftJoin', 'orderBy', 'first'].forEach((m) => { c[m] = () => c; });
+  ['whereNotNull', 'where', 'whereBetween', 'whereIn', 'whereNotIn', 'leftJoin', 'orderBy', 'first'].forEach((m) => { c[m] = () => c; });
   c.select = async () => result;
   return c;
 }
@@ -160,4 +160,43 @@ test('a failed blackout lookup fails OPEN — all dates still offered', async ()
   });
   const { slots } = await findAvailableSlots(BASE);
   expect(slots.length).toBeGreaterThan(0);
+});
+
+describe('technician pool (Field Team Program, Phase 0)', () => {
+  test('the tech query is narrowed to assignable rows (active employment AND field-dispatchable), never the legacy flag', async () => {
+    const whereCalls = [];
+    db.mockImplementation((table) => {
+      const c = chain([]);
+      if (table === 'technicians') {
+        c.where = (...args) => { whereCalls.push(args); return c; };
+        c.select = async () => [];
+      }
+      return c;
+    });
+    const out = await findAvailableSlots(BASE);
+    expect(out).toMatchObject({ slots: [], evaluated: 0, note: 'No assignable technicians found' });
+    expect(whereCalls).toEqual(expect.arrayContaining([
+      ['technicians.employment_status', 'active'],
+      ['technicians.field_dispatchable', true],
+    ]));
+    expect(whereCalls).not.toContainEqual([{ active: true }]);
+  });
+
+  test('a technicianId restriction is applied on top of the assignable filter, not instead of it', async () => {
+    const whereCalls = [];
+    db.mockImplementation((table) => {
+      const c = chain([]);
+      if (table === 'technicians') {
+        c.where = (...args) => { whereCalls.push(args); return c; };
+        c.select = async () => [];
+      }
+      return c;
+    });
+    await findAvailableSlots({ ...BASE, technicianId: 't-pinned' });
+    expect(whereCalls).toEqual(expect.arrayContaining([
+      ['technicians.employment_status', 'active'],
+      ['technicians.field_dispatchable', true],
+      ['technicians.id', 't-pinned'],
+    ]));
+  });
 });

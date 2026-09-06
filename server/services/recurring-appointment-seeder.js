@@ -9,6 +9,7 @@ const {
 const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { clearOfBlackout: nudgeOffBlackoutDates, isBlackedOut } = require('./scheduling/blackout-nudge');
 const { resolveSeriesChildIdentity } = require('./service-catalog-names');
+const { isAssignable } = require('./technician-eligibility');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1,
@@ -453,20 +454,6 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
       // leaves follow-ups resolving by mutable label while the parent keeps
       // its key (pre-push P1). Cols-guarded like the rest of the row.
       'service_key_snapshot',
-      'lat',
-      'lng',
-      // Stamped service address (property linkage): a series booked for a
-      // secondary/rental property carries a visit-level stamp; follow-ups
-      // must inherit it or every reader's COALESCE(service_address_*,
-      // customers.address_*) falls back to the customer's PRIMARY address
-      // and the visit dispatches to the wrong property. Cols-guarded like
-      // the rest of the row — the insert path maps through filterByColumns.
-      'property_id',
-      'service_address_line1',
-      'service_address_line2',
-      'service_address_city',
-      'service_address_state',
-      'service_address_zip',
       // Inert legacy names: scheduled_services has no plain
       // address/city/state/zip columns, so a real parent row never carries
       // these keys (copyIfPresent skips) and filterByColumns would strip
@@ -479,6 +466,7 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
       'state',
       'zip',
     ]);
+    Object.assign(row, require('./booking/visit-financial-stamps').recurringServiceAddress(parent));
     // Resolved identity outranks the parent's copied link AND snapshot (the
     // parent may be unlinked, linked to a row since renamed, or carry a
     // stale snapshot that must not ride into the child — codex #3604 r5
@@ -694,6 +682,7 @@ async function findActiveRecurringSeries(conn, {
     .whereNotIn('status', ['cancelled'])
     .select('id', 'service_type', 'recurring_pattern', 'scheduled_date', 'status');
   if (columns.service_id) query.select('service_id');
+  if (columns.recurring_template_overrides) query.select('recurring_template_overrides');
   if (columns.property_id) query.select('property_id');
   if (columns.service_address_line1) query.select('service_address_line1');
   if (columns.service_address_line2) query.select('service_address_line2');
@@ -712,7 +701,8 @@ async function findActiveRecurringSeries(conn, {
   const familyKeyOf = (label) => duplicateGuardFamilyKey(label);
   const targetKey = serviceType ? familyKeyOf(serviceType) : null;
   const matches = [];
-  for (const parent of parents || []) {
+  for (const historicalParent of parents || []) {
+    const parent = { ...historicalParent, ...require('./booking/visit-financial-stamps').recurringServiceAddress(historicalParent) };
     const idMatch = serviceId != null && parent.service_id != null
       && String(parent.service_id) === String(serviceId);
     const keyMatch = targetKey != null && parent.service_type
@@ -1206,7 +1196,27 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
       notifySeedShortfall(parent, seedShortfall);
     }
   };
-  const rows = builtRows.map((row) => filterByColumns(row, columns));
+  let rows = builtRows.map((row) => filterByColumns(row, columns));
+  // Follow-ups inherit the parent's technician. If that tech is no longer
+  // assignable, seed the follow-ups unassigned so auto-dispatch places them —
+  // never onto a tech who cannot take them. Every production caller (booking
+  // wizard, estimate converter, admin-schedule) hands in its transaction, so
+  // the read is FOR SHARE on the writing trx and an offboarding's FOR UPDATE
+  // cannot commit underneath the insert below; a plain connection (tests)
+  // gets a point-in-time check. The insert lines themselves are frozen by the
+  // booking insert-site contract and stay untouched.
+  {
+    const inheritedTechId = rows.find((r) => r.technician_id)?.technician_id || null;
+    if (inheritedTechId) {
+      let techQuery = conn('technicians').where({ id: inheritedTechId });
+      if (conn.isTransaction) techQuery = techQuery.forShare();
+      const inheritedTech = await techQuery.first('id', 'employment_status', 'field_dispatchable');
+      if (!isAssignable(inheritedTech)) {
+        require('./logger').warn(`[recurring-seeder] parent ${parent.id} technician ${inheritedTechId} is not assignable; seeding follow-ups unassigned`);
+        rows = rows.map((r) => (r.technician_id === inheritedTechId ? { ...r, technician_id: null } : r));
+      }
+    }
+  }
 
   if (!rows.length) {
     // Even with no NEW follow-up rows (series dates already exist), the parent

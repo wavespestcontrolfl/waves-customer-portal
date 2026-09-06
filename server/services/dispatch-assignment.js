@@ -3,6 +3,7 @@ const { getIo } = require('../sockets');
 const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { stampedDivergesSql, stampedLine2Sql } = require('./stamped-address');
+const { assertAssignableTechnician } = require('./technician-eligibility');
 
 const ADMIN_ROOM = 'dispatch:admins';
 const ADMIN_EVENT = 'dispatch:job_update';
@@ -115,7 +116,7 @@ async function emitDispatchJobUpdate({ jobId, actorId }) {
   return payload;
 }
 
-async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false, expectTechnicianId } = {}) {
+async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false, expectTechnicianId, noticeSnapshot = null, noticeActorId } = {}) {
   if (!jobId) throw httpError(400, 'jobId is required');
   if (technicianId === undefined) throw httpError(400, 'technicianId required');
   if (technicianId !== null && typeof technicianId !== 'string') {
@@ -138,12 +139,10 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     throw Object.assign(httpError(409, 'Job was reassigned concurrently - the planned technician is stale'), { code: 'ASSIGNMENT_STALE' });
   }
 
-  let tech = null;
-  if (newTechId) {
-    tech = await conn('technicians').where({ id: newTechId }).first();
-    if (!tech) throw httpError(400, 'Unknown technician');
-    if (!tech.active) throw httpError(400, 'Technician is inactive');
-  }
+  // Save-time eligibility (422 TECH_NOT_ASSIGNABLE): a stale board that still
+  // offers a tech who has since gone prospective/inactive/office-only cannot
+  // complete the assignment.
+  const tech = newTechId ? await assertAssignableTechnician(newTechId, { conn }) : null;
 
   if ((job.technician_id || null) === newTechId) {
     return {
@@ -156,6 +155,10 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
   const fromTechId = job.technician_id || null;
   let updatedRow;
   const applyAssignment = async (assignmentTrx) => {
+    // Re-checked FOR SHARE on the writing trx: a Team-tab offboarding or
+    // field-eligibility removal (FOR UPDATE) cannot slip between the
+    // pre-transaction read above and this commit.
+    if (newTechId) await assertAssignableTechnician(newTechId, { conn: assignmentTrx });
     // Tech-day membership fence (scheduling/tech-day-lock.js): reassignment
     // moves the stop between two tech-days on the same date — the nightly
     // reorder's membership read is only safe against writers holding the
@@ -222,6 +225,25 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
     }
     throw err;
   }
+
+  // Tech-facing notice (tech-visit-notifications.js): the previous holder
+  // hears the stop left their route, the new one hears it arrived. Runs after
+  // the outermost commit, best-effort; silent for the actor's own move, for a
+  // non-assignable recipient, and while GATE_TECH_VISIT_NOTIFICATIONS is off.
+  // `noticeSnapshot`: a caller whose SAME transaction also rewrites the
+  // schedule after this call (the edit modal: tech + date in one save)
+  // passes the final date/window it is about to write, so the new tech's
+  // card names the schedule that will commit, not the row as it stood here.
+  // `noticeActorId`: who the CARD names when that is not the staff row in
+  // `actorId` — a customer moving a grouped stop online (visit-groups).
+  // `actorId` also stamps dispatch_alerts.resolved_by and the broadcast, so
+  // a system label must never ride it (codex r9 P2).
+  const rowSnapshot = { date: updatedRow.scheduled_date, windowStart: updatedRow.window_start, windowEnd: updatedRow.window_end };
+  const overrides = Object.fromEntries(Object.entries(noticeSnapshot || {}).filter(([, v]) => v !== undefined));
+  void require('./tech-visit-notifications').notifyAssignmentChange({
+    visitId: jobId, fromTechId, toTechId: newTechId, actorId: noticeActorId === undefined ? actorId : noticeActorId, trx,
+    snapshot: { ...rowSnapshot, ...overrides },
+  });
 
   if (emit) {
     const emitUpdate = () => emitDispatchJobUpdate({ jobId, actorId })

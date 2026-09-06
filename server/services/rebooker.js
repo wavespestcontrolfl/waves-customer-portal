@@ -1,13 +1,35 @@
+const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-due');
+const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const crypto = require('crypto');
 const db = require('../models/db');
 const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
+const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
+
+// A caller-chosen slot technician who became ineligible between availability
+// and this commit is a "pick another slot" outcome for the customer, not an
+// internal 422 naming staff: translate it to the route's SLOT_TAKEN recovery
+// (reschedule-public refreshes availability on that code).
+async function assertAssignableSlotTechnician(technicianId, trx) {
+  try {
+    await assertAssignableTechnician(technicianId, { conn: trx });
+  } catch (err) {
+    if (err.code !== NOT_ASSIGNABLE) throw err;
+    throw Object.assign(new Error('That time slot is no longer available. Please pick another.'), {
+      statusCode: 409,
+      status: 409,
+      isOperational: true,
+      code: 'SLOT_TAKEN',
+    });
+  }
+}
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
 const { clearTechCurrentJob } = require('./tech-status');
 const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./call-booking-catalog');
 const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = require('./scheduling/occupancy');
 const { resolveStopCoords } = require('./scheduling/travel-gap');
-const { guardedCoordSelects } = require('./scheduling/day-stops');
+const { arrivalWindowRoutingEnabled } = require('./scheduling/arrival-route');
+const { guardedCoordSelects, preloadServiceLocations } = require('./scheduling/day-stops');
 const { getIo } = require('../sockets');
 const {
   parseETDateTime, etParts, etDateString, addETDays,
@@ -166,7 +188,7 @@ function calendarDaysBetween(fromStr, toStr) {
 // that lets Undo refuse a row somebody edited after the move.
 const SERIES_MOVE_SNAPSHOT_COLUMNS = [
   'scheduled_date', 'window_start', 'window_end', 'status', 'technician_id',
-  'route_order', 'time_window', 'window_display', 'track_token_expires_at',
+  'route_order', 'time_window', 'window_display', 'track_token_expires_at', 'recurring_dispatch_due_date',
   'date_exception', 'date_exception_source', 'date_exception_at', 'date_exception_cadence_date', 'updated_at',
 ];
 
@@ -195,7 +217,7 @@ function snapshotRow(row) {
   for (const col of SERIES_MOVE_SNAPSHOT_COLUMNS) {
     const v = row[col];
     if (v instanceof Date) {
-      out[col] = col === 'scheduled_date' ? v.toISOString().slice(0, 10) : v.toISOString();
+      out[col] = ['scheduled_date', 'recurring_dispatch_due_date'].includes(col) ? v.toISOString().slice(0, 10) : v.toISOString();
     } else if (v && typeof v === 'object') {
       // A knex Raw (track_token_expires_at is computed in SQL) is an
       // expression, not a value — the persisted value comes back through
@@ -424,7 +446,8 @@ function replaySeriesMoveResult(prior, requestedDate) {
         date: r.after?.scheduled_date ?? null,
         windowStart: r.after?.window_start ?? null,
         windowEnd: r.after?.window_end ?? null,
-        conflicted: !!(r.before?.window_start && !r.after?.window_start),
+        conflicted: !r.after?.recurring_dispatch_due_date && !!(r.before?.window_start && !r.after?.window_start),
+        awaitingPlacement: !!r.after?.recurring_dispatch_due_date && !r.after?.window_start,
       }));
       return {
         success: true,
@@ -905,7 +928,7 @@ class SmartRebooker {
           windowStart: window.start,
           windowEnd: candidateEnd,
           excludeServiceIds: [String(serviceId)],
-          excludeStatuses: ['cancelled', 'completed'],
+          excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
           // Travel gap: a CUSTOMER-FACING day option (rain-out sheet) must
           // survive the commit's own probe. Admin reschedule-options stay
           // overlap-only — staff saves are advisory (GH codex #3803 r3 P2).
@@ -1139,6 +1162,9 @@ class SmartRebooker {
       window_start: win.start || service.window_start,
       window_end: windowEnd,
       status: landedStatus,
+      ...(initiatedBy !== 'auto_dispatch' ? recurringDispatchDuePatch(service, {
+        scheduled_date: newDate, window_start: win.start || service.window_start,
+      }) : {}),
       ...(lifecycleRewound ? LIVE_LIFECYCLE_RESET : {}),
       // A this-visit-only DATE move of a cadence visit is a deliberate
       // exception to the series — see dateExceptionStamp.
@@ -1174,6 +1200,11 @@ class SmartRebooker {
     // advisory at any setting.
     const overlapAdvisory = options.overlapAdvisory === true;
     let overlapWarned = false;
+    let arrivalWarning = null;
+    const useArrivalWindows = overlapAdvisory && options.adminWindowRules === true && arrivalWindowRoutingEnabled();
+    if (useArrivalWindows && updates.window_start) await preloadServiceLocations(db, [serviceId]);
+    // The technician on the COMMITTED row (RETURNING off the CAS write).
+    let committedTechId = null;
 
     // Deadlock victim retry (codex #3609 r26 P2): the solo-visit recheck
     // takes the row's stop lock AFTER this transaction's tech-day lock,
@@ -1316,7 +1347,7 @@ class SmartRebooker {
           }
         }
       }
-      if (keptTechId && updates.window_start && occupancyGateEnd) {
+      if (keptTechId && updates.window_start && occupancyGateEnd && !useArrivalWindows) {
         const overlap = await trx('scheduled_services')
           .where('scheduled_date', newDateStr)
           .where('technician_id', keptTechId)
@@ -1324,7 +1355,7 @@ class SmartRebooker {
           // excludeServiceIds) — a chained sibling's OLD slot is not a
           // conflict for the shifted primary (codex #3609 r1).
           .whereNotIn('id', [...new Set([serviceId, ...(options.excludeServiceIds || [])].map(String))])
-          .whereNotIn('status', ['cancelled', 'completed'])
+          .whereNotIn('status', [...NOT_A_ROUTE_STOP_STATUSES, 'completed'])
           // Expired estimate-slot holds are dead weight until cleanup
           // reclaims them — same active-reservation predicate
           // slot-reservation.js uses, so a lapsed hold can't block a
@@ -1370,15 +1401,17 @@ class SmartRebooker {
           windowStart: updates.window_start,
           windowEnd: occupancyGateEnd,
           excludeServiceIds: [...new Set([serviceId, ...(options.excludeServiceIds || [])].map(String))],
-          excludeStatuses: ['cancelled', 'completed'],
+          excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
           // Travel gap (GATE_SLOT_TRAVEL_GAP): the moving row's own pin —
           // CUSTOMER-FACING movers only (options.travelGap: public reschedule
           // page, SMS reply). Auto-dispatch generates its candidates under
           // its own route policy; admin and tech (rain-out) moves are
           // advisory; all stay overlap-only (GH codex #3803 r4 P1).
           ...(options.travelGap === true ? { travel: await resolveStopCoords(trx, serviceId) } : {}),
+          ...(useArrivalWindows ? { arrivalWindow: { serviceId, technicianId: keptTechId, changes: updates } } : {}),
         });
         if (occupancyClash.length) {
+          arrivalWarning = occupancyClash[0].warning || null;
           if (!overlapAdvisory) {
             // Same failure mode as the kept-tech check so every caller's
             // 409/SLOT_TAKEN handling works unchanged.
@@ -1392,8 +1425,30 @@ class SmartRebooker {
         }
       }
 
-      const updated = await applyTrackLifecycleCas(
+      // Save-time eligibility for a tech change (422 TECH_NOT_ASSIGNABLE) on
+      // the same trx that writes it — a slot offered before the tech went
+      // prospective/inactive/office-only cannot land here.
+      if (Object.prototype.hasOwnProperty.call(updates, 'technician_id')) {
+        await assertAssignableSlotTechnician(updates.technician_id, trx);
+      }
+      // Caller-supplied guard for THIS row on the move transaction (auto-dispatch
+      // re-reads the receiving tech's capabilities here; the unit mover runs the
+      // matching options.memberGuard for grouped members). Refuses before the
+      // first write; nothing to undo.
+      if (typeof options.moveGuard === 'function') {
+        await options.moveGuard({ trx, technicianId: keptTechId, service });
+      }
+      // A tech CHANGE pins the observed prior technician in the CAS: the
+      // pre-read is unlocked, and a dispatch reassignment A→B landing
+      // between read and write would otherwise let this move commit and
+      // name A as the "from" tech in the notice while B, the real holder,
+      // hears nothing. A raced reassignment misses and surfaces the
+      // concurrent-change 409 like every other CAS field.
+      const techChangeRequested = Object.prototype.hasOwnProperty.call(updates, 'technician_id')
+        && (updates.technician_id || null) !== (service.technician_id || null);
+      const committedRows = await applyTrackLifecycleCas(
         trx('scheduled_services')
+          .where(techChangeRequested ? { technician_id: service.technician_id ?? null } : {})
           // The full observed tracker/lifecycle snapshot is in the CAS (see
           // applyTrackLifecycleCas): the lifecycleRewound decision above
           // came from the outer read, and tracker writers advance state and
@@ -1427,7 +1482,12 @@ class SmartRebooker {
         .update({
           ...updates,
           track_token_expires_at: scheduledServiceTrackTokenExpiry(trx, newDate, windowEnd),
-        });
+        })
+        // The technician on the COMMITTED row: a same-tech move's notice goes
+        // to whoever actually holds the visit now, not the unlocked pre-read.
+        .returning(['id', 'technician_id']);
+      const updated = committedRows.length;
+      committedTechId = committedRows[0]?.technician_id || null;
       if (updated === 0) {
         if (membershipFenced) {
           const now = await trx('scheduled_services').where({ id: serviceId }).first('visit_id');
@@ -1463,6 +1523,50 @@ class SmartRebooker {
         new_window: win.start ? `${win.start}-${win.end}` : null,
       });
     });
+
+    // Tech-facing notice (tech-visit-notifications.js), post-commit,
+    // best-effort and NOT awaited (push delivery stays off the caller's
+    // response path): a tech change tells both techs; a same-tech
+    // date/window move tells the holder. options.actorId is the acting staff row when a
+    // staff surface made the move (so their own move stays silent); system
+    // callers are named by initiatedBy. options.suppressTechNotice: the unit
+    // mover's member moves — the canonical assignment right after sends the
+    // pair, so no intermediate "visit moved" card.
+    if (options.suppressTechNotice !== true) try {
+      const techNotices = require('./tech-visit-notifications');
+      const noticeActor = options.actorId || initiatedBy || null;
+      // A tech change pinned the prior tech in the CAS (so `service` names
+      // the real "from"); a same-tech move reads the holder off the
+      // committed row.
+      const priorTechId = service.technician_id || null;
+      const noticeTechChanged = Object.prototype.hasOwnProperty.call(options, 'technicianId')
+        && (options.technicianId || null) !== priorTechId;
+      if (noticeTechChanged) {
+        void techNotices.notifyAssignmentChange({
+          visitId: serviceId, fromTechId: priorTechId, toTechId: options.technicianId || null, actorId: noticeActor,
+          snapshot: { date: newDateStr, windowStart: updates.window_start, windowEnd: updates.window_end },
+        });
+      } else if (committedTechId) {
+        const priorDay = service.scheduled_date instanceof Date
+          ? service.scheduled_date.toISOString().slice(0, 10)
+          : String(service.scheduled_date).slice(0, 10);
+        const hhmm = (v) => (v ? String(v).slice(0, 5) : null);
+        const slotChanged = priorDay !== newDateStr
+          || hhmm(updates.window_start) !== hhmm(service.window_start)
+          || hhmm(updates.window_end) !== hhmm(service.window_end);
+        if (slotChanged) {
+          void techNotices.notifyVisitRescheduled({
+            visitId: serviceId,
+            technicianId: committedTechId,
+            actorId: noticeActor,
+            previous: { date: service.scheduled_date, windowStart: service.window_start, windowEnd: service.window_end },
+            snapshot: { date: newDateStr, windowStart: updates.window_start, windowEnd: updates.window_end },
+          });
+        }
+      }
+    } catch (noticeErr) {
+      logger.warn(`[rebooker] tech notice failed for ${serviceId} (move already committed): ${noticeErr.message}`);
+    }
 
     // Live override post-commit cleanup:
     //   1. The tech's tech_status row still points at this job
@@ -1500,6 +1604,9 @@ class SmartRebooker {
         parentServiceId: serviceId,
         fromDate: originalDate,
         toDate: newDateStr,
+        // Same actor and suppression as the parent's own notice above.
+        noticeActorId: options.actorId || initiatedBy || null,
+        suppressTechNotice: options.suppressTechNotice === true,
       });
       if (shifted > 0) {
         logger.info(`[rebooker] shifted ${shifted} call-created follow-up visit(s) with parent ${serviceId} (-> ${newDateStr})`);
@@ -1559,9 +1666,11 @@ class SmartRebooker {
       const { slotOverlapWarning } = require('./scheduling/window-rules');
       // previousStatus: the status the CAS matched — the row's real
       // pre-move state, for callers that restore it (auto-dispatch).
-      return { success: true, originalDate, newDate, previousStatus: service.status, warnings: [slotOverlapWarning(newDateStr)] };
+      return { success: true, originalDate, newDate, previousStatus: service.status, technicianId: committedTechId, warnings: [arrivalWarning || slotOverlapWarning(newDateStr)] };
     }
-    return { success: true, originalDate, newDate, previousStatus: service.status };
+    // technicianId: the holder on the COMMITTED row — a caller that suppressed
+    // the per-move tech notice (options.suppressTechNotice) tells them itself.
+    return { success: true, originalDate, newDate, previousStatus: service.status, technicianId: committedTechId };
   }
 
   // Reschedule the dropped occurrence AND every future sibling in the
@@ -1602,6 +1711,20 @@ class SmartRebooker {
     // concurrency aborts are unaffected.
     const overlapAdvisory = options.overlapAdvisory === true;
     const overlapWarnDates = new Set();
+    // Customer intent reserves the selected visit only. Future cadence dates
+    // are work for dispatch, not availability prerequisites for this booking.
+    // SMS has no pre-confirmation placement disclosure, so it keeps its
+    // existing series policy. Recheck web consent after the route's awaits.
+    const deferFuturePlacement = initiatedBy === 'customer_self_serve'
+      && require('./auto-dispatch/config').isCustomerRecurringDispatchEnabled();
+    if (initiatedBy === 'customer_self_serve'
+      && (options.disclosedFuturePlacementDays ?? null) !== (deferFuturePlacement ? 3 : null)) {
+      throw Object.assign(new Error('The scheduling details for your plan changed. Please reload and confirm again.'), {
+        statusCode: 409, code: 'SCOPE_CHANGED',
+      });
+    }
+    const arrivalWarnings = new Map();
+    const useArrivalWindows = overlapAdvisory && options.adminWindowRules === true && arrivalWindowRoutingEnabled();
     const allowedStatuses = options.allowLive === true
       ? new Set([...RESCHEDULABLE_STATUSES, ...LIVE_OVERRIDE_STATUSES])
       : RESCHEDULABLE_STATUSES;
@@ -1739,6 +1862,7 @@ class SmartRebooker {
     let committedResult = null;
     let skippedCount = 0;
     const moveRows = [];
+    const preservedOccurrences = [];
     const failedMoveFields = {
       operation_key: operationKey,
       request_key: opKey.requestKey,
@@ -1753,7 +1877,16 @@ class SmartRebooker {
       delta_days: deltaDays,
       notify_requested: options.notifyRequested === true,
     };
+    if (useArrivalWindows) {
+      const arrivalRows = await db('scheduled_services')
+        .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parentId, parentId])
+        .where('customer_id', service.customer_id)
+        .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
+        .whereNotIn('status', TERMINAL).select('id');
+      await preloadServiceLocations(db, arrivalRows.map(row => row.id));
+    }
     const occurrencesRescheduled = await db.transaction(async (trx) => {
+      const preservedFutureIds = new Set();
       // NOTE (lock order): the month-based parent's recurrence-anchor UPDATE
       // is deliberately NOT here. It is the series path's first ROW lock and
       // must be taken AFTER the date-wide advisory locks (rung 1) below —
@@ -1784,10 +1917,10 @@ class SmartRebooker {
           // the authoritative sweep, never a second query.
           'visit_id', 'property_id',
           // Undo snapshot + exception handling (SERIES_MOVE_SNAPSHOT_COLUMNS).
-          'route_order', 'time_window', 'window_display', 'track_token_expires_at', 'updated_at',
+          'route_order', 'time_window', 'window_display', 'track_token_expires_at', 'recurring_dispatch_due_date', 'updated_at',
           'date_exception', 'date_exception_source', 'date_exception_at', 'date_exception_cadence_date',
           // Feeds the duration-aware occupancy fallbacks below.
-          'estimated_duration_minutes',
+          'estimated_duration_minutes', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'customer_confirmed',
           // Rewind evidence for needsLifecycleRewind below — a pending
           // sibling can still carry stale tracker stamps (or SMS guards)
           // from an aborted attempt that a partial reset left behind.
@@ -1983,6 +2116,13 @@ class SmartRebooker {
             'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
             ['recurring-series-maintenance', String(parentId)],
           );
+          if (deferFuturePlacement) {
+            // The reminder sender holds this same fence through SMS/email
+            // delivery. Take it before the freeze read and every row write:
+            // a sender already in flight finishes first and freezes its slot;
+            // a later sender re-reads our committed, pre-closed reminder.
+            await require('../utils/customer-comms-lock').lockCustomerComms(trx, service.customer_id);
+          }
           // The authoritative sibling read runs UNDER both locks; the
           // pre-lock read only named the dates rung 1 had to cover. What
           // the sweep writes must be what it locked and projected for: a
@@ -2000,6 +2140,26 @@ class SmartRebooker {
             });
           }
           siblings = locked;
+          if (deferFuturePlacement) {
+            const future = siblings.filter((row) => String(row.id) !== String(serviceId));
+            let freeze;
+            try {
+              freeze = await trx.transaction(async (sp) => {
+                const result = await require('./auto-dispatch/route-tiers').loadReminderFreeze(sp, future.map((row) => row.id), new Date());
+                if (result.failed) throw new Error('Future reminder state unreadable');
+                return result;
+              });
+            } catch (_err) {
+              freeze = { failed: true }; // preserve future commitments; the selected visit can still move
+            }
+            for (const row of future) {
+              // Dispatch consumes pending/confirmed only. An existing
+              // reschedule hold stays an exception for staff to review.
+              if (!['pending', 'confirmed'].includes(row.status)
+                || row.auto_dispatch_locked || row.auto_dispatch_excluded || row.customer_confirmed
+                || freeze.failed || freeze.frozen.has(row.id)) preservedFutureIds.add(String(row.id));
+            }
+          }
           // Membership recheck from the LOCKED sweep (codex #3609 r26 P1):
           // an anchor that was ungrouped at the unlocked read can have been
           // attached by createOrJoinVisit since — a series sweep would move
@@ -2032,17 +2192,25 @@ class SmartRebooker {
                 "SELECT count(*)::int AS n FROM scheduled_services WHERE visit_id = ? AND status NOT IN ('completed','cancelled','skipped','no_show')",
                 [vid],
               );
-              if (Number(liveRes?.rows?.[0]?.n || 0) >= 2) {
+              const grouped = Number(liveRes?.rows?.[0]?.n || 0) >= 2;
+              const preserveCommitment = deferFuturePlacement && String(siblings[droppedIdx]?.visit_id) !== vid;
+              if (grouped && !preserveCommitment) {
                 throw Object.assign(new Error('This series includes a service grouped with another at the same stop — move that stop from the schedule (this visit only), or separate the services first.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true });
               }
               // A frozen lone-member visit is just as unmovable by the
               // sweep: its seam preserves membership and the issued
               // artifacts would keep describing the old stop.
               const verdict = await vg.frozenVisitVerdict(trx, vid);
-              if (verdict.frozen) {
+              if (preserveCommitment && (grouped || verdict.frozen)) {
+                siblings.filter((r) => String(r.visit_id) === vid).forEach((r) => preservedFutureIds.add(String(r.id)));
+              }
+              if (verdict.frozen && !preserveCommitment) {
                 throw Object.assign(new Error('This series includes a service on a visit with an issued link, records or a payment in progress — finish that visit, or contact the office to move it.'), { statusCode: 409, code: 'VISIT_SERIES_MOVE_UNSUPPORTED', isOperational: true, reason: verdict.reason });
               }
             }
+          }
+          for (let i = sweptIds.length - 1; i >= 0; i--) {
+            if (preservedFutureIds.has(String(sweptIds[i]))) sweptIds.splice(i, 1);
           }
           assertAnchorMovable(siblings);
           assertAnchorPin(siblings[droppedIdx]);
@@ -2122,7 +2290,7 @@ class SmartRebooker {
             .whereRaw('(id = ? OR recurring_parent_id = ?)', [parentId, parentId])
             .whereNotIn('id', sweptIds)
             .whereNotIn('status', TERMINAL)
-            .whereIn('scheduled_date', projectedDates)
+            .whereIn('scheduled_date', deferFuturePlacement ? [seriesDateStr] : projectedDates)
             .first('id');
           if (seriesClash) {
             throw Object.assign(new Error('That date lands on another visit in this plan — pick a different time'), {
@@ -2137,12 +2305,12 @@ class SmartRebooker {
           // hit aborts so the customer picks a different anchor slot.
           if (initiatedBy !== 'admin') {
             const { getBlackoutDates } = require('./scheduling/blackout-dates');
-            const sorted = [...projectedDates].sort();
+            const sorted = (deferFuturePlacement ? [seriesDateStr] : [...projectedDates]).sort();
             // On THIS transaction's connection: the sweep already holds its
             // scheduling locks here, and a second pool checkout under load
             // would wait on an exhausted pool with them held (codex r18 P1).
             const blackout = await getBlackoutDates(sorted[0], sorted[sorted.length - 1], trx);
-            if (projectedDates.some((d) => blackout.has(d))) {
+            if (sorted.some((d) => blackout.has(d))) {
               throw Object.assign(new Error('That schedule would land a visit on an unavailable day — pick a different time'), {
                 statusCode: 409,
                 isOperational: true,
@@ -2165,6 +2333,11 @@ class SmartRebooker {
           continue;
         }
 
+        if (preservedFutureIds.has(String(sib.id))) {
+          preservedOccurrences.push({ id: sib.id, date: dateOnly(sib.scheduled_date) });
+          skippedCount += 1;
+          continue;
+        }
         const occurrenceIndex = i - startIdx;
         const isAnchor = occurrenceIndex === 0;
         // Memoized deduped projection — identical to what the collision
@@ -2199,7 +2372,8 @@ class SmartRebooker {
         // two transactions. Occupancy probes skip a windowless anchor, as
         // they do for any windowless row.
         const anchorCleared = isAnchor && options.clearAnchorWindow === true;
-        if (anchorCleared) {
+        const deferOccurrence = deferFuturePlacement && !isAnchor;
+        if (anchorCleared || deferOccurrence) {
           occurrenceWindow = { start: null, end: null };
         } else if (isAnchor) {
           occurrenceWindow = seriesOccurrenceWindow(win, sib, options);
@@ -2290,6 +2464,7 @@ class SmartRebooker {
             : occupancyProbeEnd(updateData.window_start, null, sib.estimated_duration_minutes)
         ));
         if (isAnchor && Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
+          await assertAssignableSlotTechnician(options.technicianId || null, trx);
           updateData.technician_id = options.technicianId || null;
           // Tech change also invalidates the sequence (same rule as the
           // single-reschedule path above).
@@ -2301,11 +2476,11 @@ class SmartRebooker {
               'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
               ['slot-reserve', `${options.technicianId}:${String(date).split('T')[0]}`],
             );
-            const overlap = await trx('scheduled_services')
+            const overlap = useArrivalWindows ? null : await trx('scheduled_services')
               .where('scheduled_date', date)
               .where('technician_id', options.technicianId)
               .whereNot('id', sib.id)
-              .whereNotIn('status', ['cancelled', 'completed'])
+              .whereNotIn('status', [...NOT_A_ROUTE_STOP_STATUSES, 'completed'])
               .where((q) => {
                 q.whereNull('reservation_expires_at')
                   .orWhereRaw('reservation_expires_at > NOW()');
@@ -2344,10 +2519,12 @@ class SmartRebooker {
             windowStart: updateData.window_start,
             windowEnd: anchorOccEnd,
             excludeServiceIds: sweptIds,
-            excludeStatuses: TERMINAL,
+            excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
             travel: seriesTravel,
+            ...(useArrivalWindows ? { arrivalWindow: { serviceId: sib.id, changes: updateData } } : {}),
           });
           if (anchorOccClash.length) {
+            if (anchorOccClash[0].warning) arrivalWarnings.set(String(date).split('T')[0], anchorOccClash[0].warning);
             if (!overlapAdvisory) {
               throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
                 statusCode: 409,
@@ -2425,10 +2602,12 @@ class SmartRebooker {
             windowStart: updateData.window_start,
             windowEnd: occEnd,
             excludeServiceIds: sweptIds,
-            excludeStatuses: TERMINAL,
+            excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
             travel: seriesTravel,
+            ...(useArrivalWindows ? { arrivalWindow: { serviceId: sib.id, changes: updateData } } : {}),
           });
           if (occClash.length) {
+            if (occClash[0].warning) arrivalWarnings.set(String(date).split('T')[0], occClash[0].warning);
             if (overlapAdvisory) {
               // Staff-advisory mode (admin dispatch): overlaps never block a
               // save — collect the date for the warnings[] the route returns.
@@ -2477,6 +2656,19 @@ class SmartRebooker {
           }
         }
 
+        // Existing handoffs survive later staff/SMS/gate-off moves. Rebase
+        // an untimed visit to its new due date; only a timed landing ends
+        // its dispatch obligation. Use the final window after clash handling.
+        const awaitingPlacement = !updateData.window_start
+          && (deferOccurrence || !!sib.recurring_dispatch_due_date);
+        if (deferOccurrence) updateData.recurring_dispatch_due_date = date;
+        else Object.assign(updateData, recurringDispatchDuePatch(sib, updateData));
+        if (awaitingPlacement) {
+          updateData.time_window = null;
+          updateData.window_display = null;
+          updateData.route_order = null;
+        }
+
         // Atomic optimistic guard for EVERY row — same contract as the
         // single-job path, and it carries the previously READ scheduling
         // fields, not just status: a concurrent reschedule usually leaves
@@ -2497,6 +2689,11 @@ class SmartRebooker {
               // the values read above) — a concurrent resize/reassignment
               // must invalidate the match, not be steamrolled.
               window_end: sib.window_end ?? null,
+              ...(deferFuturePlacement ? {
+                auto_dispatch_locked: sib.auto_dispatch_locked ?? null,
+                auto_dispatch_excluded: sib.auto_dispatch_excluded ?? null,
+                customer_confirmed: sib.customer_confirmed ?? null,
+              } : {}),
               technician_id: sib.technician_id ?? null,
               // Duration pin, only when the occupancy probes above derived
               // their span from it (null landing end + gate on): a
@@ -2524,7 +2721,7 @@ class SmartRebooker {
             code: 'SLOT_TAKEN',
           });
         }
-        if (sibClashBeyondHorizon || (anchorCleared && sib.window_start)) {
+        if (awaitingPlacement || sibClashBeyondHorizon || (anchorCleared && sib.window_start)) {
           // The row just went timed → windowless: pre-close its reminder in
           // THIS trx (windows_preclosed marker), or the sync trigger's
           // recompute leaves it armed for the 08:00 placeholder time.
@@ -2566,6 +2763,7 @@ class SmartRebooker {
           // schedule_conflict admin notification for retiming; the tech is
           // KEPT.
           conflicted: sibClashBeyondHorizon,
+          awaitingPlacement,
         });
       }
 
@@ -2585,6 +2783,8 @@ class SmartRebooker {
         fromDate: dateOnly(service.scheduled_date),
         toDate: seriesDateStr,
         occupancyHeld: true,
+        // Series-scope moves carry no tech notices in this PR (fan-out).
+        suppressTechNotice: true,
         // The exact rows rung 1 was taken for — a child that changed since
         // is judged against THIS set and skipped, never re-planned onto an
         // unlocked day (codex r12 P1).
@@ -2623,7 +2823,7 @@ class SmartRebooker {
       const exceptionCount = moveRows.filter((r) => r.exception).length;
       const seriesWarnings = [...overlapWarnDates].sort().map((d) => {
         const { slotOverlapWarning } = require('./scheduling/window-rules');
-        return slotOverlapWarning(d);
+        return arrivalWarnings.get(d) || slotOverlapWarning(d);
       }).concat(followUpWarnings);
       committedResult = {
         success: true,
@@ -2631,6 +2831,8 @@ class SmartRebooker {
         newDate,
         occurrencesRescheduled: touched.length,
         rescheduledOccurrences: touched,
+        ...(deferFuturePlacement ? { futurePlacementDays: 3 } : {}),
+        ...(preservedOccurrences.length ? { preservedOccurrences } : {}),
         deltaDays,
         skippedCount,
         exceptionCount,
@@ -2642,6 +2844,7 @@ class SmartRebooker {
         // operator card is a marker-fenced, reconciled effect (codex r15
         // P1), never an in-memory alert a dying pass can lose.
         overlapDates: [...overlapWarnDates].sort(),
+        arrivalWindowDates: [...arrivalWarnings.keys()].sort(),
         followUpOccurrences,
         // Rows whose tracker lifecycle this move rewound — the replay /
         // reconciler cleanup set (replaySeriesMoveCleanup).
@@ -2654,9 +2857,9 @@ class SmartRebooker {
         movable_count: touched.length,
         skipped_count: skippedCount,
         exception_count: exceptionCount,
-        // Windowless landings AND accepted advisory overlaps both owe the
+        // Conflicts and preserved future commitments both owe the
         // operator a card — the reconciler selects on this count.
-        conflict_count: touched.filter((t) => t.conflicted).length + overlapWarnDates.size,
+        conflict_count: touched.filter((t) => t.conflicted).length + overlapWarnDates.size + preservedOccurrences.length,
         status: 'committed',
         rows: JSON.stringify(moveRows),
         result: JSON.stringify(committedResult),
@@ -2852,7 +3055,7 @@ class SmartRebooker {
         windowStart: row.window_start,
         windowEnd: occupancyProbeEnd(row.window_start, row.window_end, row.estimated_duration_minutes),
         excludeServiceIds: sweptIds,
-        excludeStatuses: TERMINAL,
+        excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
       });
       if (clash.length) conflictCount += 1;
     }

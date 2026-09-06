@@ -51,7 +51,7 @@ function ReportMock() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
         <span style={{
           width: 26, height: 26, borderRadius: 8, background: W.blueDeeper,
-          color: W.white, fontSize: 13, fontWeight: 800,
+          color: W.white, fontSize: 13, fontWeight: 700,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>
           W
@@ -110,7 +110,7 @@ function ReportMock() {
           <path d="M3 7l7 7 4-4 7 7" />
           <path d="M15 17h6v-6" />
         </svg>
-        <span data-gt="" style={{ fontSize: 12, fontWeight: 700, color: W.green, lineHeight: 1.2 }}>
+        <span data-gt="" style={{ fontSize: 14, fontWeight: 700, color: W.green, lineHeight: 1.2 }}>
           Pest pressure trending down
         </span>
       </div>
@@ -143,7 +143,7 @@ function LawnReportMock() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
         <span style={{
           width: 26, height: 26, borderRadius: 8, background: W.blueDeeper,
-          color: W.white, fontSize: 13, fontWeight: 800,
+          color: W.white, fontSize: 13, fontWeight: 700,
           display: 'flex', alignItems: 'center', justifyContent: 'center',
         }}>
           W
@@ -175,14 +175,14 @@ function LawnReportMock() {
         }}>
           {/* data-gt="" — see ReportMock's 0:52 badge; the auto-tiering would
               repaint this white-on-navy text to var(--tt) and hide it. */}
-          <span data-gt="" style={{ fontSize: 18, fontWeight: 800, lineHeight: 1 }}>83</span>
+          <span data-gt="" style={{ fontSize: 18, fontWeight: 700, lineHeight: 1 }}>83</span>
           <span data-gt="" style={{ fontSize: 8.5, fontWeight: 700, letterSpacing: '0.06em' }}>/ 100</span>
         </span>
         <div style={{ flex: 1, display: 'grid', gap: 5 }}>
           {scoreRows.map(([label, score]) => (
             <div key={label} style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
               <span data-gt="" style={{ fontSize: 10.5, fontWeight: 600, color: 'rgba(255,255,255,.85)', lineHeight: 1.2 }}>{label}</span>
-              <span data-gt="" style={{ fontSize: 10.5, fontWeight: 800, color: W.white, lineHeight: 1.2 }}>{score}</span>
+              <span data-gt="" style={{ fontSize: 10.5, fontWeight: 700, color: W.white, lineHeight: 1.2 }}>{score}</span>
             </div>
           ))}
         </div>
@@ -201,7 +201,7 @@ function LawnReportMock() {
           <path d="M3 17l7-7 4 4 7-7" />
           <path d="M15 7h6v6" />
         </svg>
-        <span data-gt="" style={{ fontSize: 12, fontWeight: 700, color: W.green, lineHeight: 1.2 }}>
+        <span data-gt="" style={{ fontSize: 14, fontWeight: 700, color: W.green, lineHeight: 1.2 }}>
           Turf density trending up
         </span>
       </div>
@@ -214,7 +214,7 @@ export default function ReportShowcaseCard({ variant = 'pest' }) {
   return (
     <section style={estimateCard()}>
       <div style={{
-        fontSize: 12, fontWeight: 700, color: W.textCaption,
+        fontSize: 14, fontWeight: 700, color: W.textCaption,
         textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8,
       }}>
         {lawn ? 'The Waves lawn report' : 'The Waves report'}
