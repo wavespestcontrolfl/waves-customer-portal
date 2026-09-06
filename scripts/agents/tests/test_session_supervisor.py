@@ -245,6 +245,25 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse(any('bypass' in value or 'last' in value or 'model' in value for value in argv))
         self.assertEqual(result, {'state': 'waiting', 'reason': 'waiting_ci'})
 
+    def test_exited_cli_leader_does_not_leave_its_tool_process_running(self):
+        self.store()
+        executable = self.root / 'codex'
+        child_pid = self.root / 'child.pid'
+        executable.write_text('#!' + sys.executable + '\nimport json,subprocess,sys\n'
+                              + 'from pathlib import Path\n'
+                              + 'sys.stdin.read()\n'
+                              + 'child=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"])\n'
+                              + f'Path({str(child_pid)!r}).write_text(str(child.pid))\n'
+                              + 'print(json.dumps({"type":"item.completed","item":{"type":"agent_message",'
+                              + '"text":"{\\\"state\\\":\\\"waiting\\\",\\\"reason\\\":\\\"waiting_ci\\\"}"}}))\n')
+        executable.chmod(0o700)
+        env = {**supervisor.environment(), 'PATH': str(self.root) + ':' + os.environ['PATH']}
+        with patch.object(supervisor, 'environment', return_value=env):
+            result = supervisor.resume(self.root, self.key, self.job)
+        self.assertEqual(result['state'], 'waiting')
+        self.assertIsNone(supervisor.process_stamp(int(child_pid.read_text())))
+        self.assertFalse(supervisor.group_exists(supervisor.read_jobs(self.root)[self.key]['worker_pid']))
+
     def test_pause_during_real_child_run_terminates_only_its_worker(self):
         self.store()
         executable = self.root / 'codex'
@@ -298,6 +317,16 @@ class SupervisorTests(unittest.TestCase):
             args.session = '00000000-0000-4000-8000-000000000002'
             with self.assertRaises(ValueError):
                 supervisor.enroll(state, args)
+            existing = supervisor.read_jobs(state)
+            existing_key = next(iter(existing))
+            args.session = self.job['session']
+            for pending, alive in [(True, False), (False, True)]:
+                existing[existing_key].update({'status': 'paused', 'launch_pending': pending})
+                supervisor.atomic_json(state / 'jobs.json', existing)
+                with patch.object(supervisor, 'group_exists', return_value=alive):
+                    with self.assertRaises(ValueError):
+                        supervisor.enroll(state, args)
+                self.assertEqual(supervisor.read_jobs(state), existing)
         self.assertEqual(len(supervisor.read_jobs(state)), 1)
 
     def test_install_uses_reviewed_copy_and_launchd_runs_execute_tick(self):

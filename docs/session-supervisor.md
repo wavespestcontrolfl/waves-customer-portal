@@ -66,6 +66,8 @@ transcript open. Claude's native agent listing also detects live sessions.
 PID start times distinguish a restarted process from a reused PID. Worktree,
 origin, branch, and pushed HEAD must still match before a resume. An ambiguous
 interrupted launch fences the whole queue until inspected and explicitly retried.
+Worker cleanup drains the CLI and its remaining tool process group.
+Re-enrollment cannot erase a surviving worker or unresolved launch record.
 After a supervisor crash, the next tick terminates any recorded surviving worker
 before another job can launch; the interrupted job requires an explicit retry.
 

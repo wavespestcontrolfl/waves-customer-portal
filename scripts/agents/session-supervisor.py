@@ -104,6 +104,17 @@ def update_job(root, key, revision, changes):
         return True
 
 
+def clear_worker(root, key, pid, stamp):
+    # Cleanup remains valid after pause changes the job revision, but can never
+    # erase a replacement worker's identity.
+    with locked(root):
+        jobs = read_jobs(root)
+        job = jobs.get(key, {})
+        if job.get('worker_pid') == pid and job.get('worker_stamp') == stamp:
+            job.update({'worker_pid': None, 'worker_stamp': None, 'launch_pending': False})
+            atomic_json(root / 'jobs.json', jobs)
+
+
 def process_stamp(pid):
     if not isinstance(pid, int) or pid < 2:
         return None
@@ -225,9 +236,10 @@ def enroll(root, args):
     with locked(root) if args.execute else nullcontext():
         jobs = read_jobs(root)
         for other_key, other in jobs.items():
-            if other['status'] in ['complete', 'paused', 'blocked']:
-                continue
-            if other_key == key or other['worktree'] == cwd or (other['repo'], other['pr']) == (job['repo'], job['pr']):
+            overlap = other_key == key or other['worktree'] == cwd or (other['repo'], other['pr']) == (job['repo'], job['pr'])
+            if overlap and (other.get('launch_pending') or group_exists(other.get('worker_pid'))):
+                raise ValueError('Existing worker or interrupted launch must be recovered before re-enrollment')
+            if overlap and other['status'] not in ['complete', 'paused', 'blocked']:
                 raise ValueError('Session, PR, or worktree already enrolled; finish or pause its existing job first')
         if args.execute:
             jobs[key] = job
@@ -258,17 +270,48 @@ def disposition(raw, provider):
     return value
 
 
-def terminate(process):
-    if process.poll() is not None:
-        return
+def group_exists(pid):
+    if not isinstance(pid, int) or pid < 2:
+        return False
     try:
-        os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.wait()
+        os.killpg(pid, 0)
+        return True
     except ProcessLookupError:
-        process.wait()
+        return False
+    except PermissionError:
+        return True  # macOS can return EPERM for a group containing only zombies.
+
+
+def drain_group(pid, stamp, process=None):
+    if process is not None:
+        process.poll()
+    if not group_exists(pid):
+        return
+    current = process_stamp(pid)
+    if current and current != stamp:
+        raise RuntimeError('Worker PID was reused; refusing to signal an unrelated group')
+    if current and (os.getpgid(pid) != pid or os.getsid(pid) != pid):
+        raise RuntimeError('Worker identity is ambiguous; queue remains fenced')
+    # CLI leaders may exit before their tools. Drain the entire recorded group.
+    for sig, seconds in [(signal.SIGTERM, 10), (signal.SIGKILL, 5)]:
+        try:
+            os.killpg(pid, sig)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            if process is not None:
+                process.poll()
+            if not group_exists(pid):
+                return
+            raise
+        deadline = time.monotonic() + seconds
+        while group_exists(pid) and time.monotonic() < deadline:
+            if process is not None:
+                process.poll()  # Reap our own leader so its zombie cannot hold the group.
+            time.sleep(0.1)
+        if not group_exists(pid):
+            return
+    raise RuntimeError('Worker group has not exited; queue remains fenced')
 
 
 def resume(root, key, job):
@@ -298,9 +341,10 @@ def resume(root, key, job):
         process = subprocess.Popen(argv, cwd=job['worktree'], env=environment(),
                                    stdin=subprocess.PIPE, stdout=output, stderr=subprocess.DEVNULL,
                                    start_new_session=True)
+        stamp = process_stamp(process.pid)
         try:
             if not update_job(root, key, job['revision'], {'status': 'running', 'worker_pid': process.pid,
-                                                          'worker_stamp': process_stamp(process.pid),
+                                                          'worker_stamp': stamp,
                                                           'launch_pending': False}):
                 return {'state': 'blocked', 'reason': 'owner_decision'}
             process.stdin.write(prompt.encode())
@@ -321,7 +365,9 @@ def resume(root, key, job):
         finally:
             if not process.stdin.closed:
                 process.stdin.close()
-            terminate(process)
+            drain_group(process.pid, stamp, process)
+            process.wait()
+            clear_worker(root, key, process.pid, stamp)
 
 
 def inspect_job(job, now):
@@ -362,20 +408,13 @@ def reconcile_workers(root, jobs, execute):
     clear = True
     for key, job in jobs.items():
         pid, stamp = job.get('worker_pid'), job.get('worker_stamp')
-        if stamp and process_stamp(pid) == stamp:
+        if group_exists(pid):
             clear = False
             print(json.dumps({'job': key, 'action': 'reap', 'reason': 'orphaned_worker'}), flush=True)
             if not execute:
                 continue
-            # Only a recorded child that still leads its own session/group.
-            if os.getpgid(pid) != pid or os.getsid(pid) != pid:
-                raise RuntimeError('Worker identity is ambiguous; queue remains fenced')
-            os.killpg(pid, signal.SIGTERM)
-            deadline = time.monotonic() + 10
-            while process_stamp(pid) == stamp and time.monotonic() < deadline:
-                time.sleep(0.1)
-            if process_stamp(pid) == stamp:
-                os.killpg(pid, signal.SIGKILL)
+            drain_group(pid, stamp)
+            clear_worker(root, key, pid, stamp)
             update_job(root, key, job['revision'], {'status': 'blocked', 'reason': 'orphaned_worker'})
         elif job.get('launch_pending') or job['status'] == 'launching':
             clear = False
@@ -437,7 +476,7 @@ def control(root, args):
         if args.action == 'finish' and not snapshot(job)['merged']:
             raise ValueError('Finish requires a merged PR; pause cancelled or blocked work')
         if args.execute:
-            if args.action == 'retry' and process_stamp(job.get('worker_pid')) == job.get('worker_stamp') and job.get('worker_stamp'):
+            if args.action == 'retry' and group_exists(job.get('worker_pid')):
                 raise ValueError('Wait for the paused worker to exit before retrying it')
             job.update({'status': {'pause': 'paused', 'retry': 'watching', 'finish': 'complete'}[args.action],
                         'revision': str(uuid.uuid4()), 'reason': 'owner_' + args.action})
