@@ -2462,7 +2462,10 @@ router.get('/:id/properties', requireAdmin, async (req, res, next) => {
 router.post('/:id/properties', requireAdmin, async (req, res, next) => {
   try {
     const customerProperties = require('../services/customer-properties');
-    const { address_line1, address_line2, city, state, zip, occupancy_type, label } = req.body || {};
+    const { address_line1, address_line2, city, state, zip, occupancy_type, relationship, label } = req.body || {};
+    const { normalizeRelationship } = require('../constants/property-relationships');
+    const rel = normalizeRelationship(relationship);
+    if (!rel.ok) return res.status(400).json({ error: 'invalid relationship' });
     if (!String(address_line1 || '').trim()) {
       return res.status(400).json({ error: 'address_line1 is required' });
     }
@@ -2500,6 +2503,7 @@ router.post('/:id/properties', requireAdmin, async (req, res, next) => {
       customerId: req.params.id,
       address_line1, address_line2, city, state: stateCode, zip,
       occupancyType: occupancy_type,
+      relationship: rel.value,
       label,
       source: 'manual',
     });
@@ -2511,7 +2515,7 @@ router.post('/:id/properties', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// PATCH /api/admin/customers/:id/properties/:propertyId — edit occupancy/label.
+// PATCH /api/admin/customers/:id/properties/:propertyId — edit occupancy/relationship/label.
 router.patch('/:id/properties/:propertyId', requireAdmin, async (req, res, next) => {
   try {
     const { OCCUPANCY_TYPES, listProperties } = require('../services/customer-properties');
@@ -2521,6 +2525,11 @@ router.patch('/:id/properties/:propertyId', requireAdmin, async (req, res, next)
         return res.status(400).json({ error: 'invalid occupancy_type' });
       }
       updates.occupancy_type = req.body.occupancy_type;
+    }
+    if (req.body && req.body.relationship !== undefined) {
+      const rel = require('../constants/property-relationships').normalizeRelationship(req.body.relationship);
+      if (!rel.ok) return res.status(400).json({ error: 'invalid relationship' });
+      updates.relationship = rel.value;
     }
     if (req.body && req.body.label !== undefined) {
       const over = propertyFieldOverLimit({ label: req.body.label });

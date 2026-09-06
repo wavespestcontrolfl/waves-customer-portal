@@ -232,7 +232,7 @@ async function ensurePrimaryCore(customerOrId, { occupancyType, source } = {}, c
  * customers.address_* (filled only when empty), so the ~310 mirror readers see a
  * service address. Returns { created, propertyId }.
  */
-async function recordCallProperty({ customerId, address_line1, address_line2, city, state, zip, occupancyType, label, source = 'call_pipeline', claimFence = null, conn = null }) {
+async function recordCallProperty({ customerId, address_line1, address_line2, city, state, zip, occupancyType, relationship = null, label, source = 'call_pipeline', claimFence = null, conn = null }) {
   const street = String(address_line1 || '').trim();
   if (!customerId || !street) return { created: false, propertyId: null };
 
@@ -278,6 +278,9 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
     customer_id: customerId,
     label: label || null,
     occupancy_type: normalizeOccupancy(occupancyType),
+    // Only written when the caller classified it — a NULL relationship reads
+    // as "not recorded" in the admin panel, never as a default.
+    ...(relationship ? { relationship } : {}),
     address_line1: street,
     address_line2: address_line2 || null,
     city: city || null,

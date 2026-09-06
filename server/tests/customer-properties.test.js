@@ -145,3 +145,18 @@ describe('soleActivePropertyId (GH #3699 r3: property anchor for the visit-group
     expect(await soleActivePropertyId('c1', () => { throw new Error('down'); })).toBeNull();
   });
 });
+
+describe('property relationships (constants/property-relationships)', () => {
+  const { PROPERTY_RELATIONSHIPS, normalizeRelationship } = require('../constants/property-relationships');
+  test('vocabulary carries the family case as a relationship, not an occupancy', () => {
+    expect(PROPERTY_RELATIONSHIPS).toEqual(['own_home', 'rental_owned', 'family_home', 'managed_for_client']);
+    expect(OCCUPANCY_TYPES).not.toContain('family');
+  });
+  test('normalizes: blank clears, known values pass, anything else is refused', () => {
+    expect(normalizeRelationship(undefined)).toEqual({ ok: true, value: null });
+    expect(normalizeRelationship('')).toEqual({ ok: true, value: null });
+    expect(normalizeRelationship(' Family_Home ')).toEqual({ ok: true, value: 'family_home' });
+    expect(normalizeRelationship('family')).toEqual({ ok: false });
+    expect(normalizeRelationship(42)).toEqual({ ok: false });
+  });
+});
