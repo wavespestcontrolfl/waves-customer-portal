@@ -8582,6 +8582,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // Every save pre-acquires its complete tech-day fence before stop and
       // maintenance locks, including same-slot assignment echoes from the modal.
       // Otherwise an ordinary save and an address save can deadlock.
+      let arrivalRouteFenceKeys = new Set();
       {
         // Address rows are fenced on EVERY locked date, not just their own
         // and the requested move: a cadence rewrite in the same save can land
@@ -8606,17 +8607,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             }
           }
         }
-        if (updates.scheduled_date !== undefined) {
+        if (updates.scheduled_date !== undefined || (useArrivalWindows && occupancyRouteTouched)) {
           const prov = await trx('scheduled_services').where({ id: req.params.id })
             .first('technician_id', trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"));
           if (prov) {
             preFence.push({ techId: prov.technician_id, date: prov.day });
-            preFence.push({ techId: prov.technician_id, date: dateOnly(updates.scheduled_date) });
+            preFence.push({ techId: prov.technician_id, date: updates.scheduled_date !== undefined ? dateOnly(updates.scheduled_date) : prov.day });
           }
         }
         if (preFence.length) {
           const { lockTechDays } = require('../services/scheduling/tech-day-lock');
-          await lockTechDays(trx, preFence);
+          arrivalRouteFenceKeys = new Set(await lockTechDays(trx, preFence));
         }
       }
       // Match customer editors and grouping: maintenance/comms, customer row,
@@ -8760,6 +8761,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               statusCode: 409,
               isOperational: true,
               code: 'VISIT_CHANGED_RETRY',
+            });
+          }
+          if (useArrivalWindows && [dateOnly(occRow.scheduled_date), occDate].some((day) =>
+            !arrivalRouteFenceKeys.has(`${occRow.technician_id || 'unassigned'}:${day}`))) {
+            throw Object.assign(new Error('This appointment changed routes while saving — reload and save again.'), {
+              statusCode: 409, isOperational: true, code: 'VISIT_CHANGED_RETRY',
             });
           }
           // Scheduling-field CAS against the unlocked pre-read the window
