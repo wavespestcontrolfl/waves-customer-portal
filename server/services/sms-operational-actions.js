@@ -127,9 +127,9 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     const exceptions = facts.filter((f) => !['applied', 'unchanged'].includes(f.outcome));
     if (exceptions.length + extracted.dropped) {
       const notif = await NotificationService.notifyAdmin('alert', 'SMS instructions need review',
-        'Part of this message needs an evidence, property, timing, or existing-value check. Open the conversation to review the source.',
+        'Part of this message needs an evidence, property, timing, or existing-value check. Open the customer profile to review the source conversation.',
         { trx, bell: true, dedupeKey: `sms-property-instructions:${message.id}`,
-          link: `/admin/communications?thread=${encodeURIComponent(customer.id)}`,
+          link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
           metadata: { triggerKey: 'sms_operational_exception', customerId: customer.id, sms_log_id: message.id,
             fields: exceptions.map((f) => f.field), unverified_count: extracted.dropped,
             reasons: [...new Set(exceptions.map((f) => f.outcome))] } });
@@ -173,9 +173,9 @@ async function runSmsOperationalActions({ now = new Date(), conn = db, extract =
           const receipt = await recordExtractionAttempt({ ...source, trx, status: 'failed', error_message: 'sms_operations_failed' });
           if (receipt.status !== 'failed_max_retries') return;
           const notification = await NotificationService.notifyAdmin('alert', 'An SMS needs a manual review',
-            'The SMS agent could not finish processing this conversation after its retries. Open the conversation to check the requested work.',
+            'The SMS agent could not finish processing this conversation after its retries. Open the customer profile to check the requested work.',
             { trx, bell: true, dedupeKey: `sms-operations-failed:${message.id}`,
-              link: `/admin/communications?thread=${encodeURIComponent(message.customer_id)}`,
+              link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}`,
               metadata: { triggerKey: 'sms_operational_exception', customerId: message.customer_id, sms_log_id: message.id } });
           if (!notification?.id) throw new Error('sms_operations_bell_not_persisted');
         });
@@ -239,10 +239,10 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
         timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
       });
       const body = verdict.verdict === 'uncertain'
-        ? `The ${when} ET SMS needs a completion check. Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the conversation to verify.`
-        : `Requested or promised in the ${when} ET conversation. The available follow-up records do not establish completion. Open the conversation to take the next step.`;
+        ? `The ${when} ET SMS needs a completion check. Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the customer profile to verify.`
+        : `Requested or promised in the ${when} ET conversation. The available follow-up records do not establish completion. Open the customer profile to take the next step.`;
       const notification = await NotificationService.notifyAdmin('alert', KIND_LABELS[row.kind] || KIND_LABELS.other, body,
-        { trx, bell: true, dedupeKey, refreshOnDedupe: true, link: `/admin/communications?thread=${encodeURIComponent(message.customer_id)}`,
+        { trx, bell: true, dedupeKey, refreshOnDedupe: true, link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}`,
           metadata: { triggerKey: 'sms_operational_followup', customerId: message.customer_id,
             sms_log_id: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.verdict } });
       if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
