@@ -899,7 +899,7 @@ server-side):
     visits within ±3 calendar days of the due date, honoring preferences;
     initial placement bypasses improvement thresholds, with unresolved
     visits escalated through `schedule_conflict`. Future staff-locked,
-    customer-confirmed, reminder-frozen or committed/grouped visits stay
+    customer-confirmed, reschedule-held, reminder-frozen or committed/grouped visits stay
     unchanged and are flagged for staff review instead of blocking the
     selected appointment. GET/POST add optional `futurePlacementDays: 3`
     for disclosure. Web POST echoes `disclosed_future_placement_days`

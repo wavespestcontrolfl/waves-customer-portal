@@ -2128,7 +2128,10 @@ class SmartRebooker {
               freeze = { failed: true }; // preserve future commitments; the selected visit can still move
             }
             for (const row of future) {
-              if (row.auto_dispatch_locked || row.auto_dispatch_excluded || row.customer_confirmed
+              // Dispatch consumes pending/confirmed only. An existing
+              // reschedule hold stays an exception for staff to review.
+              if (!['pending', 'confirmed'].includes(row.status)
+                || row.auto_dispatch_locked || row.auto_dispatch_excluded || row.customer_confirmed
                 || freeze.failed || freeze.frozen.has(row.id)) preservedFutureIds.add(String(row.id));
             }
           }

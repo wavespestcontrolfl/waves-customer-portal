@@ -151,6 +151,25 @@ async function completeRun(runId, { status, totals, error = null }) {
 async function flagUnplacedVisits(config, nowDate = new Date()) {
   const { etDateString, addETDays } = require('../../utils/datetime-et');
   const { toDateStr } = require('./dates');
+  // This audit runs after placement and on later apply passes, so cleanup
+  // retries after a failure and also catches staff placement/cancellation.
+  // Keep the card unread only while its recorded due visit is still unplaced.
+  await db('notifications')
+    .where({ recipient_type: 'admin', category: 'schedule_conflict' })
+    .whereNull('read_at')
+    .whereRaw("metadata->>'dedupeKey' LIKE ?", ['recurring-dispatch:%'])
+    .whereNotExists(function stillUnplaced() {
+      this.select('s.id').from('scheduled_services as s')
+        .whereRaw("s.id::text = notifications.metadata->>'scheduledServiceId'")
+        .whereRaw("s.recurring_dispatch_due_date::text = notifications.metadata->>'dueDate'")
+        .whereNull('s.window_start')
+        .whereIn('s.status', ['pending', 'confirmed']);
+    })
+    .update({
+      read_at: nowDate,
+      title: 'Recurring placement alert resolved',
+      body: 'This visit is no longer awaiting placement for the recorded due date.',
+    });
   const cutoff = etDateString(addETDays(nowDate, Math.max(14, config.lockWindowDays + 4)));
   const rows = await db('scheduled_services as s')
     .join('customers as c', 'c.id', 's.customer_id')
@@ -172,6 +191,9 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
         bell: true,
         link: `/admin/dispatch?tab=schedule&date=${due}`,
         dedupeKey: `recurring-dispatch:${row.id}:${due}`,
+        // Reopen a previously resolved card if this due date becomes unplaced
+        // again; the shared deduper leaves acknowledged, unchanged cards alone.
+        refreshOnDedupe: true,
         metadata: { scheduledServiceId: row.id, customerId: row.customer_id, dueDate: due },
       },
     );

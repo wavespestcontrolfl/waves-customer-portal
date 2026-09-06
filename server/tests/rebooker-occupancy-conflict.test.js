@@ -517,7 +517,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     expect(sibUpdate.update).not.toHaveBeenCalled();
   });
 
-  test.each(['staff', 'customer', 'customer_sms', 'customer_locked', 'customer_confirmed', 'customer_grouped', 'customer_anchor_taken', 'customer_stale_disclosure'])('%s: quarterly move honors disclosed future-placement scope', async (actor) => {
+  test.each(['staff', 'customer', 'customer_sms', 'customer_locked', 'customer_confirmed', 'customer_rescheduled', 'customer_grouped', 'customer_anchor_taken', 'customer_stale_disclosure'])('%s: quarterly move honors disclosed future-placement scope', async (actor) => {
     process.env.GATE_CUSTOMER_RECURRING_DISPATCH = 'true';
     jest.spyOn(require('../services/auto-dispatch/config'), 'isCustomerRecurringDispatchEnabled').mockReturnValue(true);
     const anchor = {
@@ -533,9 +533,10 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     ];
     siblings.push({ ...siblings[1], id: 'svc-3', scheduled_date: dayOffset(190) });
     siblings.push({ ...siblings[1], id: 'svc-4', scheduled_date: dayOffset(280) });
-    const preservesFuture = ['customer_locked', 'customer_confirmed', 'customer_grouped'].includes(actor);
+    const preservesFuture = ['customer_locked', 'customer_confirmed', 'customer_rescheduled', 'customer_grouped'].includes(actor);
     if (actor === 'customer_locked') siblings[1].auto_dispatch_locked = true;
     if (actor === 'customer_confirmed') siblings[1].customer_confirmed = true;
+    if (actor === 'customer_rescheduled') siblings[1].status = 'rescheduled';
     if (actor === 'customer_grouped') {
       siblings[1].visit_id = 'future-visit';
       jest.spyOn(require('../services/visit-groups'), 'frozenVisitVerdict').mockResolvedValue({ frozen: false });

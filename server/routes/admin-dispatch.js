@@ -4259,7 +4259,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       try {
         const NotificationService = require('../services/notification-service');
         const parts = [];
-        if (!cardOnly && preserved.length) parts.push(`${preserved.length} future visit(s) kept existing appointments because of staff locks, confirmed timing, or visit commitments (${preserved.map((c) => c.date).join(', ')}) — review their cadence in dispatch`);
+        if (!cardOnly && preserved.length) parts.push(`${preserved.length} future visit(s) kept existing appointments because of staff locks, reschedule holds, confirmed timing, or visit commitments (${preserved.map((c) => c.date).join(', ')}) — review their cadence in dispatch`);
         if (dueConflicts.length) parts.push(`${dueConflicts.length} future visit(s) landed on already-booked windows and kept their date and technician but have NO time window (${dueConflicts.map((c) => c.date).join(', ')}) — set a time from dispatch`);
         if (!cardOnly && overlapDates.length) parts.push(`${overlapDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${overlapDates.join(', ')}) — check those days' routes`);
         const notif = await NotificationService.notifyAdmin(
