@@ -530,14 +530,14 @@ async function runAutoDispatch(opts = {}) {
     logger.error(`[auto-dispatch] run ${runId} fatal: ${fatal.message}`);
   }
 
-  if (config.mode === 'apply') {
-    try {
-      await audit.flagUnplacedVisits(config);
-    } catch (err) {
-      totals.failed++;
-      if (runStatus === 'completed') runStatus = 'completed_with_errors';
-      logger.error(`[auto-dispatch] unplaced visit escalation failed: ${err.message}`);
-    }
+  // Existing handoffs still need office escalation while placement is paused.
+  // This audit only maintains staff alerts; it never moves appointments.
+  try {
+    await audit.flagUnplacedVisits(config);
+  } catch (err) {
+    totals.failed++;
+    if (runStatus === 'completed') runStatus = 'completed_with_errors';
+    logger.error(`[auto-dispatch] unplaced visit escalation failed: ${err.message}`);
   }
   await audit.completeRun(runId, { status: runStatus, totals, error: runError });
   logger.info(`[auto-dispatch] run ${runId} ${runStatus} evaluated=${totals.evaluated} skipped=${totals.skipped} recommended=${totals.recommended} changed=${totals.changed} failed=${totals.failed} geocoded=${geocoded}/${geocodeAttempts}`);

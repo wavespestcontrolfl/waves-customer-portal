@@ -22,6 +22,7 @@ jest.mock('../services/auto-dispatch/audit', () => ({
   startRun: jest.fn(async () => 'run1'),
   logDecision: jest.fn(async () => {}),
   completeRun: jest.fn(async () => {}),
+  flagUnplacedVisits: jest.fn(async () => 0),
 }));
 
 const db = require('../models/db');

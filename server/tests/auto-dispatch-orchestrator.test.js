@@ -102,6 +102,7 @@ test('apply requested without the server gate is downgraded to a dry-run recomme
     const res = await runAutoDispatch({ mode: 'apply' });
     expect(res).toMatchObject({ changed: 0, recommended: 1 });
     expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+    expect(audit.flagUnplacedVisits).toHaveBeenCalledTimes(1);
   } finally {
     process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
   }
@@ -115,6 +116,7 @@ test('apply mode honors the per-run change cap and counts cap-held moves as reco
     const res = await runAutoDispatch({ mode: 'apply', maxChangesPerRun: 0 });
     expect(res).toMatchObject({ changed: 0, recommended: 1 });
     expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+    expect(audit.flagUnplacedVisits).toHaveBeenCalledTimes(1);
     expect(lastDecision('recommended').reason_code).toBe('MAX_CHANGES_REACHED');
   } finally {
     process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
@@ -346,7 +348,7 @@ test('an untimed due date is placed even when it offers no route improvement', a
   candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT_GOOD, candidates: [CAND_SMALL] });
   const res = await runAutoDispatch({ mode: 'dry_run', minScoreImprovement: 100 });
   expect(res).toMatchObject({ recommended: 1, changed: 0 });
-  expect(audit.flagUnplacedVisits).not.toHaveBeenCalled();
+  expect(audit.flagUnplacedVisits).toHaveBeenCalledTimes(1);
 });
 
 test('unplaced due dates get the run budget ahead of ordinary route improvements', async () => {

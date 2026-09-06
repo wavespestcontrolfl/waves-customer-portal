@@ -539,3 +539,27 @@ test('pins the complete location in the atomic rebooker expectation', async () =
   await applyAutoDispatchMove(scored, BEST, 'run1', {});
   expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toMatchObject(LOCATION);
 });
+
+
+test('confirmation after scoring prevents deferred placement', async () => {
+  const scored = { ...SERVICE, status: 'pending', window_start: null, window_end: null, recurring_dispatch_due_date: SERVICE.scheduled_date, customer_confirmed: false };
+  db.mockImplementation(() => readRow({ ...scored, customer_confirmed: true }));
+  await expect(applyAutoDispatchMove(scored, { ...BEST, date: SERVICE.scheduled_date }, 'run1'))
+    .rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
+  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+});
+
+test('pins confirmation in the deferred placement write and rechecks each locked member', async () => {
+  const scored = { ...SERVICE, recurring_dispatch_due_date: SERVICE.scheduled_date, customer_confirmed: false };
+  const queue = [readRow(scored), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+  db.mockImplementation(() => queue.shift());
+  await applyAutoDispatchMove(scored, { ...BEST, date: SERVICE.scheduled_date }, 'run1');
+  const options = SmartRebooker.reschedule.mock.calls[0][5];
+  expect(options.expect).toMatchObject({ customer_confirmed: false });
+  const trx = jest.fn();
+  for (const id of [scored.id, 'grouped-sibling']) {
+    await expect(options.moveGuard({ trx, service: { ...scored, id, customer_confirmed: true } }))
+      .rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+  }
+  expect(trx).not.toHaveBeenCalled();
+});

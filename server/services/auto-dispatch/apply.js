@@ -50,7 +50,7 @@ async function revalidatePlacement(service) {
   const fresh = await db('scheduled_services')
     .where({ id: service.id })
     .first('scheduled_date', 'window_start', 'window_end', 'technician_id', 'status',
-      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', 'recurring_dispatch_due_date', ...LOCATION_FIELDS);
+      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', 'recurring_dispatch_due_date', 'customer_confirmed', ...LOCATION_FIELDS);
   if (!fresh) {
     return { ok: false, fresh: null, code: 'STALE_PLACEMENT', reason: 'Service no longer exists' };
   }
@@ -62,6 +62,9 @@ async function revalidatePlacement(service) {
   // still be a live pending/confirmed visit before moving.
   if (!['pending', 'confirmed'].includes(String(fresh.status))) {
     return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: `Visit status changed to '${fresh.status}' after scoring` };
+  }
+  if (fresh.recurring_dispatch_due_date && fresh.customer_confirmed === true) {
+    return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Customer confirmed this recurring occurrence after scoring' };
   }
   const changed = toDateStr(fresh.recurring_dispatch_due_date) !== toDateStr(service.recurring_dispatch_due_date)
     || toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
@@ -181,6 +184,9 @@ function makeMoveGuard({ service, best }) {
   );
   return async ({ trx, technicianId, service: movingRow }) => {
     const row = movingRow || service;
+    if (row.recurring_dispatch_due_date && row.customer_confirmed === true) {
+      throw refuse(row.id, 'was confirmed by the customer');
+    }
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
   };
@@ -322,6 +328,7 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     window_end: fresh.window_end,
     technician_id: fresh.technician_id,
     recurring_dispatch_due_date: fresh.recurring_dispatch_due_date ?? null,
+    ...(fresh.recurring_dispatch_due_date ? { customer_confirmed: fresh.customer_confirmed ?? null } : {}),
     ...Object.fromEntries(LOCATION_FIELDS.map((field) => [field, fresh[field] ?? null])),
   };
 
