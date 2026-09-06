@@ -147,6 +147,8 @@ describe('buildPrompt with a plan', () => {
       const p = gen.buildPrompt({ title: 'T', keyword: 'Three steps', topic: 'Turn the dial.', mode: 'blog-body', shot: 'action', avoid: 'a timer', city: 'Venice', plan, captions: ['Step one'] });
       expect(p).toMatch(/Layout: .*on a plain light background/);
       expect(p).not.toMatch(/Setting:|Vantage:|Framing:|Southwest Florida home/);
+      // The style and layout never ask for numbers or labels the caption rule forbids (Codex r12 P2).
+      expect(p).not.toMatch(/numbered|labeled|legible .*labels/i);
       expect(p).not.toMatch(/\b(early morning|mid-morning|noon|late afternoon|golden hour|dusk)\b/);
       // The alt describes the composition, not a home at a time of day.
       const alt = gen.buildAltText({ title: 'T', keyword: 'Three steps', city: 'Venice', mode: 'blog-body', plan });
@@ -237,9 +239,21 @@ describe('screenGeneratedImage', () => {
     dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": [], "logos_or_brand_marks": [], "forbidden_scenes": ["irrigation repair scenes", "a made-up item"]}' });
     const r = await screenGeneratedImage({ buffer, avoidDepicting: ['irrigation repair scenes'] });
     expect(r).toMatchObject({ ok: false, forbidden: ['irrigation repair scenes'], reasons: [expect.stringMatching(/forbidden scene: irrigation repair scenes/)] });
-    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toMatch(/FORBIDDEN .*"irrigation repair scenes"/);
+    expect(dispatchWithFallback.mock.calls.at(-1)[1].text).toMatch(/FORBIDDEN .*1\. "irrigation repair scenes"/);
     // Without exclusions the field is ignored entirely.
     expect(await screenGeneratedImage({ buffer })).toMatchObject({ ok: true, forbidden: [] });
+  });
+
+  test('a detection counts as its exclusion by id, exact text, or paraphrase — never by invention (Codex r12 P2 on #3964)', async () => {
+    const avoidDepicting = ['irrigation repair scenes', 'a competitor\'s branded vehicle'];
+    const run = async (forbidden) => {
+      dispatchWithFallback.mockResolvedValue({ ok: true, text: JSON.stringify({ readable_text: [], logos_or_brand_marks: [], forbidden_scenes: forbidden }) });
+      return screenGeneratedImage({ buffer, avoidDepicting });
+    };
+    expect(await run([2])).toMatchObject({ ok: false, forbidden: ['a competitor\'s branded vehicle'], violations: 1 });
+    expect(await run(['an irrigation repair scene'])).toMatchObject({ ok: false, forbidden: ['irrigation repair scenes'] });
+    expect(await run(['Irrigation Repair Scenes', 1])).toMatchObject({ ok: false, forbidden: ['irrigation repair scenes'], violations: 1 });
+    expect(await run([3, 0, 'a lawn mower', 'repair'])).toMatchObject({ ok: true, forbidden: [] });
   });
 
   test('with exclusions active, a missing or scalar forbidden_scenes is an unusable answer, not a clean verdict (Codex r9 P2 on #3964)', async () => {

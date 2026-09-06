@@ -112,10 +112,10 @@ function buildScreenPrompt({ allowedText = [], avoidDepicting = [] } = {}) {
   return `Inspect this generated blog image and answer as strict JSON only, shape {"readable_text": string[], "logos_or_brand_marks": string[], "forbidden_scenes": string[], "notes": string}.
 - readable_text: every string of readable text, letters or numbers in the image (labels on devices, signs, captions, watermarks). Empty array if none.
 - logos_or_brand_marks: every recognizable company logo, brand name, or brand mark (on vehicles, uniforms, equipment, packaging). Empty array if none.
-- forbidden_scenes: which of the FORBIDDEN items below the image clearly depicts, quoted verbatim. Empty array if none${forbidden.length ? '' : ' (there are none to check)'}.
+- forbidden_scenes: the NUMBERS of the FORBIDDEN items below the image clearly depicts (e.g. [1]). Empty array if none${forbidden.length ? '' : ' (there are none to check)'}.
 - notes: one short sentence.
 ${allowed.length ? `The following captions are ALLOWED and should still be listed under readable_text: ${allowed.map((t) => `"${t}"`).join(', ')}.` : ''}
-${forbidden.length ? `FORBIDDEN (the brief's own exclusions): ${forbidden.map((t) => `"${t}"`).join('; ')}.` : ''}`;
+${forbidden.length ? `FORBIDDEN (the brief's own exclusions): ${forbidden.map((t, i) => `${i + 1}. "${t}"`).join('; ')}.` : ''}`;
 }
 function parseScreen(text, { requireForbidden = false } = {}) {
   try {
@@ -134,7 +134,9 @@ function parseScreen(text, { requireForbidden = false } = {}) {
     return {
       readableText: obj.readable_text.map((t) => String(t || '').trim()).filter(Boolean),
       logos: obj.logos_or_brand_marks.map((t) => String(t || '').trim()).filter(Boolean),
-      forbidden: Array.isArray(obj.forbidden_scenes) ? obj.forbidden_scenes.map((t) => String(t || '').trim()).filter(Boolean) : [],
+      // Numbers (the ids the prompt asks for) or strings (a model that quotes
+      // instead) — the caller matches either against the exclusions it named.
+      forbidden: Array.isArray(obj.forbidden_scenes) ? obj.forbidden_scenes.map((t) => (typeof t === 'number' ? t : String(t || '').trim())).filter((t) => t !== '') : [],
       notes: typeof obj.notes === 'string' ? obj.notes.slice(0, 200) : '',
     };
   } catch {
@@ -142,6 +144,18 @@ function parseScreen(text, { requireForbidden = false } = {}) {
   }
 }
 const normalizeText = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+// A detection names an exclusion when it is its 1-based id, the same text,
+// or a paraphrase carrying every content word of it ("an irrigation repair
+// scene" for "irrigation repair scenes") — an exact-only match let a
+// well-formed detection through as clean (Codex r12 P2 on #3964).
+const STOP_WORDS = new Set(['a', 'an', 'the', 'of', 'or', 'and', 'any', 'scene', 'scenes']);
+const contentWords = (t) => normalizeText(t).split(' ').filter((w) => w && !STOP_WORDS.has(w)).map((w) => w.replace(/s$/, ''));
+function matchExclusion(detection, exclusions) {
+  if (typeof detection === 'number') return Number.isInteger(detection) && detection >= 1 && detection <= exclusions.length ? exclusions[detection - 1] : null;
+  const norm = normalizeText(detection);
+  const words = new Set(contentWords(detection));
+  return exclusions.find((x) => normalizeText(x) === norm || (contentWords(x).length && contentWords(x).every((w) => words.has(w)))) || null;
+}
 /**
  * screenGeneratedImage({ buffer, mimeType, allowedText, avoidDepicting, timeoutMs })
  * → { ok, checked, readableText, logos, forbidden, reasons, violations }
@@ -217,9 +231,10 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
     // A brief's exclusion the provider ignored (an irrigation repair scene on
     // a post that says Waves does not repair irrigation) fails the screen
     // like a logo would (Codex r8 P2 on #3964). Only exclusions the caller
-    // actually named count — the model cannot invent a forbidden item.
-    const named = new Set(avoidDepicting.map((t) => normalizeText(t)).filter(Boolean));
-    const forbidden = parsed.forbidden.filter((t) => named.has(normalizeText(t)));
+    // actually named count — the model cannot invent a forbidden item — and
+    // each detection is reported as the exclusion it names.
+    const named = avoidDepicting.map((t) => String(t || '').trim()).filter(Boolean);
+    const forbidden = [...new Set(parsed.forbidden.map((t) => matchExclusion(t, named)).filter(Boolean))];
     if (forbidden.length) reasons.push(`forbidden scene: ${forbidden.slice(0, 3).join('; ')}`);
     // violations counts what actually failed — stray strings, missing or
     // incomplete captions, logos, forbidden scenes — never an allowed

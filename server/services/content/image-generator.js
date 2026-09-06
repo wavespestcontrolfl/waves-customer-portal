@@ -143,7 +143,9 @@ const IMAGE_STYLES = Object.freeze({
   },
   infographic: {
     label: 'Infographic',
-    line: 'Style: clean modern infographic on a plain light background — simple icons, numbered steps or labeled parts, generous white space, Waves blue #009CDE and gold #FFD700 accents, large legible sans-serif labels.',
+    // No numbers or labels beyond the caption: the text rule allows only the
+    // caption and the screen rejects every other string (Codex r12 P2).
+    line: 'Style: clean modern infographic on a plain light background — simple flat icons, generous white space, Waves blue #009CDE and gold #FFD700 accents; no numbers, labels, or lettering other than the caption named below.',
     allowsText: true,
   },
 });
@@ -220,11 +222,11 @@ const VANTAGES = ['eye level', 'low angle from the ground', 'high angle looking 
 // vantage — a photographic setting line contradicted the style's plain
 // background and let providers draw the scene instead (Codex r10 P2 on #3964).
 const INFOGRAPHIC_LAYOUTS = [
-  'a numbered step-by-step row of simple icons',
-  'a labeled-parts diagram with short callout lines',
+  'a left-to-right row of simple icons joined by arrows',
+  'a parts diagram with plain callout lines and no labels',
   'a side-by-side comparison of two or three panels',
-  'a do-and-don\'t checklist with check and cross marks',
-  'a circular process diagram with a few icon stages',
+  'a checklist of icons with check and cross marks',
+  'a circular process diagram of a few icon stages',
 ];
 function hashString(input) {
   let h = 2166136261;
