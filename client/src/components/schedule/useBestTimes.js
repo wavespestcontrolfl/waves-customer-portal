@@ -18,7 +18,7 @@ function authHeaders() {
   };
 }
 
-export function useBestTimes({ date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds, enabled = true }) {
+export function useBestTimes({ date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds, arrivalWindows = false, enabled = true }) {
   const [bestTimes, setBestTimes] = useState([]);
   const [checking, setChecking] = useState(false);
   // Stable dep for the (usually tiny) id array.
@@ -39,6 +39,7 @@ export function useBestTimes({ date, serviceId, customerId, durationMinutes, tec
           signal: controller.signal,
           body: JSON.stringify({
             hint: true,
+            arrivalWindows,
             // Existing-visit surfaces pass serviceId so the server ranks at
             // the VISIT's stamped address (secondary/rental properties),
             // not the customer's primary home.
@@ -85,6 +86,6 @@ export function useBestTimes({ date, serviceId, customerId, durationMinutes, tec
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, serviceId, customerId, durationMinutes, technicianId, excludeKey]);
+  }, [enabled, date, serviceId, customerId, durationMinutes, technicianId, excludeKey, arrivalWindows]);
   return { bestTimes, checking };
 }

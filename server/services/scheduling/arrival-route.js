@@ -103,7 +103,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   const { date, rows, now, grouped, activeTarget } = context;
   const target = {
     ...context.target, window_start: windowStart, window_end: windowEnd,
-    estimated_duration_minutes: durationMinutes ?? context.target.estimated_duration_minutes,
+    estimated_duration_minutes: Math.max(workDuration(context.target), Number(durationMinutes) || 0),
   };
   const own = rows.filter(row => row.technician_id === target.technician_id && row.reservation_expires_at == null);
   if (!target.technician_id || !hasCoords(target) || grouped) {

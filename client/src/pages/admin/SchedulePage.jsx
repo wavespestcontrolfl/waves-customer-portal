@@ -1524,6 +1524,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // Advisory drive-detour suggestions for the same fixed day — picking a
   // chip only fills the window fields (never saves).
   const { bestTimes } = useBestTimes({
+    arrivalWindows: true,
     date: form.scheduledDate,
     serviceId: service.id,
     customerId: service.customerId || service.customer_id,

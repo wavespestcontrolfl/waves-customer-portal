@@ -165,3 +165,11 @@ test('an older completed stop needs no coordinates when the latest origin is kno
     rows: [older, { ...latest, lat: null, lng: null }],
   }), placement('10:00')).reason).toBe('route_unverified');
 });
+
+test.each([
+  { estimated_duration_minutes: 180 },
+  { estimated_duration_minutes: 60, window_end: '12:00' },
+])('a short requested block cannot erase the existing service work duration: %j', existingWork => {
+  const input = context({ target: { ...target(), ...existingWork } });
+  expect(evaluateArrivalPlacement(input, placement('09:00', 60)).feasible).toBe(false);
+});

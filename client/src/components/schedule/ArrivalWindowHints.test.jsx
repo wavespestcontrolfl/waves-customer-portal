@@ -30,9 +30,10 @@ it('keeps the arrival estimate supplied by the picker API', async () => {
     start_time: '09:00', end_time: '10:00', estimated_arrival: '09:44', route_mode: 'arrival_windows',
     technician: { id: 'tech' }, detour_minutes: 9,
   }] }) }));
-  const { result } = renderHook(() => useBestTimes({ date: '2035-01-01', serviceId: 'fixture', technicianId: 'tech' }));
+  const { result } = renderHook(() => useBestTimes({ date: '2035-01-01', serviceId: 'fixture', technicianId: 'tech', arrivalWindows: true }));
   await waitFor(() => expect(result.current.bestTimes).toHaveLength(1));
   expect(result.current.bestTimes[0]).toMatchObject({ estimatedArrival: '09:44', arrivalWindows: true });
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({ arrivalWindows: true, serviceId: 'fixture' });
 });
 
 it('refreshes the live route check with the edited technician and full service duration', async () => {
@@ -46,4 +47,12 @@ it('refreshes the live route check with the edited technician and full service d
   expect(JSON.parse(fetch.mock.calls[1][1].body).targets[0]).toMatchObject({
     serviceId: 'fixture', technicianId: 'tech-b', durationMinutes: 120,
   });
+});
+
+it('keeps unmigrated hint callers on their existing route contract', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ slots: [] }) });
+  vi.stubGlobal('fetch', fetch);
+  renderHook(() => useBestTimes({ date: '2035-01-01', serviceId: 'fixture', technicianId: 'tech' }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({ arrivalWindows: false });
 });

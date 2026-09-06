@@ -4264,7 +4264,8 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           : `${overlapDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${overlapDates.join(', ')}) — check those days' routes`);
         const notif = await NotificationService.notifyAdmin(
           'schedule_conflict',
-          dueConflicts.length ? 'Series move left visits without a time window' : 'Series move overlaps other visits',
+          dueConflicts.length ? 'Series move left visits without a time window'
+            : (result.arrivalWindowDates?.length ? 'Series move needs route review' : 'Series move overlaps other visits'),
           `A series move shifted a recurring plan: ${parts.join('; ')}.`,
           { metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates } }
         );

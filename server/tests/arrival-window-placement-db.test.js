@@ -82,6 +82,15 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
     ]);
   });
 
+  test('a short requested block preserves stored work in hints, live checks, and save probes', async () => {
+    await mockConn('scheduled_services').where({ id: TARGET }).update({ estimated_duration_minutes: 180 });
+    expect((await findAvailableSlots(OPTIONS)).slots.some(slot => slot.start_time === '09:00')).toBe(false);
+    expect((await probe())[0].conflict_reason).toBe('arrival_window');
+    const check = await checkSlots({ targets: [{ serviceId: TARGET, technicianId: TECH, date: DAY,
+      window: { start: '09:00', end: '10:00' }, durationMinutes: 60, excludeServiceIds: [TARGET] }] });
+    expect(check.results[0].conflicts[0].reason).toBe('arrival_window');
+  });
+
   test('fresh save check catches work added after the suggestion, including technician-NULL rows', async () => {
     expect((await findAvailableSlots(OPTIONS)).slots.some(s => s.start_time === '09:00')).toBe(true);
     await mockConn('scheduled_services').insert({ id: BLOCKER, scheduled_date: DAY, window_start: '09:00', window_end: '12:00', status: 'confirmed', estimated_duration_minutes: 180, technician_id: null });

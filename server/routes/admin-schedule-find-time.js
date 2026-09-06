@@ -13,6 +13,7 @@
  *     serviceId?,             // existing-visit surfaces: rank at the VISIT's stamped address
  *     excludeServiceIds?,     // drop these visits from occupancy (reschedule self-exclusion)
  *     slotStepMinutes?,       // snap starts to this granularity (1–120)
+ *     arrivalWindows?,        // supported edit/drag picker opt-in
  *     hint?,                  // advisory best-times consumer — gated (GATE_BEST_TIME_HINTS)
  *   }
  */
@@ -152,7 +153,7 @@ router.post('/', async (req, res) => {
       customerId, address, lat, lng,
       durationMinutes, dateFrom, dateTo,
       technicianId, topN,
-      hint, serviceId, excludeServiceIds, slotStepMinutes,
+      hint, serviceId, arrivalWindows, excludeServiceIds, slotStepMinutes,
     } = req.body || {};
 
     // Best-time hint consumers go dark behind GATE_BEST_TIME_HINTS — read
@@ -209,7 +210,7 @@ router.post('/', async (req, res) => {
       excludeServiceIds,
       // Existing-visit staff hints share their route check with the edit
       // and rebooker save probes. Other consumers retain their slot contract.
-      ...(hint && serviceId ? { arrivalWindow: { serviceId } } : {}),
+      ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId } } : {}),
       slotStepMinutes: slotStepMinutes !== undefined ? Number(slotStepMinutes) : undefined,
       // Staff tool: blackout days stay visible — admin manual scheduling is
       // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).
