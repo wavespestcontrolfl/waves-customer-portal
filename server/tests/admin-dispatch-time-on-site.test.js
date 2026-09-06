@@ -1085,7 +1085,8 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // (codex P1 #3742 r4) and touches no service_records/scheduled_services
     // state, so the correction/finalization ordering this pin protects is
     // unchanged.
-    expect(source).toMatch(/await db\.transaction\(async \(trx\) => \{\s*\n(?:\s*\/\/[^\n]*\n)*(?:\s*const snapshotCustomerRow = await trx\('customers'\)[^;]*;\s*\n)?\s*const lockedSvcRow = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);/);
+    expect(source).toMatch(/const persistRecord = async \(trx\) => \{\s*\n(?:\s*\/\/[^\n]*\n)*(?:\s*const snapshotCustomerRow = await trx\('customers'\)[^;]*;\s*\n)?\s*const lockedSvcRow = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);/);
+    expect(source).toContain('else await db.transaction(persistRecord);');
   });
 
   test('the finalization reconciles with the LOCKED row and preserves a mid-flight correction (codex P2 round 15)', () => {
