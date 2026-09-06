@@ -475,10 +475,8 @@ describe('autonomous versus lane (pest showdown)', () => {
       const cards = plans.map((p) => `${p.versusPair.key}|${p.city}`);
       expect(new Set(cards).size).toBe(cards.length);
       expect(new Set(plans.map((p) => p.city)).size).toBeGreaterThan(1);
-      // All eligible pairs surface before any repeats — no half-hidden bank.
-      const eligibleCount = Studio.PEST_VERSUS_PAIRS
-        .filter((p) => !p.months || p.months.includes(Number(yearMonth.slice(5)))).length;
-      expect(new Set(plans.map((p) => p.versusPair.key)).size).toBe(eligibleCount);
+      // No pair repeats inside a month either (8 fires against a 24-pair bank).
+      expect(new Set(plans.map((p) => p.versusPair.key)).size).toBe(plans.length);
     }
   });
 
@@ -502,7 +500,7 @@ describe('autonomous versus lane (pest showdown)', () => {
         }
       }
     }
-    const combos = Studio.PEST_VERSUS_PAIRS.length * 4; // 6 pairs x 4 cities
+    const combos = Studio.PEST_VERSUS_PAIRS.length * 4; // 24 pairs x 4 cities
     const lastSeen = new Map();
     let minGap = Infinity;
     cards.forEach((c, i) => {
@@ -510,7 +508,7 @@ describe('autonomous versus lane (pest showdown)', () => {
       if (lastSeen.has(c)) minGap = Math.min(minGap, i - lastSeen.get(c));
       lastSeen.set(c, i);
     });
-    expect(minGap).toBe(combos); // 24 fires between identical cards, never 23
+    expect(minGap).toBe(combos); // 96 fires between identical cards, never fewer
   });
 
   test('cards stay unique across a season boundary (fixed modulus, no remapping)', () => {
@@ -520,8 +518,17 @@ describe('autonomous versus lane (pest showdown)', () => {
     // within 14 days (2027-06-18 and 2027-07-02 both gave chinch-bug for
     // Lakewood Ranch). The swarmer's July slot must yield to the campaign
     // lane, not remap the sequence.
-    const plans = [...fireDays('2027-06'), ...fireDays('2027-07')]
-      .map((d) => Studio.selectAutonomousVersusPlan(d));
+    // With a 24-pair bank a gated pair's slot lands roughly once a quarter,
+    // so walk a whole year: every season boundary is crossed, at least one
+    // out-of-season slot yields, and no card repeats inside the year (a year
+    // has ~95 fires, under the 96-fire cycle).
+    const plans = [];
+    for (let m = 1; m <= 12; m++) {
+      const lastDay = new Date(Date.UTC(2027, m, 0)).getUTCDate(); // Feb has no 30th
+      for (const d of [2, 6, 10, 14, 18, 22, 26, 30].filter((x) => x <= lastDay)) {
+        plans.push(Studio.selectAutonomousVersusPlan(etNoon(`2027-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`)));
+      }
+    }
     expect(plans.some((p) => p === null)).toBe(true); // out-of-season slots skipped
     const cards = plans.filter(Boolean).map((p) => `${p.versusPair.key}|${p.city}`);
     expect(new Set(cards).size).toBe(cards.length);
@@ -529,13 +536,23 @@ describe('autonomous versus lane (pest showdown)', () => {
 
   test('season-gated pairs stay out of off-season months, at selection AND approval', () => {
     process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
-    // Termite swarmer cards are swarm-season content (Feb–Jun) — never August.
-    for (const plan of fireDays('2026-08').map((d) => Studio.selectAutonomousVersusPlan(d)).filter(Boolean)) {
-      expect(plan.versusPair.key).not.toBe('termite_swarmer_vs_winged_ant');
+    // Gated pairs (swarmer Feb–Jun, webworm May–Oct) never surface outside
+    // their months, and each is still reachable in season — checked across
+    // two years so every gated pair's slot lands both in and out of season.
+    const gated = Studio.PEST_VERSUS_PAIRS.filter((p) => Array.isArray(p.months));
+    expect(gated.map((p) => p.key)).toContain('termite_swarmer_vs_winged_ant');
+    const inSeasonHits = new Set();
+    for (let y = 2026; y <= 2027; y++) {
+      for (let m = 1; m <= 12; m++) {
+        for (const plan of fireDays(`${y}-${String(m).padStart(2, '0')}`).map((d) => Studio.selectAutonomousVersusPlan(d)).filter(Boolean)) {
+          const pair = gated.find((p) => p.key === plan.versusPair.key);
+          if (!pair) continue;
+          expect({ key: pair.key, month: m, inSeason: pair.months.includes(m) }).toEqual({ key: pair.key, month: m, inSeason: true });
+          inSeasonHits.add(pair.key);
+        }
+      }
     }
-    // In season the pair is still reachable.
-    const marchKeys = fireDays('2026-03').map((d) => Studio.selectAutonomousVersusPlan(d).versusPair.key);
-    expect(marchKeys).toContain('termite_swarmer_vs_winged_ant');
+    expect([...inSeasonHits].sort()).toEqual(gated.map((p) => p.key).sort());
 
     // A draft created in season must not be APPROVABLE out of season — the
     // stored versusPair is re-checked against the current ET month.
@@ -866,5 +883,59 @@ describe('studio link relevance + legacy-card alert predicates', () => {
     expect(Studio.legacyCardShipped([{ platform: 'facebook', success: true, imageUrl: 'https://cdn.example.com/scene.jpg' }, { platform: 'gbp', success: true, imageUrl: gbpCard }], new Set([gbpCard]), 'https://cdn.example.com/scene.jpg')).toBe(true);
     // Nothing rendered → never alerts.
     expect(Studio.legacyCardShipped([{ platform: 'facebook', success: true, imageUrl: card }], new Set(), card)).toBe(false);
+  });
+});
+
+describe('content bank refill (2026-09-06)', () => {
+  test('every month carries six campaign topics, each with a known angle/cta and a service line', () => {
+    const angles = new Set(['signs to check', 'what we are seeing', 'new Florida homeowner', 'do not ignore this', 'myth/fact']);
+    const ctas = new Set(['book inspection', 'request estimate', 'read guide']);
+    for (let m = 1; m <= 12; m++) {
+      const topics = Studio.SEASONAL_AUTONOMOUS_TOPICS[m];
+      expect({ month: m, count: topics.length }).toEqual({ month: m, count: 6 });
+      expect(new Set(topics.map((t) => t.topic)).size).toBe(6);
+      for (const t of topics) {
+        expect(angles.has(t.angle)).toBe(true);
+        expect(ctas.has(t.cta)).toBe(true);
+        expect(t.service).toMatch(/^(general pest|lawn care|termite|mosquito|rodent|tree and shrub)$/);
+      }
+    }
+  });
+
+  test('the versus bank holds 24 unique pairs with the original six first (rotation order stable)', () => {
+    expect(Studio.PEST_VERSUS_PAIRS).toHaveLength(24);
+    expect(new Set(Studio.PEST_VERSUS_PAIRS.map((p) => p.key)).size).toBe(24);
+    expect(Studio.PEST_VERSUS_PAIRS.slice(0, 6).map((p) => p.key)).toEqual([
+      'carpenter_ant_vs_ghost_ant', 'subterranean_vs_drywood_termite', 'termite_swarmer_vs_winged_ant',
+      'paper_wasp_vs_mud_dauber', 'chinch_bug_vs_drought_stress', 'roof_rat_vs_norway_rat',
+    ]);
+    for (const pair of Studio.PEST_VERSUS_PAIRS) {
+      expect(pair.left.points).toHaveLength(3);
+      expect(pair.right.points).toHaveLength(3);
+      expect(pair.verdict.length).toBeLessThanOrEqual(90);
+      if (pair.months) expect(pair.months.every((m) => m >= 1 && m <= 12)).toBe(true);
+    }
+  });
+
+  test('every seasonal topic builds compliant campaign drafts', () => {
+    const context = {
+      location: { city: 'Sarasota', id: 'sarasota', name: 'Sarasota' },
+      services: [],
+      content: [],
+      recentSocials: [],
+      pestPressure: { explanation: 'Pest Pressure is a 0-5 score that estimates the current level of pest activity at your property.' },
+      reviews: [],
+      competitorPatterns: Studio.DEFAULT_COMPETITOR_PATTERNS,
+    };
+    for (let m = 1; m <= 12; m++) {
+      for (const t of Studio.SEASONAL_AUTONOMOUS_TOPICS[m]) {
+        const drafts = Studio.buildCampaignDrafts({ ...t, city: 'Sarasota', channels: ['facebook', 'instagram', 'linkedin', 'gbp'] }, context);
+        const validation = Studio.validateDrafts(drafts);
+        for (const [platform, result] of Object.entries(validation)) {
+          expect({ topic: t.topic, platform, issues: result.issues || [], valid: result.valid })
+            .toEqual({ topic: t.topic, platform, issues: [], valid: true });
+        }
+      }
+    }
   });
 });

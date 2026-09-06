@@ -352,3 +352,25 @@ describe('generateVideoVariant', () => {
     expect(VideoGenerator.generate).not.toHaveBeenCalled();
   });
 });
+
+describe('scene library refill (2026-09-06)', () => {
+  test('every bucket is at least eight concepts deep with unique keys and no text/people/logo words', () => {
+    const allKeys = [];
+    for (const [bucket, concepts] of Object.entries(Engine.SCENE_LIBRARY)) {
+      expect({ bucket, size: concepts.length }).toEqual({ bucket, size: expect.any(Number) });
+      expect(concepts.length).toBeGreaterThanOrEqual(8);
+      for (const c of concepts) {
+        allKeys.push(c.key);
+        expect(c.scene).not.toMatch(/\b(?:logo|watermark|caption|signage)\b/i);
+      }
+    }
+    expect(new Set(allKeys).size).toBe(allKeys.length);
+  });
+
+  test('new topic keywords route to their service bank', () => {
+    expect(Engine.resolveSceneBucket({ topic: 'nutsedge taking over soggy spots', service: 'lawn care' })).toBe('lawn');
+    expect(Engine.resolveSceneBucket({ topic: 'No-See-Um vs Mosquito', service: 'mosquito' })).toBe('mosquito');
+    expect(Engine.resolveSceneBucket({ topic: 'Whitefly vs Mealybug', service: 'tree and shrub' })).toBe('tree_shrub');
+    expect(Engine.resolveSceneBucket({ topic: 'Drywood Termite Frass vs Carpenter Ant Frass', service: 'termite' })).toBe('termite');
+  });
+});
