@@ -15,6 +15,12 @@
  * Usage:
  *   node server/scripts/approve-autonomous-run.js --id=<run_uuid> --by=adam
  *
+ * Reconcile a repaired open blog PR with its stored draft (MUTATES only with
+ * --execute; otherwise validates and previews). Uses paid content gates.
+ *   node server/scripts/approve-autonomous-run.js --id=<run_uuid> --by=adam \
+ *     --reconcile-pr=<number> --head=<full_commit_sha> [--execute]
+ * No merge, publication trigger, or customer communication is sent here.
+ *
  * Intended for Railway/operator use after reviewing the stored
  * autonomous_runs.draft_payload + gate snapshots.
  */
@@ -41,6 +47,15 @@ if (!RUN_ID) {
 
 (async function main() {
   try {
+    if (ARGS['reconcile-pr']) {
+      const { reconcileAutonomousPr } = require('../services/content/codex-remediation');
+      const result = await reconcileAutonomousPr({
+        runId: RUN_ID, prNumber: Number(ARGS['reconcile-pr']), headSha: String(ARGS.head || ''),
+        approvedBy: ARGS.by, execute: ARGS.execute === true,
+      });
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
     const run = await db('autonomous_runs')
       .where('id', RUN_ID)
       .where('outcome', 'completed_pending_review')

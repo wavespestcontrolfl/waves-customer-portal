@@ -1212,31 +1212,14 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     try { parsed = fm.parse(fixedMarkdown); } catch (e) { return { ok: false, reason: `unparseable fix: ${e.message}` }; }
     const draft = { ...draft0, body: String((parsed && parsed.content) || '').trim() };
     if (!draft.body) return { ok: false, reason: 'fixed body is empty' };
-    // The fix may carry code-derived FAQ schema and whitelisted frontmatter
-    // rewrites (meta_description / hero alt). The stored payload predates them, so swap the FIXED values
-    // into the draft before evaluating — otherwise the SEO/quality gates
-    // below re-validate the STALE metadata and a rewritten meta_description
-    // reaches the branch (and the draft_payload mirror) ungated.
+    // Validate the branch file's actual metadata, including operator repairs.
+    // The automatic writer still enforces its narrow frontmatter whitelist
+    // before this gate. A stale title or image in the stored draft must not
+    // be substituted for the candidate that will be synchronized and merged.
     const fixedData = (parsed && parsed.data) || {};
-    if (Array.isArray(fixedData.schema_types)) {
-      draft.frontmatter = { ...draft.frontmatter, schema_types: fixedData.schema_types };
-    }
-    if (typeof fixedData.meta_description === 'string' && fixedData.meta_description.trim()) {
-      draft.meta_description = fixedData.meta_description;
-      if (draft.frontmatter && typeof draft.frontmatter === 'object') {
-        draft.frontmatter = { ...draft.frontmatter, meta_description: fixedData.meta_description };
-      }
-    }
-    const fixedAlt = (fixedData.hero_image && typeof fixedData.hero_image === 'object') ? fixedData.hero_image.alt : undefined;
-    if (typeof fixedAlt === 'string' && fixedAlt.trim() && draft.frontmatter && typeof draft.frontmatter === 'object') {
-      draft.frontmatter = {
-        ...draft.frontmatter,
-        hero_image: {
-          ...(draft.frontmatter.hero_image && typeof draft.frontmatter.hero_image === 'object' ? draft.frontmatter.hero_image : {}),
-          alt: fixedAlt,
-        },
-      };
-    }
+    draft.frontmatter = fixedData;
+    draft.title = fixedData.title;
+    draft.meta_description = fixedData.meta_description;
 
     // 0a. Claims-ledger validation for facts-gated runs (runner step 3b): the
     //     run's claims_ledger_result was rendered against the ORIGINAL body,
@@ -2589,7 +2572,146 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   }, deps);
 }
 
+// Operator recovery for an exact reviewed content commit. This is deliberately
+// absent from the poller: a foreign head requires an explicit human decision.
+async function reconcileAutonomousPr(options, deps = {}) {
+  const Joi = require('joi');
+  Joi.assert(options, Joi.object({
+    runId: Joi.string().uuid().required(), prNumber: Joi.number().integer().positive().required(),
+    headSha: Joi.string().pattern(/^[0-9a-f]{40}$/).required(), approvedBy: Joi.string().trim().min(1).max(100).required(),
+    execute: Joi.boolean(),
+  }));
+  const { runId, prNumber, headSha, approvedBy } = options;
+  const db = deps.db || dbDefault;
+  const gh = deps.gh || ghDefault;
+  const repo = gh.env();
+  const snapshot = await db.transaction((trx) => readReconciliationState(trx, options, repo));
+  const { run, state, opp } = snapshot;
+  const draft = parseJsonMaybe(run.draft_payload);
+  Joi.assert(draft, Joi.object({ autopublish_head_sha: Joi.string().pattern(/^[0-9a-f]{40}$/).required(),
+    frontmatter: Joi.object().required() }).unknown().required());
+  const pinned = draft.autopublish_head_sha;
+  const pr = await gh.getPr(prNumber);
+  const baseSha = await gh.getBranchSha(repo.defaultBranch);
+  Joi.assert(baseSha, Joi.string().pattern(/^[0-9a-f]{40}$/).required());
+  await assertReconciliationHead(gh, prNumber, headSha, state.branch, repo.defaultBranch);
+  const publisher = deps.publisher || require('../content-astro/astro-publisher');
+  const slug = publisher._internals.categoryRouteSlug(
+    publisher._internals.slugPathFromFrontmatter(draft.frontmatter),
+    publisher._internals.normalizeAutonomousCategory(draft.frontmatter, {}),
+  );
+  const filePath = `${ASTRO_BLOG_DIR}/${slug}.mdx`;
+  const delta = await gh.compareFiles(headSha, pinned);
+  const allowed = new Set([filePath, ...['hero', 'body-1', 'body-2'].map((name) => `public/images/blog/${slug}/${name}.webp`)]);
+  Joi.assert(delta, Joi.object({ mergeBaseSha: Joi.valid(pinned).required(),
+    files: Joi.array().max(299).items(Joi.valid(...allowed)).required() }).unknown().required(),
+  'head must be a content-and-images-only descendant of the publisher pin');
+  if (state.sync_pending_sha) {
+    const pending = await gh.compareFiles(headSha, state.sync_pending_sha);
+    Joi.assert(pending.mergeBaseSha, Joi.valid(state.sync_pending_sha).required(), 'held push must be an ancestor of the head');
+  }
+  const original = await gh.getFile(filePath, pinned);
+  const candidate = await gh.getFile(filePath, headSha);
+  const fileSchema = Joi.object({ content: Joi.string().min(1).required() }).unknown().required();
+  Joi.assert(original, fileSchema); Joi.assert(candidate, fileSchema);
+  const before = fm.parse(original.content).data;
+  const parsed = fm.parse(candidate.content);
+  // Operator repairs may correct presentation, dates and declarations, never
+  // move a route, change author identity, add a spoke, or change image paths.
+  const editable = new Set(['title', 'meta_description', 'schema_types', 'updated', 'modified', 'hero_image']);
+  for (const key of new Set([...Object.keys(before), ...Object.keys(parsed.data)])) {
+    if (!editable.has(key) && canonValue(before[key]) !== canonValue(parsed.data[key])) {
+      throw new Error(`operator recovery cannot change frontmatter ${key}`);
+    }
+  }
+  Joi.assert(canonValue({ ...parsed.data.hero_image, alt: null }),
+    Joi.valid(canonValue({ ...before.hero_image, alt: null })), 'operator recovery cannot change hero image paths');
+  const runner = deps.autonomousRunner || require('./autonomous-runner');
+  const brief = await runner._loadReviewedBrief(run);
+  Joi.assert(brief, Joi.object().required());
+  const guardContext = {
+    ...await runner._deriveGuardrailOptions(opp, brief),
+    checkedExistingRoutes: draft.checked_existing_routes,
+    operatorBriefText: runner._internals.operatorBriefTextForComparisonGate(opp, brief),
+  };
+  const preflight = await (deps.validateFixedBlogFile || validateFixedBlogFile)(candidate.content, {
+    guardContext, operatorFaqException: guardContext.operatorFaqException === true,
+    originalMetaDescription: before.meta_description,
+  }, deps);
+  Joi.assert(preflight, Joi.object({ ok: Joi.valid(true).required() }).unknown().required(), 'file validation failed');
+  const gates = await (deps.validateAutonomousRunGates || validateAutonomousRunGates)(candidate.content, run, { ...deps, prHeadRef: headSha });
+  Joi.assert(gates, Joi.object({ ok: Joi.valid(true).required(), comparisonResult: Joi.object().required() }).unknown().required(), 'run validation failed');
+  const next = { ...draft, body: parsed.content.trim(), frontmatter: parsed.data,
+    title: parsed.data.title, meta_description: parsed.data.meta_description,
+    trust_build_approved_head_sha: headSha };
+  const priorComparison = parseJsonMaybe(run.comparison_table_result);
+  const comparison = { ...gates.comparisonResult,
+    requiresHumanReview: priorComparison?.requiresHumanReview === true || gates.comparisonResult.requiresHumanReview === true };
+  const result = { runId, prNumber, headSha, filePath, changedFiles: delta.files,
+    previousPin: pinned, previousSyncHold: state.sync_pending_sha, executed: false };
+  // Preview runs the same content gates (including paid fact/compliance
+  // checks) but never changes business rows. Re-read under the same lock order
+  // as the operator review path, then update mirrors and release atomically.
+  await db.transaction(async (trx) => {
+    const current = await readReconciliationState(trx, options, repo);
+    if (canonValue(current) !== canonValue(snapshot)) throw new Error('review state changed during validation; inspect again');
+    await assertReconciliationHead(gh, prNumber, headSha, pr.head.ref, repo.defaultBranch);
+    if (await gh.getBranchSha(repo.defaultBranch) !== baseSha) throw new Error('base branch changed during validation; inspect again');
+    if (!options.execute) return;
+    const now = new Date();
+    await trx('autonomous_runs').where({ id: runId }).update({
+      draft_payload: JSON.stringify(next), comparison_table_result: JSON.stringify(comparison),
+      trust_build_approved_at: now, trust_build_approved_by: approvedBy.trim(),
+      reviewer_notes: [run.reviewer_notes, `Operator ${approvedBy.trim()} reconciled PR #${prNumber} at ${headSha}; content gates passed; automatic review/publication gates remain in force.`].filter(Boolean).join(' | '),
+      updated_at: now,
+    });
+    await trx('codex_remediation_state').where({ pr_number: prNumber }).update({
+      synced_sha: headSha, sync_pending_sha: null, status: 'active', park_reason: null,
+      parked_head_sha: null, park_phase: null, updated_at: now,
+    });
+    // Never reset the spent round budget. A failed write or read-back rolls
+    // back both updates, retaining the original hold.
+    const saved = await trx('autonomous_runs').where({ id: runId }).first();
+    const released = await trx('codex_remediation_state').where({ pr_number: prNumber }).first();
+    Joi.assert(canonValue(parseJsonMaybe(saved.draft_payload)), Joi.valid(canonValue(next)), 'draft read-back failed');
+    Joi.assert(released, Joi.object({ synced_sha: Joi.valid(headSha).required(), sync_pending_sha: Joi.valid(null).required() }).unknown().required());
+    result.executed = true;
+  });
+  return result;
+}
+
+// Used before expensive validation and again before writing. The queue lock
+// prevents a requeue/replacement run from inheriting approval of an older draft.
+async function readReconciliationState(trx, { runId, prNumber }, repo) {
+  const Joi = require('joi');
+  const selected = await trx('autonomous_runs').where({ id: runId }).first();
+  Joi.assert(selected, Joi.object({ opportunity_id: Joi.string().required() }).unknown().required());
+  const opp = await trx('opportunity_queue').where({ id: selected.opportunity_id }).forUpdate().first();
+  Joi.assert(opp, Joi.object({ status: Joi.valid('pending_review').required(),
+    skip_reason: Joi.valid('astro_pr_pending_merge').required() }).unknown().required(), 'opportunity is no longer pending');
+  const run = await trx('autonomous_runs').where({ opportunity_id: selected.opportunity_id })
+    .orderBy('claimed_at', 'desc').forUpdate().first();
+  Joi.assert(run, Joi.object({ id: Joi.valid(runId).required(), action_type: Joi.valid('new_supporting_blog').required(),
+    shadow_mode: Joi.valid(false).required(), outcome: Joi.valid('completed_pending_review').required(),
+    skip_reason: Joi.valid('astro_pr_pending_merge').required(),
+    astro_pr_url: Joi.valid(`https://github.com/${repo.owner}/${repo.repo}/pull/${prNumber}`).required(),
+  }).unknown().required(), 'run is not the current live pending blog for this PR');
+  const state = await trx('codex_remediation_state').where({ pr_number: prNumber }).forUpdate().first();
+  Joi.assert(state, Joi.object({ status: Joi.valid('active', 'parked', 'remediating').required(), branch: Joi.string().required(),
+    sync_pending_sha: Joi.string().pattern(/^[0-9a-f]{40}$/).allow(null).required(),
+  }).unknown().required(), 'remediation state is missing, terminal, or has a push in flight');
+  return { run, state, opp };
+}
+
+async function assertReconciliationHead(gh, prNumber, headSha, branch, baseBranch) {
+  const current = await gh.getPr(prNumber);
+  if (!branch || current?.state !== 'open' || current.merged || current.merged_at
+    || current.head?.sha !== headSha || current.head?.ref !== branch || current.base?.ref !== baseBranch
+    || await gh.getBranchSha(branch) !== headSha) throw new Error('PR is closed or its branch/head/base changed');
+}
+
 module.exports = {
+  reconcileAutonomousPr,
   revalidateBodyImagesForFix,
   revalidateBodyImagesForMarkdown,
   maybeRemediateBlogPost,
