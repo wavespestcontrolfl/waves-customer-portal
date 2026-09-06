@@ -682,6 +682,7 @@ async function findActiveRecurringSeries(conn, {
     .whereNotIn('status', ['cancelled'])
     .select('id', 'service_type', 'recurring_pattern', 'scheduled_date', 'status');
   if (columns.service_id) query.select('service_id');
+  if (columns.recurring_template_overrides) query.select('recurring_template_overrides');
   if (columns.property_id) query.select('property_id');
   if (columns.service_address_line1) query.select('service_address_line1');
   if (columns.service_address_line2) query.select('service_address_line2');
@@ -700,7 +701,8 @@ async function findActiveRecurringSeries(conn, {
   const familyKeyOf = (label) => duplicateGuardFamilyKey(label);
   const targetKey = serviceType ? familyKeyOf(serviceType) : null;
   const matches = [];
-  for (const parent of parents || []) {
+  for (const historicalParent of parents || []) {
+    const parent = { ...historicalParent, ...require('./booking/visit-financial-stamps').recurringServiceAddress(historicalParent) };
     const idMatch = serviceId != null && parent.service_id != null
       && String(parent.service_id) === String(serviceId);
     const keyMatch = targetKey != null && parent.service_type

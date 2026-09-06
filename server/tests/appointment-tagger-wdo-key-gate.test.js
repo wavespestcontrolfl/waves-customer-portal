@@ -83,6 +83,18 @@ describe('triggerWDOPrep provider-key gate', () => {
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
   });
 
+  test('moved WDO research uses the service stamp and refuses stale publication', async () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    const c = chain(); c.update.mockResolvedValue(0); db.mockReturnValue(c);
+    await tagger.triggerWDOPrep({ ...service, property_id: 'new', service_address_line1: '200 Example Road',
+      service_address_city: 'Example', service_address_zip: '00000' });
+    expect(require('../services/property-lookup/ai-property-lookup').lookupPropertyFromAITrio)
+      .toHaveBeenCalledWith('200 Example Road, Example, FL 00000');
+    expect(c.where).toHaveBeenCalledWith(expect.objectContaining({ property_id: 'new', service_address_line1: '200 Example Road' }));
+    expect(c.insert).not.toHaveBeenCalled();
+  });
+
   test('no provider key at all → deterministic template, no AI dispatch', async () => {
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.OPENAI_API_KEY;

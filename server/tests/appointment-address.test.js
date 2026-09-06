@@ -1,3 +1,7 @@
+jest.mock('../services/appointment-tagger', () => ({
+  classifyAppointmentType: jest.fn((type) => ({ tag: type === 'WDO' ? 'wdo_inspection' : 'general' })),
+  triggerWDOPrep: jest.fn(async () => {}),
+}));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn() }));
 jest.mock('../services/scheduling/tech-day-lock', () => ({ lockTechDays: jest.fn() }));
 jest.mock('../services/visit-groups', () => ({
@@ -39,7 +43,7 @@ function connection({ rows = [row], visits = [], selected = property } = {}) {
     const predicates = [];
     const filtered = () => result.filter((r) => predicates.every((p) => p(r)));
     const chain = {};
-    for (const name of ['where', 'whereIn', 'whereNotIn', 'orWhere', 'orderBy', 'forUpdate', 'forShare']) {
+    for (const name of ['where', 'whereIn', 'whereNotIn', 'orWhere', 'orderBy', 'forUpdate', 'forShare', 'forNoKeyUpdate']) {
       chain[name] = (...args) => {
         query.filters.push([name, ...args]);
         if (name === 'where') predicates.push(predicate(args));
@@ -236,3 +240,26 @@ test.each(require('../services/visit-context/statuses').JOIN_INELIGIBLE_STATUSES
     expect(addressWrite.filters).toContainEqual(['whereIn', 'id', [row.id]]);
   },
 );
+
+
+test('address stop locking takes the customer row lock first', async () => {
+  const conn = connection();
+  const plan = await planAppointmentAddress(conn, row.id, property.id);
+  lockStop.mockImplementationOnce(async () => {
+    expect(conn.calls.some((call) => call.table === 'customers'
+      && call.filters.some(([name]) => name === 'forNoKeyUpdate'))).toBe(true);
+  });
+  await lockAppointmentAddress(conn, plan);
+});
+
+test('address refresh rebuilds only WDO research', async () => {
+  const rows = [{ id: 'wdo', service_type: 'WDO' }, { id: 'pest', service_type: 'Pest' }];
+  const query = {};
+  for (const name of ['leftJoin', 'whereIn', 'whereNotIn']) query[name] = jest.fn(() => query);
+  query.select = jest.fn(async () => rows);
+  const conn = jest.fn(() => query);
+  await require('../services/appointment-address').refreshAppointmentAddressBriefs(conn, ['wdo', 'pest']);
+  expect(require('../services/appointment-tagger').triggerWDOPrep).toHaveBeenCalledTimes(1);
+  expect(require('../services/appointment-tagger').triggerWDOPrep).toHaveBeenCalledWith(rows[0]);
+  expect(query.whereNotIn).toHaveBeenCalledWith('ss.status', require('../services/visit-context/statuses').JOIN_INELIGIBLE_STATUSES);
+});

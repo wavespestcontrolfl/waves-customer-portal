@@ -762,3 +762,16 @@ describe('the series creators consume the guard (source guards)', () => {
     expect(scheduleSrc).toContain("if (Array.isArray(err.duplicateRecurringSeries)) {");
   });
 });
+
+test.each([false, true])('future property drives duplicate matching (serialized: %s)', async (serialized) => {
+  const overrides = { appointment_address: { property_id: 'property-b' } };
+  const parent = { id: 'parent', service_id: 'svc', status: 'completed', recurring_ongoing: true,
+    property_id: 'property-a', recurring_template_overrides: serialized ? JSON.stringify(overrides) : overrides };
+  const conn = makeConn({ parents: [parent], columns: { ...COLS, property_id: {}, recurring_template_overrides: {} } });
+  for (const [propertyId, count] of [['property-b', 1], ['property-a', 0]]) {
+    expect(await findActiveRecurringSeries(conn, { customerId: 'customer', serviceId: 'svc',
+      serviceAddressScope: { estimatePropertyId: propertyId } })).toHaveLength(count);
+  }
+  expect(conn.recorded[0].calls).toContainEqual(['select', 'recurring_template_overrides']);
+  expect(parent.property_id).toBe('property-a');
+});

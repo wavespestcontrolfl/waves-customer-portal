@@ -157,6 +157,11 @@ class AppointmentTagger {
 
   // WDO — AI property search + AI pre-inspection brief
   async triggerWDOPrep(service) {
+    service = { ...service,
+      address_line1: service.service_address_line1 ?? service.address_line1,
+      city: service.service_address_city ?? service.city,
+      zip: service.service_address_zip ?? service.zip,
+    };
     const address = `${service.address_line1}, ${service.city}, FL ${service.zip}`;
 
     try {
@@ -178,11 +183,21 @@ class AppointmentTagger {
         brief = this.generateWDOBriefTemplate(service, propertyData);
       }
 
-      await db('scheduled_services').where({ id: service.id }).update({
+      // A later address edit invalidates this research while providers run.
+      const written = await db('scheduled_services').where({ id: service.id,
+        property_id: service.property_id ?? null,
+        service_address_line1: service.service_address_line1 ?? null,
+        service_address_line2: service.service_address_line2 ?? null,
+        service_address_city: service.service_address_city ?? null,
+        service_address_state: service.service_address_state ?? null,
+        service_address_zip: service.service_address_zip ?? null,
+      }).update({
         pre_service_brief: JSON.stringify(brief),
         pre_service_brief_type: 'wdo_inspection',
         pre_service_brief_generated_at: new Date(),
       });
+
+      if (!written) return;
 
       await db('customer_interactions').insert({
         customer_id: service.customer_id, interaction_type: 'note',

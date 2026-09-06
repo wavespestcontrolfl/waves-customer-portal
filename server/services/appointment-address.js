@@ -39,6 +39,8 @@ async function planAppointmentAddress(conn, serviceId, propertyId) {
 
 // Called after the date-wide occupancy locks, before maintenance/comms/rows.
 async function lockAppointmentAddress(trx, plan, updates = {}) {
+  // Match createOrJoinVisit: customer row before every stop lock.
+  await trx('customers').where({ id: plan.anchor.customer_id }).forNoKeyUpdate().first('id');
   const keys = new Set(plan.stopKeys);
   if (updates.scheduled_date) {
     for (const row of plan.rows) {
@@ -120,4 +122,19 @@ async function applyAppointmentAddress(trx, plan, actorId) {
   return locked.map((row) => row.id);
 }
 
-module.exports = { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress };
+// Rebuild only WDO research; replaying booking automations could send prep.
+async function refreshAppointmentAddressBriefs(conn, ids) {
+  if (!ids.length) return;
+  const tagger = require('./appointment-tagger');
+  const rows = await conn('scheduled_services as ss')
+    .leftJoin('customers as c', 'ss.customer_id', 'c.id')
+    .whereIn('ss.id', ids).whereNotIn('ss.status', JOIN_INELIGIBLE_STATUSES)
+    .select('ss.*', 'c.first_name', 'c.last_name', 'c.address_line1', 'c.city', 'c.zip');
+  for (const row of rows) {
+    if (tagger.classifyAppointmentType(row.service_type).tag === 'wdo_inspection') {
+      await tagger.triggerWDOPrep(row);
+    }
+  }
+}
+
+module.exports = { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress, refreshAppointmentAddressBriefs };
