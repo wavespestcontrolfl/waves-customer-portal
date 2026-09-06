@@ -737,7 +737,7 @@ async function requestBookingText(input = {}, ctx = {}) {
       address: [customer.address_line1, customer.city, customer.state, customer.zip]
         .filter(Boolean).join(', ') || null,
       city: customer.city || null,
-    }).catch(() => ({}));
+    }).catch(() => { ctx.toolFailed = true; return {}; });
   if (!bookingCoords || !bookingCoords.lat || !bookingCoords.lng) {
     return 'Could not verify the service location for this account, so no booking request was placed. '
       + 'Capture the lead with the preferred time; a team member will call to schedule.';

@@ -480,6 +480,15 @@ describe('the conversation side', () => {
   });
 
 
+  test('failure streak restoration follows same-generation session nonce order', async () => {
+    primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [
+      { generation: 2, session_key: 'nonce-a', model_failures: 2, tool_failures: 2 },
+      { generation: 2, session_key: 'nonce-z', model_failures: 0, tool_failures: 1 },
+    ] } } });
+    expect(await recovery.loadResumeState(require('../models/db'), 'CA-tie', { sessionKey: 'nonce-2' }))
+      .toMatchObject({ modelFailures: 0, toolFailures: 1 });
+  });
+
   test('the provider-failure streak continues across the reconnect (codex r1 P2)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     expect(segmentStore.buildSegment({ generation: 1, text: 'x', modelFailures: 1, toolFailures: 0 })).toEqual(expect.objectContaining({ model_failures: 1, tool_failures: 0 }));

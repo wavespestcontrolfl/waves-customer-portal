@@ -1051,6 +1051,17 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     }));
   });
 
+  test('coordinate provider rejection marks the invocation failed', async () => {
+    primeDb({ propertyCount: 0 });
+    resolveCallBookingPropertyLinkage.mockResolvedValue({ propertyId: null, address: null, lat: null, lng: null });
+    booking.resolveBookingCoords.mockRejectedValueOnce(new Error('fixture coordinate outage'));
+    const ctx = slotCtx();
+    const out = await executeTool('request_booking', GOOD_INPUT, ctx);
+    expect(out).toMatch(/Could not verify the service location/i);
+    expect(ctx.toolFailed).toBe(true);
+    assertNoCreateWrites();
+  });
+
   test('an account whose service location cannot be resolved books NOTHING', async () => {
     primeDb({ propertyCount: 0 });
     resolveCallBookingPropertyLinkage.mockResolvedValue({ propertyId: null, address: null, lat: null, lng: null });
