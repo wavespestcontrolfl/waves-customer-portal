@@ -6752,7 +6752,7 @@ const CallRecordingProcessor = {
       const segment = composeRelaySegment(row);
       const resumedClaim = Number(meta?.relay_reconnect_ms) > 0 && Number(meta?.relay_session_claim_gen) >= Number(meta.relay_reconnect_ms);
       const reconnected = Number(meta?.relay_reconnects) > 0 && Boolean(segment || resumedClaim);
-      const transferred = Boolean(meta && typeof meta === 'object' && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || meta.relay_transfer_ring_at)) || reconnected || row.call_outcome === 'ai_transferred';
+      const transferred = Boolean(meta && typeof meta === 'object' && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || meta.relay_transfer_ring_at)) || reconnected || Array.isArray(meta?.relay_segment_owners) || row.call_outcome === 'ai_transferred';
       return { row, segment, transferred, reconnected, label: row.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff' };
     };
     // Registering claims and appending closes share the call-row lock with
@@ -6760,15 +6760,14 @@ const CallRecordingProcessor = {
     const initialRelayState = await currentRelayState();
     const initialRelayMeta = typeof initialRelayState.row.metadata === 'string'
       ? JSON.parse(initialRelayState.row.metadata) : (initialRelayState.row.metadata || {});
-    if (Array.isArray(initialRelayMeta.relay_segment_owners)) {
+    if (process.env.GATE_VOICE_RELAY_RECOVERY === 'true' || Array.isArray(initialRelayMeta.relay_segment_owners)) {
       const sealed = await require('./voice-agent/relay-segments').sealSegmentsForExtraction(db, call.id, procToken);
       if (sealed.status === 'ownership_lost') return abandonToPeer('the relay completion barrier');
       if (sealed.status !== 'ready') {
-        const released = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
-          processing_status: 'no_transcription', processing_token: null, updated_at: new Date(),
-        });
-        if (!released) return abandonToPeer('the pending relay release');
-        return { success: false, skipped: true, reason: 'relay_segments_pending' };
+        // Use the existing bounded extraction retry/triage mechanism. A
+        // crashed socket cannot be retried forever or silently treated as
+        // complete: after the normal cap, the office reviews the recording.
+        throw new Error('Relay close records are missing; if the socket was abandoned, inspect the recording and resolve intake manually.');
       }
     }
     // Transfer-marked row whose relay text had NOT landed at compose time:
