@@ -687,6 +687,19 @@ export default function DispatchPageV2({
     fetchSchedule(date);
   }, [date, fetchSchedule]);
 
+  // Auto-Dispatch audit links open the existing appointment detail sheet.
+  // Inspecting a move must never enter the completion or new-booking flows.
+  useEffect(() => {
+    const id = searchParams.get("appointment");
+    if (!id || loading || !data) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete("appointment");
+    setSearchParams(next, { replace: true });
+    const visit = (data.services || []).find((service) => String(service.id) === id);
+    if (visit) setDetailService(visit);
+    else setError(new Error("That appointment is no longer on this date. Find its current placement on the schedule."));
+  }, [searchParams, setSearchParams, loading, data]);
+
   // C4 (universal one-time services, ratified Q9): /tech deep-links typed
   // jobs here as ?completeService=<scheduledServiceId> instead of alert-
   // bouncing. The param is consumed once (deleted immediately, same shape
