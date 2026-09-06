@@ -73,7 +73,7 @@
  *   GATE_IB_TOOL_ACTIVITY=true (Intelligence Bar answers carry a toolActivity list — one operator-facing line per tool the exchange ran: label, done/error/proposed, duration — rendered above the answer in the ⌘K palette; off = response byte-identical to today)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
- *   GATE_ESTIMATE_LAWN_CALENDAR=true (season timeline under the lawn price card — four SWFL turf seasons from the current month, one-line focus each, cadence + projected months per frequency from the scheduling catalog on /data; dev-open, prod dark)
+ *   GATE_ESTIMATE_LAWN_CALENDAR=true ("Your program" block under the lawn price card — annual application count + four plain season rows behind a toggle; count from the scheduling catalog on /data; dev-open, prod dark)
  *   GATE_ESTIMATE_SUCCESS_REFERRAL=true (referral share card on accepted / just-accepted estimate screens + POST /:token/referral-link; enrolls on the tap only; dev-open, prod dark)
  *   GATE_ESTIMATE_HOT_VIEW_ALERT=true (owner-side admin bell when the multi_view_high_intent rule matches on a page open; one per estimate per 24h, silent until the owner enables the category; not a customer message — STRICT opt-in in dev too)
  *   GATE_ESTIMATE_SOFT_EXIT=true (customer soft exit on a sent estimate: reason-tagged decline, still-deciding signal, change request → service_requests row + admin bell; no customer comms; dev-open, prod dark)
@@ -1701,12 +1701,13 @@ const gates = {
   // Enable with GATE_SEND_REQUIRES_SERVER_PRICING=true; unset = revoke.
   sendRequiresServerPricing: process.env.GATE_SEND_REQUIRES_SERVER_PRICING === 'true',
   // Lawn program seasons on the estimate page: under the lawn price card,
-  // the four SWFL turf seasons in order from the current month, each with a
-  // one-line focus and the number of the selected frequency's applications
-  // the scheduling catalog puts there. Gates the /data `lawnCalendar` block
-  // ({ programs: { [frequencyKey]: { visitsPerYear, cadence, months } } },
-  // projected by describeLawnProgramCadence). No product, step, or
-  // fertilizer names (owner-owned business logic). Dev-open, prod dark.
+  // the program's annual application count and four plain season rows
+  // (what each SWFL turf season is for) behind a toggle — education, not a
+  // schedule (owner 2026-09-05: no per-season counts, month ranges, or
+  // interval line). Gates the /data `lawnCalendar` block ({ programs: {
+  // [frequencyKey]: { visitsPerYear, cadence, months } } }, projected by
+  // describeLawnProgramCadence). No product, step, or fertilizer names
+  // (owner-owned business logic). Dev-open, prod dark.
   // Enable with GATE_ESTIMATE_LAWN_CALENDAR=true.
   estimateLawnCalendar: isProd ? process.env.GATE_ESTIMATE_LAWN_CALENDAR === 'true' : true,
 

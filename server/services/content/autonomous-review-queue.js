@@ -250,6 +250,7 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
       await lockCurrentRun(trx, opportunityId, run, expectedRunId);
       await updatePendingReviewOpportunity(trx, opportunityId, {
         status: 'pending',
+        claim_id: null,
         claimed_at: null,
         completed_at: null,
         skip_reason: null,

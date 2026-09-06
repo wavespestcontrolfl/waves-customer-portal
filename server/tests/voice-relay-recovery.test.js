@@ -113,11 +113,11 @@ describe('relay-recovery module', () => {
     expect(append.sql).toBe("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_segments', COALESCE(metadata->'relay_segments', '[]'::jsonb) || ?::jsonb)");
     expect(JSON.parse(append.bindings[0])).toEqual([seg]);
     const compose = segmentStore.composeSegmentsSql(db);
-    expect(compose.sql).toContain("string_agg(seg->>'text', ? ORDER BY (seg->>'generation')::bigint, COALESCE(seg->>'session_key', ''), ord)");
+    expect(compose.sql).toContain("string_agg(seg->>'text', ? ORDER BY (seg->>'generation')::bigint, COALESCE(seg->>'session_key', '') COLLATE \"C\", ord)");
     expect(compose.bindings).toEqual([segmentStore.SEGMENT_SEPARATOR]);
     expect(segmentStore.segmentsText([{ generation: 2, text: 'second' }, { generation: 1, text: 'first' }, { generation: 3, text: '' }])).toBe(`first${segmentStore.SEGMENT_SEPARATOR}second`);
     const q = { whereRaw: jest.fn().mockReturnThis() };
-    segmentStore.generationFenceSql(q, 99);
+    segmentStore.closeFenceSql(q, 99, 'nonce-1');
     expect(q.whereRaw).toHaveBeenCalledWith("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [99]);
   });
 
@@ -1636,5 +1636,40 @@ describe('provider failure tracking', () => {
     await convo._runLoop('second');
     expect(convo._modelFailures).toBe(0);
     expect(convo._toolFailures).toBe(1);
+  });
+});
+
+describe('socket completion registration and bounded ownership reads', () => {
+  test('a silent authenticated socket registers and closes even without caller identity', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb();
+    const register = jest.spyOn(segmentStore, 'registerSegmentSession').mockResolvedValueOnce(true);
+    const append = jest.spyOn(segmentStore, 'appendSegment').mockResolvedValueOnce(1);
+    try {
+      const convo = new RelayConversation({ callSid: 'CA-silent', sessionKey: 'silent', callTokenVerified: true, send: jest.fn() });
+      await convo._contextReady;
+      convo._callerVerified = false;
+      convo._runCaptureFloor = jest.fn(async () => {});
+      expect(register).toHaveBeenCalledWith(expect.anything(), 'CA-silent', 'silent');
+      await convo.end('ws_close');
+      expect(append).toHaveBeenCalledWith(expect.anything(), 'CA-silent', expect.objectContaining({
+        session_key: 'silent', text: '', turns: 0,
+      }), { allowUnclaimed: true });
+    } finally { register.mockRestore(); append.mockRestore(); }
+  });
+
+  test.each(['registration', 'ownership'])('a stalled %s read fails closed within the turn deadline', async (stage) => {
+    jest.useFakeTimers();
+    const context = require('../services/voice-agent/relay-context');
+    const owner = jest.spyOn(context, 'relaySessionClaimOwner').mockReturnValue(new Promise(() => {}));
+    try {
+      const convo = Object.assign(Object.create(RelayConversation.prototype), {
+        callSid: 'CA-bound', sessionKey: 'first', _callerVerified: true,
+        _segmentRegistration: stage === 'registration' ? new Promise(() => {}) : null,
+      });
+      const verdict = convo._sessionSuperseded();
+      await jest.advanceTimersByTimeAsync(2001);
+      expect(await verdict).toBe(true);
+    } finally { owner.mockRestore(); jest.useRealTimers(); }
   });
 });

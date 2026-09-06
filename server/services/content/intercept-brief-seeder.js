@@ -247,6 +247,8 @@ async function seedAll({ file = DEFAULT_MANIFEST_PATH, dryRun = false, now = new
        ON CONFLICT (dedupe_key) DO UPDATE
          SET score = EXCLUDED.score,
              score_breakdown = EXCLUDED.score_breakdown,
+             claim_id = CASE WHEN opportunity_queue.status IN ('claimed', 'done', 'pending_review')
+                             THEN opportunity_queue.claim_id ELSE NULL END,
              signal_metadata = EXCLUDED.signal_metadata,
              mined_at = EXCLUDED.mined_at,
              expires_at = EXCLUDED.expires_at,

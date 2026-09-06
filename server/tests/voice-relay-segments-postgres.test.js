@@ -27,7 +27,7 @@ postgres('atomic relay segment append and composition', () => {
       t.text('id').primary(); t.text('twilio_call_sid').unique(); t.jsonb('metadata'); t.text('transcription');
       t.text('transcription_provider'); t.text('transcription_status');
       t.text('call_summary'); t.jsonb('transcription_metadata'); t.integer('duration_seconds'); t.timestamp('created_at').defaultTo(db.fn.now());
-      t.text('source'); t.text('call_outcome'); t.jsonb('transcript_structured'); t.timestamp('updated_at');
+      t.text('processing_token'); t.text('source'); t.text('call_outcome'); t.jsonb('transcript_structured'); t.timestamp('updated_at');
     });
     await db.schema.createTable('call_commitments', (t) => {
       t.increments('id');
@@ -151,127 +151,77 @@ postgres('atomic relay segment append and composition', () => {
     expect(latestPromises(row.metadata.relay_segments)[0].expectation).toBe('b');
   });
 
-  test('a commitment pass waiting on the call lock uses the latest same-owner promise', async () => {
-    const { recordRelayCommitments } = require('../services/call-commitments');
-    const at = new Date();
-    const old = buildSegment({ generation: 1, sessionKey: 'a', text: 'Agent: I will send you an estimate.',
-      promises: [{ kind: 'send_estimate', verdict: true, expectation: 'about_15_minutes', at }] });
-    const newer = buildSegment({ generation: 2, sessionKey: 'b', text: 'Agent: I will send you an estimate when the office opens.',
-      promises: [{ kind: 'send_estimate', verdict: true, expectation: 'when_office_opens', at }] });
-    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', transcription: old.text, call_outcome: 'ai_handled',
-      metadata: { relay_session_claim_owner: 'b', relay_segments: [old] } });
-    const trx = await db.transaction();
-    let pass;
+  test('SQL and memory apply the whole-call cap after ordering and scrubbing', async () => {
+    const { MAX_TRANSCRIPT_CHARS } = require('../services/voice-agent/relay-transcript');
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture',
+      metadata: { relay_reconnects: 1, relay_reconnect_ms: 3 } });
+    for (const generation of [2, 1]) await appendSegment(db, 'CA-fixture', buildSegment({
+      generation, sessionKey: `session-${generation}`, text: Array(20).fill('Caller: ' + 'x'.repeat(2000)).join('\n'),
+    }));
+    const row = await db('call_log').first();
+    expect(row.transcription).toHaveLength(MAX_TRANSCRIPT_CHARS);
+    expect(row.transcription).toBe(segmentsText(row.metadata.relay_segments));
+    expect(row.metadata.relay_segments).toHaveLength(2);
+  });
+
+  test('an uncommitted predecessor defers the seal; a completed set forbids later claims and appends', async () => {
+    const { beginRelaySessionClaim } = require('../services/voice-agent/relay-context');
+    const { sealSegmentsForExtraction } = require('../services/voice-agent/relay-segments');
+    const gate = process.env.GATE_VOICE_RELAY_RECOVERY;
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     try {
-      await trx('call_log').where('id', 'fixture').forUpdate().first();
-      pass = recordRelayCommitments(db, { callSid: 'CA-fixture', sessionKey: 'b', transcript: old.text,
-        estimateQueued: true, estimateExpectation: 'about_15_minutes', estimatePromisedAt: at });
-      let blocked = false;
-      for (let attempt = 0; attempt < 100; attempt += 1) {
-        const activity = await db.raw('SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name = ? AND cardinality(pg_blocking_pids(pid)) > 0) AS blocked', [schema]);
-        if (activity.rows[0].blocked) { blocked = true; break; }
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      expect(blocked).toBe(true);
-      // The stale arguments survive the race; the transaction must replace
-      // them with the row state visible once its lock is acquired.
-      await trx('call_log').where('id', 'fixture').update({ transcription: segmentsText([old, newer]),
-        metadata: { relay_session_claim_owner: 'b', relay_segments: [old, newer] } });
-      await trx.commit();
-      expect(await pass).toMatchObject({ written: 1 });
-      const owed = await db('call_commitments').where('kind', 'send_estimate').first();
-      expect(owed.due_at).toBeNull();
-      expect(owed.due_basis).not.toBe('stated');
-    } finally { if (!trx.isCompleted()) await trx.rollback(); if (pass) await pass; }
+      await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', processing_token: 'processor' });
+      expect(await beginRelaySessionClaim('CA-fixture', 'first', 1)).toBe(true);
+      expect(await beginRelaySessionClaim('CA-fixture', 'second', 2)).toBe(true);
+      await db('call_log').update({ metadata: db.raw("metadata || '{\"relay_reconnects\":1,\"relay_reconnect_ms\":2}'::jsonb") });
+      await appendSegment(db, 'CA-fixture', buildSegment({ generation: 2, sessionKey: 'second', text: '' }));
+      expect(await sealSegmentsForExtraction(db, 'fixture', 'processor')).toEqual({ status: 'pending' });
+      // This writer STARTS after the extraction checkpoint, the race that a
+      // standalone SELECT FOR UPDATE could not prevent.
+      await appendSegment(db, 'CA-fixture', buildSegment({ generation: 1, sessionKey: 'first', text: 'Caller: termite inspection' }));
+      const sealed = await sealSegmentsForExtraction(db, 'fixture', 'processor');
+      expect(sealed.status).toBe('ready');
+      expect(sealed.row.transcription).toContain('termite inspection');
+      expect(await beginRelaySessionClaim('CA-fixture', 'third', 3)).toBe(false);
+      const before = await db('call_log').first();
+      expect(await appendSegment(db, 'CA-fixture', buildSegment({ generation: 0, sessionKey: 'unknown', text: 'Caller: late' }))).toBe(0);
+      expect(await appendSegment(db, 'CA-fixture', buildSegment({ generation: 1, sessionKey: 'first', text: 'Caller: changed' }))).toBe(1);
+      expect(await db('call_log').first()).toEqual(before);
+      expect(await sealSegmentsForExtraction(db, 'fixture', 'replacement')).toEqual({ status: 'ownership_lost' });
+    } finally {
+      if (gate === undefined) delete process.env.GATE_VOICE_RELAY_RECOVERY;
+      else process.env.GATE_VOICE_RELAY_RECOVERY = gate;
+    }
   });
 
-  test.each([true, false])('summary repair uses explicit provenance, model-written=%s', async (modelWritten) => {
-    const { buildTranscriptUpdate } = require('../services/voice-agent/relay-transcript');
-    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
-    const modelSummary = modelWritten ? 'AI phone assistant discussed a termite follow-up.' : null;
-    const patch = buildTranscriptUpdate({ modelSummary, turns: [{ role: 'caller', text: 'first leg' }] });
-    const meta = { relay_segments: [buildSegment({ generation: 1, text: 'Caller: first leg' }), buildSegment({ generation: 2, text: 'Caller: second leg' })] };
-    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', metadata: meta,
-      call_summary: patch.call_summary, transcription_metadata: patch.transcription_metadata });
-    const convo = Object.assign(Object.create(RelayConversation.prototype), { callSid: 'CA-fixture' });
-    const refreshed = await convo._refreshCallSummary(meta);
+  test('authenticated unclaimed sockets join the same barrier without gaining a customer claim', async () => {
+    const { registerSegmentSession, sealSegmentsForExtraction } = require('../services/voice-agent/relay-segments');
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', processing_token: 'processor' });
+    expect(await registerSegmentSession(db, 'CA-fixture', 'withheld')).toBe(true);
+    expect(await sealSegmentsForExtraction(db, 'fixture', 'processor')).toEqual({ status: 'pending' });
+    expect(await appendSegment(db, 'CA-fixture', buildSegment({ sessionKey: 'withheld', text: 'Caller: ants' }))).toBe(1);
+    expect((await sealSegmentsForExtraction(db, 'fixture', 'processor')).status).toBe('ready');
     const row = await db('call_log').first();
-    expect(refreshed).toBe(!modelWritten);
-    if (modelWritten) expect(row.call_summary).toBe(modelSummary);
-    else expect(row.call_summary).toContain('first leg | second leg');
+    expect(row.metadata.relay_session_claim_owner).toBeUndefined();
+    expect(row.metadata.relay_segments[0].text).toContain('ants');
+    expect(await registerSegmentSession(db, 'CA-fixture', 'late')).toBe(false);
   });
 
-  test.each([
-    [null, null, 'Caller: retained unverified text'],
-    ['foreign', null, null],
-    [null, 'fixture_recording', 'Recorded caller message.'],
-  ])('trusted late repair respects owner %s and provider %s', async (owner, provider, expected) => {
-    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
-    const segment = buildSegment({ generation: 1, sessionKey: 'first', text: 'Caller: retained unverified text' });
-    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', call_outcome: 'ai_handled',
-      metadata: { relay_session_claim_owner: owner, relay_segments: [segment] },
-      transcription_provider: provider, transcription: provider ? 'Recorded caller message.' : null });
-    const convo = Object.assign(Object.create(RelayConversation.prototype), {
-      callSid: 'CA-fixture', sessionKey: 'first', _callTokenVerified: true,
-      _recordCommitments: jest.fn(async () => {}), _refreshFloorLeadSummary: jest.fn(async () => {}), _refreshCallSummary: jest.fn(async () => {}),
-    });
-    await convo._reconcileLateSegment();
-    const row = await db('call_log').first();
-    expect(row.transcription).toBe(expected);
-    expect(row.metadata.relay_session_claim_owner).toBe(owner);
+  test('legacy recordings seal their existing evidence without requiring retroactive close records', async () => {
+    const { registerSegmentSession, sealSegmentsForExtraction } = require('../services/voice-agent/relay-segments');
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', processing_token: 'processor', transcription: 'Legacy recording' });
+    const result = await sealSegmentsForExtraction(db, 'fixture', 'processor');
+    expect(result.status).toBe('ready');
+    expect(result.row.transcription).toBe('Legacy recording');
+    expect(await registerSegmentSession(db, 'CA-fixture', 'late')).toBe(false);
   });
 
-  test.each([['first', true], ['replacement', false], [null, true]])('post-floor linkage is fenced against owner %s', async (owner, expected) => {
-    const { stampCallLeadLinkage } = require('../services/voice-agent/relay-context');
-    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', metadata: {
-      relay_session_claim_owner: owner, relay_lead_id: 'existing-lead',
-    } });
-    expect(await stampCallLeadLinkage('CA-fixture', 'floor-lead', { sessionKey: 'first' })).toBe(expected);
-    expect((await db('call_log').first()).metadata.relay_lead_id).toBe(expected ? 'floor-lead' : 'existing-lead');
-  });
-
-  test.each([null, 'deterministic', 'model'])('late owning repair preserves model summary provenance over %s', async (source) => {
-    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
-    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', call_outcome: 'ai_handled',
-      metadata: { relay_session_claim_owner: 'first', relay_segments: [buildSegment({ generation: 1, sessionKey: 'first', text: 'Caller: ants' })] },
-      call_summary: source ? 'Previously stored summary' : null,
-      transcription_metadata: source ? { summary_source: source } : null });
-    const convo = Object.assign(Object.create(RelayConversation.prototype), { callSid: 'CA-fixture', sessionKey: 'first',
-      _modelSummary: 'Caller requested help with ants and a callback.',
-      _recordCommitments: jest.fn(async () => {}), _refreshFloorLeadSummary: jest.fn(async () => {}),
-    });
-    await convo._reconcileLateSegment();
-    const row = await db('call_log').first();
-    expect(row.call_summary).toBe(source === 'model' ? 'Previously stored summary' : convo._modelSummary);
-    expect(row.transcription_metadata.summary_source).toBe('model');
-  });
-
-  test('a summary repair retries from a changed segment snapshot instead of overwriting with stale text', async () => {
-    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
-    const old = { relay_segments: [buildSegment({ generation: 1, text: 'Caller: first leg' })] };
-    const current = { relay_segments: [...old.relay_segments, buildSegment({ generation: 2, text: 'Caller: second leg' })] };
-    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', metadata: current,
-      call_summary: 'AI phone assistant handled this call. Caller said: first leg | second leg',
-      transcription_metadata: { summary_source: 'deterministic' } });
-    const convo = Object.assign(Object.create(RelayConversation.prototype), { callSid: 'CA-fixture' });
-    expect(await convo._refreshCallSummary(old)).toBe(true);
-    expect((await db('call_log').first()).call_summary).toContain('first leg | second leg');
-  });
-
-  test.each([
-    ['relay_failed', {}, 0], ['voicemail', {}, 0],
-    ['ai_handled', {}, 1], ['ai_transferred', {}, 1],
-    ['voicemail', { relay_handoff: { reason: 'fixture' } }, 1],
-    ['voicemail', { relay_reconnects: 1 }, 1],
-  ])('late commitment eligibility follows durable outcome %s and evidence %j', async (outcome, evidence, expected) => {
-    const { recordRelayCommitments } = require('../services/call-commitments');
-    const segment = buildSegment({ generation: 1, sessionKey: 'a', text: 'Agent: I will send you an estimate.',
-      promises: [{ kind: 'send_estimate', verdict: true }] });
-    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', call_outcome: outcome,
-      metadata: { relay_session_claim_owner: 'a', relay_segments: [segment], ...evidence } });
-    expect(await recordRelayCommitments(db, { callSid: 'CA-fixture', sessionKey: 'a', transcript: null }))
-      .toMatchObject({ written: expected });
-    expect(await db('call_commitments').select()).toHaveLength(expected);
+  test('a superseded equal-generation nonce cannot finalize through the shared close fence', async () => {
+    const { closeFenceSql } = require('../services/voice-agent/relay-segments');
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture',
+      metadata: { relay_reconnect_ms: 2, relay_session_claim_gen: 2, relay_session_claim_owner: 'nonce-z' } });
+    expect(await closeFenceSql(db('call_log').where('id', 'fixture'), 2, 'nonce-a').update({ call_summary: 'stale' })).toBe(0);
+    expect(await closeFenceSql(db('call_log').where('id', 'fixture'), 2, 'nonce-z').update({ call_summary: 'current' })).toBe(1);
   });
 
 });

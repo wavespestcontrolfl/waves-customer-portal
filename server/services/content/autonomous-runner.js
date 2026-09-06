@@ -217,6 +217,7 @@ class AutonomousRunner {
     if (!opp) return finalize(run, t0, { outcome: 'skipped_no_opportunity' });
 
     run.opportunity_id = opp.id;
+    run.queue_claim_id = opp.claim_id || null;
     run.action_type = opp.effective_action_type || opp.action_type;
     run.shadow_mode = isShadow(run.action_type);
     const claimToken = opp.claimed_at;
@@ -3623,6 +3624,7 @@ async function finalize(run, t0, patch, { persist = true } = {}) {
   try {
     const [persisted] = await db('autonomous_runs').insert({
       opportunity_id: run.opportunity_id || null,
+      queue_claim_id: run.queue_claim_id || null,
       brief_id: run.brief_id || null,
       action_type: run.action_type || 'unknown',
       page_type: run.page_type || null,

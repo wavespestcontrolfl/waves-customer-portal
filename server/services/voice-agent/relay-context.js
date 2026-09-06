@@ -117,6 +117,8 @@ async function beginRelaySessionClaim(callSid, sessionKey = null, sessionGenerat
     //     the same socket still cannot claim twice (the r25 race).
     // Legacy shape (no sessionKey) keeps the strict one-claim predicate.
     const q = db('call_log').where({ twilio_call_sid: key });
+    const trackSegments = process.env.GATE_VOICE_RELAY_RECOVERY === 'true' && owner;
+    q.whereRaw("COALESCE(metadata->>'relay_segments_sealed', 'false') <> 'true'");
     if (owner) {
       // Sandy PR 2B: a claimant must be minted at or after the row's LATEST
       // reconnect stamp (codex r5 P1) — a token from a reconnect render whose
@@ -140,8 +142,13 @@ async function beginRelaySessionClaim(callSid, sessionKey = null, sessionGenerat
           ? db.raw(
             `jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${RELAY_CLAIM_KEY}}', to_jsonb(now()::text), true), `
             + `'{${RELAY_CLAIM_OWNER_KEY}}', to_jsonb(?::text), true), `
-            + `'{${RELAY_CLAIM_GEN_KEY}}', to_jsonb(?::bigint), true)`,
-            [owner, generation],
+            + `'{${RELAY_CLAIM_GEN_KEY}}', to_jsonb(?::bigint), true)`
+            + (trackSegments ? ` || jsonb_build_object('relay_segment_owners',
+              COALESCE(metadata->'relay_segment_owners', '[]'::jsonb)
+              || CASE WHEN metadata->>'${RELAY_CLAIM_OWNER_KEY}' IS NOT NULL
+                 THEN jsonb_build_array(metadata->>'${RELAY_CLAIM_OWNER_KEY}') ELSE '[]'::jsonb END
+              || jsonb_build_array(?::text))` : ''),
+            [owner, generation, ...(trackSegments ? [owner] : [])],
           )
           : db.raw(
             `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${RELAY_CLAIM_KEY}}', to_jsonb(now()::text), true)`,

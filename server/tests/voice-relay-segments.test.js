@@ -1,5 +1,4 @@
 const segments = require('../services/voice-agent/relay-segments');
-const { composeRelaySegment } = require('../services/voice-agent/relay-transfer');
 
 describe('relay segment storage representation', () => {
   test('retains the issued references and search context in the serialized record', () => {
@@ -21,7 +20,7 @@ describe('relay segment storage representation', () => {
       segments.buildSegment({ generation: 2, text: 'Caller: second' }),
       segments.buildSegment({ generation: 1, text: 'Caller: first' }),
     ] } };
-    const composed = composeRelaySegment(row);
+    const composed = { text: segments.segmentsText(row.metadata.relay_segments) };
     expect(composed.text).toContain('Caller: first\n\n[Reconnected]\nCaller: second');
     expect(segments.callerTurnsFromText(composed.text)).toEqual(['first', 'second']);
   });

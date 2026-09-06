@@ -709,7 +709,9 @@ plan matching the frequency's visitsPerYear through the scheduler's own
 `buildRecurringOccurrenceDates`; no customer data, no dates. A frequency
 with no catalog plan is omitted; the key is ABSENT when the gate is off or
 nothing resolves (it was boolean `true` from 2026-08 until #3755). The page
-only buckets months into seasons — it never derives an interval itself.
+renders the count and fixed season copy from it and never derives an
+interval itself; since 2026-09-05 it shows neither `cadence` nor `months`
+(owner: education, not a schedule).
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and a one-time-ONLY estimate whose billable rows all resolve to one copy

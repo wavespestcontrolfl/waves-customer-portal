@@ -6752,9 +6752,24 @@ const CallRecordingProcessor = {
       const segment = composeRelaySegment(row);
       const resumedClaim = Number(meta?.relay_reconnect_ms) > 0 && Number(meta?.relay_session_claim_gen) >= Number(meta.relay_reconnect_ms);
       const reconnected = Number(meta?.relay_reconnects) > 0 && Boolean(segment || resumedClaim);
-      const transferred = Boolean(meta && typeof meta === 'object' && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || meta.relay_transfer_ring_at)) || reconnected || row.call_outcome === 'ai_transferred';
+      const transferred = Boolean(meta && typeof meta === 'object' && ((meta.relay_handoff && typeof meta.relay_handoff === 'object') || meta.relay_transfer_ring_at)) || reconnected || Array.isArray(meta?.relay_segment_owners) || row.call_outcome === 'ai_transferred';
       return { row, segment, transferred, reconnected, label: row.call_outcome === 'voicemail' ? 'Voicemail' : 'Staff' };
     };
+    // Registering claims and appending closes share the call-row lock with
+    // this barrier. Do not transcribe, reject, extract or route a partial set.
+    const initialRelayState = await currentRelayState();
+    const initialRelayMeta = typeof initialRelayState.row.metadata === 'string'
+      ? JSON.parse(initialRelayState.row.metadata) : (initialRelayState.row.metadata || {});
+    if (process.env.GATE_VOICE_RELAY_RECOVERY === 'true' || Array.isArray(initialRelayMeta.relay_segment_owners)) {
+      const sealed = await require('./voice-agent/relay-segments').sealSegmentsForExtraction(db, call.id, procToken);
+      if (sealed.status === 'ownership_lost') return abandonToPeer('the relay completion barrier');
+      if (sealed.status !== 'ready') {
+        // Use the existing bounded extraction retry/triage mechanism. A
+        // crashed socket cannot be retried forever or silently treated as
+        // complete: after the normal cap, the office reviews the recording.
+        throw new Error('Relay close records are missing; if the socket was abandoned, inspect the recording and resolve intake manually.');
+      }
+    }
     // Transfer-marked row whose relay text had NOT landed at compose time:
     // the transcript write below then composes INSIDE the UPDATE from the
     // row's metadata, so a stash landing between the read and the write is
@@ -7208,7 +7223,10 @@ const CallRecordingProcessor = {
 
     if (!transcription) {
       const relay = await currentRelayState();
-      if (relay.segment) {
+      if (relay.segment && !call.recording_url) {
+        // With no recording to retrieve, the durable AI conversation remains
+        // usable. A provider failure for an existing recording must retain
+        // no_transcription so the normal sweep retries that recorded leg.
         // A silent/unavailable recording does not erase the caller's durable
         // AI conversation. Store the plain relay representation and retain
         // the AI label for extraction; there is no recorded half to invent.
@@ -7313,12 +7331,10 @@ const CallRecordingProcessor = {
     const v2PromptVersion = extractionPromptVersion(bookableServiceNames);
 
     if (relayPending) {
-      // A socket append can commit after writeTranscript returned. Read the
-      // scrubbed composite under the append writer's row lock: an unlocked
-      // MVCC read can return old text while that append is still uncommitted.
-      // The statement lock releases before the model call.
+      // The registered set is sealed before transcription. Refresh the
+      // processor's own composed write while retaining its claim fence.
       const fresh = await db('call_log').where({ id: call.id })
-        .where('processing_token', procToken).forUpdate().first('transcription', 'transcription_provider');
+        .where('processing_token', procToken).first('transcription', 'transcription_provider');
       if (!fresh) return abandonToPeer('the relay transcript refresh');
       const relayText = fresh.transcription_provider === RELAY_TRANSCRIPTION_PROVIDER
         ? `[AI segment]\n${fresh.transcription || ''}` : fresh.transcription;
@@ -8682,6 +8698,7 @@ const CallRecordingProcessor = {
           .update({
             ai_extraction: JSON.stringify(extracted),
             call_summary: extracted.call_summary || null,
+            transcription_metadata: trx.raw("COALESCE(transcription_metadata, '{}'::jsonb) || jsonb_build_object('summary_source', 'model')"),
             sentiment: extracted.sentiment || null,
             lead_quality: extracted.lead_quality || null,
             processing_status: extracted.is_spam ? 'spam' : 'processed',
@@ -9845,6 +9862,7 @@ const CallRecordingProcessor = {
       } : {}),
       ai_extraction: JSON.stringify(extracted),
       call_summary: extracted.call_summary || null,
+      transcription_metadata: db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || jsonb_build_object('summary_source', 'model')"),
       sentiment: extracted.sentiment || null,
       lead_quality: extracted.lead_quality || null,
       updated_at: new Date(),
