@@ -31,7 +31,7 @@
  * Dark behind GATE_CALL_COMMITMENTS (checked by the processor). Reads
  * happen regardless of the gate so already-recorded rows stay visible.
  * SMS actions share this ledger through sms_log_id and sms_context. The
- * call readers below deliberately join call_log: SMS work is internal and
+ * call readers below require a linked call record: SMS work is internal and
  * surfaces only through its customer/conversation-linked admin bells.
  */
 

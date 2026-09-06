@@ -65,6 +65,11 @@ jobs:
         env:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx knex migrate:latest --knexfile server/knexfile.js
+      - name: SMS operational transaction tests
+        working-directory: server
+        env:
+          SMS_OPERATIONS_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/sms-operations-postgres.test.js
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
         run: npx jest --ci --silent --maxWorkers=2
@@ -102,11 +107,6 @@ jobs:
         env:
           IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/intelligence-bar-operational-postgres.test.js
-      - name: SMS operational transaction tests
-        working-directory: server
-        env:
-          SMS_OPERATIONS_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/sms-operations-postgres.test.js
       - name: Tool contract tests (202 IB/agent tools vs the migrated schema)
         # Blocks on critical only (schema drift, missing tables/columns);
         # execute-smoke warnings (e.g. uuid-typed params fed 'test') are
