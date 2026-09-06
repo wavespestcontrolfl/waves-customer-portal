@@ -142,6 +142,30 @@ describe('ImageGenerator: chain success on first provider', () => {
   });
 });
 
+describe('ImageGenerator: one deadline for the whole chain (Codex r5 P2 on #3964)', () => {
+  test('a leg with less than the floor remaining is skipped as budget-exhausted instead of getting a fresh 180 s', async () => {
+    process.env.OPENAI_API_KEY = 'sk-test';
+    process.env.GEMINI_API_KEY = 'gem-test';
+    const { IMAGE_LEG_FLOOR_MS, legTimeoutMs, IMAGE_REQUEST_TIMEOUT_MS } = require('../services/content/image-generator')._internals;
+    let clock = 1_000_000;
+    // The first leg burns the whole budget (a hang that only the abort ends).
+    const mockFetch = jest.fn().mockImplementation(() => { clock += 200_000; return Promise.resolve(err(500, 'upstream hang')); });
+    const gen = new ImageGenerator({ envChain: 'gpt-image-2,gemini,gpt-image-1', fetchFn: mockFetch, chainBudgetMs: 200_000, now: () => clock });
+    await expect(gen.generate({ title: 'Test' })).rejects.toMatchObject({
+      attempts: [
+        expect.objectContaining({ provider: 'gpt-image-2' }),
+        expect.objectContaining({ provider: 'gemini', result: expect.objectContaining({ skipped: true, reason: expect.stringMatching(/chain budget exhausted/) }) }),
+        expect.objectContaining({ provider: 'gpt-image-1', result: expect.objectContaining({ skipped: true }) }),
+      ],
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    // The primary keeps its full allowance; a later leg gets only what is left.
+    expect(legTimeoutMs(clock + 400_000, clock)).toBe(IMAGE_REQUEST_TIMEOUT_MS);
+    expect(legTimeoutMs(clock + 30_000, clock)).toBe(30_000);
+    expect(legTimeoutMs(clock + IMAGE_LEG_FLOOR_MS - 1, clock)).toBeNull();
+  });
+});
+
 describe('ImageGenerator: chain fallback on fatal OpenAI error', () => {
   test('404 model_not_found on gpt-image-2 → falls to gpt-image-1', async () => {
     process.env.OPENAI_API_KEY = 'sk-test';

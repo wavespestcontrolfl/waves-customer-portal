@@ -348,13 +348,27 @@ const IMAGE_REQUEST_TIMEOUT_MS = (() => {
   const n = Number(process.env.BLOG_IMAGE_TIMEOUT_MS);
   return Number.isFinite(n) && n >= 10_000 ? n : 180_000;
 })();
-const imageRequestSignal = () => (
+// The whole chain shares one deadline: the slow primary keeps its full
+// allowance, later legs get what is left, and a leg with less than the floor
+// remaining is skipped — six hung providers must not hold an admin request or
+// the exclusive scheduled-content tick for 18 minutes (Codex r5 P2 on #3964).
+const IMAGE_CHAIN_BUDGET_MS = (() => {
+  const n = Number(process.env.BLOG_IMAGE_CHAIN_BUDGET_MS);
+  return Number.isFinite(n) && n >= IMAGE_REQUEST_TIMEOUT_MS ? n : Math.max(IMAGE_REQUEST_TIMEOUT_MS * 2, 360_000);
+})();
+const IMAGE_LEG_FLOOR_MS = 15_000;
+const legTimeoutMs = (deadline, now = Date.now()) => {
+  const remaining = deadline - now;
+  if (remaining < IMAGE_LEG_FLOOR_MS) return null;
+  return Math.min(IMAGE_REQUEST_TIMEOUT_MS, remaining);
+};
+const imageRequestSignal = (timeoutMs = IMAGE_REQUEST_TIMEOUT_MS) => (
   typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
-    ? AbortSignal.timeout(IMAGE_REQUEST_TIMEOUT_MS)
+    ? AbortSignal.timeout(timeoutMs)
     : undefined
 );
 
-async function callOpenAI({ model, quality, prompt, size }, { fetchFn = fetch } = {}) {
+async function callOpenAI({ model, quality, prompt, size }, { fetchFn = fetch, timeoutMs } = {}) {
   if (!process.env.OPENAI_API_KEY) {
     return { skipped: true, reason: 'OPENAI_API_KEY not set' };
   }
@@ -366,7 +380,7 @@ async function callOpenAI({ model, quality, prompt, size }, { fetchFn = fetch } 
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ model, prompt, size, quality, n: 1 }),
-      signal: imageRequestSignal(),
+      signal: imageRequestSignal(timeoutMs),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -387,7 +401,7 @@ async function callOpenAI({ model, quality, prompt, size }, { fetchFn = fetch } 
   }
 }
 
-async function callGemini({ model, prompt, aspectRatio }, { fetchFn = fetch } = {}) {
+async function callGemini({ model, prompt, aspectRatio }, { fetchFn = fetch, timeoutMs } = {}) {
   if (!process.env.GEMINI_API_KEY) {
     return { skipped: true, reason: 'GEMINI_API_KEY not set' };
   }
@@ -405,7 +419,7 @@ async function callGemini({ model, prompt, aspectRatio }, { fetchFn = fetch } = 
           contents: [{ parts: [{ text: prompt }] }],
           generationConfig,
         }),
-        signal: imageRequestSignal(),
+        signal: imageRequestSignal(timeoutMs),
       }
     );
     if (!res.ok) {
@@ -431,8 +445,10 @@ async function callGemini({ model, prompt, aspectRatio }, { fetchFn = fetch } = 
 // ── public API ───────────────────────────────────────────────────────
 
 class ImageGenerator {
-  constructor({ envChain = process.env.BLOG_IMAGE_PROVIDER, fetchFn = fetch } = {}) {
+  constructor({ envChain = process.env.BLOG_IMAGE_PROVIDER, fetchFn = fetch, chainBudgetMs = IMAGE_CHAIN_BUDGET_MS, now = Date.now } = {}) {
     this.chain = parseChain(envChain);
+    this._chainBudgetMs = chainBudgetMs;
+    this._now = now;
     if (!this.chain.length) {
       logger.warn('[image-generator] no valid providers in BLOG_IMAGE_PROVIDER; falling back to defaults');
       this.chain = parseChain(DEFAULT_CHAIN);
@@ -457,16 +473,20 @@ class ImageGenerator {
     const prompt = customPrompt || buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting });
     const alt = customPrompt ? null : buildAltText({ title, topic, keyword, city, mode, plan });
     const attempts = [];
+    const deadline = this._now() + this._chainBudgetMs;
 
     for (const slug of this.chain) {
       const cfg = MODEL_MAP[slug];
       const size = sizeFor(mode, cfg.api);
+      const timeoutMs = legTimeoutMs(deadline, this._now());
       let result;
-      if (cfg.api === 'openai') {
-        result = await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt, size }, { fetchFn: this._fetchFn });
+      if (timeoutMs === null) {
+        result = { skipped: true, reason: `chain budget exhausted (${this._chainBudgetMs} ms)` };
+      } else if (cfg.api === 'openai') {
+        result = await callOpenAI({ model: cfg.model, quality: cfg.quality, prompt, size }, { fetchFn: this._fetchFn, timeoutMs });
       } else if (cfg.api === 'gemini') {
         const aspectRatio = cfg.imageAspect ? (MODE_ASPECTS[mode] || MODE_ASPECTS['blog-hero']) : null;
-        result = await callGemini({ model: cfg.model, prompt, aspectRatio }, { fetchFn: this._fetchFn });
+        result = await callGemini({ model: cfg.model, prompt, aspectRatio }, { fetchFn: this._fetchFn, timeoutMs });
       } else {
         result = { fatal: true, status: 'unknown_api' };
       }
@@ -569,6 +589,9 @@ module.exports._internals = {
   planFor,
   hashString,
   IMAGE_REQUEST_TIMEOUT_MS,
+  IMAGE_CHAIN_BUDGET_MS,
+  IMAGE_LEG_FLOOR_MS,
+  legTimeoutMs,
   parseChain,
   isFatalOpenAIError,
   sizeFor,

@@ -1595,7 +1595,15 @@ describe('Astro publisher hero image republish', () => {
     const queries = [read, update];
     db.mockImplementation(() => queries.shift() || chain());
 
+    const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
+    screenGeneratedImage.mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ORKIN'], logos: ['Orkin logo'], reasons: ['logo or brand mark: Orkin logo'] });
     await AstroPublisher.publishAstro('post-1');
+
+    // An admin-generated data: URL hero is screened again at publish time
+    // and the PR body carries the verdict in bold (Codex r5 P2 on #3964).
+    expect(screenGeneratedImage).toHaveBeenCalledWith(expect.objectContaining({ mimeType: 'image/png', buffer: expect.any(Buffer) }));
+    const prBody = gh.createPr.mock.calls.at(-1)[0].body;
+    expect(prBody).toContain('- hero: admin pre-generated (unplanned) — **screen flagged after retry: logo or brand mark: Orkin logo**');
 
     // The republish carries the fresh hero bytes in the single publish
     // commit — the tree write replaces the existing path unconditionally,

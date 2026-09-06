@@ -1246,6 +1246,17 @@ async function publishAstro(postId) {
       // genuinely transient.
       try {
         heroImage = await fetchImageBuffer(post.featured_image_url);
+        // An admin-generated hero arrives as a data: URL — the row kept only
+        // the bytes, not its screen verdict — so it is screened again here and
+        // the PR body carries the result like an autonomous hero's (Codex r5
+        // P2 on #3964). Curated remote photos are not screened: a real photo
+        // of the Waves van legitimately carries the logo.
+        const dataUrl = parseImageDataUrl(post.featured_image_url);
+        if (heroImage?.buffer && dataUrl) {
+          const { screenGeneratedImage } = require('../content/hero-alt-vision');
+          heroImage.model = 'admin pre-generated';
+          heroImage.screen = await screenGeneratedImage({ buffer: heroImage.buffer, mimeType: dataUrl.mime || 'image/png' });
+        }
       } catch (mediaErr) {
         const e = new Error(`featured image could not be fetched for Astro publish: ${mediaErr.message}`);
         e.code = 'BLOG_HERO_MEDIA_FAILED';
