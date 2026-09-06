@@ -263,3 +263,14 @@ test('address refresh rebuilds only WDO research', async () => {
   expect(require('../services/appointment-tagger').triggerWDOPrep).toHaveBeenCalledWith(rows[0]);
   expect(query.whereNotIn).toHaveBeenCalledWith('ss.status', require('../services/visit-context/statuses').JOIN_INELIGIBLE_STATUSES);
 });
+
+test('address saves take maintenance and comms before customer and stop locks', () => {
+  const source = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+  const handler = source.slice(source.indexOf("router.put('/:id/update-details'"));
+  const maintenance = handler.indexOf('await acquireRecurringSeriesMaintenanceLock(trx,');
+  const comms = handler.indexOf('await lockCustomerComms(trx,');
+  const customerAndStops = handler.indexOf('await lockAppointmentAddress(trx,');
+  expect(maintenance).toBeGreaterThan(-1);
+  expect(comms).toBeGreaterThan(maintenance);
+  expect(customerAndStops).toBeGreaterThan(comms);
+});

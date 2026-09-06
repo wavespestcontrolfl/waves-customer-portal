@@ -8618,6 +8618,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           await lockTechDays(trx, preFence);
         }
       }
+      // Match customer editors and grouping: maintenance/comms, customer row,
+      // then stop locks. Tech-day fences remain ahead of all three.
+      const wantsExistingPlanMutation = wantsVisitCountReconcile || !!addressPlan
+        || (isRecurring && recurringOngoing !== undefined && spawnRecurringChildren === false)
+        || wantsPriceServiceScope
+        // The no-scope override-coherence refresh (and the conversion
+        // override stamp) write the template too, from legacy surfaces
+        // that post no scope — EVERY template writer must serialize with
+        // the extension readers on this same lock (Codex #3505 r4 P1).
+        || (isEnabled('editApptPriceServiceScope')
+          && Object.keys(updates).some((key) => PRICE_SERVICE_OVERRIDE_KEYS.has(key)));
+      if (wantsExistingPlanMutation && commsPeek) {
+        await acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id || req.params.id);
+      }
+      if (commsPeek) await lockCustomerComms(trx, commsPeek.customer_id);
       if (addressPlan) await lockAppointmentAddress(trx, addressPlan, updates);
       if (preReadVisitId) {
         try {
@@ -8655,19 +8670,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // overrides that auto-extend / top-up / alert-extend read, so it must
       // serialize against those writers (and against a concurrent scoped
       // save merging the same override JSON) — Codex #3505 r1 P1.
-      const wantsExistingPlanMutation = wantsVisitCountReconcile || !!addressPlan
-        || (isRecurring && recurringOngoing !== undefined && spawnRecurringChildren === false)
-        || wantsPriceServiceScope
-        // The no-scope override-coherence refresh (and the conversion
-        // override stamp) write the template too, from legacy surfaces
-        // that post no scope — EVERY template writer must serialize with
-        // the extension readers on this same lock (Codex #3505 r4 P1).
-        || (isEnabled('editApptPriceServiceScope')
-          && Object.keys(updates).some((key) => PRICE_SERVICE_OVERRIDE_KEYS.has(key)));
-      if (wantsExistingPlanMutation && commsPeek) {
-        await acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id || req.params.id);
-      }
-      if (commsPeek) await lockCustomerComms(trx, commsPeek.customer_id);
       // The plan's ongoing flag, read UNDER the maintenance lock (Codex #3337
       // r6 P1). A concurrent series mutation can hold that lock and commit the
       // opposite value while this request waits for it, so a pre-lock read is
