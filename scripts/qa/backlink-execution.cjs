@@ -208,9 +208,13 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
         assert.deepEqual(await check('seo_link_prospects').where({ id: p.id }).first(), beforePlacement);
         assert.deepEqual(await check('seo_link_attempts').where({ id: rejectedAttempt }).first(), beforeAttempt);
         assert.equal((await check('audit_log').where({ resource_id: p.id, action: 'backlink.submission.confirm' })).length, 0);
+        await check('seo_link_attempts').where({ id: rejectedAttempt }).update({ detail: { ...beforeAttempt.detail, execution_revision: authority.path_revision, citation: { website: 'https://wavespestcontrol.com', location: p.location_key } } });
+        const recoveryCard = (await Q.listOwnerQueue(proxy)).cards.find(card => card.placement.id === p.id);
+        assert.equal(recoveryCard.placement.live_url, beforePlacement.live_url);
+        assert.equal((await confirm({ live_url: recoveryCard.placement.live_url })).prospect.status, status);
       } finally { await check.rollback(); active = trx; }
     }
-    console.log('PASS confirmation cannot replace a live/indexed publisher URL or reuse its verification evidence');
+    console.log('PASS live/indexed confirmation rejects replacement URLs and accepts the exact URL supplied by the owner queue');
     await trx('seo_link_prospects').where({ id: p.id }).update({ location_key: '-', target_page: '/sarasota-pest-control/' });
     await new Promise((resolve, reject) => edit({ params: { id: p.id }, body: { target_page: '/venice-pest-control/' } }, { json: resolve }, reject));
     const beforeRefusal = await trx('seo_link_prospects').where({ id: p.id }).first();

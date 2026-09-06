@@ -227,7 +227,7 @@ async function listOwnerQueue(db) {
   const uncertain = await db('seo_link_attempts').where({ action: 'submit', outcome: 'submit_ambiguous' }).select('id', 'prospect_id', 'evidence_url', 'updated_at');
   const candidates = await db('seo_link_prospects').where((q) => q.whereIn('status', [...CARD_STATUSES])
     .orWhere((held) => held.whereIn('id', uncertain.map((a) => a.prospect_id)))).whereNotNull('domain_id')
-    .select('id', 'domain_id', 'path_id', 'target_page', 'location_key', 'link_type', 'payment_group_id', 'status', 'parked_from_status', 'outreach_status', 'outreach_draft_attempts', 'outreach_to_email', 'outreach_subject', 'outreach_body', 'follow_up_status', 'follow_up_subject', 'follow_up_body', 'follow_up_skipped_reason', 'claimed_at', 'updated_at', 'quality_signals'); // follow_up_skipped_reason: followUpReview reads the owner-routing markers from it — the card must judge the SAME inputs as the bridge
+    .select('id', 'domain_id', 'path_id', 'target_page', 'live_url', 'location_key', 'link_type', 'payment_group_id', 'status', 'parked_from_status', 'outreach_status', 'outreach_draft_attempts', 'outreach_to_email', 'outreach_subject', 'outreach_body', 'follow_up_status', 'follow_up_subject', 'follow_up_body', 'follow_up_skipped_reason', 'claimed_at', 'updated_at', 'quality_signals'); // follow_up_skipped_reason: followUpReview reads the owner-routing markers from it — the card must judge the SAME inputs as the bridge
   const uncertainById = new Map(await Promise.all(uncertain.map(async (a) => [a.prospect_id, { ...a, evidence_url: await require('./signup-evidence').getEvidenceUrl(a.evidence_url, { expiresIn: 900 }) }])));
   const liveRows = candidates.length ? await db(AUTH).whereIn('prospect_id', candidates.map((p) => p.id)).whereNull('ended_at') : [];
   const executionById = new Map(liveRows.filter((r) => r.dimension === 'execution' && r.instance_kind === '-').map((r) => [r.prospect_id, r]));
@@ -378,7 +378,7 @@ async function listOwnerQueue(db) {
       submission_ambiguity: uncertainById.get(p.id) || null,
       outreach_draft_exhausted: eligibleDomains.has(d.id) && CARD_STATUSES.includes(p.status) && exhaustedDraft(p),
       backlink_match: eligibleDomains.has(d.id) && CARD_STATUSES.includes(p.status) ? matchById.get(p.quality_signals?.outreach_match_ambiguous) || null : null,
-      placement: { id: p.id, target_page: p.target_page, location_key: p.location_key, link_type: p.link_type, status: p.status, outreach_status: p.outreach_status, follow_up_status: p.follow_up_status, claimed_at: p.claimed_at, updated_at: p.updated_at, payment_group_id: p.payment_group_id },
+      placement: { id: p.id, target_page: p.target_page, live_url: p.live_url, location_key: p.location_key, link_type: p.link_type, status: p.status, outreach_status: p.outreach_status, follow_up_status: p.follow_up_status, claimed_at: p.claimed_at, updated_at: p.updated_at, payment_group_id: p.payment_group_id },
       domain: { id: d.id, domain: d.domain, agent_state: d.agent_state, score: d.score, score_reasons: d.score_reasons, spam_score: d.spam_score, domain_rating: d.domain_rating, organic_traffic: d.organic_traffic, referring_domains: d.referring_domains, competitors_linked: d.competitors_linked, source: d.source, discovery_priority: d.discovery_priority },
       path: path ? {
         id: path.id, on_best_path: onBestPath, acquisition_type: path.acquisition_type, link_type: path.link_type, submission_url: path.submission_url,
