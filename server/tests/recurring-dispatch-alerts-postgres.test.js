@@ -6,6 +6,7 @@ jest.mock('../models/db', () => {
   const db = (...args) => db.connection(...args);
   return db;
 });
+jest.mock('../services/scheduling/find-time', () => ({ findAvailableSlots: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
@@ -108,6 +109,30 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
     const rows = await loadEligibleServices('2099-01-20', '2099-03-01', '2099-01-20');
     expect(rows).toHaveLength(5000);
     expect(rows[0].id).toBe(ids.unplaced);
+  });
+
+  test.each([true, false])('reschedule holds block same-plan dates for due placement=%s', async (duePlacement) => {
+    const parentId = randomUUID();
+    await trx('scheduled_services').insert({
+      id: randomUUID(), customer_id: customerId, recurring_parent_id: parentId,
+      status: 'rescheduled', scheduled_date: due, window_start: '09:00',
+    });
+    const { findAvailableSlots } = require('../services/scheduling/find-time');
+    findAvailableSlots.mockResolvedValue({ slots: [due, '2099-02-02'].map((date) => ({
+      date, technician: { id: 'synthetic-tech' }, start_time: '15:00', end_time: '16:00',
+      detour_minutes: 1, total_drive_minutes: 10, stops_that_day: 1,
+    })) });
+    const { findValidCandidateSlots } = require('../services/auto-dispatch/candidate-slots');
+    const result = await findValidCandidateSlots({
+      id: randomUUID(), recurring_parent_id: parentId, scheduled_date: due,
+      recurring_dispatch_due_date: duePlacement ? due : null,
+      window_start: null, technician_id: null, lat: 27.4, lng: -82.5,
+    }, { service_category: 'general' }, {
+      db: trx, nowDate: now, lockWindowDays: 0, lookaheadDays: 90,
+      capabilityFor: () => 'qualified',
+    });
+    expect(result.candidates.map((slot) => slot.date)).toEqual(duePlacement ? ['2099-02-02'] : [due, '2099-02-02']);
+    expect(result.drops.sibling).toBe(duePlacement ? 1 : 0);
   });
 
   test('seeds separate truthful SMS copy and preserves administrator edits on rerun', async () => {

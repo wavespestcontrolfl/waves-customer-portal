@@ -258,11 +258,12 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       if (!r.recurring_parent_id && r.is_recurring !== true) continue;
       const parentId = r.recurring_parent_id || r.id;
       // Mirrors candidate-slots' sibling-date exclusion: every non-cancelled,
-      // non-request row of the series except the members moving together.
+      // non-request row (including reschedule holds for due placement),
+      // except the members moving together.
       const clash = await trx('scheduled_services')
         .where(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
         .whereNotIn('id', memberIds)
-        .whereNotIn('status', ['cancelled', 'rescheduled'])
+        .whereNotIn('status', r.recurring_dispatch_due_date ? ['cancelled'] : ['cancelled', 'rescheduled'])
         .where('scheduled_date', best.date)
         .first('id');
       if (clash) throw refuse(r.id, `already has another visit of its series on ${best.date}`);

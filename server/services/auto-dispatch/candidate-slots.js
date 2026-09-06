@@ -224,9 +224,9 @@ async function findValidCandidateSlots(service, prefs, ctx) {
   const siblingRows = await ctx.db('scheduled_services')
     .where(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
     .whereNot('id', service.id)
-    // 'rescheduled' siblings are phantom customer requests on a stale date, so
-    // they must NOT block an actually-open day (mirrors the seeder's dedup).
-    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    // Due placement must honor reschedule holds preserved by the customer
+    // re-anchor. Legacy optimization retains the seeder's request exclusion.
+    .whereNotIn('status', service.recurring_dispatch_due_date ? ['cancelled'] : ['cancelled', 'rescheduled'])
     .whereBetween('scheduled_date', [dateFrom, dateTo])
     .select('scheduled_date');
   const siblingDates = new Set(siblingRows.map((r) => toDateStr(r.scheduled_date)));
