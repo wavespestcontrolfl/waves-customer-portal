@@ -104,7 +104,7 @@ describe('findConflictingVisits — travel option (GATE_SLOT_TRAVEL_GAP)', () =>
     });
     expect(q.leftJoin).toHaveBeenCalledWith('customers', 'scheduled_services.customer_id', 'customers.id');
     expect(q.where).toHaveBeenCalledWith('scheduled_services.scheduled_date', '2099-01-05');
-    expect(q.whereNotIn).toHaveBeenCalledWith('scheduled_services.status', ['cancelled']);
+    expect(q.whereNotIn).toHaveBeenCalledWith('scheduled_services.status', ['cancelled', 'skipped', 'no_show', 'rescheduled']);
     expect(q.whereNotIn).toHaveBeenCalledWith('scheduled_services.id', ['x']);
     expect(q.whereNotNull).toHaveBeenCalledWith('scheduled_services.window_start');
     expect(q.orWhereNot).toHaveBeenCalledWith('scheduled_services.customer_id', 'c1');
@@ -170,8 +170,8 @@ describe('findConflictingVisits', () => {
     expect(db).toHaveBeenCalledWith('scheduled_services');
     expect(q.where).toHaveBeenCalledWith('scheduled_date', '2099-01-05');
     // Default status set mirrors createSelfBooking's commit gate exactly.
-    expect(q.whereNotIn).toHaveBeenCalledWith('status', ['cancelled']);
-    expect(DEFAULT_EXCLUDE_STATUSES).toEqual(['cancelled']);
+    expect(q.whereNotIn).toHaveBeenCalledWith('status', ['cancelled', 'skipped', 'no_show', 'rescheduled']);
+    expect(DEFAULT_EXCLUDE_STATUSES).toEqual(['cancelled', 'skipped', 'no_show', 'rescheduled']);
     // Expired holds never block; live ones do.
     expect(q.whereNull).toHaveBeenCalledWith('reservation_expires_at');
     expect(q.orWhereRaw).toHaveBeenCalledWith('reservation_expires_at > NOW()');
@@ -258,7 +258,7 @@ describe('listOccupiedWindows', () => {
     await listOccupiedWindows({ db, dateFrom: '2099-01-01', dateTo: '2099-01-14' });
     expect(q.whereBetween).toHaveBeenCalledWith('scheduled_date', ['2099-01-01', '2099-01-14']);
     expect(q.whereNotNull).toHaveBeenCalledWith('window_start');
-    expect(q.whereNotIn).toHaveBeenCalledWith('status', ['cancelled']);
+    expect(q.whereNotIn).toHaveBeenCalledWith('status', ['cancelled', 'skipped', 'no_show', 'rescheduled']);
   });
 
   test('normalizes dates and derives endMin with the duration-or-60 fallback', async () => {

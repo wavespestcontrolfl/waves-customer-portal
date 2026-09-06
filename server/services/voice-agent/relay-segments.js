@@ -7,7 +7,7 @@ const SEGMENT_SEPARATOR = '\n\n[Reconnected]\n';
 const MAX_SEGMENT_TEXT_CHARS = require('./relay-transcript').MAX_TRANSCRIPT_CHARS;
 
 /** One socket's close record — played text only (buildTranscriptText reads played text). */
-function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled, noLeadCreated, promises = [], holdOpen, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [], slotRefs = [], modelFailures = 0, toolFailures = 0 }) {
+function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, leadId = null, reserviceFiled, noLeadCreated, promises = [], holdOpen, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [], slotRefs = [], modelFailures = 0, toolFailures = 0 }) {
   return {
     model_failures: Number(modelFailures) || 0,
     tool_failures: Number(toolFailures) || 0,
@@ -47,6 +47,7 @@ function buildSegment({ generation, sessionKey, reason, text, turns, latency, ve
     latency: latency || null,
     versions: versions || null,
     lead_captured: leadCaptured === true,
+    lead_id: leadId,
     ended_at: new Date().toISOString(),
   };
 }
@@ -58,10 +59,19 @@ function nonEmptyFields(fields) {
   return Object.keys(kept).length ? kept : null;
 }
 
+/** Match the claim's generation/nonce total order (nonce tokens are ASCII). */
+function compareSegments(a, b) {
+  const generation = (Number(a.generation) || 0) - (Number(b.generation) || 0);
+  if (generation) return generation;
+  const left = String(a.session_key || '');
+  const right = String(b.session_key || '');
+  return left === right ? 0 : (left < right ? -1 : 1);
+}
+
 /** Scrub the ordered turn sequence before rendering socket boundaries. */
 function scrubStoredSegments(segments) {
   const { scrubTurnsForStorage, CALLER_LABEL, AGENT_LABEL } = require('./relay-transcript');
-  const ordered = [...segments].sort((a, b) => (Number(a.generation) || 0) - (Number(b.generation) || 0));
+  const ordered = [...segments].sort(compareSegments);
   const lines = ordered.flatMap((segment, index) => String(segment.text || '').split('\n').map((line) => {
     const caller = line.startsWith(`${CALLER_LABEL}: `);
     const agent = line.startsWith(`${AGENT_LABEL}: `);
@@ -82,12 +92,14 @@ function scrubStoredSegments(segments) {
  * leg in one transaction, so no reader sees a reconstructed card number and
  * a concurrent late close cannot reintroduce a fragment from a stale read.
  */
-async function appendSegment(db, callSid, segment) {
+async function appendSegment(db, callSid, segment, { allowUnclaimed = false } = {}) {
   return db.transaction(async (trx) => {
     const query = trx('call_log').where('twilio_call_sid', callSid)
-      .where((q) => q
-        .whereRaw("(metadata->>'relay_session_claim_owner') = ?", [segment.session_key || ''])
-        .orWhereRaw("(COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 AND COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) > ?)", [segment.generation || 0]));
+      .where((q) => {
+        q.whereRaw("(metadata->>'relay_session_claim_owner') = ?", [segment.session_key || ''])
+        .orWhereRaw("(COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 AND COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) > ?)", [segment.generation || 0]);
+        if (allowUnclaimed) q.orWhereRaw("metadata->>'relay_session_claim_owner' IS NULL");
+      });
     const row = await query.clone().forUpdate().first('metadata');
     if (!row) return 0;
     const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
@@ -134,7 +146,7 @@ function composeSegmentsSql(db, segment = null) {
     ? `${keyed ? `(SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM jsonb_array_elements(${rowSegments}) e WHERE COALESCE(e->>'session_key', '') <> ?)` : rowSegments} || ?::jsonb`
     : rowSegments;
   return db.raw(
-    `(SELECT string_agg(seg->>'text', ? ORDER BY (seg->>'generation')::bigint, ord) FROM jsonb_array_elements(${source}) WITH ORDINALITY AS s(seg, ord) WHERE COALESCE(seg->>'text', '') <> '')`,
+    `(SELECT string_agg(seg->>'text', ? ORDER BY (seg->>'generation')::bigint, COALESCE(seg->>'session_key', ''), ord) FROM jsonb_array_elements(${source}) WITH ORDINALITY AS s(seg, ord) WHERE COALESCE(seg->>'text', '') <> '')`,
     segment ? [SEGMENT_SEPARATOR, ...(keyed ? [String(segment.session_key)] : []), JSON.stringify([segment])] : [SEGMENT_SEPARATOR],
   );
 }
@@ -199,10 +211,10 @@ function appendSegmentPatch(db, segment) {
 // An EMPTY, unowned transcript column on a row that RECONNECTED — the only
 // empty column a late segment may fill (hook r28 P1).
 const FILL_EMPTY_SQL = "(COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND COALESCE((metadata->>'relay_reconnects')::int, 0) > 0)";
-// A RECORDING's own transcript, alone, on a row that reconnected: the
+// A recorded transcript on a reconnected call or a durably proven transfer: the
 // processor finished before this segment landed (a silent resumed leg wrote
 // no stash). The recording is preserved; the AI segment goes ahead of it.
-const RECORDED_ONLY_SQL = "(transcription_provider IS NOT NULL AND transcription_provider <> ? AND COALESCE(transcription, '') <> '' AND transcription NOT LIKE '[AI segment]%' AND COALESCE((metadata->>'relay_reconnects')::int, 0) > 0)";
+const RECORDED_ONLY_SQL = "((transcription_provider <> ? OR (transcription_provider IS NULL AND transcription_metadata->'recorded_segment_rejected' IS NOT NULL)) AND COALESCE(transcription, '') <> '' AND transcription NOT LIKE '[AI segment]%' AND (COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 OR call_outcome = 'ai_transferred' OR jsonb_typeof(metadata->'relay_handoff') = 'object' OR metadata->>'relay_transfer_ring_at' IS NOT NULL))";
 const RELAY_PROVIDER = require('./relay-transcript').TRANSCRIPTION_PROVIDER;
 // The recorded half of a processor composite, from its segment header to the end (non-capturing!).
 const COMPOSITE_RECORDED_RE = '\\n\\n\\[(?:Staff|Voicemail) segment\\]\\n[\\s\\S]*$';
@@ -211,7 +223,7 @@ const COMPOSITE_RECORDED_RE = '\\n\\n\\[(?:Staff|Voicemail) segment\\]\\n[\\s\\S
 function segmentsText(segments = []) {
   return [...(Array.isArray(segments) ? segments : [])]
     .filter((s) => s && String(s.text || '').trim())
-    .sort((a, b) => (Number(a.generation) || 0) - (Number(b.generation) || 0))
+    .sort(compareSegments)
     .map((s) => String(s.text))
     .join(SEGMENT_SEPARATOR);
 }
@@ -232,7 +244,7 @@ function generationFenceSql(q, generation) {
 function latestPromises(segments) {
   const ordered = [...(Array.isArray(segments) ? segments : [])]
     .filter((seg) => seg && typeof seg === 'object')
-    .sort((a, b) => (Number(a.generation) || 0) - (Number(b.generation) || 0));
+    .sort(compareSegments);
   const byKind = new Map();
   for (const seg of ordered) {
     for (const p of (Array.isArray(seg.promises) ? seg.promises : [])) {

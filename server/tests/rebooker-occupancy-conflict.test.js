@@ -221,7 +221,7 @@ describe('reschedule — shared occupancy conflict gate', () => {
       excludeServiceIds: ['svc-1'],
       // Matches the tech check's status semantics: a completed morning
       // visit must never block an afternoon move.
-      excludeStatuses: ['cancelled', 'completed'],
+      excludeStatuses: ['cancelled', 'skipped', 'no_show', 'rescheduled', 'completed'],
     });
 
     // Date-wide occupancy lock FIRST (guards the tech-blind probe), then the
@@ -258,7 +258,7 @@ describe('reschedule — shared occupancy conflict gate', () => {
       expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({
         windowStart: '09:00',
         windowEnd: '10:30',
-        excludeStatuses: ['cancelled', 'completed'],
+        excludeStatuses: ['cancelled', 'skipped', 'no_show', 'rescheduled', 'completed'],
       }));
     });
 

@@ -1793,6 +1793,7 @@ async function attemptRelayReconnect(req, callSid, failure) {
   const state = await recovery.readReconnectState(db, callSid, { timeoutMs: STAMP_DEADLINE_MS });
   if (!state) return { unconfirmed: true };
   const result = { xml: null, duplicate: false, secondFailure: false, fallbackGeneration: state.reconnectMs || 0 };
+  if (state.transferClaimed) return { ...result, duplicate: true };
   if (state.reconnects < 1) return result;
   const callbackGeneration = Number(req.query.gen) || null;
   result.secondFailure = callbackGeneration !== null && callbackGeneration === state.reconnectMs;
@@ -1807,7 +1808,7 @@ async function attemptRelayReconnect(req, callSid, failure) {
   // A concurrent reissue or resumed claim wins; a terminal row can fall back.
   const current = await recovery.readReconnectState(db, callSid, { timeoutMs: STAMP_DEADLINE_MS });
   if (!current) return { unconfirmed: true };
-  result.duplicate = Boolean(current.reconnectMs && (current.reconnectMs !== state.reconnectMs || current.claimGen >= current.reconnectMs));
+  result.duplicate = current.transferClaimed || Boolean(current.reconnectMs && (current.reconnectMs !== state.reconnectMs || current.claimGen >= current.reconnectMs));
   return result;
 }
 
@@ -1837,6 +1838,7 @@ async function reissueRelayReconnect(callSid, priorMs) {
  * fallback's shape and today's path runs.
  */
 async function renderRelayReconnect(req, callSid, failure, genMs) {
+  const { isEnabled } = require('../config/feature-gates');
   const recovery = require('../services/voice-agent/relay-recovery');
   const sandbox = req.query.sandbox === '1';
   const language = relayCompleteLanguage(req);
@@ -1848,7 +1850,7 @@ async function renderRelayReconnect(req, callSid, failure, genMs) {
   } else {
     try {
       const routingConfig = await withDeadline(getCallRoutingConfig(db), STAMP_DEADLINE_MS, null);
-      if (routingConfig && agentHandoffKind(routingConfig) === 'relay') {
+      if (isEnabled('voiceAiAgent') && routingConfig && agentHandoffKind(routingConfig) === 'relay') {
         wsUrl = routingConfig.agentEndpoint.trim();
         spanishVoice = routingConfig.spanishVoice || null; // the Spanish leg's voice, as the vestibule renders it
       }
@@ -1880,6 +1882,9 @@ async function renderRelayReconnect(req, callSid, failure, genMs) {
   // failure callback is told apart from a retry of the first leg's.
   const baseAction = sandbox ? RELAY_COMPLETE_ACTION_SANDBOX : (spanish ? RELAY_COMPLETE_ACTION_ES : RELAY_COMPLETE_ACTION);
   const action = `${baseAction}${baseAction.includes('?') ? '&' : '?'}gen=${genMs}`;
+  if (!recovery.isRecoveryGateOn() || (!sandbox && !isEnabled('voiceAiAgent'))) {
+    return { xml: null, duplicate: false, secondFailure: false, fallbackGeneration: genMs };
+  }
   const xml = buildRelayTwiML({
     wsUrl,
     callSid,
@@ -2029,7 +2034,7 @@ function sandboxRelayXml({ callSid, cell, req = null }) {
 // leg is attributed to a profile it never used (codex r14 P2).
 async function stampRelayProfile(callSid, opts, { clearWhenEmpty = false } = {}) {
   const has = Boolean(opts && opts.relayProfileId);
-  if (!has && !clearWhenEmpty) return;
+  if (!has && !clearWhenEmpty && process.env.GATE_VOICE_RELAY_RECOVERY !== 'true') return;
   const stamp = has
     ? { relay_profile_id: opts.relayProfileId, relay_attrs: opts.relayAttrs || {} }
     : { relay_profile_id: null, relay_attrs: null };

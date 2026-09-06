@@ -87,12 +87,20 @@ function installTransaction(chains, { activeTimer } = {}) {
     if (table === 'time_entries') return activeTimers;
     if (table === 'scheduled_services as s') return makeChain({ rows: [] });
     if (table === 'scheduled_services' || table === 'service_records' || table === 'review_incentive_payouts') return makeChain({ first: undefined });
+    if (table === 'technician_capabilities') {
+      // createTechnician seeds the five dispatch categories on the same trx.
+      const seed = makeChain();
+      seed.onConflict = jest.fn(() => seed);
+      seed.ignore = jest.fn(async () => undefined);
+      return seed;
+    }
     if (table !== 'technicians') throw new Error(`Unexpected transaction table: ${table}`);
     const chain = queue.shift();
     if (!chain) throw new Error('Unexpected technicians query');
     return chain;
   });
   trx.raw = jest.fn(async () => undefined);
+  trx.fn = { now: jest.fn(() => 'NOW') };
   db.transaction = jest.fn(async (callback) => callback(trx));
   return { activeTimers, trx, remaining: () => queue };
 }
@@ -144,6 +152,7 @@ describe('admin timetracking technician data/auth boundaries', () => {
 
   test('list responses use positive allowlists for admins and technicians', async () => {
     db.mockReturnValueOnce(makeChain({ rows: [rawTechnician] }));
+    db.mockReturnValueOnce(makeChain({ rows: [] })); // capability summary read
     const admin = await invoke(listTechnicians, {
       technician: { id: 'admin-1', role: 'admin' },
     });
@@ -160,6 +169,7 @@ describe('admin timetracking technician data/auth boundaries', () => {
     }
 
     db.mockReturnValueOnce(makeChain({ rows: [rawTechnician] }));
+    db.mockReturnValueOnce(makeChain({ rows: [] })); // capability summary read
     const tech = await invoke(listTechnicians, {
       technician: { id: 'tech-2', role: 'technician' },
     });

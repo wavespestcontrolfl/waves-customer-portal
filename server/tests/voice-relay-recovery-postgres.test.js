@@ -36,7 +36,7 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     admin = knex({ client: 'pg', connection });
     await admin.schema.createSchema(schema);
     mockPg = knex({ client: 'pg', connection: { connectionString: connection, application_name: schema }, searchPath: [schema], pool: { min: 0, max: 4 } });
-    await mockPg.schema.createTable('call_log', (t) => { t.text('id').primary(); t.text('twilio_call_sid').unique(); t.jsonb('metadata'); t.timestamp('voicemail_callback_alerted_at'); t.integer('duration_seconds'); t.text('call_summary'); t.timestamp('created_at', { useTz: true }); t.timestamp('updated_at', { useTz: true }); });
+    await mockPg.schema.createTable('call_log', (t) => { t.text('id').primary(); t.text('twilio_call_sid').unique(); t.jsonb('metadata'); t.timestamp('voicemail_callback_alerted_at'); t.integer('duration_seconds'); t.text('call_summary'); t.text('call_outcome'); t.timestamp('created_at', { useTz: true }); t.timestamp('updated_at', { useTz: true }); });
     await mockPg.schema.createTable('notifications', (t) => {
       t.increments('id');
       for (const field of ['recipient_type', 'recipient_id', 'category', 'title', 'body', 'icon', 'link']) t.text(field);
@@ -309,6 +309,14 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     } finally {
       await mockPg.raw('ALTER TABLE call_log DROP CONSTRAINT reject_reservice_evidence');
     }
+  });
+
+  test.each([{ call_outcome: 'ai_transferred' }, { metadata: { relay_transfer_ring_at: '2026-01-01T00:00:00Z' } }])('fallback atomically preserves a concurrent transfer: %j', async (transfer) => {
+    await mockPg('call_log').where('twilio_call_sid', callSid).update({ ...transfer, metadata: {
+      relay_reconnect_ms: 777, relay_session_claim_gen: 500, ...transfer.metadata,
+    } });
+    expect(await fallbackFence(mockPg('call_log').where('twilio_call_sid', callSid), { generation: 777, callbackGeneration: 0 })
+      .update({ call_outcome: 'voicemail' })).toBe(0);
   });
 
   test.each([

@@ -86,7 +86,7 @@ function childEnvironment(context, { database = false, sha } = {}) {
   });
   if (database) {
     const file = path.join(context.root, '.tmp', 'dev', 'database.env');
-    if (!fs.existsSync(file)) throw new Error('Missing .tmp/dev/database.env. Configure a dedicated Railway dev/preview DATABASE_URL; see docs/development.md.');
+    if (!fs.existsSync(file)) throw new Error('Missing .tmp/dev/database.env. Configure a verified Railway dev/preview cluster DATABASE_URL and WAVES_DATABASE_ENVIRONMENT here, chmod 600 .tmp/dev/database.env, then run npm run qa:database for this worktree’s private QA database. See docs/development.md#dev-database.');
     const values = require('dotenv').parse(fs.readFileSync(file));
     if (!['development', 'preview', 'test'].includes(values.WAVES_DATABASE_ENVIRONMENT)) {
       throw new Error('database.env must identify WAVES_DATABASE_ENVIRONMENT=development, preview, or test. Production is forbidden.');

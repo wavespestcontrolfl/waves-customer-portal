@@ -4567,25 +4567,8 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WaveGuard lawn readiness — route-morning protocol preflight snapshot.
-  // Stores the readiness ledger and opens an admin alert when appointments
-  // are blocked by assignment, calibration, inventory, or property gates.
-  // =========================================================================
-  cron.schedule('30 5 * * *', async () => {
-    try {
-      const { runReadinessSnapshot } = require('./lawn-protocol-readiness-cron');
-      const result = await runReadinessSnapshot({ days: 14, limit: 100, source: 'scheduled_daily' });
-      if (!result.skipped) {
-        logger.info(`[lawn-protocol-readiness] ready=${result.ready || 0} warning=${result.warning || 0} blocked=${result.blocked || 0} appointments=${result.appointmentCount || 0}`);
-      }
-    } catch (err) {
-      logger.error(`Lawn protocol readiness snapshot failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
   // WaveGuard inventory forecast — proactive product shortage warning before
-  // readiness starts blocking dispatch.
+  // the scheduled treatments need the products.
   // =========================================================================
   cron.schedule('45 5 * * *', async () => {
     try {

@@ -57,6 +57,7 @@ function selfBookedBuilder() {
       if (typeof field === 'string') preds.push((r) => String(r[field]) === String(value));
       return b;
     },
+    whereNotExists: () => b,
     whereNot(field, value) {
       preds.push((r) => String(r[field]) !== String(value));
       return b;
@@ -87,8 +88,10 @@ function arrayChain(rowsArr) {
   const b = {
     where: () => b,
     whereNot: () => b,
+    whereNotExists: () => b,
     whereIn: () => b,
     whereNotIn: () => b,
+    whereNotNull: () => b,
     // The GLOBAL day cap also counts VOICE-AGENT bookings, which live on
     // scheduled_services and write no self_booked_appointments row at all.
     // None in these fixtures, so the zone-vs-global assertions are unchanged.

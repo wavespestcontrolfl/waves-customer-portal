@@ -273,3 +273,37 @@ describe('dashboard intelligence-bar guard', () => {
     delete process.env.GATE_IB_UI_CONFIRM;
   });
 });
+
+// The system prompt's team line is read live from the roster (Field Team
+// Program, Phase 0 item 4): assignable technicians only, never a static list.
+describe('liveTeamPrompt', () => {
+  const db = require('../models/db');
+  const { liveTeamPrompt } = require('../routes/admin-intelligence-bar');
+
+  function rosterChain(rows) {
+    const chain = { filters: [] };
+    chain.where = jest.fn((col, val) => { chain.filters.push([col, val]); return chain; });
+    chain.orderBy = jest.fn(() => chain);
+    chain.select = jest.fn(() => chain);
+    chain.then = (res, rej) => Promise.resolve(rows).then(res, rej);
+    return chain;
+  }
+
+  test('lists assignable technicians by name and keeps Virginia as office', async () => {
+    const chain = rosterChain([{ name: 'Adam' }, { name: 'Jordan Reyes' }]);
+    db.mockImplementationOnce(() => chain);
+    const out = await liveTeamPrompt();
+    expect(out).toContain('Field technicians who can take assignments: Adam, Jordan Reyes');
+    expect(out).toContain('Virginia (office manager)');
+    expect(out).not.toMatch(/Jose|Jacob/);
+    // technician-eligibility's definition, not a local one
+    expect(chain.filters).toEqual([['technicians.employment_status', 'active'], ['technicians.field_dispatchable', true]]);
+  });
+
+  test('an empty roster says so; a failed read contributes nothing and never throws', async () => {
+    db.mockImplementationOnce(() => rosterChain([]));
+    expect(await liveTeamPrompt()).toContain('none currently dispatchable');
+    db.mockImplementationOnce(() => { throw new Error('boom'); });
+    expect(await liveTeamPrompt()).toBe('');
+  });
+});
