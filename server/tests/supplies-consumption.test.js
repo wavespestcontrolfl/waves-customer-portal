@@ -134,19 +134,27 @@ test('an internal-only completion profile (Waves Assessment) consumes nothing ev
   expect(inserts).toHaveLength(0);
 });
 
-test('a WDO inspection on the termite line consumes the termite-scoped notice (owner ruling 2026-09-06)', async () => {
-  const notice = { ...sign, id: 'prod-notice', name: 'Termite protection notice', per_completion_service_lines: '["termite"]', inventory_on_hand: '10' };
+const notice = { ...sign, id: 'prod-notice', name: 'Termite protection notice', per_completion_service_lines: '["termite"]', inventory_on_hand: '10' };
+
+test('a WDO inspection project consumes the termite-scoped notice (owner ruling 2026-09-06)', async () => {
   const { db, inserts } = fakeDb({ products: [notice] });
-  const res = await consumeCompletionSupplies(db, { ...args, serviceType: 'WDO Inspection', serviceLine: 'termite' });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceType: 'WDO Inspection', serviceLine: 'termite', projectType: 'wdo_inspection' });
   expect(res.skipped).toEqual([]);
   expect(res.consumed).toEqual([{ productId: 'prod-notice', name: 'Termite protection notice', usage: 1, unit: 'each', before: 10, after: 9, costUsed: null }]);
   expect(inserts).toHaveLength(1);
 });
 
-test('a WDO inspection still leaves the pest-scoped yard sign alone', async () => {
+test('a WDO inspection project still leaves the pest-scoped yard sign alone', async () => {
   const { db, inserts } = fakeDb({ products: [{ ...sign, per_completion_service_lines: '["pest"]' }] });
-  const res = await consumeCompletionSupplies(db, { ...args, serviceType: 'WDO Inspection', serviceLine: 'termite' });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceType: 'WDO Inspection', serviceLine: 'termite', projectType: 'wdo_inspection' });
   expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'service_line_excluded' }]);
+  expect(inserts).toHaveLength(0);
+});
+
+test('a visual Termite Inspection Service on the normal path posts no notice — the exception is the WDO project, not the termite line (codex #3996 P2)', async () => {
+  const { db, inserts } = fakeDb({ products: [notice] });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceType: 'Termite Inspection Service', serviceLine: 'termite' });
+  expect(res.skipped).toEqual([{ reason: 'inspection_service' }]);
   expect(inserts).toHaveLength(0);
 });
 

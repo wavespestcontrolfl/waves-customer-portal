@@ -571,6 +571,9 @@ async function completeProjectBackedService({
   }
 
   let postCommitTrackServiceId = null;
+  // Set once the visit is completed through this project (fresh flip or
+  // already-completed re-close): the consumables hook runs after commit.
+  let postCommitConsumption = null;
   const result = await knex.transaction(async (trx) => {
     // Project row FIRST (codex #3344 r9 P2): the combined report/invoice
     // send (resolveOrCreateProjectInvoice) holds the project FOR UPDATE and
@@ -913,6 +916,7 @@ async function completeProjectBackedService({
       });
       postCommitTrackServiceId = scheduledService.id;
     }
+    postCommitConsumption = { scheduledService, serviceRecord, profile };
 
     const projectUpdate = {
       status: 'closed',
@@ -959,6 +963,29 @@ async function completeProjectBackedService({
       });
     } catch (err) {
       logger.warn(`[project-completion] track completion refresh failed for ${postCommitTrackServiceId}: ${err.message}`);
+    }
+  }
+
+  // Per-completion consumables (the termite protection notice on a WDO
+  // inspection / pre-treat / trenching / liquid treatment — every termite
+  // service completes through THIS path, never the normal closeout hook).
+  // Same posture as the normal path: after commit, own transaction,
+  // at-most-once per (product, visit), never throws (GH codex #3996 P1).
+  if (postCommitConsumption) {
+    const { scheduledService, serviceRecord, profile } = postCommitConsumption;
+    try {
+      const { consumeCompletionSupplies } = require('./supplies-consumption');
+      await consumeCompletionSupplies(knex, {
+        scheduledServiceId: scheduledService.id,
+        serviceRecordId: serviceRecord?.id || null,
+        customerId: scheduledService.customer_id || null,
+        technicianId: scheduledService.technician_id || null,
+        serviceLine: detectServiceLine(scheduledService.service_type),
+        serviceType: scheduledService.service_type || null,
+        projectType: profile.projectType || null,
+      });
+    } catch (err) {
+      logger.error(`[project-completion] completion supplies consumption failed for ${scheduledService.id}: ${err.message}`);
     }
   }
 

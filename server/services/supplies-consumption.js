@@ -20,8 +20,17 @@
  *   - skipped for an inspection SERVICE (service type contains
  *     "inspection", e.g. "Pest Inspection Service") completed normally —
  *     the card is a pesticide-application notice and an inspection applies
- *     nothing. Owner can overrule by renaming the service or ruling
- *     otherwise; the rule lives in INSPECTION_SERVICE_RE.
+ *     nothing. The one exception is the WDO inspection PROJECT
+ *     (projectType 'wdo_inspection'): it posts the termite protection
+ *     notice (owner ruling 2026-09-06), so termite-scoped kit consumes
+ *     there. A visual "Termite Inspection Service" completed on the normal
+ *     path posts nothing and stays skipped (GH codex #3996 P2). Owner can
+ *     overrule by renaming the service or ruling otherwise; the rule lives
+ *     in INSPECTION_SERVICE_RE + NOTICE_PROJECT_TYPE.
+ *   - called from BOTH completion flows: the normal closeout
+ *     (complete-scheduled-service.js) and the project-backed completion
+ *     (project-completion.js — every termite service Adam named completes
+ *     there, GH codex #3996 P1). Both call it after their own commit.
  *   - retired products (active = false) are never consumed.
  *   - a kit item the technician ALSO logged in the completion product picker
  *     (an ordinary usage movement for the same product + visit already
@@ -43,11 +52,13 @@ const { gateEnvValue } = require('../config/feature-gates');
 
 const SOURCE = 'completion_consumable';
 const GATE = 'GATE_AUTO_REORDER';
-// A scheduled inspection (no application) leaves no yard sign — except on
-// the termite line: a WDO inspection posts the termite protection notice
-// (owner ruling 2026-09-06), so termite-scoped kit still consumes there.
+// A scheduled inspection (no application) leaves no yard sign — except the
+// WDO inspection project: it posts the termite protection notice (owner
+// ruling 2026-09-06), so termite-scoped kit still consumes there. Keyed on
+// the completion profile's projectType, not the service line: a visual
+// Termite Inspection Service posts nothing.
 const INSPECTION_SERVICE_RE = /\binspection\b/i;
-const INSPECTION_CONSUMES_LINE = 'termite';
+const NOTICE_PROJECT_TYPE = 'wdo_inspection';
 
 // Reasons to do nothing at all, in order, decided before any read.
 const SKIP_WHEN = [
@@ -60,7 +71,7 @@ const SKIP_WHEN = [
   // detectServiceLine reads it as pest — the completion's own posture is the
   // authority (Codex r9 P2).
   [(a) => a.isInternalOnlyCompletion === true, 'internal_only_completion'],
-  [(a) => !!a.serviceType && INSPECTION_SERVICE_RE.test(String(a.serviceType)) && a.serviceLine !== INSPECTION_CONSUMES_LINE, 'inspection_service'],
+  [(a) => !!a.serviceType && INSPECTION_SERVICE_RE.test(String(a.serviceType)) && a.projectType !== NOTICE_PROJECT_TYPE, 'inspection_service'],
 ];
 
 // SQL NULL = every line. Anything else must be an array of line keys —
@@ -218,9 +229,12 @@ async function consumeCompletionSupplies(db, {
   isInternalOnlyCompletion = false,
   serviceLine = null,
   serviceType = null,
+  // completion profile projectType for a project-backed completion; null on
+  // the normal closeout path.
+  projectType = null,
 } = {}) {
   const result = { consumed: [], skipped: [], errors: [] };
-  const skip = SKIP_WHEN.find(([applies]) => applies({ scheduledServiceId, isIncompleteVisit, visitPerformed, isInternalOnlyCompletion, serviceType, serviceLine }));
+  const skip = SKIP_WHEN.find(([applies]) => applies({ scheduledServiceId, isIncompleteVisit, visitPerformed, isInternalOnlyCompletion, serviceType, serviceLine, projectType }));
   if (skip) { result.skipped.push({ reason: skip[1] }); return result; }
 
   let products;

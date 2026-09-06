@@ -520,4 +520,17 @@ describe('resolveOrCreateProjectInvoice mint serialization (source contract)', (
     const completion = fs.readFileSync(require.resolve('../services/project-completion.js'), 'utf8');
     expect(completion).toMatch(/const project = await trx\('projects'\)\.where\(\{ id: projectId \}\)\.forUpdate\(\)\.first\(\);/);
   });
+
+  // Every termite service (WDO inspection, pre-treat, trenching, liquid)
+  // completes through this path, so the per-completion consumables hook
+  // must run here too — after the commit, with the profile's projectType so
+  // the WDO inspection clears the inspection skip (GH codex #3996 P1).
+  test('completeProjectBackedService consumes completion supplies after the transaction commits', () => {
+    const completion = fs.readFileSync(require.resolve('../services/project-completion.js'), 'utf8');
+    const trxEnd = completion.indexOf('if (postCommitTrackServiceId) {');
+    const consumeAt = completion.indexOf('consumeCompletionSupplies(knex, {');
+    expect(trxEnd).toBeGreaterThan(-1);
+    expect(consumeAt).toBeGreaterThan(trxEnd);
+    expect(completion.slice(consumeAt, completion.indexOf('});', consumeAt))).toContain('projectType: profile.projectType');
+  });
 });
