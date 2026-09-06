@@ -3959,7 +3959,7 @@ router.get('/:id/schedule-source', async (req, res, next) => {
         'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
         'estimate_slug', 'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
         'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at', 'expires_at',
-        'customer_name', 'customer_phone', 'customer_email', 'address', 'property_id',
+        'customer_name', 'customer_phone', 'customer_email', 'address',
       );
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
 
@@ -4037,9 +4037,6 @@ router.get('/:id/schedule-source', async (req, res, next) => {
         // Human-facing estimate number (EST-YYYY-NNNN) — matches the
         // schedule-estimates row shape so the provenance card can cite it.
         estimateSlug: estimate.estimate_slug || null,
-        // Quoted property — same key as the schedule-estimates row, so the
-        // modal's service-address picker lands on it and keeps it selectable.
-        propertyId: estimate.property_id || null,
         status: estimate.status,
         serviceInterest: estimate.service_interest,
         acceptedAt: estimate.accepted_at,

@@ -4680,9 +4680,6 @@ router.post('/', requireAdmin, async (req, res, next) => {
       primaryLinePrice, estimatedPrice, estimatedDuration, urgency, internalNotes, customerNotes, isCallback,
       parentServiceId, sendConfirmationSms, sendTechNotification, sourceEstimateId,
       sendCardOnFileLink,
-      // The operator's explicit service address for a multi-property customer
-      // (customer_properties.id). Absent → the sole-property anchor below.
-      propertyId,
     } = req.body;
 
     // Window intake by explicit presence (windowIntakeFromBody, shared with
@@ -4718,32 +4715,6 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // before any pricing/tech work); it runs outside the series-creating
     // transaction, so it cannot stop two concurrent creates on its own. The
     // race-safe backstop is the locked re-check inside the transaction below.
-    // Explicit service address (New Appointment "Service address" picker).
-    // Same gate as the Edit-appointment address dropdown: both are "the
-    // office chooses which of the customer's properties a visit lands on".
-    // Resolved to the scheduled_services stamp up front so the duplicate-
-    // series guards, zone, tech matching and the insert all see the chosen
-    // property; the sole-property anchor stays the default when nothing was
-    // chosen. The linked-estimate mismatch check runs once the quote loads.
-    let bookingProperty = null;
-    let bookingSeriesScope = null;
-    if (propertyId !== undefined && propertyId !== null && propertyId !== '') {
-      if (!isEnabled('editApptAddress')) throw httpError(409, 'Appointment address changes are not enabled.');
-      bookingProperty = await require('../services/customer-properties').bookingPropertyStamp({ customerId, propertyId });
-      // Per-property duplicate-series scope (codex #3998 r2 P1): the same
-      // shape the estimate converter hands the guards, so an active pest
-      // series at the customer's home does not 409 a new one at the rental,
-      // while a second series at the SAME property is still refused.
-      bookingSeriesScope = await require('../services/estimate-converter').buildSeriesAddressScope(db, {
-        property_id: bookingProperty.property_id,
-        address: [
-          [bookingProperty.service_address_line1, bookingProperty.service_address_line2].filter(Boolean).join(' '),
-          bookingProperty.service_address_city,
-          `${bookingProperty.service_address_state} ${bookingProperty.service_address_zip}`,
-        ].join(', '),
-      }, customerId);
-    }
-
     if (isRecurring) {
       try {
         const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
@@ -4751,7 +4722,6 @@ router.post('/', requireAdmin, async (req, res, next) => {
           customerId,
           serviceId: serviceId || null,
           serviceType,
-          serviceAddressScope: bookingSeriesScope,
         });
         if (existingSeries.length > 0) {
           if (req.body.allowDuplicateSeries === true) {
@@ -4782,15 +4752,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
         .first(
           'id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'estimate_data', 'expires_at',
           'monthly_total', 'annual_total', 'onetime_total', 'bill_by_invoice', 'show_one_time_option',
-          'property_id',
         );
       if (!linkedEstimate) return res.status(404).json({ error: 'Linked estimate not found' });
-      // A quote priced for one property must not book at another: the
-      // estimate's own linkage would otherwise re-stamp the visit to the
-      // quoted address after commit and silently undo the operator's choice.
-      if (bookingProperty && linkedEstimate.property_id && String(linkedEstimate.property_id) !== String(bookingProperty.property_id)) {
-        throw Object.assign(httpError(422, 'This estimate was quoted for a different property. Choose that address or book without the estimate.'), { code: 'ESTIMATE_PROPERTY_MISMATCH' });
-      }
       // Reject only a genuine MISMATCH (estimate owned by a different customer).
       // A lead / standalone quote carries customer_id = NULL — that's bookable:
       // it gets attached to this customer on book (below) so the customer-keyed
@@ -5089,9 +5052,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
     // Base-only rows stay stamp-free.
     const addonOnlyTotal = (lines) => (lines || []).reduce((sum, a) => sum + (Number(a?.price) > 0 ? Number(a.price) : 0), 0);
 
-    const zone = bookingProperty
-      ? getZone(bookingProperty.service_address_city, bookingProperty.service_address_zip)
-      : getZone(customer?.city, customer?.zip);
+    const zone = getZone(customer?.city, customer?.zip);
     // Owner directive (2026-07-03): every service call defaults to 60 minutes;
     // the service-record default or an explicit tech-entered duration wins below.
     let duration = 60;
@@ -5479,7 +5440,6 @@ router.post('/', requireAdmin, async (req, res, next) => {
           customerId,
           serviceId: serviceId || null,
           serviceType,
-          serviceAddressScope: bookingSeriesScope,
         });
         if (guardError) logger.warn(`[schedule] locked duplicate-series guard failed (booking proceeds): ${guardError.message}`);
         if (matches.length > 0) {
@@ -5500,15 +5460,6 @@ router.post('/', requireAdmin, async (req, res, next) => {
         notes: combinedNotes, is_recurring: isRecurring || false, recurring_pattern: recurringPattern,
       };
 
-      // Operator-chosen property: stamp identity + service address + coords
-      // on the parent; children and boosters inherit through
-      // copyStampedServiceAddressFields, and the sole-property anchor below
-      // sees property_id already set and leaves it alone.
-      if (bookingProperty) {
-        for (const [field, value] of Object.entries(bookingProperty)) {
-          if (cols[field]) insertData[field] = value;
-        }
-      }
       // Property identity for the visit-group stamp (GH codex r4 P2):
       // manual bookings have no estimate-linkage regroup, so an unstamped
       // property makes maybeGroupRow refuse forever — and spawned

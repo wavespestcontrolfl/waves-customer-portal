@@ -49,19 +49,3 @@ export const RELATIONSHIP_OPTIONS = [
   { value: "family_home", label: "Family member's home" },
   { value: "managed_for_client", label: "Managed for a client" },
 ];
-
-const RELATIONSHIP_SHORT_LABELS = {
-  own_home: "Home",
-  rental_owned: "Rental",
-  family_home: "Family",
-  managed_for_client: "Managed",
-};
-
-// One-word chip copy for pickers (appointment address cards). Falls back to
-// the occupancy so an unclassified legacy row still says something useful.
-export function propertyRelationshipChip(property) {
-  if (!property) return "";
-  if (RELATIONSHIP_SHORT_LABELS[property.relationship]) return RELATIONSHIP_SHORT_LABELS[property.relationship];
-  const occ = OCCUPANCY_OPTIONS.find((o) => o.value === property.occupancy_type && o.value !== "unknown");
-  return occ ? occ.label : "";
-}
