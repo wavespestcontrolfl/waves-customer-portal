@@ -251,9 +251,15 @@ function buildAltText({ title, topic, keyword, city, mode = 'blog-hero', plan = 
     const clipped = lead.length > 140 ? `${lead.slice(0, 140).replace(/\s+\S*$/, '')}…` : lead;
     subject = `${String(keyword).trim()} — ${clipped}`.replace(/[.!?]+$/, '');
   }
-  const setting = city
+  // A planned image is described by ITS setting (the prompt's), not the
+  // legacy postcard — the alt must match the picture that was asked for
+  // (pre-push Codex P1 on a3920f4fb).
+  const plannedSetting = plan && plan.setting
+    ? `${String(plan.setting).split(',')[0].trim()}${plan.timeOfDay ? `, ${plan.timeOfDay}` : ''}, at a ${city ? `${city}-area ` : ''}Southwest Florida home`
+    : null;
+  const setting = plannedSetting || (city
     ? `a sunny ${city}-area Southwest Florida home with palm trees and sandy soil`
-    : 'a sunny Southwest Florida home with palm trees and tropical landscaping';
+    : 'a sunny Southwest Florida home with palm trees and tropical landscaping');
   const styled = plan && IMAGE_STYLES[plan.style] ? IMAGE_STYLES[plan.style].label : null;
   const kind = styled
     ? (mode === 'social-square' ? `${styled} social tile` : styled)

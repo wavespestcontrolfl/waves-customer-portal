@@ -88,9 +88,12 @@ describe('buildPrompt with a plan', () => {
     expect(p).toMatch(/Must not depict: .*no company logos/);
   });
 
-  test('alt text names the style so it describes the picture that was asked for', () => {
-    expect(gen.buildAltText({ title: 'T', keyword: 'K', mode: 'blog-hero', plan: { style: 'cartoon' } })).toMatch(/^Cartoon illustration of /);
-    expect(gen.buildAltText({ title: 'T', keyword: 'K', mode: 'blog-hero' })).toMatch(/^Photorealistic scene of /);
+  test('alt text names the style AND the planned setting so it describes the picture that was asked for', () => {
+    const plan = { style: 'cartoon', setting: 'inside a residential garage, controller and tools on the wall', timeOfDay: 'dusk', vantage: 'eye level' };
+    const alt = gen.buildAltText({ title: 'T', keyword: 'K', city: 'Venice', mode: 'blog-hero', plan });
+    expect(alt).toMatch(/^Cartoon illustration of inside a residential garage, dusk, at a Venice-area Southwest Florida home, illustrating K\./);
+    expect(alt).not.toMatch(/palm trees/);
+    expect(gen.buildAltText({ title: 'T', keyword: 'K', mode: 'blog-hero' })).toMatch(/^Photorealistic scene of a sunny Southwest Florida home with palm trees/);
   });
 
   test('the request timeout is long enough for gpt-image-2 (was 60 s: every image fell to gpt-image-1.5)', () => {
