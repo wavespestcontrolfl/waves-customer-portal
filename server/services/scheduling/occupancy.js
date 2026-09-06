@@ -352,9 +352,29 @@ async function findConflictingVisits({
   excludeStatuses = DEFAULT_EXCLUDE_STATUSES,
   includeHolds = true,
   travel,
+  arrivalWindow,
 } = {}) {
   if (!date || !windowStart || !windowEnd) return [];
   const excludeIds = (excludeServiceIds || []).filter(Boolean).map(String);
+
+  // Only staff callers explicitly opt into this advisory placement check.
+  // Public booking/reservation and customer reschedule contracts stay on
+  // their existing overlap/travel probes. The save caller already holds
+  // the date-wide occupancy lock; this is a read of that same transaction.
+  if (arrivalWindow) {
+    const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('./arrival-route');
+    if (arrivalWindowRoutingEnabled()) {
+      const fit = await checkArrivalPlacement({
+        conn: db, ...arrivalWindow, date: String(date).split('T')[0],
+        windowStart, windowEnd, excludeServiceIds: excludeIds,
+      });
+      return fit.feasible ? [] : [{
+        ...fit.target, id: arrivalWindow.serviceId,
+        window_start: windowStart, window_end: windowEnd,
+        conflict_reason: fit.reason, warning: fit.warning,
+      }];
+    }
+  }
 
   if (travel !== undefined && travelGapEnabled()) {
     return findConflictingVisitsWithTravel({

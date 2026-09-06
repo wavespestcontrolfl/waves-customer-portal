@@ -2257,6 +2257,12 @@ const gates = {
   // with no slots and every picker renders exactly as today.
   bestTimeHints: gateEnvValue('GATE_BEST_TIME_HINTS'),
 
+  // Staff existing-visit picker + save checks use complete-route arrival
+  // simulation within the existing two-hour customer promises. Advisory;
+  // never changes neighbours' promises or sends notifications. Call-time
+  // kill switch in scheduling/arrival-route.js; off in every environment.
+  adminArrivalWindows: gateEnvValue('GATE_ADMIN_ARRIVAL_WINDOWS'),
+
   // Call property-role classification (2026-08-15): the extraction classifies
   // each property a call discusses (occupancy + which one is the caller's
   // primary residence); the pipeline fills only-unknown occupancies directly

@@ -432,7 +432,7 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
             e.stopPropagation();
             onViewAudit(service);
           }}
-          className="absolute top-0.5 right-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring"
+          className="absolute z-[1] top-0.5 right-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring"
           title="View completion audit"
           aria-label="View completion audit"
         >
@@ -448,7 +448,7 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
             onProtocol(service);
           }}
           className={cn(
-            'absolute top-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
+            'absolute z-[1] top-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
             hasAuditAction ? 'right-6' : 'right-0.5'
           )}
           title="Protocol"
@@ -466,7 +466,7 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
             onTreatmentPlan(service);
           }}
           className={cn(
-            'absolute top-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
+            'absolute z-[1] top-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
             hasAuditAction && hasProtocolAction ? 'right-11' : hasAuditAction || hasProtocolAction ? 'right-6' : 'right-0.5'
           )}
           title="Treatment plan"

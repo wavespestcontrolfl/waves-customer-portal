@@ -30,15 +30,15 @@ export default function SlotConflictNotice({ conflicts, style }) {
     : '';
   return (
     <div style={{
-      fontSize: 13, padding: '8px 10px', borderRadius: 8,
+      fontSize: 14, padding: '8px 10px', borderRadius: 8,
       background: '#FFFBEB', border: '1px solid #FDE68A', color: '#B45309',
       ...style,
     }}>
-      <div>
+      {first.warning ? <div>{first.warning}</div> : <><div>
         {`⚠️ ${conflictLabel(first)} is already booked${span} on this date`}
         {conflicts.length > 1 ? `, and ${conflicts.length - 1} more.` : '.'}
       </div>
-      <div style={{ marginTop: 2 }}>Saving will double-book this time slot.</div>
+      <div style={{ marginTop: 2 }}>Saving will double-book this time slot.</div></>}
     </div>
   );
 }

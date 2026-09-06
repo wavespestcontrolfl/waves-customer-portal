@@ -3293,6 +3293,7 @@ describe('rain-out service', () => {
 
     test('malformed dates and windows are refused before any query', async () => {
       for (const target of [
+        ...[{ serviceId: 'bad-id' }, { technicianId: 12 }, { durationMinutes: '60' }, { durationMinutes: -1 }].map(extra => ({ date: '2035-01-01', window: { start: '09:00', end: '10:00' }, ...extra })),
         { date: 'not-a-date', window: { start: '14:00', end: '15:00' } },
         { date: '2026-08-20', window: { start: 'nope', end: '15:00' } },
         { date: '2026-08-20', window: { start: '14:00' } },
