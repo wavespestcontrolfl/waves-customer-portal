@@ -352,10 +352,10 @@ describe('recalcBestPrice', () => {
     expect(catalogUpdates[0].needs_pricing).toBe(false);
     // COGS moves with the winner (r1 P1): 20.07 / 20 per tablet, unit kept.
     expect(catalogUpdates[0].cost_per_unit).toBe(1.0035);
-    expect(catalogUpdates[0].cost_unit).toBe('tablet');
+    expect(catalogUpdates[0].cost_unit).toBe('each'); // canonical count unit (r5 P1) — 'tablet' cannot be matched by the movement-driven COGS consumers
   });
 
-  test('COUNT-BASED product: a pack of 10 scales to the catalog\'s single unit — $86.94/10 stations → $8.69/station, cost_unit from the catalog noun', async () => {
+  test('COUNT-BASED product: a pack of 10 scales to the catalog\'s single unit — $86.94/10 stations → $8.69/station, cost_unit canonical each', async () => {
     const { catalogUpdates } = wireBestPrice({
       rows: [{ id: 'vp-ves', vendor_id: 'v-ves', price: 86.94, quantity: '10 stations', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Veseris' }],
       product: { unit_size_oz: null, best_price: 8.69, container_size: '1 station', cost_unit: null },
@@ -365,7 +365,7 @@ describe('recalcBestPrice', () => {
     expect(catalogUpdates[0].best_price_amount_cached).toBe(86.94);
     expect(catalogUpdates[0].best_price_status).toBe('current');
     expect(catalogUpdates[0].cost_per_unit).toBe(8.694);
-    expect(catalogUpdates[0].cost_unit).toBe('station');
+    expect(catalogUpdates[0].cost_unit).toBe('each');
   });
 
   test('COUNT-BASED product: rows rank by LANDED per-unit — a $10/10 pack with $20 shipping does not beat a delivered $20/10 pack; the sticker per-unit is what persists', async () => {
@@ -483,10 +483,51 @@ describe('recalcBestPrice', () => {
     expect(wasEach.catalogUpdates[0].cost_unit).toBeNull();
   });
 
-  test('an applied price snapshot replaces the row\'s shipping / tax inputs too — a snapshot carries none, so they clear; shipping_estimate follows it (r4 P1)', () => {
+  test('an applied price snapshot replaces the row\'s shipping / tax inputs too — a snapshot carries none, so they clear; shipping_estimate follows it; price_per_oz clears (r4 P1, r5 P1)', () => {
     const { snapshotPricingFields } = inventoryRouter._test;
     const f = snapshotPricingFields({ price: 20.07, quantity: '20 count', normalized_unit_price: null, normalized_unit: null, expires_at: null, shipping_estimate: 6.5 });
-    expect(f).toEqual({ normalized_unit_price: null, landed_unit_price: null, quantity: '20 count', unit_normalized: null, expires_at: null, shipping_cost: null, tax_rate: null, landed_cost: null, shipping_estimate: 6.5 });
+    expect(f).toEqual({ normalized_unit_price: null, landed_unit_price: null, price_per_oz: null, quantity: '20 count', unit_normalized: null, expires_at: null, shipping_cost: null, tax_rate: null, landed_cost: null, shipping_estimate: 6.5 });
+  });
+
+  test('COGS that contradicts the catalog\'s committed size is reset on EVERY path — the stale guard, the no-valid-price path — while unknown semantics are left alone (r5 P1)', async () => {
+    // measured catalog ("64 oz"), count-only rows → raw mode → stale guard: the per-station cost still resets
+    const guard = wireBestPrice({
+      rows: [{ id: 'vp-c', vendor_id: 'v-c', price: 86.94, quantity: '10 stations', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Veseris' }],
+      product: { unit_size_oz: 64, best_price: 8.69, container_size: '64 oz', cost_unit: 'station' },
+    });
+    await recalcBestPrice('prod-1');
+    expect(guard.catalogUpdates[0].best_price_status).toBe('stale');
+    expect(guard.catalogUpdates[0].cost_per_unit).toBeNull();
+    expect(guard.catalogUpdates[0].cost_unit).toBeNull();
+    // no eligible rows at all: same reset rides the invalidation
+    const none = wireBestPrice({ rows: [], product: { unit_size_oz: 64, best_price: 8.69, container_size: '64 oz', cost_unit: 'each' } });
+    await recalcBestPrice('prod-1');
+    expect(none.catalogUpdates[0].best_price_status).toBe('no_valid_price');
+    expect(none.catalogUpdates[0].cost_per_unit).toBeNull();
+    // the reverse: a counted catalog with an $/oz cost resets too
+    const rev = wireBestPrice({ rows: [], product: { unit_size_oz: null, best_price: 5, container_size: '20 count', cost_unit: 'oz' } });
+    await recalcBestPrice('prod-1');
+    expect(rev.catalogUpdates[0].cost_per_unit).toBeNull();
+    // unknown semantics (null container, no unit_size_oz) with an 'each' cost — the yard-sign rows — untouched
+    const unknown = wireBestPrice({ rows: [], product: { unit_size_oz: null, best_price: 0.5356, container_size: null, cost_unit: 'each' } });
+    await recalcBestPrice('prod-1');
+    expect(unknown.catalogUpdates[0]).not.toHaveProperty('cost_per_unit');
+  });
+
+  test('a count row honors the worker\'s PER-UNIT landed_unit_price when its unit is a count unit, and ignores it otherwise (r5 P1)', () => {
+    const { scoreVendorRows } = inventoryRouter;
+    const product = { unit_size_oz: null, container_size: '1 station' };
+    const honored = scoreVendorRows([
+      { id: 'cheapSticker', price: 10, quantity: '10 stations', landed_unit_price: 3, unit_normalized: 'each' },
+      { id: 'delivered', price: 20, quantity: '10 stations' },
+    ], product);
+    expect(honored.ranked[0].row.id).toBe('delivered');
+    expect(honored.ranked[1].rankPerUnit).toBe(3);
+    const ignored = scoreVendorRows([
+      { id: 'cheapSticker', price: 10, quantity: '10 stations', landed_unit_price: 3, unit_normalized: null },
+      { id: 'delivered', price: 20, quantity: '10 stations' },
+    ], product);
+    expect(ignored.ranked[0].row.id).toBe('cheapSticker');
   });
 
   test('PUT /:id recalculates INSIDE the size-edit transaction, after the product-scoped advisory lock — a failing recalculation fails the edit (r4 P1)', async () => {

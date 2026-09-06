@@ -141,6 +141,10 @@ function snapshotPricingFields(snapshot) {
   return {
     normalized_unit_price: snapshot.normalized_unit_price ?? null,
     landed_unit_price: snapshot.landed_unit_price ?? null,
+    // price_per_oz is the last per-oz fallback vendorRowPricePerOz reads
+    // (Codex #3974 r5 P1): left over from a measured pack, it would keep a
+    // row that the snapshot moved to a count pack in 'oz' mode.
+    price_per_oz: null,
     quantity: snapshot.quantity ?? null,
     unit_normalized: snapshot.normalized_unit ?? null,
     expires_at: snapshot.expires_at ?? null,
@@ -3306,6 +3310,26 @@ function vendorRowPricePerOz(row) {
     ?? (numberOrNull(row.price_per_oz) > 0 ? numberOrNull(row.price_per_oz) : null);
 }
 
+// COGS whose unit contradicts the catalog's COMMITTED size semantics is
+// invalid on EVERY path out of the recalculation (Codex #3974 r5 P1), not
+// only after a successful measured scoring: costLineFromUsage and the plan
+// engine read cost_per_unit first without checking needs_pricing, so a
+// per-station figure left on a product now measured in ounces (or an $/oz
+// figure on a product now counted) would be multiplied as usage cost. The
+// reset keys on what the catalog says the product IS — measured
+// (unit_size_oz or a measurable container) vs counted (a count container) —
+// and leaves a product whose semantics are unknown (null container) alone.
+// Returns the update fragment: { cost_per_unit: null, cost_unit: null } or {}.
+function cogsResetFor(product, unitSizeOz) {
+  const catalogIsMeasured = unitSizeOz > 0 || (quantityToOz(product?.container_size) || 0) > 0;
+  const catalogIsCount = !catalogIsMeasured && !!parsePackCount(product?.container_size);
+  const costUnit = product?.cost_unit ? String(product.cost_unit) : null;
+  const costUnitIsCount = !!costUnit && parsePackCount(`1 ${costUnit}`) != null;
+  const costUnitIsMeasured = !!costUnit && !costUnitIsCount && convertToOz(1, costUnit) != null;
+  const contradicts = (catalogIsMeasured && costUnitIsCount) || (catalogIsCount && costUnitIsMeasured);
+  return contradicts ? { cost_per_unit: null, cost_unit: null } : {};
+}
+
 // ── Shared vendor-row scoring (the ONE ranking basis) ──
 // Used by recalcBestPrice (the canonical writer) AND the Intelligence Bar's
 // compare_vendor_pricing / find_cheapest_vendor (Codex #3974 r1 P1: the IB
@@ -3339,12 +3363,19 @@ function scoreVendorRows(rows, product) {
     // the wrong vendor and persist the wrong best_price / cost_per_unit.
     const hasLandedParts = row.shipping_cost != null || row.tax_rate != null;
     const landedTotal = countable && hasLandedParts ? calcLandedCost(price, row.shipping_cost, row.tax_rate) : null;
+    // The price-sync worker carries landed cost as a PER-UNIT figure
+    // (landed_unit_price, denominated in unit_normalized), not as shipping /
+    // tax columns (Codex #3974 r5 P1): for a count row it is honored when
+    // its unit is a count unit ('each' / a counted noun) — the denominator
+    // is then one item; a measured or absent unit cannot be read per item.
+    const rowUnitIsCount = !!row.unit_normalized && parsePackCount(`1 ${row.unit_normalized}`) != null;
+    const perItemLanded = countable && rowUnitIsCount && numberOrNull(row.landed_unit_price) > 0 ? numberOrNull(row.landed_unit_price) : null;
     return {
       row,
       perOz,
       rankPerOz: landedPerOz ?? perOz,
       perUnit: countable ? price / pack.count : null,
-      rankPerUnit: countable ? (landedTotal > 0 ? landedTotal : price) / pack.count : null,
+      rankPerUnit: countable ? (landedTotal > 0 ? landedTotal / pack.count : perItemLanded ?? price / pack.count) : null,
       price,
     };
   });
@@ -3397,6 +3428,9 @@ async function recalcBestPriceLocked(productId, dbc) {
   const rows = await eligibleVendorPricing(dbc('vendor_pricing').where({ product_id: productId }))
     .join('vendors', 'vendor_pricing.vendor_id', 'vendors.id')
     .select('vendor_pricing.*', 'vendors.name as vendor_name');
+  const product = await dbc('products_catalog').where({ id: productId }).select('unit_size_oz', 'best_price', 'container_size', 'cost_unit').first();
+  const unitSizeOz = numberOrNull(product?.unit_size_oz);
+  const cogsReset = cogsResetFor(product, unitSizeOz);
   if (!rows || !rows.length) {
     // No eligible (active, approved, unexpired) vendor price remains — the
     // previous winner must not keep feeding costing as if it were current.
@@ -3409,14 +3443,12 @@ async function recalcBestPriceLocked(productId, dbc) {
       best_price_updated_at: new Date(),
       best_price_status: 'no_valid_price',
       needs_pricing: true,
+      ...cogsReset,
     });
     await dbc('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
     return;
   }
-
-  const product = await dbc('products_catalog').where({ id: productId }).select('unit_size_oz', 'best_price', 'container_size', 'cost_unit').first();
-  const unitSizeOz = numberOrNull(product?.unit_size_oz);
-  const { mode, pool, catalogCount, catalogUnit } = scoreVendorRows(rows, product);
+  const { mode, pool, catalogCount } = scoreVendorRows(rows, product);
   const best = pool[0];
   const countScalable = mode === 'count';
   const scalable = (best.perOz != null && unitSizeOz > 0) || countScalable;
@@ -3437,6 +3469,7 @@ async function recalcBestPriceLocked(productId, dbc) {
       best_price_status: 'stale',
       needs_pricing: true,
       best_price_updated_at: new Date(),
+      ...cogsReset,
     });
     await dbc('vendor_pricing').where({ product_id: productId }).update({ is_best_price: false });
     return;
@@ -3450,20 +3483,15 @@ async function recalcBestPriceLocked(productId, dbc) {
   // cost_per_unit FIRST and its best_price fallback needs unit_size_oz, so a
   // count product's job/estimate cost would keep a seeded figure ($26.88/20)
   // beside a current best price. The winning STICKER per-unit is written with
-  // the price; the existing cost_unit is kept (it names what one unit is —
-  // 'tablet'), else the catalog's counted noun, else 'each'.
-  // Leaving count mode (a product corrected to a measured unit_size_oz)
-  // must not keep a per-station / per-tablet figure that costLineFromUsage
-  // would read ahead of the new measured best_price (Codex #3974 r3 P1): a
-  // cost_unit that is a counted noun (or the generic 'each') is count-derived
-  // and is cleared; measured units (oz, fl_oz, lb) are left alone.
-  // (Codex #3974 r4 P1: the count writer itself stores 'each' for a generic
-  // count, so 'each' is count-derived too; only a MEASURED recalculation
-  // clears — raw mode keeps whatever the operator set.)
-  const countDerivedCostUnit = mode === 'oz' && !!product?.cost_unit && parsePackCount(`1 ${product.cost_unit}`) != null;
+  // the price, in the CANONICAL count unit 'each' (Codex #3974 r5 P1): the
+  // inventory conversion contract (inventory-units.js) carries count stock
+  // only as 'each', and the movement-driven COGS consumers
+  // (calculateInventoryCost, supplies-consumption) require an exact unit
+  // match — a 'station' / 'tablet' cost unit would record null actual COGS.
+  // Any other path resets COGS whose unit contradicts the catalog (above).
   const countCost = countScalable
-    ? { cost_per_unit: Math.round(best.perUnit * 10000) / 10000, cost_unit: product?.cost_unit || catalogUnit || 'each' }
-    : countDerivedCostUnit ? { cost_per_unit: null, cost_unit: null } : {};
+    ? { cost_per_unit: Math.round(best.perUnit * 10000) / 10000, cost_unit: 'each' }
+    : cogsReset;
 
   // Update the control-layer backing/cache fields atomically with the winner:
   // the pricing-engine DB bridge only trusts best_price when
