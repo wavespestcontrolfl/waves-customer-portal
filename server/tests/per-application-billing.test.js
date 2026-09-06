@@ -697,7 +697,7 @@ describe('accepted pest cadence reaches the service schedule', () => {
   test('without a final selection the line keeps its own cadence', () => {
     expect(EstimateConverter.converterFollowUpSeedingPattern(staleLine, parent, 'monthly', null)).toBe('quarterly');
     expect(EstimateConverter.annualPrepayCoverageCadence(staleLine, 'monthly', null)).toBe('quarterly');
-    expect(EstimateConverter.remainingUnitCatalogKey(staleLine)).toBe('pest_general_quarterly');
+    expect(EstimateConverter.remainingUnitCatalogKey(staleLine)).toBeNull();
   });
 
   test('commercial pest and lawn do not inherit residential pest selection rules', () => {

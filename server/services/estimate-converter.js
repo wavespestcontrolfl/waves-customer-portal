@@ -3269,7 +3269,7 @@ function identityOnlyCatalogKey(catalogServiceKey) {
 }
 
 function remainingUnitCatalogKey(svc = {}, acceptedPlanFrequency = null) {
-  if (seedingFamilyKey(svc) === 'pest_control') {
+  if (acceptedPestSelectionVisits(svc, acceptedPlanFrequency)) {
     const pattern = converterFollowUpSeedingPattern(svc, {}, undefined, acceptedPlanFrequency);
     return PEST_CADENCE_CATALOG_KEYS[pattern] || null;
   }
