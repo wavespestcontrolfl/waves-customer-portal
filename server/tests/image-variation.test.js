@@ -219,6 +219,16 @@ describe('screenGeneratedImage', () => {
     expect(await screenGeneratedImage({ buffer })).toMatchObject({ ok: true, forbidden: [] });
   });
 
+  test('with exclusions active, a missing or scalar forbidden_scenes is an unusable answer, not a clean verdict (Codex r9 P2 on #3964)', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": [], "logos_or_brand_marks": []}' });
+    expect(await screenGeneratedImage({ buffer, avoidDepicting: ['irrigation repair scenes'] })).toMatchObject({ ok: true, checked: false });
+    dispatchWithFallback.mockResolvedValue({ ok: true, text: '{"readable_text": [], "logos_or_brand_marks": [], "forbidden_scenes": "irrigation repair scenes"}' });
+    expect(await screenGeneratedImage({ buffer, avoidDepicting: ['irrigation repair scenes'] })).toMatchObject({ ok: true, checked: false });
+    expect(parseScreen('{"readable_text": [], "logos_or_brand_marks": []}', { requireForbidden: true })).toBeNull();
+    // The same answer without exclusions is a checked, clean screen.
+    expect(await screenGeneratedImage({ buffer, avoidDepicting: [] })).toMatchObject({ ok: true, checked: true });
+  });
+
   test('fails open on a vision miss, unusable output, or a throw', async () => {
     dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
     expect(await screenGeneratedImage({ buffer })).toMatchObject({ ok: true, checked: false });

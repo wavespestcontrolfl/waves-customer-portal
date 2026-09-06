@@ -873,7 +873,9 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
     const allowedText = plan.style === 'infographic' ? captions : [];
     // The screen runs inside the same slot deadline as the generation.
     const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', allowedText, avoidDepicting, timeoutMs: deadlineAt - Date.now() });
-    const candidate = { ...img, dataUrl: gen.dataUrl, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen };
+    // deadlineAt rides along so the caller's alt-text vision pass runs
+    // inside the same slot budget (Codex r9 P2).
+    const candidate = { ...img, dataUrl: gen.dataUrl, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen, deadlineAt };
     if (screen.ok) return candidate;
     candidates.push(candidate);
     if (attempt === 0) {
@@ -1903,6 +1905,7 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile, imageAvo
       model: img.model || null,
       plan: img.plan || null,
       screen: img.screen || null,
+      deadlineAt: Number.isFinite(img.deadlineAt) ? img.deadlineAt : null,
     };
   } catch (err) {
     // The blog schema REQUIRES hero_image + og_image (packages/blog-schema/
@@ -1948,10 +1951,13 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile, imageAvo
   // generation-prompt-derived alt already on `generated` — still closer to
   // the real image than the writer's pre-image alt, which is the last
   // resort in the caller.
+  // Bounded by what is left of the hero's slot deadline — a hung vision
+  // provider must not run past the image budget (Codex r9 P2 on #3964).
   generated.alt = (await describeHeroForAlt({
     buffer: generated.buffer,
     title: frontmatter.title,
     keyword: frontmatter.primary_keyword,
+    timeoutMs: Number.isFinite(generated.deadlineAt) ? generated.deadlineAt - Date.now() : null,
   })) || generated.alt || null;
   return generated;
 }
@@ -3006,7 +3012,8 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     // Vision-described alt (fail-open) over the prompt-derived one, vetted by
     // the same guardrails as the hero alt; the prompt-derived alt is the
     // fallback — it describes what was asked for, never the writer's text.
-    const described = await describeHeroForAlt({ buffer, title: frontmatter.title, keyword: slot.heading });
+    // Bounded by what is left of the slot deadline (Codex r9 P2 on #3964).
+    const described = await describeHeroForAlt({ buffer, title: frontmatter.title, keyword: slot.heading, timeoutMs: slotDeadline - Date.now() });
     const alt = vetGeneratedAlt(described, gen.alt || `Illustration for ${slot.heading}`, Array.isArray(frontmatter.domains) ? frontmatter.domains : null);
     logger.info(`[astro-publisher] generated body image ${n} for ${slug} via ${gen.model} (${gen.plan?.style || 'unplanned'}, "${slot.heading}")`);
     files.push({ path: repoPath, buffer });

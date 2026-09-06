@@ -1259,11 +1259,14 @@ describe('publishOrUpdatePage autonomous hero pipeline', () => {
 
     await AstroPublisher.publishOrUpdatePage(heroDraft(), { action_type: 'new_supporting_blog' });
 
-    // The vision pass sees the exact bytes we commit, plus the post context.
+    // The vision pass sees the exact bytes we commit, plus the post context,
+    // and runs inside what is left of the hero's slot deadline (Codex r9 P2 on #3964).
     expect(heroAltVision.describeHeroForAlt).toHaveBeenCalledWith(expect.objectContaining({
       buffer: gh.putBinary.mock.calls[0][0].buffer,
       title: 'Dollar Spot in Venice',
+      timeoutMs: expect.any(Number),
     }));
+    expect(heroAltVision.describeHeroForAlt.mock.calls[0][0].timeoutMs).toBeGreaterThan(0);
     const parsed = fmModule.parse(gh.putFile.mock.calls[0][0].content);
     expect(parsed.data.hero_image.alt).toBe('Brown patch rings spreading across a St. Augustine lawn');
   });
@@ -3850,6 +3853,8 @@ describe('generatePlannedImage — one deadline per slot, safer candidate when b
     }
     expect(out.screen.logos).toEqual([]);
     expect(out.screen.reasons).toEqual(['readable text: ZONE 5']);
+    // The slot deadline rides on the result so the caller's alt pass shares it (Codex r9 P2).
+    expect(out.deadlineAt).toBe(first);
   });
 
   test('with no logos on either side, the candidate with fewer detected strings ships (Codex r7 P2)', async () => {

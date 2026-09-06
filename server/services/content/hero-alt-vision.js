@@ -60,8 +60,15 @@ function sanitizeAlt(text) {
  * @param {string} [opts.keyword] primary keyword
  * @returns {Promise<string|null>} alt text, or null (caller keeps its fallback)
  */
-async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyword } = {}) {
+async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyword, timeoutMs = null } = {}) {
   if (!Buffer.isBuffer(buffer) || !buffer.length) return null;
+  // Same contract as the screen: timeoutMs is what is left of the caller's
+  // image-slot deadline; nothing left → keep the writer alt (fail-open)
+  // rather than a vision pass that outlives the slot (Codex r9 P2 on #3964).
+  if (timeoutMs !== null && !(timeoutMs > 0)) {
+    logger.warn('[hero-alt-vision] vision alt skipped — slot deadline already spent (keeping writer alt)');
+    return null;
+  }
 
   try {
     // VISION first, OpenAI Terra on a miss; a two-leg miss (no key, provider
@@ -71,6 +78,7 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
       images: [{ data: buffer.toString('base64'), mimeType }],
       jsonMode: false,
       maxTokens: 300,
+      ...(timeoutMs > 0 ? { timeoutMs } : {}),
     });
     if (!res.ok) {
       logger.warn(`[hero-alt-vision] vision call failed (${res.reason}) — keeping writer alt (fail-open)`);
@@ -109,7 +117,7 @@ function buildScreenPrompt({ allowedText = [], avoidDepicting = [] } = {}) {
 ${allowed.length ? `The following captions are ALLOWED and should still be listed under readable_text: ${allowed.map((t) => `"${t}"`).join(', ')}.` : ''}
 ${forbidden.length ? `FORBIDDEN (the brief's own exclusions): ${forbidden.map((t) => `"${t}"`).join('; ')}.` : ''}`;
 }
-function parseScreen(text) {
+function parseScreen(text, { requireForbidden = false } = {}) {
   try {
     const raw = String(text || '').replace(/```[a-z]*|```/gi, '').trim();
     const start = raw.indexOf('{');
@@ -119,10 +127,13 @@ function parseScreen(text) {
     // answer (→ fail-open as unchecked), never a clean verdict (Codex r1 P2
     // on #3964).
     if (!obj || !Array.isArray(obj.readable_text) || !Array.isArray(obj.logos_or_brand_marks)) return null;
+    // forbidden_scenes is only asked for when the caller supplied exclusions
+    // — and then it is held to the same bar: a scalar or missing field is an
+    // unusable answer, never a clean verdict (Codex r9 P2 on #3964).
+    if (requireForbidden && !Array.isArray(obj.forbidden_scenes)) return null;
     return {
       readableText: obj.readable_text.map((t) => String(t || '').trim()).filter(Boolean),
       logos: obj.logos_or_brand_marks.map((t) => String(t || '').trim()).filter(Boolean),
-      // Optional: only asked for when the caller supplied exclusions.
       forbidden: Array.isArray(obj.forbidden_scenes) ? obj.forbidden_scenes.map((t) => String(t || '').trim()).filter(Boolean) : [],
       notes: typeof obj.notes === 'string' ? obj.notes.slice(0, 200) : '',
     };
@@ -159,7 +170,7 @@ async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedTe
       logger.warn(`[hero-alt-vision] image screen failed (${res.reason}) — accepting image (fail-open)`);
       return open;
     }
-    const parsed = parseScreen(res.text);
+    const parsed = parseScreen(res.text, { requireForbidden: avoidDepicting.some((t) => String(t || '').trim()) });
     if (!parsed) {
       logger.warn('[hero-alt-vision] image screen returned unusable output — accepting image (fail-open)');
       return open;
