@@ -1364,13 +1364,17 @@ describe('renewal banner revalidates historical recurring alerts', () => {
   });
 });
 
-(process.env.DATABASE_URL ? describe : describe.skip)('renewal revalidation savepoint (PostgreSQL)', () => {
+const SKIP = !process.env.DATABASE_URL;
+(SKIP ? describe.skip : describe)('renewal revalidation savepoint (PostgreSQL)', () => {
   let conn;
   beforeAll(() => {
     const config = require('../knexfile');
     conn = require('knex')(config.development || config);
   });
-  afterAll(async () => { if (conn) await conn.destroy(); });
+  afterAll(async () => {
+    if (conn) await conn.destroy();
+    await require('../models/db').destroy();
+  });
 
   test('a SQL error rejects the savepoint and leaves the outer transaction usable', async () => {
     await conn.transaction(async trx => {
