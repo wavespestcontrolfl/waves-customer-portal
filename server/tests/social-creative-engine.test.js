@@ -352,3 +352,35 @@ describe('generateVideoVariant', () => {
     expect(VideoGenerator.generate).not.toHaveBeenCalled();
   });
 });
+
+describe('versus + milestone runs on the engine (2026-09-06)', () => {
+  test('milestone scenes come from the review (calm home) bank', () => {
+    expect(Engine.resolveSceneBucket({ variant: 'milestone', service: 'Google reviews', topic: '300 Google reviews' })).toBe('review');
+  });
+
+  test.each([
+    ['versus', 'photo_versus'],
+    ['milestone', 'photo_milestone'],
+    ['campaign', 'photo'],
+  ])('%s runs composite the %s overlay', async (variant, overlay) => {
+    const renderSpy = jest.fn().mockResolvedValue('SkpQRw==');
+    ImageGenerator.mockImplementation(() => ({
+      generate: jest.fn().mockResolvedValue({ dataUrl: 'data:image/png;base64,QUJD', model: 'gemini-image-best' }),
+    }));
+    Renderer.renderPhotoCardJpegBase64.mockImplementation(renderSpy);
+    uploadImageToS3.mockResolvedValue('https://cdn.test/x.jpg');
+
+    await Engine.generateVariants({
+      cardInput: { city: 'Venice' },
+      topic: 'Paper Wasp vs Mud Dauber',
+      variant,
+      count: 1,
+      now: NOW,
+    });
+
+    expect(renderSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ variant: overlay, city: 'Venice' }),
+      expect.objectContaining({ platform: 'square' })
+    );
+  });
+});

@@ -868,3 +868,44 @@ describe('studio link relevance + legacy-card alert predicates', () => {
     expect(Studio.legacyCardShipped([{ platform: 'facebook', success: true, imageUrl: card }], new Set(), card)).toBe(false);
   });
 });
+
+describe('creativeCardForRun (2026-09-06: versus + milestone join the creative engine)', () => {
+  const pair = Studio.PEST_VERSUS_PAIRS.find((p) => p.key === 'paper_wasp_vs_mud_dauber');
+
+  test('versus runs hand the engine the versus overlay input', () => {
+    const out = Studio.creativeCardForRun(
+      { versusPair: pair, city: 'Sarasota', service: pair.service, topic: 'Paper Wasp vs Mud Dauber' },
+      {},
+      { isReviewRun: false, isVersusRun: true, isMilestoneRun: false }
+    );
+    expect(out.variant).toBe('versus');
+    expect(out.cardInput).toMatchObject({ variant: 'versus', city: 'Sarasota', left: pair.left, right: pair.right, verdict: pair.verdict });
+  });
+
+  test('milestone runs hand the engine the milestone overlay input (company-wide: no city)', () => {
+    const out = Studio.creativeCardForRun(
+      { milestone: 300, averageRating: 4.8, city: 'Venice' },
+      {},
+      { isReviewRun: false, isVersusRun: false, isMilestoneRun: true }
+    );
+    expect(out.variant).toBe('milestone');
+    expect(out.cardInput).toMatchObject({ variant: 'milestone', count: 300, averageRating: 4.8, city: null });
+  });
+
+  test('review and campaign mappings are unchanged', () => {
+    const review = Studio.creativeCardForRun(
+      { reviewGraphic: { googleReviewId: 'r1', city: 'Venice', excerpt: 'Great', reviewerDisplayName: 'K.' } },
+      {},
+      { isReviewRun: true, isVersusRun: false, isMilestoneRun: false }
+    );
+    expect(review.variant).toBe('review');
+    expect(review.cardInput.variant).toBe('review');
+    const campaign = Studio.creativeCardForRun(
+      { city: 'Parrish', topic: 'ants moving around lanais', service: 'general pest', cta: 'book inspection' },
+      { inputs: {} },
+      { isReviewRun: false, isVersusRun: false, isMilestoneRun: false }
+    );
+    expect(campaign.variant).toBe('campaign');
+    expect(campaign.cardInput.variant).toBe('campaign');
+  });
+});

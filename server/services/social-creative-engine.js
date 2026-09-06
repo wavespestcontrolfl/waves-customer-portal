@@ -140,8 +140,17 @@ const BUCKET_KEYWORDS = [
   { bucket: 'tree_shrub', match: ['tree', 'shrub', 'ornamental', 'palm'] },
 ];
 
+// Overlay the renderer composites for each run kind (photo = campaign).
+const OVERLAY_VARIANTS = {
+  review: 'photo_review',
+  versus: 'photo_versus',
+  milestone: 'photo_milestone',
+};
+
 function resolveSceneBucket({ service, topic, variant } = {}) {
-  if (variant === 'review') return 'review';
+  // A milestone is a company-wide thank-you, so it takes the review bank's
+  // calm home scenes rather than a pest close-up.
+  if (variant === 'review' || variant === 'milestone') return 'review';
   const text = `${service || ''} ${topic || ''}`.toLowerCase();
   for (const group of BUCKET_KEYWORDS) {
     if (group.match.some((keyword) => text.includes(keyword))) return group.bucket;
@@ -243,7 +252,7 @@ async function generateVariants({
   if (!concepts.length) return [];
 
   const generator = new ImageGenerator({ envChain: CREATIVE_FLAGS.chain });
-  const overlayVariant = variant === 'review' ? 'photo_review' : 'photo';
+  const overlayVariant = OVERLAY_VARIANTS[variant] || 'photo';
   const seedBase = SocialCardRenderer.filenameSlug(`${variant}-${city || 'waves'}-${topic || 'creative'}`);
 
   const results = await Promise.all(concepts.map(async (concept, index) => {

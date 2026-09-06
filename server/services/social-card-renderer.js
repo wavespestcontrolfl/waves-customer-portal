@@ -127,6 +127,102 @@ function ctaButton(label, x, y) {
   `;
 }
 
+// Star row depicting a REAL average: each star is an outline, filled to the
+// fractional share it represents (4.7 → four full, one 70%). Shared by the
+// milestone card and its photo overlay so both tell the same truth; no
+// average → no stars, so a card never implies a 5.0.
+const STAR_PATH = 'M0 -18 L5.3 -5.5 L18.6 -5.5 L7.9 2.9 L12 15.7 L0 7.9 L-12 15.7 L-7.9 2.9 L-18.6 -5.5 L-5.3 -5.5 Z';
+function ratingStars(x0, y, avg, { emptyFill = COLORS.white, idPrefix = 'star-clip' } = {}) {
+  if (!Number.isFinite(avg) || avg <= 0) return '';
+  return [0, 1, 2, 3, 4].map((i) => {
+    const share = Math.max(0, Math.min(1, avg - i));
+    const x = x0 + i * 50;
+    const fillW = Math.round(37.2 * share * 10) / 10;
+    return `
+      <path transform="translate(${x} ${y})" d="${STAR_PATH}" fill="${emptyFill}" stroke="${COLORS.star}" stroke-width="2"/>
+      ${share > 0 ? `<clipPath id="${idPrefix}-${i}"><rect x="${-18.6}" y="-20" width="${fillW}" height="40"/></clipPath>
+      <path transform="translate(${x} ${y})" d="${STAR_PATH}" fill="${COLORS.star}" clip-path="url(#${idPrefix}-${i})"/>` : ''}
+    `;
+  }).join('');
+}
+
+// The VS badge: gold disc, navy ring, centred "VS".
+function vsBadge(cx, cy, r = 44) {
+  return `
+    <circle cx="${cx}" cy="${cy}" r="${r}" fill="${COLORS.gold}" stroke="${COLORS.blueDeeper}" stroke-width="3"/>
+    <text x="${cx}" y="${cy + Math.round(r * 0.28)}" text-anchor="middle" font-family="${FONTS.display}" font-size="${Math.round(r * 0.8)}" font-weight="800" fill="${COLORS.blueDeeper}">VS</text>
+  `;
+}
+
+// Largest size in `sizes` at which `text` wraps into ≤ maxLines without
+// truncation; falls back to the smallest size (truncated) so a runaway string
+// still renders. Returns { size, lines }.
+function fitText(text, availW, sizes, maxLines, factor = 0.56) {
+  let last = null;
+  for (const size of sizes) {
+    const lines = wrapText(text, fitChars(availW, size, factor), maxLines);
+    last = { size, lines };
+    if (!lines.length || !lines[lines.length - 1].endsWith('...')) return last;
+  }
+  return last;
+}
+
+// Row-based versus layout shared by the text card and the photo overlay. Both
+// columns are wrapped FIRST so the two names share one baseline and bullet i
+// sits on the same row in both columns — a two-line name or point on one side
+// pushes both sides down together instead of colliding with what's below.
+function versusLayout({ left, right, colW, nameSize: baseNameSize, pointSize }) {
+  // Prefer both names on ONE line (stepping the shared size down to ~70%)
+  // before letting either wrap to two — a wrapped name is the exception for
+  // long species names, not the default look.
+  let nameSize = baseNameSize;
+  let names = null;
+  for (const step of [1, 0.86, 0.72]) {
+    const size = Math.round(baseNameSize * step);
+    const chars = fitChars(colW, size, 0.60);
+    if ([left.name, right.name].every((name) => cleanText(name, 40).length <= chars)) {
+      nameSize = size;
+      names = [left.name, right.name].map((name) => wrapText(name, chars, 1));
+      break;
+    }
+  }
+  if (!names) names = [left.name, right.name].map((name) => wrapText(name, fitChars(colW, nameSize, 0.60), 2));
+  const pointChars = fitChars(colW - Math.round(pointSize * 1.2), pointSize, 0.52);
+  const rowCount = Math.max(left.points.length, right.points.length);
+  const rows = [];
+  for (let i = 0; i < rowCount; i += 1) {
+    const cells = [left.points[i], right.points[i]].map((point) => (point ? wrapText(point, pointChars, 3) : []));
+    const lineCount = Math.max(1, ...cells.map((c) => c.length));
+    rows.push({ cells, h: Math.round(lineCount * pointSize * 1.22) + Math.round(pointSize * 0.9) });
+  }
+  const nameLineH = Math.round(nameSize * 1.06);
+  const nameBlockH = Math.max(1, ...names.map((n) => n.length)) * nameLineH;
+  const pointsH = rows.reduce((sum, row) => sum + row.h, 0);
+  return { names, rows, nameSize, nameLineH, nameBlockH, pointsH, gap: Math.round(nameSize * 0.55) };
+}
+
+// Render a versusLayout at the given column x positions. `nameY` is the
+// first name baseline; `stretchTo` (optional) is the height the point rows
+// should fill, distributing the slack evenly so short points spread over a
+// tile instead of huddling under the name.
+function versusColumns(layout, { xs, nameY, pointSize, nameFills, pointFill, stretchTo = 0 }) {
+  const slack = Math.max(0, stretchTo - layout.pointsH);
+  const extra = layout.rows.length ? Math.floor(slack / layout.rows.length) : 0;
+  let svg = layout.names.map((lines, i) => textBlock(lines, {
+    x: xs[i], y: nameY, size: layout.nameSize, weight: 800, fill: nameFills[i], family: FONTS.display, lineHeight: 1.06,
+  })).join('');
+  let cursor = nameY + layout.nameBlockH - layout.nameLineH + layout.gap + pointSize;
+  for (const row of layout.rows) {
+    row.cells.forEach((lines, i) => {
+      if (!lines.length) return;
+      svg += `<circle cx="${xs[i] + Math.round(pointSize * 0.3)}" cy="${cursor - pointSize * 0.34}" r="${Math.round(pointSize * 0.22)}" fill="${COLORS.gold}"/>`;
+      svg += textBlock(lines, { x: xs[i] + Math.round(pointSize * 1.1), y: cursor, size: pointSize, weight: 600, fill: pointFill, family: FONTS.body, lineHeight: 1.22 });
+    });
+    cursor += row.h + extra;
+  }
+  return svg;
+}
+
 // Decorative brand wave (gold over blue), bottom-right flourish.
 function waveMotif(cx, cy, scale = 1) {
   const s = scale;
@@ -302,48 +398,60 @@ function renderVersusSvg(input = {}, logoDataUri = null) {
   const verdict = cleanText(input.verdict, 120);
 
   const { svg: frame, box } = chrome({ W, H, city, service, logoDataUri });
+  const S = Math.min(W, H) / 1080; // type scale — the 4:3 GBP card is shorter, not just wider
   const eyebrowY = box.panelY + 128;
-  const midX = Math.round((box.padL + box.padR) / 2);
-  const colGap = 44;
-  const colW = midX - colGap - box.padL;
 
-  const nameSize = Math.round(W * 0.034);
-  const pointSize = Math.round(W * 0.022);
-  const namesY = eyebrowY + 62 + nameSize;
+  // Two tinted tiles fill the panel between the eyebrow and the verdict —
+  // blue for the left pest, gold for the right — with the VS badge riding
+  // the seam. Everything is sized from the tile, so three short points read
+  // as a full card instead of a header over empty space.
+  const { size: verdictSize, lines: verdictLines } = fitText(
+    verdict, box.padR - box.padL - 200, [58, 50, 42].map((s) => Math.round(s * S)), 2
+  );
+  const verdictBlockH = verdictLines.length ? Math.round(verdictLines.length * verdictSize * 1.18) : 0;
+  const verdictBottom = box.panelY + box.panelH - 96;
+  const tileY = eyebrowY + 78;
+  const tileBottom = verdictLines.length ? verdictBottom - verdictBlockH - 54 : verdictBottom;
+  const tileH = tileBottom - tileY;
+  const seamGap = 22;
+  const tileW = Math.round((box.padR - box.padL - seamGap) / 2);
+  const tileX = [box.padL, box.padL + tileW + seamGap];
+  const tilePad = Math.round(34 * S);
+  const midX = box.padL + tileW + Math.round(seamGap / 2);
 
-  function column(x, name, points, nameFill) {
-    const nameLines = wrapText(name, fitChars(colW, nameSize, 0.60), 2);
-    let svg = textBlock(nameLines, { x, y: namesY, size: nameSize, weight: 800, fill: nameFill, family: FONTS.display, lineHeight: 1.08 });
-    // Accumulate y per point so a wrapped (two-line) point pushes the next
-    // bullet down instead of crowding it.
-    let y = namesY + (nameLines.length - 1) * nameSize + Math.round(nameSize * 1.5);
-    for (const point of points) {
-      const lines = wrapText(point, fitChars(colW - 30, pointSize, 0.56), 2);
-      svg += `<circle cx="${x + 8}" cy="${y - pointSize * 0.32}" r="6" fill="${COLORS.gold}"/>`;
-      svg += textBlock(lines, { x: x + 26, y, size: pointSize, weight: 600, fill: COLORS.textBody, family: FONTS.body, lineHeight: 1.22 });
-      y += Math.round(lines.length * pointSize * 1.22) + Math.round(pointSize * 1.2);
-    }
-    return svg;
+  // Type steps down until the two columns fit inside the tile.
+  let nameSize; let pointSize; let layout;
+  for (const step of [1, 0.9, 0.8, 0.7]) {
+    nameSize = Math.round(56 * S * step);
+    pointSize = Math.round(31 * S * step);
+    layout = versusLayout({
+      left: { name: leftName, points: leftPoints }, right: { name: rightName, points: rightPoints },
+      colW: tileW - tilePad * 2, nameSize, pointSize,
+    });
+    if (layout.nameBlockH + layout.gap + layout.pointsH <= tileH - tilePad * 2) break;
   }
+  const nameY = tileY + tilePad + layout.nameSize;
+  const tiles = [COLORS.blueLight, '#FFF6CC'].map((fill, i) => (
+    `<rect x="${tileX[i]}" y="${tileY}" width="${tileW}" height="${tileH}" rx="26" fill="${fill}"/>`
+  )).join('');
+  const columns = versusColumns(layout, {
+    xs: tileX.map((x) => x + tilePad), nameY, pointSize,
+    nameFills: [COLORS.blueDeeper, COLORS.blueDark], pointFill: COLORS.blueDeeper,
+    stretchTo: tileH - tilePad * 2 - layout.nameBlockH - layout.gap,
+  });
 
-  const dividerTop = eyebrowY + 78;
-  const dividerBottom = box.panelY + box.panelH - 200;
-  const vsY = Math.round((dividerTop + dividerBottom) / 2);
-  const verdictY = box.panelY + box.panelH - 128;
-  const verdictLines = wrapText(verdict, fitChars(box.padR - box.padL, Math.round(W * 0.026), 0.56), 2);
+  const verdictY = verdictBottom - verdictBlockH + verdictSize;
 
   return `
     <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
       ${frame}
       ${eyebrow('Pest ID: know the difference', box.padL, eyebrowY, COLORS.wavesBlue)}
-      <line x1="${midX}" y1="${dividerTop}" x2="${midX}" y2="${dividerBottom}" stroke="${COLORS.blueLight}" stroke-width="4"/>
-      <circle cx="${midX}" cy="${vsY}" r="44" fill="${COLORS.gold}" stroke="${COLORS.blueDeeper}" stroke-width="3"/>
-      <text x="${midX}" y="${vsY + 12}" text-anchor="middle" font-family="${FONTS.display}" font-size="34" font-weight="800" fill="${COLORS.blueDeeper}">VS</text>
-      ${column(box.padL, leftName, leftPoints, COLORS.blueDeeper)}
-      ${column(midX + colGap, rightName, rightPoints, COLORS.blueDark)}
-      ${verdict ? `<line x1="${box.padL}" y1="${verdictY - 44}" x2="${box.padR - 180}" y2="${verdictY - 44}" stroke="${COLORS.blueLight}" stroke-width="4"/>` : ''}
-      ${textBlock(verdictLines, { x: box.padL, y: verdictY, size: Math.round(W * 0.026), weight: 700, fill: COLORS.blueDeeper, family: FONTS.heading, lineHeight: 1.3 })}
-      ${waveMotif(box.padR - 60, verdictY - 8, W / 1080)}
+      ${tiles}
+      ${columns}
+      ${vsBadge(midX, tileY, Math.round(44 * S))}
+      ${verdictLines.length ? `<rect x="${box.padL}" y="${verdictY - verdictSize + Math.round(verdictSize * 0.12)}" width="10" height="${verdictBlockH}" rx="5" fill="${COLORS.gold}"/>` : ''}
+      ${textBlock(verdictLines, { x: box.padL + 30, y: verdictY, size: verdictSize, weight: 800, fill: COLORS.blueDeeper, family: FONTS.display, lineHeight: 1.18 })}
+      ${waveMotif(box.padR - 60, verdictBottom - 40, W / 1080)}
     </svg>
   `;
 }
@@ -368,21 +476,7 @@ function renderMilestoneSvg(input = {}, logoDataUri = null) {
   const labelSize = Math.round(W * 0.05);
   const labelY = numberY + Math.round(labelSize * 1.3);
   const starsY = labelY + Math.round(labelSize * 1.5);
-  // Stars depict the REAL average: each star is a light outline, with gold
-  // filled to the fractional share that star represents (4.7 → four full,
-  // one 70%). No average → no star row, so the card never implies a 5.0.
-  const STAR = 'M0 -18 L5.3 -5.5 L18.6 -5.5 L7.9 2.9 L12 15.7 L0 7.9 L-12 15.7 L-7.9 2.9 L-18.6 -5.5 L-5.3 -5.5 Z';
-  const hasAverage = Number.isFinite(avg) && avg > 0;
-  const stars = hasAverage ? [0, 1, 2, 3, 4].map((i) => {
-    const share = Math.max(0, Math.min(1, avg - i));
-    const x = box.padL + 20 + i * 50;
-    const fillW = Math.round(37.2 * share * 10) / 10;
-    return `
-      <path transform="translate(${x} ${starsY})" d="${STAR}" fill="${COLORS.white}" stroke="${COLORS.star}" stroke-width="2"/>
-      ${share > 0 ? `<clipPath id="star-clip-${i}"><rect x="${-18.6}" y="-20" width="${fillW}" height="40"/></clipPath>
-      <path transform="translate(${x} ${starsY})" d="${STAR}" fill="${COLORS.star}" clip-path="url(#star-clip-${i})"/>` : ''}
-    `;
-  }).join('') : '';
+  const stars = ratingStars(box.padL + 20, starsY, avg);
   const thanksY = box.panelY + box.panelH - 128;
   const thanksLines = wrapText(thanks, fitChars(box.padR - box.padL - 200, Math.round(W * 0.032), 0.56), 2);
 
@@ -417,21 +511,23 @@ function renderSocialCardSvg(input = {}, logoDataUri = null) {
 // rect) rasterized onto the photo by sharp in renderPhotoCardJpegBase64.
 
 // Shared photo-card chrome: legibility gradients (top + bottom), eyebrow pill,
-// logo on a white chip (the mark needs solid backing on arbitrary photos), and
-// the footer domain. Returns { svg, box } like chrome().
+// the transparent logo mark with a soft drop shadow (owner ruling 2026-09-06:
+// never a white chip behind the logo — the mark sits on the photo), and the
+// footer domain. Returns { svg, box } like chrome().
 function photoChrome({ W, H, eyebrowLabel, eyebrowFill, logoDataUri }) {
   const padX = Math.round(W * 0.052);
-  const chipSize = Math.round(H * 0.115);
-  const chipPad = 14;
-  const chipX = W - padX - chipSize - chipPad * 2;
-  const chipY = Math.round(H * 0.038);
+  const logoSize = Math.round(H * 0.14);
+  const logoX = W - padX - logoSize;
+  const logoY = Math.round(H * 0.034);
   const logo = logoDataUri
-    ? `<rect x="${chipX}" y="${chipY}" width="${chipSize + chipPad * 2}" height="${chipSize + chipPad * 2}" rx="20" fill="${COLORS.white}" opacity="0.94"/>
-       <image x="${chipX + chipPad}" y="${chipY + chipPad}" width="${chipSize}" height="${chipSize}" href="${logoDataUri}" preserveAspectRatio="xMidYMid meet"/>`
-    : `<text x="${W - padX}" y="${chipY + 52}" text-anchor="end" font-family="${FONTS.display}" font-size="46" font-weight="800" fill="${COLORS.white}" letter-spacing="1">WAVES</text>`;
+    ? `<image x="${logoX}" y="${logoY}" width="${logoSize}" height="${logoSize}" href="${logoDataUri}" preserveAspectRatio="xMidYMid meet" filter="url(#logoShadow)"/>`
+    : `<text x="${W - padX}" y="${logoY + 52}" text-anchor="end" font-family="${FONTS.display}" font-size="46" font-weight="800" fill="${COLORS.white}" letter-spacing="1">WAVES</text>`;
 
   const svg = `
     <defs>
+      <filter id="logoShadow" x="-25%" y="-25%" width="150%" height="150%">
+        <feDropShadow dx="0" dy="4" stdDeviation="7" flood-color="${COLORS.navy}" flood-opacity="0.55"/>
+      </filter>
       <linearGradient id="scrimBottom" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0" stop-color="${COLORS.navy}" stop-opacity="0"/>
         <stop offset="0.42" stop-color="${COLORS.navy}" stop-opacity="0.62"/>
@@ -523,9 +619,109 @@ function renderPhotoReviewOverlaySvg(input = {}) {
   `;
 }
 
+// Versus over a photo: two white columns (name + points) on the bottom scrim,
+// the gold VS badge on the seam, and the verdict as the gold hero line. No CTA
+// button — the caption carries the ask; the card's job is the comparison.
+function renderPhotoVersusOverlaySvg(input = {}) {
+  const { w: W, h: H } = resolveSize(input.platform);
+  const S = Math.min(W, H) / 1080;
+  const city = cleanText(input.city || input.location, 60);
+  const left = input.left || {};
+  const right = input.right || {};
+  const leftName = cleanText(left.name, 40) || 'Pest A';
+  const rightName = cleanText(right.name, 40) || 'Pest B';
+  const leftPoints = (Array.isArray(left.points) ? left.points : []).slice(0, 3);
+  const rightPoints = (Array.isArray(right.points) ? right.points : []).slice(0, 3);
+  const verdict = cleanText(input.verdict, 120);
+
+  const { svg: frame, box } = photoChrome({
+    W, H,
+    eyebrowLabel: city ? `${city} · pest ID` : 'Pest ID: know the difference',
+    eyebrowFill: COLORS.wavesBlue,
+    logoDataUri: input.logoDataUri,
+  });
+
+  const badgeR = Math.round(32 * S);
+  const seamGap = badgeR * 2 + Math.round(28 * S);
+  const colW = Math.round((box.padR - box.padX - seamGap) / 2);
+  const colX = [box.padX, box.padX + colW + seamGap];
+  const midX = box.padX + colW + Math.round(seamGap / 2);
+  const nameSize = Math.round(48 * S);
+  const pointSize = Math.round(27 * S);
+
+  // Bottom-anchor: footer < verdict < columns. The whole stack must stay on
+  // the bottom scrim (legibility), so the columns start no higher than ~52%.
+  const { size: verdictSize, lines: verdictLines } = fitText(
+    verdict, box.padR - box.padX, [34, 30, 26].map((s) => Math.round(s * S)), 2
+  );
+  const verdictBlockH = verdictLines.length ? Math.round(verdictLines.length * verdictSize * 1.25) : 0;
+  const verdictBottom = H - Math.round(H * 0.082);
+  const verdictY = verdictBottom - verdictBlockH + verdictSize;
+  const columnsBottom = verdictLines.length ? verdictY - verdictSize - Math.round(30 * S) : verdictBottom;
+  const layout = versusLayout({
+    left: { name: leftName, points: leftPoints }, right: { name: rightName, points: rightPoints },
+    colW, nameSize, pointSize,
+  });
+  const nameY = columnsBottom - layout.pointsH - layout.gap - layout.nameBlockH + layout.nameSize;
+  const columns = versusColumns(layout, {
+    xs: colX, nameY, pointSize, nameFills: [COLORS.white, COLORS.white], pointFill: COLORS.white,
+  });
+
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+      ${frame}
+      ${columns}
+      ${vsBadge(midX, nameY - Math.round(layout.nameSize * 0.32), badgeR)}
+      ${textBlock(verdictLines, { x: box.padX, y: verdictY, size: verdictSize, weight: 800, fill: COLORS.gold, family: FONTS.heading, lineHeight: 1.25 })}
+    </svg>
+  `;
+}
+
+// Milestone over a photo: the count as the hero, "GOOGLE REVIEWS" in gold, the
+// real-average star row, and the thank-you line — bottom-anchored on the scrim.
+function renderPhotoMilestoneOverlaySvg(input = {}) {
+  const { w: W, h: H } = resolveSize(input.platform);
+  const S = Math.min(W, H) / 1080;
+  const count = Math.max(0, Math.round(Number(input.count) || 0));
+  const countLabel = count.toLocaleString('en-US');
+  const avg = Number(input.averageRating);
+  const avgLabel = Number.isFinite(avg) && avg > 0 ? `${avg.toFixed(1)} average rating` : '';
+  const thanks = cleanText(input.thanks, 140) || 'Thank you, Southwest Florida.';
+
+  const { svg: frame, box } = photoChrome({
+    W, H,
+    eyebrowLabel: 'Milestone',
+    eyebrowFill: COLORS.gold,
+    logoDataUri: input.logoDataUri,
+  });
+
+  const thanksSize = Math.round(34 * S);
+  const thanksLines = wrapText(thanks, fitChars(box.padR - box.padX, thanksSize, 0.56), 2);
+  const thanksBottom = H - Math.round(H * 0.082);
+  const thanksY = thanksBottom - Math.round(thanksLines.length * thanksSize * 1.25) + thanksSize;
+  const starsY = thanksY - thanksSize - Math.round(34 * S);
+  const labelSize = Math.round(52 * S);
+  const labelY = starsY - Math.round(44 * S);
+  const numberSize = Math.round(210 * S);
+  const numberY = labelY - Math.round(labelSize * 1.1);
+
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+      ${frame.replace(`fill="${COLORS.white}" letter-spacing="1.5">MILESTONE`, `fill="${COLORS.blueDeeper}" letter-spacing="1.5">MILESTONE`)}
+      <text x="${box.padX}" y="${numberY}" font-family="${FONTS.display}" font-size="${numberSize}" font-weight="800" fill="${COLORS.white}" letter-spacing="-2">${escapeXml(countLabel)}</text>
+      <text x="${box.padX}" y="${labelY}" font-family="${FONTS.display}" font-size="${labelSize}" font-weight="800" fill="${COLORS.gold}" letter-spacing="1">GOOGLE REVIEWS</text>
+      ${ratingStars(box.padX + 20, starsY, avg, { emptyFill: 'none', idPrefix: 'photo-star-clip' })}
+      ${avgLabel ? `<text x="${box.padX + 270}" y="${starsY + 9}" font-family="${FONTS.body}" font-size="${Math.round(26 * S)}" font-weight="600" fill="${COLORS.white}">${escapeXml(avgLabel)}</text>` : ''}
+      ${textBlock(thanksLines, { x: box.padX, y: thanksY, size: thanksSize, weight: 700, fill: COLORS.white, family: FONTS.heading, lineHeight: 1.25 })}
+    </svg>
+  `;
+}
+
 function renderPhotoOverlaySvg(input = {}, logoDataUri = null) {
   const withLogo = { ...input, logoDataUri };
   if (input.variant === 'photo_review') return renderPhotoReviewOverlaySvg(withLogo);
+  if (input.variant === 'photo_versus') return renderPhotoVersusOverlaySvg(withLogo);
+  if (input.variant === 'photo_milestone') return renderPhotoMilestoneOverlaySvg(withLogo);
   return renderPhotoCampaignOverlaySvg(withLogo);
 }
 

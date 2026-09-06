@@ -1087,19 +1087,26 @@ function hasVideoCapableChannel(channels) {
   return (list.includes('facebook') && fbReady) || (list.includes('instagram') && igReady);
 }
 
-async function creativeVariantsForRun(plan, preview, { isReviewRun, wantsGbp, effectiveMode, now }) {
+// Which overlay + card input the creative engine composites for a run. One
+// place, so the engine's `variant` and the overlay's input can't drift apart.
+function creativeCardForRun(plan, preview, { isReviewRun, isVersusRun, isMilestoneRun }) {
+  if (isReviewRun) return { variant: 'review', cardInput: buildReviewCardInput(plan.reviewGraphic) };
+  if (isVersusRun) return { variant: 'versus', cardInput: buildVersusCardInput(plan.versusPair, plan) };
+  if (isMilestoneRun) return { variant: 'milestone', cardInput: buildMilestoneCardInput(plan) };
+  return { variant: 'campaign', cardInput: buildCampaignCardInput(plan, preview) };
+}
+
+async function creativeVariantsForRun(plan, preview, { isReviewRun, isVersusRun, isMilestoneRun, wantsGbp, effectiveMode, now }) {
   if (!CreativeEngine.CREATIVE_FLAGS.enabled) return [];
   try {
-    const cardInput = isReviewRun
-      ? buildReviewCardInput(plan.reviewGraphic)
-      : buildCampaignCardInput(plan, preview);
+    const { variant, cardInput } = creativeCardForRun(plan, preview, { isReviewRun, isVersusRun, isMilestoneRun });
     const excludeConcepts = await recentCreativeConceptKeys();
     const variants = await CreativeEngine.generateVariants({
       cardInput,
       topic: plan.topic,
       service: plan.service,
       city: plan.city,
-      variant: isReviewRun ? 'review' : 'campaign',
+      variant,
       count: effectiveMode === 'draft' ? CreativeEngine.CREATIVE_FLAGS.variantCount : 1,
       excludeConcepts,
       wantGbp: wantsGbp,
@@ -1114,7 +1121,7 @@ async function creativeVariantsForRun(plan, preview, { isReviewRun, wantsGbp, ef
     // visual — stays a still.
     if (
       variants.length
-      && !isReviewRun
+      && variant === 'campaign'
       && effectiveMode === 'draft'
       && CreativeEngine.VIDEO_FLAGS.enabled
       && CreativeEngine.isVideoDay(now)
@@ -2075,12 +2082,13 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // PERSISTED after a successful publish.
     const isReviewRun = !!plan.reviewGraphic?.googleReviewId;
     const canPersistGraphic = isReviewRun && await hasTable('review_graphics');
-    // Versus runs are the deterministic split-panel ID card by design — an AI
-    // photo scene can't render a two-pest comparison, so the creative engine is
-    // skipped entirely (same "never block, never substitute" posture as GBP).
+    // Versus and milestone runs take the creative engine like campaigns do
+    // (owner ruling 2026-09-06: the fixed SVG card reads as the "old post") —
+    // the engine composites their own overlays (photo_versus / photo_milestone)
+    // on the scene; GBP still gets the deterministic card (no AI imagery).
     const isVersusRun = !isReviewRun && !!plan.versusPair;
-    // Milestone runs are the deterministic number card (same posture as versus).
     const isMilestoneRun = !isReviewRun && !isVersusRun && !!plan.milestone;
+    const runKinds = { isReviewRun, isVersusRun, isMilestoneRun };
 
     // Creative engine first (AI photo scene + deterministic brand overlay,
     // gated by SOCIAL_CREATIVE_ENGINE_ENABLED). An empty result — engine off,
@@ -2098,7 +2106,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // approval queue's content and publish later, when readiness may differ.
     const hasNonGbpChannel = Array.isArray(plan.channels)
       && plan.channels.some((c) => c !== 'gbp');
-    let creativeEligible = hasNonGbpChannel && !isVersusRun && !isMilestoneRun;
+    let creativeEligible = hasNonGbpChannel;
     if (creativeEligible && effectiveMode !== 'draft') {
       creativeEligible = false;
       for (const ch of plan.channels) {
@@ -2110,7 +2118,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     }
     const creativeVariants = creativeEligible
       ? await creativeVariantsForRun(plan, preview, {
-        isReviewRun, wantsGbp: false, effectiveMode, now: startedAt,
+        ...runKinds, wantsGbp: false, effectiveMode, now: startedAt,
       })
       : [];
     // Campaign runs with a live page attached use that page's hero photo
@@ -2136,6 +2144,10 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       if (wantsGbp) {
         if (isReviewRun) {
           gbpImageUrl = await renderReviewGraphicImageUrl(plan.reviewGraphic, 'gbp');
+        } else if (isVersusRun) {
+          gbpImageUrl = await renderVersusImageUrl(plan.versusPair, plan, 'gbp');
+        } else if (isMilestoneRun) {
+          gbpImageUrl = await renderMilestoneImageUrl(plan, 'gbp');
         } else {
           const hero = await resolveCampaignHero();
           gbpImageUrl = hero || await renderCampaignImageUrl(plan, preview, 'gbp');
@@ -2143,12 +2155,17 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
           if (!hero && gbpImageUrl) legacyCardUrls.add(gbpImageUrl);
         }
       }
+      const creativeKind = creativeCardForRun(plan, preview, runKinds).variant;
       finalPreview = previewWithVisual(preview, {
         imageUrl,
         gbpImageUrl,
         gbpImageBranded,
-        variant: isReviewRun ? 'review' : 'campaign',
-        templateKey: isReviewRun ? 'waves_photo_review_v1' : 'waves_photo_square_v1',
+        variant: creativeKind,
+        templateKey: {
+          review: 'waves_photo_review_v1',
+          versus: 'waves_photo_versus_v1',
+          milestone: 'waves_photo_milestone_v1',
+        }[creativeKind] || 'waves_photo_square_v1',
         creative: {
           conceptKey: creativeVariants[0].conceptKey,
           sceneModel: creativeVariants[0].sceneModel,
@@ -3567,6 +3584,7 @@ module.exports = {
   captionContentRows,
   rowMatchesIntentKeywords,
   legacyCardShipped,
+  creativeCardForRun,
   firstLivePage,
   suggestedLink,
   suggestedLinkTitle,
