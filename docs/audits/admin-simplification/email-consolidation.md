@@ -99,3 +99,57 @@ Events and the template library stay separate while their staff/owner editing
 permissions differ. No queue, persisted business state, provider integration,
 pricing or server route is merged or retired by this branch. Revert the Email
 commits independently to restore its direct navigation and prior editor state.
+
+
+## Verification evidence
+
+Application/QA commit: `3c7471ecf`. Commands use Node 20.20.2 in the task-owned
+worktree `/private/tmp/waves-admin-email-communications-20260906`; setup and
+frontend doctor passed with no database or provider credentials. The branch
+is stacked on cleanup `58d48129a`; no Email commits are published yet.
+
+- Final production build passes, including schema/vendor/brand/domain checks
+  (`.tmp/email-complete-build.log`, 26.32 seconds). No migrations ran locally.
+- Six focused suites pass 59 tests covering Email draft recovery, pending
+  send guards, account/sign-out isolation, role enforcement, aliases,
+  navigation and the existing Email Intelligence Bar context
+  (`.tmp/email-workspace-focused.log`). The final synchronous channel-selection
+  adjustment is also covered by the browser run below.
+- Nine synthetic browser scenarios pass with five reviewed screenshots at
+  1440/390, zero page exceptions, zero unmatched APIs, and exactly three
+  intercepted send requests (`.tmp/email-browser/report.json`,
+  `.tmp/email-workspace-browser-final.log`). Tests cover old message URLs,
+  both channel drafts and retained search, reload recovery, failed/successful
+  compose, pending reply navigation, retained blocked view, inactive message
+  reads and forged stored-role denial. No browser request reached a backend
+  or email provider. Desktop and mobile images show one visible command
+  header, the existing Email sub-section row and a usable compose dialog;
+  no page overflow was found. Existing small Email labels remain unchanged.
+- Scoped lint reports zero errors and nine warnings in existing large
+  components/legacy code (`.tmp/email-complete-lint.log`). New small helpers
+  do not exceed the structural warning threshold; no blanket refactor ran.
+- A complete earlier Email run passed 267 suites / 2,535 tests at `c5ed984f6`
+  before the pending-send and channel-filter regressions were added
+  (`.tmp/email-final-client-verified.log`). The final-source coverage run at `3c7471ecf` passes **267 suites / 2,537
+  tests** with two workers and exit 0 (`.tmp/email-complete-client.log`).
+
+Regression history is retained. The first full Email run under machine load
+above 300 failed the same two baseline timing-sensitive tests,
+`PortalPage.silent-failures` and `CallLogTabV2`; both passed in the following
+73-test focused run and in the complete 2,535-test run. Earlier browser starts
+timed out while the machine was overloaded. The pending-send tests and
+retained-filter browser assertion failed before their fixes. The initial
+pending compose assertion used three dots where the existing label uses the
+ellipsis character; only that selector was corrected. No test was removed or
+weakened, and the unrelated baseline components were not edited.
+
+Bundle effect (uncompressed bytes): Communications `275530 → 306734`; its
+former separate Email chunk (`27291` bytes) is now included. The main chunk
+is `472611 → 474074` bytes. These are build outputs, not timed latency or
+bandwidth savings. Other Communications tabs do not start Email requests
+before first use; returning to a visited channel retains the existing instance.
+
+The unchanged server test baseline is recorded in `verification.md`:
+40,418 passed tests with no DB and external network blocked. It is reused
+because this branch changes no server, lockfile, schema, provider or native
+contract. Live integration and native device behavior remain unverified locally.
