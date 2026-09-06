@@ -31,7 +31,7 @@ const keyOf = (item) => `${item.party}:${item.kind}:${hashExtractionSource(
   JSON.stringify([item.quote, item.property_id, item.description]),
 ).slice(0, 20)}`;
 
-function eligibleMessage(message) {
+function eligibleMessage(message = {}) {
   const ourNumber = message.direction === 'inbound' ? message.to_phone : message.from_phone;
   return !!message.customer_id && !!message.message_body
     && !isInternalTestCustomerId(message.customer_id)
@@ -117,7 +117,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     if (!customer) return { skipped: 'customer_unavailable' };
     const live = await trx('sms_log').where({ id: message.id }).forUpdate().first();
     if (!enabled() || matchedContext.captureCommitments !== smsCommitmentsEnabled()) return { skipped: 'gate_changed' };
-    if (!live || live.customer_id !== message.customer_id || live.message_body !== message.message_body) return { skipped: 'source_changed' };
+    if (!eligibleMessage(live) || live.customer_id !== message.customer_id || live.message_body !== message.message_body) return { skipped: 'source_changed' };
     if (live.operational_analysis?.version === VERSION) return { skipped: 'already_processed' };
     const properties = await trx('customer_properties').where({ customer_id: customer.id, active: true }).select('id');
     const current = await trx('property_preferences').where({ customer_id: customer.id }).forUpdate().first();

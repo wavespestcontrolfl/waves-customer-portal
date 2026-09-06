@@ -571,6 +571,19 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
   });
 
+  test.each(['failed', 'undelivered'])('outbound %s during extraction cannot create a promise', async (status) => {
+    message = { ...message, direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone,
+      message_type: 'manual', status: 'sent', message_body: "I'll send the estimate" };
+    await mockPg('sms_log').where({ id: message.id }).update(message);
+    context = await loadMessageContext(mockPg, message);
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], quote: message.message_body, basis: 'promise' };
+    await mockPg('sms_log').where({ id: message.id }).update({ status });
+    expect(await recordMessageOperations(mockPg, message, result, context)).toEqual({ skipped: 'source_changed' });
+    expect(await mockPg('call_commitments')).toEqual([]);
+    expect((await mockPg('sms_log').first()).operational_analysis).toBeNull();
+  });
+
   test('disabled automation keeps recorded open work readable', async () => {
     await recordMessageOperations(mockPg, message, result, context);
     process.env.GATE_SMS_COMMITMENT_FOLLOWUP = 'false';
