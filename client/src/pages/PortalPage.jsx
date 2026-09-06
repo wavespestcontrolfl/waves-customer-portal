@@ -3998,9 +3998,7 @@ const APPOINTMENT_CHANNEL_KEYS = [
   'serviceReminder72hChannel',
   'serviceReminder24hChannel',
   'enRouteChannel',
-  // techArrivedChannel intentionally absent: the arrival alert is SMS-only
-  // (the appointment.tech_arrived email twin was retired 2026-08-06), so the
-  // bulk "updates by email" shortcut must not claim to route it to email.
+  'techArrivedChannel',
 ];
 
 // Gold on/off switch — the ONE toggle idiom for customer notification rows

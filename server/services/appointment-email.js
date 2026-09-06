@@ -469,10 +469,15 @@ async function sendTechEnRouteEmail({ customerId, scheduledServiceId, techName, 
 // re-activated by 20260906000020). Retired 2026-08-06 (#3247), restored on
 // the owner's 2026-09-06 go so the Text / Email / Both picker means what it
 // says for arrivals.
-async function sendTechArrivedEmail({ customerId, scheduledServiceId, techName, idempotencyKey } = {}) {
+// `occurrence` scopes the idempotency key to the appointment OCCURRENCE
+// (`<scheduled_service_id>:<date>`): live rescheduling reuses the row, so a
+// key on the id alone would dedupe the next genuine arrival against the
+// previous one's email.
+async function sendTechArrivedEmail({ customerId, scheduledServiceId, techName, occurrence, idempotencyKey } = {}) {
   // Same stamped-label override as the confirmation/reminder emails — the
   // template's Property row must name where the tech actually arrived.
   const stampedLabel = await stampedPropertyLabel(scheduledServiceId);
+  const eventId = `appointment.tech_arrived:${occurrence || scheduledServiceId || customerId}`;
   return sendTemplate({
     customerId,
     templateKey: 'appointment.tech_arrived',
@@ -481,9 +486,9 @@ async function sendTechArrivedEmail({ customerId, scheduledServiceId, techName, 
       tech_name: clean(techName) || 'Your technician',
       ...(stampedLabel ? { property_label: stampedLabel } : {}),
     },
-    idempotencyKey: idempotencyKey || `appointment.tech_arrived:${scheduledServiceId || customerId}`,
+    idempotencyKey: idempotencyKey || eventId,
     categories: ['appointment_tech_arrived'],
-    triggerEventId: `appointment.tech_arrived:${scheduledServiceId || customerId}`,
+    triggerEventId: eventId,
     metadata: { scheduled_service_id: scheduledServiceId || null },
   });
 }
