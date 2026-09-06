@@ -254,7 +254,11 @@ postgres('SMS operations on PostgreSQL', () => {
     const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date(after.getTime() + 1000));
     expect(evidence.failures).toEqual([]);
     expect(evidence.records.filter((r) => r.type === 'email_delivery').map((r) => r.id)).toEqual([retried.id]);
-    expect(admissibleWitness(evidence.records[0], { kind: 'send_appointment_confirmation' })).toBe(true);
+    expect(evidence.records[0].recipient_email_snapshot).toBe(base.recipient_email_snapshot);
+    expect(admissibleWitness(evidence.records[0], { kind: 'send_appointment_confirmation',
+      evidence: [{ quote: 'Send the confirmation to synthetic@example.invalid' }] })).toBe(true);
+    expect(admissibleWitness(evidence.records[0], { kind: 'send_appointment_confirmation',
+      evidence: [{ quote: 'Send the confirmation to another@example.invalid' }] })).toBe(false);
   });
 
   test('persisted evidence checks avoid repeated LLM calls and rerun after a delivery changes', async () => {

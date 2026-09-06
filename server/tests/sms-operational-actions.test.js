@@ -395,14 +395,26 @@ describe('fulfillment proof', () => {
   test('provider acceptance or a SENT label cannot close an answer before delivery succeeds', () => {
     const answer = { kind: 'other' };
     const sms = { type: 'sms', message_type: 'manual' };
-    const email = { type: 'email_delivery', sent_at: '2040-03-11T15:00:00Z' };
+    const email = { type: 'email_delivery', recipient_email_snapshot: 'synthetic@example.invalid', sent_at: '2040-03-11T15:00:00Z' };
+    const emailAnswer = { ...answer, evidence: [{ quote: 'Email the answer to synthetic@example.invalid' }] };
     expect(admissibleWitness({ ...sms, status: 'sent' }, answer)).toBe(false);
     expect(admissibleWitness({ ...sms, status: 'undelivered' }, answer)).toBe(false);
     expect(admissibleWitness({ ...sms, status: 'delivered' }, answer)).toBe(true);
-    expect(admissibleWitness({ ...email, status: 'sent' }, answer)).toBe(false);
-    expect(admissibleWitness({ ...email, status: 'bounced', bounced_at: '2040-03-11T15:01:00Z' }, answer)).toBe(false);
-    expect(admissibleWitness({ ...email, status: 'delivered' }, answer)).toBe(true);
+    expect(admissibleWitness({ ...email, status: 'sent' }, emailAnswer)).toBe(false);
+    expect(admissibleWitness({ ...email, status: 'bounced', bounced_at: '2040-03-11T15:01:00Z' }, emailAnswer)).toBe(false);
+    expect(admissibleWitness({ ...email, status: 'delivered' }, emailAnswer)).toBe(true);
     expect(admissibleWitness({ type: 'email', label_ids: ['SENT'] }, answer)).toBe(false);
+  });
+
+  test('email completion requires the exact single recipient in the grounded request', () => {
+    const request = { kind: 'other', evidence: [{ quote: 'Send the answer to desired@example.invalid' }] };
+    const email = { type: 'email_delivery', status: 'delivered', sent_at: '2040-03-11T15:00:00Z',
+      recipient_email_snapshot: 'old@example.invalid' };
+    expect(admissibleWitness(email, request)).toBe(false);
+    expect(admissibleWitness({ ...email, recipient_email_snapshot: 'DESIRED@example.invalid' }, request)).toBe(true);
+    expect(admissibleWitness(email, { kind: 'other', evidence: [{ quote: 'Send the answer to my manager' }] })).toBe(false);
+    expect(admissibleWitness(email, { ...request, evidence: [{ quote: 'Send to old@example.invalid and desired@example.invalid' }] })).toBe(false);
+    expect(admissibleWitness({ type: 'sms', status: 'delivered', message_type: 'manual' }, request)).toBe(false);
   });
 
   test('a visit needs post-request scheduling or completion activity', () => {
