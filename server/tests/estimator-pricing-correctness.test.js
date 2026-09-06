@@ -1,4 +1,4 @@
-const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
+const { generateEstimate, quickQuote } = require('../services/pricing-engine/estimate-engine');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 const { SPECIALTY } = require('../services/pricing-engine/constants');
 const { deriveModifiers } = require('../services/pricing-engine/modifiers');
@@ -86,6 +86,9 @@ describe('palm annual cents and historical quote preservation', () => {
     expect(raw.lineItems[0]).toMatchObject({ perVisit: 255, annual: 127.5, annualRounding: 'cents' });
     expect(mapped.results.injection).toMatchObject({ perVisit: 255, ann: 127.5, annualRounding: 'cents' });
     expect(mapped.totals.year1).toBe(127.5);
+    expect(raw.summary.year1Total).toBe(mapped.totals.year1);
+    expect(raw.summary.year2Annual).toBe(mapped.totals.year2);
+    expect(quickQuote({ ...property, services }).year1).toBe(mapped.totals.year1);
     const replay = generateEstimate({ ...property, services, ...savedFloorReplaySignals({ result: mapped }) });
     expect(mapV1ToLegacyShape(replay).totals.year1).toBe(127.5);
   });

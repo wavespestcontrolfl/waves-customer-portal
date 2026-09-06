@@ -2653,8 +2653,8 @@ function generateEstimate(input) {
       rodentBaitSetupTotal,
       specialtyTotal,
       installationTotal,
-      year1Total: Math.round(year1Total),
-      year2Annual: Math.round(year2WithRenewal),
+      year1Total: roundMoney(year1Total),
+      year2Annual: roundMoney(year2WithRenewal),
       year2Monthly: Math.round(year2WithRenewal / 12 * 100) / 100,
     },
 
