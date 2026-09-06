@@ -15,6 +15,7 @@ from pathlib import Path
 import plistlib
 import re
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
@@ -177,32 +178,56 @@ def snapshot(job):
                                  '--json', 'statusCheckRollup']))['statusCheckRollup']
     terminal_checks = sorted((c.get('name', c.get('context', '')), c.get('conclusion') or c.get('state', ''))
                              for c in checks if c.get('status') == 'COMPLETED' or c.get('state') in ['SUCCESS', 'FAILURE', 'ERROR'])
-    bot = 'chatgpt-codex-connector[bot]'
-    verdicts = [c for c in comments if c['user']['login'] == bot and
-                re.search(r'Reviewed[ -]commit', c.get('body', ''), re.I)]
-    findings = [r for r in reviews if r['user']['login'] == bot and r.get('submitted_at')]
     signals = {'head': info['head']['sha'], 'state': info['state'], 'merged': info['merged'],
                'draft': info['draft'], 'checks': terminal_checks,
-               'verdicts': [(c['id'], c['updated_at']) for c in verdicts],
-               'reviews': [(r['id'], r['submitted_at']) for r in findings],
+               'comments': [(c['id'], c['updated_at']) for c in comments],
+               'reviews': [(r['id'], r.get('submitted_at'), r.get('state')) for r in reviews],
                'inline': [(c['id'], c['updated_at']) for c in inline]}
     # This is a wake signal, never a substitute for the agent's full merge gate.
-    ready = bool(verdicts or findings or terminal_checks or info['state'] == 'closed')
+    ready = bool(comments or reviews or inline or terminal_checks or info['state'] == 'closed')
     return {'fingerprint': hashlib.sha256(json.dumps(signals, sort_keys=True).encode()).hexdigest(),
             'head': signals['head'], 'closed': info['state'] == 'closed',
             'merged': info['merged'], 'draft': info['draft'], 'ready': ready}
 
 
+def in_worktree(path, root):
+    return bool(path) and Path(path).resolve().is_relative_to(Path(root).resolve())
+
+
+def worktree_busy(job):
+    # Inspect live process metadata only, never another saved conversation.
+    rows = command(['lsof', '-a', '-u', str(os.getuid()), '-d', 'cwd', '-Fpcn'])
+    pid, name = None, ''
+    for row in rows.splitlines():
+        if row.startswith('p'):
+            pid = int(row[1:])
+        elif row.startswith('c'):
+            name = row[1:].lower()
+        elif row.startswith('n') and name in ['codex', 'claude']:
+            if in_worktree(row[1:], job['worktree']):
+                return True
+            if name == 'codex':
+                args = shlex.split(command(['ps', '-ww', '-p', str(pid), '-o', 'args=']))
+                for index, arg in enumerate(args):
+                    directory = arg[5:] if arg.startswith('--cd=') else (
+                        args[index + 1] if arg in ['--cd', '-C'] and index + 1 < len(args) else None)
+                    if directory and in_worktree(Path(row[1:]) / directory, job['worktree']):
+                        return True
+    return False
+
+
 def session_busy(job):
     if process_stamp(job.get('owner_pid')) == job.get('owner_stamp') and job.get('owner_stamp'):
         return True
-    if job['provider'] == 'claude':
-        sessions = json.loads(command(['claude', 'agents', '--json']))
-        for item in sessions:
-            if item.get('sessionId') == job['session'] and (
-                    item.get('kind') == 'interactive' or
-                    item.get('state') not in ['completed', 'failed', 'stopped']):
-                return True
+    sessions = json.loads(command(['claude', 'agents', '--json']))
+    for item in sessions:
+        same_session = job['provider'] == 'claude' and item.get('sessionId') == job['session']
+        if (same_session or in_worktree(item.get('cwd'), job['worktree'])) and (
+                item.get('kind') == 'interactive' or
+                item.get('state') not in ['completed', 'failed', 'stopped']):
+            return True
+    if worktree_busy(job):
+        return True
     # Covers a manually resumed session whose PID differs from the enrollee.
     result = subprocess.run(['lsof', '-t', '--', job['transcript']], env=environment(),
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=15)
@@ -214,7 +239,7 @@ def session_busy(job):
 def check_enrollment(jobs, key, job):
     for other_key, other in jobs.items():
         overlap = other_key == key or other['worktree'] == job['worktree'] or (other['repo'], other['pr']) == (job['repo'], job['pr'])
-        if overlap and (other.get('launch_pending') or group_exists(other.get('worker_pid'))):
+        if overlap and (other.get('launch_pending') or group_active(other.get('worker_pid'))):
             raise ValueError('Existing worker or interrupted launch must be recovered before re-enrollment')
         if overlap and other['status'] not in ['complete', 'paused', 'blocked']:
             raise ValueError('Session, PR, or worktree already enrolled; finish or pause its existing job first')
@@ -274,22 +299,20 @@ def disposition(raw, provider):
     return value
 
 
-def group_exists(pid):
+def group_active(pid):
     if not isinstance(pid, int) or pid < 2:
         return False
-    try:
-        os.killpg(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # macOS can return EPERM for a group containing only zombies.
+    # A zombie still reserves its group ID but cannot run or be killed. Some
+    # Linux container init processes never reap orphaned zombies.
+    rows = command(['ps', '-axo', 'pgid=,stat='])
+    return any(int(group) == pid and not state.startswith('Z')
+               for group, state in (row.split() for row in rows.splitlines()))
 
 
 def drain_group(pid, stamp, process=None):
     if process is not None:
         process.poll()
-    if not group_exists(pid):
+    if not group_active(pid):
         return
     # An unreaped Popen child is still ours even if the ps identity read failed.
     current = None if process is not None and process.returncode is None else process_stamp(pid)
@@ -306,15 +329,15 @@ def drain_group(pid, stamp, process=None):
         except PermissionError:
             if process is not None:
                 process.poll()
-            if not group_exists(pid):
+            if not group_active(pid):
                 return
             raise
         deadline = time.monotonic() + seconds
-        while group_exists(pid) and time.monotonic() < deadline:
+        while group_active(pid) and time.monotonic() < deadline:
             if process is not None:
                 process.poll()  # Reap our own leader so its zombie cannot hold the group.
             time.sleep(0.1)
-        if not group_exists(pid):
+        if not group_active(pid):
             return
     raise RuntimeError('Worker group has not exited; queue remains fenced')
 
@@ -349,6 +372,8 @@ def resume(root, key, job):
         stamp = None
         try:
             stamp = process_stamp(process.pid)
+            if not stamp:
+                raise RuntimeError('Worker identity unavailable')
             if not update_job(root, key, job['revision'], {'status': 'running', 'worker_pid': process.pid,
                                                           'worker_stamp': stamp,
                                                           'launch_pending': False}):
@@ -415,7 +440,7 @@ def reconcile_workers(root, jobs, execute):
     clear = True
     for key, job in jobs.items():
         pid, stamp = job.get('worker_pid'), job.get('worker_stamp')
-        if group_exists(pid):
+        if group_active(pid):
             clear = False
             print(json.dumps({'job': key, 'action': 'reap', 'reason': 'orphaned_worker'}), flush=True)
             if not execute:
@@ -483,7 +508,7 @@ def control(root, args):
             raise ValueError('Finish requires a merged PR; pause cancelled or blocked work')
         if args.execute:
             if args.action == 'retry':
-                if group_exists(job.get('worker_pid')):
+                if group_active(job.get('worker_pid')):
                     raise ValueError('Wait for the paused worker to exit before retrying it')
                 check_enrollment({k: v for k, v in jobs.items() if k != args.job}, args.job, job)
             job.update({'status': {'pause': 'paused', 'retry': 'watching', 'finish': 'complete'}[args.action],
@@ -525,7 +550,12 @@ def install(root, execute=False):
             'StandardOutPath': str(root / 'service.log'), 'StandardErrorPath': str(root / 'service-error.log')}
     if execute:
         if plist.exists():
-            raise ValueError('Service already installed; stop it before replacing its reviewed code')
+            loaded = subprocess.run(['launchctl', 'print', f'gui/{os.getuid()}/{LABEL}'],
+                                    env=environment(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+            if loaded.returncode == 0:
+                raise ValueError('Service already installed; stop it before replacing its reviewed code')
+            if loaded.returncode != 113:  # launchctl: service not found in this domain
+                raise RuntimeError('Cannot determine whether the service is stopped')
         with locked(root):
             shutil.copyfile(__file__, target)
             os.chmod(target, 0o600)

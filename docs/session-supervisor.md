@@ -37,7 +37,9 @@ service state. Installation copies this reviewed script to
 `~/.local/share/waves-session-supervisor/session-supervisor.py` and installs
 `~/Library/LaunchAgents/com.waves.session-supervisor.plist`. It starts with an
 empty queue: no existing conversations or PRs are automatically enrolled.
-A second install refuses to overwrite the running service. The source copy
+A second install refuses to overwrite the running service. To update it, run
+`stop --execute`, then run `install --execute` from the new reviewed checkout;
+the existing queue remains paused until explicitly retried. The source copy
 in a worktree can be removed after shipping; the installed copy is independent.
 
 ## Enroll from the owning agent
@@ -62,11 +64,14 @@ Use `--provider claude` for Claude. Codex exposes the current UUID through
 Enrollment reads only the selected session's filename, not an archive sample.
 
 The worker waits while the original process exists or another process has its
-transcript open. Claude's native agent listing also detects live sessions.
+transcript open. It also checks live Codex/Claude working directories (including
+Codex `--cd`) and Claude's native agent listing, so a different session that
+claims the same worktree blocks a resume.
 PID start times distinguish a restarted process from a reused PID. Worktree,
 origin, branch, and pushed HEAD must still match before a resume. An ambiguous
 interrupted launch fences the whole queue until inspected and explicitly retried.
-Worker cleanup drains the CLI and its remaining tool process group.
+Worker cleanup drains the CLI and its remaining live tool process group;
+zombies count as exited because they cannot run or respond to signals.
 Re-enrollment cannot erase a surviving worker or unresolved launch record.
 After a supervisor crash, the next tick terminates any recorded surviving worker
 before another job can launch; the interrupted job requires an explicit retry.
@@ -104,7 +109,7 @@ requires the PR to be merged; it does not itself verify deployment.
 
 Only one resumed model process runs at a time. A run lasts at most 30 minutes,
 with at least five minutes between starts, at most three starts for unchanged
-PR evidence and twelve starts per job per rolling day. A permission denial,
+PR evidence (including human comments and reviews) and twelve starts per job per rolling day. A permission denial,
 owner question, quota error, invalid final result, or failed CLI invocation
 parks the job. Reaching a resume limit keeps watching: new PR evidence resets
 the unchanged-evidence count, and rolling daily slots become available as they

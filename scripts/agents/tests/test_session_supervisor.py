@@ -3,6 +3,7 @@ from contextlib import ExitStack
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -59,12 +60,14 @@ class SupervisorTests(unittest.TestCase):
     def test_pid_reuse_does_not_masquerade_as_original_owner(self):
         result = subprocess.CompletedProcess([], 1, stdout='')
         with patch.object(supervisor, 'process_stamp', return_value='reused'), \
+                patch.object(supervisor, 'command', return_value='[]'), \
                 patch.object(supervisor.subprocess, 'run', return_value=result):
             self.assertFalse(supervisor.session_busy(self.job))
 
     def test_another_process_holding_transcript_prevents_duplicate_resume(self):
         result = subprocess.CompletedProcess([], 0, stdout='12345\n')
         with patch.object(supervisor, 'process_stamp', return_value=None), \
+                patch.object(supervisor, 'command', return_value='[]'), \
                 patch.object(supervisor.subprocess, 'run', return_value=result):
             self.assertTrue(supervisor.session_busy(self.job))
 
@@ -75,6 +78,45 @@ class SupervisorTests(unittest.TestCase):
             with patch.object(supervisor, 'process_stamp', return_value=None), \
                     patch.object(supervisor, 'command', return_value=json.dumps(sessions)):
                 self.assertTrue(supervisor.session_busy(self.job))
+
+    def test_other_claude_session_in_worktree_blocks_a_codex_resume(self):
+        sessions = [{'sessionId': 'different', 'cwd': self.job['worktree'],
+                     'kind': 'interactive', 'state': 'idle'}]
+        with patch.object(supervisor, 'process_stamp', return_value=None), \
+                patch.object(supervisor, 'command', return_value=json.dumps(sessions)):
+            self.assertTrue(supervisor.session_busy(self.job))
+
+    def test_live_codex_worktree_or_cd_argument_blocks_resume(self):
+        for cwd, args in [(self.job['worktree'], ''), ('/tmp', 'codex --cd ' + self.job['worktree']),
+                          ('/tmp', 'codex --cd=/unrelated')]:
+            with self.subTest(cwd=cwd, args=args), \
+                    patch.object(supervisor, 'command', side_effect=lambda argv:
+                                 f'p1234\nccodex\nn{cwd}\n' if argv[0] == 'lsof' else args):
+                self.assertEqual(supervisor.worktree_busy(self.job), 'unrelated' not in args)
+
+    @unittest.skipUnless(shutil.which('lsof') and shutil.which('cc'), 'requires lsof and a C compiler')
+    def test_real_other_process_in_worktree_blocks_resume(self):
+        executable = self.root / 'codex'
+        subprocess.run(['cc', '-x', 'c', '-', '-o', str(executable)],
+                       input='#include <unistd.h>\nint main(void) { sleep(30); return 0; }\n',
+                       text=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        process = subprocess.Popen([str(executable)], cwd=self.root, start_new_session=True)
+        try:
+            deadline = time.monotonic() + 3
+            busy = False
+            while not busy and time.monotonic() < deadline:
+                busy = supervisor.worktree_busy(self.job)
+                if not busy:
+                    time.sleep(0.1)
+            self.assertTrue(busy)
+        finally:
+            process.terminate()
+            process.wait()
+
+    def test_zombie_only_group_is_drained_but_live_child_keeps_fence(self):
+        for states, active in [('123 Z\n456 S\n', False), ('123 Z\n123 S\n', True)]:
+            with patch.object(supervisor, 'command', return_value=states):
+                self.assertEqual(supervisor.group_active(123), active)
 
     def test_pause_and_complete_never_inspect_or_resume(self):
         with patch.object(supervisor, 'session_busy', side_effect=AssertionError('provider called')):
@@ -216,6 +258,29 @@ class SupervisorTests(unittest.TestCase):
         self.assertIn('pulls/7/reviews?per_page=100', endpoints)
         self.assertIn('pulls/7/comments?per_page=100', endpoints)
 
+    def test_human_comments_and_reviews_change_wake_fingerprint(self):
+        info = {'head': {'repo': {'full_name': 'example/project'}, 'ref': 'feat/task', 'sha': 'a' * 40},
+                'state': 'open', 'merged': False, 'draft': False}
+        comments, reviews = [], []
+        def gh(repo, endpoint):
+            if endpoint == 'pulls/7':
+                return [info]
+            if endpoint.startswith('issues/'):
+                return [comments]
+            if '/reviews?' in endpoint:
+                return [reviews]
+            return [[]]
+        with patch.object(supervisor, 'gh_json', side_effect=gh), \
+                patch.object(supervisor, 'command', return_value='{"statusCheckRollup":[]}'):
+            empty = supervisor.snapshot(self.job)
+            comments.append({'id': 1, 'updated_at': 'later', 'user': {'login': 'human'}})
+            comment = supervisor.snapshot(self.job)
+            reviews.append({'id': 2, 'submitted_at': 'later', 'state': 'CHANGES_REQUESTED'})
+            review = supervisor.snapshot(self.job)
+        self.assertTrue(comment['ready'])
+        self.assertNotEqual(empty['fingerprint'], comment['fingerprint'])
+        self.assertNotEqual(comment['fingerprint'], review['fingerprint'])
+
     def test_codex_intermediate_commentary_does_not_break_final_disposition(self):
         rows = [{'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'Working on it'}},
                 {'type': 'item.completed', 'item': {'type': 'agent_message',
@@ -254,20 +319,24 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse(any('bypass' in value or 'last' in value or 'model' in value for value in argv))
         self.assertEqual(result, {'state': 'waiting', 'reason': 'waiting_ci'})
 
-    def test_identity_read_failure_after_spawn_reaps_child_before_clearing_fence(self):
-        self.store()
-        process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
-                                   stdin=subprocess.PIPE, start_new_session=True)
-        self.addCleanup(lambda: process.poll() is None and process.kill())
-        with patch.object(supervisor, 'inspect_job', return_value={'action': 'resume', 'reason': 'pr_ready'}), \
-                patch.object(supervisor.subprocess, 'Popen', return_value=process), \
-                patch.object(supervisor, 'process_stamp', side_effect=OSError('ps unavailable')):
-            supervisor.tick(self.root, execute=True)
-        self.assertIsNotNone(process.poll())
-        self.assertFalse(supervisor.group_exists(process.pid))
-        job = supervisor.read_jobs(self.root)[self.key]
-        self.assertEqual(job['status'], 'blocked')
-        self.assertFalse(job['launch_pending'])
+    def test_failed_or_empty_identity_after_spawn_reaps_child_before_clearing_fence(self):
+        popen = subprocess.Popen
+        for lookup in [None, OSError('ps unavailable')]:
+            with self.subTest(lookup=lookup):
+                self.store()
+                process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                                           stdin=subprocess.PIPE, start_new_session=True)
+                self.addCleanup(lambda p=process: p.poll() is None and p.kill())
+                with patch.object(supervisor, 'inspect_job', return_value={'action': 'resume', 'reason': 'pr_ready'}), \
+                        patch.object(supervisor.subprocess, 'Popen', side_effect=lambda argv, **kw:
+                                     process if argv[0] == 'codex' else popen(argv, **kw)), \
+                        patch.object(supervisor, 'process_stamp', side_effect=lookup, return_value=None):
+                    supervisor.tick(self.root, execute=True)
+                self.assertIsNotNone(process.poll())
+                self.assertFalse(supervisor.group_active(process.pid))
+                job = supervisor.read_jobs(self.root)[self.key]
+                self.assertEqual(job['status'], 'blocked')
+                self.assertFalse(job['launch_pending'])
 
     def test_unconfirmed_cleanup_retains_launch_fence(self):
         self.store()
@@ -292,8 +361,10 @@ class SupervisorTests(unittest.TestCase):
         with patch.object(supervisor, 'environment', return_value=env):
             result = supervisor.resume(self.root, self.key, self.job)
         self.assertEqual(result['state'], 'waiting')
-        self.assertIsNone(supervisor.process_stamp(int(child_pid.read_text())))
-        self.assertFalse(supervisor.group_exists(supervisor.read_jobs(self.root)[self.key]['worker_pid']))
+        status = subprocess.run(['ps', '-p', child_pid.read_text(), '-o', 'stat='],
+                                stdout=subprocess.PIPE, text=True).stdout.strip()
+        self.assertTrue(not status or status.startswith('Z'))
+        self.assertFalse(supervisor.group_active(supervisor.read_jobs(self.root)[self.key]['worker_pid']))
 
     def test_pause_during_real_child_run_terminates_only_its_worker(self):
         self.store()
@@ -354,7 +425,7 @@ class SupervisorTests(unittest.TestCase):
             for pending, alive in [(True, False), (False, True)]:
                 existing[existing_key].update({'status': 'paused', 'launch_pending': pending})
                 supervisor.atomic_json(state / 'jobs.json', existing)
-                with patch.object(supervisor, 'group_exists', return_value=alive):
+                with patch.object(supervisor, 'group_active', return_value=alive):
                     with self.assertRaises(ValueError):
                         supervisor.enroll(state, args)
                 self.assertEqual(supervisor.read_jobs(state), existing)
@@ -380,8 +451,15 @@ class SupervisorTests(unittest.TestCase):
             self.assertEqual(data['EnvironmentVariables']['CODEX_HOME'], str(launch_home / 'codex-custom'))
             self.assertEqual(data['EnvironmentVariables']['CLAUDE_CONFIG_DIR'], str(launch_home / 'claude-custom'))
             run.assert_called_once()
-            with self.assertRaises(ValueError):
+            with patch.object(supervisor.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
+                with self.assertRaises(ValueError):
+                    supervisor.install(state, execute=True)
+            preserved = {'job': {'status': 'paused'}}
+            supervisor.atomic_json(state / 'jobs.json', preserved)
+            with patch.object(supervisor.subprocess, 'run', return_value=subprocess.CompletedProcess([], 113)):
                 supervisor.install(state, execute=True)
+            self.assertEqual(supervisor.read_jobs(state), preserved)
+            self.assertEqual(run.call_count, 2)
 
     def test_child_environment_drops_production_and_integration_credentials(self):
         with patch.dict(os.environ, {'DATABASE_URL': 'do-not-inherit', 'ANTHROPIC_API_KEY': 'do-not-inherit',
