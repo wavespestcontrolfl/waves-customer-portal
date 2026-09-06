@@ -68,7 +68,7 @@ not the route,
 `/api/receipt/:token`, `/api/contracts/:token`, `/api/booking/*`,
 `/api/public/estimates/:token/ask`,
 `/api/public/estimates/:token/find-slots`,
-`/api/public/estimates/:token/slots` and `/reserve` (with the strict opt-in
+`/api/public/estimates/:token/available-slots` and `/reserve` (with the strict opt-in
 `GATE_VISIT_COMBINED_CAPACITY` and prerequisite `GATE_SEPARATE_COMBO_VISITS`, recurring multi-service selections reserve
 60 minutes per selected service. Slot `durationMinutes` and `windowEnd`
 describe the entire work block; arrival copy remains start plus 120 minutes.
