@@ -1161,7 +1161,7 @@ class SmartRebooker {
       window_end: windowEnd,
       status: landedStatus,
       ...(service.recurring_dispatch_due_date && initiatedBy !== 'auto_dispatch'
-        ? { recurring_dispatch_due_date: null } : {}),
+        ? { recurring_dispatch_due_date: (win.start || service.window_start) ? null : newDate } : {}),
       ...(lifecycleRewound ? LIVE_LIFECYCLE_RESET : {}),
       // A this-visit-only DATE move of a cadence visit is a deliberate
       // exception to the series — see dateExceptionStamp.
@@ -2347,8 +2347,8 @@ class SmartRebooker {
         // two transactions. Occupancy probes skip a windowless anchor, as
         // they do for any windowless row.
         const anchorCleared = isAnchor && options.clearAnchorWindow === true;
-        const awaitingPlacement = deferFuturePlacement && !isAnchor;
-        if (anchorCleared || awaitingPlacement) {
+        const deferOccurrence = deferFuturePlacement && !isAnchor;
+        if (anchorCleared || deferOccurrence) {
           occurrenceWindow = { start: null, end: null };
         } else if (isAnchor) {
           occurrenceWindow = seriesOccurrenceWindow(win, sib, options);
@@ -2391,8 +2391,6 @@ class SmartRebooker {
             : (sib.date_exception === true ? { date_exception_cadence_date: cadenceSlotDate(occurrenceIndex) } : {}));
         const updateData = {
           scheduled_date: date,
-          ...(deferFuturePlacement || sib.recurring_dispatch_due_date
-            ? { recurring_dispatch_due_date: deferFuturePlacement && !isAnchor ? date : null } : {}),
           window_start: occurrenceWindow.start,
           window_end: occurrenceWindow.end,
           status: isAnchor ? 'confirmed' : sib.status,
@@ -2403,11 +2401,6 @@ class SmartRebooker {
           // destination day appends the stop (consumers sort NULLs last).
           ...(sibDateChanges ? { route_order: null } : {}),
         };
-        if (awaitingPlacement) {
-          updateData.time_window = null;
-          updateData.window_display = null;
-          updateData.route_order = null;
-        }
         // Rewound rows need the post-commit cleanup (tech pointer release +
         // customer tracker refresh) — collected here, applied after the trx
         // commits. The sibling SELECT is column-limited, so carry the
@@ -2632,6 +2625,20 @@ class SmartRebooker {
               logger.warn(`[rebooker] series re-anchor for ${serviceId}: occurrence ${sib.id} projected onto a seeded-placeholder window ${String(date).split('T')[0]} ${occurrenceWindow.start} beyond the ${SERIES_SIBLING_CLASH_HORIZON_DAYS}d clash horizon — committed at cadence WITHOUT a window, flagged for retiming`);
             }
           }
+        }
+
+        // Existing handoffs survive later staff/SMS/gate-off moves. Rebase
+        // an untimed visit to its new due date; only a timed landing ends
+        // its dispatch obligation. Use the final window after clash handling.
+        const awaitingPlacement = !updateData.window_start
+          && (deferOccurrence || !!sib.recurring_dispatch_due_date);
+        if (deferFuturePlacement || sib.recurring_dispatch_due_date) {
+          updateData.recurring_dispatch_due_date = awaitingPlacement ? date : null;
+        }
+        if (awaitingPlacement) {
+          updateData.time_window = null;
+          updateData.window_display = null;
+          updateData.route_order = null;
         }
 
         // Atomic optimistic guard for EVERY row — same contract as the

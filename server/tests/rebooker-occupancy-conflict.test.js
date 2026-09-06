@@ -151,6 +151,17 @@ describe('reschedule — shared occupancy conflict gate', () => {
     findConflictingVisits.mockReset().mockResolvedValue([]);
   });
 
+  test.each([null, { start: '09:00', end: '11:00' }])('single move keeps its dispatch obligation until timed: %j', async (window) => {
+    const { trxScheduled } = wireRescheduleMocks(service({
+      window_start: null, window_end: null, recurring_dispatch_due_date: BASE,
+    }));
+    const result = await SmartRebooker.reschedule('svc-1', TARGET, window, 'customer_request', 'admin');
+    expect(result.success).toBe(true);
+    expect(trxScheduled.update).toHaveBeenCalledWith(expect.objectContaining({
+      recurring_dispatch_due_date: window ? null : TARGET,
+    }));
+  });
+
   test('techless move: any overlapping row now 409s with SLOT_TAKEN (was silent)', async () => {
     wireRescheduleMocks(service());
     findConflictingVisits.mockResolvedValue([{ id: 'svc-other', technician_id: null }]);
@@ -517,9 +528,10 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     expect(sibUpdate.update).not.toHaveBeenCalled();
   });
 
-  test.each(['staff', 'customer', 'customer_sms', 'customer_locked', 'customer_confirmed', 'customer_rescheduled', 'customer_grouped', 'customer_anchor_taken', 'customer_stale_disclosure'])('%s: quarterly move honors disclosed future-placement scope', async (actor) => {
-    process.env.GATE_CUSTOMER_RECURRING_DISPATCH = 'true';
-    jest.spyOn(require('../services/auto-dispatch/config'), 'isCustomerRecurringDispatchEnabled').mockReturnValue(true);
+  test.each(['staff_deferred', 'sms_deferred', 'web_gate_off_deferred', 'staff_timed_marker', 'staff', 'customer', 'customer_sms', 'customer_locked', 'customer_confirmed', 'customer_rescheduled', 'customer_grouped', 'customer_anchor_taken', 'customer_stale_disclosure'])('%s: quarterly move honors disclosed future-placement scope', async (actor) => {
+    const existingHandoff = ['staff_deferred', 'sms_deferred', 'web_gate_off_deferred', 'staff_timed_marker'].includes(actor);
+    process.env.GATE_CUSTOMER_RECURRING_DISPATCH = actor === 'web_gate_off_deferred' ? 'false' : 'true';
+    jest.spyOn(require('../services/auto-dispatch/config'), 'isCustomerRecurringDispatchEnabled').mockReturnValue(actor !== 'web_gate_off_deferred');
     const anchor = {
       id: 'svc-1', customer_id: 'cust-1', technician_id: null,
       scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00',
@@ -533,6 +545,12 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     ];
     siblings.push({ ...siblings[1], id: 'svc-3', scheduled_date: dayOffset(190) });
     siblings.push({ ...siblings[1], id: 'svc-4', scheduled_date: dayOffset(280) });
+    if (existingHandoff) {
+      for (const sibling of siblings.slice(1)) {
+        sibling.recurring_dispatch_due_date = sibling.scheduled_date;
+        if (actor !== 'staff_timed_marker') { sibling.window_start = null; sibling.window_end = null; }
+      }
+    }
     const preservesFuture = ['customer_locked', 'customer_confirmed', 'customer_rescheduled', 'customer_grouped'].includes(actor);
     if (actor === 'customer_locked') siblings[1].auto_dispatch_locked = true;
     if (actor === 'customer_confirmed') siblings[1].customer_confirmed = true;
@@ -597,6 +615,28 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
       .mockResolvedValueOnce([{ id: 'other-job' }])  // second visit conflicts
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{ id: 'another-job' }]); // fourth visit conflicts
+    if (existingHandoff) {
+      findConflictingVisits.mockReset().mockResolvedValue([]);
+      const source = actor === 'sms_deferred' ? 'customer_sms'
+        : actor === 'web_gate_off_deferred' ? 'customer_self_serve' : 'admin';
+      const result = await SmartRebooker.rescheduleSeries(
+        'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', source,
+        { disclosedFuturePlacementDays: null },
+      );
+      expect(result.success).toBe(true);
+      expect(sibUpdate.update).toHaveBeenCalledTimes(3);
+      const staysUntimed = actor !== 'staff_timed_marker';
+      for (const [update] of sibUpdate.update.mock.calls) {
+        expect(update.recurring_dispatch_due_date).toBe(staysUntimed ? update.scheduled_date : null);
+        if (staysUntimed) expect(update.window_start).toBeNull();
+      }
+      expect(result.rescheduledOccurrences.slice(1)).toHaveLength(3);
+      for (const occurrence of result.rescheduledOccurrences.slice(1)) {
+        expect(occurrence.awaitingPlacement).toBe(staysUntimed);
+        expect(occurrence.conflicted).toBe(false);
+      }
+      return;
+    }
     if (actor === 'customer_anchor_taken') {
       findConflictingVisits.mockReset().mockResolvedValue([{ id: 'occupied' }]);
       await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve', { disclosedFuturePlacementDays: 3 })).rejects.toMatchObject({ code: 'SLOT_TAKEN' });
