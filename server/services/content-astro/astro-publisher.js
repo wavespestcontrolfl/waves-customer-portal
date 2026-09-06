@@ -870,7 +870,8 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
       throw err;
     }
     const allowedText = plan.style === 'infographic' ? captions : [];
-    const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', allowedText });
+    // The screen runs inside the same slot deadline as the generation.
+    const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', allowedText, timeoutMs: deadlineAt - Date.now() });
     const candidate = { ...img, dataUrl: gen.dataUrl, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen };
     if (screen.ok) return candidate;
     candidates.push(candidate);
@@ -883,8 +884,9 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
     }
   }
   // Both failed: ship the safer one — no logo beats a logo, then fewer
-  // violations — with the reviewer note (Codex r6 P2).
-  const safest = [...candidates].sort((a, b) => (a.screen.logos.length > 0) - (b.screen.logos.length > 0) || a.screen.reasons.length - b.screen.reasons.length)[0];
+  // detected marks and strings — with the reviewer note (Codex r6/r7 P2).
+  const violations = (c) => c.screen.logos.length + c.screen.readableText.length;
+  const safest = [...candidates].sort((a, b) => (a.screen.logos.length > 0) - (b.screen.logos.length > 0) || violations(a) - violations(b))[0];
   logger.warn(`[astro-publisher] ${mode} image for ${slug} still failed the text/logo screen after a retry (${safest.screen.reasons.join('; ')}) — shipping the safer candidate with a reviewer note`);
   return safest;
 }

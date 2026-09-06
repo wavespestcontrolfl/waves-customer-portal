@@ -3843,8 +3843,24 @@ describe('generatePlannedImage — one deadline per slot, safer candidate when b
     const [first, second] = imageGenerator.generate.mock.calls.map((c) => c[0].deadlineAt);
     expect(first).toBe(second);
     expect(first).toBeGreaterThanOrEqual(before + 360000);
+    // The screen is bounded by what is left of the same deadline (Codex r7 P2).
+    for (const call of screenGeneratedImage.mock.calls) {
+      expect(call[0].timeoutMs).toBeGreaterThan(0);
+      expect(call[0].timeoutMs).toBeLessThanOrEqual(360000);
+    }
     expect(out.screen.logos).toEqual([]);
     expect(out.screen.reasons).toEqual(['readable text: ZONE 5']);
+  });
+
+  test('with no logos on either side, the candidate with fewer detected strings ships (Codex r7 P2)', async () => {
+    const imageGenerator = require('../services/content/image-generator');
+    const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
+    imageGenerator.generate.mockReset().mockResolvedValue({ dataUrl: PNG, mimeType: 'image/png', model: 'gpt-image-2', attempts: [], alt: 'a' });
+    screenGeneratedImage
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ZONE 5', 'SET TIME', 'RUN'], logos: [], reasons: ['readable text: ZONE 5, SET TIME, RUN'] })
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ON'], logos: [], reasons: ['readable text: ON'] });
+    const out = await AstroPublisher.generatePlannedImage(args);
+    expect(out.screen.readableText).toEqual(['ON']);
   });
 
   test('a clean first image returns without a retry', async () => {

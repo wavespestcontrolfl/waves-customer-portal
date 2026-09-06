@@ -132,15 +132,23 @@ const normalizeText = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g
  *   ok=false when the image carries a logo / brand mark, or readable text
  *   beyond the captions the caller allowed (an infographic's own labels).
  */
-async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedText = [] } = {}) {
+async function screenGeneratedImage({ buffer, mimeType = 'image/webp', allowedText = [], timeoutMs = null } = {}) {
   const open = { ok: true, checked: false, readableText: [], logos: [], reasons: [] };
   if (!Buffer.isBuffer(buffer) || !buffer.length) return open;
+  // timeoutMs bounds the whole vision chain (both legs) — the caller passes
+  // what is left of its image-slot deadline; nothing left → unchecked
+  // (fail-open) rather than a screen that outlives the slot (Codex r7 P2).
+  if (timeoutMs !== null && !(timeoutMs > 0)) {
+    logger.warn('[hero-alt-vision] image screen skipped — slot deadline already spent (fail-open)');
+    return open;
+  }
   try {
     const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.visionAnalysis, {
       text: buildScreenPrompt({ allowedText }),
       images: [{ data: buffer.toString('base64'), mimeType }],
       jsonMode: true,
       maxTokens: 400,
+      ...(timeoutMs > 0 ? { timeoutMs } : {}),
     });
     if (!res.ok) {
       logger.warn(`[hero-alt-vision] image screen failed (${res.reason}) — accepting image (fail-open)`);

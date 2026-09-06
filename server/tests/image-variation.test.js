@@ -174,6 +174,13 @@ describe('screenGeneratedImage', () => {
     expect(r).toMatchObject({ ok: true, checked: true, reasons: [] });
     expect(dispatchWithFallback.mock.calls[0][0]).toBe('visionAnalysis');
     expect(dispatchWithFallback.mock.calls[0][1].images[0].data).toBe(buffer.toString('base64'));
+    // The caller's remaining slot time bounds the vision chain; a spent deadline skips the screen (Codex r7 P2 on #3964).
+    expect(dispatchWithFallback.mock.calls[0][1].timeoutMs).toBeUndefined();
+    await screenGeneratedImage({ buffer, timeoutMs: 42_000 });
+    expect(dispatchWithFallback.mock.calls[1][1].timeoutMs).toBe(42_000);
+    dispatchWithFallback.mockClear();
+    expect(await screenGeneratedImage({ buffer, timeoutMs: 0 })).toMatchObject({ ok: true, checked: false });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
   test('a logo fails; invented labels fail; the infographic\'s own captions are allowed', async () => {
