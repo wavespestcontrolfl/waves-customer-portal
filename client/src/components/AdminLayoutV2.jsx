@@ -26,7 +26,7 @@ import {
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
 import { refetchFlags, useFeatureFlag } from "../hooks/useFeatureFlag";
-import { adminFetch } from "../utils/admin-fetch";
+import { adminFetch, adminLoginUrl } from "../utils/admin-fetch";
 import { trackAdminPageView, markUsageSource } from "../lib/adminUsage";
 import {
   ADMIN_DESKTOP_NAV_SECTIONS,
@@ -77,8 +77,7 @@ export default function AdminLayoutV2() {
   useEffect(() => {
     const token = localStorage.getItem("waves_admin_token");
     if (!token) {
-      const next = `${location.pathname}${location.search}${location.hash}`;
-      navigate(`/admin/login?next=${encodeURIComponent(next)}`, { replace: true });
+      navigate(adminLoginUrl(location), { replace: true });
       return;
     }
     adminFetch("/admin/auth/me")
@@ -106,8 +105,7 @@ export default function AdminLayoutV2() {
           localStorage.removeItem("waves_admin_token");
           localStorage.removeItem("waves_admin_user");
           refetchFlags().catch(() => {});
-          const next = `${location.pathname}${location.search}${location.hash}`;
-          navigate(`/admin/login?next=${encodeURIComponent(next)}`, { replace: true });
+          navigate(adminLoginUrl(location), { replace: true });
           return;
         }
         setAuthStatus("error");

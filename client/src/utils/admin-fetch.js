@@ -42,6 +42,11 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function adminLoginUrl({ pathname, search, hash }) {
+  const next = `${pathname}${search}${hash}`;
+  return pathname === '/admin/login' ? next : `/admin/login?next=${encodeURIComponent(next)}`;
+}
+
 export async function adminFetch(path, options = {}) {
   let attempt = 0;
    
@@ -56,11 +61,7 @@ export async function adminFetch(path, options = {}) {
     });
 
     if (r.status === 401) {
-      const { pathname, search, hash } = window.location;
-      const next = `${pathname}${search}${hash}`;
-      window.location.href = pathname === '/admin/login'
-        ? next
-        : `/admin/login?next=${encodeURIComponent(next)}`;
+      window.location.href = adminLoginUrl(window.location);
       const err = new Error('Session expired');
       err.status = 401;
       err.code = 'UNAUTHENTICATED';

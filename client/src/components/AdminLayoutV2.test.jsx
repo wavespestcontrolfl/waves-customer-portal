@@ -12,7 +12,7 @@ vi.mock("../hooks/useFeatureFlag", () => ({
   refetchFlags: vi.fn(() => Promise.resolve()),
   useFeatureFlag: vi.fn(() => false),
 }));
-vi.mock("../utils/admin-fetch", () => ({ adminFetch: vi.fn() }));
+vi.mock("../utils/admin-fetch", async (importOriginal) => ({ ...(await importOriginal()), adminFetch: vi.fn() }));
 vi.mock("./NotificationBell", () => ({ default: () => null }));
 vi.mock("./admin/GlobalCommandPalette", async () => {
   const ReactModule = await import("react");
