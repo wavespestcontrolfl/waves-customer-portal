@@ -571,8 +571,13 @@ async function completeProjectBackedService({
   }
 
   let postCommitTrackServiceId = null;
-  // Set once the visit is completed through this project (fresh flip or
-  // already-completed re-close): the consumables hook runs after commit.
+  // Set only when THIS close flips the visit to completed: the consumables
+  // hook runs after commit. Never on a re-close of an already-completed
+  // visit (a historical project predating the hook would otherwise deduct
+  // today's stock on replay — no movement exists for the unique index to
+  // match) and never for a `rescheduled` row (the legacy reschedule path
+  // leaves the replaced appointment linked; completing it performs no
+  // visit). GH codex #3996 r2 P2 ×2.
   let postCommitConsumption = null;
   const result = await knex.transaction(async (trx) => {
     // Project row FIRST (codex #3344 r9 P2): the combined report/invoice
@@ -915,8 +920,12 @@ async function completeProjectBackedService({
         trx,
       });
       postCommitTrackServiceId = scheduledService.id;
+      // Identity from the frozen record + locked project, not the mutable
+      // scheduled_services row / live profile (GH codex #3996 r2 P2).
+      if (String(scheduledService.status || '').toLowerCase() !== 'rescheduled') {
+        postCommitConsumption = { scheduledService, serviceRecord, project };
+      }
     }
-    postCommitConsumption = { scheduledService, serviceRecord, profile };
 
     const projectUpdate = {
       status: 'closed',
@@ -972,7 +981,8 @@ async function completeProjectBackedService({
   // Same posture as the normal path: after commit, own transaction,
   // at-most-once per (product, visit), never throws (GH codex #3996 P1).
   if (postCommitConsumption) {
-    const { scheduledService, serviceRecord, profile } = postCommitConsumption;
+    const { scheduledService, serviceRecord, project } = postCommitConsumption;
+    const serviceType = serviceRecord?.service_type || scheduledService.service_type || null;
     try {
       const { consumeCompletionSupplies } = require('./supplies-consumption');
       await consumeCompletionSupplies(knex, {
@@ -980,9 +990,9 @@ async function completeProjectBackedService({
         serviceRecordId: serviceRecord?.id || null,
         customerId: scheduledService.customer_id || null,
         technicianId: scheduledService.technician_id || null,
-        serviceLine: detectServiceLine(scheduledService.service_type),
-        serviceType: scheduledService.service_type || null,
-        projectType: profile.projectType || null,
+        serviceLine: serviceRecord?.service_line || detectServiceLine(serviceType),
+        serviceType,
+        projectType: project.project_type || null,
       });
     } catch (err) {
       logger.error(`[project-completion] completion supplies consumption failed for ${scheduledService.id}: ${err.message}`);

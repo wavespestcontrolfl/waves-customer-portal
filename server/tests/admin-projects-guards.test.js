@@ -531,6 +531,14 @@ describe('resolveOrCreateProjectInvoice mint serialization (source contract)', (
     const consumeAt = completion.indexOf('consumeCompletionSupplies(knex, {');
     expect(trxEnd).toBeGreaterThan(-1);
     expect(consumeAt).toBeGreaterThan(trxEnd);
-    expect(completion.slice(consumeAt, completion.indexOf('});', consumeAt))).toContain('projectType: profile.projectType');
+    expect(completion.slice(consumeAt, completion.indexOf('});', consumeAt))).toContain('projectType: project.project_type');
+    // Scheduled only inside the fresh status flip, and never for a replaced
+    // `rescheduled` row (r2 P2s: historical re-close replay, phantom visit).
+    const flipAt = completion.indexOf("if (scheduledService.status !== 'completed') {");
+    const scheduleAt = completion.indexOf('postCommitConsumption = {');
+    const flipEnd = completion.indexOf('const projectUpdate = {', flipAt);
+    expect(scheduleAt).toBeGreaterThan(flipAt);
+    expect(scheduleAt).toBeLessThan(flipEnd);
+    expect(completion.slice(flipAt, scheduleAt)).toContain("!== 'rescheduled'");
   });
 });
