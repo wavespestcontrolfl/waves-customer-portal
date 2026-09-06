@@ -270,6 +270,8 @@ const NotificationService = {
 
   async revertRelayFailureCallback({ callSid, callbackStamp, notificationId }) {
     return db.transaction(async (trx) => {
+      await trx.raw("SET LOCAL statement_timeout = '2s'");
+      await trx.raw("SET LOCAL idle_in_transaction_session_timeout = '5s'");
       const call = await trx('call_log').where('twilio_call_sid', callSid).forUpdate().first('id');
       if (!call) return;
       const cleared = await trx('call_log').where('id', call.id)

@@ -162,7 +162,7 @@ describe('the conversation side', () => {
     } finally { append.mockRestore(); jest.useRealTimers(); }
   });
 
-  test('an append settling during the capture floor records commitments after the outcome is final', async () => {
+  test('the floor finishes before the close snapshot and a late append repairs commitments after finalization', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     const row = { call_outcome: null, transcription: null, metadata: { relay_session_claim_owner: 'nonce-1' } };
     primeDb({ firstRow: row, updateImpl: jest.fn(async (patch) => {
@@ -177,6 +177,7 @@ describe('the conversation side', () => {
     });
     let finishFloor;
     const convo = convoWithTurns();
+    convo._callTokenVerified = true;
     convo._runCaptureFloor = jest.fn(() => new Promise((resolve) => { finishFloor = resolve; }));
     convo._promises.set('send_estimate', { verdict: true, expectation: 'about_15_minutes', at: new Date() });
     const owed = [];
@@ -191,11 +192,14 @@ describe('the conversation side', () => {
       const closing = convo.end('ws_close');
       await jest.advanceTimersByTimeAsync(10010);
       expect(convo._runCaptureFloor).toHaveBeenCalled();
-      settleAppend();
-      await jest.advanceTimersByTimeAsync(0);
-      expect(owed).toEqual([]);
+      expect(settleAppend).toBeUndefined();
+      convo.leadCaptured = true;
       finishFloor();
+      await jest.advanceTimersByTimeAsync(10010);
       await closing;
+      expect(append.mock.calls[0][2].lead_captured).toBe(true);
+      expect(owed).toEqual([]);
+      settleAppend();
       await jest.advanceTimersByTimeAsync(0);
       expect(owed).toEqual([expect.objectContaining({ sessionKey: 'nonce-1', estimateQueued: true })]);
     } finally {
@@ -203,6 +207,30 @@ describe('the conversation side', () => {
       recordRelayCommitments.mockImplementation(async () => ({ found: true, written: 1 }));
       jest.useRealTimers();
     }
+  });
+
+  test('a capture finishing after the close deadline triggers reporting repair', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb();
+    const { createLeadFromExtraction } = require('../services/lead-from-extraction');
+    let finish;
+    createLeadFromExtraction.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const convo = convoWithTurns();
+    convo._callTokenVerified = true;
+    convo.leadCaptured = false;
+    convo._reconcileLateSegment = jest.fn(async () => {});
+    jest.useFakeTimers();
+    try {
+      const closing = convo.end('ws_close');
+      await jest.advanceTimersByTimeAsync(10010);
+      await closing;
+      expect(convo.leadCaptured).toBe(false);
+      expect(convo._reconcileLateSegment).not.toHaveBeenCalled();
+      finish({ leadId: 'late-floor' });
+      await jest.advanceTimersByTimeAsync(0);
+      expect(convo.leadCaptured).toBe(true);
+      expect(convo._reconcileLateSegment).toHaveBeenCalledTimes(1);
+    } finally { jest.useRealTimers(); }
   });
 
   test('gate off ⇒ no segment append and no generation fence (today\'s statements)', async () => {
@@ -275,21 +303,18 @@ describe('the conversation side', () => {
 
   test('a superseded socket whose late segment lands after the resumed socket\'s floor wrote a no-transcript lead refreshes THAT lead\'s summary from the whole call (compare-and-set on the placeholder) (hook r22 P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
-    const { db, builder, updates, guardQ } = primeDb({ firstRow: { transcription: 'Caller: my ants are back', metadata: { relay_session_claim_owner: 'nonce-2', relay_reconnects: 1, relay_lead_id: 'L-linked', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }, { generation: 2, text: 'Agent: Sorry, I lost you for a second.' }] } } });
+    const { db, builder, updates } = primeDb({ firstRow: { id: 'L-linked', transcript_summary: 'Inbound voice call (auto-captured on hangup). No transcript captured.', transcription: 'Caller: my ants are back', metadata: { relay_session_claim_owner: 'nonce-2', relay_reconnects: 1, relay_lead_id: 'L-linked', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }, { generation: 2, text: 'Agent: Sorry, I lost you for a second.' }] } } });
     const convo = convoWithTurns();
     convo._sessionSuperseded = jest.fn(async () => true);
     await convo.end('ws_close');
     expect(db).toHaveBeenCalledWith('leads');
-    // this call's lead: inserted by this call OR the persisted linkage (a reused lead keeps another call's twilio_call_sid — codex r3 P2)
-    expect(guardQ.where).toHaveBeenCalledWith({ twilio_call_sid: 'CA-rec' });
-    expect(guardQ.orWhere).toHaveBeenCalledWith({ id: 'L-linked' });
-    expect(builder.where).toHaveBeenCalledWith('transcript_summary', 'like', '%No transcript captured.');
+    expect(builder.where).toHaveBeenCalledWith({ id: 'L-linked' });
     const refresh = updates.find((u) => typeof u.transcript_summary === 'string');
     expect(refresh.transcript_summary).toBe('Inbound voice call (auto-captured on hangup). Caller said: my ants are back');
     // no caller lines on the row ⇒ nothing to refresh; sandbox ⇒ never
     primeDb({ firstRow: { transcription: 'Agent: hello', metadata: { relay_session_claim_owner: 'nonce-2', relay_segments: [{ generation: 1, text: 'Agent: hello' }] } } });
-    expect(await convoWithTurns()._refreshFloorLeadSummary({ relay_segments: [{ generation: 1, text: 'Agent: hello' }] })).toBe(false);
-    expect(await convoWithTurns({ sandbox: true })._refreshFloorLeadSummary({ relay_segments: [{ generation: 1, text: 'Caller: hi' }] })).toBe(false);
+    expect(await convoWithTurns()._refreshFloorLeadSummary()).toBe(false);
+    expect(await convoWithTurns({ sandbox: true })._refreshFloorLeadSummary()).toBe(false);
   });
 
 });

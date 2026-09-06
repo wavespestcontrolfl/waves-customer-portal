@@ -338,21 +338,18 @@ describe('the conversation side', () => {
 
   test('a superseded socket whose late segment lands after the resumed socket\'s floor wrote a no-transcript lead refreshes THAT lead\'s summary from the whole call (compare-and-set on the placeholder) (hook r22 P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
-    const { db, builder, updates, guardQ } = primeDb({ firstRow: { transcription: 'Caller: my ants are back', metadata: { relay_session_claim_owner: 'nonce-2', relay_reconnects: 1, relay_lead_id: 'L-linked', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }, { generation: 2, text: 'Agent: Sorry, I lost you for a second.' }] } } });
+    const { db, builder, updates } = primeDb({ firstRow: { id: 'L-linked', transcript_summary: 'Inbound voice call (auto-captured on hangup). No transcript captured.', transcription: 'Caller: my ants are back', metadata: { relay_session_claim_owner: 'nonce-2', relay_reconnects: 1, relay_lead_id: 'L-linked', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }, { generation: 2, text: 'Agent: Sorry, I lost you for a second.' }] } } });
     const convo = convoWithTurns();
     convo._sessionSuperseded = jest.fn(async () => true);
     await convo.end('ws_close');
     expect(db).toHaveBeenCalledWith('leads');
-    // this call's lead: inserted by this call OR the persisted linkage (a reused lead keeps another call's twilio_call_sid — codex r3 P2)
-    expect(guardQ.where).toHaveBeenCalledWith({ twilio_call_sid: 'CA-rec' });
-    expect(guardQ.orWhere).toHaveBeenCalledWith({ id: 'L-linked' });
-    expect(builder.where).toHaveBeenCalledWith('transcript_summary', 'like', '%No transcript captured.');
+    expect(builder.where).toHaveBeenCalledWith({ id: 'L-linked' });
     const refresh = updates.find((u) => typeof u.transcript_summary === 'string');
     expect(refresh.transcript_summary).toBe('Inbound voice call (auto-captured on hangup). Caller said: my ants are back');
     // no caller lines on the row ⇒ nothing to refresh; sandbox ⇒ never
     primeDb({ firstRow: { transcription: 'Agent: hello', metadata: { relay_session_claim_owner: 'nonce-2', relay_segments: [{ generation: 1, text: 'Agent: hello' }] } } });
-    expect(await convoWithTurns()._refreshFloorLeadSummary({ relay_segments: [{ generation: 1, text: 'Agent: hello' }] })).toBe(false);
-    expect(await convoWithTurns({ sandbox: true })._refreshFloorLeadSummary({ relay_segments: [{ generation: 1, text: 'Caller: hi' }] })).toBe(false);
+    expect(await convoWithTurns()._refreshFloorLeadSummary()).toBe(false);
+    expect(await convoWithTurns({ sandbox: true })._refreshFloorLeadSummary()).toBe(false);
   });
 
   test('a resumed socket the caller never spoke on still composes the earlier segment(s) onto the columns at its close (hook P1)', async () => {
@@ -1276,6 +1273,33 @@ describe('the conversation side', () => {
       });
       return { Convo, leadWriter, dbIso };
     }
+
+    test.each(['resolve', 'reject'])('callback cleanup deadline keeps observing a late %s', async (settlement) => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      const { Convo, dbIso } = isolated({ streamImpl: jest.fn(), executeToolImpl: jest.fn() });
+      primeDb({ db: dbIso });
+      const service = require('../services/notification-service');
+      let resolve;
+      let reject;
+      service.revertRelayFailureCallback = jest.fn(() => new Promise((res, rej) => { resolve = res; reject = rej; }));
+      const receipt = { callSid: 'CA-cleanup', notificationId: 'fixture', callbackStamp: 'fixture-stamp' };
+      const convo = new Convo({ callSid: 'CA-cleanup', send: jest.fn(), endSession: jest.fn(() => false) });
+      convo._modelFailures = 2;
+      convo._sessionSuperseded = jest.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
+      convo._fileFailureCallback = jest.fn(async () => { convo._failureCallbackReceipt = receipt; return true; });
+      jest.useFakeTimers();
+      try {
+        const handoff = convo._maybeHandoffForFailure({ officeOpenNow: () => false });
+        await jest.advanceTimersByTimeAsync(2001);
+        expect(await handoff).toBe(true);
+        expect(service.revertRelayFailureCallback).toHaveBeenCalledWith(receipt);
+        expect(convo._failureCallbackReceipt).toBe(receipt); // timeout is not confirmation of deletion
+        if (settlement === 'resolve') resolve();
+        else reject(new Error('fixture cleanup unavailable'));
+        await jest.advanceTimersByTimeAsync(1);
+        expect(convo._failureCallbackReceipt).toBe(settlement === 'resolve' ? null : receipt);
+      } finally { resolve?.(); jest.useRealTimers(); }
+    });
 
     test('a turn queued during callback persistence cannot run after the handoff ends the relay', async () => {
       process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
