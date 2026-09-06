@@ -26,7 +26,7 @@ const {
   KNOCKDOWN_FOLLOWUP_WINDOW_DAYS,
 } = require('../services/typed-followup-obligation');
 
-const dispatchSource = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+const dispatchSource = (fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8') + '\n' + fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8'));
 const jobStatusSource = fs.readFileSync(path.join(__dirname, '../services/job-status.js'), 'utf8');
 
 const BED_BUG_PROFILE = {

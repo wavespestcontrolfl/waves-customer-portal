@@ -68,13 +68,8 @@ const fs = require('fs');
 const path = require('path');
 
 const router = require('../routes/admin-dispatch');
-const {
-  liveTimeOnSitePlan,
-  adjustedCompletionEndInstant,
-  timeOnSiteEditPlan,
-  backfillTimeOnSiteMinutes,
-  BACKFILL_MAX_TIME_ON_SITE_MINUTES,
-} = require('../routes/admin-dispatch')._test;
+const { liveTimeOnSitePlan, adjustedCompletionEndInstant, backfillTimeOnSiteMinutes, BACKFILL_MAX_TIME_ON_SITE_MINUTES } = require('../services/complete-scheduled-service');
+const { timeOnSiteEditPlan } = require('../routes/admin-dispatch')._test;
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 const JobCosting = require('../services/job-costing');
 // The REAL labor calculator (the module is jest.mocked above for the route's
@@ -82,7 +77,7 @@ const JobCosting = require('../services/job-costing');
 const { calcLaborCost: realCalcLaborCost } = jest.requireActual('../services/job-costing');
 const { timeOnSiteAdjustedPdfSignature } = require('../services/service-report/pdf-storage');
 
-const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+const source = (fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8') + '\n' + fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8'));
 const costingSource = fs.readFileSync(path.join(__dirname, '../services/job-costing.js'), 'utf8');
 const pdfQueueSource = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
 const reportsPublicSource = fs.readFileSync(path.join(__dirname, '../routes/reports-public.js'), 'utf8');
@@ -373,8 +368,8 @@ describe('live override composed with buildCompletionLifecycleUpdates', () => {
 
 describe('route wiring contracts', () => {
   test('the live plan gates intake AFTER the backfill plan and BEFORE anything commits', () => {
-    expect(source).toMatch(/const livePlan = liveTimeOnSitePlan\(\{ timeOnSite, role: req\.techRole, backfill: isBackfillCompletion, service: svc \}\);/);
-    expect(source).toMatch(/if \(livePlan\.error\) \{\s*\n\s*return res\.status\(livePlan\.status\)\.json\(livePlan\.error\);/);
+    expect(source).toMatch(/const livePlan = liveTimeOnSitePlan\(\{ timeOnSite, role: completionInput\.actor\.techRole, backfill: isBackfillCompletion, service: svc \}\);/);
+    expect(source).toMatch(/if \(livePlan\.error\) \{\s*\n\s*return \(\{ status: livePlan\.status, body: livePlan\.error \}\);/);
     const backfillPlanAt = source.indexOf('backfillCompletionPlan({ backfill, scheduledDate: svc.scheduled_date');
     const livePlanAt = source.indexOf('const livePlan = liveTimeOnSitePlan(');
     const completionTrxAt = source.indexOf('const completionEndedAt = new Date();');

@@ -301,7 +301,7 @@ describe('specialty service closeout vocabulary', () => {
   test('the completion route skips specialty preset checks on typed lanes', () => {
     const fs = require('fs');
     const path = require('path');
-    const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-dispatch.js'), 'utf8');
+    const source = fs.readFileSync(path.join(__dirname, '..', 'services', 'complete-scheduled-service.js'), 'utf8');
     // mosquito_one_time aliases onto the mosquito preset while its typed
     // mosquito_event schema owns the areas — the preset area/action checks
     // must not run for typed closeouts.

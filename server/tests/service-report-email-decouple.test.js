@@ -1,4 +1,4 @@
-const { serviceReportEmailEligible } = require('../routes/admin-dispatch')._test;
+const { serviceReportEmailEligible } = require('../services/complete-scheduled-service');
 
 describe('service report email is decoupled from the completion-SMS toggle', () => {
   test('eligible for a real, non-suppressed report (no SMS input — that is the decoupling)', () => {

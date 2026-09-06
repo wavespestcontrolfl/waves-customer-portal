@@ -7,8 +7,7 @@
 // domain, and left the old path dangling — the customer received
 // a doubled-path URL (slug fabricated here — never commit a real short code).
 
-const { _test } = require('../routes/admin-dispatch');
-const { ensureSmsContainsReportLink } = _test;
+const { ensureSmsContainsReportLink } = require('../services/complete-scheduled-service');
 
 const SHORT = 'https://portal.wavespestcontrol.com/l/report-fake1';
 const SHORT_SCHEMELESS = 'portal.wavespestcontrol.com/l/report-fake1';

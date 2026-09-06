@@ -3236,7 +3236,7 @@ async function enrichBillingLaneWithWalletGap({ billingLane, svc, alerts, comple
   if (!fromAttachedInvoice && profileKnown
     && (['invoice', 'auto_charge'].includes(billingLane.prediction?.kind) || pricedPayer)) {
     try {
-      const { shouldAutoInvoiceCompletion } = require('./admin-dispatch')._test;
+      const { shouldAutoInvoiceCompletion } = require('../services/complete-scheduled-service');
       willMint = shouldAutoInvoiceCompletion({
         recapReviewOnly: false,
         alreadyPaid: false,
@@ -3357,7 +3357,7 @@ function recurringWithoutBillableAmount({
   // explicit lane/tier applies, and GATE_AUTOINVOICE_PRICED_VISITS is off.
   // Lazy require: admin-dispatch pulls admin-schedule helpers, so a
   // top-level import would close a cycle.
-  const { shouldAutoInvoiceCompletion } = require('./admin-dispatch')._test;
+  const { shouldAutoInvoiceCompletion } = require('../services/complete-scheduled-service');
   const { completionInvoiceAmount } = require('../services/billing-lane');
   const invoiceAmount = completionInvoiceAmount({
     estimatedPrice: Number(recurringFloorPrice) > 0 ? recurringFloorPrice : null,
