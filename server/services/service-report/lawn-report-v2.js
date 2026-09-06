@@ -550,8 +550,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // structured moisture evidence, with an explicit technician flag taking
   // precedence over the photo severity. Prose, other stress scores, and old
   // assessments without either signal cannot establish a watering problem.
-  const drySignal = typeof scores.stressFlags?.drought_stress === 'boolean'
-    ? scores.stressFlags.drought_stress
+  const technicianDrought = scores.stressFlags?.drought_stress;
+  const drySignal = typeof technicianDrought === 'boolean'
+    ? technicianDrought
     : ['none', 'minor', 'moderate', 'severe'].includes(lawnAssessment.droughtStress)
       ? lawnAssessment.droughtStress !== 'none' : null;
   // The Water/Coverage score is derived from fungus/over-water signals and ignores
@@ -567,7 +568,10 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
       : 'A few areas look dry — the lawn may benefit from a bit more even watering.';
     waterCat.explanation = waterCat.customerExplanation;
   }
-  if (water) water.coverageWatch = coverageWatch;
+  if (water) {
+    water.coverageWatch = coverageWatch;
+    water.droughtSignal = drySignal;
+  }
 
   const mowing = mapMowing(mowingHeight, grassLabel);
   const treatment = buildTreatment({ applications, actions });
@@ -583,6 +587,8 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
       status: effectiveWaterStatus,
       // A balanced total with a localized dry read → coverage, not "water more".
       localizedDry: coverageWatch || (usingSnapshot && waterSnapshot.interpretation === 'coverage_issue_possible'),
+      localizedDryConfidence: technicianDrought === true
+        ? 'tech_confirmed' : 'area_estimated',
     } : {},
     mowing,
     grassLabel,

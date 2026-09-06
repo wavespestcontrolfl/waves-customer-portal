@@ -99,6 +99,11 @@ projected. The existing customer/visit linkage and signed assessment pin
 requirements apply to this field too. Localized watering advice uses this
 structured severity, overridden by an explicit boolean
 `scores.stressFlags.drought_stress` from the same confirmed assessment.
+The resolved boolean-or-null state travels as `reportV2.water.droughtSignal`
+through the final public/PDF reconciliation; only `true` permits a drought
+hypothesis to be rewritten into a coverage finding. Localized-drought cards
+label an explicit technician finding `tech_confirmed`; automated coverage
+advice retains its `area_estimated` label.
 Without either signal, observation/summary wording cannot trigger sprinkler
 advice or an unqualified "no action needed" reassurance. Measured water
 deficits/surpluses and eligible stored water snapshots

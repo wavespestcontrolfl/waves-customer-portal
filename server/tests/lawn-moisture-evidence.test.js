@@ -2,7 +2,7 @@ jest.mock('../models/db', () => jest.fn(() => { throw new Error('Unexpected data
 jest.mock('../config/feature-gates', () => ({ isEnabled: () => false }));
 
 const { mergePhotoComposites } = require('../services/lawn-photo-merge');
-const { mapToDisplayScores, applySeasonalAdjustment } = require('../services/lawn-assessment');
+const { averageScores, mapToDisplayScores, applySeasonalAdjustment } = require('../services/lawn-assessment');
 const { buildLawnAssessmentReportData } = require('../services/service-report/report-data');
 const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
 
@@ -40,6 +40,35 @@ function assessmentDb(rows) {
 const reportFor = row => buildLawnAssessmentReportData(SERVICE, 'lawn', assessmentDb([row]));
 
 describe('moisture evidence survives assessment persistence and report projection', () => {
+  test.each([
+    [undefined, undefined, null],
+    ['unknown', 'modrate', null],
+    [true, ['severe'], null],
+    ['severe', undefined, 'severe'],
+    ['invalid', 'minor', 'minor'],
+    ['none', null, 'none'],
+    ['none', 'severe', 'moderate'],
+  ])('provider values %j / %j persist as %j', async (first, second, expected) => {
+    const { composite } = averageScores({ drought_stress: first }, { drought_stress: second });
+    const display = mapToDisplayScores(composite);
+    const report = await reportFor({ ...ASSESSMENT, composite_scores: JSON.stringify(display) });
+    expect(report.droughtStress).toBe(expected);
+    const rendered = buildLawnReportV2({ lawnAssessment: report });
+    expect(rendered.water.droughtSignal).toBe(expected === null ? null : expected !== 'none');
+    if (expected === null) expect(rendered.snapshot.noActionNeeded).toBe(false);
+  });
+
+  test('missing or malformed photos cannot erase a valid provider finding', async () => {
+    const photos = [
+      averageScores({ drought_stress: ['severe'] }, null),
+      averageScores({}, { drought_stress: 'invalid' }),
+      averageScores(null, { drought_stress: 'minor' }),
+    ];
+    const display = mapToDisplayScores(mergePhotoComposites(photos));
+    expect((await reportFor({ ...ASSESSMENT, composite_scores: JSON.stringify(display) })).droughtStress).toBe('minor');
+    expect(mapToDisplayScores(mergePhotoComposites(photos.slice(0, 2))).drought_stress).toBeNull();
+  });
+
   test.each(['none', 'minor', 'moderate', 'severe'])('%s survives display mapping, seasonal adjustment and JSON storage', async severity => {
     const display = mapToDisplayScores({ drought_stress: severity, observations: 'Synthetic lawn observation.' });
     const adjusted = applySeasonalAdjustment(display, 1);

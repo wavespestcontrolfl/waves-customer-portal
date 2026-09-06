@@ -6,7 +6,7 @@
 // one of these fails.
 
 const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
-const { reconcileLawnReport } = require('../services/service-report/report-consistency');
+const { reconcileLawnReport, applyLawnReportReconciliation } = require('../services/service-report/report-consistency');
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
 const { buildServiceReportV1SmsVars } = require('../services/service-report/delivery');
 const { frozenSmsSummary } = require('../services/service-report/lawn-report-write-gate');
@@ -143,6 +143,53 @@ describe('structured moisture evidence owns sprinkler advice', () => {
   });
 
   test.each([
+    ['none', undefined, false],
+    [null, undefined, false],
+    ['severe', false, false],
+    ['minor', undefined, true],
+    ['none', true, true],
+  ])('final public/PDF reconciliation honors severity %j and technician flag %j', (droughtStress, flag, rewritten) => {
+    const hypothesis = 'Drought stress may be contributing to thinning.';
+    const nextVisitFocus = 'Recheck the flagged edge for drought stress next visit.';
+    const lawnAssessment = baseAssessment({
+      ...CASES.healthy,
+      droughtStress,
+      scores: { ...CASES.healthy.scores, stressFlags: { drought_stress: flag } },
+      observations: hypothesis, aiSummary: hypothesis, customerSummary: hypothesis,
+      recommendations: { nextVisitFocus },
+      snapshot: { summary: hypothesis, nextWatchItems: [nextVisitFocus], findings: [{ customerCopy: hypothesis }] },
+      recommendationCards: [{ customerCopy: hypothesis }],
+      waterContext: {
+        rainfallInches7d: 2.96, irrigationInchesPerWeek: 0, effectiveInches7d: 2.96, targetInchesPerWeek: 0.75,
+        irrigationAdvice: { status: 'surplus', rainKnown: true, profileMissing: false, recommendedInchesPerWeek: 0.75 },
+      },
+    });
+    const reportV2 = buildLawnReportV2({ lawnAssessment });
+    // Narrative overlays may replace existing card/hero text before this final pass.
+    reportV2.insights[0].whatWeSaw = hypothesis;
+    reportV2.snapshot.mainWatch = hypothesis;
+    reportV2.snapshot.customerAction = nextVisitFocus;
+    const data = {
+      serviceLine: 'lawn', lawnAssessment, reportV2,
+      summary: `Recent rainfall totaling 2.72 inches raised pressure this week. ${hypothesis}`,
+    };
+    applyLawnReportReconciliation(data, null);
+    expect(data.summary).toContain('2.96 inches');
+    const surfaces = [
+      data.summary, data.reportV2.photoSummary, data.reportV2.insights[0].whatWeSaw,
+      data.reportV2.snapshot.mainWatch, data.reportV2.snapshot.customerAction,
+      data.reportV2.followUp.reason, data.lawnAssessment.aiSummary,
+      data.lawnAssessment.customerSummary, data.lawnAssessment.observations,
+      data.lawnAssessment.snapshot.summary, data.lawnAssessment.snapshot.nextWatchItems[0],
+      data.lawnAssessment.snapshot.findings[0].customerCopy, data.lawnAssessment.recommendationCards[0].customerCopy,
+    ];
+    for (const copy of surfaces) {
+      expect(/uneven sprinkler coverage/i.test(copy)).toBe(rewritten);
+    }
+    expect(data.reportV2.water.rainInches).toBe(2.96);
+  });
+
+  test.each([
     [true, 'none'],
     [true, null],
     [false, 'severe'],
@@ -153,6 +200,7 @@ describe('structured moisture evidence owns sprinkler advice', () => {
     });
     expect(report.water.coverageWatch).toBe(flag);
     expect(!!waterCard(report)).toBe(flag);
+    if (flag) expect(waterCard(report).confidence).toBe('tech_confirmed');
   });
 
   test.each([undefined, {}, { shade_stress: true }, { drought_stress: 'true' }])('other or malformed technician flags %j cannot create a drought diagnosis', stressFlags => {
@@ -187,6 +235,7 @@ describe('structured moisture evidence owns sprinkler advice', () => {
       },
     });
     expect(waterCard(report).customerAction).toMatch(/Check sprinkler coverage/);
+    expect(waterCard(report).confidence).toBe('area_estimated');
   });
 });
 
