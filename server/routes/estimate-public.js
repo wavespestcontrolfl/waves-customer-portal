@@ -277,7 +277,7 @@ async function registerAcceptedEstimateAppointmentReminder({
     `${date}T${scheduledTimeOnly(appointment.window_start)}`,
     serviceType || appointment.service_type || 'Pest Control',
     'estimate_accept_slot',
-    { sendConfirmation: false },
+    { sendConfirmation: false, fromCommittedRow: true },
   );
 }
 
@@ -10717,6 +10717,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             estimate: acceptedEstimateForScheduling,
             serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
             selectedFrequency: acceptedSchedulingFrequencyKey,
+            serviceCadences,
             // Rung 1 was pre-acquired on this key at the top of this txn —
             // commitReservation re-checks the hold still sits on it.
             preLockedDate: acceptPreLockedDate,
@@ -10773,6 +10774,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               estimate: acceptedEstimateForScheduling,
               serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
               selectedFrequency: acceptedSchedulingFrequencyKey,
+              serviceCadences,
               // Rung 1 was pre-acquired on this key at the top of this txn —
               // commitReservation re-checks the hold still sits on it.
               preLockedDate: acceptPreLockedDate,

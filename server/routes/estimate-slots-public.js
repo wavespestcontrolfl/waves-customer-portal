@@ -328,6 +328,9 @@ router.get('/:token/available-slots', async (req, res) => {
       throw svcErr;
     }
   } catch (err) {
+    if (err.code === 'COMBINED_VISIT_UNAVAILABLE') {
+      return res.status(409).json({ error: err.message, code: err.code });
+    }
     logger.error(`[estimate-slots-public] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'unable to load availability', retry: true });
   }
@@ -448,6 +451,9 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
       throw svcErr;
     }
   } catch (err) {
+    if (err.code === 'COMBINED_VISIT_UNAVAILABLE') {
+      return res.status(409).json({ error: err.message, code: err.code });
+    }
     logger.error(`[estimate-slots-public:find-slots] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'unable to search availability', retry: true });
   }
@@ -559,6 +565,9 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
       throw svcErr;
     }
   } catch (err) {
+    if (err.code === 'COMBINED_VISIT_UNAVAILABLE') {
+      return res.status(409).json({ error: err.message, code: err.code });
+    }
     logger.error(`[estimate-slots-public:reserve] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'unable to reserve slot', retry: true });
   }

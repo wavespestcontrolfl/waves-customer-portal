@@ -67,7 +67,29 @@ already on it (no homeowner PII/links); settlement happens via the webhook,
 not the route,
 `/api/receipt/:token`, `/api/contracts/:token`, `/api/booking/*`,
 `/api/public/estimates/:token/ask`,
-`/api/public/estimates/:token/find-slots`, `/api/reports/:token/*` (the
+`/api/public/estimates/:token/find-slots`,
+`/api/public/estimates/:token/available-slots` and `/reserve` (with the strict opt-in
+`GATE_VISIT_COMBINED_CAPACITY` and prerequisite `GATE_SEPARATE_COMBO_VISITS`, recurring multi-service selections reserve
+60 minutes per physical service program; termite rental and bond billing riders
+fold into bait service and legacy supplements add their physical programs through
+the existing converter rules. Unsupported cadences
+and families, including recurring foam and commercial programs, are refused before offering or holding a slot. Slot `durationMinutes` and `windowEnd`
+describe the entire work block; arrival copy remains start plus 120 minutes.
+Offers and reservations require one assignable technician whose capability
+is not explicitly off for any selected service. Existing token, signature,
+rate-limit and privacy guards remain. Unsupported combined selections return
+409 `COMBINED_VISIT_UNAVAILABLE`. The service-mix stamp is server-owned and
+not included in public slot metadata. `/api/estimates/:token/accept`
+revalidates the selection, technician and complete occupancy under the existing
+transaction locks, then assigns separate 60-minute member windows. A stamped
+reservation retains this policy when the creation gate turns off; missing or
+unmatched members abort acceptance. Confirmations and reminders resolve the
+shared arrival from each member's immutable allocation, including when visit grouping is
+off or the customer uses Auto Pay. The existing reminder sync and sibling
+promotion functions retain that promise through cancellation; an individually
+moved service uses its newly booked arrival. Individual service histories, cadences,
+invoice and Auto Pay policies remain unchanged in this capacity prerequisite),
+`/api/reports/:token/*` (the
 service-report V1 payload — `/data`, the PDF at `/:token`, `/map.svg`, and
 the queued PDF / report-email renders that share `buildReportV1Data` —
 renders the report's IDENTITY facts from the completion-time snapshot on

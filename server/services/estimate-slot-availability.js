@@ -704,10 +704,32 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   const estData = parseEstimateData(estimate.estimate_data);
   const serviceMode = userOpts.serviceMode === 'one_time' ? 'one_time' : 'recurring';
   const selectedFrequency = userOpts.selectedFrequency || '';
+  const combinedPolicy = serviceMode !== 'one_time'
+    && (process.env.GATE_VISIT_COMBINED_CAPACITY === 'true' || userOpts.preserveCombinedCapacity === true);
+  let recurringSelection = serviceMode === 'one_time' ? []
+    : recurringRowsForEstimate(estimate, estData, selectedFrequency);
+  if (combinedPolicy) {
+    const converter = require('./estimate-converter');
+    if (!selectedPricingFrequency(estimate, estData, selectedFrequency)?.perServiceTreatments?.length) {
+      recurringSelection = converter.recurringServicesFromEstimateData(estData);
+    }
+    const isLegacyRodentRow = require('./billing-cadence').legacyRodentRowPredicateFor(estData);
+    const units = converter.combineRecurringServicesForScheduling(
+      converter.foldTermiteRentalIntoBait(recurringSelection).filter((row) => !isLegacyRodentRow(row)), {
+        acceptFrequency: selectedFrequency,
+        supplementalCompanions: converter.supplementalCompanionLines(estData),
+      },
+    );
+    recurringSelection = [
+      ...units.remaining,
+      ...units.standalone.map((unit) => unit.service),
+      ...units.combos.flatMap((unit) => unit.route.retiredBySeparateVisits ? unit.combinedFrom : [unit.service]),
+    ];
+  }
 
   let services = serviceMode === 'one_time'
     ? oneTimeProfileServices(estimate, estData)
-    : recurringRowsForEstimate(estimate, estData, selectedFrequency)
+    : recurringSelection
       .map((row) => {
         const key = serviceKeyFor(row);
         const label = labelForService(row);
@@ -759,12 +781,28 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
     }
   }
 
-  // Owner directive (2026-07-03): every service call books at the flat
-  // 60-minute default — techs adjust individual appointments afterward.
-  // Per-service labor sizing used to be summed here; the lawn formula fell
-  // back to full LOT sqft (the measured turf lives at inputs.measuredTurfSf,
-  // a key it never read) and inflated self-booked visits to 90 minutes.
-  const durationMinutes = clampDuration(userOpts.durationMinutes || DEFAULT_OPTS.durationMinutes);
+  // Legacy and single-service bookings retain their default. Combined stops
+  // reserve the owner-approved 60 minutes for EACH selected service.
+  const reservationServiceMix = combinedPolicy && services.length > 1
+    ? require('./combined-visit-capacity').capacityForServices(services)
+    : null;
+  if (reservationServiceMix && process.env.GATE_SEPARATE_COMBO_VISITS !== 'true') {
+    throw require('./combined-visit-capacity').capacityUnavailable();
+  }
+  if (reservationServiceMix) {
+    const { converterFollowUpSeedingPattern } = require('./estimate-converter');
+    const supported = recurringSelection.every((row, index) => {
+      const profile = services[index];
+      const selected = { ...row, visitsPerYear: profile.visitsPerYear };
+      if (profile.service === 'pest_control') {
+        selected.frequency = require('./recurring-appointment-seeder').patternFromVisitsPerYear(profile.visitsPerYear);
+      }
+      return !!converterFollowUpSeedingPattern(selected, { service_type: profile.label });
+    });
+    if (!supported) throw require('./combined-visit-capacity').capacityUnavailable();
+  }
+  const durationMinutes = reservationServiceMix?.durationMinutes
+    || clampDuration(userOpts.durationMinutes || DEFAULT_OPTS.durationMinutes);
   const serviceLabel = formatServiceProfileLabel(services)
     || estimate.service_interest
     || (serviceMode === 'one_time' ? 'One-time service' : 'Estimate service');
@@ -784,6 +822,7 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
     durationMinutes,
     serviceLabel,
     services,
+    ...(reservationServiceMix ? { reservationServiceMix } : {}),
   };
 }
 
@@ -1283,8 +1322,16 @@ function selectCustomerFacingSlots(slots, limit, { routeFirst = false } = {}) {
 //      the same predicate reserveSlot/commitReservation enforce via
 //      findConflictingVisits' `travel` option. `coords` = the estimate's pin
 //      (null on the no-coords branch → buffer-only).
-async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = null, coords = null }) {
+async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = null, coords = null, serviceMix = null }) {
   if (!Array.isArray(slots) || slots.length === 0) return slots;
+  let inactiveTechs = new Set();
+  if (serviceMix) {
+    const ids = [...new Set(slots.map((slot) => slot.techId).filter(Boolean))];
+    const inactive = await require('./technician-capabilities').inactiveCapabilitiesForServices(
+      db, ids, serviceMix.services.map((key) => ({ service_type: key.replace(/_/g, ' ') })),
+    );
+    inactiveTechs = new Set(inactive.map((row) => String(row.technician_id)));
+  }
   const rows = await db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
@@ -1362,6 +1409,7 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = nu
   });
 
   return slots.filter((s) => {
+    if (serviceMix && (!s.techId || inactiveTechs.has(String(s.techId)))) return false;
     const slotStart = timeToMinutes(s.windowStart);
     const slotEnd = timeToMinutes(s.windowEnd);
     if (slotStart == null || slotEnd == null) return true;
@@ -1502,6 +1550,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   }
 
   const serviceProfile = resolveEstimateSlotProfile(estimate, userOpts);
+  const publicServiceProfile = { ...serviceProfile };
+  delete publicServiceProfile.reservationServiceMix;
 
   // Cache check — keyed per (estimateId, hour bucket).
   cleanupCache(wrapperCache);
@@ -1536,7 +1586,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     travelGapEnabled() ? `travel-gap:${travelBufferMinutes()}` : 'travel-gap:off',
   ].join(':');
   const cached = wrapperCache.get(cacheKey);
-  if (cached) {
+  if (cached && !serviceProfile.reservationServiceMix) {
     // The result was cached for 5 min but the bucket can straddle a lead-time
     // boundary — a slot bookable when cached (e.g. 13:00 at 10:59 ET) can be
     // inside the cutoff by the time it's served (11:01 ET). If re-applying the
@@ -1621,7 +1671,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // serving an unfunneled pool to a funnel-zone estimate — caching that
   // would extend one transient failure across the whole TTL. Gate off keeps
   // today's caching untouched.
-  const skipResultCache = isEnabled('southZoneDayFunnel') && (zoneResolutionFailed || funnelLookupFailed);
+  const skipResultCache = !!serviceProfile.reservationServiceMix
+    || (isEnabled('southZoneDayFunnel') && (zoneResolutionFailed || funnelLookupFailed));
   const coords = await resolveEstimateCoords(estimate);
 
   // If we can't resolve coords, degrade gracefully: return empty primary,
@@ -1640,7 +1691,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       includeWeekends: opts.includeWeekends,
       minimumLeadMinutes: opts.minimumLeadMinutes,
     })))).flat();
-    const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords });
+    const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix });
     const filtered = dedupeSlots(asap).sort(compareCustomerFacingSlots);
     const bookable = filterSeasonalSlots(
       filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes }),
@@ -1676,7 +1727,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
         proximityDriveMinutes: opts.proximityDriveMinutes,
         includeWeekends: opts.includeWeekends,
         minimumLeadMinutes: opts.minimumLeadMinutes,
-        serviceProfile,
+        serviceProfile: publicServiceProfile,
         generatedAt: new Date().toISOString(),
         cacheHit: false,
         ...(funnel ? { zoneDayFunnel: funnel } : {}),
@@ -1715,12 +1766,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes));
   // Drop candidates whose rounded display window collides with a real
   // existing booking on the same tech/date — see filterCollidingSlots.
-  const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone, coords });
+  const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix });
 
   // Target: always show the soonest upcoming customer-facing windows first,
   // even when those windows are not route-optimal. Route-optimality remains
   // a per-slot badge/copy signal, not a reason to bury sooner dates.
-  const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords });
+  const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix });
   const sortedPool = dedupeSlots([...asap, ...classified]).sort(compareCustomerFacingSlots);
   // Preserve the collision-checked windows while choosing the displayed options.
   const bookable = filterSeasonalSlots(
@@ -1783,7 +1834,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       proximityDriveMinutes: opts.proximityDriveMinutes,
       includeWeekends: opts.includeWeekends,
       minimumLeadMinutes: opts.minimumLeadMinutes,
-      serviceProfile,
+      serviceProfile: publicServiceProfile,
       generatedAt: new Date().toISOString(),
       cacheHit: false,
       ...(funnel ? { zoneDayFunnel: funnel } : {}),

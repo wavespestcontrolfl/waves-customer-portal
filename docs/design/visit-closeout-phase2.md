@@ -13,11 +13,25 @@ comments referring to one visit payment across separate invoices describe an
 older design. The invoice for this lane must be a single invoice containing
 the eligible service lines; do not implement a second payment-allocation system.
 
+The owner approved a 60-minute booking allowance **per service** for combined
+stops. Two services reserve 120 minutes, three reserve 180 minutes, and larger
+mixes must not be truncated to the old 180-minute picker cap. Keep each member's
+start on the hour and allocate the work sequentially. This is booking capacity;
+the customer arrival window remains the shared start plus 120 minutes.
+`GATE_VISIT_COMBINED_CAPACITY` requires `GATE_SEPARATE_COMBO_VISITS` so every
+selected application has its own service record. Billing riders do not add work
+hours; scheduling uses the converter’s physical service units. Combined selections
+with unsupported converter families or cadences are refused before a hold.
+Creation defaults off.
+
 ## Existing mechanisms to extend
 
 - `services/visit-groups.js`: stop identity, membership locks, frozen membership,
   movement, reminder fanout, and refusal of legacy completion when a packet exists.
 - `services/visit-combine.js`: office grouping and sequential service placement.
+- `services/appointment-reminders.js` and its existing database sync/promotion
+  functions: one shared arrival promise, reminder ownership, and cancellation
+  handoff, including customers outside the Phase 1 visit-grouping cohort.
 - `services/complete-scheduled-service.js`: canonical single-service validation,
   ownership, completion claims, durable writes, and resumable side effects.
 - `services/completion-attempts.js`: existing idempotency and recovery protocol.
