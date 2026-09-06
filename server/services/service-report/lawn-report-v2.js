@@ -571,7 +571,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // A comma/"and" can join a negated list; split only when it starts a new
   // subject or follows a completed observation ("no weeds seen, ...").
   const underwateringSignal = obsText
-    .split(/[.!?;]|\b(?:but|however|yet|while|whereas)\b|(?:,|\band\b)\s*(?=(?:the|this|that|these|those)\b)|\b(?:seen|found|observed|present)\s*(?:,\s*(?:and\s+)?|and\s+)/)
+    .split(/[.!?;]|\b(?:but|however|yet|while|whereas)\b|(?:,|\band\b)\s*(?=(?:the|this|that|these|those)\b)|(?<=\b(?:seen|found|observed|present))\s*(?:,\s*(?:and\s+)?|and\s+)/)
     .some(clause => [...clause.matchAll(/\bunder[\s-]?water(?:ing|ed)\b/g)].some(match => {
       const before = clause.slice(0, match.index);
       const after = clause.slice(match.index + match[0].length);
