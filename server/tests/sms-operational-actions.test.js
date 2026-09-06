@@ -105,6 +105,17 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.facts.map((f) => f.value)).toEqual(['#aB12*']);
   });
 
+  test('notes cannot omit a negation or a condition from the source sentence', () => {
+    const message = source('Do not treat the barn. Treat the yard only when the pets are inside.');
+    const result = groundExtraction(extracted([], [
+      fact({ field: 'special_instructions', quote: 'treat the barn', value: 'treat the barn' }),
+      fact({ field: 'special_instructions', quote: 'Treat the yard', value: 'Treat the yard' }),
+      fact({ field: 'special_instructions', quote: 'Do not treat the barn', value: 'Do not treat the barn' }),
+    ]), { message, properties });
+    expect(result.facts.map((f) => f.value)).toEqual(['Do not treat the barn']);
+    expect(result.dropped).toBe(2);
+  });
+
   test('unknown fields fail schema validation and provider failures are retryable', async () => {
     expect(() => groundExtraction(extracted([], [fact({ field: 'payment_method' })]), {
       message: source(fact().quote), properties,

@@ -94,6 +94,30 @@ postgres('SMS operations on PostgreSQL', () => {
     }
   });
 
+  test('the same sentence can request estimates for two properties without dropping either', async () => {
+    const secondProperty = randomUUID();
+    await mockPg('customer_properties').insert({ id: secondProperty, customer_id: message.customer_id,
+      address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236', active: true });
+    message.message_body = 'Please send an estimate for both properties';
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
+    const first = { ...result.obligations[0], quote: message.message_body };
+    result = { dropped: 0, facts: [], obligations: [first, { ...first, property_id: secondProperty }] };
+    await recordMessageOperations(mockPg, message, result, context);
+    const rows = await mockPg('call_commitments');
+    expect(rows).toHaveLength(2);
+    expect(new Set(rows.map((r) => r.sms_context.property_id))).toEqual(new Set([first.property_id, secondProperty]));
+  });
+
+  test('different deliverables in the same quote retain separate obligations', async () => {
+    message.message_body = 'Please send the inspection report and the treatment report';
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
+    const first = { ...result.obligations[0], kind: 'send_report', quote: message.message_body,
+      description: 'Send the inspection report' };
+    result = { dropped: 0, facts: [], obligations: [first, { ...first, description: 'Send the treatment report' }] };
+    await recordMessageOperations(mockPg, message, result, context);
+    expect(await mockPg('call_commitments')).toHaveLength(2);
+  });
+
   test('a source relink during extraction does not update the originally matched customer', async () => {
     await mockPg('sms_log').where({ id: message.id }).update({ customer_id: null });
     expect(await recordMessageOperations(mockPg, message, result, context)).toEqual({ skipped: 'source_changed' });

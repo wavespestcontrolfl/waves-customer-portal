@@ -21,7 +21,13 @@ const SOURCE_COLUMNS = ['id', 'customer_id', 'direction', 'message_body', 'messa
 const HUMAN_TYPES = ['manual', 'ai_approved', 'ai_revised'];
 const EXCLUDED_TYPES = ['opt_out', 'opt_in', 'sms_reaction', 'help_request', 'reschedule_reply'];
 const tail = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-const keyOf = (item) => `${item.party}:${item.kind}:${hashExtractionSource(item.quote).slice(0, 20)}`;
+// A sentence can request the same kind of work for two properties or two
+// recipients/deliverables. Keep that scope in identity. Source-row locking
+// and operational_analysis prevent a reworded retry from committing a
+// second extraction of the same SMS.
+const keyOf = (item) => `${item.party}:${item.kind}:${hashExtractionSource(
+  JSON.stringify([item.quote, item.property_id, item.description]),
+).slice(0, 20)}`;
 
 function eligibleMessage(message) {
   const ourNumber = message.direction === 'inbound' ? message.to_phone : message.from_phone;
@@ -119,13 +125,14 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     await recordExtractionAttempt({ trx, source_type: 'message', source_id: message.id, extractor_version: VERSION,
       source_hash: hashExtractionSource(message.message_body), status: 'ok', proposal_count: extracted.obligations.length });
     const exceptions = facts.filter((f) => !['applied', 'unchanged'].includes(f.outcome));
-    if (exceptions.length) {
-      const notif = await NotificationService.notifyAdmin('alert', 'SMS property instructions need review',
-        'A customer supplied instructions that need a property, timing, or existing-value check. Open their conversation to review the source.',
+    if (exceptions.length + extracted.dropped) {
+      const notif = await NotificationService.notifyAdmin('alert', 'SMS instructions need review',
+        'Part of this message needs an evidence, property, timing, or existing-value check. Open the conversation to review the source.',
         { trx, bell: true, dedupeKey: `sms-property-instructions:${message.id}`,
           link: `/admin/communications?thread=${encodeURIComponent(customer.id)}`,
           metadata: { triggerKey: 'sms_operational_exception', customerId: customer.id, sms_log_id: message.id,
-            fields: exceptions.map((f) => f.field), reasons: [...new Set(exceptions.map((f) => f.outcome))] } });
+            fields: exceptions.map((f) => f.field), unverified_count: extracted.dropped,
+            reasons: [...new Set(exceptions.map((f) => f.outcome))] } });
       if (!notif?.id) throw new Error('sms_operations_bell_not_persisted');
     }
     return { recorded: extracted.obligations.length, applied: facts.filter((f) => f.outcome === 'applied').length };

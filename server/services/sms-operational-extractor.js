@@ -89,15 +89,26 @@ function groundExtraction(parsed, { message, properties = [] }) {
     const clockStated = timingGrounded && /\b(?:\d{1,2}:\d{2}|\d{1,2}\s*(?:am|pm|a\.m\.|p\.m\.))\b/i.test(item.due_text);
     const due = clockStated && item.due_at ? parseDueAt(item.due_at) : null;
     return { ...item, due_text: timingGrounded ? item.due_text : null,
-      due_at: due instanceof Date ? due.toISOString() : null };
+      due_at: due instanceof Date ? due.toISOString() : null,
+      timing_unverified: !!clockStated && !(due instanceof Date) };
   });
   const facts = message.direction !== 'inbound' ? [] : parsed.facts.filter((item) => {
     if (!grounded(item)) return false;
     if (item.field === 'contact_preference') return ['call', 'text', 'email'].includes(item.value);
-    if (/notes$|details$|instructions$|issues$/.test(item.field) && item.value !== item.quote) return false;
+    if (/notes$|details$|instructions$|issues$/.test(item.field)) {
+      if (item.value !== item.quote) return false;
+      const offset = message.message_body.indexOf(item.quote);
+      const before = message.message_body.slice(0, offset);
+      const after = message.message_body.slice(offset + item.quote.length);
+      // A literal substring is insufficient if it drops the preceding
+      // "do not" or a following condition from the same sentence.
+      if (before.trim() && !/[.!?;\n]\s*$/.test(before)) return false;
+      if (after.trim() && !/^\s*[.!?;\n]/.test(after)) return false;
+    }
     return message.message_body.includes(item.value) && item.quote.includes(item.value);
   });
-  return { obligations, facts, dropped: parsed.obligations.length + parsed.facts.length - obligations.length - facts.length };
+  return { obligations, facts, dropped: parsed.obligations.length + parsed.facts.length - obligations.length - facts.length
+    + obligations.filter((item) => item.timing_unverified).length };
 }
 
 async function extractSmsOperations(context) {
