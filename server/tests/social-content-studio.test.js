@@ -1119,6 +1119,19 @@ describe('showdown bank formats: myth vs fact + three signs (PR 3)', () => {
     const idx = Studio.SHOWDOWN_BANK.findIndex((e) => e.key === natural.versusPair.key);
     expect(skipped.versusPair.key).toBe(Studio.SHOWDOWN_BANK[(idx + 1) % Studio.SHOWDOWN_BANK.length].key);
     expect(skipped.city).toBe(natural.city);
+    // Once past the natural slot, an out-of-season candidate is skipped rather than yielding (Codex r2).
+    const waspIdx = Studio.SHOWDOWN_BANK.findIndex((e) => e.key === 'signs_paper_wasps');
+    const before = Studio.SHOWDOWN_BANK[(waspIdx - 1 + Studio.SHOWDOWN_BANK.length) % Studio.SHOWDOWN_BANK.length];
+    let fall = null;
+    for (let d = 2; d <= 30 && !fall; d += 4) {
+      const p = Studio.selectAutonomousVersusPlan(etNoon(`2026-11-${String(d).padStart(2, '0')}`));
+      if (p?.versusPair.key === before.key) fall = etNoon(`2026-11-${String(d).padStart(2, '0')}`);
+    }
+    if (fall) {
+      const stepped = Studio.selectAutonomousVersusPlan(fall, { recent: new Set([before.key]) });
+      expect(stepped).not.toBeNull();
+      expect(stepped.versusPair.key).not.toBe('signs_paper_wasps');
+    }
     // Every key recent → the plain sequence (never a dead lane).
     const all = new Set(Studio.SHOWDOWN_BANK.map((e) => e.key));
     expect(Studio.selectAutonomousVersusPlan(day, { recent: all }).versusPair.key).toBe(natural.versusPair.key);

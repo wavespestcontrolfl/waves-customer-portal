@@ -551,7 +551,7 @@ const PEST_MYTHS = [
     grounding: { facts: ['service_pest_control_species_palmetto_bug_01', 'service_pest_control_species_american_roach_01'] } },
   { key: 'myth_daddy_longlegs', service: 'general pest', format: 'myth', title: 'Daddy longlegs',
     myth: 'Daddy longlegs are the most venomous spiders around.',
-    fact: 'The ones in your garage are harvestmen, not spiders, and they do not bite people.',
+    fact: 'The nickname covers harvestmen (not spiders) and cellar spiders; neither one bites people.',
     verdict: 'A lanai regular that earns its keep eating small insects.',
     grounding: { refs: ['UC Riverside Entomology: daddy-longlegs myth', 'UF/IFAS Featured Creatures: long-bodied cellar spider'] } },
   { key: 'myth_rats_only_dirty', service: 'rodent', format: 'myth', title: 'Roof rats and tidy homes',
@@ -1759,7 +1759,9 @@ async function recentShowdownKeys(limit = 22) {
       .where({ run_type: 'autonomous' })
       .whereIn('status', ['published', 'draft_created'])
       .orderBy('started_at', 'desc')
-      .limit(Math.max(1, Math.min(120, Number(limit) * 3 || 66)))
+      // Showdown runs are one autonomous run in four (day % 4 === 2), so
+      // five rows per requested key recovers the full window.
+      .limit(Math.max(1, Math.min(200, Number(limit) * 5 || 110)))
       .select('input');
     const keys = [];
     for (const row of rows) {
@@ -1803,11 +1805,16 @@ function selectAutonomousVersusPlan(now = new Date(), { recent = new Set() } = {
   // boundary, replaying the prior month's cards within days.
   // Step past keys published inside the recent window (a grown bank remaps
   // the sequence; see recentShowdownKeys). With every key recent, or none,
-  // this is the plain sequence.
+  // this is the plain sequence. The natural slot keeps its yield-when-out-
+  // of-season behaviour below; once the walk has moved past it, an out-of-
+  // season candidate is skipped too — otherwise a spring-only card would
+  // stall the lane all fall, since a yield records no key.
   let pair = null;
   for (let step = 0; step < SHOWDOWN_BANK.length && !pair; step += 1) {
     const candidate = SHOWDOWN_BANK[(seq + step) % SHOWDOWN_BANK.length];
-    if (!recent.has(candidate.key)) pair = candidate;
+    if (recent.has(candidate.key)) continue;
+    if (step > 0 && candidate.months && !candidate.months.includes(month)) continue;
+    pair = candidate;
   }
   if (!pair) pair = SHOWDOWN_BANK[seq % SHOWDOWN_BANK.length];
   if (pair.months && !pair.months.includes(month)) return null;
