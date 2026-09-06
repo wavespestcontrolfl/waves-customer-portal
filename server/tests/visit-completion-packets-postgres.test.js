@@ -18,7 +18,7 @@ const { randomUUID } = require('crypto');
 const { saveVisitCompletionPacket } = require('../services/visit-completion-packets');
 const { completeScheduledService } = require('../services/complete-scheduled-service');
 const { etDateString } = require('../utils/datetime-et');
-const { stopBaseKey } = require('../services/visit-groups');
+const { stopBaseKey, dateOnly } = require('../services/visit-groups');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { chargeInvoiceWithSavedCard } = require('../services/stripe');
 const InvoiceService = require('../services/invoice');
@@ -218,6 +218,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(invoice.line_items.filter((line) => line.amount > 0).map((line) => line.client_id))
       .toEqual(fixture.serviceIds.map((id) => `scheduled_${id}_primary`));
     expect(invoice.visit_completion_packet_id).toBe(result.body.packetId);
+    expect(dateOnly(invoice.due_date)).toBe(etDateString());
     expect((await createVisitCompletionInvoice(result.body.packetId)).invoiceId).toBe(invoice.id);
   });
 
@@ -256,6 +257,38 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(res.status).not.toHaveBeenCalled();
     expect(res.json.mock.calls[0][0].needs_review)
       .toEqual(expect.arrayContaining([expect.objectContaining({ scheduled_service_id: fixture.serviceIds[1] })]));
+  });
+
+  test('concurrent submissions need only their transaction connection for completion helpers', async () => {
+    await mockPg('customers').where({ id: fixture.customerId }).update({
+      property_type: 'commercial', autopay_enabled: true,
+    });
+    const normalPool = mockPg;
+    mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 1 }, acquireConnectionTimeout: 20000 });
+    const flags = require('../services/feature-flags').isUserFeatureEnabled;
+    const context = require('../services/recap-visit-context').buildRecapVisitContext;
+    flags.mockImplementation(jest.requireActual('../services/feature-flags').isUserFeatureEnabled);
+    context.mockImplementation(jest.requireActual('../services/recap-visit-context').buildRecapVisitContext);
+    const recap = jest.spyOn(require('../services/completion-recap'), 'generateRecap')
+      .mockResolvedValue({ recap: 'The service record is ready.', source: 'fixture' });
+    try {
+      const input = submission();
+      for (const item of input.items) delete item.body.customerRecap;
+      const results = await Promise.allSettled([saveVisitCompletionPacket(input), saveVisitCompletionPacket(input)]);
+      expect(results).toEqual([
+        expect.objectContaining({ status: 'fulfilled', value: expect.objectContaining({ status: 202 }) }),
+        expect.objectContaining({ status: 'fulfilled', value: expect.objectContaining({ status: 202 }) }),
+      ]);
+      expect(new Set(results.map((result) => result.value.body.packetId)).size).toBe(1);
+      expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
+      expect(context).toHaveBeenCalled();
+    } finally {
+      recap.mockRestore();
+      flags.mockImplementation(async () => false);
+      context.mockImplementation(async () => '');
+      await mockPg.destroy();
+      mockPg = normalPool;
+    }
   });
 
   test('commercial tax and an estimate deposit settle once on the same invoice', async () => {

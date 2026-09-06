@@ -5,7 +5,7 @@
 const db = require('../models/db');
 const InvoiceService = require('./invoice');
 const { acquireScheduledInvoiceMintLock, TERMINAL_INVOICE_STATUSES } = require('./scheduled-invoice-mint');
-const { lockStop } = require('./visit-groups');
+const { lockStop, dateOnly } = require('./visit-groups');
 const { resolveBillingLane, completionInvoiceAmount } = require('./billing-lane');
 const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 const { pendingDepositCredit, consumeDepositCredit } = require('./estimate-deposits');
@@ -119,7 +119,7 @@ async function mintPacketInvoice({ packet, visit, members, customer, trx }) {
   const deposit = sourceEstimateId ? await pendingDepositCredit(sourceEstimateId, trx) : null;
   const invoice = await InvoiceService.create({
     database: trx, customerId: customer.id, scheduledServiceId: billed[0].member.id,
-    serviceRecordId: billed[0].member.record_id, serviceDate: visit.scheduled_date,
+    serviceRecordId: billed[0].member.record_id, serviceDate: visit.scheduled_date, dueDate: dateOnly(visit.scheduled_date),
     title: 'Combined service visit', lineItems, trustedStoredDiscountSources: ['scheduled_service'],
     ...(deposit ? { depositCredit: { amount: deposit.amount, estimateId: sourceEstimateId } } : {}),
   }, { packetId: packet.id });
