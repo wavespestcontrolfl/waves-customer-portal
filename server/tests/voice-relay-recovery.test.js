@@ -659,12 +659,16 @@ describe('the conversation side', () => {
     expect(resumedSessionBudgetMs({ created_at: null, metadata: { relay_reconnects: 1 } }, { now })).toBe(WS_MAX_SESSION_MS);
   });
 
-  test('only committed callback evidence permits repeating the promise without another delivery', async () => {
+  test.each([true, false])('a previous callback stamp still requires the locked delivery result (%s)', async (bellWritten) => {
     const { triggerNotification: trig } = require('../services/notification-triggers');
     primeDb({ firstRow: { id: 'cl-9', metadata: { relay_failure_callback_filed_at: new Date().toISOString() } } });
+    trig.mockImplementationOnce((_key, _payload, options) => {
+      options.onBell(bellWritten);
+      return Promise.resolve({ bellWritten });
+    });
     const convo = new RelayConversation({ callSid: 'CA-cb-dup', from: '+19415551234', send: jest.fn() });
-    expect(await convo._fileFailureCallback()).toBe(true);
-    expect(trig).not.toHaveBeenCalled();
+    expect(await convo._fileFailureCallback()).toBe(bellWritten);
+    expect(trig).toHaveBeenCalledTimes(1);
   });
 
   test('a committed callback is promised even while push delivery remains pending', async () => {
@@ -1208,6 +1212,35 @@ describe('the conversation side', () => {
       });
       return { Convo, leadWriter, dbIso };
     }
+
+    test('a turn queued during callback persistence cannot run after the handoff ends the relay', async () => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      const stream = jest.fn(() => ({ finalMessage: async () => ({ stop_reason: 'tool_use', content: [
+        { type: 'tool_use', id: 'queued-write', name: 'capture_lead', input: {} },
+      ] }) }));
+      const executeTool = jest.fn(async () => 'Captured.');
+      const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: executeTool });
+      primeDb({ db: dbIso });
+      const endSession = jest.fn(() => true);
+      const convo = new Convo({ callSid: 'CA-queued-handoff', from: '+19415550123', send: jest.fn(), endSession });
+      convo._modelFailures = 2;
+      convo._sessionSuperseded = jest.fn(async () => false);
+      let entered;
+      let finish;
+      const filing = new Promise((resolve) => { entered = resolve; });
+      convo._fileFailureCallback = jest.fn(() => { entered(); return new Promise((resolve) => { finish = resolve; }); });
+      const first = convo.handlePrompt('Please arrange a callback.');
+      await filing;
+      const queued = convo.handlePrompt('Also change my appointment.');
+      expect(convo._ending).toBe(false);
+      finish(true);
+      await Promise.all([first, queued]);
+      expect(convo._ending).toBe(true);
+      expect(endSession).toHaveBeenCalledTimes(1);
+      expect(stream).not.toHaveBeenCalled();
+      expect(executeTool).not.toHaveBeenCalled();
+      expect(convo._transcript.filter((turn) => turn.role === 'caller').map((turn) => turn.text)).toEqual(['Please arrange a callback.']);
+    });
 
     test.each([true, false])('a write settling during the drain updates the transferred outcome (success: %s)', async (success) => {
       process.env.GATE_VOICE_RELAY_RECOVERY = 'true';

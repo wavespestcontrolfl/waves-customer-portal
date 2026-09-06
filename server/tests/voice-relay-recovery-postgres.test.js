@@ -25,6 +25,7 @@ jest.mock('../services/reservice-scheduler', () => ({
   openReserviceCallbacks: jest.fn(async () => ({})), reserviceLanesForCustomer: jest.fn(async () => ['pest']),
   RESERVICE_LANES: { pest: { serviceKey: 'pest_reservice' } }, openCallbackExistsForLane: jest.fn(async () => false),
 }));
+jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'notification-fixture' })) }));
 jest.mock('../services/voice-agent/relay-alert', () => ({ alertOwnerReservice: jest.fn(async () => true) }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn(async () => {}) }));
@@ -54,7 +55,7 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     admin = knex({ client: 'pg', connection });
     await admin.schema.createSchema(schema);
     mockPg = knex({ client: 'pg', connection: { connectionString: connection, application_name: schema }, searchPath: [schema], pool: { min: 0, max: 4 } });
-    await mockPg.schema.createTable('call_log', (t) => { t.text('id').primary(); t.text('twilio_call_sid').unique(); t.jsonb('metadata'); t.timestamp('voicemail_callback_alerted_at'); t.integer('duration_seconds'); t.text('call_summary'); t.text('call_outcome'); t.text('answered_by'); t.text('status'); t.timestamp('created_at', { useTz: true }); t.timestamp('updated_at', { useTz: true }); });
+    await mockPg.schema.createTable('call_log', (t) => { t.text('id').primary(); t.text('twilio_call_sid').unique(); t.text('customer_id'); t.text('from_phone'); t.jsonb('metadata'); t.timestamp('voicemail_callback_alerted_at'); t.integer('duration_seconds'); t.text('call_summary'); t.text('call_outcome'); t.text('answered_by'); t.text('status'); t.timestamp('created_at', { useTz: true }); t.timestamp('updated_at', { useTz: true }); });
     await mockPg.schema.createTable('notifications', (t) => {
       t.increments('id');
       for (const field of ['recipient_type', 'recipient_id', 'category', 'title', 'body', 'icon', 'link']) t.text(field);
@@ -125,6 +126,51 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     await NotificationService.revertRelayFailureCallback(receipt);
     expect(await mockPg('notifications')).toHaveLength(1); // newer attempt survives a stale undo
     expect((await mockPg('call_log').first()).voicemail_callback_alerted_at).toBeTruthy();
+  });
+
+  test('callback filing waits for in-flight compensation and promises only its replacement receipt', async () => {
+    let oldReceipt;
+    await NotificationService.notifyAdmin('voicemail_callback', 'Callback fixture', 'Callback required', {
+      dedupeKey: `relay-failure:${callSid}`,
+      relayFailureCall: { callSid, owner: 'old', onCommitted: (value) => { oldReceipt = value; } },
+    });
+    const { triggerNotification } = require('../services/notification-triggers');
+    triggerNotification.mockImplementationOnce(async (_key, _payload, options) => {
+      const result = await NotificationService.notifyAdmin('voicemail_callback', 'Callback fixture', 'Callback required', {
+        dedupeKey: `relay-failure:${callSid}`, relayFailureCall: options.relayFailureCall,
+      });
+      const bellWritten = Boolean(result && !result.suppressed);
+      options.onBell(bellWritten);
+      return { bellWritten };
+    });
+    let entered;
+    let release;
+    const compensating = new Promise((resolve) => { entered = resolve; });
+    const proceed = new Promise((resolve) => { release = resolve; });
+    const transaction = mockPg.transaction.bind(mockPg);
+    jest.spyOn(require('../models/db'), 'transaction').mockImplementationOnce((fn) => transaction(async (trx) => {
+      const result = await fn(trx); // actual compensation has deleted the receipt, but has not committed
+      entered();
+      await proceed;
+      return result;
+    }));
+    const compensation = NotificationService.revertRelayFailureCallback(oldReceipt);
+    await compensating;
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    const convo = Object.assign(Object.create(RelayConversation.prototype), {
+      callSid, sessionKey: 'old', from: '+19415550123', _callerVerified: true,
+    });
+    let settled = false;
+    const filing = convo._fileFailureCallback().then((result) => { settled = true; return result; });
+    try {
+      await waitForBlockedClaim();
+      expect(settled).toBe(false); // plain SELECT still sees the old stamp, but cannot authorize a promise
+    } finally { release(); }
+    await compensation;
+    expect(await filing).toBe(true);
+    expect(convo._failureCallbackReceipt.notificationId).not.toBe(oldReceipt.notificationId);
+    await NotificationService.revertRelayFailureCallback(oldReceipt);
+    expect((await mockPg('notifications').first()).id).toBe(convo._failureCallbackReceipt.notificationId);
   });
 
   test('post-commit takeover permits compensation without changing the replacement owner', async () => {

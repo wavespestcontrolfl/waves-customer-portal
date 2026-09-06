@@ -1163,7 +1163,7 @@ class RelayConversation {
     // prior _runLoop is still in flight can't be inserted ahead of that loop's
     // assistant/tool_result messages and corrupt the conversation order.
     this._chain = this._chain.then(() => {
-      if (this.ended) return undefined;
+      if (this.ended || this._ending) return undefined;
       // Recorded HERE (inside the serialized chain), not at enqueue time, so
       // the transcript's caller/agent ordering matches what actually happened.
       // The MESSAGE itself is pushed inside _runLoop, after the office-hours
@@ -1756,11 +1756,11 @@ class RelayConversation {
   async _fileFailureCallback() {
     if (this.ended || this.sandbox || !this.callSid) return false;
     try {
-      const row = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid).first('id', 'customer_id', 'from_phone', 'metadata').catch(() => null), 2000, null);
+      const row = await withTimeout(db('call_log').where('twilio_call_sid', this.callSid).first('id', 'customer_id', 'from_phone').catch(() => null), 2000, null);
       if (!row) return false;
-      let meta = row.metadata;
-      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-      if (meta?.relay_failure_callback_filed_at) return true;
+      // A previous receipt can still be compensated. Only this attempt's
+      // locked notification result authorizes a callback promise. An existing
+      // claim is suppressed rather than accepted on another session's behalf.
       const verified = this._callerVerified === true;
       const phone = toE164((verified && row.from_phone) || this.from || '');
       if (!isLikelyE164(phone)) return false;
