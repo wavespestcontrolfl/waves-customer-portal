@@ -2926,9 +2926,8 @@ async function recapSuppliesOwed(result) {
   if (result.priorCompleted !== true) return true;
   if (!result.recordId) return false;
   try {
-    const rec = await db('service_records').where({ id: result.recordId }).first('field_flags');
-    const flags = typeof rec?.field_flags === 'string' ? JSON.parse(rec.field_flags) : (rec?.field_flags || {});
-    return flags.completion_supplies_owed === true;
+    const { completionSuppliesOwed } = require('../services/supplies-consumption');
+    return completionSuppliesOwed(await db('service_records').where({ id: result.recordId }).first('field_flags'));
   } catch (err) {
     // A failed read establishes nothing: consuming anyway would deduct
     // today's kit for a HISTORICAL completion edited now — one completed
@@ -2941,42 +2940,31 @@ async function recapSuppliesOwed(result) {
   }
 }
 
-// The consume itself (same hook as /:serviceId/complete, same at-most-once
-// index) plus the job-cost recalc a kit movement's cost_used warrants
-// (idempotent UPSERT, fire-and-forget — GH codex r4 P2).
-async function consumeRecapSupplies(serviceId, result) {
-  const { consumeCompletionSupplies } = require('../services/supplies-consumption');
-  const svcRow = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'technician_id', 'service_type');
-  const consumption = await consumeCompletionSupplies(db, {
-    scheduledServiceId: serviceId,
-    serviceRecordId: result.recordId || null,
-    customerId: svcRow?.customer_id || null,
-    technicianId: svcRow?.technician_id || null,
-    isIncompleteVisit: false,
-    visitPerformed: result.priorNonPerformed !== true,
-    serviceLine: detectServiceLine(svcRow?.service_type || 'Pest Control'),
-    serviceType: svcRow?.service_type || null,
-  });
-  if (consumption?.consumed?.length) {
-    const JobCosting = require('../services/job-costing');
-    void JobCosting.calculateJobCost(serviceId).catch((jcErr) => logger.warn(`[dispatch] recap job costing after supplies consumption failed: ${jcErr.message}`));
-  }
-  return consumption;
-}
-
-// Recap consumable settlement: consume when owed, then clear the owed marker
-// — unless the hand-off bell was LOST (Codex #3832 r14 P1): a landed bell
-// means staff adjust by hand, so a retry must not deduct the same kit again
-// on top of their correction; only a miss nobody was told about keeps the
-// marker so the next retry re-runs the at-most-once consume (pre-push P1).
+// Recap consumable settlement: consume when owed (same hook as
+// /:serviceId/complete, same at-most-once index), clear the owed marker per
+// the shared lifecycle in supplies-consumption.js (kept only when the
+// hand-off bell was lost), then the job-cost recalc a kit movement's
+// cost_used warrants (idempotent UPSERT, fire-and-forget — GH codex r4 P2).
 // Never throws: the recap response never waits on a supplies write.
 async function settleRecapSupplies(serviceId, result) {
   if (!(await recapSuppliesOwed(result))) return;
   try {
-    const consumption = await consumeRecapSupplies(serviceId, result);
-    // A hand-off bell that did not land, or an obsolete one that could not be retired (Codex r30 P1): the marker stays for the next retry.
-    const handoffLost = (consumption?.errors || []).some((e) => e.reason === 'failure_bell_not_sent' || e.reason === 'bell_retire_failed');
-    if (result.recordId && !handoffLost) await db('service_records').where({ id: result.recordId }).update({ field_flags: db.raw("COALESCE(field_flags, '{}'::jsonb) - 'completion_supplies_owed'") });
+    const { settleOwedCompletionSupplies } = require('../services/supplies-consumption');
+    const svcRow = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'technician_id', 'service_type');
+    const consumption = await settleOwedCompletionSupplies(db, {
+      scheduledServiceId: serviceId,
+      serviceRecordId: result.recordId || null,
+      customerId: svcRow?.customer_id || null,
+      technicianId: svcRow?.technician_id || null,
+      isIncompleteVisit: false,
+      visitPerformed: result.priorNonPerformed !== true,
+      serviceLine: detectServiceLine(svcRow?.service_type || 'Pest Control'),
+      serviceType: svcRow?.service_type || null,
+    });
+    if (consumption?.consumed?.length) {
+      const JobCosting = require('../services/job-costing');
+      void JobCosting.calculateJobCost(serviceId).catch((jcErr) => logger.warn(`[dispatch] recap job costing after supplies consumption failed: ${jcErr.message}`));
+    }
   } catch (err) { logger.error(`[dispatch] recap supplies consumption failed: ${err.message}`); }
 }
 
@@ -4210,10 +4198,13 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         const NotificationService = require('../services/notification-service');
         const parts = [];
         if (dueConflicts.length) parts.push(`${dueConflicts.length} future visit(s) landed on already-booked windows and kept their date and technician but have NO time window (${dueConflicts.map((c) => c.date).join(', ')}) — set a time from dispatch`);
-        if (!cardOnly && overlapDates.length) parts.push(`${overlapDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${overlapDates.join(', ')}) — check those days' routes`);
+        if (!cardOnly && overlapDates.length) parts.push(result.arrivalWindowDates?.length
+          ? `${overlapDates.length} occurrence(s) need route review to keep every promised arrival window (${overlapDates.join(', ')}) — check those days' routes`
+          : `${overlapDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${overlapDates.join(', ')}) — check those days' routes`);
         const notif = await NotificationService.notifyAdmin(
           'schedule_conflict',
-          dueConflicts.length ? 'Series move left visits without a time window' : 'Series move overlaps other visits',
+          dueConflicts.length ? 'Series move left visits without a time window'
+            : (result.arrivalWindowDates?.length ? 'Series move needs route review' : 'Series move overlaps other visits'),
           `A series move shifted a recurring plan: ${parts.join('; ')}.`,
           { metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates } }
         );
@@ -4770,6 +4761,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // Staff surface: occupancy clashes commit with a warning instead of
     // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
     rescheduleOptions.overlapAdvisory = true;
+    rescheduleOptions.adminWindowRules = true;
     rescheduleOptions.sourceSurface = 'dispatch_board';
     rescheduleOptions.notifyRequested = notifyCustomer !== false;
     if (operationKey) rescheduleOptions.operationKey = operationKey;

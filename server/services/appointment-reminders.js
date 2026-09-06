@@ -91,6 +91,7 @@ const FALLBACK_KIND_LABEL = {
   '72h': '72-hour appointment reminder',
   '24h': '24-hour appointment reminder',
   en_route: 'technician en-route notice',
+  tech_arrived: 'technician arrival notice',
 };
 
 // messaging_audit_log purpose / original_message_type → fallback kind.
@@ -609,8 +610,9 @@ async function scheduledServiceApptTime(scheduledServiceId, { throwOnError = fal
   try {
     const svc = await db('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('scheduled_date', 'window_start');
+      .first('id', 'reservation_service_mix', 'scheduled_date', 'window_start');
     if (!svc) return null;
+    svc.window_start = await require('./reservation-arrival').arrivalStartForService(db, svc);
     return composeScheduledApptTime(svc);
   } catch (err) {
     logger.warn(`[appt-remind] appt-time lookup failed for service ${scheduledServiceId}: ${err.message}`);
@@ -890,9 +892,9 @@ async function confirmationArrivalWindow({ scheduledServiceId = null, windowStar
   const { spokenArrivalWindow, UNKNOWN_ARRIVAL_WINDOW } = require('../utils/sms-time-format');
   try {
     let start = windowStart;
-    if (!start && scheduledServiceId) {
-      const row = await db('scheduled_services').where({ id: scheduledServiceId }).first('window_start');
-      start = row?.window_start || null;
+    if (scheduledServiceId) {
+      const row = await db('scheduled_services').where({ id: scheduledServiceId }).first('id', 'reservation_service_mix', 'window_start');
+      if (row) start = await require('./reservation-arrival').arrivalStartForService(db, row);
     }
     return spokenArrivalWindow(String(start || '').slice(0, 5));
   } catch {
@@ -2221,7 +2223,8 @@ const AppointmentReminders = {
 
   async registerVisitReminderInTx(conn, { scheduledServiceId, customerId, appointmentTime, serviceType, source, createdAt }) {
     if (!conn || !scheduledServiceId || !customerId) return null;
-    const apptTime = parseETDateTime(appointmentTime);
+    const resolved = await this.resolveCommittedVisitTime(scheduledServiceId, appointmentTimeParts(appointmentTime), conn);
+    const apptTime = parseETDateTime(resolved ? resolved.appointmentTime : appointmentTime);
     if (isNaN(apptTime.getTime())) return null;
     const now = new Date();
     // Label recovery reads through the caller's conn — borrowing a second
@@ -2411,7 +2414,7 @@ const AppointmentReminders = {
       // reschedule UPDATE then waits until the reminder exists, so its
       // sync trigger finds a row to correct instead of nothing.
       if (lock) query = query.forShare();
-      const row = await query.first('scheduled_date', 'window_start');
+      const row = await query.first('id', 'reservation_service_mix', 'scheduled_date', 'window_start');
       if (row) {
         // The row is the whole truth once found: a NULL window means
         // "windowless" (08:00 convention), not "keep the caller's stale
@@ -2421,7 +2424,8 @@ const AppointmentReminders = {
             ? row.scheduled_date.toISOString().slice(0, 10)
             : String(row.scheduled_date).slice(0, 10);
         }
-        resolvedStart = row.window_start ? String(row.window_start).slice(0, 5) : null;
+        const arrivalStart = await require('./reservation-arrival').arrivalStartForService(conn, row);
+        resolvedStart = arrivalStart ? String(arrivalStart).slice(0, 5) : null;
       }
     } catch (err) {
       logger.warn(`[appt-remind] could not read back visit ${scheduledServiceId} for its reminder time (${err.message}) — using the caller's values`);
@@ -3767,7 +3771,8 @@ const AppointmentReminders = {
         });
       };
 
-      const newApptTime = parseETDateTime(newTime);
+      const resolved = await this.resolveCommittedVisitTime(scheduledServiceId, appointmentTimeParts(newTime));
+      const newApptTime = parseETDateTime(resolved ? resolved.appointmentTime : newTime);
       if (isNaN(newApptTime.getTime())) {
         logger.error(`[appt-remind] Reschedule: invalid time ${newTime}`);
         return null;

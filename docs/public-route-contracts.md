@@ -67,7 +67,15 @@ already on it (no homeowner PII/links); settlement happens via the webhook,
 not the route,
 `/api/receipt/:token`, `/api/contracts/:token`, `/api/booking/*`,
 `/api/public/estimates/:token/ask`,
-`/api/public/estimates/:token/find-slots`, `/api/reports/:token/*` (the
+`/api/public/estimates/:token/find-slots`,
+`/api/public/estimates/:token/available-slots` and `/reserve` (the recurring
+service profile uses the converter's canonical stored/engine service rows.
+Generated or saved tier selections replace the listed service cadences and
+retain omitted companion programs; choosing a tier is not a service removal.
+The existing pest-only recurring choice on eligible one-time-toggle estimates
+retains its intentional companion exclusion, using the acceptance predicate.
+Existing request fields, token/signature guards, rate limits, privacy headers,
+and booking duration policy apply), `/api/reports/:token/*` (the
 service-report V1 payload — `/data`, the PDF at `/:token`, `/map.svg`, and
 the queued PDF / report-email renders that share `buildReportV1Data` —
 renders the report's IDENTITY facts from the completion-time snapshot on
@@ -680,6 +688,14 @@ customer's last selection once the route writes it back (validation audit
 SEC-001, 2026-09-02; before it the ceiling applied only to opted-out
 estimates). A membership reconcile that reprices the mix refreshes the
 opt-out stamp with the row tier.
+Appointment reminders registered by `/accept` derive their date and arrival
+from the committed service row. A server-owned `reservation_service_mix`
+allocation can preserve one booked arrival across sequential member work
+windows, including when grouping is disabled. The existing reminder dedupe,
+reschedule sync, sibling promotion, and send-time hold checks use that arrival;
+a member moved away from its allocated date/start returns to its own arrival.
+Registration still suppresses immediate confirmation delivery. This metadata
+is internal and adds no request field or public payload field.
 `/accept` existing-appointment adoption (`existingAppointmentId` in the
 body, offered by the view contract instead of the slot picker): the row
 must belong to this customer, be unclaimed or claimed by THIS estimate,

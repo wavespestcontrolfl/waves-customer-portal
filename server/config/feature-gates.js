@@ -2066,6 +2066,11 @@ const gates = {
   // stay individually available regardless of this gate.
   prepaidInvoiceReceipt: isProd ? process.env.GATE_PREPAID_INVOICE === 'true' : true,
 
+  // Record collected annual prepay: commit a receipt job with the payment,
+  // then deliver through the standard receipt queue. Customer communications
+  // stay off in every environment until explicitly enabled.
+  recordedAnnualPrepayReceipt: process.env.GATE_RECORDED_ANNUAL_PREPAY_RECEIPT === 'true',
+
   // Zelle payment-notice reconciler — the Gmail sync recognises Capital One
   // "Someone sent you money with Zelle" notices (forwarded from the owner's
   // personal inbox to contact@), matches the payer + exact amount to ONE open
@@ -2256,6 +2261,12 @@ const gates = {
   // needs no redeploy. Kill switch: unset — hint requests answer gated:true
   // with no slots and every picker renders exactly as today.
   bestTimeHints: gateEnvValue('GATE_BEST_TIME_HINTS'),
+
+  // Staff existing-visit picker + save checks use complete-route arrival
+  // simulation within the existing two-hour customer promises. Advisory;
+  // never changes neighbours' promises or sends notifications. Call-time
+  // kill switch in scheduling/arrival-route.js; off in every environment.
+  adminArrivalWindows: gateEnvValue('GATE_ADMIN_ARRIVAL_WINDOWS'),
 
   // Call property-role classification (2026-08-15): the extraction classifies
   // each property a call discusses (occupancy + which one is the caller's
