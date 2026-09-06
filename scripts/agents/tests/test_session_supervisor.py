@@ -88,11 +88,20 @@ class SupervisorTests(unittest.TestCase):
 
     def test_live_codex_worktree_or_cd_argument_blocks_resume(self):
         for cwd, args in [(self.job['worktree'], ''), ('/tmp', 'codex --cd ' + self.job['worktree']),
+                          ('/tmp', 'codex -C' + self.job['worktree']),
+                          ('/tmp', 'codex -C=' + self.job['worktree']),
                           ('/tmp', 'codex --cd=/unrelated')]:
             with self.subTest(cwd=cwd, args=args), \
                     patch.object(supervisor, 'command', side_effect=lambda argv:
                                  f'p1234\nccodex\nn{cwd}\n' if argv[0] == 'lsof' else args):
                 self.assertEqual(supervisor.worktree_busy(self.job), 'unrelated' not in args)
+
+    def test_flattened_whitespace_in_worktree_argument_fails_closed(self):
+        job = {**self.job, 'worktree': str(self.root / 'task with spaces')}
+        for flag in ['--cd ', '-C', '-C=']:
+            with patch.object(supervisor, 'command', side_effect=lambda argv:
+                              'p1234\nccodex\nn/tmp\n' if argv[0] == 'lsof' else 'codex ' + flag + job['worktree']):
+                self.assertTrue(supervisor.worktree_busy(job))
 
     @unittest.skipUnless(shutil.which('lsof') and shutil.which('cc'), 'requires lsof and a C compiler')
     def test_real_other_process_in_worktree_blocks_resume(self):
@@ -450,6 +459,26 @@ class SupervisorTests(unittest.TestCase):
         self.assertIsNone(supervisor.process_stamp(pid))
         self.assertEqual(result[0]['reason'], 'owner_decision')
         self.assertEqual(supervisor.read_jobs(self.root)[self.key]['status'], 'paused')
+
+    def test_finish_and_retry_refuse_an_active_worker_without_changing_state(self):
+        process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
+        try:
+            self.job.update({'status': 'running', 'worker_pid': process.pid,
+                             'worker_stamp': supervisor.process_stamp(process.pid)})
+            self.store()
+            with patch.object(supervisor, 'snapshot', return_value={**self.fresh, 'merged': True}):
+                for action in ['finish', 'retry']:
+                    with self.assertRaises(ValueError):
+                        supervisor.control(self.root, argparse.Namespace(job=self.key, action=action, execute=True))
+                    self.assertEqual(supervisor.read_jobs(self.root)[self.key], self.job)
+                self.job.update({'status': 'launching', 'worker_pid': None, 'launch_pending': True})
+                self.store()
+                with self.assertRaises(ValueError):
+                    supervisor.control(self.root, argparse.Namespace(job=self.key, action='finish', execute=True))
+                self.assertEqual(supervisor.read_jobs(self.root)[self.key], self.job)
+        finally:
+            process.terminate()
+            process.wait()
 
     def test_finish_requires_merged_pr_and_stops_future_wakeups(self):
         self.store()

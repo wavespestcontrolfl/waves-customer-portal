@@ -67,7 +67,7 @@ Enrollment reads only the selected session's filename, not an archive sample.
 
 The worker waits while the original process exists or another process has its
 transcript open. It also checks live Codex/Claude working directories (including
-Codex `--cd`) and Claude's native agent listing, so a different session that
+Codex `--cd` and attached `-C/path`) and Claude's native agent listing, so a different session that
 claims the same worktree blocks a resume.
 PID start times distinguish a restarted process from a reused PID. Worktree,
 origin, branch, and pushed HEAD must still match before a resume. An ambiguous
@@ -108,7 +108,11 @@ from the live owning session after the previous worker has exited. The worker re
 stopped run cannot erase its own recovery path.
 When the original session finishes its own PR, run `finish` after merge and
 deployment verification, then perform the normal worktree cleanup. `finish`
-requires the PR to be merged; it does not itself verify deployment.
+requires the PR to be merged and refuses while its worker group is active
+or a launch is unresolved,
+so completion cannot race worktree removal. It does not itself verify deployment.
+A background worker returns its final disposition instead of invoking `finish`
+on itself; the supervisor drains it before recording completion.
 
 Only one resumed model process runs at a time. A run lasts at most 30 minutes,
 with at least five minutes between starts, at most three starts for unchanged
