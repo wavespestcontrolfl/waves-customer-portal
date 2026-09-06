@@ -19,6 +19,36 @@ const {
 } = require('../services/llm/call');
 const { PROVIDER, ROUTES, FLAGSHIP, OPENAI_BEST, GEMINI_VISION_BEST, CALL_EXTRACTION_ANTHROPIC } = require('../config/models');
 
+describe('PDF documents across the fallback chain', () => {
+  test('Anthropic failure passes the same PDF bytes to OpenAI, with no remote file upload', async () => {
+    const keys = { anthropic: process.env.ANTHROPIC_API_KEY, openai: process.env.OPENAI_API_KEY };
+    const originalFetch = global.fetch;
+    try {
+      process.env.ANTHROPIC_API_KEY = 'test-key'; process.env.OPENAI_API_KEY = 'test-key';
+      mockAnthropicCreate.mockReset().mockRejectedValue(new Error('unavailable'));
+      global.fetch = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ output_text: '{"ok":true}' }) });
+      const data = Buffer.from('%PDF-synthetic').toString('base64');
+      const result = await dispatchWithFallback({ primary: { provider: 'anthropic', model: FLAGSHIP }, fallback: { provider: 'openai', model: OPENAI_BEST } }, {
+        system: 'Extract this synthetic document.', text: 'Return JSON.', documents: [{ filename: 'label.pdf', data }], maxTokens: 4096,
+      });
+      expect(result.ok).toBe(true);
+      expect(mockAnthropicCreate.mock.calls[0][0].messages[0].content).toContainEqual({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data } });
+      const request = JSON.parse(global.fetch.mock.calls[0][1].body);
+      expect(request.input[0].content).toContainEqual({ type: 'input_file', filename: 'label.pdf', file_data: `data:application/pdf;base64,${data}` });
+      expect(request.store).toBe(false);
+    } finally {
+      global.fetch = originalFetch;
+      for (const [key, value] of [['ANTHROPIC_API_KEY', keys.anthropic], ['OPENAI_API_KEY', keys.openai]]) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+  });
+  test('an unsupported route cannot silently omit the document', async () => {
+    expect(await dispatch({ provider: 'gemini', model: GEMINI_VISION_BEST }, { documents: [{ filename: 'label.pdf', data: 'JVBERi0=' }] }))
+      .toEqual({ ok: false, reason: 'unsupported_pdf_provider' });
+  });
+});
+
 describe('llm/call parsers', () => {
   test('extractOpenAIText reads output_text and the output[].content walk', () => {
     expect(extractOpenAIText({ output_text: '{"ok":true}' })).toBe('{"ok":true}');

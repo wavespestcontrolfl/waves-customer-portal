@@ -44,6 +44,61 @@
  * word on the returned order.
  */
 
+const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
+const hhmmToMin = (hhmm) => {
+  const [h, m] = String(hhmm).split(':').map(Number);
+  return h * 60 + m;
+};
+
+/**
+ * The [start, end] minute-of-day ARRIVAL range a stop is PROMISED to begin
+ * within, or null when unconstrained. window_start rows: ALWAYS start + 120
+ * — the customer's arrival promise is "time + 2h window" (the same rule the
+ * SMS formatter's arrivalWindowRange enforces), NEVER the stored window_end,
+ * which is a service-END estimate: a 3-hour 09:00 job has a noon window_end
+ * but its promised arrival deadline is 11:00 (codex GitHub round P1). Legacy
+ * bands get their real band ends (morning = 08:00–12:00, afternoon =
+ * 12:00–17:00); a literal HH:MM in time_window gets the same +120 promise.
+ */
+function effectiveWindowRange(stop) {
+  if (stop.window_start) {
+    const ws = hhmmToMin(String(stop.window_start).slice(0, 5));
+    return { startMin: ws, endMin: ws + ARRIVAL_WINDOW_MINUTES };
+  }
+  const raw = String(stop.time_window || '').trim().toLowerCase();
+  if (raw === 'morning') return { startMin: 8 * 60, endMin: 12 * 60 };
+  if (raw === 'afternoon') return { startMin: 12 * 60, endMin: 17 * 60 };
+  const m = raw.match(/^(\d{1,2}):(\d{2})/);
+  if (m) {
+    const ws = Number(m[1]) * 60 + Number(m[2]);
+    return { startMin: ws, endMin: ws + ARRIVAL_WINDOW_MINUTES };
+  }
+  return null;
+}
+
+/** Stops ordered as the board currently runs them — the "before" baseline
+ *  savings are measured against. MUST mirror the dispatch consumers' SQL
+ *  exactly (dispatch.js jobs query: COALESCE(route_order, 999),
+ *  COALESCE(window_start, '23:59'), created_at — no time_window, windowless
+ *  stops LAST): a baseline built from any other sequence measures savings
+ *  against a route nobody drives and can trigger a spurious reorder of an
+ *  already-efficient day (codex GitHub round P2). `id` is a final stable
+ *  tiebreak only — SQL leaves created_at ties unordered. */
+function currentOrder(stops) {
+  return [...stops].sort((a, b) => {
+    const ra = a.route_order == null ? 999 : Number(a.route_order);
+    const rb = b.route_order == null ? 999 : Number(b.route_order);
+    if (ra !== rb) return ra - rb;
+    const wa = a.window_start ? String(a.window_start).slice(0, 5) : '23:59';
+    const wb = b.window_start ? String(b.window_start).slice(0, 5) : '23:59';
+    if (wa !== wb) return wa < wb ? -1 : 1;
+    const ca = a.created_at ? new Date(a.created_at).getTime() : 0;
+    const cb = b.created_at ? new Date(b.created_at).getTime() : 0;
+    if (ca !== cb) return ca - cb;
+    return String(a.id) < String(b.id) ? -1 : 1;
+  });
+}
+
 // Sequence-count ceiling for the exhaustive search. n stops with k timed in
 // g equal-start groups have (n!/k!)·∏ gᵢ! backbone-preserving sequences
 // (interleavings × within-tie permutations); beyond this we fall back to
@@ -95,21 +150,27 @@ function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop) {
     if (startMin > range.endMin) return null;
     startMin = Math.max(startMin, range.startMin);
   }
-  return { clock: startMin + stopDuration(stop), prev, travelMin: state.travelMin + travel };
+  return { clock: startMin + stopDuration(stop), prev, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel) };
 }
 
-/** Simulate a full sequence; null when infeasible, else total travel
- *  minutes including the return leg to HQ. */
-function simulateSequence(RouteOptimizer, effectiveWindowRange, seq) {
-  let state = { clock: 8 * 60, prev: RouteOptimizer.HQ, travelMin: 0 };
+/** Simulate the complete route under the promised ARRIVAL windows. Work may
+ * finish after a window closes; the next arrival still has to fit. Shared by
+ * nightly reordering and staff picker/save checks. No scheduled times change.
+ * null means at least one promise (or the requested day end) cannot be kept. */
+function simulateArrivalRoute(RouteOptimizer, rangeForStop, seq, {
+  startMin = 8 * 60, origin = RouteOptimizer.HQ, dayEndMin = Infinity,
+} = {}) {
+  let state = { clock: startMin, prev: origin, travelMin: 0, waitingMin: 0 };
+  const arrivals = [];
   for (const stop of seq) {
-    state = advanceSim(RouteOptimizer, effectiveWindowRange, state, stop);
-    if (!state) return null;
+    state = advanceSim(RouteOptimizer, rangeForStop, state, stop);
+    if (!state || state.clock > dayEndMin) return null;
+    arrivals.push({ id: stop.id, arrivalMin: state.arrivalMin, departureMin: state.clock });
   }
   const returnMin = RouteOptimizer.fallbackLegMetrics(
     RouteOptimizer.haversine(state.prev.lat, state.prev.lng, RouteOptimizer.HQ.lat, RouteOptimizer.HQ.lng),
   ).minutes || 0;
-  return state.travelMin + returnMin;
+  return { arrivals, travelMin: state.travelMin + returnMin, waitingMin: state.waitingMin, finishMin: state.clock };
 }
 
 /** Exhaustive backbone-preserving interleaving search with prefix pruning.
@@ -170,14 +231,14 @@ function exhaustiveSearch(RouteOptimizer, guards, groups, untimed) {
  *  insert the globally cheapest feasible (untimed stop, position) pair. */
 function greedyInsertion(RouteOptimizer, guards, backbone, untimed) {
   let seq = [...backbone];
-  if (simulateSequence(RouteOptimizer, guards.effectiveWindowRange, seq) == null) return null;
+  if (simulateArrivalRoute(RouteOptimizer, guards.effectiveWindowRange, seq) == null) return null;
   const remaining = [...untimed];
   while (remaining.length > 0) {
     let bestPick = null;
     for (let r = 0; r < remaining.length; r++) {
       for (let pos = 0; pos <= seq.length; pos++) {
         const candidate = [...seq.slice(0, pos), remaining[r], ...seq.slice(pos)];
-        if (simulateSequence(RouteOptimizer, guards.effectiveWindowRange, candidate) == null) continue;
+        if (simulateArrivalRoute(RouteOptimizer, guards.effectiveWindowRange, candidate) == null) continue;
         const meters = guards.modelDistanceMeters(RouteOptimizer, candidate);
         if (!bestPick || meters < bestPick.meters) bestPick = { r, candidate, meters };
       }
@@ -270,16 +331,19 @@ function computeWindowFitOrder(RouteOptimizer, stops, guards) {
   if (guards.violatesWindowChronology(winner, stops)) return null;
   if (guards.violatesWindowFeasibility(RouteOptimizer, winner, stops, null)) return null;
 
-  const travelMin = simulateSequence(RouteOptimizer, guards.effectiveWindowRange, winner);
-  if (travelMin == null) return null;
+  const simulation = simulateArrivalRoute(RouteOptimizer, guards.effectiveWindowRange, winner);
+  if (!simulation) return null;
   return {
     orderedStops: winner,
     afterMeters: guards.modelDistanceMeters(RouteOptimizer, winner),
-    afterSeconds: Math.round(travelMin * 60),
+    afterSeconds: Math.round(simulation.travelMin * 60),
   };
 }
 
 module.exports = {
   computeWindowFitOrder,
-  _internals: { sequenceCount, simulateSequence, exhaustiveSearch, greedyInsertion, EXHAUSTIVE_SEQUENCE_CAP },
+  effectiveWindowRange,
+  currentOrder,
+  simulateArrivalRoute,
+  _internals: { sequenceCount, exhaustiveSearch, greedyInsertion, EXHAUSTIVE_SEQUENCE_CAP },
 };

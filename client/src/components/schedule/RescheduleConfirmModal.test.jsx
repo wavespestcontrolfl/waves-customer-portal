@@ -5,10 +5,11 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
 import { SERIES_ACK_REQUIRED } from './seriesMove';
+import { useSlotConflicts } from './useSlotConflicts';
 
 // The advisory hooks fetch on their own — keep them quiet so the only
 // network traffic under test is the series-move preview.
-vi.mock('./useSlotConflicts', () => ({ useSlotConflicts: () => ({ conflicts: [] }) }));
+vi.mock('./useSlotConflicts', () => ({ useSlotConflicts: vi.fn(() => ({ conflicts: [] })) }));
 vi.mock('./useBestTimes', () => ({ useBestTimes: () => ({ bestTimes: [] }) }));
 
 const PREVIEW = {
@@ -162,4 +163,12 @@ describe('RescheduleConfirmModal — collective series moves', () => {
     await waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(2));
     expect(onConfirm.mock.calls[1][0]).toMatchObject({ seriesAck: true, seriesAckIds: ['occ-1', 'occ-2', 'occ-3', 'occ-4'] });
   });
+});
+
+
+it('checks the landing technician and duration when confirming a cross-technician drag', () => {
+  renderModal({ technicianId: 'destination-tech', durationMinutes: 90, isRecurring: false });
+  expect(useSlotConflicts).toHaveBeenLastCalledWith(expect.objectContaining({
+    technicianId: 'destination-tech', durationMinutes: 90,
+  }));
 });

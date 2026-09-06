@@ -424,6 +424,11 @@ export class ApiClient {
     return this.request('/schedule/next');
   }
 
+  // Every property on the account with its next visit (multi-property Visits tab).
+  getAccountUpcoming() {
+    return this.request('/schedule/account-next');
+  }
+
   confirmAppointment(id) {
     return this.request(`/schedule/${id}/confirm`, { method: 'POST' });
   }

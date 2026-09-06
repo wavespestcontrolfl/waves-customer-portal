@@ -759,13 +759,10 @@ function domainRefusal(domain, path) {
   return null;
 }
 
-// a SUBMIT-FIRST outreach path (execution_after_send=false, §6.4 / §7): the pitch follows the acquisition — nothing
-// sends while the execution instance is open. (The LATE SEND itself, on the Judge-owned placed row, arrives with the
-// acquire claim that can produce that row — PR 4; until then no submit-first placement can reach it.)
-async function submitStepOwed(trx, { placement, path }) {
-  if (!P.submitFirst(path)) return false; // the flag on a path with no acquire step orders nothing
-  const exec = await trx(AUTH).where({ prospect_id: placement.id, dimension: 'execution', instance_kind: '-' }).whereNull('ended_at').first('id', 'satisfied_at');
-  return !exec || !exec.satisfied_at;
+// A submit-first pitch follows completed execution on its own path. Verifier promotion alone does not complete
+// that step; the sender and both approval views use this predicate over the active execution instance.
+function submitStepOwed(path, execution) {
+  return P.submitFirst(path || {}) && (execution?.path_id !== path.id || !execution?.satisfied_at);
 }
 
 /**
@@ -795,7 +792,8 @@ async function openSendInstance(trx, { placement, path, policy, followUp = false
   // way (link-owner-queue), and the board's direct send is not the way around it
   if (path.legal_attestation === true && !require('./link-owner-queue').legalTermsUrlOf(path)) return { ok: false, code: 'not_authorized', error: 'the agreement is not viewable (no terms url in the evidence) — re-investigate before sending' };
   if (row.level === P.LEVELS.AUTO_OUTREACH && !stillAutoOutreach(row, ctx, followUp)) return { ok: false, code: 'not_authorized', error: 'the outreach policy moved since the automatic decision — the nightly bridge re-decides it' };
-  if (await submitStepOwed(trx, { placement, path })) return { ok: false, code: 'not_authorized', error: 'submit-first path: the pitch follows the publisher\'s form / account step, which has not completed' };
+  const execution = await trx(AUTH).where({ prospect_id: placement.id, dimension: 'execution', instance_kind: '-' }).whereNull('ended_at').first('path_id', 'satisfied_at');
+  if (submitStepOwed(path, execution)) return { ok: false, code: 'not_authorized', error: 'submit-first path: the pitch follows the publisher\'s form / account step, which has not completed' };
   return { ok: true, row, ctx, hash, revision };
 }
 
@@ -1189,6 +1187,8 @@ module.exports = {
   STALE_SENDING_MS,
   REPLY_CHECK_TIMEOUT_MS,
   SENDABLE_STATUSES,
+  lateSend,
+  submitStepOwed,
   CONVERSATION_CLOSED_STATUSES,
   conversationOpen: CONVERSATION_OPEN,
   AMBIGUOUS_SEND_STATUSES: M.AMBIGUOUS_SEND_STATUSES,

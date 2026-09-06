@@ -97,11 +97,12 @@ describe('isRecurringPlanActive', () => {
   function fakeDb({ alert = null, subs = [] }) {
     return (table) => {
       if (table === 'recurring_plan_alerts') {
+        const predicates = {};
         return {
-          where: function () { return this; },
+          where: function (key, value) { predicates[key] = value; return this; },
           whereIn: function () { return this; },
           whereNull: function () { return this; },
-          first: async () => alert,
+          first: async () => alert && Object.entries(predicates).every(([key, value]) => ({ customer_id: 'c1', recurring_parent_id: 'p1', ...alert })[key] === value) ? alert : null,
         };
       }
       if (table === 'customer_subscriptions') {
@@ -121,6 +122,17 @@ describe('isRecurringPlanActive', () => {
   test('inactive when an unresolved plan_lapsed alert exists', async () => {
     const r = await isRecurringPlanActive(svc({ recurring_parent_id: 'p1' }), fakeDb({ alert: { id: 'a1', alert_type: 'plan_lapsed' } }));
     expect(r).toMatchObject({ active: false, reason_code: 'RECURRING_PLAN_INACTIVE' });
+  });
+
+  test('a reassigned series is not blocked by the former owner’s lapse alert', async () => {
+    const result = await isRecurringPlanActive(svc({ recurring_parent_id: 'p1', customer_id: 'c2' }),
+      fakeDb({ alert: { id: 'a1', customer_id: 'c1', recurring_parent_id: 'p1', alert_type: 'plan_lapsed' } }));
+    expect(result.active).toBe(true);
+  });
+
+  test('a stale plan_ending reminder cannot block a live recurring visit', async () => {
+    const result = await isRecurringPlanActive(svc({ recurring_parent_id: 'p1' }), fakeDb({ alert: { id: 'a1', alert_type: 'plan_ending' } }));
+    expect(result).toMatchObject({ active: true });
   });
 
   test('does NOT veto on legacy paused/cancelled customer_subscriptions', async () => {

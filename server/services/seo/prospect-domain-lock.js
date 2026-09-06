@@ -83,7 +83,8 @@ function targetPageOf(url) {
 function targetPageVariants(url) {
   const path = targetPathOf(url);
   const bare = path.replace(/\/$/, '');
-  const out = new Set();
+  // Board edits also accept relative page paths; they represent the same placement.
+  const out = new Set([path, bare || '/']);
   for (const host of ['https://wavespestcontrol.com', 'https://www.wavespestcontrol.com', 'http://wavespestcontrol.com', 'http://www.wavespestcontrol.com']) {
     out.add(`${host}${path}`);
     if (bare) out.add(`${host}${bare}`);

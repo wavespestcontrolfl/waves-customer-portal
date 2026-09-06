@@ -34,8 +34,9 @@
  *     head. If Codex hasn't re-reviewed the latest push yet it no-ops (and
  *     re-posts the "@codex review" request if a prior post failed), so it never
  *     double-fires or strands a PR on a transient GitHub error.
- *   - Fixes are BODY-ONLY: any frontmatter change parks. A fix that passes the
- *     content gates but introduces named-competitor content parks (the human-
+ *   - Fixes preserve frontmatter outside targeted meta/alt repairs and code-derived
+ *     FAQ schema. An out-of-scope edit gets one corrective attempt, then parks.
+ *     A fix that passes the content gates but introduces named-competitor content parks (the human-
  *     sign-off stamps predate the fix). The autonomous lane re-runs the
  *     runner's uniqueness/quality/SEO/visibility gates on the rewritten body
  *     and parks on anything it can't prove; the scheduler lane mirrors the
@@ -573,6 +574,7 @@ const FIX_SYSTEM = [
   'Rules:',
   '- Apply ONLY the minimal changes needed to resolve the findings. Preserve everything else exactly: document structure and the author voice.',
   '- YAML frontmatter is immutable — reproduce every key and value byte-for-byte — with EXACTLY two exceptions, and only when a finding targets them: (1) you may rewrite the `meta_description` VALUE (a complete sentence, 115–160 characters — it renders as the search snippet and the visible hero intro); (2) you may rewrite the `hero_image.alt` VALUE (describe the actual image, at most 255 characters). Never touch any other frontmatter key — not the hero/og image paths, not slug/canonical/title/dates/domains. If a finding can only be resolved by changing other frontmatter, leave that part unchanged (it will be routed to a human).',
+  '- The publisher maintains FAQPage in schema_types from the visible FAQ section. Fix a requested FAQ in the body; preserve schema_types in your output. Never change spoke_links, even when a finding requests it.',
   '- Never invent facts, statistics, reviews, or prices. Pricing phrases link to /pest-control-calculator/ — never a hardcoded number.',
   '- Do not add "near me" phrasing. Do not name competitors.',
   '- Keep every link pointing at a route that actually exists for this post\'s domain.',
@@ -580,7 +582,7 @@ const FIX_SYSTEM = [
   '- Output the ENTIRE corrected file (frontmatter + body) and nothing else — no explanation, no code fence.',
 ].join('\n');
 
-function buildFixUserMessage(markdown, findings) {
+function buildFixUserMessage(markdown, findings, frontmatterFailure = null) {
   const findingList = findings
     .map((f, i) => `${i + 1}. [${f.path || 'file'}${f.line ? ':' + f.line : ''}] ${f.body}`)
     .join('\n\n');
@@ -595,6 +597,11 @@ function buildFixUserMessage(markdown, findings) {
     markdown,
     'FILE',
     '',
+    ...(frontmatterFailure ? [
+      `The prior proposal was rejected before any write: ${frontmatterFailure}.`,
+      'Retry from the original file above. Preserve its frontmatter exactly except a valid meta_description or hero_image.alt repair explicitly requested by a finding. Fix requested FAQ content in the body; the publisher maintains FAQPage. Leave findings requiring other frontmatter changes unresolved.',
+      '',
+    ] : []),
     'Return the complete corrected file that resolves every finding you agree with. Output only the file contents.',
   ].join('\n');
 }
@@ -607,16 +614,23 @@ function stripCodeFence(text) {
   return t.trim() + '\n';
 }
 
-async function generateFix(markdown, findings, deps = {}) {
+async function generateFix(markdown, findings, deps = {}, frontmatterFailure = null) {
   const call = deps.callAnthropic || callAnthropic;
-  const res = await call({
-    laneId: 'codex_remediation',
-    model: MODELS.FLAGSHIP,
-    system: FIX_SYSTEM,
-    text: buildFixUserMessage(markdown, findings),
-    jsonMode: false,
-    maxTokens: 16000,
-  });
+  let res;
+  try {
+    res = await call({
+      laneId: 'codex_remediation',
+      model: MODELS.FLAGSHIP,
+      system: FIX_SYSTEM,
+      text: buildFixUserMessage(markdown, findings, frontmatterFailure),
+      jsonMode: false,
+      maxTokens: 16000,
+    });
+  } catch {
+    // Both initial and corrective failures must reach the caller's budget
+    // accounting, just like a provider's structured { ok: false } result.
+    return null;
+  }
   if (!res || !res.ok || !res.text) return null;
   // Fail closed on a truncated completion — committing a cut-off article would
   // pass the preview build and could merge.
@@ -837,6 +851,7 @@ const META_FINDING_RE = /meta[\s_-]?description/i;
 // LLM would happily "fix" the alt and mirror it. `\balt\b` covers "alt",
 // "alt text", "hero alt"; `hero_?alt` covers heroAlt / hero_alt casings.
 const HERO_ALT_FINDING_RE = /\balt\b|hero_?alt/i;
+const FAQ_FINDING_RE = /\bfaq(?:s|page)?\b|frequently\s+asked|common\s+questions/i;
 
 function frontmatterFixViolation(originalMd, fixedMd, findings = []) {
   let a; let b;
@@ -1031,28 +1046,69 @@ function envInt(key, defaultValue = null) {
 }
 
 /**
- * Frontmatter schema is FROZEN during remediation (body-only fixes), but the
- * publisher derives schema_types FROM the body (astro-publisher
- * schemaTypesForContent — e.g. FAQPage appears iff the body has a visible FAQ
- * section). A body fix that adds/removes a FAQ therefore strands the frozen
- * frontmatter describing content that no longer exists (P0-class structured-
- * data mismatch on the live page). Returns true when the fix changes the
- * derived schema-type set — the caller parks (restamping frontmatter is a
- * human call). Fails closed (true) when the derivation is unavailable.
+ * Maintain the publisher-derived FAQPage stamp while preserving the original
+ * non-FAQ schema types. The model may keep the original list or propose the
+ * exact derived list; it cannot add unrelated schema declarations. All other
+ * frontmatter still passes the existing targeted-field validator.
  */
-function schemaShapeChanged(originalMd, fixedMd, deps = {}) {
-  let derive = deps.schemaTypesForContent;
-  if (!derive) {
-    // Exposed on the publisher's _internals (same derivation buildFrontmatter uses).
-    try { derive = require('../content-astro/astro-publisher')._internals.schemaTypesForContent; } catch (_) { return true; }
+function prepareFrontmatterFix(originalMd, fixedMd, findings = [], deps = {}) {
+  let original; let fixed;
+  try { original = fm.parse(originalMd); fixed = fm.parse(fixedMd); } catch (_) {
+    return { violation: 'frontmatter unparseable after fix', changed: {} };
   }
-  if (typeof derive !== 'function') return true;
-  let a; let b;
-  try {
-    a = derive(String((fm.parse(originalMd) || {}).content || ''));
-    b = derive(String((fm.parse(fixedMd) || {}).content || ''));
-  } catch (_) { return true; }
-  return canonValue([...(a || [])].sort()) !== canonValue([...(b || [])].sort());
+  let baseline = originalMd;
+  let markdown = fixedMd;
+  let schemaTypes;
+  if (Array.isArray(original.data.schema_types)) {
+    const baseTypes = original.data.schema_types.filter((type) => type !== 'FAQPage');
+    try {
+      const derive = deps.schemaTypesForContent || require('../content-astro/astro-publisher')._internals.schemaTypesForContent;
+      const derived = derive(fixed.content, baseTypes);
+      if (!Array.isArray(derived) || derived.length === 0) throw new Error('empty schema result');
+      // The helper appends FAQPage; retain the original order when it was
+      // already present, and change only its presence when the body needs it.
+      schemaTypes = original.data.schema_types.filter((type) => type !== 'FAQPage' || derived.includes(type));
+      if (derived.includes('FAQPage') && !schemaTypes.includes('FAQPage')) schemaTypes.push('FAQPage');
+    } catch (_) {
+      return { violation: 'body-derived schema types unavailable', changed: {} };
+    }
+    const proposedTypes = fixed.data.schema_types;
+    const proposed = canonValue(Array.isArray(proposedTypes) ? [...proposedTypes].sort() : proposedTypes);
+    const allowedDeclarations = [original.data.schema_types, schemaTypes].map((types) => canonValue([...types].sort()));
+    if (!allowedDeclarations.includes(proposed)) {
+      return { violation: 'schema_types differs from the original and body-derived declaration sets', changed: {} };
+    }
+    if (canonValue(original.data.schema_types) !== canonValue(schemaTypes)) {
+      if (!findings.some((finding) => FAQ_FINDING_RE.test(String(finding?.body || '')))) {
+        return { violation: 'FAQ schema changed but no finding in this round targets the FAQ', changed: {} };
+      }
+      baseline = fm.stringify({ ...original.data, schema_types: schemaTypes }, original.content);
+    }
+    if (canonValue(proposedTypes) !== canonValue(schemaTypes)) {
+      markdown = fm.stringify({ ...fixed.data, schema_types: schemaTypes }, fixed.content);
+    }
+  }
+  const result = frontmatterFixViolation(baseline, markdown, findings);
+  if (result.violation) return { ...result, markdown };
+  // Only a permitted FAQ schema change rewrites the validation baseline.
+  if (baseline !== originalMd) {
+    result.changed.schema_types = schemaTypes;
+  }
+  if (Object.keys(result.changed).length === 0
+    && original.content.trimEnd() === fixed.content.trimEnd()) {
+    markdown = originalMd;
+  }
+  return { ...result, markdown };
+}
+
+// Existing persisted parks from the old freeze have never pushed a fix. Give
+// just this class the corrected contract, retaining its budget. New rejected
+// corrections use a different reason and stay parked on the same head.
+function retryableFrontmatterPark(state) {
+  if (state.park_phase !== PARK_PRE_PUSH || state.sync_pending_sha || atRoundLimit(state.rounds)) return false;
+  return /^fix changed frontmatter beyond the whitelist: (?:frontmatter key "(?:schema_types|spoke_links)" changed|meta_description changed but no finding in this round targets it)/.test(String(state.park_reason || ''))
+    || state.park_reason === 'fix changes the body-derived schema types (frontmatter schema is frozen)'
+    || state.park_reason === 'frontmatter repair rejected after bounded retry: schema_types may only follow the publisher-derived FAQPage change';
 }
 
 /**
@@ -1156,12 +1212,15 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     try { parsed = fm.parse(fixedMarkdown); } catch (e) { return { ok: false, reason: `unparseable fix: ${e.message}` }; }
     const draft = { ...draft0, body: String((parsed && parsed.content) || '').trim() };
     if (!draft.body) return { ok: false, reason: 'fixed body is empty' };
-    // The fix may carry whitelisted frontmatter rewrites (meta_description /
-    // hero alt). The stored payload predates them, so swap the FIXED values
+    // The fix may carry code-derived FAQ schema and whitelisted frontmatter
+    // rewrites (meta_description / hero alt). The stored payload predates them, so swap the FIXED values
     // into the draft before evaluating — otherwise the SEO/quality gates
     // below re-validate the STALE metadata and a rewritten meta_description
     // reaches the branch (and the draft_payload mirror) ungated.
     const fixedData = (parsed && parsed.data) || {};
+    if (Array.isArray(fixedData.schema_types)) {
+      draft.frontmatter = { ...draft.frontmatter, schema_types: fixedData.schema_types };
+    }
     if (typeof fixedData.meta_description === 'string' && fixedData.meta_description.trim()) {
       draft.meta_description = fixedData.meta_description;
       if (draft.frontmatter && typeof draft.frontmatter === 'object') {
@@ -1630,8 +1689,8 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // A park is a verdict on the head it was rendered against. If the branch
     // has since received a NEW head (a human or agent pushed a fix), the
     // verdict is stale — re-arm with fresh rounds so the loop can carry that
-    // push the rest of the way. Same head (or no head to compare) stays
-    // parked. Legacy rows parked before parked_head_sha existed re-arm once:
+    // push the rest of the way. Same-head frontmatter parks from the old
+    // contract may retry once with their existing budget; other parks hold. Legacy rows parked before parked_head_sha existed re-arm once:
     // the round either succeeds or re-parks stamping reason + head, so this
     // converges instead of looping.
     const parkedHead = String(state.parked_head_sha || '').trim().toLowerCase();
@@ -1656,7 +1715,14 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       try { refHead = String((await gh.getBranchSha(branch)) || '').trim().toLowerCase(); } catch (_) { refHead = null; }
       if (refHead !== currentHead) staleMovedPastPark = false;
     }
-    if (!currentHead || (parkedHead && parkedHead === currentHead && !staleMovedPastPark)) {
+    // Only pinned autonomous runs retain a pollable claim after parking.
+    // Scheduler parks disarm their publishing claim for human review and
+    // must not be reactivated by this autonomous recovery path.
+    let retryFrontmatter = !!expectedParentSha && parkedHead === currentHead && retryableFrontmatterPark(state);
+    if (retryFrontmatter) {
+      try { retryFrontmatter = String(await gh.getBranchSha(branch)).toLowerCase() === currentHead; } catch (_) { retryFrontmatter = false; }
+    }
+    if (!currentHead || (parkedHead && parkedHead === currentHead && !staleMovedPastPark && !retryFrontmatter)) {
       // Same-head park = held for a human. But a park is a verdict on
       // remediation's ability to FIX this head, not on Codex REVIEWING it —
       // if Codex has neither inline findings, a submitted review, nor a
@@ -1702,19 +1768,22 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // last_push_sha == head, i.e. "no remediation round spent yet" forever.
     // That combination is exactly how astro #409 spent two rounds and still
     // reported none. Keep the count on a same-head re-arm.
-    const rearmRounds = staleMovedPastPark ? (state.rounds || 0) : 0;
-    await saveState(db, prNumber, {
+    const rearmRounds = (staleMovedPastPark || retryFrontmatter) ? (state.rounds || 0) : 0;
+    const rearmed = await saveState(db, prNumber, {
       status: 'active', rounds: rearmRounds, park_reason: null, parked_head_sha: null,
       // Clear the phase with the rest of the park verdict — a stale 'post_push'
       // left behind would keep the merge bar shut for a head this row no longer
       // has a verdict on.
       park_phase: null,
     });
+    if (!rearmed) return { skipped: true, reason: 'pr left the open state while re-arming remediation' };
     state.status = 'active';
     state.rounds = rearmRounds;
     logger.info(staleMovedPastPark
       ? `[codex-remediation] re-armed parked PR #${prNumber}: 'moved past' park contradicted — the branch head IS the parked push ${currentHead.slice(0, 7)} (stale read at park time)`
-      : `[codex-remediation] re-armed parked PR #${prNumber}: head advanced ${parkedHead ? `${parkedHead.slice(0, 7)} → ` : ''}${currentHead.slice(0, 7)}`);
+      : retryFrontmatter
+        ? `[codex-remediation] re-armed frontmatter park for PR #${prNumber}: bounded correction on head ${currentHead.slice(0, 7)} (${rearmRounds} rounds already spent)`
+        : `[codex-remediation] re-armed parked PR #${prNumber}: head advanced ${parkedHead ? `${parkedHead.slice(0, 7)} → ` : ''}${currentHead.slice(0, 7)}`);
   }
 
   const reviewComments = await gh.listPrReviewComments(prNumber);
@@ -1816,19 +1885,22 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     if (atRoundLimit(attempt)) return park(db, prNumber, 'LLM produced no valid fix after max attempts', onPark, headSha, PARK_PRE_PUSH);
     return { skipped: true, reason: 'no valid LLM fix (will retry)' };
   }
+  // Code owns FAQ schema; every model-written field still meets the strict
+  // whitelist. Retry an invalid proposal once from the ORIGINAL baseline,
+  // with the concrete rejection, before giving up this head.
+  let fmDelta = prepareFrontmatterFix(baseline, fixed, findings, deps);
+  if (fmDelta.violation && llmFindings.length > 0) {
+    fixed = await generateFix(baseline, llmFindings, deps, fmDelta.violation);
+    fmDelta = fixed ? prepareFrontmatterFix(baseline, fixed, findings, deps)
+      : { violation: 'no valid corrected file returned', changed: {} };
+  }
+  if (fmDelta.violation) {
+    await saveState(db, prNumber, { branch, rounds: (state.rounds || 0) + 1 });
+    return park(db, prNumber, `frontmatter repair rejected after bounded retry: ${fmDelta.violation}`, onPark, headSha, PARK_PRE_PUSH);
+  }
+  fixed = fmDelta.markdown;
   if (fixed.trim() === String(file.content).trim()) {
     return park(db, prNumber, 'remediation produced no change (likely false-positive findings)', onPark, headSha, PARK_PRE_PUSH);
-  }
-  // Frontmatter is immutable during remediation outside the validated
-  // meta_description / hero_image.alt whitelist — any other added/removed/
-  // altered key parks: routing keys would mark a different URL published
-  // than the portal recorded, and the rest feed merge stamps and portal
-  // columns written before the fix that nothing restamps. Compared against
-  // the restamped baseline, so the deterministic date restamp above plus the
-  // whitelist are the ONLY frontmatter deltas that can ever pass.
-  const fmDelta = frontmatterFixViolation(baseline, fixed, findings);
-  if (fmDelta.violation) {
-    return park(db, prNumber, `fix changed frontmatter beyond the whitelist: ${fmDelta.violation}`, onPark, headSha, PARK_PRE_PUSH);
   }
   // Scheduler-lane metadata quality re-check (the autonomous lane covers
   // this inside revalidateFix — validateAutonomousRunGates swaps the
@@ -1838,14 +1910,6 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     if (!metaVerdict.ok) {
       return park(db, prNumber, `rewritten meta_description failed metadata quality checks: ${metaVerdict.reason}`, onPark, headSha, PARK_PRE_PUSH);
     }
-  }
-  // The frozen frontmatter must still DESCRIBE the fixed body: schema_types is
-  // derived from the body at publish (FAQPage iff a visible FAQ exists), so a
-  // body fix that adds/removes a FAQ section would ship structured data for
-  // content that isn't there. Park — restamping schema is a human call.
-  const schemaChanged = deps.schemaShapeChanged || schemaShapeChanged;
-  if (schemaChanged(file.content, fixed, deps)) {
-    return park(db, prNumber, 'fix changes the body-derived schema types (frontmatter schema is frozen)', onPark, headSha, PARK_PRE_PUSH);
   }
   // An un-interpolated {{token}} in an .mdx body crashes the MDX compile —
   // publishOrUpdatePage blocks these before opening a PR (astro-publisher
@@ -2036,7 +2100,17 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // any post-commit synchronization. Best-effort on transient GitHub errors
   // (the recovery branch re-drives an interrupted round next tick).
   try {
-    const fresh = await gh.getPr(prNumber);
+    let fresh = await gh.getPr(prNumber);
+    // GitHub can briefly return the pre-push head from BOTH the PR and ref
+    // endpoints. Give that exact predecessor three seconds to catch up
+    // before withholding sync. A closed PR or any different head goes
+    // straight to the existing fail-closed checks below.
+    for (let retry = 0; retry < 3
+      && fresh?.state === 'open' && !fresh.merged && !fresh.merged_at
+      && fresh.head?.sha === headSha && headSha !== newHead; retry += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      fresh = await gh.getPr(prNumber);
+    }
     if (!fresh || fresh.merged || fresh.merged_at || fresh.state !== 'open') {
       const terminal = fresh && (fresh.merged || fresh.merged_at) ? 'merged' : 'closed';
       await markPrTerminal(prNumber, terminal, db);
@@ -2087,6 +2161,13 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
         return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(recheck.head?.sha)}); sync withheld`, onPark, newHead, PARK_POST_PUSH);
       }
       // Open AND at our head on the re-read → proceed with the round.
+    }
+    // A cached PR response can catch up to our commit while the branch has
+    // already advanced again. Confirm the ref immediately before syncing;
+    // lookup failures fall through to the fail-closed catch below.
+    const syncHead = String((await gh.getBranchSha(branch)) || '').trim().toLowerCase();
+    if (!newHead || syncHead !== String(newHead).trim().toLowerCase()) {
+      return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(syncHead)}); sync withheld`, onPark, newHead || headSha, PARK_POST_PUSH);
     }
   } catch (e) {
     // Fail CLOSED: proceeding could mirror a fix into portal state that
@@ -2437,6 +2518,8 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // lane's row sync (runRemediationForPr parks when onRemediated throws):
     // a stale caption degrades to the title-only fallback, never a wrong
     // route — not worth parking a pushed fix over, so failures only warn.
+    // Body + derived schema join the existing atomic head re-pin so later
+    // gate checks cannot use the pre-fix article or FAQ declaration.
     // Re-pin the run to THIS fix commit (PR r12): the poller's merge gate
     // only auto-merges publisher-produced heads
     // (draft_payload.autopublish_head_sha), and the remediation push is the
@@ -2445,7 +2528,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // throw here post-push-parks the PR (fail closed: an unpinned fix head
     // must wait for a human, never merge unverified).
     onRemediated: run && run.id
-      ? async ({ frontmatterChanges, newHead }) => {
+      ? async ({ frontmatterChanges, newHead, body }) => {
         // Re-pin + verdict persist, ATOMICALLY (PR r13 P1): merge governance
         // reads comparison_table_result, so a fix that INTRODUCES a named
         // competitor must land its flagged verdict in the same update as
@@ -2464,6 +2547,10 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
             if (typeof dp === 'string') dp = JSON.parse(dp);
             const next = (dp && typeof dp === 'object') ? dp : {};
             next.autopublish_head_sha = newHead;
+            next.body = body;
+            if (frontmatterChanges.schema_types) {
+              next.frontmatter = { ...next.frontmatter, schema_types: frontmatterChanges.schema_types };
+            }
             const update = { draft_payload: JSON.stringify(next), updated_at: new Date() };
             if (lastComparisonVerdict) {
               // The competitor-bypass marker is STICKY (PR r15 P1): a run
@@ -2518,7 +2605,7 @@ module.exports = {
   validateAutonomousRunGates,
   frontmatterFixViolation,
   validateRewrittenMeta,
-  schemaShapeChanged,
+  prepareFrontmatterFix,
   isDateStampFinding,
   restampFrontmatterDates,
   _internals: { saveState, getState, park, PARK_PRE_PUSH, PARK_POST_PUSH },

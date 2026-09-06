@@ -202,6 +202,8 @@ async function appointmentPropertyPreview(conn, plan) {
   }
   const customer = await conn('customers').where({ id: plan.anchor.customer_id }).whereNull('deleted_at').first();
   if (!customer) throw new Error('Customer not found');
+  // Research is rebuilt after commit for WDO visits only (refreshAppointmentAddressBriefs).
+  const wdo = plan.rows.some(row => require('../appointment-tagger').classifyAppointmentType(row.service_type).tag === 'wdo_inspection');
   return {
     proposal: true,
     customer_id: customer.id,
@@ -214,7 +216,7 @@ async function appointmentPropertyPreview(conn, plan) {
       status: row.status, service_type: row.service_type,
       current_address: formatAddress(effectiveServiceAddress(row, customer)),
     })),
-    effects: 'Changes the destination and map coordinates for these service lines; regroups their visit at the destination and clears the route position and cached pre-service brief. Preserves the primary customer address, future visits, schedule times, status, and billing. Sends no messages.',
+    effects: `Changes the destination and map coordinates for these service lines and clears the route position and cached pre-service brief${wdo ? ', then rebuilds WDO research for the new address' : ''}. The visit keeps its current grouping and is not combined with other stops at the destination; regroup from Dispatch if needed. Preserves the primary customer address, future visits, schedule times, status, and billing. Sends no messages.`,
     navigation: 'An already-open navigation app may need its destination refreshed separately.',
   };
 }
@@ -223,7 +225,7 @@ async function switchAppointmentProperty(input, actionContext) {
   if (!require('../../config/feature-gates').isEnabled('editApptAddress')) return { error: 'Appointment address changes are not enabled.' };
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   if (!uuid.test(input.appointment_id) || !uuid.test(input.property_id)) return { error: 'Resolve the appointment and saved property IDs first.' };
-  const { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress } = require('../appointment-address');
+  const { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress, refreshAppointmentAddressBriefs } = require('../appointment-address');
   const { previewFingerprint } = require('./authorization-contract');
   const plan = await planAppointmentAddress(db, input.appointment_id, input.property_id, 'visit');
   if (input.confirmed !== true) return appointmentPropertyPreview(db, plan);
@@ -231,8 +233,8 @@ async function switchAppointmentProperty(input, actionContext) {
   const result = await db.transaction(async trx => {
     await require('../scheduling/occupancy').acquireOccupancyLocks(trx, plan.rows.map(row => require('../visit-groups').dateOnly(row.scheduled_date)));
     await require('../scheduling/tech-day-lock').lockTechDays(trx, plan.rows.map(row => ({ techId: row.technician_id, date: require('../visit-groups').dateOnly(row.scheduled_date) })));
-    await lockAppointmentAddress(trx, plan);
     await require('../../utils/customer-comms-lock').lockCustomerComms(trx, plan.anchor.customer_id);
+    await lockAppointmentAddress(trx, plan);
     await trx('customers').where({ id: plan.anchor.customer_id }).forShare().first();
     await trx('customer_properties').where({ id: input.property_id }).forShare().first();
     await trx('scheduled_services').whereIn('id', plan.rows.map(row => row.id)).orderBy('id').forUpdate();
@@ -245,6 +247,12 @@ async function switchAppointmentProperty(input, actionContext) {
     return { success: true, updated_service_ids: ids, destination: preview.destination, messages_sent: false };
   });
   if (result.success) {
+    // Research must see committed address stamps; the helper rebuilds WDO
+    // briefs only and never replays booking prep sends (parity with the
+    // Dispatch update-details path).
+    void refreshAppointmentAddressBriefs(db, result.updated_service_ids).catch(err => {
+      logger.error(`[intelligence-bar] address brief refresh failed: ${err.message}`);
+    });
     const { emitDispatchJobUpdate } = require('../dispatch-assignment');
     const broadcasts = await Promise.allSettled(result.updated_service_ids.map(jobId =>
       emitDispatchJobUpdate({ jobId, actorId: actionContext.technicianId })));

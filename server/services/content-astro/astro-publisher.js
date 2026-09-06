@@ -830,33 +830,88 @@ async function compressToWebp(buffer, { width = 1600 } = {}) {
 // commits it into the PR branch as /images/blog/<slug>/hero.<ext>. The data
 // URL is never written to the DB — featured_image_url is varchar(255) and the
 // blog list does SELECT *, so persisting it would break/bloat both.
-async function generateHeroBuffer(post) {
+// Generate one image under a variation plan, then screen it for readable text
+// and logos (hero-alt-vision.screenGeneratedImage). A failed screen
+// regenerates ONCE in the retry style; a second failure ships the image with
+// a warning rather than parking the publish (the screen is a vision judgment
+// and must not become a hard gate on its own — owner direction 2026-09-05).
+async function generatePlannedImage({ title, topic, keyword, city, mode, shot, avoid, slug, index, captions = [], avoidDepicting = [], deadlineAt = null }) {
   const imageGenerator = require('../content/image-generator');
-  const gen = await imageGenerator.generate({
+  const { screenGeneratedImage } = require('../content/hero-alt-vision');
+  // The plan's subject is what the picture is about — title + keyword (the
+  // section heading for a body slot) — not the lead, which may mention
+  // equipment in passing (Codex r2 P2).
+  const subject = [title, keyword].filter(Boolean).join(' ');
+  let plan = imageGenerator.planFor({ slug, mode, index, captions, subject });
+  // One deadline for the whole slot, screen retry included — a second call
+  // must not start a second budget (Codex r6 P2). A caller that re-frames a
+  // slot (the near-duplicate retry) passes the slot's deadline in.
+  if (!Number.isFinite(deadlineAt)) deadlineAt = Date.now() + imageGenerator.IMAGE_CHAIN_BUDGET_MS;
+  const candidates = [];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let gen;
+    let img;
+    try {
+      gen = await imageGenerator.generate({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, deadlineAt });
+      img = await fetchImageBuffer(gen.dataUrl);
+      if (!img?.buffer) throw new Error(`${mode} image generation produced no usable image`);
+    } catch (err) {
+      // Post-provider failure: the generator SUCCEEDED, so carry its provider
+      // chain onto the thrown error — describeHeroFailure reads err.attempts,
+      // and this failure class is exactly what the full diagnosis exists for
+      // (Codex r1).
+      if (!err.attempts && Array.isArray(gen?.attempts)) err.attempts = gen.attempts;
+      // The screen is advisory: a retry that fails to generate keeps the
+      // usable first image rather than failing the publish (pre-push Codex
+      // P1 on 1436d5d69). With nothing usable yet, the error stands.
+      if (candidates.length) {
+        logger.warn(`[astro-publisher] ${mode} image retry for ${slug} failed (${err.message}) — keeping the first image despite the screen (${candidates[0].screen.reasons.join('; ')})`);
+        return candidates[0];
+      }
+      throw err;
+    }
+    const allowedText = plan.style === 'infographic' ? captions : [];
+    // The screen runs inside the same slot deadline as the generation.
+    const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', allowedText, avoidDepicting, timeoutMs: deadlineAt - Date.now() });
+    // deadlineAt rides along so the caller's alt-text vision pass runs
+    // inside the same slot budget (Codex r9 P2).
+    const candidate = { ...img, dataUrl: gen.dataUrl, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen, deadlineAt };
+    if (screen.ok) return candidate;
+    candidates.push(candidate);
+    if (attempt === 0) {
+      // Retry in a style no sibling slot uses (a fresh style shakes a repeated
+      // defect) under a fresh seed — never a fixed swap into a sibling's style.
+      const retryStyle = imageGenerator.retryStyleFor({ slug, mode, index, captions });
+      logger.warn(`[astro-publisher] ${mode} image for ${slug} failed the text/logo screen (${screen.reasons.join('; ')}) — regenerating once as ${retryStyle}`);
+      plan = imageGenerator.planFor({ slug, mode, index: index + 1000, captions, subject, style: retryStyle });
+    }
+  }
+  // Both failed: ship the safer one — no logo beats a logo, then fewer
+  // screen violations (stray strings, missing/incomplete captions, forbidden
+  // scenes — an allowed caption the image rendered is not one; Codex r11 P2)
+  // — with the reviewer note (Codex r6/r7 P2).
+  const safest = [...candidates].sort((a, b) => (a.screen.logos.length > 0) - (b.screen.logos.length > 0) || a.screen.violations - b.screen.violations)[0];
+  logger.warn(`[astro-publisher] ${mode} image for ${slug} still failed the text/logo screen after a retry (${safest.screen.reasons.join('; ')}) — shipping the safer candidate with a reviewer note`);
+  return safest;
+}
+
+async function generateHeroBuffer(post) {
+  const hero = await generatePlannedImage({
     title: post.title,
     topic: post.meta_description,
     keyword: post.keyword,
     mode: 'blog-hero',
+    slug: post.slug,
+    index: 0,
+    avoidDepicting: Array.isArray(post.image_avoid) ? post.image_avoid : [],
   });
-  let img;
-  try {
-    img = await fetchImageBuffer(gen.dataUrl);
-    if (!img?.buffer) throw new Error('hero image generation produced no usable image');
-  } catch (err) {
-    // Post-provider failure: the generator SUCCEEDED, so carry its provider
-    // chain onto the thrown error — describeHeroFailure reads err.attempts,
-    // and this failure class is exactly what the full diagnosis exists for
-    // (Codex r1).
-    if (!err.attempts && Array.isArray(gen.attempts)) err.attempts = gen.attempts;
-    throw err;
-  }
-  logger.info(`[astro-publisher] generated hero image for ${post.slug || post.title} via ${gen.model}`);
+  logger.info(`[astro-publisher] generated hero image for ${post.slug || post.title} via ${hero.model} (${hero.plan.style}, ${hero.plan.setting.split(',')[0]})`);
   // Carry the generator's alt (derived from the actual generation prompt's
   // subject/setting) so callers can overwrite any pre-written
   // hero_image_alt — alt authored BEFORE the image exists routinely
   // mismatches what was generated. `attempts` rides along so downstream
   // post-generation failures (e.g. Sharp compression) can attach it too.
-  return { ...img, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null };
+  return hero;
 }
 
 // ── Main publish ───────────────────────────────────────────────────
@@ -1204,6 +1259,17 @@ async function publishAstro(postId) {
       // genuinely transient.
       try {
         heroImage = await fetchImageBuffer(post.featured_image_url);
+        // An admin-generated hero arrives as a data: URL — the row kept only
+        // the bytes, not its screen verdict — so it is screened again here and
+        // the PR body carries the result like an autonomous hero's (Codex r5
+        // P2 on #3964). Curated remote photos are not screened: a real photo
+        // of the Waves van legitimately carries the logo.
+        const dataUrl = parseImageDataUrl(post.featured_image_url);
+        if (heroImage?.buffer && dataUrl) {
+          const { screenGeneratedImage } = require('../content/hero-alt-vision');
+          heroImage.model = 'admin pre-generated';
+          heroImage.screen = await screenGeneratedImage({ buffer: heroImage.buffer, mimeType: dataUrl.mime || 'image/png' });
+        }
       } catch (mediaErr) {
         const e = new Error(`featured image could not be fetched for Astro publish: ${mediaErr.message}`);
         e.code = 'BLOG_HERO_MEDIA_FAILED';
@@ -1215,7 +1281,9 @@ async function publishAstro(postId) {
         throw e;
       }
     } else if (!post.featured_image_url) {
-      heroImage = await generateHeroBuffer(post);
+      // The resolved slug, not post.slug: a calendar row without one would
+      // otherwise plan every hero from the same 'post' seed (Codex r1 P2).
+      heroImage = await generateHeroBuffer({ ...post, slug });
     }
     // Normalize any committed hero to a resized WebP. Generated heroes are
     // ~3-5MB PNGs and the layout renders the hero eager + fetchpriority=high
@@ -1225,7 +1293,7 @@ async function publishAstro(postId) {
     // source extension.
     if (heroImage?.buffer) {
       // Preserve alt across the recompress — only the generated path sets it.
-      heroImage = { buffer: await compressToWebp(heroImage.buffer), ext: 'webp', alt: heroImage.alt || null };
+      heroImage = { buffer: await compressToWebp(heroImage.buffer), ext: 'webp', alt: heroImage.alt || null, model: heroImage.model || null, plan: heroImage.plan || null, screen: heroImage.screen || null };
     }
     const heroImageExt = heroImage?.buffer ? 'webp' : imageExtFromSource(post.featured_image_url);
 
@@ -1427,7 +1495,7 @@ async function publishAstro(postId) {
     });
 
     // 4. PR
-    const prBody = buildPrBody({ post, slug, branch, content: finalBody });
+    const prBody = buildPrBody({ post, slug, branch, content: finalBody, images: { hero: heroImage, body: bodyImages.images } });
     prCreateAttempted = true;
     const pr = await gh.createPr({
       head: branch,
@@ -1780,7 +1848,16 @@ function describeHeroFailure(err) {
 // error (see isDeterministicPublishError in autonomous-runner) so the runner
 // parks the run for review instead of retry-looping, and never publishes
 // hero-less.
-async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
+// The brief's "must not depict" list for every image of the post: a brief-level
+// image_avoid, or the operator brief's (category-seed / intercept manifests
+// carry it; pre-push Codex P1 on e8b864170 asked for the hero to get it too).
+function imageExclusionsFor(brief = {}) {
+  const raw = Array.isArray(brief?.image_avoid) ? brief.image_avoid
+    : (Array.isArray(brief?.voice_constraints?.operator_brief?.image_avoid) ? brief.voice_constraints.operator_brief.image_avoid : []);
+  return raw.map((v) => String(v || '').trim()).filter(Boolean);
+}
+
+async function resolveAutonomousHero({ frontmatter, slug, existingFile, imageAvoid = [] }) {
   if (existingFile) {
     try {
       const liveSrc = fm.parse(existingFile.file.content)?.data?.hero_image?.src;
@@ -1806,6 +1883,7 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
       meta_description: frontmatter.meta_description,
       keyword: frontmatter.primary_keyword,
       slug,
+      image_avoid: imageAvoid,
     });
     let buffer;
     try {
@@ -1823,6 +1901,12 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
       // Generation-derived alt: describes the image that was ACTUALLY
       // produced. The caller stamps it over the agent's pre-generation alt.
       alt: img.alt || null,
+      // Provenance for the PR body: which provider served, under which plan,
+      // and what the text/logo screen said.
+      model: img.model || null,
+      plan: img.plan || null,
+      screen: img.screen || null,
+      deadlineAt: Number.isFinite(img.deadlineAt) ? img.deadlineAt : null,
     };
   } catch (err) {
     // The blog schema REQUIRES hero_image + og_image (packages/blog-schema/
@@ -1868,10 +1952,13 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
   // generation-prompt-derived alt already on `generated` — still closer to
   // the real image than the writer's pre-image alt, which is the last
   // resort in the caller.
+  // Bounded by what is left of the hero's slot deadline — a hung vision
+  // provider must not run past the image budget (Codex r9 P2 on #3964).
   generated.alt = (await describeHeroForAlt({
     buffer: generated.buffer,
     title: frontmatter.title,
     keyword: frontmatter.primary_keyword,
+    timeoutMs: Number.isFinite(generated.deadlineAt) ? generated.deadlineAt - Date.now() : null,
   })) || generated.alt || null;
   return generated;
 }
@@ -2875,12 +2962,17 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     let hash;
     // Framing rotates with the slot; a near-duplicate of the hero or a
     // sibling regenerates ONCE with the next framing, then parks — three of
-    // the same picture never ship.
+    // the same picture never ship. Both framings share ONE slot deadline
+    // (Codex r8 P2).
+    const slotDeadline = Date.now() + require('../content/image-generator').IMAGE_CHAIN_BUDGET_MS;
     for (let attempt = 0; ; attempt++) {
       const shot = BODY_IMAGE_SHOTS[(k + attempt) % BODY_IMAGE_SHOTS.length];
       try {
-        const imageGenerator = require('../content/image-generator');
-        gen = await imageGenerator.generate({
+        // An infographic slot may carry ONE caption: the section heading,
+        // when it is short enough to letter legibly.
+        const heading = String(slot.heading || '').trim();
+        const captions = heading && heading.length <= 40 ? [heading] : [];
+        gen = await generatePlannedImage({
           title: frontmatter.title,
           topic: slot.lead || frontmatter.meta_description,
           keyword: slot.heading || frontmatter.primary_keyword,
@@ -2888,10 +2980,13 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
           mode: 'blog-body',
           shot,
           avoid: heroSubject,
+          slug,
+          index: k + 1 + attempt * 100,
+          captions,
+          avoidDepicting: imageExclusionsFor(brief),
+          deadlineAt: slotDeadline,
         });
-        const img = await fetchImageBuffer(gen.dataUrl);
-        if (!img?.buffer) throw new Error('body image generation produced no usable image');
-        buffer = await compressToWebp(img.buffer, { width: BODY_IMAGE_WIDTH });
+        buffer = await compressToWebp(gen.buffer, { width: BODY_IMAGE_WIDTH });
       } catch (err) {
         if (!err.attempts && Array.isArray(gen?.attempts)) err.attempts = gen.attempts;
         const bodyErr = new Error(`autonomous blog body image ${n} generation failed for ${slug} ("${slot.heading}"): ${describeHeroFailure(err)}`);
@@ -2918,11 +3013,12 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     // Vision-described alt (fail-open) over the prompt-derived one, vetted by
     // the same guardrails as the hero alt; the prompt-derived alt is the
     // fallback — it describes what was asked for, never the writer's text.
-    const described = await describeHeroForAlt({ buffer, title: frontmatter.title, keyword: slot.heading });
+    // Bounded by what is left of the slot deadline (Codex r9 P2 on #3964).
+    const described = await describeHeroForAlt({ buffer, title: frontmatter.title, keyword: slot.heading, timeoutMs: slotDeadline - Date.now() });
     const alt = vetGeneratedAlt(described, gen.alt || `Illustration for ${slot.heading}`, Array.isArray(frontmatter.domains) ? frontmatter.domains : null);
-    logger.info(`[astro-publisher] generated body image ${n} for ${slug} via ${gen.model} ("${slot.heading}")`);
+    logger.info(`[astro-publisher] generated body image ${n} for ${slug} via ${gen.model} (${gen.plan?.style || 'unplanned'}, "${slot.heading}")`);
     files.push({ path: repoPath, buffer });
-    images.push({ src, alt, reused: false });
+    images.push({ src, alt, reused: false, model: gen.model || null, plan: gen.plan || null, screen: gen.screen || null });
     newAlts.push(alt);
     placements.push({ insertAt: slot.insertAt, src, alt });
   }
@@ -3147,7 +3243,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // commit into this branch. Fails CLOSED (deterministic publish error) —
   // never a silent hero-less publish. Resolution happens BEFORE the branch is
   // cut so a hero failure can't orphan a branch/PR.
-  const hero = await resolveAutonomousHero({ frontmatter, slug, existingFile });
+  const hero = await resolveAutonomousHero({ frontmatter, slug, existingFile, imageAvoid: imageExclusionsFor(brief) });
   // A freshly generated hero carries a generation-derived alt that describes
   // the actual image — it wins over the agent's alt, which was written
   // before the image existed (the recurring alt↔hero mismatch). Reused
@@ -3250,7 +3346,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const pr = await gh.createPr({
     head: branch,
     title: `Blog: ${frontmatter.title}`.slice(0, 72),
-    body: buildDraftPrBody({ frontmatter, slug, branch, content: finalBody, brief }),
+    body: buildDraftPrBody({ frontmatter, slug, branch, content: finalBody, brief, images: { hero, body: bodyImages.images } }),
   });
   await requestCodexReview({
     pr,
@@ -3713,7 +3809,7 @@ async function publishRefresh(draft, brief = {}) {
   const pr = await gh.createPr({
     head: branch,
     title: `Refresh: ${nextFrontmatter.title || nextFrontmatter.metaTitle || publicPathFromAstroFile(filePath)}`.slice(0, 72),
-    body: buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody: finalBody, brief, backfilledFields }),
+    body: buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody: finalBody, brief, backfilledFields, images: { hero: null, body: refreshImages.images || [] } }),
   });
   await requestCodexReview({
     pr,
@@ -4297,7 +4393,20 @@ function liveUrlForPost(post) {
   return `${origin.replace(/\/$/, '')}/${slug}/`;
 }
 
-function buildPrBody({ post, slug, branch, content }) {
+// "### Images" block shared by every PR body that commits generated images:
+// provider, plan and screen verdict per image (a flagged screen is bold so a
+// reviewer sees it before merging).
+function imageProvenanceSection(images) {
+  if (!images) return [];
+  // A body image is labelled by its committed file name (body-2 when the
+  // draft already carried body-1), not by its position in the generated
+  // list (Codex r13 P2 on #3964).
+  const labelFor = (img, i) => (String(img?.src || '').match(/\/(body-\d+)\.\w+$/) || [])[1] || `body-${i + 1}`;
+  const lines = [describeImageProvenance('hero', images.hero), ...((images.body || []).map((img, i) => describeImageProvenance(labelFor(img, i), img)))].filter(Boolean);
+  return lines.length ? [``, `### Images`, ...lines] : [];
+}
+
+function buildPrBody({ post, slug, branch, content, images = null }) {
   const wordCount = content ? content.split(/\s+/).filter(Boolean).length : 0;
   return [
     `**Blog publish from admin portal**`,
@@ -4308,6 +4417,7 @@ function buildPrBody({ post, slug, branch, content }) {
     `- Author: ${post.author_slug || '—'}`,
     `- Reviewer: ${post.reviewer_slug || '—'}`,
     `- Word count: ${wordCount}`,
+    ...imageProvenanceSection(images),
     ``,
     `Generated by waves-customer-portal → astro-publisher. Merge to go live.`,
     ``,
@@ -4315,7 +4425,21 @@ function buildPrBody({ post, slug, branch, content }) {
   ].join('\n');
 }
 
-function buildDraftPrBody({ frontmatter, slug, branch, content, brief }) {
+// One line per generated image: provider, style, setting, and the text/logo
+// screen verdict — so a reviewer (and the audit) can see which model actually
+// served and whether anything slipped past the screen, without a DB column.
+function describeImageProvenance(label, img) {
+  if (!img) return null;
+  if (img.reused) return `- ${label}: reused from main`;
+  if (!img.model && !img.plan) return null;
+  const plan = img.plan ? `${img.plan.style}, ${String(img.plan.setting || '').split(',')[0]}, ${img.plan.timeOfDay}` : 'unplanned';
+  const screen = img.screen
+    ? (img.screen.checked ? (img.screen.ok ? 'screen clean' : `**screen flagged after retry: ${img.screen.reasons.join('; ')}**`) : 'screen unavailable (fail-open)')
+    : 'not screened';
+  return `- ${label}: ${img.model || 'unknown model'} (${plan}) — ${screen}`;
+}
+
+function buildDraftPrBody({ frontmatter, slug, branch, content, brief, images = null }) {
   const wordCount = content ? content.split(/\s+/).filter(Boolean).length : 0;
   const seoSection = buildSeoReviewSection({ frontmatter, brief });
   return [
@@ -4326,6 +4450,7 @@ function buildDraftPrBody({ frontmatter, slug, branch, content, brief }) {
     `- Category: ${frontmatter.category || '—'}`,
     `- Service areas: ${formatList(frontmatter.service_areas_tag)}`,
     `- Word count: ${wordCount}`,
+    ...imageProvenanceSection(images),
     ``,
     seoSection,
     ``,
@@ -4358,13 +4483,14 @@ function buildMetadataPrBody({ filePath, targetUrl, branch, before = {}, after =
     ] : []),
     `Body, slug, canonical, and schema are intentionally unchanged${backfilledFields.length ? ' (other than the backfilled fields above)' : ''}.`,
     ``,
+    ``,
     `Generated by waves-customer-portal autonomous runner. Merge after review.`,
     ``,
     `Branch: \`${branch}\``,
   ].join('\n');
 }
 
-function buildRefreshPrBody({ filePath, targetUrl, branch, before = {}, after = {}, oldBody = '', newBody = '', brief = {}, backfilledFields = [] }) {
+function buildRefreshPrBody({ filePath, targetUrl, branch, before = {}, after = {}, oldBody = '', newBody = '', brief = {}, backfilledFields = [], images = null }) {
   const oldWords = String(oldBody).split(/\s+/).filter(Boolean).length;
   const newWords = String(newBody).split(/\s+/).filter(Boolean).length;
   const titleField = after.metaTitle !== undefined ? 'metaTitle' : 'title';
@@ -4390,6 +4516,7 @@ function buildRefreshPrBody({ filePath, targetUrl, branch, before = {}, after = 
       ``,
     ] : []),
     `**Frozen (unchanged):** canonical, slug, schema, domains, trackingNumberKey, cityPhone, ${backfilledFields.some((f) => String(f).startsWith('page_type')) ? '' : 'pageType, '}category, robots, ogImage — all preserved from the live page. Only body + meta + freshness date${backfilledFields.length ? ' + the backfilled fields above' : ''} changed.`,
+    ...imageProvenanceSection(images),
     ``,
     `Generated by waves-customer-portal autonomous runner. Merge after review.`,
     ``,
@@ -4946,6 +5073,7 @@ function stripManagedBodyImagesForPost(body, post) {
 
 module.exports = {
   publishAstro,
+  generatePlannedImage,
   reconcileTopicBlockedPostPrs,
   normalizeCategory,
   serviceAreasForCity,
@@ -5035,6 +5163,9 @@ module.exports = {
     normalizeAutonomousBlogFrontmatter,
     normalizeAuthorBlock,
     buildDraftPrBody,
+    buildPrBody,
+    imageExclusionsFor,
+    describeImageProvenance,
     buildMetadataPrBody,
     buildRefreshPrBody,
     buildSeoReviewSection,

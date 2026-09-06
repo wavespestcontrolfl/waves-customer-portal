@@ -4,8 +4,7 @@ const { dateOnly } = require('./visit-groups');
 
 const { recurringServiceAddress } = require('./booking/visit-financial-stamps');
 
-// Rescheduled rows are inactive placeholders for the original appointment.
-const terminal = ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'];
+const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 const retry = () => Object.assign(new Error('Appointments changed while saving. Reload and choose the address again.'), { statusCode: 409, isOperational: true });
 
 // The template remains the address source for future recurrence generation.
@@ -21,12 +20,12 @@ async function planAppointmentAddress(conn, serviceId, propertyId, scope = 'seri
     .where((q) => {
       q.where('id', anchor.id);
       if (parentId) q.orWhere('id', parentId).orWhere((children) => children
-        .where('recurring_parent_id', parentId).whereNotIn('status', terminal));
+        .where('recurring_parent_id', parentId).whereNotIn('status', JOIN_INELIGIBLE_STATUSES));
     }).orderBy('id');
-  const visitIds = [...new Set(rows.filter((row) => row.id === anchor.id || !terminal.includes(row.status))
+  const visitIds = [...new Set(rows.filter((row) => row.id === anchor.id || !JOIN_INELIGIBLE_STATUSES.includes(row.status))
     .map((row) => row.visit_id).filter(Boolean))];
   if (visitIds.length) {
-    const members = await conn('scheduled_services').whereIn('visit_id', visitIds).whereNotIn('status', terminal);
+    const members = await conn('scheduled_services').whereIn('visit_id', visitIds).whereNotIn('status', JOIN_INELIGIBLE_STATUSES);
     if (members.some((row) => row.customer_id !== anchor.customer_id)) throw retry();
     rows = [...new Map([...rows, ...members].map((row) => [row.id, row])).values()]
       .sort((a, b) => String(a.id).localeCompare(String(b.id)));
@@ -38,8 +37,10 @@ async function planAppointmentAddress(conn, serviceId, propertyId, scope = 'seri
   return { anchor, parentId, propertyId, scope, rows, visits, stopKeys };
 }
 
-// Called after the date-wide occupancy locks, before maintenance/comms/rows.
+// Called after occupancy, tech-day, maintenance and comms locks, before stop/appointment rows.
 async function lockAppointmentAddress(trx, plan, updates = {}) {
+  // Match createOrJoinVisit: customer row before every stop lock.
+  await trx('customers').where({ id: plan.anchor.customer_id }).forNoKeyUpdate().first('id');
   const keys = new Set(plan.stopKeys);
   if (updates.scheduled_date) {
     for (const row of plan.rows) {
@@ -65,7 +66,7 @@ async function applyAppointmentAddress(trx, plan, actorId) {
   }
   const locked = await trx('scheduled_services').whereIn('id', plan.rows.map((row) => row.id)).orderBy('id').forUpdate();
   if (fingerprint({ rows: locked }) !== fingerprint(plan)) throw retry();
-  const addressRows = locked.filter((row) => row.id === plan.anchor.id || !terminal.includes(row.status));
+  const addressRows = locked.filter((row) => row.id === plan.anchor.id || !JOIN_INELIGIBLE_STATUSES.includes(row.status));
   for (const visit of fresh.visits) {
     const verdict = await frozenVisitVerdict(trx, visit.id);
     // A retained historical member must never be left at a different property
@@ -121,4 +122,19 @@ async function applyAppointmentAddress(trx, plan, actorId) {
   return locked.map((row) => row.id);
 }
 
-module.exports = { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress };
+// Rebuild only WDO research; replaying booking automations could send prep.
+async function refreshAppointmentAddressBriefs(conn, ids) {
+  if (!ids.length) return;
+  const tagger = require('./appointment-tagger');
+  const rows = await conn('scheduled_services as ss')
+    .leftJoin('customers as c', 'ss.customer_id', 'c.id')
+    .whereIn('ss.id', ids).whereNotIn('ss.status', JOIN_INELIGIBLE_STATUSES)
+    .select('ss.*', 'c.first_name', 'c.last_name', 'c.address_line1', 'c.city', 'c.zip');
+  for (const row of rows) {
+    if (tagger.classifyAppointmentType(row.service_type).tag === 'wdo_inspection') {
+      await tagger.triggerWDOPrep(row);
+    }
+  }
+}
+
+module.exports = { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress, refreshAppointmentAddressBriefs };

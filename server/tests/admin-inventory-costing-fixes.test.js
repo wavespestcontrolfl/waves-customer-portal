@@ -335,6 +335,353 @@ describe('recalcBestPrice', () => {
     expect(flagged.where).toEqual([{ id: 'vp-a' }]);
   });
 
+  test('COUNT-BASED product: the cheapest PER-UNIT row wins, best_price scales to the catalog count and cost_per_unit follows — current, never the r19 stale guard', async () => {
+    // Summit dunks: catalog "20 count", seeded cost_per_unit 1.344/tablet; Amazon $26.88/20, SiteOne $20.07/20.
+    const { catalogUpdates } = wireBestPrice({
+      rows: [
+        { id: 'vp-amz', vendor_id: 'v-amz', price: 26.88, quantity: '20 count', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Amazon' },
+        { id: 'vp-s1', vendor_id: 'v-s1', price: 20.07, quantity: '20 count', normalized_unit_price: null, price_per_oz: null, vendor_name: 'SiteOne' },
+      ],
+      product: { unit_size_oz: null, best_price: 26.88, container_size: '20 count', cost_unit: 'tablet' },
+    });
+    await recalcBestPrice('prod-1');
+    expect(catalogUpdates).toHaveLength(1);
+    expect(catalogUpdates[0].best_price).toBe(20.07);
+    expect(catalogUpdates[0].best_vendor).toBe('SiteOne');
+    expect(catalogUpdates[0].best_price_status).toBe('current');
+    expect(catalogUpdates[0].needs_pricing).toBe(false);
+    // COGS moves with the winner (r1 P1): 20.07 / 20 per tablet, unit kept.
+    expect(catalogUpdates[0].cost_per_unit).toBe(1.0035);
+    expect(catalogUpdates[0].cost_unit).toBe('each'); // canonical count unit (r5 P1) — 'tablet' cannot be matched by the movement-driven COGS consumers
+  });
+
+  test('COUNT-BASED product: a pack of 10 scales to the catalog\'s single unit — $86.94/10 stations → $8.69/station, cost_unit canonical each', async () => {
+    const { catalogUpdates } = wireBestPrice({
+      rows: [{ id: 'vp-ves', vendor_id: 'v-ves', price: 86.94, quantity: '10 stations', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Veseris' }],
+      product: { unit_size_oz: null, best_price: 8.69, container_size: '1 station', cost_unit: null },
+    });
+    await recalcBestPrice('prod-1');
+    expect(catalogUpdates[0].best_price).toBe(8.69);
+    expect(catalogUpdates[0].best_price_amount_cached).toBe(86.94);
+    expect(catalogUpdates[0].best_price_status).toBe('current');
+    expect(catalogUpdates[0].cost_per_unit).toBe(8.694);
+    expect(catalogUpdates[0].cost_unit).toBe('each');
+  });
+
+  test('COUNT-BASED product: rows rank by LANDED per-unit — a $10/10 pack with $20 shipping does not beat a delivered $20/10 pack; the sticker per-unit is what persists', async () => {
+    const { catalogUpdates } = wireBestPrice({
+      rows: [
+        // landed is REBUILT from shipping/tax on the current price (r2 P1): a stale stored landed_cost must not decide
+        { id: 'vp-cheap', vendor_id: 'v-cheap', price: 10, quantity: '10 stations', shipping_cost: 20, landed_cost: 12, normalized_unit_price: null, price_per_oz: null, vendor_name: 'Cheap Sticker' },
+        { id: 'vp-deliv', vendor_id: 'v-deliv', price: 20, quantity: '10 stations', shipping_cost: 0, landed_cost: 999, normalized_unit_price: null, price_per_oz: null, vendor_name: 'Delivered' },
+      ],
+      product: { unit_size_oz: null, best_price: null, container_size: '1 station', cost_unit: null },
+    });
+    await recalcBestPrice('prod-1');
+    expect(catalogUpdates[0].best_vendor).toBe('Delivered');
+    expect(catalogUpdates[0].best_price).toBe(2);
+  });
+
+  test('COUNT-BASED product whose catalog noun is a container ("1 case") never scales against a generic count ("12 count") — the r19 stale guard stays', async () => {
+    const { catalogUpdates } = wireBestPrice({
+      rows: [{ id: 'vp-s1', vendor_id: 'v-s1', price: 31.16, quantity: '12 count', normalized_unit_price: null, price_per_oz: null, vendor_name: 'SiteOne' }],
+      product: { unit_size_oz: null, best_price: 31.16, container_size: '1 case', cost_unit: null },
+    });
+    await recalcBestPrice('prod-1');
+    expect(catalogUpdates[0].best_price_status).toBe('stale');
+    expect(catalogUpdates[0].needs_pricing).toBe(true);
+    expect(catalogUpdates[0].cost_per_unit).toBeUndefined();
+  });
+
+  test('a measured row still takes precedence over count-based rows', async () => {
+    const { catalogUpdates } = wireBestPrice({
+      rows: [
+        { id: 'vp-a', vendor_id: 'v-a', price: 100, quantity: '128 oz', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor A' },
+        { id: 'vp-c', vendor_id: 'v-c', price: 1, quantity: '20 count', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor C' },
+      ],
+      product: { unit_size_oz: 64, best_price: null, container_size: '20 count' },
+    });
+    await recalcBestPrice('prod-1');
+    expect(catalogUpdates[0].best_vendor).toBe('Vendor A');
+    expect(catalogUpdates[0].best_price).toBe(50);
+    expect(catalogUpdates[0].cost_per_unit).toBeUndefined();
+  });
+
+  test('scoreVendorRows is the shared basis the Intelligence Bar reads: count mode ranks compatible rows per unit and puts incompatible rows last with a null rank', () => {
+    const { scoreVendorRows } = inventoryRouter;
+    const rows = [
+      { id: 'a', price: 26.88, quantity: '20 count', vendor_name: 'Amazon' },
+      { id: 'b', price: 20.07, quantity: '20 count', vendor_name: 'SiteOne' },
+      { id: 'c', price: 5, quantity: '1 case', vendor_name: 'Case Seller' },
+    ];
+    const out = scoreVendorRows(rows, { unit_size_oz: null, container_size: '20 count' });
+    expect(out.mode).toBe('count');
+    expect(out.ranked.map((r) => r.row.id)).toEqual(['b', 'a', 'c']);
+    expect(out.ranked[0].rank).toBeCloseTo(20.07 / 20, 6);
+    expect(out.ranked[2].rank).toBeNull();
+    const oz = scoreVendorRows([{ id: 'x', price: 100, quantity: '128 oz' }, { id: 'y', price: 40, quantity: '32 oz' }], { unit_size_oz: 64 });
+    expect(oz.mode).toBe('oz');
+    expect(oz.ranked[0].row.id).toBe('x');
+  });
+
+  test('PUT /:id with a new containerSize recalculates the best price — "1 case" → "12 count" turns a stale count product current (r1 P2)', async () => {
+    const product = { id: 'prod-1', container_size: '1 case', unit_size_oz: null, best_price: 31.16, cost_unit: null, inventory_on_hand: null, inventory_unit: null, low_stock_threshold: null };
+    const rows = [{ id: 'vp-s1', vendor_id: 'v-s1', price: 31.16, quantity: '12 count', normalized_unit_price: null, price_per_oz: null, vendor_name: 'SiteOne' }];
+    const catalogUpdates = [];
+    const trx = (table) => db(table);
+    trx.raw = jest.fn(async () => ({}));
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    db.mockImplementation((table) => makeChain(table, (q) => {
+      if (table === 'vendor_pricing') return q.called('update') ? 1 : rows;
+      if (table === 'products_catalog') {
+        if (q.called('update')) { const u = q.args('update')[0]; catalogUpdates.push(u); Object.assign(product, u); return 1; }
+        return { ...product }; // a fresh read each time, like a real row — the route's pre-update snapshot must not mutate
+      }
+      throw new Error(`Unexpected table ${table}`);
+    }));
+    await withServer(async (baseUrl) => {
+      const r = await fetch(`${baseUrl}/admin/inventory/prod-1`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ containerSize: '12 count' }) });
+      expect(r.status).toBe(200);
+      const body = await r.json();
+      expect(body.product.container_size).toBe('12 count');
+    });
+    const best = catalogUpdates.find((u) => u.best_price_status);
+    expect(best).toBeDefined();
+    expect(best.best_price_status).toBe('current');
+    expect(best.best_price).toBe(31.16);
+    expect(best.cost_per_unit).toBe(2.5967);
+  });
+
+  test('approvals clear the stored pack-level landed total along with the landed per-oz (r2 P1)', () => {
+    const { approvedPerOzFields } = inventoryRouter._test;
+    const f = approvedPerOzFields(20.07, '20 count');
+    expect(f.landed_unit_price).toBeNull();
+    expect(f.landed_cost).toBeNull();
+    // …and the shipping / tax inputs the count ranking would rebuild a landed total from (r3 P1)
+    expect(f.shipping_cost).toBeNull();
+    expect(f.tax_rate).toBeNull();
+    expect(f.shipping_estimate).toBeNull();
+    expect(f.approval_status).toBe('approved');
+  });
+
+  test('leaving count mode clears count-derived COGS — a per-station cost_per_unit does not survive a measured recalculation; measured cost units are left alone (r3 P1)', async () => {
+    const rows = [{ id: 'vp-a', vendor_id: 'v-a', price: 100, quantity: '128 oz', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor A' }];
+    const wasCount = wireBestPrice({ rows, product: { unit_size_oz: 64, best_price: 8.69, container_size: '64 oz', cost_unit: 'station' } });
+    await recalcBestPrice('prod-1');
+    expect(wasCount.catalogUpdates[0].best_price).toBe(50);
+    expect(wasCount.catalogUpdates[0].cost_per_unit).toBeNull();
+    expect(wasCount.catalogUpdates[0].cost_unit).toBeNull();
+    const measured = wireBestPrice({ rows, product: { unit_size_oz: 64, best_price: 50, container_size: '64 oz', cost_unit: 'oz' } });
+    await recalcBestPrice('prod-1');
+    expect(measured.catalogUpdates[0]).not.toHaveProperty('cost_per_unit');
+    expect(measured.catalogUpdates[0]).not.toHaveProperty('cost_unit');
+    // the generic 'each' the count writer itself stores is count-derived too (r4 P1)
+    const wasEach = wireBestPrice({ rows, product: { unit_size_oz: 64, best_price: 1.0035, container_size: '64 oz', cost_unit: 'each' } });
+    await recalcBestPrice('prod-1');
+    expect(wasEach.catalogUpdates[0].cost_per_unit).toBeNull();
+    expect(wasEach.catalogUpdates[0].cost_unit).toBeNull();
+  });
+
+  test('an applied price snapshot replaces the row\'s shipping / tax inputs too — a snapshot carries none, so they clear; shipping_estimate follows it; price_per_oz clears (r4 P1, r5 P1)', () => {
+    const { snapshotPricingFields } = inventoryRouter._test;
+    const f = snapshotPricingFields({ price: 20.07, quantity: '20 count', normalized_unit_price: null, normalized_unit: null, expires_at: null, shipping_estimate: 6.5 });
+    expect(f).toEqual({ normalized_unit_price: null, landed_unit_price: null, price_per_oz: null, quantity: '20 count', unit_normalized: null, expires_at: null, shipping_cost: null, tax_rate: null, landed_cost: null, shipping_estimate: 6.5 });
+    // a worker COUNT offer carries its unit in uom ("each"), not normalized_unit — it must reach unit_normalized so the per-item landed price is honored (r6 P1)
+    const c = snapshotPricingFields({ price: 10, quantity: '10 stations', uom: 'each', landed_unit_price: 3, normalized_unit: null });
+    expect(c.unit_normalized).toBe('each');
+    expect(c.landed_unit_price).toBe(3);
+    // a measured uom without a normalized unit stays null (measured rows read normalized_unit)
+    expect(snapshotPricingFields({ price: 10, quantity: '1 gal', uom: 'gal', normalized_unit: null }).unit_normalized).toBeNull();
+  });
+
+  test('COGS that contradicts the catalog\'s committed size is reset on EVERY path — the stale guard, the no-valid-price path — while unknown semantics are left alone (r5 P1)', async () => {
+    // measured catalog ("64 oz"), count-only rows → raw mode → stale guard: the per-station cost still resets
+    const guard = wireBestPrice({
+      rows: [{ id: 'vp-c', vendor_id: 'v-c', price: 86.94, quantity: '10 stations', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Veseris' }],
+      product: { unit_size_oz: 64, best_price: 8.69, container_size: '64 oz', cost_unit: 'station' },
+    });
+    await recalcBestPrice('prod-1');
+    expect(guard.catalogUpdates[0].best_price_status).toBe('stale');
+    expect(guard.catalogUpdates[0].cost_per_unit).toBeNull();
+    expect(guard.catalogUpdates[0].cost_unit).toBeNull();
+    // no eligible rows at all: same reset rides the invalidation
+    const none = wireBestPrice({ rows: [], product: { unit_size_oz: 64, best_price: 8.69, container_size: '64 oz', cost_unit: 'each' } });
+    await recalcBestPrice('prod-1');
+    expect(none.catalogUpdates[0].best_price_status).toBe('no_valid_price');
+    expect(none.catalogUpdates[0].cost_per_unit).toBeNull();
+    // the reverse: a counted catalog with an $/oz cost resets too
+    const rev = wireBestPrice({ rows: [], product: { unit_size_oz: null, best_price: 5, container_size: '20 count', cost_unit: 'oz' } });
+    await recalcBestPrice('prod-1');
+    expect(rev.catalogUpdates[0].cost_per_unit).toBeNull();
+    // unknown semantics (null container, no unit_size_oz) with an 'each' cost — the yard-sign rows — untouched
+    const unknown = wireBestPrice({ rows: [], product: { unit_size_oz: null, best_price: 0.5356, container_size: null, cost_unit: 'each' } });
+    await recalcBestPrice('prod-1');
+    expect(unknown.catalogUpdates[0]).not.toHaveProperty('cost_per_unit');
+  });
+
+  test('a count row honors the worker\'s PER-UNIT landed_unit_price when its unit is a count unit, and ignores it otherwise (r5 P1)', () => {
+    const { scoreVendorRows } = inventoryRouter;
+    const product = { unit_size_oz: null, container_size: '1 station' };
+    const honored = scoreVendorRows([
+      { id: 'cheapSticker', price: 10, quantity: '10 stations', landed_unit_price: 3, unit_normalized: 'each' },
+      { id: 'delivered', price: 20, quantity: '10 stations' },
+    ], product);
+    expect(honored.ranked[0].row.id).toBe('delivered');
+    expect(honored.ranked[1].rankPerUnit).toBe(3);
+    const ignored = scoreVendorRows([
+      { id: 'cheapSticker', price: 10, quantity: '10 stations', landed_unit_price: 3, unit_normalized: null },
+      { id: 'delivered', price: 20, quantity: '10 stations' },
+    ], product);
+    expect(ignored.ranked[0].row.id).toBe('cheapSticker');
+  });
+
+  test('PUT /:id recalculates INSIDE the size-edit transaction, after the product-scoped advisory lock — a failing recalculation fails the edit (r4 P1)', async () => {
+    const product = { id: 'prod-1', container_size: '64 oz', unit_size_oz: 64, best_price: 50, cost_unit: 'oz', inventory_on_hand: null, inventory_unit: null, low_stock_threshold: null };
+    const rows = [{ id: 'vp-a', vendor_id: 'v-a', price: 100, quantity: '128 oz', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor A' }];
+    const events = [];
+    let txOpen = false;
+    const trx = (table) => db(table);
+    trx.raw = jest.fn(async (sql, params) => { events.push(['raw', params && params[0]]); return {}; });
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction.mockImplementation(async (fn) => { txOpen = true; try { return await fn(trx); } finally { txOpen = false; } });
+    let failRecalcWrite = false;
+    db.mockImplementation((table) => makeChain(table, (q) => {
+      if (table === 'vendor_pricing') {
+        if (q.called('update')) { if (failRecalcWrite) throw new Error('connection reset'); return 1; }
+        return rows;
+      }
+      if (table === 'products_catalog') {
+        if (q.called('update')) { const u = q.args('update')[0]; events.push([u.best_price_status ? 'best' : 'product', txOpen]); Object.assign(product, u); return 1; }
+        if (q.called('forUpdate')) events.push(['rowlock', txOpen]);
+        return { ...product };
+      }
+      throw new Error(`Unexpected table ${table}`);
+    }));
+    await withServer(async (baseUrl) => {
+      const r = await fetch(`${baseUrl}/admin/inventory/prod-1`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ containerSize: '32 oz' }) });
+      expect(r.status).toBe(200);
+    });
+    // advisory lock → row lock → product write → best-price write, all inside the transaction
+    expect(events[0]).toEqual(['raw', 'inventory.best_price']);
+    expect(events[1]).toEqual(['rowlock', true]);
+    expect(events.find((e) => e[0] === 'best')).toEqual(['best', true]);
+    // a recalculation failure fails the edit instead of committing a half-updated product
+    failRecalcWrite = true;
+    await withServer(async (baseUrl) => {
+      const r = await fetch(`${baseUrl}/admin/inventory/prod-1`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ containerSize: '16 oz' }) });
+      expect(r.status).toBe(500);
+    });
+  });
+
+  test('PUT /:id with a measured containerSize and no unitSizeOz re-derives unit_size_oz — "64 oz" → "32 oz" scales best_price to 32 (r3 P1)', async () => {
+    const product = { id: 'prod-1', container_size: '64 oz', unit_size_oz: 64, best_price: 50, cost_unit: 'oz', inventory_on_hand: null, inventory_unit: null, low_stock_threshold: null };
+    const rows = [{ id: 'vp-a', vendor_id: 'v-a', price: 100, quantity: '128 oz', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor A' }];
+    const catalogUpdates = [];
+    const trx = (table) => db(table);
+    trx.raw = jest.fn(async () => ({}));
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    db.mockImplementation((table) => makeChain(table, (q) => {
+      if (table === 'vendor_pricing') return q.called('update') ? 1 : rows;
+      if (table === 'products_catalog') {
+        if (q.called('update')) { const u = q.args('update')[0]; catalogUpdates.push(u); Object.assign(product, u); return 1; }
+        return { ...product };
+      }
+      throw new Error(`Unexpected table ${table}`);
+    }));
+    await withServer(async (baseUrl) => {
+      const r = await fetch(`${baseUrl}/admin/inventory/prod-1`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ containerSize: '32 oz' }) });
+      expect(r.status).toBe(200);
+    });
+    expect(catalogUpdates[0].unit_size_oz).toBe(32);
+    const best = catalogUpdates.find((u) => u.best_price_status);
+    expect(best.best_price).toBe(25);
+    expect(best.best_price_status).toBe('current');
+  });
+
+  test('a stored landed_cost with NO shipping/tax components is ignored by count ranking — the sticker per-unit decides', () => {
+    const { scoreVendorRows } = inventoryRouter;
+    const out = scoreVendorRows([
+      { id: 'stale', price: 10, quantity: '10 stations', landed_cost: 999 },
+      { id: 'fresh', price: 12, quantity: '10 stations' },
+    ], { unit_size_oz: null, container_size: '1 station' });
+    expect(out.mode).toBe('count');
+    expect(out.ranked[0].row.id).toBe('stale');
+    expect(out.ranked[0].rank).toBe(1);
+  });
+
+  test('PUT /:id decides the size change on the LOCKED row, not the pre-transaction snapshot (r2 P1)', async () => {
+    // Snapshot read before the transaction already says "12 count" (a concurrent edit landed), the locked row says "1 count":
+    // the write of "12 count" IS a change and must recalculate.
+    const snapshot = { id: 'prod-1', container_size: '12 count', unit_size_oz: null, best_price: 31.16, cost_unit: null, inventory_on_hand: null, inventory_unit: null, low_stock_threshold: null };
+    const locked = { ...snapshot, container_size: '1 count' };
+    const rows = [{ id: 'vp-s1', vendor_id: 'v-s1', price: 31.16, quantity: '12 count', normalized_unit_price: null, price_per_oz: null, vendor_name: 'SiteOne' }];
+    const catalogUpdates = [];
+    const trx = (table) => db(table);
+    trx.raw = jest.fn(async () => ({}));
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    db.mockImplementation((table) => makeChain(table, (q) => {
+      if (table === 'vendor_pricing') return q.called('update') ? 1 : rows;
+      if (table === 'products_catalog') {
+        if (q.called('update')) { const u = q.args('update')[0]; catalogUpdates.push(u); Object.assign(locked, u); return 1; }
+        return q.called('forUpdate') ? { ...locked } : { ...snapshot, ...locked, container_size: catalogUpdates.length ? locked.container_size : snapshot.container_size };
+      }
+      throw new Error(`Unexpected table ${table}`);
+    }));
+    await withServer(async (baseUrl) => {
+      const r = await fetch(`${baseUrl}/admin/inventory/prod-1`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ containerSize: '12 count' }) });
+      expect(r.status).toBe(200);
+    });
+    const best = catalogUpdates.find((u) => u.best_price_status);
+    expect(best).toBeDefined();
+    expect(best.best_price_status).toBe('current');
+  });
+
+  test('Intelligence Bar compare_vendor_pricing reports a count-based product on a per-UNIT basis (r2 P2)', async () => {
+    const tools = require('../services/intelligence-bar/procurement-tools');
+    const product = { id: 'prod-1', name: 'Summit Mosquito Dunk Tablets', category: 'mosquito', container_size: '20 count', unit_size_oz: null, best_price: 26.88, best_vendor: 'Amazon' };
+    const rows = [
+      { id: 'vp-amz', vendor_id: 'v-amz', price: 26.88, quantity: '20 count', shipping_cost: 20, vendor_name: 'Amazon', is_best_price: true },
+      { id: 'vp-s1', vendor_id: 'v-s1', price: 20.07, quantity: '20 count', vendor_name: 'SiteOne', is_best_price: false },
+      { id: 'vp-case', vendor_id: 'v-case', price: 5, quantity: '1 case', vendor_name: 'Case Seller', is_best_price: false },
+    ];
+    db.mockImplementation((table) => makeChain(table, () => (table === 'products_catalog' ? product : rows)));
+    const out = await tools.executeProcurementTool('compare_vendor_pricing', { product_id: 'prod-1' });
+    expect(out.cheapest_vendor).toBe('SiteOne');
+    expect(out.comparison_basis).toMatch(/per-unit/);
+    expect(out.price_range).toMatch(/\/unit spread/);
+    expect(out.cheapest_price_per_unit).toBe(1.0035);
+    expect(out.vendor_prices[0].price_per_oz).toBeNull();
+    // landed per-unit is what the winner was chosen on (r3 P2): shipping on Amazon makes it dearer still
+    expect(out.vendor_prices[0].landed_price_per_unit).toBe(1.0035);
+    expect(out.vendor_prices[1].landed_price_per_unit).toBe(2.344);
+    // the spread runs to the last COMPARABLE vendor — the incompatible "1 case" row must not null it (r3 P2)
+    expect(out.price_range).toBe('$1.3405/unit spread across 3 vendors'); // landed basis: 2.344 - 1.0035
+  });
+
+  test('parsePackCount reads count packs with their noun; countUnitsCompatible refuses container-vs-item scaling', () => {
+    const { parsePackCount, countUnitsCompatible } = require('../services/product-costing');
+    expect(parsePackCount('20 count')).toEqual({ count: 20, unit: 'each' });
+    expect(parsePackCount('10 stations')).toEqual({ count: 10, unit: 'station' });
+    expect(parsePackCount('1 trap')).toEqual({ count: 1, unit: 'trap' });
+    expect(parsePackCount('12 ct')).toEqual({ count: 12, unit: 'each' });
+    expect(parsePackCount('25')).toEqual({ count: 25, unit: 'each' });
+    expect(parsePackCount('100 case')).toEqual({ count: 100, unit: 'case' });
+    expect(parsePackCount('2.5 gal')).toBeNull();
+    expect(parsePackCount('78 fl oz')).toBeNull();
+    expect(parsePackCount('4 x 30g tubes')).toBeNull();
+    expect(parsePackCount('one case')).toBeNull();
+    expect(parsePackCount('')).toBeNull();
+    expect(countUnitsCompatible('each', 'station')).toBe(true);
+    expect(countUnitsCompatible('station', 'station')).toBe(true);
+    expect(countUnitsCompatible('case', 'case')).toBe(true);
+    expect(countUnitsCompatible('case', 'each')).toBe(false);
+    expect(countUnitsCompatible('each', 'pack')).toBe(false);
+    expect(countUnitsCompatible('station', 'trap')).toBe(false);
+  });
+
   test('ranks by LANDED per-oz when present — cheap sticker + heavy shipping must not win', async () => {
     // Vendor A: $50/64 oz sticker ($0.78/oz) but $30 shipping → landed $1.25/oz.
     // Vendor B: $60/64 oz delivered → landed $0.9375/oz. B wins the ordering;

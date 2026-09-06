@@ -294,6 +294,8 @@ jobs:
         run: npm run check:portal-brand
       - name: Domain rules gate
         run: npm run check:domain-rules
+      - name: Local session supervisor lifecycle tests
+        run: python3 -m unittest discover -s scripts/agents/tests -v
       - name: Lint changed files (errors-only, same scope as the pre-commit hook)
         # Changed-files-only is deliberate — the repo has no lint history and
         # eslint.config.js encodes that decision. Full-repo lint would flag

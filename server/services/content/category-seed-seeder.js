@@ -470,6 +470,11 @@ function buildCategoryOverlay({ opportunity, pageType, requiredSections = [], sc
     // registry at gate time and the runner parks the draft as
     // affiliate_review for the owner.
     affiliate_products: affiliateProductsFor(payload),
+    // "Must not depict" lines for the post's generated images (hero + body):
+    // the image generator appends them to its standing no-logo / no-invented-
+    // label guards (e.g. "irrigation repair scenes" on a guide that says Waves
+    // does not repair irrigation).
+    image_avoid: (Array.isArray(payload.image_avoid) ? payload.image_avoid : []).map((v) => String(v || '').trim()).filter(Boolean),
     binding_instructions: buildBindingInstructions({ payload, byline, ctaDirectives, requiredSources, sourceNotes, globalRules: meta.manifest_notes, faqBlocked, payloadSchema }),
   };
 

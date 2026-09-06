@@ -682,9 +682,16 @@ const gates = {
   // status/log listing. Kill switch: unset.
   voiceRelayTransfer: process.env.GATE_VOICE_RELAY_TRANSFER === 'true',
 
-  // Durable capture evidence for voice-session recovery. Strict opt-in,
-  // read at write time; unset is the kill switch. Reconnect behavior follows
-  // in the recovery PR built on this prerequisite.
+  // Sandy PR 2B — voice-session recovery. On, a relay socket that fails
+  // mid-call is reconnected ONCE (/relay-complete re-renders the relay with
+  // a resumed greeting; the new socket takes the claim), every socket's
+  // transcript lands as a segment (metadata.relay_segments) and the owning
+  // close composes the whole call; a second failure hands the caller to the
+  // office (transfer gate, office open) or voicemail; a second consecutive
+  // model / tool failure hands off instead of re-prompting. Off ⇒
+  // /relay-complete and the close-time writes are byte-identical to today.
+  // Read at CALL time (services/voice-agent/relay-recovery.js, exact
+  // 'true'); this entry is the status/log listing. Kill switch: unset.
   voiceRelayRecovery: process.env.GATE_VOICE_RELAY_RECOVERY === 'true',
 
   // AI Assistant — auto-sends AI replies to customers via SMS
@@ -1909,6 +1916,9 @@ const gates = {
   // (services/job-card.js) so a flip needs no redeploy; kill switch: unset
   // GATE_JOB_CARD — the endpoint answers {enabled:false} and the tab hides.
   jobCard: gateEnvValue('GATE_JOB_CARD'),
+  // Current-visit procedure and readable SOP sheet inside the Job Card drawer.
+  // Uses the same visit resolver; unset restores the legacy protocol tabs.
+  protocolSop: gateEnvValue('GATE_PROTOCOL_SOP'),
   // The wrapped-van scene on the appointment page + booking step 4 (owner
   // 2026-09-03). Rides the existing page payloads (appointment `vanScene`,
   // booking config `van_scene`) — no extra client fetch. Kill switch: unset
@@ -2249,6 +2259,12 @@ const gates = {
   // with no slots and every picker renders exactly as today.
   bestTimeHints: gateEnvValue('GATE_BEST_TIME_HINTS'),
 
+  // Staff existing-visit picker + save checks use complete-route arrival
+  // simulation within the existing two-hour customer promises. Advisory;
+  // never changes neighbours' promises or sends notifications. Call-time
+  // kill switch in scheduling/arrival-route.js; off in every environment.
+  adminArrivalWindows: gateEnvValue('GATE_ADMIN_ARRIVAL_WINDOWS'),
+
   // Call property-role classification (2026-08-15): the extraction classifies
   // each property a call discusses (occupancy + which one is the caller's
   // primary residence); the pipeline fills only-unknown occupancies directly
@@ -2351,7 +2367,6 @@ const gates = {
   // Read at CALL time so a flip needs no redeploy.
   techDictationUpload: gateEnvValue('GATE_TECH_DICTATION_UPLOAD'),
 
-
   // Agent Activity feed — the Activity tab in /admin/agents: one read-only
   // timeline built from autonomous_runs, content_email_approvals,
   // message_drafts and job_health (server/services/agent-activity.js). OFF
@@ -2433,6 +2448,9 @@ const gates = {
   // (default, dev AND prod): the pre-gate five-fact mapping, byte-identical.
   // Read-only, no comms, no bell-policy change. Kill switch: unset. This
   // entry is for logGateStatus; the service reads gateEnvValue at CALL time.
+  // EPA label weather review; request-time checks use gateEnvValue.
+  labelPipeline: gateEnvValue('GATE_LABEL_PIPELINE'),
+
   closeoutMoneyCommsAlerts: gateEnvValue('GATE_CLOSEOUT_MONEY_COMMS_ALERTS'),
 };
 

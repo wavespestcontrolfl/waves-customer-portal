@@ -18,7 +18,7 @@ function authHeaders() {
   };
 }
 
-export function useBestTimes({ date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds, enabled = true }) {
+export function useBestTimes({ date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds, arrivalWindows = false, enabled = true }) {
   const [bestTimes, setBestTimes] = useState([]);
   const [checking, setChecking] = useState(false);
   // Stable dep for the (usually tiny) id array.
@@ -39,6 +39,7 @@ export function useBestTimes({ date, serviceId, customerId, durationMinutes, tec
           signal: controller.signal,
           body: JSON.stringify({
             hint: true,
+            arrivalWindows,
             // Existing-visit surfaces pass serviceId so the server ranks at
             // the VISIT's stamped address (secondary/rental properties),
             // not the customer's primary home.
@@ -73,6 +74,8 @@ export function useBestTimes({ date, serviceId, customerId, durationMinutes, tec
             end: s.end_time,
             detourMinutes: s.detour_minutes,
             stopsThatDay: s.stops_that_day,
+            estimatedArrival: s.estimated_arrival || null,
+            arrivalWindows: s.route_mode === 'arrival_windows',
             // Id always travels — a consumer that can assign (create modal
             // auto mode) must adopt the tech the detour was scored for.
             technicianId: s.technician?.id || null,
@@ -83,6 +86,6 @@ export function useBestTimes({ date, serviceId, customerId, durationMinutes, tec
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, serviceId, customerId, durationMinutes, technicianId, excludeKey]);
+  }, [enabled, date, serviceId, customerId, durationMinutes, technicianId, excludeKey, arrivalWindows]);
   return { bestTimes, checking };
 }

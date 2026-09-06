@@ -19,12 +19,16 @@ jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 
 const db = require('../models/db');
+db.transaction = async (cb) => cb(db);
 const { dispatchWithFallback } = require('../services/llm/call');
 const tagger = require('../services/appointment-tagger');
 
 function chain() {
   const c = {
     where: jest.fn(() => c),
+    whereNotIn: jest.fn(() => c),
+    forNoKeyUpdate: jest.fn(() => c),
+    first: jest.fn(async () => ({ id: 'cust-wdo-1' })),
     update: jest.fn(async () => 1),
     insert: jest.fn(async () => 1),
   };
@@ -34,6 +38,9 @@ function chain() {
 const service = {
   id: 'svc-wdo-1',
   customer_id: 'cust-wdo-1',
+  service_id: 'catalog-wdo',
+  service_type: 'WDO Inspection',
+  status: 'confirmed',
   address_line1: '100 Unit Test Way',
   city: 'Venice',
   zip: '34285',
@@ -81,6 +88,115 @@ describe('triggerWDOPrep provider-key gate', () => {
     await tagger.triggerWDOPrep({ ...service });
 
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+  });
+
+  test('moved WDO research uses the service stamp and refuses stale publication', async () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    const c = chain(); c.update.mockResolvedValue(0); db.mockReturnValue(c);
+    await tagger.triggerWDOPrep({ ...service, property_id: 'new', service_address_line1: '200 Example Road',
+      service_address_city: 'Example', service_address_zip: '00000' });
+    expect(require('../services/property-lookup/ai-property-lookup').lookupPropertyFromAITrio)
+      .toHaveBeenCalledWith('200 Example Road, Example, FL 00000');
+    expect(c.where).toHaveBeenCalledWith(expect.objectContaining({ property_id: 'new', service_address_line1: '200 Example Road' }));
+    expect(c.insert).not.toHaveBeenCalled();
+  });
+
+  // Publication predicate: exact match on the stamped columns, plus a
+  // terminal-status exclusion (whereNotIn) rather than an exact status pin.
+  function livePublication(live) {
+    const c = chain();
+    let publication; let excludedStatuses = [];
+    c.where.mockImplementation((where) => { publication = where; return c; });
+    c.whereNotIn.mockImplementation((column, values) => {
+      if (column === 'status') excludedStatuses = values;
+      return c;
+    });
+    c.update.mockImplementation(async (patch) => {
+      const matches = Object.entries(publication).every(([key, expected]) => (live[key] ?? null) === expected)
+        && !excludedStatuses.includes(live.status);
+      if (matches) Object.assign(live, patch);
+      return matches ? 1 : 0;
+    });
+    return c;
+  }
+
+  test.each([
+    ['customer_id', 'cust-merge-winner'],
+    ['service_id', 'catalog-pest'],
+    ['service_type', 'General Pest Control'],
+    ['status', 'cancelled'],
+    ['status', 'rescheduled'],
+  ])('discards research when %s changes during the provider call', async (field, value) => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    const live = { ...service };
+    const c = livePublication(live);
+    db.mockReturnValue(c);
+    require('../services/property-lookup/ai-property-lookup').lookupPropertyFromAITrio
+      .mockImplementationOnce(async () => { live[field] = value; return null; });
+
+    await tagger.triggerWDOPrep({ ...service });
+
+    expect(live.pre_service_brief).toBeUndefined();
+    expect(c.insert).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['pending', 'confirmed'],
+    ['confirmed', 'en_route'],
+  ])('keeps the brief when a live status moves %s → %s during the provider call', async (from, to) => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    const live = { ...service, status: from };
+    const c = livePublication(live);
+    db.mockReturnValue(c);
+    require('../services/property-lookup/ai-property-lookup').lookupPropertyFromAITrio
+      .mockImplementationOnce(async () => { live.status = to; return null; });
+
+    await tagger.triggerWDOPrep({ ...service, status: from });
+
+    expect(live.pre_service_brief_type).toBe('wdo_inspection');
+    expect(live.status).toBe(to);
+    expect(c.insert).toHaveBeenCalledTimes(1);
+  });
+
+  test('publication and the interaction note commit in one transaction', async () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    const live = { ...service };
+    const trx = livePublication(live);
+    const outer = chain();
+    db.mockReturnValue(outer);
+    const transaction = jest.fn(async (cb) => cb(() => trx));
+    db.transaction = transaction;
+    try {
+      await tagger.triggerWDOPrep({ ...service });
+    } finally {
+      db.transaction = async (cb) => cb(db);
+    }
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(trx.update).toHaveBeenCalledTimes(1);
+    expect(trx.insert).toHaveBeenCalledTimes(1);
+    expect(outer.update).not.toHaveBeenCalled();
+    expect(outer.insert).not.toHaveBeenCalled();
+  });
+
+  test('publication locks the customer row before the service row (customer merge lock order)', async () => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    const live = { ...service };
+    const trx = livePublication(live);
+    db.transaction = jest.fn(async (cb) => cb(() => trx));
+    try {
+      await tagger.triggerWDOPrep({ ...service });
+    } finally {
+      db.transaction = async (cb) => cb(db);
+    }
+    expect(trx.where).toHaveBeenNthCalledWith(1, { id: service.customer_id });
+    expect(trx.forNoKeyUpdate).toHaveBeenCalledTimes(1);
+    expect(trx.forNoKeyUpdate.mock.invocationCallOrder[0]).toBeLessThan(trx.update.mock.invocationCallOrder[0]);
+    expect(trx.update.mock.invocationCallOrder[0]).toBeLessThan(trx.insert.mock.invocationCallOrder[0]);
   });
 
   test('no provider key at all → deterministic template, no AI dispatch', async () => {

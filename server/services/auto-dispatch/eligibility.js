@@ -87,13 +87,18 @@ function isEligibleForAutoDispatch(service, ctx = {}) {
 /**
  * Is the recurring plan behind this service still active?
  *
- * Signal: an unresolved plan_lapsed/plan_ending alert on this series (joinable
- * directly on recurring_parent_id). We deliberately do NOT veto on
+ * Signal: an unresolved plan_lapsed alert on this series (joinable
+ * on recurring_parent_id and the current customer_id). We deliberately do NOT veto on
  * customer_subscriptions: active recurring plans in this app are driven by the
  * scheduled_services rows themselves (the future recurring row loadEligible-
  * Services already found), while customer_subscriptions is a legacy/Square
  * table that can hold stale paused/cancelled rows for an otherwise-active
  * customer — vetoing on it would silently exclude valid recurring visits.
+ *
+ * A plan_ending row is a refill reminder, not a pause/lapse instruction.
+ * This caller already has a live future recurring visit; an old ending alert
+ * must not veto that visit after a refill or annual-prepay conversion, even
+ * when the renewal banner no longer displays the stale reminder.
  *
  * Best-effort: a missing table or query error is treated as "active" (fail
  * open — don't block optimization on a bookkeeping gap), never as inactive.
@@ -104,7 +109,8 @@ async function isRecurringPlanActive(service, db) {
   try {
     const alert = await db('recurring_plan_alerts')
       .where('recurring_parent_id', parentId)
-      .whereIn('alert_type', ['plan_lapsed', 'plan_ending'])
+      .where('customer_id', service.customer_id)
+      .where('alert_type', 'plan_lapsed')
       .whereNull('resolved_at')
       .first('id', 'alert_type');
     if (alert) {

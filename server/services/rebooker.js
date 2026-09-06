@@ -27,6 +27,7 @@ const { clearTechCurrentJob } = require('./tech-status');
 const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./call-booking-catalog');
 const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = require('./scheduling/occupancy');
 const { resolveStopCoords } = require('./scheduling/travel-gap');
+const { arrivalWindowRoutingEnabled } = require('./scheduling/arrival-route');
 const { guardedCoordSelects } = require('./scheduling/day-stops');
 const { getIo } = require('../sockets');
 const {
@@ -1197,6 +1198,8 @@ class SmartRebooker {
     // advisory at any setting.
     const overlapAdvisory = options.overlapAdvisory === true;
     let overlapWarned = false;
+    let arrivalWarning = null;
+    const useArrivalWindows = overlapAdvisory && options.adminWindowRules === true && arrivalWindowRoutingEnabled();
     // The technician on the COMMITTED row (RETURNING off the CAS write).
     let committedTechId = null;
 
@@ -1341,7 +1344,7 @@ class SmartRebooker {
           }
         }
       }
-      if (keptTechId && updates.window_start && occupancyGateEnd) {
+      if (keptTechId && updates.window_start && occupancyGateEnd && !useArrivalWindows) {
         const overlap = await trx('scheduled_services')
           .where('scheduled_date', newDateStr)
           .where('technician_id', keptTechId)
@@ -1402,8 +1405,10 @@ class SmartRebooker {
           // its own route policy; admin and tech (rain-out) moves are
           // advisory; all stay overlap-only (GH codex #3803 r4 P1).
           ...(options.travelGap === true ? { travel: await resolveStopCoords(trx, serviceId) } : {}),
+          ...(useArrivalWindows ? { arrivalWindow: { serviceId, technicianId: keptTechId, changes: updates } } : {}),
         });
         if (occupancyClash.length) {
+          arrivalWarning = occupancyClash[0].warning || null;
           if (!overlapAdvisory) {
             // Same failure mode as the kept-tech check so every caller's
             // 409/SLOT_TAKEN handling works unchanged.
@@ -1658,7 +1663,7 @@ class SmartRebooker {
       const { slotOverlapWarning } = require('./scheduling/window-rules');
       // previousStatus: the status the CAS matched — the row's real
       // pre-move state, for callers that restore it (auto-dispatch).
-      return { success: true, originalDate, newDate, previousStatus: service.status, technicianId: committedTechId, warnings: [slotOverlapWarning(newDateStr)] };
+      return { success: true, originalDate, newDate, previousStatus: service.status, technicianId: committedTechId, warnings: [arrivalWarning || slotOverlapWarning(newDateStr)] };
     }
     // technicianId: the holder on the COMMITTED row — a caller that suppressed
     // the per-move tech notice (options.suppressTechNotice) tells them itself.
@@ -1715,6 +1720,8 @@ class SmartRebooker {
         statusCode: 409, code: 'SCOPE_CHANGED',
       });
     }
+    const arrivalWarnings = new Map();
+    const useArrivalWindows = overlapAdvisory && options.adminWindowRules === true && arrivalWindowRoutingEnabled();
     const allowedStatuses = options.allowLive === true
       ? new Set([...RESCHEDULABLE_STATUSES, ...LIVE_OVERRIDE_STATUSES])
       : RESCHEDULABLE_STATUSES;
@@ -2451,7 +2458,7 @@ class SmartRebooker {
               'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
               ['slot-reserve', `${options.technicianId}:${String(date).split('T')[0]}`],
             );
-            const overlap = await trx('scheduled_services')
+            const overlap = useArrivalWindows ? null : await trx('scheduled_services')
               .where('scheduled_date', date)
               .where('technician_id', options.technicianId)
               .whereNot('id', sib.id)
@@ -2496,8 +2503,10 @@ class SmartRebooker {
             excludeServiceIds: sweptIds,
             excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
             travel: seriesTravel,
+            ...(useArrivalWindows ? { arrivalWindow: { serviceId: sib.id, changes: updateData } } : {}),
           });
           if (anchorOccClash.length) {
+            if (anchorOccClash[0].warning) arrivalWarnings.set(String(date).split('T')[0], anchorOccClash[0].warning);
             if (!overlapAdvisory) {
               throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
                 statusCode: 409,
@@ -2577,8 +2586,10 @@ class SmartRebooker {
             excludeServiceIds: sweptIds,
             excludeStatuses: [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
             travel: seriesTravel,
+            ...(useArrivalWindows ? { arrivalWindow: { serviceId: sib.id, changes: updateData } } : {}),
           });
           if (occClash.length) {
+            if (occClash[0].warning) arrivalWarnings.set(String(date).split('T')[0], occClash[0].warning);
             if (overlapAdvisory) {
               // Staff-advisory mode (admin dispatch): overlaps never block a
               // save — collect the date for the warnings[] the route returns.
@@ -2795,7 +2806,7 @@ class SmartRebooker {
       const exceptionCount = moveRows.filter((r) => r.exception).length;
       const seriesWarnings = [...overlapWarnDates].sort().map((d) => {
         const { slotOverlapWarning } = require('./scheduling/window-rules');
-        return slotOverlapWarning(d);
+        return arrivalWarnings.get(d) || slotOverlapWarning(d);
       }).concat(followUpWarnings);
       committedResult = {
         success: true,
@@ -2816,6 +2827,7 @@ class SmartRebooker {
         // operator card is a marker-fenced, reconciled effect (codex r15
         // P1), never an in-memory alert a dying pass can lose.
         overlapDates: [...overlapWarnDates].sort(),
+        arrivalWindowDates: [...arrivalWarnings.keys()].sort(),
         followUpOccurrences,
         // Rows whose tracker lifecycle this move rewound — the replay /
         // reconciler cleanup set (replaySeriesMoveCleanup).

@@ -35,6 +35,10 @@ const SCAN_DIRS = [
   // The V2 report bodies (lawn / pest / mosquito / cockroach / tree & shrub)
   // and the gauge primitives — swept onto the sheet with #3895.
   path.join(ROOT, 'client/src/components/report'),
+  // Portal-only components (cancel flow, cancelled plan): the button-weight
+  // rule removal on #3971 exposed 800/850 weights here that the gate could
+  // not see.
+  path.join(ROOT, 'client/src/components/portal'),
 ];
 // Files explicitly excluded — dev-only demos, theme tokens themselves, etc.
 const EXCLUDED_FILES = new Set([
@@ -114,6 +118,8 @@ function walk(dir) {
     if (!entry.isFile()) continue;
     if (!/\.(jsx?|tsx?)$/.test(entry.name)) continue;
     if (EXCLUDED_FILES.has(entry.name)) continue;
+    // Test fixtures style stub components; they are not customer surfaces.
+    if (/\.test\.[jt]sx?$/.test(entry.name)) continue;
     if (EXCLUDED_DIR_HINTS.some(h => p.includes(h))) continue;
     if (NON_CUSTOMER_FILENAME_PREFIXES.some(pre => entry.name.startsWith(pre))) continue;
     out.push(p);

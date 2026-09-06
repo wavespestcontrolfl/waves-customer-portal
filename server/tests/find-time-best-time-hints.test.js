@@ -266,3 +266,12 @@ test('the guard fails OPEN — a snapshot error keeps the engine answer', async 
   expect(res.status).toBe(200);
   expect((await res.json()).slots).toHaveLength(1);
 });
+
+test.each([undefined, false, true])('existing-visit arrival routing requires explicit supported-caller opt-in: %s', async (arrivalWindows) => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const res = await post({ ...BASE, serviceId: 'svc-1', hint: true, arrivalWindows });
+  expect(res.status).toBe(200);
+  const opts = findAvailableSlots.mock.calls[0][0];
+  if (arrivalWindows === true) expect(opts.arrivalWindow).toEqual({ serviceId: 'svc-1' });
+  else expect(opts).not.toHaveProperty('arrivalWindow');
+});
