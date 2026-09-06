@@ -147,7 +147,7 @@ const SCENE_LIBRARY = {
     { key: 'pest-paper-wasp-nest', scene: 'a small open umbrella-shaped paper wasp nest hanging under the eave of a stucco Florida home, morning light', only: ['wasp'] },
     { key: 'pest-mud-dauber-tubes', scene: 'close-up of grey mud tubes built by a mud dauber on a lanai ceiling beam, soft shade', only: ['dauber', 'wasp'] },
     { key: 'pest-web-lanai-corner', scene: 'a spider web in the corner of a screened lanai catching golden sunrise light, pool blurred behind', only: ['spider', 'web', 'widow'] },
-    { key: 'pest-lanai-floor-rain', scene: 'wet lanai pavers after a Florida downpour with a few small dark millipedes near the sliding door track, overcast light', only: ['millipede', 'springtail', 'earwig'] },
+    { key: 'pest-lanai-floor-rain', scene: 'wet lanai pavers after a Florida downpour with a few small dark millipedes near the sliding door track, overcast light', only: ['millipede'] },
     { key: 'pest-garage-door-seal', scene: 'the bottom corner of a garage door where the rubber seal meets the concrete, daylight glowing through a small gap' },
     { key: 'pest-holiday-boxes', scene: 'holiday storage bins stacked in a Florida garage with a wreath box on top, warm overhead light', only: ['holiday', 'boxes', 'storage', 'wreath', 'garland'] },
     { key: 'pest-outdoor-kitchen', scene: 'a clean outdoor kitchen on a Florida lanai with a grill and countertop at golden hour, tropical plants beyond the screen', only: ['holiday', 'cookout', 'guest', 'yellowjacket', 'outdoor kitchen'] },

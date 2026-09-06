@@ -451,6 +451,9 @@ const PEST_VERSUS_PAIRS = [
   {
     key: 'no_see_um_vs_mosquito',
     service: 'mosquito',
+    // No-see-ums are separate scope, covered only when named (estimate-service-
+    // details), so the card must not read as "the mosquito program covers both".
+    label: 'Pest ID',
     left: { name: 'No-See-Um', points: ['Tiny enough to pass through screens', 'Bites near water at dawn and dusk', 'Welts show up before you see the bug'] },
     right: { name: 'Mosquito', points: ['Visible, with a distinct whine', 'Breeds in standing water', 'Rests on walls and under eaves'] },
     verdict: 'Bites alone do not tell. Bitten through the screen at dusk? Think no-see-ums.',
@@ -1141,7 +1144,7 @@ function buildVersusCardInput(pair = {}, input = {}) {
     // General-pest comparisons carry a neutral ID label: several pairs (German
     // roach, flea, honey bee) belong to specialty services, and stamping
     // "General Pest" on them would imply the recurring program covers them.
-    service: (input.service || pair.service) === 'general pest' ? 'Pest ID' : titleCase(input.service || pair.service || 'Pest ID'),
+    service: pair.label || ((input.service || pair.service) === 'general pest' ? 'Pest ID' : titleCase(input.service || pair.service || 'Pest ID')),
     left: pair.left,
     right: pair.right,
     verdict: pair.verdict,
@@ -1415,7 +1418,9 @@ async function recentCampaignCards(limit = 24) {
   try {
     const rows = await db('social_content_studio_runs')
       .where({ run_type: 'autonomous' })
-      .whereIn('status', ['published', 'draft_created', 'dry_run'])
+      // dry_run posts nothing, so it is not history — a publisher check must
+      // not reserve a topic/city the audience never saw.
+      .whereIn('status', ['published', 'draft_created'])
       .orderBy('started_at', 'desc')
       .limit(Math.max(1, Math.min(120, Number(limit) * 3 || 72)))
       .select('topic', 'city', 'input');

@@ -1068,6 +1068,9 @@ describe('versus card label (Codex r3 on #3990)', () => {
   test('general-pest pairs render a neutral Pest ID label; service pairs keep their service', () => {
     const roach = Studio.PEST_VERSUS_PAIRS.find((p) => p.key === 'german_roach_vs_american_roach');
     expect(Studio.buildVersusCardInput(roach, { city: 'Venice', service: roach.service }).service).toBe('Pest ID');
+    // No-see-ums are separate scope: the pair keeps the mosquito scene bank but never the Mosquito label (Codex r6 on #3990).
+    const nsu = Studio.PEST_VERSUS_PAIRS.find((p) => p.key === 'no_see_um_vs_mosquito');
+    expect(Studio.buildVersusCardInput(nsu, { city: 'Venice', service: nsu.service }).service).toBe('Pest ID');
     const lawn = Studio.PEST_VERSUS_PAIRS.find((p) => p.key === 'chinch_bug_vs_drought_stress');
     expect(Studio.buildVersusCardInput(lawn, { city: 'Venice', service: lawn.service }).service).toBe('Lawn Care');
   });
