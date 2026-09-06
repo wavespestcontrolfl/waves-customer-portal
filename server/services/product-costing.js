@@ -277,12 +277,28 @@ function costLineFromUsage(row, areaSqFt = 0) {
   };
 }
 
+// Count-based pack: how many units a row's quantity holds when it carries no
+// measurable size — "10 stations", "20 count", "12 ct", "1 trap", a bare "25".
+// Returns null for measured packs (those go through parsePackSize) and for
+// anything it cannot read, so callers fall back to the raw-price path.
+const COUNT_WORDS = /^(?:count|ct|pcs?|pieces?|each|ea|units?|stations?|traps?|tubes?|blocks?|blox|briquets?|briquettes?|dunks?|bags?|cases?|packs?|boxes|box|signs?|stakes?|cards?|stickers?)$/;
+function parsePackCount(quantity) {
+  const raw = String(quantity || '').toLowerCase().trim();
+  const m = raw.match(/^(\d+)\s*(?:x\s*)?([a-z]*)\.?$/);
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  if (m[2] && !COUNT_WORDS.test(m[2])) return null;
+  return n;
+}
+
 module.exports = {
   calcLandedCost,
   convertToOz,
   costLineFromUsage,
   normalizeQuantityToOz,
   normalizeUnit,
+  parsePackCount,
   parsePackSize,
   unitPriceBreakdown,
   usageAmountForArea,

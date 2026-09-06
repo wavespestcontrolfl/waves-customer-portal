@@ -335,6 +335,72 @@ describe('recalcBestPrice', () => {
     expect(flagged.where).toEqual([{ id: 'vp-a' }]);
   });
 
+  test('COUNT-BASED product: the cheapest PER-UNIT row wins and best_price is scaled to the catalog count — current, never the r19 stale guard', async () => {
+    // Summit dunks: catalog container "20 count"; Amazon $26.88/20, SiteOne $20.07/20.
+    const { catalogUpdates } = wireBestPrice({
+      rows: [
+        { id: 'vp-amz', vendor_id: 'v-amz', price: 26.88, quantity: '20 count', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Amazon' },
+        { id: 'vp-s1', vendor_id: 'v-s1', price: 20.07, quantity: '20 count', normalized_unit_price: null, price_per_oz: null, vendor_name: 'SiteOne' },
+      ],
+      product: { unit_size_oz: null, best_price: 26.88, container_size: '20 count' },
+    });
+    await recalcBestPrice('prod-1');
+    expect(catalogUpdates).toHaveLength(1);
+    expect(catalogUpdates[0].best_price).toBe(20.07);
+    expect(catalogUpdates[0].best_vendor).toBe('SiteOne');
+    expect(catalogUpdates[0].best_price_status).toBe('current');
+    expect(catalogUpdates[0].needs_pricing).toBe(false);
+  });
+
+  test('COUNT-BASED product: a pack of 10 scales to the catalog\'s single unit — $86.94/10 stations → $8.69/station (the HexPro figure)', async () => {
+    const { catalogUpdates } = wireBestPrice({
+      rows: [{ id: 'vp-ves', vendor_id: 'v-ves', price: 86.94, quantity: '10 stations', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Veseris' }],
+      product: { unit_size_oz: null, best_price: 8.69, container_size: '1 station' },
+    });
+    await recalcBestPrice('prod-1');
+    expect(catalogUpdates[0].best_price).toBe(8.69);
+    expect(catalogUpdates[0].best_price_amount_cached).toBe(86.94);
+    expect(catalogUpdates[0].best_price_status).toBe('current');
+  });
+
+  test('COUNT-BASED product whose catalog count cannot be read ("1 case" vs "12 count") keeps the r19 stale guard', async () => {
+    const { catalogUpdates } = wireBestPrice({
+      rows: [{ id: 'vp-s1', vendor_id: 'v-s1', price: 31.16, quantity: '12 count', normalized_unit_price: null, price_per_oz: null, vendor_name: 'SiteOne' }],
+      product: { unit_size_oz: null, best_price: 31.16, container_size: 'one case' },
+    });
+    await recalcBestPrice('prod-1');
+    expect(catalogUpdates[0].best_price_status).toBe('stale');
+    expect(catalogUpdates[0].needs_pricing).toBe(true);
+  });
+
+  test('a measured row still takes precedence over count-based rows', async () => {
+    const { catalogUpdates } = wireBestPrice({
+      rows: [
+        { id: 'vp-a', vendor_id: 'v-a', price: 100, quantity: '128 oz', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor A' },
+        { id: 'vp-c', vendor_id: 'v-c', price: 1, quantity: '20 count', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor C' },
+      ],
+      product: { unit_size_oz: 64, best_price: null, container_size: '20 count' },
+    });
+    await recalcBestPrice('prod-1');
+    expect(catalogUpdates[0].best_vendor).toBe('Vendor A');
+    expect(catalogUpdates[0].best_price).toBe(50);
+  });
+
+  test('parsePackCount reads count packs and refuses measured or unreadable ones', () => {
+    const { parsePackCount } = require('../services/product-costing');
+    expect(parsePackCount('20 count')).toBe(20);
+    expect(parsePackCount('10 stations')).toBe(10);
+    expect(parsePackCount('1 trap')).toBe(1);
+    expect(parsePackCount('12 ct')).toBe(12);
+    expect(parsePackCount('25')).toBe(25);
+    expect(parsePackCount('100 case')).toBe(100);
+    expect(parsePackCount('2.5 gal')).toBeNull();
+    expect(parsePackCount('78 fl oz')).toBeNull();
+    expect(parsePackCount('4 x 30g tubes')).toBeNull();
+    expect(parsePackCount('one case')).toBeNull();
+    expect(parsePackCount('')).toBeNull();
+  });
+
   test('ranks by LANDED per-oz when present — cheap sticker + heavy shipping must not win', async () => {
     // Vendor A: $50/64 oz sticker ($0.78/oz) but $30 shipping → landed $1.25/oz.
     // Vendor B: $60/64 oz delivered → landed $0.9375/oz. B wins the ordering;
