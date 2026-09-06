@@ -107,6 +107,42 @@ describe("Email draft and navigation preservation", () => {
     expect(reply).toHaveValue("Owner edited while waiting");
   });
 
+  it("does not restore a discarded reply when an AI draft returns late", async () => {
+    let finish;
+    draftResponse = () => new Promise((resolve) => { finish = resolve; });
+    const view = mount(); const reply = await open(a);
+    fireEvent.click(screen.getByRole("button", { name: /AI Draft/ }));
+    fireEvent.change(reply, { target: { value: "Discard this reply" } });
+    fireEvent.click(screen.getByRole("button", { name: "Discard reply" }));
+    view.unmount(); mount();
+    await screen.findByRole("textbox", { name: "Reply" });
+    await act(async () => finish(response({ reply_draft: "Late discarded suggestion" })));
+    expect(screen.getByRole("textbox", { name: "Reply" })).toHaveValue("");
+  });
+
+  it("preserves a compose edited back to the submitted text while its send is pending", async () => {
+    let finish;
+    sendResponse = () => new Promise((resolve) => { finish = resolve; });
+    mount(); const dialog = await compose();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Send", exact: true }));
+    fireEvent.change(screen.getByLabelText("Message *"), { target: { value: "New compose edit" } });
+    fireEvent.change(screen.getByLabelText("Message *"), { target: { value: "Unsent compose text" } });
+    await act(async () => finish(response({ success: true })));
+    expect(screen.getByLabelText("Message *")).toHaveValue("Unsent compose text");
+  });
+
+  it("preserves a reply edited back to the submitted text while its send is pending", async () => {
+    let finish;
+    sendResponse = () => new Promise((resolve) => { finish = resolve; });
+    mount(); const reply = await open(a);
+    fireEvent.change(reply, { target: { value: "Submitted snapshot" } });
+    fireEvent.click(screen.getByRole("button", { name: /Send Reply/ }));
+    fireEvent.change(reply, { target: { value: "New reply edit" } });
+    fireEvent.change(reply, { target: { value: "Submitted snapshot" } });
+    await act(async () => finish(response({ success: true })));
+    expect(reply).toHaveValue("Submitted snapshot");
+  });
+
   it("keeps a newer reply when the previously submitted text completes", async () => {
     let finish;
     sendResponse = () => new Promise((resolve) => { finish = resolve; });
@@ -125,6 +161,17 @@ describe("Email draft and navigation preservation", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("Draft recovery is unavailable");
     const reload = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(reload); expect(reload.defaultPrevented).toBe(true);
+  });
+
+  it("keeps the storage failure reload warning after leaving Communications", async () => {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("Synthetic quota failure"); });
+    const view = mount(); await compose(); view.unmount();
+    const leaving = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(leaving); expect(leaving.defaultPrevented).toBe(true);
+    mount(); fireEvent.click(await screen.findByRole("button", { name: "Resume draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard draft" }));
+    const discarded = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(discarded); expect(discarded.defaultPrevented).toBe(false);
   });
 
   it("does not offer another verified account's draft", async () => {

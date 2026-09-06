@@ -2,7 +2,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 beforeEach(() => { sessionStorage.clear(); vi.resetModules(); });
-afterEach(() => vi.restoreAllMocks());
+afterEach(async () => {
+  (await import("./emailDrafts")).clearEmailDrafts();
+  vi.restoreAllMocks();
+});
 
 describe("local email editor recovery", () => {
   it("recovers typed drafts after a module reload and isolates another verified account", async () => {
@@ -22,6 +25,16 @@ describe("local email editor recovery", () => {
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("Synthetic quota failure"); });
     expect(store.updateEmailDrafts(session, (d) => ({ ...d, replies: { a: "Keep this" } })).saved).toBe(false);
     expect(store.loadEmailDrafts("fixture-owner")).toMatchObject({ saved: false, drafts: { replies: { a: "Keep this" } } });
+  });
+
+  it("does not recover an old draft when storing its removal fails", async () => {
+    let store = await import("./emailDrafts");
+    const session = store.loadEmailDrafts("fixture-owner");
+    store.updateEmailDrafts(session, (d) => ({ ...d, replies: { a: "Already sent or discarded" } }));
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("Synthetic quota failure"); });
+    store.updateEmailDrafts(session, (d) => ({ ...d, replies: {} }));
+    vi.resetModules(); store = await import("./emailDrafts");
+    expect(store.loadEmailDrafts("fixture-owner").drafts.replies).toEqual({});
   });
 
   it("sign-out invalidates outstanding callbacks so they cannot resurrect discarded session data", async () => {

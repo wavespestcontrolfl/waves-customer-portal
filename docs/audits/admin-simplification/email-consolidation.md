@@ -153,3 +153,66 @@ The unchanged server test baseline is recorded in `verification.md`:
 40,418 passed tests with no DB and external network blocked. It is reused
 because this branch changes no server, lockfile, schema, provider or native
 contract. Live integration and native device behavior remain unverified locally.
+
+## Resumed build verification
+
+The continuation started from clean Email HEAD `b47c58fd9`. Cleanup PR #3980
+remains open at `91b560832`; its runtime review fixes were already included
+in this branch. Email remains a local, unpublished child of that cleanup.
+The previous demonstration processes had stopped; the same checked fixtures
+were reopened in dedicated Chrome windows with DevTools and both Vite servers.
+
+Five regression cases exposed gaps in the draft contract and now pass:
+
+- A storage-failure reload warning now follows the shared draft session after
+  leaving Communications, until the text is discarded, saved or signed out.
+- A delayed AI suggestion cannot restore a reply that was typed and discarded,
+  including after the editor remounts.
+- Late compose and reply send responses preserve newer edits even when the
+  operator changes the text back to its earlier value. Compose compares its
+  immutable snapshot; replies track per-message edits in memory.
+- If storing a draft removal fails, recovery attempts to remove the stale
+  browser snapshot so sent/discarded text cannot return after a quota failure.
+  If the browser also refuses removal, storage remains unavailable; no
+  cross-device or provider recovery guarantee is added.
+
+The existing draft store owns these protections. No new persistence key,
+server route, provider call site, dependency, schema or send policy was added.
+The regressions extend the existing component/store suites and browser runner,
+encoding the failure class without adding another permanent project rule.
+
+Checks on the continuation source, using Node 20.20.2:
+
+- Six focused suites: **64 tests passed** (`.tmp/email-resume-focused.log`).
+- Full client coverage: **267 suites / 2,542 tests passed**, exit 0
+  (`.tmp/email-resume-client.log`).
+- Production build and schema/vendor/brand/domain prebuild checks passed,
+  with no migrations (`.tmp/email-resume-build.log`).
+- Changed-source lint: zero errors; three existing EmailPage warnings
+  (`.tmp/email-resume-lint.log`). The final browser-runner lint also passes.
+- **Eleven synthetic browser scenarios passed**, with zero page exceptions,
+  zero unmatched APIs, three intercepted sends and one intercepted AI-draft
+  request (`.tmp/email-resume-browser-complete.log`,
+  `.tmp/email-browser/report.json`). The storage scenario uses DevTools to
+  issue a real reload from Settings, dismisses the browser's beforeunload
+  dialog, verifies the same document remains, recovers the reply after Back,
+  and verifies discard survives a subsequent reload.
+- Desktop inbox, mobile composer and storage-warning screenshots were reviewed.
+  The existing header/layout remains intact; the new warning uses the existing
+  alert treatment. No page overflow was found at 1440 or 390. Existing compact
+  Email typography is unchanged; this does not claim a typography refresh.
+  The open demo windows were also reloaded and inspected through DevTools at
+  both widths (`.tmp/chrome-showcase/email-resumed-1440.png` and
+  `email-resumed-390.png`).
+
+Regression evidence is retained: four component tests failed before the first
+fix (`.tmp/email-resume-red.log`); the stale-storage test then failed before
+its fix (`.tmp/email-resume-storage-red.log`). Browser harness corrections
+matched the existing icon-prefixed AI button label, scoped the quota failure
+to sessionStorage so authentication storage remained functional, and used
+DevTools reload because a deliberately dismissed reload never fires a new
+document load event. Product assertions were retained.
+
+No live messages, AI requests, database access, merge or deployment was made
+in this continuation. Draft PR publication remains separate from local build
+completion because repository publication starts an automatic isolated preview.

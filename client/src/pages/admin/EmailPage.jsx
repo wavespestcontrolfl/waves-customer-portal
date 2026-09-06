@@ -187,12 +187,6 @@ export default function EmailPage({ navigation, active }) {
   const [toDropdownOpen, setToDropdownOpen] = useState(false);
   const toFieldRef = useRef(null);
   const hasDrafts = Object.values(composeForm).some(Boolean) || Object.values(drafts.replies).some(Boolean);
-  useEffect(() => {
-    if (!storageError || !hasDrafts) return undefined;
-    const warnBeforeReload = (event) => { event.preventDefault(); event.returnValue = ""; };
-    window.addEventListener("beforeunload", warnBeforeReload);
-    return () => window.removeEventListener("beforeunload", warnBeforeReload);
-  }, [storageError, hasDrafts]);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -408,6 +402,7 @@ export default function EmailPage({ navigation, active }) {
 
   const handleReply = async () => {
     if (!replyText.trim() || !selectedEmail) return;
+    const replyRevision = draftSession.replyRevisions[selectedEmail.id] || 0;
     if (!setEmailSending(draftSession, "reply", true)) return;
     try {
       const r = await adminFetch("/api/admin/email/send", {
@@ -422,7 +417,7 @@ export default function EmailPage({ navigation, active }) {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       changeDrafts((current) => ({ ...current, replies: {
         ...current.replies,
-        [selectedEmail.id]: current.replies[selectedEmail.id] === replyText ? "" : current.replies[selectedEmail.id],
+        [selectedEmail.id]: (draftSession.replyRevisions[selectedEmail.id] || 0) === replyRevision ? "" : current.replies[selectedEmail.id],
       } }));
       const threadResponse = await adminFetch(
         `/api/admin/email/thread/${selectedEmail.gmail_thread_id}`,
@@ -438,6 +433,7 @@ export default function EmailPage({ navigation, active }) {
 
   const handleAiDraft = async () => {
     if (!selectedEmail) return;
+    const replyRevision = draftSession.replyRevisions[selectedEmail.id] || 0;
     setDrafting(true);
     setDraftResult(null);
     try {
@@ -446,7 +442,7 @@ export default function EmailPage({ navigation, active }) {
         { method: "POST" },
       );
       const d = await r.json();
-      if (d.reply_draft && (draftSession.drafts.replies[selectedEmail.id] || "") === replyText) {
+      if (d.reply_draft && (draftSession.replyRevisions[selectedEmail.id] || 0) === replyRevision) {
         setReplyDraft(selectedEmail.id, d.reply_draft);
         if (selectedIdRef.current === selectedEmail.id) setDraftResult(d);
       }
@@ -471,7 +467,7 @@ export default function EmailPage({ navigation, active }) {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       // A response can arrive after channel navigation or another edit. Clear
       // only the submitted snapshot, including in the recovery store.
-      if (JSON.stringify(draftSession.drafts.compose) === JSON.stringify(composeForm)) {
+      if (draftSession.drafts.compose === composeForm) {
         setComposeForm(() => ({ to: "", subject: "", body: "" }));
         setShowCompose(false);
       }

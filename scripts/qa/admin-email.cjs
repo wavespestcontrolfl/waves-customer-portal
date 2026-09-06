@@ -19,6 +19,8 @@ async function main() {
   let failSend = false;
   let sendHold;
   let releaseSend;
+  let draftHold;
+  let releaseDraft;
   async function openPage(role = 'admin', width = 1440) {
     const page = await browser.newPage({ viewport: { width, height: 1000 }, timezoneId: 'America/New_York', serviceWorkers: 'block' });
     page.setDefaultTimeout(15000);
@@ -42,6 +44,7 @@ async function main() {
       let body;
       let status = 200;
       if (api === '/admin/auth/me') body = { id: 'fixture-owner', name: 'Fixture operator', email: 'operator@example.invalid', role };
+      else if (api === '/health') body = { status: 'ok', gates: {} };
       else if (api === '/admin/feature-flags') body = { flags: {} };
       else if (api === '/admin/notifications/unread-count') body = { count: 0 };
       else if (api === '/admin/email/oauth/status') body = { connected: true };
@@ -50,6 +53,7 @@ async function main() {
       else if (api === '/admin/email/daily-digest') body = { total_received: 0 };
       else if (api === '/admin/email/blocked') body = { blocked: [] };
       else if (api === '/admin/email/send' && request.method() === 'POST') { await sendHold; body = failSend ? { error: 'Synthetic send failure' } : { success: true }; status = failSend ? 503 : 200; }
+      else if (api === `/admin/email/message/${a.id}/ai-draft` && request.method() === 'POST') { await draftHold; body = { reply_draft: 'Synthetic delayed suggestion' }; }
       else if (api === `/admin/email/message/${a.id}`) body = a;
       else if (api === `/admin/email/message/${b.id}`) body = b;
       else if (api === '/admin/email/thread/thread-a') body = { thread: [a] };
@@ -184,15 +188,68 @@ async function main() {
       assert.equal(report.requests.filter((r) => r.stage === stage && r.path.startsWith('/admin/email/')).length, 0);
       await shot(tech, 'communications-technician-mobile-390');
     });
+    const recovery = await openPage();
+    await scenario('a delayed AI suggestion cannot restore a discarded reply', async () => {
+      await recovery.goto(`${server.baseUrl}/admin/communications?id=${a.id}#tab=email`);
+      await recovery.getByRole('textbox', { name: 'Reply' }).waitFor();
+      draftHold = new Promise((resolve) => { releaseDraft = resolve; });
+      await recovery.getByRole('button', { name: /AI Draft/ }).click();
+      await recovery.getByRole('button', { name: 'Drafting...', exact: true }).waitFor();
+      await recovery.getByRole('textbox', { name: 'Reply' }).fill('Synthetic discarded reply');
+      await recovery.getByRole('button', { name: 'Discard reply', exact: true }).click();
+      releaseDraft(); draftHold = undefined; releaseDraft = undefined;
+      await recovery.getByRole('button', { name: /AI Draft/ }).waitFor();
+      assert.equal(await recovery.getByRole('textbox', { name: 'Reply' }).inputValue(), '');
+    });
+    await scenario('storage failure keeps the real reload warning after leaving Communications', async () => {
+      await recovery.evaluate(() => {
+        const setItem = Storage.prototype.setItem;
+        Storage.prototype.setItem = function (key, value) {
+          if (this === sessionStorage) throw new DOMException('Synthetic quota failure', 'QuotaExceededError');
+          return setItem.call(this, key, value);
+        };
+      });
+      await recovery.getByRole('textbox', { name: 'Reply' }).fill('Synthetic memory-only reply');
+      await recovery.getByRole('alert').filter({ hasText: 'Draft recovery is unavailable' }).waitFor();
+      await shot(recovery, 'email-recovery-warning-desktop-1440');
+      await recovery.evaluate(() => {
+        history.pushState({}, '', '/admin/settings?tab=general');
+        dispatchEvent(new PopStateEvent('popstate'));
+      });
+      await recovery.getByText('Company Info', { exact: true }).waitFor();
+      recovery.removeAllListeners('dialog');
+      const cdp = await recovery.context().newCDPSession(recovery);
+      const beforeReload = (await cdp.send('Page.getFrameTree')).frameTree.frame.loaderId;
+      const warning = recovery.waitForEvent('dialog');
+      // DevTools issues the real reload without waiting for a new document's
+      // load event: dismissing beforeunload deliberately prevents that event.
+      const reload = cdp.send('Page.reload');
+      const dialog = await warning;
+      assert.equal(dialog.type(), 'beforeunload');
+      await dialog.dismiss();
+      await reload;
+      assert.equal((await cdp.send('Page.getFrameTree')).frameTree.frame.loaderId, beforeReload,
+        'Dismissing the reload warning keeps the current document');
+      await cdp.detach();
+      await recovery.goBack();
+      await recovery.getByRole('textbox', { name: 'Reply' }).waitFor();
+      assert.equal(await recovery.getByRole('textbox', { name: 'Reply' }).inputValue(), 'Synthetic memory-only reply');
+      await recovery.getByRole('button', { name: 'Discard reply', exact: true }).click();
+      await recovery.reload();
+      await recovery.getByRole('textbox', { name: 'Reply' }).waitFor();
+      assert.equal(await recovery.getByRole('textbox', { name: 'Reply' }).inputValue(), '');
+    });
     assert.deepEqual(report.unmatched, []);
     assert.deepEqual(report.pageErrors, []);
-    assert.deepEqual(report.requests.filter((r) => r.method !== 'GET' && r.path !== '/admin/email/send'), []);
+    assert.deepEqual(report.requests.filter((r) => r.method !== 'GET'
+      && r.path !== '/admin/email/send' && r.path !== `/admin/email/message/${a.id}/ai-draft`), []);
     report.passed = true;
   } catch (error) {
     report.failure = { stage, message: error.message };
     throw error;
   } finally {
     releaseSend?.();
+    releaseDraft?.();
     fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
     try { for (const context of browser?.contexts() || []) await context.setOffline(true); await browser?.close(); }
     finally { await server?.close(); }
