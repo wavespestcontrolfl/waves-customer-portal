@@ -745,7 +745,9 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     const throwing = makeBuilder([]);
     throwing.first = jest.fn(() => Promise.reject(new Error('connection terminated')));
     db.mockImplementation((table) => (table === 'call_log' ? throwing : builders[table] || makeBuilder([])));
-    const out = await executeTool('request_booking', GOOD_INPUT, slotCtx());
+    const ctx = slotCtx();
+    const out = await executeTool('request_booking', GOOD_INPUT, ctx);
+    expect(ctx.toolFailed).toBe(true);
     expect(out).toMatch(/NOTHING was booked/);
     expect(out).toMatch(/Do NOT say anything is booked/i);
     assertNoCreateWrites();
@@ -1047,6 +1049,17 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     expect(booking.buildBookingAvailability).toHaveBeenCalledWith(expect.objectContaining({
       lat: 27.55, lng: -82.55,
     }));
+  });
+
+  test('coordinate provider rejection marks the invocation failed', async () => {
+    primeDb({ propertyCount: 0 });
+    resolveCallBookingPropertyLinkage.mockResolvedValue({ propertyId: null, address: null, lat: null, lng: null });
+    booking.resolveBookingCoords.mockRejectedValueOnce(new Error('fixture coordinate outage'));
+    const ctx = slotCtx();
+    const out = await executeTool('request_booking', GOOD_INPUT, ctx);
+    expect(out).toMatch(/Could not verify the service location/i);
+    expect(ctx.toolFailed).toBe(true);
+    assertNoCreateWrites();
   });
 
   test('an account whose service location cannot be resolved books NOTHING', async () => {

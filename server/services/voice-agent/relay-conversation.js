@@ -541,6 +541,10 @@ class RelayConversation {
     this._resume = null;
     this._resumeReady = null;
     this._resumeSeeded = false;
+    this._modelFailures = 0; // consecutive model timeouts / errors
+    this._toolFailures = 0; // consecutive failed tools
+    this._inheritedFailures = { model: 0, tool: 0 };
+    this._clearedFailures = { model: false, tool: false };
     this._eventShapesSeen = new Set();
     // Telemetry labels the rendering TwiML put on its <Parameter>s (the
     // active relay profile and the voice it rendered) — stamped into the
@@ -1668,6 +1672,18 @@ class RelayConversation {
     // fields win over the earlier ones.
     this._holdOpenForRetry ??= state.holdOpen || null;
     this._estimateFields = { ...state.estimateFields, ...this._estimateFields };
+    // The provider-failure streak continues across the drop (codex r1 P2):
+    // a second consecutive failure on the resumed leg hands off at the
+    // documented threshold instead of counting from zero again.
+    // Restore each provider independently. Add only newly observed inherited
+    // failures, preserving failures here without counting repeated reloads twice.
+    // A success clears only its own provider's inherited streak for this leg.
+    for (const kind of ['model', 'tool']) {
+      if (this._clearedFailures[kind]) continue;
+      const inherited = Math.max(0, Number(state[`${kind}Failures`]) || 0);
+      this[`_${kind}Failures`] += Math.max(0, inherited - this._inheritedFailures[kind]);
+      this._inheritedFailures[kind] = Math.max(this._inheritedFailures[kind], inherited);
+    }
     for (const p of state.promises || []) {
       if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
     }
@@ -1900,14 +1916,18 @@ class RelayConversation {
         // turn keeps its FIRST stamp, not the last round's.
         stream.on?.('streamEvent', (ev) => { if (ev?.type === 'content_block_start') stat.firstTokenAt ??= now(); });
         msg = await stream.finalMessage();
+        this._modelFailures = 0;
+        this._clearedFailures.model = true;
       } catch (err) {
         if (streamTimedOut) {
+          this._modelFailures += 1;
           stat.timedOut = true;
           logger.warn(`[voice-relay] model stream timeout (${STREAM_TIMEOUT_MS}ms) callSid=${this.callSid}`);
           this.say(require('./relay-language').copy('streamTimeout', this.language));
           return;
         }
         if (this._controller.signal.aborted) return; // barge-in; caller is talking
+        this._modelFailures += 1;
         logger.error(`[voice-relay] anthropic error callSid=${this.callSid}: ${err.message}`);
         this.say(require('./relay-language').copy('modelError', this.language));
         return;
@@ -1973,17 +1993,21 @@ class RelayConversation {
           // carry the caller's contact details and belongs in the lead row.
           this._recordTurn('tool', block.name);
           const toolStartAt = now();
-          toolCtx.toolFailed = false; // set by executeTool's catch (an operational failure answered with a string)
-          const out = await this._executeToolBounded(block.name, block.input, toolCtx);
+          // Detached tools retain their own outcome flag; live context getters stay live.
+          const invocationCtx = Object.defineProperties({}, Object.getOwnPropertyDescriptors(toolCtx));
+          invocationCtx.toolFailed = false;
+          const out = await this._executeToolBounded(block.name, block.input, invocationCtx);
           stat.toolMs += now() - toolStartAt;
           stat.toolCount += 1;
           // ok = the tool answered without failing (a timeout / in-flight
           // refusal / caught failure is not a success — the handoff card
           // must not tell staff a failed lookup succeeded, codex r1 P2).
           const sentinel = [TOOL_TIMEOUT_TEXT, WRITE_TOOL_TIMEOUT_TEXT, WRITE_TOOL_IN_FLIGHT_TEXT].includes(out);
-          const toolOk = !sentinel && toolCtx.toolFailed !== true;
+          const toolOk = !sentinel && invocationCtx.toolFailed !== true;
           if (block.name === 'lookup_customer' && toolOk && typeof out === 'string' && out.includes('customer_ref:') && require('./relay-recovery').isRecoveryGateOn()) this._lookupResults.push(out);
           this._toolOutcomes.push({ name: block.name, ok: toolOk });
+          this._toolFailures = toolOk ? 0 : this._toolFailures + 1;
+          this._clearedFailures.tool ||= toolOk;
           results.push({ type: 'tool_result', tool_use_id: block.id, content: out });
           // The threshold is judged after EACH failed tool (codex r3 P2): a
           // later block in the same response must not run — and reset the
@@ -2119,6 +2143,8 @@ class RelayConversation {
           leadCaptured: this.leadCaptured && !this._noLeadCreated,
           reserviceFiled: this._reserviceFiled === true,
           noLeadCreated: this._noLeadCreated === true,
+          modelFailures: this._modelFailures,
+          toolFailures: this._toolFailures,
           promises: [...this._promises.entries()].map(([kind, v]) => ({ kind, ...v })),
           holdOpen: this._holdOpenForRetry === true,
           estimateFields: this._estimateFields || null,

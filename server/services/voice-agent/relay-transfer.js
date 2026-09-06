@@ -256,6 +256,7 @@ async function transferToOfficeText(input = {}, ctx = {}) {
     noContext = wrote === 'written'; // the minimal stamp is what landed
   }
   if (wrote !== 'written' && wrote !== 'reconciled') {
+    ctx.toolFailed = true;
     logger.warn(`[voice-relay] transfer refused (${wrote}) — row not owned, already terminal, or storage unconfirmed callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}`);
     revertLateWrites(ctx, packet.attempt, late);
     return 'The transfer could not be started on this call. Do NOT try again — take their details with capture_lead '
@@ -266,6 +267,7 @@ async function transferToOfficeText(input = {}, ctx = {}) {
   // this very tool chain before it can stamp the close — so the row would
   // stay a transfer nobody rang. Undo the stamp (detached) and abort.
   if (typeof ctx.sessionEnded === 'function' && ctx.sessionEnded() === true) {
+    ctx.toolFailed = true;
     logger.warn(`[voice-relay] transfer abandoned — session ended during the packet write callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}`);
     // AWAITED (bounded): end() resumes when this tool returns and reconciles
     // the row at once — a detached revert would race it (an ai_transferred
@@ -287,6 +289,7 @@ async function transferToOfficeText(input = {}, ctx = {}) {
   if (typeof ctx.say === 'function') ctx.say(copy('transferring', facts.language));
   const sent = typeof ctx.endForTransfer === 'function' ? ctx.endForTransfer() : false;
   if (sent === false) {
+    ctx.toolFailed = true;
     // The socket closed (or the send threw) between the ended check and
     // the end frame: no /relay-complete transfer callback will come, so the
     // stamp is undone the same way (codex r5 P1). Nothing rings.

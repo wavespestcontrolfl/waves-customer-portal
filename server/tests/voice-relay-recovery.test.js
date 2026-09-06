@@ -164,7 +164,7 @@ describe('relay-recovery module', () => {
     const { db } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, text: 'Caller: ants' }] } } });
     expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'other-nonce' })).toBeNull(); // not this socket's claim ⇒ nothing (hook P0)
     expect(await recovery.loadResumeState(db, 'CA-1')).toBeNull(); // no key ⇒ nothing
-    expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: ants', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, promises: [], callerTurns: ['ants'] });
+    expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: ants', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['ants'] });
     primeDb({ firstRow: { metadata: JSON.stringify({ ...OWNED, relay_segments: [{ generation: 1, text: 'x' }] }) } });
     expect(await recovery.loadResumeState(db, 'CA-1', { sessionKey: 'nonce-2' })).toBeNull(); // no reconnect stamp ⇒ a forged <Parameter resumed> proves nothing
     primeDb({ firstRow: null });
@@ -480,6 +480,25 @@ describe('the conversation side', () => {
   });
 
 
+  test('failure streak restoration follows same-generation session nonce order', async () => {
+    primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [
+      { generation: 2, session_key: 'nonce-a', model_failures: 2, tool_failures: 2 },
+      { generation: 2, session_key: 'nonce-z', model_failures: 0, tool_failures: 1 },
+    ] } } });
+    expect(await recovery.loadResumeState(require('../models/db'), 'CA-tie', { sessionKey: 'nonce-2' }))
+      .toMatchObject({ modelFailures: 0, toolFailures: 1 });
+  });
+
+  test('the provider-failure streak continues across the reconnect (codex r1 P2)', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    expect(segmentStore.buildSegment({ generation: 1, text: 'x', modelFailures: 1, toolFailures: 0 })).toEqual(expect.objectContaining({ model_failures: 1, tool_failures: 0 }));
+    primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 1, text: 'Caller: hi', model_failures: 1, tool_failures: 1 }] } } });
+    const convo = resumedConvo({ callSid: 'CA-streak' });
+    await convo._resumeReady;
+    expect(convo._modelFailures).toBe(1);
+    expect(convo._toolFailures).toBe(1);
+  });
+
   test('a proven prior lead restores the capture state (lead_captured true; the session may end when the caller is done) (hook P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1' } } });
@@ -769,14 +788,40 @@ describe('the conversation side', () => {
     expect(convo.leadCaptured).toBe(true);
   });
 
-  test('the earlier legs\' caller turns count toward the call turn cap', async () => {
+  test('late inherited failures add to this leg once and model success leaves tool failures intact', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1 } } });
+    const convo = resumedConvo({ callSid: 'CA-late-streak' });
+    await convo._resumeReady;
+    convo._modelFailures = 1;
+    convo._toolFailures = 1;
+    const late = { ...convo._resume, modelFailures: 1, toolFailures: 1 };
+    await convo._applyResumeState(late);
+    await convo._applyResumeState(late);
+    expect(convo._modelFailures).toBe(2);
+    expect(convo._toolFailures).toBe(2);
+
+    const fresh = resumedConvo({ callSid: 'CA-independent-streak' });
+    await fresh._resumeReady;
+    fresh._clearedFailures.model = true;
+    await fresh._applyResumeState(late);
+    expect(fresh._modelFailures).toBe(0);
+    expect(fresh._toolFailures).toBe(1);
+  });
+
+  test('a late reload never resurrects a failure streak this leg already cleared; the earlier legs\' caller turns count toward the call turn cap (codex r3 P2 ×2)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1 } } });
     const convo = resumedConvo({ callSid: 'CA-streak' });
     await convo._resumeReady;
-    const late = { ...convo._resume, callerTurns: Array.from({ length: 39 }, (_, i) => `turn ${i}`) };
+    const late = { ...convo._resume, modelFailures: 1, toolFailures: 1, callerTurns: Array.from({ length: 39 }, (_, i) => `turn ${i}`) };
     await convo._applyResumeState(late); // before any round on this leg ⇒ the streak carries over
+    expect(convo._modelFailures).toBe(1);
+    convo._clearedFailures = { model: true, tool: true }; // successful rounds cleared both providers
+    convo._modelFailures = 0; convo._toolFailures = 0;
     await convo._applyResumeState(late);
+    expect(convo._modelFailures).toBe(0);
+    expect(convo._toolFailures).toBe(0);
     // 39 earlier caller turns + this one ⇒ the cap (40) ends the call
     expect(convo._priorCallerTurns).toBe(39);
     const endSession = jest.fn();
@@ -864,7 +909,7 @@ describe('the conversation side', () => {
     primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L1', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }] } } });
     const convo = resumedConvo({ callSid: 'CA-res', sessionGeneration: 2 });
     await convo._resumeReady;
-    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: my ants are back\nAgent: Sorry to hear that.', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, promises: [], callerTurns: ['my ants are back'] });
+    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: 'Caller: my ants are back\nAgent: Sorry to hear that.', relayLeadId: 'L1', reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: ['my ants are back'] });
     await convo._runLoop('where were we').catch(() => {}); // no Anthropic client in tests: the seeding half runs
     const seeded = convo.messages.filter((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call, before the line dropped'));
     expect(seeded).toHaveLength(1);
@@ -960,7 +1005,7 @@ describe('the conversation side', () => {
     const { builder } = primeDb({ firstRow: { metadata: { ...OWNED, relay_reconnects: 1 } } }); // proven, but no segment yet
     const convo = resumedConvo({ callSid: 'CA-race' });
     await convo._resumeReady;
-    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: '', relayLeadId: null, reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, promises: [], callerTurns: [] });
+    expect(convo._resume).toEqual({ reconnects: 1, reconnectMs: null, segmentsText: '', relayLeadId: null, reserviceFiled: false, noLeadCreated: false, leadCaptured: false, lookupsUsed: 0, lookupRefs: [], lookupResults: [], slotRefs: [], startedAtMs: null, holdOpen: false, estimateFields: null, modelFailures: 0, toolFailures: 0, promises: [], callerTurns: [] });
     await convo._runLoop('hello').catch(() => {});
     expect(convo.messages.some((m) => typeof m.content === 'string' && m.content.includes('[Earlier in this call'))).toBe(false);
     builder.first = jest.fn(async () => ({ metadata: { ...OWNED, relay_reconnects: 1, relay_lead_id: 'L9', relay_segments: [{ generation: 1, text: 'Caller: my ants are back', promises: [{ kind: 'send_estimate', verdict: true, expectation: 'about_15_minutes', at: '2026-09-05T02:00:00.000Z' }] }] } })); // the old socket's append landed
@@ -1027,6 +1072,88 @@ describe('the conversation side', () => {
     expect(off._resumeReady).toBeNull();
   });
 
+});
+
+describe('provider failure tracking', () => {
+    function isolated({ streamImpl, executeToolImpl }) {
+      let Convo;
+      let leadWriter;
+      let dbIso;
+      jest.resetModules(); // relay-conversation requires relay-tools lazily — a cached instance from an earlier case must not win
+      jest.isolateModules(() => {
+        jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() { return { messages: { stream: streamImpl } }; });
+        jest.doMock('../services/voice-agent/relay-tools', () => ({ TOOLS: [], CONTEXT_TOOLS: [], activeTools: () => [], executeTool: executeToolImpl }));
+        Convo = require('../services/voice-agent/relay-conversation').RelayConversation;
+        leadWriter = require('../services/lead-from-extraction').createLeadFromExtraction; // the isolated registry's mocks
+        dbIso = require('../models/db');
+      });
+      return { Convo, leadWriter, dbIso };
+    }
+
+
+  test('a timed-out tool cannot mark a later successful invocation failed; copied getters stay live', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    let failFirst;
+    let finishSecond;
+    let secondCtx;
+    const firstDone = new Promise((resolve) => { failFirst = resolve; });
+    const secondDone = new Promise((resolve) => { finishSecond = resolve; });
+    const stream = jest.fn()
+      .mockReturnValueOnce({ finalMessage: async () => ({ stop_reason: 'tool_use', content: [
+        { type: 'tool_use', id: 't1', name: 'get_services_catalog', input: {} },
+        { type: 'tool_use', id: 't2', name: 'find_slots', input: {} },
+      ] }) })
+      .mockReturnValue({ finalMessage: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Here are the options.' }] }) });
+    const executeTool = jest.fn(async (name, _input, ctx) => {
+      if (name === 'get_services_catalog') {
+        await firstDone;
+        ctx.toolFailed = true;
+        return 'Catalog unavailable.';
+      }
+      secondCtx = ctx;
+      await secondDone;
+      return 'An available slot.';
+    });
+    const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: executeTool });
+    primeDb({ db: dbIso });
+    const endSession = jest.fn();
+    const convo = new Convo({ callSid: 'CA-overlap-fixture', from: '+19415551234', send: jest.fn(), endSession });
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
+    try {
+      const pending = convo._runLoop('what is available');
+      await jest.advanceTimersByTimeAsync(3010);
+      expect(executeTool).toHaveBeenCalledTimes(2);
+      expect(convo._toolFailures).toBe(1);
+      failFirst();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(secondCtx.toolFailed).toBe(false);
+      convo._callerContext = { tier: 'full', customer: { id: 'customer-fixture' } };
+      expect(secondCtx.customerTier).toBe('full');
+      expect(secondCtx.customerId).toBe('customer-fixture');
+      finishSecond();
+      await pending;
+      expect(convo._toolOutcomes).toEqual([
+        { name: 'get_services_catalog', ok: false }, { name: 'find_slots', ok: true },
+      ]);
+      expect(convo._toolFailures).toBe(0);
+      expect(endSession).not.toHaveBeenCalled();
+    } finally { failFirst(); finishSecond(); jest.useRealTimers(); }
+  });
+
+  test('a successful model round clears only model failures', async () => {
+    const stream = jest.fn()
+      .mockReturnValueOnce({ finalMessage: async () => { throw new Error('provider unavailable'); } })
+      .mockReturnValue({ finalMessage: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Please continue.' }] }) });
+    const { Convo, dbIso } = isolated({ streamImpl: stream, executeToolImpl: jest.fn() });
+    primeDb({ db: dbIso });
+    const convo = new Convo({ callSid: 'CA-model-fixture', from: '+19415551234', send: jest.fn() });
+    convo._toolFailures = 1;
+    await convo._runLoop('first');
+    expect(convo._modelFailures).toBe(1);
+    await convo._runLoop('second');
+    expect(convo._modelFailures).toBe(0);
+    expect(convo._toolFailures).toBe(1);
+  });
 });
 
 describe('socket completion registration and bounded ownership reads', () => {

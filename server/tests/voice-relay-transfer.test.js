@@ -122,6 +122,7 @@ describe('executeTool transfer_to_office', () => {
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
     const { ctx } = ctxFor({ writeHandoff: jest.fn().mockRejectedValue(new Error('pool down')) });
     expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx)).toMatch(/could not be started/);
+    expect(ctx.toolFailed).toBe(true);
     expect(ctx.writeHandoff).toHaveBeenCalledTimes(2);
     expect(ctx.endForTransfer).not.toHaveBeenCalled();
     await new Promise((r) => setImmediate(r));
@@ -132,6 +133,7 @@ describe('executeTool transfer_to_office', () => {
     process.env.GATE_VOICE_RELAY_TRANSFER = 'true';
     const { ctx } = ctxFor({ writeHandoff: jest.fn().mockRejectedValueOnce(new Error('pool down')).mockResolvedValueOnce(0) });
     expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx)).toMatch(/could not be started/);
+    expect(ctx.toolFailed).toBe(true);
     expect(ctx.endForTransfer).not.toHaveBeenCalled();
   });
 
@@ -154,6 +156,7 @@ describe('executeTool transfer_to_office', () => {
     const { ctx } = ctxFor({ writeHandoff: jest.fn(async () => 0) });
     expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx)).toMatch(/could not be started.*Do NOT try again/s);
     expect(ctx.writeHandoff).toHaveBeenCalledTimes(1);
+    expect(ctx.toolFailed).toBe(true);
     expect(triggerNotification).not.toHaveBeenCalled();
     expect(ctx.say).not.toHaveBeenCalled();
     expect(ctx.endForTransfer).not.toHaveBeenCalled();
@@ -485,6 +488,7 @@ describe('codex r3 follow-ups', () => {
     const revertHandoff = jest.fn(async () => { await new Promise((r) => setTimeout(r, 20)); reverted = true; return 1; });
     const { ctx } = ctxFor({ writeHandoff, revertHandoff, sessionEnded: () => ended });
     expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx)).toMatch(/call has ended/);
+    expect(ctx.toolFailed).toBe(true);
     expect(reverted).toBe(true); // AWAITED: end()'s reconcile (which resumes when the tool returns) sees the reverted row
     expect(triggerNotification).not.toHaveBeenCalled();
     expect(revertHandoff).toHaveBeenCalledWith(writeHandoff.mock.calls[0][0].attempt);
@@ -500,6 +504,7 @@ describe('codex r3 follow-ups', () => {
     const p2 = executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx2);
     await jest.advanceTimersByTimeAsync(4010);
     expect(await p2).toMatch(/call has ended/);
+    expect(ctx2.toolFailed).toBe(true);
     await jest.advanceTimersByTimeAsync(0);
     expect(triggerNotification).not.toHaveBeenCalled(); // the no-context stamp landed, but the transfer was abandoned ⇒ no bell (codex r4 P2)
     settleFull({ rows: 1, contextAvailable: true });
@@ -522,6 +527,7 @@ describe('codex r5 follow-ups', () => {
     const revertHandoff = jest.fn(async () => 1);
     const { ctx } = ctxFor({ endForTransfer: jest.fn(() => false), revertHandoff });
     expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx)).toMatch(/could not be started/);
+    expect(ctx.toolFailed).toBe(true);
     expect(revertHandoff).toHaveBeenCalledWith(ctx.writeHandoff.mock.calls[0][0].attempt);
     await new Promise((r) => setImmediate(r));
     expect(triggerNotification).not.toHaveBeenCalled();
