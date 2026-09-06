@@ -2067,7 +2067,11 @@ class RelayConversation {
           const { TRANSCRIPTION_PROVIDER: RELAY_PROVIDER } = require('./relay-transcript');
           composedFromRowOnly = {
             // …and its summary (the superseded first socket never wrote one).
-            ...(priorCallerTurns.length ? { call_summary: buildCallSummary({ modelSummary: this._modelSummary, turns: priorCallerTurns, reason, leadCaptured: capturedLead }) } : {}),
+            ...(priorCallerTurns.length ? {
+              call_summary: buildCallSummary({ modelSummary: this._modelSummary, turns: priorCallerTurns, reason, leadCaptured: capturedLead }),
+              transcription_metadata: transcriptUpdate?.transcription_metadata
+                || db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || jsonb_build_object('summary_source', 'deterministic')"),
+            } : {}),
             transcription: db.raw('COALESCE(?, transcription)', [segmentStore.composeSegmentsSql(db)]),
             transcription_provider: db.raw('CASE WHEN ? IS NOT NULL THEN ? ELSE transcription_provider END', [segmentStore.composeSegmentsSql(db), RELAY_PROVIDER]),
             transcription_status: db.raw("CASE WHEN ? IS NOT NULL THEN 'completed' ELSE transcription_status END", [segmentStore.composeSegmentsSql(db)]),
