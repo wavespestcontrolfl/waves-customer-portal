@@ -228,6 +228,7 @@ function recurringServiceKey(svc = {}) {
     if (raw.includes('rodent') && /bait|station|monitor/.test(raw)) return 'commercial_rodent_bait';
     if (raw.includes('pest')) return 'commercial_pest';
   }
+  if (!raw.includes('commercial') && /\b(?:foam\s*recurring|recurring\s*(?:termite\s*)?foam)\b/.test(words)) return 'foam_recurring';
   if (raw.includes('pest')) return 'pest_control';
   if (raw.includes('lawn')) return 'lawn_care';
   if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'tree_shrub';
@@ -2239,7 +2240,7 @@ function recurringServicesFromEstimateData(estimateData = {}) {
     data.recurring?.services,
     data.result?.recurring?.services,
     data.result?.results?.recurring?.services,
-    Array.isArray(data.services) ? data.services.filter((svc) => svc.recurring || svc.frequency) : [],
+    Array.isArray(data.services) ? data.services.filter((svc) => svc.recurring || svc.frequency || svc.visitsPerYear || svc.visits) : [],
     // Deduped by recurringServiceKey, so this coalesces with (never duplicates)
     // any matching recurring.services row from the admin/mapped save shape.
     recurringLinesFromEngineResult(data),

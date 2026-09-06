@@ -78,6 +78,28 @@ describe('estimate slot selection retains companion programs', () => {
       .toEqual([['lawn_care', 6], ['tree_shrub', 9], ['mosquito', 12]]);
   });
 
+  test.each(['visitsPerYear', 'visits'])('flat legacy rows identified by %s retain seasonal restrictions', (countField) => {
+    const estimate = { estimate_data: { services: [{ service: 'mosquito', name: 'Mosquito Control', [countField]: 9 }] } };
+    const profile = resolveEstimateSlotProfile(estimate);
+    expect(profile.services).toEqual([expect.objectContaining({ service: 'mosquito', visitsPerYear: 9 })]);
+    expect(require('../services/estimate-slot-availability').seasonalSelectionProfile(profile)).toBe(true);
+    expect(require('../services/estimate-converter').recurringServicesFromEstimateData(estimate.estimate_data)).toHaveLength(1);
+  });
+
+  test.each(['Recurring Termite Foam Service', 'Recurring Foam Treatment', 'Foam Recurring'])('saved foam selection coalesces the legacy name %s', (name) => {
+    const estimate = estimateWith([{ name, visitsPerYear: 4 }]);
+    estimate.estimate_data.sendSnapshot = { pricingBundle: { frequencies: [{
+      key: 'quarterly', monthly: 100, annual: 1200,
+      perServiceTreatments: [{ service: 'foam_recurring', label: 'Recurring Termite Foam Service', visitsPerYear: 4 }],
+    }] } };
+    const profile = resolveEstimateSlotProfile(estimate, { selectedFrequency: 'quarterly' });
+    expect(profile.services).toEqual([expect.objectContaining({ service: 'foam_recurring', visitsPerYear: 4 })]);
+    const converter = require('../services/estimate-converter');
+    expect(converter.recurringServiceKey({ name })).toBe('foam_recurring');
+    expect(converter.recurringServiceKey({ name: 'Termite Foam Service' })).toBe('termite_foam_service');
+    expect(converter.recurringServiceKey({ service: 'commercial_foam_recurring' })).toBe('commercial_foam_recurring');
+  });
+
   test('a selected bait line does not erase distinct rental or bond identities', () => {
     const estimate = estimateWith([
       { service: 'termite_bait', name: 'Termite Bait', visitsPerYear: 4 },
