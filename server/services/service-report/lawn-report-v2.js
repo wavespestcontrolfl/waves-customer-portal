@@ -580,8 +580,8 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
       const predicate = match[0].endsWith('ing')
         ? after.replace(/^\s+(?:and|or|nor)\s+(?:[a-z'’-]+\s+)+?(?=(?:is|was|are|were|has|have|had)\b)/, ' ')
         : after;
-      return !/\b(?:no|not|never|without|isn['’]t|wasn['’]t|aren['’]t|weren['’]t|free of|absence of)\b/.test(before)
-        && !/^\s+(?:(?:is|was|are|were|has|have|had)\s+)?(?:been\s+)?(?:absent|unlikely|ruled out|(?:not|never|isn['’]t|wasn['’]t|hasn['’]t)\b(?!\s+(?:only|just|due to|caused by|because of|from|limited to)\b))\b/.test(predicate);
+      return !/\b(?:no|not|never|without|[a-z]+n['’]t|cannot|free of|absence of)\b/.test(before)
+        && !/^\s+(?:(?!(?:and|or|nor|with|without|because|due|from|not|never)\b)[a-z'’-]+\s+)*?(?:absent|unlikely|ruled out|no longer|(?:not|never|[a-z]+n['’]t|cannot)\b(?!\s+(?:only|just|due to|caused by|because of|from|limited to)\b))\b/.test(predicate);
     }));
   const drySignal = underwateringSignal || /\b(dry|drier|drought|wilt)\b/.test(obsText)
     || /\buneven\s+(?:irrigation|water(?:ing)?|sprinkler|moisture)\b/.test(obsText)

@@ -259,6 +259,11 @@ describe('Tan edge wear does not establish a watering problem', () => {
     'Underwatering is not currently evident.',
     'Underwatering and disease were not observed.',
     'Underwatering is not an active concern.',
+    'Underwatering is currently not evident.',
+    'Underwatering symptoms are not visible.',
+    'The lawn doesn’t show signs of underwatering.',
+    'Underwatering couldn’t be confirmed.',
+    'Underwatering is no longer evident.',
   ])('does not invent sprinkler advice from %s', observation => {
     const report = renderObservation(observation);
     expect(report.water.coverageWatch).toBe(false);
