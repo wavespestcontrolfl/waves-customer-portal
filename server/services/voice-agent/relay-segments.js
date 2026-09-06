@@ -270,9 +270,10 @@ function callerTurnsFromText(text) {
 }
 
 
-/** The close-time column-write fence: a socket older than the latest reconnect never writes columns. */
-function generationFenceSql(q, generation) {
-  return q.whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [Number(generation) || 0]);
+/** A close must remain both the current owner and no older than a pending reconnect. */
+function closeFenceSql(q, generation, sessionKey) {
+  return q.whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [Number(generation) || 0])
+    .whereRaw("((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)", [sessionKey || '']);
 }
 
 /** The latest promise per kind across a row's segments, in generation order. */
@@ -291,6 +292,6 @@ function latestPromises(segments) {
 
 
 module.exports = {
-  appendSegment, registerSegmentSession, sealSegmentsForExtraction, scrubStoredSegments, generationFenceSql, latestPromises, SEGMENT_SEPARATOR, buildSegment, nonEmptyFields, appendSegmentSql,
+  appendSegment, registerSegmentSession, sealSegmentsForExtraction, scrubStoredSegments, closeFenceSql, latestPromises, SEGMENT_SEPARATOR, buildSegment, nonEmptyFields, appendSegmentSql,
   appendSegmentPatch, composeSegmentsSql, segmentsText, callerTurnsFromText,
 };
