@@ -474,6 +474,22 @@ describe("TwilioService.sendTechEnRoute", () => {
     expect(result).toMatchObject({ success: false, suppressed: true, reason: "blocked" });
   });
 
+  test("sendTechArrived stays retryable when one arrival-email recipient is suppressed and another failed transiently", async () => {
+    db.mockReturnValueOnce(
+      firstQuery({ id: "cust-1", first_name: "Sam", phone: null, email: "sam@example.com" }),
+    ).mockReturnValueOnce(
+      firstQuery({ tech_arrived: true, sms_enabled: false, tech_arrived_channel: "email" }),
+    );
+    getAppointmentContacts.mockReturnValue([]);
+    // Mixed fan-out: appointment-email keeps both facts.
+    AppointmentEmail.sendTechArrivedEmail.mockResolvedValueOnce({ ok: false, blocked: true, reason: "suppressed", error: "provider timeout" });
+
+    const result = await TwilioService.sendTechArrived("cust-1", "Bryan", { scheduledServiceId: "job-9" });
+
+    expect(result.success).toBe(false);
+    expect(result.suppressed).toBeFalsy();
+  });
+
   test("sendTechArrived rings the no-channel staff alert when neither leg can reach an Email customer", async () => {
     db.mockReturnValueOnce(
       firstQuery({ id: "cust-1", first_name: "Sam", phone: null }),

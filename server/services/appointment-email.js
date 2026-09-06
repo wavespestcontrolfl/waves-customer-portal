@@ -311,8 +311,13 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
 
   const sent = outcomes.find((o) => o?.sent);
   if (sent) return { ok: true, messageId: sent.message?.provider_message_id || null };
-  if (outcomes.some((o) => o?.blocked)) return { ok: false, blocked: true, reason: 'suppressed' };
+  // A mixed fan-out (one recipient suppressed, another hit a transient
+  // provider error) keeps BOTH facts: `blocked` for the suppression, `error`
+  // for the failure — a caller deciding whether to retry must see the error.
   const errored = outcomes.find((o) => o?.error);
+  if (outcomes.some((o) => o?.blocked)) {
+    return { ok: false, blocked: true, reason: 'suppressed', ...(errored ? { error: errored.error, ...(errored.code ? { code: errored.code } : {}) } : {}) };
+  }
   if (errored) return { ok: false, error: errored.error, ...(errored.code ? { code: errored.code } : {}) };
   return { ok: false, reason: outcomes.find((o) => o?.reason)?.reason || 'email_not_sent' };
 }

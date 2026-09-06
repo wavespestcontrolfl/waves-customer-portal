@@ -333,7 +333,10 @@ function classifyArrivalMiss({ results, emailRes, smsLegAvailable }) {
   if (results.some((r) => r?.code === "QUIET_HOURS_HOLD")) {
     return { success: false, suppressed: true, reason: "send_window_hold", results };
   }
-  const emailTransient = emailRes ? !(emailRes.ok || emailRes.skipped || emailRes.blocked) : false;
+  // Transient = not delivered, not a deterministic skip, and either a
+  // provider error is present (even alongside a suppressed sibling recipient)
+  // or nothing at all was blocked.
+  const emailTransient = !!emailRes && !emailRes.ok && !emailRes.skipped && (!!emailRes.error || !emailRes.blocked);
   const smsRetryable = smsLegAvailable && (results.length === 0 || results.some((r) => r?.retryable));
   if (emailTransient || smsRetryable) return { success: false, results };
   return { success: false, suppressed: true, reason: "blocked", results };
