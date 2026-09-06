@@ -300,7 +300,6 @@ async function listOwnerQueue(db) {
   const coveredByGroup = new Map();
   for (const [groupId, primaryId] of groupPrimary) {
     const p = cardsFor.find((x) => x.id === primaryId);
-    const d = domainById.get(p.domain_id);
     const path = pathById.get(p.path_id) || null;
     const lead = path ? rows.find((r) => r.prospect_id === p.id && r.dimension === 'payment' && !r.satisfied_at) : null;
     const attachable = (s) => s.payment_group_id === groupId && s.path_id === path.id && !s.claimed_at
