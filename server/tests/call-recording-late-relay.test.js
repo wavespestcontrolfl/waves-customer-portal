@@ -13,7 +13,7 @@ const processor = require('../services/call-recording-processor');
 const recorded = 'Caller: Please call me back about the details I gave Sandy.';
 const composite = `[AI segment]\nCaller: I need a termite inspection.\n\n[Voicemail segment]\n${recorded}`;
 
-function primeDb({ loseOwnership = false } = {}) {
+function primeDb({ loseOwnership = false, extractionRead = null, emptyRecording = false } = {}) {
   const row = {
     id: 'late-relay-fixture', twilio_call_sid: 'CA00000000000000000000000000000123',
     direction: 'inbound', from_phone: '+19415550123', to_phone: '+19415550124',
@@ -21,17 +21,26 @@ function primeDb({ loseOwnership = false } = {}) {
     transcription: recorded, transcription_provider: 'twilio_builtin', call_outcome: 'voicemail',
     created_at: new Date(), metadata: { relay_reconnects: 1, relay_reconnect_ms: 2, relay_session_claim_gen: 2 },
   };
+  if (emptyRecording) {
+    row.transcription = null;
+    row.metadata.relay_segments = [{ generation: 1, text: 'Caller: I need a termite inspection.' }];
+  }
   let appended = false;
   db.mockImplementation((table) => {
     const builder = {};
     let owner;
+    let lockRequested = false;
     const chain = (...args) => {
       if (args[0] === 'processing_token') owner = args[1];
       for (const arg of args) if (typeof arg === 'function') arg.call(builder, builder);
       return builder;
     };
     for (const method of ['where', 'whereRaw', 'whereNull', 'whereNotNull', 'whereIn', 'orWhere', 'orWhereRaw', 'andWhere', 'select', 'orderBy', 'limit', 'leftJoin', 'forUpdate']) builder[method] = chain;
-    builder.first = async () => table === 'call_log' && (!owner || owner === row.processing_token) ? { ...row } : null;
+    builder.forUpdate = () => { lockRequested = true; return builder; };
+    builder.first = async (...columns) => {
+      if (table === 'call_log' && owner && columns[0] === 'transcription' && extractionRead) return extractionRead({ lockRequested, owner });
+      return table === 'call_log' && (!owner || owner === row.processing_token) ? { ...row } : null;
+    };
     builder.update = (patch, returning) => {
       if (table === 'call_log') {
         if (patch.processing_token !== undefined) row.processing_token = patch.processing_token;
@@ -52,7 +61,7 @@ function primeDb({ loseOwnership = false } = {}) {
     appended = true;
     // appendSegmentPatch has repaired the column AFTER writeTranscript
     // returned the recording-only value. The processor's local copy is stale.
-    row.transcription = composite;
+    if (!extractionRead) row.transcription = composite;
     if (loseOwnership) row.processing_token = 'replacement-worker';
   });
   return row;
@@ -80,6 +89,69 @@ describe('late relay transcript at the extraction boundary', () => {
     expect(result.error).toContain('fixture extraction boundary');
     const prompt = JSON.parse(fetchSpy.mock.calls[0][1].body).contents[0].parts[0].text;
     expect(prompt).toContain(composite);
+  });
+
+  test('an empty recording still extracts the durable AI conversation', async () => {
+    const row = primeDb({ emptyRecording: true });
+    const result = await processor.processRecording(row.twilio_call_sid);
+    expect(result.error).toContain('fixture extraction boundary');
+    const prompt = JSON.parse(fetchSpy.mock.calls[0][1].body).contents[0].parts[0].text;
+    expect(prompt).toContain('I need a termite inspection.');
+  });
+
+  const postgres = process.env.VOICE_RECOVERY_TEST_DATABASE_URL ? test : test.skip;
+  postgres('extraction waits for a segment writer holding the call row lock', async () => {
+    const knex = require('knex');
+    const connection = process.env.VOICE_RECOVERY_TEST_DATABASE_URL;
+    if (!['localhost', '127.0.0.1', '[::1]'].includes(new URL(connection).hostname)) throw new Error('Use isolated loopback PostgreSQL');
+    const pg = knex({ client: 'pg', connection, pool: { min: 0, max: 3 } });
+    const table = `extraction_lock_${require('crypto').randomUUID().replaceAll('-', '')}`;
+    let writer;
+    let release;
+    let processing;
+    try {
+      await pg.schema.createTable(table, (t) => { t.text('id').primary(); t.text('transcription'); t.text('processing_token'); });
+      await pg(table).insert({ id: 'fixture', transcription: recorded });
+      let started;
+      const pending = new Promise((resolve) => { started = resolve; });
+      const finish = new Promise((resolve) => { release = resolve; });
+      writer = pg.transaction(async (trx) => {
+        await trx(table).where('id', 'fixture').update({ transcription: composite });
+        started();
+        await finish;
+      });
+      await pending;
+      let reading;
+      const reachedRead = new Promise((resolve) => { reading = resolve; });
+      const row = primeDb({ extractionRead: async ({ lockRequested }) => {
+        const query = pg(table).where('id', 'fixture');
+        if (lockRequested) query.forUpdate();
+        reading();
+        return query.first('transcription');
+      } });
+      processing = processor.processRecording(row.twilio_call_sid);
+      await reachedRead;
+      // Wait until PostgreSQL reports the extraction read blocked on the
+      // writer. An unlocked read instead proceeds to the intercepted model.
+      let waited = false;
+      for (let attempt = 0; attempt < 50 && !fetchSpy.mock.calls.length; attempt += 1) {
+        const locks = await pg('pg_stat_activity').where('wait_event_type', 'Lock').where('query', 'like', `%${table}%`).first('pid');
+        if (locks) { waited = true; break; }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      release();
+      await writer;
+      await processing;
+      expect(waited).toBe(true);
+      const prompt = JSON.parse(fetchSpy.mock.calls[0][1].body).contents[0].parts[0].text;
+      expect(prompt).toContain(composite);
+    } finally {
+      release?.();
+      await writer?.catch(() => {});
+      await processing?.catch(() => {});
+      await pg.schema.dropTableIfExists(table);
+      await pg.destroy();
+    }
   });
 
   test('a reclaimed worker stops before extracting the replacement transcript', async () => {

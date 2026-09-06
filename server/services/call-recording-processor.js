@@ -7206,6 +7206,26 @@ const CallRecordingProcessor = {
       return { success: true, skipped: true, reason: 'transcription_rejected_implausible' };
     }
 
+    if (!transcription) {
+      const relay = await currentRelayState();
+      if (relay.segment) {
+        // A silent/unavailable recording does not erase the caller's durable
+        // AI conversation. Store the plain relay representation and retain
+        // the AI label for extraction; there is no recorded half to invent.
+        transcription = relay.segment.text;
+        transcriptionProvenance = { provider: RELAY_TRANSCRIPTION_PROVIDER, model: null,
+          metadata: { relay: relay.segment.metadata, recording_transcription_unavailable: true } };
+        const wrote = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
+          transcription: db.raw('COALESCE(?, ?)', [relayTextSql(), transcription.slice('[AI segment]\n'.length)]),
+          transcription_provider: RELAY_TRANSCRIPTION_PROVIDER, transcription_status: 'completed',
+          transcription_model: null, transcript_structured: null,
+          transcription_metadata: transcriptionMetadataWrite(transcriptionProvenance.metadata), updated_at: new Date(),
+        });
+        if (!wrote) return abandonToPeer('the relay-only transcript write');
+        relayPending = true;
+      }
+    }
+
     if (transcription) {
       await updateUnifiedVoiceMessage(
         { ...call, transcription },
@@ -7294,13 +7314,16 @@ const CallRecordingProcessor = {
 
     if (relayPending) {
       // A socket append can commit after writeTranscript returned. Read the
-      // scrubbed composite at the extraction boundary so both extractors and
-      // routing consume the same relay evidence as the persisted call.
+      // scrubbed composite under the append writer's row lock: an unlocked
+      // MVCC read can return old text while that append is still uncommitted.
+      // The statement lock releases before the model call.
       const fresh = await db('call_log').where({ id: call.id })
-        .where('processing_token', procToken).first('transcription');
+        .where('processing_token', procToken).forUpdate().first('transcription', 'transcription_provider');
       if (!fresh) return abandonToPeer('the relay transcript refresh');
-      if (fresh.transcription?.startsWith('[AI segment]') && fresh.transcription !== transcription) {
-        transcription = fresh.transcription;
+      const relayText = fresh.transcription_provider === RELAY_TRANSCRIPTION_PROVIDER
+        ? `[AI segment]\n${fresh.transcription || ''}` : fresh.transcription;
+      if (relayText?.startsWith('[AI segment]') && relayText !== transcription) {
+        transcription = relayText;
         recordedSegmentText = recordedPartOfComposite(transcription);
         await updateUnifiedVoiceMessage({ ...call, transcription }, { body: transcription });
       }
