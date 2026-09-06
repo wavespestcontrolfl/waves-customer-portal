@@ -733,8 +733,8 @@ class RelayConversation {
       this._resumeReady = (this._contextReady || Promise.resolve())
         .catch(() => {})
         .then(() => (this._callerVerified === true ? loadResumeState(db, this.callSid, { sessionKey: this.sessionKey }) : null))
-        .then((state) => {
-          this._applyResumeState(state);
+        .then(async (state) => {
+          await this._applyResumeState(state);
           if (state) logger.info(`[voice-relay] resumed session proven callSid=${maskSid(this.callSid)} reconnects=${state.reconnects} priorChars=${state.segmentsText.length} lead=${state.relayLeadId ? 'linked' : 'none'}`);
           else logger.warn(`[voice-relay] resumed hint NOT proven (row / ownership / verification) callSid=${maskSid(this.callSid)} — treated as a fresh session`);
         })
@@ -1624,7 +1624,7 @@ class RelayConversation {
    * carry over with their spoken expectation and original timestamp — a
    * promise THIS leg already made for the same kind is kept.
    */
-  _applyResumeState(state) {
+  async _applyResumeState(state) {
     this._resume = state; // loadResumeState returns a verified state or null
     if (!state) return;
     this.leadCaptured = [this.leadCaptured, state.relayLeadId, state.leadCaptured, state.reserviceFiled, state.noLeadCreated].some(Boolean);
@@ -1671,6 +1671,12 @@ class RelayConversation {
     for (const p of state.promises || []) {
       if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
     }
+    // A segment may reveal its captured lead only after this leg booked.
+    // Repair that existing card just as capture_lead and the capture floor do.
+    if (this._leadId && this._bookingRequested) {
+      const { attachLeadToVoiceBookingCard } = require('./relay-booking');
+      await withTimeout(attachLeadToVoiceBookingCard(this.callSid, this._leadId), 2000, false);
+    }
   }
 
   // Both turn-time hydration and a silent close can race the older socket's
@@ -1680,7 +1686,7 @@ class RelayConversation {
     if (this._callerVerified !== true || !recovery.isRecoveryGateOn()) return;
     try {
       const fresh = await recovery.loadResumeState(db, this.callSid, { sessionKey: this.sessionKey });
-      if (fresh && (fresh.segmentsText || !this._resume)) this._applyResumeState(fresh);
+      if (fresh && (fresh.segmentsText || !this._resume)) await this._applyResumeState(fresh);
     } catch { /* fail-soft: a later turn or close may retry */ }
   }
 
