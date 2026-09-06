@@ -124,6 +124,33 @@ function approvedPerOzFields(price, quantity) {
   };
 }
 
+// The vendor_pricing fields an APPLIED price snapshot replaces, verbatim —
+// INCLUDING clearing them when the snapshot has none — so a price-only report
+// can't leave a stale unit cost behind that then wins best-price ordering
+// (COALESCE landed → normalized → price), or a stale quantity that makes the
+// per-unit price display recompute the new price against the old pack size.
+// The unit the normalized/landed figures are DENOMINATED in moves with them
+// (r23-push P1): the scorer divides through unit_normalized, so an 'oz'
+// snapshot over a row previously normalized in pounds would rank ~16x cheap.
+// Expiry follows the applied snapshot (codex GH r3 P1). The shipping / tax
+// INPUTS are cleared too (Codex #3974 r4 P1): a snapshot carries no
+// shipping_cost / tax_rate / landed_cost, and the count-based ranking rebuilds
+// its landed total from them, so an obsolete charge left beside the new
+// price would still decide the vendor; shipping_estimate follows the snapshot.
+function snapshotPricingFields(snapshot) {
+  return {
+    normalized_unit_price: snapshot.normalized_unit_price ?? null,
+    landed_unit_price: snapshot.landed_unit_price ?? null,
+    quantity: snapshot.quantity ?? null,
+    unit_normalized: snapshot.normalized_unit ?? null,
+    expires_at: snapshot.expires_at ?? null,
+    shipping_cost: null,
+    tax_rate: null,
+    landed_cost: null,
+    shipping_estimate: snapshot.shipping_estimate ?? null,
+  };
+}
+
 function numberOrNull(value) {
   if (value === '' || value == null) return null;
   const n = Number(value);
@@ -2002,20 +2029,7 @@ router.post('/price-sync/review-queue/:id/approve', async (req, res, next) => {
         // landed → normalized → price), or a stale quantity that makes the per-unit
         // price display recompute the new price against the old pack size. Only when
         // a snapshot is actually being applied.
-        if (snapshot) {
-          pricingUpdate.normalized_unit_price = snapshot.normalized_unit_price ?? null;
-          pricingUpdate.landed_unit_price = snapshot.landed_unit_price ?? null;
-          pricingUpdate.quantity = snapshot.quantity ?? null;
-          // The unit the normalized/landed figures are DENOMINATED in must
-          // move with them (r23-push P1): the scorer divides through
-          // unit_normalized, so an 'oz' snapshot over a row previously
-          // normalized in pounds would rank ~16x cheap.
-          pricingUpdate.unit_normalized = snapshot.normalized_unit ?? null;
-          // Expiry follows the APPLIED snapshot (codex GH r3 P1): a stale
-          // expires_at from a prior scrape would immediately hide the
-          // freshly approved price from the eligibility predicate.
-          pricingUpdate.expires_at = snapshot.expires_at ?? null;
-        }
+        if (snapshot) Object.assign(pricingUpdate, snapshotPricingFields(snapshot));
         if (snapshot?.source_type) pricingUpdate.source_type = snapshot.source_type;
         if (snapshot?.price_type) pricingUpdate.price_type = snapshot.price_type;
         if (snapshot?.price_confidence != null) pricingUpdate.price_confidence = snapshot.price_confidence;
@@ -3441,9 +3455,12 @@ async function recalcBestPriceLocked(productId, dbc) {
   // Leaving count mode (a product corrected to a measured unit_size_oz)
   // must not keep a per-station / per-tablet figure that costLineFromUsage
   // would read ahead of the new measured best_price (Codex #3974 r3 P1): a
-  // cost_unit that is a counted noun is count-derived and is cleared; 'each'
-  // and measured units (oz, fl_oz, lb) are left alone.
-  const countDerivedCostUnit = (() => { const c = parsePackCount(`1 ${product?.cost_unit || ''}`); return !!(c && c.unit !== 'each'); })();
+  // cost_unit that is a counted noun (or the generic 'each') is count-derived
+  // and is cleared; measured units (oz, fl_oz, lb) are left alone.
+  // (Codex #3974 r4 P1: the count writer itself stores 'each' for a generic
+  // count, so 'each' is count-derived too; only a MEASURED recalculation
+  // clears — raw mode keeps whatever the operator set.)
+  const countDerivedCostUnit = mode === 'oz' && !!product?.cost_unit && parsePackCount(`1 ${product.cost_unit}`) != null;
   const countCost = countScalable
     ? { cost_per_unit: Math.round(best.perUnit * 10000) / 10000, cost_unit: product?.cost_unit || catalogUnit || 'each' }
     : countDerivedCostUnit ? { cost_per_unit: null, cost_unit: null } : {};
@@ -3668,7 +3685,16 @@ router.put('/:id', async (req, res, next) => {
 
     Object.assign(upd, await autoReorderPatch(req.body));
 
+    const sizeInPayload = upd.container_size !== undefined || upd.unit_size_oz !== undefined;
     const updated = await db.transaction(async (trx) => {
+      // A size edit recalculates INSIDE this transaction (Codex #3974 r4 P1):
+      // a recalculation that failed after the size committed would leave
+      // best_price scaled to the old size, and a retry of the same edit sees
+      // no change. The product-scoped advisory lock is taken BEFORE the row
+      // lock — the same order the pricing writers use (advisory → row) — so
+      // the two cannot deadlock; recalcBestPrice re-takes it on this
+      // connection (xact advisory locks are re-entrant).
+      if (sizeInPayload) await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['inventory.best_price', String(req.params.id)]);
       const locked = await trx('products_catalog').where({ id: req.params.id }).forUpdate().first();
       if (!locked) {
         const err = new Error('Product not found');
@@ -3720,14 +3746,13 @@ router.put('/:id', async (req, res, next) => {
           },
         });
       }
-      return { row: await trx('products_catalog').where({ id: req.params.id }).first(), sizeChanged: lockedSizeChanged };
+      // A changed catalog size changes how vendor rows scale (per-oz size or
+      // count) — recalculate so the fix lands without an operator re-saving
+      // a vendor price (Codex #3974 r1 P2), in this transaction (r4 P1).
+      if (lockedSizeChanged) await recalcBestPrice(req.params.id, trx);
+      return trx('products_catalog').where({ id: req.params.id }).first();
     });
-    // A changed catalog size changes how vendor rows scale (per-oz size or
-    // count) — recalculate so the fix lands without an operator re-saving a
-    // vendor price (Codex #3974 r1 P2). Own serialized transaction, after the
-    // product write committed.
-    if (updated.sizeChanged) await recalcBestPrice(req.params.id);
-    res.json({ success: true, product: updated.sizeChanged ? await db('products_catalog').where({ id: req.params.id }).first() : updated.row });
+    res.json({ success: true, product: updated });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);
@@ -3917,6 +3942,7 @@ router._test = {
   vendorRowPricePerOz,
   approvedPerOzFields,
   scoreVendorRows,
+  snapshotPricingFields,
 };
 
 // The ONE best-price writer (codex #3465 r2 P1): every approval surface —

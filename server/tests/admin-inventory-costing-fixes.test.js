@@ -476,6 +476,55 @@ describe('recalcBestPrice', () => {
     await recalcBestPrice('prod-1');
     expect(measured.catalogUpdates[0]).not.toHaveProperty('cost_per_unit');
     expect(measured.catalogUpdates[0]).not.toHaveProperty('cost_unit');
+    // the generic 'each' the count writer itself stores is count-derived too (r4 P1)
+    const wasEach = wireBestPrice({ rows, product: { unit_size_oz: 64, best_price: 1.0035, container_size: '64 oz', cost_unit: 'each' } });
+    await recalcBestPrice('prod-1');
+    expect(wasEach.catalogUpdates[0].cost_per_unit).toBeNull();
+    expect(wasEach.catalogUpdates[0].cost_unit).toBeNull();
+  });
+
+  test('an applied price snapshot replaces the row\'s shipping / tax inputs too — a snapshot carries none, so they clear; shipping_estimate follows it (r4 P1)', () => {
+    const { snapshotPricingFields } = inventoryRouter._test;
+    const f = snapshotPricingFields({ price: 20.07, quantity: '20 count', normalized_unit_price: null, normalized_unit: null, expires_at: null, shipping_estimate: 6.5 });
+    expect(f).toEqual({ normalized_unit_price: null, landed_unit_price: null, quantity: '20 count', unit_normalized: null, expires_at: null, shipping_cost: null, tax_rate: null, landed_cost: null, shipping_estimate: 6.5 });
+  });
+
+  test('PUT /:id recalculates INSIDE the size-edit transaction, after the product-scoped advisory lock — a failing recalculation fails the edit (r4 P1)', async () => {
+    const product = { id: 'prod-1', container_size: '64 oz', unit_size_oz: 64, best_price: 50, cost_unit: 'oz', inventory_on_hand: null, inventory_unit: null, low_stock_threshold: null };
+    const rows = [{ id: 'vp-a', vendor_id: 'v-a', price: 100, quantity: '128 oz', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor A' }];
+    const events = [];
+    let txOpen = false;
+    const trx = (table) => db(table);
+    trx.raw = jest.fn(async (sql, params) => { events.push(['raw', params && params[0]]); return {}; });
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction.mockImplementation(async (fn) => { txOpen = true; try { return await fn(trx); } finally { txOpen = false; } });
+    let failRecalcWrite = false;
+    db.mockImplementation((table) => makeChain(table, (q) => {
+      if (table === 'vendor_pricing') {
+        if (q.called('update')) { if (failRecalcWrite) throw new Error('connection reset'); return 1; }
+        return rows;
+      }
+      if (table === 'products_catalog') {
+        if (q.called('update')) { const u = q.args('update')[0]; events.push([u.best_price_status ? 'best' : 'product', txOpen]); Object.assign(product, u); return 1; }
+        if (q.called('forUpdate')) events.push(['rowlock', txOpen]);
+        return { ...product };
+      }
+      throw new Error(`Unexpected table ${table}`);
+    }));
+    await withServer(async (baseUrl) => {
+      const r = await fetch(`${baseUrl}/admin/inventory/prod-1`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ containerSize: '32 oz' }) });
+      expect(r.status).toBe(200);
+    });
+    // advisory lock → row lock → product write → best-price write, all inside the transaction
+    expect(events[0]).toEqual(['raw', 'inventory.best_price']);
+    expect(events[1]).toEqual(['rowlock', true]);
+    expect(events.find((e) => e[0] === 'best')).toEqual(['best', true]);
+    // a recalculation failure fails the edit instead of committing a half-updated product
+    failRecalcWrite = true;
+    await withServer(async (baseUrl) => {
+      const r = await fetch(`${baseUrl}/admin/inventory/prod-1`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ containerSize: '16 oz' }) });
+      expect(r.status).toBe(500);
+    });
   });
 
   test('PUT /:id with a measured containerSize and no unitSizeOz re-derives unit_size_oz — "64 oz" → "32 oz" scales best_price to 32 (r3 P1)', async () => {
