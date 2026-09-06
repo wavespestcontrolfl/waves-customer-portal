@@ -1074,7 +1074,8 @@ function prepareFrontmatterFix(originalMd, fixedMd, findings = [], deps = {}) {
     }
     const proposedTypes = fixed.data.schema_types;
     const proposed = canonValue(Array.isArray(proposedTypes) ? [...proposedTypes].sort() : proposedTypes);
-    if (proposed !== canonValue([...original.data.schema_types].sort()) && proposed !== canonValue([...schemaTypes].sort())) {
+    const allowedDeclarations = [original.data.schema_types, schemaTypes].map((types) => canonValue([...types].sort()));
+    if (!allowedDeclarations.includes(proposed)) {
       return { violation: 'schema_types differs from the original and body-derived declaration sets', changed: {} };
     }
     if (canonValue(original.data.schema_types) !== canonValue(schemaTypes)) {
@@ -1088,10 +1089,12 @@ function prepareFrontmatterFix(originalMd, fixedMd, findings = [], deps = {}) {
     }
   }
   const result = frontmatterFixViolation(baseline, markdown, findings);
-  if (!result.violation && schemaTypes && canonValue(original.data.schema_types) !== canonValue(schemaTypes)) {
+  if (result.violation) return { ...result, markdown };
+  // Only a permitted FAQ schema change rewrites the validation baseline.
+  if (baseline !== originalMd) {
     result.changed.schema_types = schemaTypes;
   }
-  if (!result.violation && Object.keys(result.changed).length === 0
+  if (Object.keys(result.changed).length === 0
     && original.content.trimEnd() === fixed.content.trimEnd()) {
     markdown = originalMd;
   }
