@@ -47,6 +47,17 @@ describe('combined visit booking capacity', () => {
     expect(mixed.reservationServiceMix.services).toEqual(['pest_control', 'termite_bait']);
   });
 
+  test.each(['scalar', 'pinned'])('legacy %s rodent supplement reserves its own hour', (shape) => {
+    process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
+    const estimate = estimateFor(['pest_control', 'lawn_care']);
+    const recurring = estimate.estimate_data.result.recurring;
+    if (shape === 'scalar') recurring.rodentBaitMo = 50;
+    else recurring.services.push({ service: 'rodent_bait', name: 'Rodent Bait', mo: 50, legacyPinnedReplay: true });
+    const profile = resolveEstimateSlotProfile(estimate);
+    expect(profile.durationMinutes).toBe(180);
+    expect(profile.reservationServiceMix.services).toEqual(['pest_control', 'lawn_care', 'rodent_bait']);
+  });
+
   test('a service cadence the converter cannot seed is refused before offering a combined slot', () => {
     process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
     const estimate = estimateFor(['pest_control', 'lawn_care']);
@@ -76,9 +87,13 @@ describe('combined visit booking capacity', () => {
     expect(profile.reservationServiceMix).toBeUndefined();
   });
 
-  test('duplicate service-family selections refuse instead of promising an unfulfillable extra application', () => {
+  test('duplicate source rows normalize to one program; duplicate capacity members still refuse', () => {
     process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
-    expect(() => resolveEstimateSlotProfile(estimateFor(['pest_control', 'pest_control'])))
+    const profile = resolveEstimateSlotProfile(estimateFor(['pest_control', 'pest_control']));
+    expect(profile.services).toHaveLength(1);
+    expect(profile.durationMinutes).toBe(60);
+    expect(profile.reservationServiceMix).toBeUndefined();
+    expect(() => capacityForServices([{ service: 'pest_control' }, { service: 'pest_control' }]))
       .toThrow(expect.objectContaining({ code: 'COMBINED_VISIT_UNAVAILABLE' }));
   });
 

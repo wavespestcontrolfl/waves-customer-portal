@@ -92,17 +92,27 @@ postgres('combined capacity conversion on the migrated application schema', () =
       service: 'termite_bait', name: 'Termite Bait', visitsPerYear: 4, frequency: 'quarterly',
       catalog: 'termite_bait', pattern: 'quarterly',
     }], ['termite_station_rental', 'termite_bond_1yr']],
-  ])('%s keep separate identities, sequential hours and their own cadences', async (_, selected, riders = []) => {
+    ...['scalar', 'pinned'].map((shape) => [`pest and lawn with legacy ${shape} rodent`, [...lines.slice(0, 2), {
+      service: 'rodent_bait', name: 'Rodent Bait', visitsPerYear: 4, frequency: 'quarterly',
+      catalog: 'rodent_bait_quarterly', pattern: 'quarterly',
+    }], [], shape]),
+  ])('%s keep separate identities, sequential hours and their own cadences', async (_, selected, riders = [], legacyRodent = null) => {
     const trx = await mockPg.transaction();
     try {
       const count = selected.length;
       const f = await fixture(trx, selected);
       await trx('customers').where({ id: f.customerId }).update({ autopay_enabled: true });
-      if (riders.length) {
+      if (riders.length || legacyRodent) {
         const estimate = await trx('estimates').where({ id: f.estimateId }).first();
         estimate.estimate_data.result.recurring.services.push(...riders.map((service) => ({
           service, name: service, visitsPerYear: 4, annual: 120, mo: 10, perTreatment: 30,
         })));
+        if (legacyRodent) {
+          const recurring = estimate.estimate_data.result.recurring;
+          recurring.services = recurring.services.filter((row) => row.service !== 'rodent_bait');
+          if (legacyRodent === 'scalar') recurring.rodentBaitMo = 50;
+          else recurring.services.push({ service: 'rodent_bait', name: 'Rodent Bait', mo: 50, legacyPinnedReplay: true });
+        }
         await trx('estimates').where({ id: f.estimateId }).update({ estimate_data: estimate.estimate_data });
       }
       // Exercise the real public-accept transaction boundary: graduate the
@@ -198,6 +208,17 @@ postgres('combined capacity conversion on the migrated application schema', () =
       let sibling = await trx('appointment_reminders').where({ scheduled_service_id: parents[1].id }).first();
       expect(sibling.suppressed_by_sibling).toBe(false);
       expect(sibling.cancelled).toBe(false);
+      const sharedPool = mockPg;
+      mockPg = trx;
+      try {
+        const { parseETDateTime: parseArrival } = require('../utils/datetime-et');
+        await expect(require('../services/visit-groups').appointmentSendHeld(
+          parents[1].id, parseArrival(`${f.date}T09:00`).getTime(),
+        )).resolves.toBe(false);
+        await expect(require('../services/visit-groups').appointmentSendHeld(
+          parents[1].id, parseArrival(`${f.date}T10:00`).getTime(),
+        )).resolves.toBe(true);
+      } finally { mockPg = sharedPool; }
       await expect(AppointmentReminders.resolveCommittedVisitTime(parents[1].id, {}, trx))
         .resolves.toMatchObject({ appointmentTime: `${f.date}T09:00` });
       await trx('scheduled_services').where({ id: parents[1].id }).update({ window_start: '13:00', window_end: '14:00' });

@@ -710,8 +710,15 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
     : recurringRowsForEstimate(estimate, estData, selectedFrequency);
   if (combinedPolicy) {
     const converter = require('./estimate-converter');
+    if (!selectedPricingFrequency(estimate, estData, selectedFrequency)?.perServiceTreatments?.length) {
+      recurringSelection = converter.recurringServicesFromEstimateData(estData);
+    }
+    const isLegacyRodentRow = require('./billing-cadence').legacyRodentRowPredicateFor(estData);
     const units = converter.combineRecurringServicesForScheduling(
-      converter.foldTermiteRentalIntoBait(recurringSelection), { acceptFrequency: selectedFrequency },
+      converter.foldTermiteRentalIntoBait(recurringSelection).filter((row) => !isLegacyRodentRow(row)), {
+        acceptFrequency: selectedFrequency,
+        supplementalCompanions: converter.supplementalCompanionLines(estData),
+      },
     );
     recurringSelection = [
       ...units.remaining,

@@ -71,7 +71,8 @@ not the route,
 `/api/public/estimates/:token/available-slots` and `/reserve` (with the strict opt-in
 `GATE_VISIT_COMBINED_CAPACITY` and prerequisite `GATE_SEPARATE_COMBO_VISITS`, recurring multi-service selections reserve
 60 minutes per physical service program; termite rental and bond billing riders
-fold into bait service through the existing converter rules. Unsupported cadences
+fold into bait service and legacy supplements add their physical programs through
+the existing converter rules. Unsupported cadences
 and families, including recurring foam and commercial programs, are refused before offering or holding a slot. Slot `durationMinutes` and `windowEnd`
 describe the entire work block; arrival copy remains start plus 120 minutes.
 Offers and reservations require one assignable technician whose capability
