@@ -3,15 +3,17 @@
  * heroes + social squares.
  *
  * Provider chain via env BLOG_IMAGE_PROVIDER (default:
- * "gpt-image-2,gpt-image-1.5,gpt-image-1,gemini-image-best,gemini-image"). Each
- * provider is tried in order; on 404 / model-not-found / 5xx we fall
+ * "gpt-image-2,gemini-image-pro,gpt-image-1.5,gemini-image-best,gemini-image,gpt-image-1").
+ * Each provider is tried in order; on 404 / model-not-found / 5xx we fall
  * through to the next. On the first 2xx with image bytes we return.
  *
- * Chain rationale (verified 2026-08-27): gpt-image-2 is the top-ranked
- * image model overall; the Gemini fallbacks are the image-NATIVE Nano
- * Banana line from config/models.js (gemini-3.1-flash-image-preview /
- * gemini-2.5-flash-image — env-overridable, e.g. MODEL_GEMINI_IMAGE=
- * gemini-3-pro-image for Nano Banana Pro). gpt-image-1 stays as the LAST
+ * Chain rationale (bake-off 2026-09-05): gpt-image-2 is the top-ranked
+ * image model overall; Nano Banana Pro (gemini-3-pro-image, its OWN
+ * selector MODEL_GEMINI_IMAGE_PRO) is a close second and cheaper; the
+ * remaining Gemini legs are the flash Nano Banana line from
+ * config/models.js (MODEL_GEMINI_IMAGE / MODEL_GEMINI_IMAGE_STABLE — do not
+ * point those at the Pro model, that only duplicates the Pro leg).
+ * gpt-image-1 stays as the LAST
  * OpenAI fallback — an account without the newer models and no
  * GEMINI_API_KEY must not lose its only working provider. The legacy
  * 'gemini' slug (gemini-2.5-flash text model with image modality) is out
@@ -469,11 +471,14 @@ class ImageGenerator {
    *   generated image (null when a customPrompt made the fields unreliable).
    * Throws if every provider in the chain failed.
    */
-  async generate({ title, topic, keyword, city, mode = 'blog-hero', shot, avoid, plan = null, captions = [], avoidDepicting = [], prompt: customPrompt } = {}) {
+  // deadlineAt — an absolute ms timestamp the whole call must respect; a
+  // caller that generates more than once for one slot (screen retry) passes
+  // the same deadline to both calls so the slot never gets a second budget.
+  async generate({ title, topic, keyword, city, mode = 'blog-hero', shot, avoid, plan = null, captions = [], avoidDepicting = [], prompt: customPrompt, deadlineAt = null } = {}) {
     const prompt = customPrompt || buildPrompt({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting });
     const alt = customPrompt ? null : buildAltText({ title, topic, keyword, city, mode, plan });
     const attempts = [];
-    const deadline = this._now() + this._chainBudgetMs;
+    const deadline = Number.isFinite(deadlineAt) ? deadlineAt : this._now() + this._chainBudgetMs;
 
     for (const slug of this.chain) {
       const cfg = MODEL_MAP[slug];
@@ -574,6 +579,7 @@ module.exports.ImageGenerator = ImageGenerator;
 // every autonomous publish).
 module.exports.planFor = planFor;
 module.exports.retryStyleFor = retryStyleFor;
+module.exports.IMAGE_CHAIN_BUDGET_MS = IMAGE_CHAIN_BUDGET_MS;
 module.exports.IMAGE_STYLES = IMAGE_STYLES;
 module.exports._internals = {
   stylePermutation,

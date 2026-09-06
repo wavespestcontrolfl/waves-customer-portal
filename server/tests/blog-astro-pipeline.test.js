@@ -46,7 +46,7 @@ jest.mock('../services/content-astro/author-service', () => ({
 }));
 jest.mock('../services/content/image-generator', () => ({
   generate: jest.fn(),
-  planFor: jest.fn(() => ({ style: 'photo', setting: 'inside a residential garage', timeOfDay: 'late afternoon', vantage: 'eye level' })), retryStyleFor: jest.fn(() => 'illustration'),
+  planFor: jest.fn(() => ({ style: 'photo', setting: 'inside a residential garage', timeOfDay: 'late afternoon', vantage: 'eye level' })), retryStyleFor: jest.fn(() => 'illustration'), IMAGE_CHAIN_BUDGET_MS: 360000,
 }));
 jest.mock('../services/content/fact-check-gate', () => ({
   evaluate: jest.fn().mockResolvedValue({ pass: true, findings: [], checked: false }),
@@ -3825,6 +3825,38 @@ describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () =
   });
 });
 
+
+describe('generatePlannedImage — one deadline per slot, safer candidate when both screens fail (Codex r6 P2 on #3964)', () => {
+  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const args = { title: 'T', keyword: 'K', mode: 'blog-hero', slug: 'x/y', index: 0 };
+
+  test('the screen retry reuses the first call\'s deadline and, when both fail, the candidate without a logo ships with its warning', async () => {
+    const imageGenerator = require('../services/content/image-generator');
+    const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
+    imageGenerator.generate.mockReset().mockResolvedValue({ dataUrl: PNG, mimeType: 'image/png', model: 'gpt-image-2', attempts: [], alt: 'a' });
+    screenGeneratedImage
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ZONE 5'], logos: [], reasons: ['readable text: ZONE 5'] })
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ZONE 5'], logos: ['Orkin'], reasons: ['logo or brand mark: Orkin', 'readable text: ZONE 5'] });
+    const before = Date.now();
+    const out = await AstroPublisher.generatePlannedImage(args);
+    expect(imageGenerator.generate).toHaveBeenCalledTimes(2);
+    const [first, second] = imageGenerator.generate.mock.calls.map((c) => c[0].deadlineAt);
+    expect(first).toBe(second);
+    expect(first).toBeGreaterThanOrEqual(before + 360000);
+    expect(out.screen.logos).toEqual([]);
+    expect(out.screen.reasons).toEqual(['readable text: ZONE 5']);
+  });
+
+  test('a clean first image returns without a retry', async () => {
+    const imageGenerator = require('../services/content/image-generator');
+    const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
+    imageGenerator.generate.mockReset().mockResolvedValue({ dataUrl: PNG, mimeType: 'image/png', model: 'gemini-image-pro', attempts: [], alt: 'a' });
+    screenGeneratedImage.mockResolvedValueOnce({ ok: true, checked: true, readableText: [], logos: [], reasons: [] });
+    const out = await AstroPublisher.generatePlannedImage(args);
+    expect(imageGenerator.generate).toHaveBeenCalledTimes(1);
+    expect(out).toMatchObject({ model: 'gemini-image-pro', screen: { ok: true } });
+  });
+});
 
 describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)', () => {
   const fmModule = require('../services/content-astro/frontmatter');

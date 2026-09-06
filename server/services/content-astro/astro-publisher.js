@@ -843,12 +843,15 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
   // equipment in passing (Codex r2 P2).
   const subject = [title, keyword].filter(Boolean).join(' ');
   let plan = imageGenerator.planFor({ slug, mode, index, captions, subject });
-  let last = null;
+  // One deadline for the whole slot, screen retry included — a second call
+  // must not start a second budget (Codex r6 P2).
+  const deadlineAt = Date.now() + imageGenerator.IMAGE_CHAIN_BUDGET_MS;
+  const candidates = [];
   for (let attempt = 0; attempt < 2; attempt++) {
     let gen;
     let img;
     try {
-      gen = await imageGenerator.generate({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting });
+      gen = await imageGenerator.generate({ title, topic, keyword, city, mode, shot, avoid, plan, captions, avoidDepicting, deadlineAt });
       img = await fetchImageBuffer(gen.dataUrl);
       if (!img?.buffer) throw new Error(`${mode} image generation produced no usable image`);
     } catch (err) {
@@ -860,16 +863,17 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
       // The screen is advisory: a retry that fails to generate keeps the
       // usable first image rather than failing the publish (pre-push Codex
       // P1 on 1436d5d69). With nothing usable yet, the error stands.
-      if (last) {
-        logger.warn(`[astro-publisher] ${mode} image retry for ${slug} failed (${err.message}) — keeping the first image despite the screen (${last.screen.reasons.join('; ')})`);
-        return last;
+      if (candidates.length) {
+        logger.warn(`[astro-publisher] ${mode} image retry for ${slug} failed (${err.message}) — keeping the first image despite the screen (${candidates[0].screen.reasons.join('; ')})`);
+        return candidates[0];
       }
       throw err;
     }
     const allowedText = plan.style === 'infographic' ? captions : [];
     const screen = await screenGeneratedImage({ buffer: img.buffer, mimeType: img.mimeType || gen.mimeType || 'image/png', allowedText });
-    last = { ...img, dataUrl: gen.dataUrl, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen };
-    if (screen.ok) return last;
+    const candidate = { ...img, dataUrl: gen.dataUrl, alt: gen.alt || null, attempts: Array.isArray(gen.attempts) ? gen.attempts : null, model: gen.model, plan, screen };
+    if (screen.ok) return candidate;
+    candidates.push(candidate);
     if (attempt === 0) {
       // Retry in a style no sibling slot uses (a fresh style shakes a repeated
       // defect) under a fresh seed — never a fixed swap into a sibling's style.
@@ -878,8 +882,11 @@ async function generatePlannedImage({ title, topic, keyword, city, mode, shot, a
       plan = imageGenerator.planFor({ slug, mode, index: index + 1000, captions, subject, style: retryStyle });
     }
   }
-  logger.warn(`[astro-publisher] ${mode} image for ${slug} still failed the text/logo screen after a retry (${last.screen.reasons.join('; ')}) — shipping with a reviewer note`);
-  return last;
+  // Both failed: ship the safer one — no logo beats a logo, then fewer
+  // violations — with the reviewer note (Codex r6 P2).
+  const safest = [...candidates].sort((a, b) => (a.screen.logos.length > 0) - (b.screen.logos.length > 0) || a.screen.reasons.length - b.screen.reasons.length)[0];
+  logger.warn(`[astro-publisher] ${mode} image for ${slug} still failed the text/logo screen after a retry (${safest.screen.reasons.join('; ')}) — shipping the safer candidate with a reviewer note`);
+  return safest;
 }
 
 async function generateHeroBuffer(post) {

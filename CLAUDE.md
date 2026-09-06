@@ -101,7 +101,7 @@ Everything else — architecture, the context→tools mapping, design decisions,
 
 Core: `DATABASE_URL`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN`, `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`, `JWT_SECRET`.
 
-Optional model overrides: `MODEL_DEEP` / `MODEL_EXTREME` / `MODEL_FLAGSHIP` / `MODEL_WORKHORSE` / `MODEL_FAST` / `MODEL_VOICE` / `MODEL_VISION` (global), `INTELLIGENCE_BAR_MODEL` / `INTELLIGENCE_BAR_TECH_MODEL` (IB-specific). Fable is never automatic; opt in explicitly through `MODEL_EXTREME` or a deliberate feature route.
+Optional model overrides: `MODEL_DEEP` / `MODEL_EXTREME` / `MODEL_FLAGSHIP` / `MODEL_WORKHORSE` / `MODEL_FAST` / `MODEL_VOICE` / `MODEL_VISION` (global), `INTELLIGENCE_BAR_MODEL` / `INTELLIGENCE_BAR_TECH_MODEL` (IB-specific), `MODEL_GEMINI_IMAGE_PRO` (Nano Banana Pro, second leg of the blog image chain; `BLOG_IMAGE_TIMEOUT_MS` per request, `BLOG_IMAGE_CHAIN_BUDGET_MS` for the whole chain incl. the screen retry). Fable is never automatic; opt in explicitly through `MODEL_EXTREME` or a deliberate feature route.
 
 LLM mention prober (AEO): `PERPLEXITY_API_KEY` enables the Perplexity probe (`PERPLEXITY_MENTIONS_MODEL`, default `sonar`) alongside the existing `OPENAI_MENTIONS_MODEL` / `GEMINI_MENTIONS_MODEL` / `MODEL_MENTIONS` / `LLM_MENTIONS_MAX_PROBES` overrides. Measurement probes call each answer engine directly by design — no ROUTES entry, no Claude fallback (a fallback would falsify the visibility measurement).
 
