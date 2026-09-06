@@ -37,7 +37,7 @@ postgres('blog queue ownership on PostgreSQL', () => {
       t.uuid('id').primary(); t.uuid('opportunity_id'); t.text('action_type'); t.text('outcome'); t.text('skip_reason');
       t.text('astro_pr_url'); t.text('published_url'); t.timestamp('claimed_at', { useTz: true });
       t.uuid('brief_id'); t.jsonb('draft_payload'); t.text('reviewer_notes'); t.text('poll_pending_reason'); t.text('trust_build_approved_by');
-      for (const c of ['created_at', 'updated_at', 'poll_pending_since', 'poll_pending_annotated_at', 'trust_build_approved_at']) t.timestamp(c, { useTz: true });
+      for (const c of ['created_at', 'updated_at', 'astro_pr_merged_at', 'poll_pending_since', 'poll_pending_annotated_at', 'trust_build_approved_at']) t.timestamp(c, { useTz: true });
     });
     await mockPg.schema.createTable('content_briefs', (t) => {
       t.uuid('id').primary(); t.uuid('opportunity_id'); t.text('action_type'); t.timestamp('composed_at', { useTz: true });
@@ -83,14 +83,30 @@ postgres('blog queue ownership on PostgreSQL', () => {
     expect(await mockPg('opportunity_queue').where({ id }).first()).toMatchObject({ status: 'pending_review', skip_reason: 'astro_pr_pending_merge' });
   });
 
+  test.each(['completed_published', 'completed_pending_review'])('repairs owned %s evidence after the daily expiration sweep', async (outcome) => {
+    const { id, claim } = await seed({ status: 'pending', outcome, queuePatch: { expires_at: new Date(Date.now() - 1000) } });
+    await queue.expireStale();
+    expect((await mockPg('opportunity_queue').where({ id }).first()).status).toBe('expired');
+    await queue.sweepExhaustedAttempts();
+    expect(await mockPg('opportunity_queue').where({ id }).first()).toMatchObject({
+      status: outcome === 'completed_published' ? 'done' : 'pending_review', claim_id: claim,
+    });
+  });
+
+  test.each([null, randomUUID()])('expired requeued ownership is not overwritten (%s)', async (claim_id) => {
+    const { id } = await seed({ status: 'expired', queuePatch: { claim_id } });
+    await queue.reconcilePublishedClaims();
+    expect((await mockPg('opportunity_queue').where({ id }).first()).status).toBe('expired');
+  });
+
   test.each([null, randomUUID()])('does not overwrite a requeue or replacement owner (%s)', async (claim_id) => {
     const { id } = await seed({ status: 'pending', queuePatch: { claim_id } });
     await queue.reconcilePublishedClaims();
     expect((await mockPg('opportunity_queue').where({ id }).first()).status).toBe('pending');
   });
 
-  test('an operator requeue committed while reconciliation waits on the row wins', async () => {
-    const { id } = await seed();
+  test.each(['claimed', 'expired'])('an operator requeue wins while reconciliation waits on the %s row', async (status) => {
+    const { id } = await seed({ status });
     const trx = await mockPg.transaction();
     await trx('opportunity_queue').where({ id }).forUpdate().first();
     const repair = queue.reconcilePublishedClaims();
@@ -155,6 +171,37 @@ postgres('blog queue ownership on PostgreSQL', () => {
     expect((await mockPg('autonomous_runs').where({ id: run.id }).first()).astro_pr_retired_at).toBeInstanceOf(Date);
     expect((await mockPg('opportunity_queue').where({ id }).first()).skip_reason).toBe('affiliate_review');
     expect((await queue.peek()).map((r) => r.id)).toContain(id);
+  });
+
+  test.each(['pending', 'pending_review'])('merged historical PRs leave polling while preserving the %s queue fence', async (status) => {
+    const { id, run } = await seed({ status, outcome: 'failed', runPatch: { astro_pr_merged_at: new Date() },
+      queuePatch: { skip_reason: 'affiliate_review', claim_id: null } });
+    const gh = require('../services/content-astro/github-client');
+    gh.getPr.mockClear();
+    gh.getPr.mockResolvedValue({ number: 1, state: 'closed', merged: true, head: { ref: 'content/fixture', sha: 'head' } });
+    const poller = require('../services/content/autonomous-pr-poller');
+    expect(await poller.pollPending()).toMatchObject({ count: 1, results: [{ id: run.id, retired: false }] });
+    const observed = await mockPg('autonomous_runs').where({ id: run.id }).first();
+    expect(observed.poll_pending_reason).toBe('historical_pr_merged');
+    expect(observed.astro_pr_retired_at).toBeNull();
+    expect(await poller.pollPending()).toMatchObject({ count: 0 });
+    expect(gh.getPr).toHaveBeenCalledTimes(1);
+    expect(await queue.claimNext()).toBeNull();
+    expect((await mockPg('opportunity_queue').where({ id }).first()).status).toBe(status);
+  });
+
+  test('a previously observed historical merge still retries failed terminal bookkeeping', async () => {
+    const { run } = await seed({ status: 'pending', outcome: 'failed', runPatch: { astro_pr_merged_at: new Date() } });
+    const gh = require('../services/content-astro/github-client');
+    gh.getPr.mockResolvedValue({ number: 1, state: 'closed', merged: true });
+    const rem = require('../services/content/codex-remediation');
+    rem.markPrTerminal.mockResolvedValueOnce({ error: 'db down' });
+    const poller = require('../services/content/autonomous-pr-poller');
+    await poller.pollPending();
+    expect((await mockPg('autonomous_runs').where({ id: run.id }).first()).poll_pending_reason).toBeNull();
+    expect(await poller.pollPending()).toMatchObject({ count: 1 });
+    expect(await poller.pollPending()).toMatchObject({ count: 0 });
+    expect(await queue.claimNext()).toBeNull();
   });
 
   test('migration rollback and reapply are idempotent inside a rolled-back transaction', async () => {

@@ -443,6 +443,7 @@ const TOPIC_BLOCKED_SKIP_REASON = 'topic_targeting_blocked';
 // Stamped on a parked run once its closed PR's terminal bookkeeping is done
 // (reconciliation then stops re-reading it); cleared by un-park.
 const TOPIC_BLOCK_PR_RETIRED = 'topic_block_pr_retired';
+const HISTORICAL_PR_MERGED = 'historical_pr_merged';
 // A deterministic merge-time topic block cannot clear by polling: park the
 // run out of the pending set (CAS on the exact pending state, like
 // supersedeRun) with the verdict in reviewer_notes, and stamp the parked
@@ -1901,7 +1902,16 @@ async function reconcileSupersededPr(run) {
     if (!pr || pr.state === 'open') return { retired: false };
     const merged = !!(pr.merged || pr.merged_at);
     if (!await stampTerminal(number, merged ? 'merged' : 'closed', run)) return { retired: false };
-    if (merged || run.action_type !== 'new_supporting_blog') return { retired: false };
+    if (merged) {
+      // Leave the publication fence intact, but stop inspecting this terminal
+      // PR only after its remediation tombstone has been persisted.
+      await db('autonomous_runs').where('id', run.id).where('astro_pr_url', run.astro_pr_url).update({
+        poll_pending_reason: HISTORICAL_PR_MERGED, poll_pending_since: null,
+        poll_pending_annotated_at: null, updated_at: new Date(),
+      });
+      return { retired: false };
+    }
+    if (run.action_type !== 'new_supporting_blog') return { retired: false };
     const result = await verifyClosedPrRetirement(run, { ...pr, number }, gh);
     return { retired: !!result?.retired };
   } catch (err) {
@@ -1921,6 +1931,7 @@ async function pollPending() {
             this.where('action_type', 'new_supporting_blog')
               .where(function terminal() { this.whereIn('outcome', ['failed', 'skipped']).orWhere('skip_reason', SUPERSEDED_SKIP_REASON); })
               .whereNull('astro_pr_retired_at').whereNull('published_url')
+              .where((q) => q.whereNull('poll_pending_reason').orWhereNot('poll_pending_reason', HISTORICAL_PR_MERGED))
               .whereRaw(`EXISTS (SELECT 1 FROM opportunity_queue q WHERE q.id = autonomous_runs.opportunity_id
                 AND q.status IN ('pending', 'pending_review'))`);
           });

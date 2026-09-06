@@ -416,7 +416,7 @@ class OpportunityQueue {
           completed_at = CASE WHEN r.outcome = 'completed_published' THEN now() ELSE NULL END,
           updated_at = now()
       FROM autonomous_runs r
-      WHERE (q.status IN ('claimed', 'pending') AND q.claim_id = r.queue_claim_id
+      WHERE (q.status IN ('claimed', 'pending', 'expired') AND q.claim_id = r.queue_claim_id
           OR q.status = 'pending_review' AND q.skip_reason IN ('astro_pr_pending_merge', 'astro_pr_queue_transition_failed', 'published_queue_complete_failed') AND (
             q.claim_id = r.queue_claim_id OR q.claim_id IS NULL AND r.queue_claim_id IS NULL))
         AND r.id = (SELECT latest.id FROM autonomous_runs latest
