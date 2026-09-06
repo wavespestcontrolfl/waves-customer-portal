@@ -682,7 +682,7 @@ function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow =
       create_invoice_on_complete: false,
       ...parentOverrides,
     },
-    alert: alertRow ? { ...alertRow } : null,
+    alert: alertRow ? { customer_id: 5, ...alertRow } : null,
     insertedVisits: [],
     auditInserts: [],
     activityInserts: [],
@@ -698,7 +698,9 @@ function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow =
     .length;
   const statusVisible = (calls, rows) => {
     const notIn = calls.find((c) => c[0] === 'whereNotIn' && c[1] === 'status');
-    return notIn ? rows.filter((r) => !notIn[2].includes(r.status)) : rows;
+    const inStatuses = calls.find((c) => c[0] === 'whereIn' && c[1] === 'status');
+    return rows.filter(r => (!notIn || !notIn[2].includes(r.status))
+      && (!inStatuses || inStatuses[2].includes(r.status)));
   };
   const handler = ({ table, calls, op, data }) => {
     if (table === 'scheduled_services') {
@@ -707,6 +709,9 @@ function alertActionScenario({ parentOverrides = {}, seriesRows = [], alertRow =
         const firstCall = calls.find((c) => c[0] === 'first');
         if (calls.some((c) => c[0] === 'count')) return { c: String(upcomingCount()) };
         if (firstCall[1] === 'recurring_ongoing') return { recurring_ongoing: !!state.parent.recurring_ongoing };
+        if (calls.some(([op, fields]) => op === 'where' && fields?.status === 'completed')) {
+          return [state.parent, ...seriesRows].find(row => row.status === 'completed');
+        }
         if (firstCall[1] === 'create_invoice_on_complete') return undefined;
         // Post-registration terminal re-check: visit still live.
         if (firstCall[1] === 'status' && !calls.some((c) => c[0] === 'orderBy')) return { status: 'pending' };
@@ -1037,8 +1042,8 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     const { state, handler } = alertActionScenario({
       parentOverrides: { status: 'cancelled' },
       seriesRows: [
-        { scheduled_date: '2098-04-15', status: 'completed' },
-        { scheduled_date: '2098-07-15', status: 'pending' },
+        { scheduled_date: daysOut(-90), status: 'completed' },
+        { scheduled_date: daysOut(7), status: 'pending' },
       ],
       alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
     });
@@ -1075,6 +1080,63 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
     expect(out.status).toBe(409);
     expect(state.insertedVisits).toHaveLength(0);
     expect(state.alert.resolved_at).toBeNull();
+  });
+
+  test.each([
+    { label: 'refilled', seriesRows: [{ scheduled_date: daysOut(3), status: 'pending' }, { scheduled_date: daysOut(7), status: 'confirmed' }] },
+    { label: 'reassigned', parentOverrides: { customer_id: 6 } },
+    { label: 'awaiting first service', parentOverrides: { status: 'pending' } },
+  ])('a stale queued card refuses a plan that is $label', async (changes) => {
+    const { state, handler } = alertActionScenario({ ...changes,
+      alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action: 'extend', count: 2, adminUserId: null });
+    expect(out.status).toBe(409);
+    expect(state.insertedVisits).toHaveLength(0);
+    expect(state.alert.resolved_at).toBeNull();
+  });
+
+  test('a stale queued card refuses newly prepaid coverage and coverage lookup failures', async () => {
+    const coverage = jest.spyOn(require('../services/annual-prepay-renewals'), 'annualPrepayCoversVisit');
+    try {
+      for (const fail of [false, true]) {
+        if (fail) coverage.mockRejectedValueOnce(new Error('coverage unavailable'));
+        else coverage.mockResolvedValueOnce(true);
+        const { state, handler } = alertActionScenario({
+          seriesRows: [{ scheduled_date: daysOut(7), status: 'pending' }],
+          alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+        });
+        const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action: 'extend', count: 2, adminUserId: null });
+        expect(out.status).toBe(409);
+        expect(state.insertedVisits).toHaveLength(0);
+        expect(state.alert.resolved_at).toBeNull();
+      }
+    } finally { coverage.mockRestore(); }
+  });
+
+  test('a later individually cancelled visit does not block a still-pending child', async () => {
+    const { state, handler } = alertActionScenario({
+      parentOverrides: { status: 'cancelled' },
+      seriesRows: [
+        { scheduled_date: daysOut(-90), status: 'completed' },
+        { scheduled_date: daysOut(7), status: 'pending' },
+        { scheduled_date: daysOut(30), status: 'cancelled' },
+      ],
+      alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_ending', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action: 'extend', count: 2, adminUserId: null });
+    expect(out.status).toBe(200);
+    expect(state.insertedVisits).toHaveLength(2);
+  });
+
+  test('an explicit lapse stays actionable after future visits are added', async () => {
+    const { state, handler } = alertActionScenario({
+      seriesRows: [{ scheduled_date: daysOut(30), status: 'pending' }, { scheduled_date: daysOut(90), status: 'confirmed' }],
+      alertRow: { id: 58, recurring_parent_id: 10, alert_type: 'plan_lapsed', resolved_at: null },
+    });
+    const out = await runRecurringAlertAction(makeConn(handler), { idParam: '58', action: 'let_lapse', adminUserId: null });
+    expect(out.status).toBe(200);
+    expect(state.alert.resolved_at).toBeTruthy();
   });
 
   test('derived ids recompute the derived-scan condition under the lock — a concurrent refill makes the second click a no-op', async () => {
@@ -1244,6 +1306,12 @@ describe('renewal banner revalidates historical recurring alerts', () => {
   });
   test('does not treat an accepted plan awaiting its first service as a renewal', async () => {
     expect(await refreshRecurringPlanAlert(scenario({ completed: false }), alert)).toBeNull();
+  });
+  test('keeps explicit lapse holds visible regardless of refill, date, or paid coverage', async () => {
+    AnnualPrepayRenewals.annualPrepayCoversVisit.mockResolvedValue(true);
+    expect(await refreshRecurringPlanAlert(scenario({ upcoming: 2, lastDate: daysOut(90) }), { ...alert, alertType: 'plan_lapsed' }))
+      .toMatchObject({ remainingVisits: 2, alertType: 'plan_lapsed' });
+    expect(AnnualPrepayRenewals.annualPrepayCoversVisit).not.toHaveBeenCalled();
   });
   test('drops a queued alert once two appointments exist', async () => {
     expect(await refreshRecurringPlanAlert(scenario({ upcoming: 2 }), alert)).toBeNull();
