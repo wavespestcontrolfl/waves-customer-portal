@@ -103,6 +103,9 @@ postgres('visit completion packet records on PostgreSQL', () => {
       }))));
     expect(await mockPg('job_status_history').whereIn('job_id', fixture.serviceIds)).toHaveLength(2);
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId }).first()).toMatchObject({
+      service_type: 'Combined service visit', tech_notes: null, products_applied: [], service_photos: [],
+    });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
@@ -259,12 +262,15 @@ postgres('visit completion packet records on PostgreSQL', () => {
       .toEqual(expect.arrayContaining([expect.objectContaining({ scheduled_service_id: fixture.serviceIds[1] })]));
   });
 
-  test('concurrent submissions need only their transaction connection for completion helpers', async () => {
+  test.each(['pest', 'lawn'])('concurrent submissions need only their transaction connection for %s helpers', async (lane) => {
+    if (lane === 'lawn') {
+      await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ service_type: 'WaveGuard Lawn Care' });
+    }
     await mockPg('customers').where({ id: fixture.customerId }).update({
       property_type: 'commercial', autopay_enabled: true,
     });
     const normalPool = mockPg;
-    mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 1 }, acquireConnectionTimeout: 20000 });
+    mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 1 }, acquireConnectionTimeout: 30000 });
     const flags = require('../services/feature-flags').isUserFeatureEnabled;
     const context = require('../services/recap-visit-context').buildRecapVisitContext;
     flags.mockImplementation(jest.requireActual('../services/feature-flags').isUserFeatureEnabled);

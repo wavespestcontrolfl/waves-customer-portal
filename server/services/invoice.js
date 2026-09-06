@@ -1670,6 +1670,13 @@ const InvoiceService = {
           ...(resolvedPayerSnapshot ? { payer_snapshot: JSON.stringify(resolvedPayerSnapshot) } : {}),
           ...(accruedStatementId ? { payer_statement_id: accruedStatementId } : {}),
           ...serviceData,
+          // The record link identifies a billed member; its treatment is not
+          // the whole visit. Keep packet invoice copy neutral after tax used
+          // the validated service basis. Each report owns its treatment detail.
+          ...(packetWrite ? {
+            service_type: 'Combined service visit', tech_notes: null,
+            products_applied: JSON.stringify([]), service_photos: JSON.stringify([]),
+          } : {}),
         });
         break;
       } catch (err) {

@@ -3597,6 +3597,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     if (claim.action === 'proceed') {
       if (canLinkLawnAssessmentRecord) {
         const lawnAssessmentCompletionBlock = await preflightLawnAssessmentCompletion({
+          knex: db,
           serviceId: svc.id,
           customerId: svc.customer_id,
           reportServiceLine,
