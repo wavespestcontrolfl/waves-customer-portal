@@ -242,6 +242,11 @@ describe('Tan edge wear does not establish a watering problem', () => {
     'No signs of over-watering or under-watering are visible.',
     'Underwatering is not a concern.',
     'Underwatering isn’t the problem.',
+    'No signs of overwatering, underwatering, or disease are visible.',
+    'No disease, weed pressure, or underwatering is visible.',
+    'Underwatering has not been observed.',
+    'Underwatering hasn’t been observed.',
+    'Underwatering was ruled out.',
   ])('does not invent sprinkler advice from %s', observation => {
     const report = renderObservation(observation);
     expect(report.water.coverageWatch).toBe(false);
@@ -261,6 +266,8 @@ describe('Tan edge wear does not establish a watering problem', () => {
     'The edges are under-watered. No weeds were seen.',
     'No weeds were seen and the edges look under-watered.',
     'No underwatering in the center; dry patches remain near the pavement.',
+    'No weeds were seen, the edges are under-watered.',
+    'No disease or weeds are present, but underwatering is visible near the pavement.',
   ])('preserves moisture evidence in %s', observation => {
     const report = renderObservation(observation);
     expect(report.water.coverageWatch).toBe(true);

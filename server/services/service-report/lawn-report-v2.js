@@ -571,8 +571,8 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const underwateringSignal = [...obsText.matchAll(/\bunder[\s-]?water(?:ing|ed)\b/g)].some(match => {
     const before = obsText.slice(0, match.index);
     const after = obsText.slice(match.index + match[0].length);
-    return !/\b(?:no|not|never|without|isn['’]t|wasn['’]t|aren['’]t|weren['’]t|free of|absence of)\s+(?:(?!(?:but|however|yet|while|whereas)\b)[a-z'’-]+\s+){0,3}(?:over[\s-]?water(?:ing|ed)\s+(?:or|and|nor)\s+)?$/.test(before)
-      && !/^\s+(?:(?:is|was|are|were)\s+)?(?:absent|(?:not|never|isn['’]t|wasn['’]t)\s+(?:(?:a|an|the)\s+)?(?:seen|observed|visible|present|evident|concern|issue|problem|cause))\b/.test(after);
+    return !/\b(?:no|not|never|without|isn['’]t|wasn['’]t|aren['’]t|weren['’]t|free of|absence of)\s+(?:(?!(?:but|however|yet|while|whereas)\b)[a-z'’-]+\s+){0,3}(?:[a-z'’-]+(?:\s+[a-z'’-]+){0,2}\s*(?:,\s*(?:(?:or|and|nor)\s+)?|(?:or|and|nor)\s+))*$/.test(before)
+      && !/^\s+(?:(?:is|was|are|were|has|have|had)\s+)?(?:absent|ruled out|(?:not|never|isn['’]t|wasn['’]t|hasn['’]t)\s+(?:been\s+)?(?:(?:a|an|the)\s+)?(?:seen|observed|visible|present|evident|concern|issue|problem|cause))\b/.test(after);
   });
   const drySignal = underwateringSignal || /\b(dry|drier|drought|wilt)\b/.test(obsText)
     || /\buneven\s+(?:irrigation|water(?:ing)?|sprinkler|moisture)\b/.test(obsText)
