@@ -575,11 +575,11 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     .replace(/\byet\s+to(?=\s+(?:be\s+)?(?:observed|seen|visible|evident|present|detected|found|supported|confirmed|verified|proven)\b)/g, 'not')
     // A trailing passive dismissal still belongs to the same diagnosis.
     // Keep an explicit different object ("but excluded disease") separate.
-    .replace(/(?:,\s*)?\b(?:but|however|yet)\b(?=\s+(?:it\s+)?(?:(?:was|is|has|had|been|currently|actually|yet|ever|previously|later|subsequently)\s+)*(?:(?:excluded|ruled out)(?:\s+(?:after|based|because|following|on|once|when)\b|[.!?;]|$)|(?:not|never|[a-z]+n['’]t)\s+(?:been\s+)?(?:(?:currently|actually|yet|ever|previously)\s+)*(?:observed|seen|visible|evident|present|detected|found|supported|confirmed|verified|proven)\b))/g, ' ')
+    .replace(/(?:,\s*)?\b(?:but|however|yet)\b(?=\s+(?:it\s+)?(?:(?:was|were|is|are|has|have|had|been|now|currently|actually|yet|ever|previously|later|subsequently)\s+)*(?:(?:excluded|ruled out|resolved|recovered|cleared|corrected)(?:\s+(?:after|based|because|following|on|once|when)\b|[.!?;]|$)|(?:not|never|[a-z]+n['’]t)\s+(?:been\s+)?(?:(?:currently|actually|yet|ever|previously)\s+)*(?:observed|seen|visible|evident|present|detected|found|supported|confirmed|verified|proven)\b))/g, ' ')
     // Two finite predicates joined by "and" or a comma are separate observations, unlike
     // a shared subject list ("no signs of overwatering and underwatering").
     .replace(/(\b(?:is|are|was|were|has|have|had|do|does|did)\b[^.!?;,]*?)(?:\band\b|,)(?=[^.!?;,]*\b(?:is|are|was|were|has|have|had|points? to|suggests?|indicates?|shows?|appears?|looks?|remains?|persists?)\b)/g, '$1;')
-    .split(/[.!?;]|\b(?:but|however|yet|while|whereas)\b|(?<=\b(?:seen|found|observed|present))\s*(?:,\s*(?:and\s+)?|and\s+)/)
+    .split(/[.!?;]|\b(?:but|however|yet|while|whereas)\b|(?<=\b(?:seen|found|observed|present|visible))\s*(?:,\s*(?:and\s+)?|and\s+)/)
     .some(clause => [...clause.matchAll(/\b(?:under[\s-]?water(?:ing|ed)|(?:sprinklers?|irrigation)(?:\s+heads?)?\s+(?:(?:is|are|does|do)\s+)?(?:not|[a-z]+n['’]t)\s+(?:reach(?:ing)?|cover(?:ing)?))\b/g)].some(match => {
       const before = clause.slice(0, match.index).replace(/\bnot\s+(?:only|just)\b/g, '');
       const after = clause.slice(match.index + match[0].length).replace(/^\s*[:—–-]\s*/, ' ');

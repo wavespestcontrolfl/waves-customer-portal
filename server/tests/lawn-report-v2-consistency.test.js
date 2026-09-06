@@ -319,6 +319,8 @@ describe('Tan edge wear does not establish a watering problem', () => {
     'Signs of underwatering — not observed.',
     'Signs of underwatering have yet to be observed.',
     'Signs of underwatering were suspected but later ruled out.',
+    'Signs of underwatering were observed last month but have now resolved.',
+    'Signs of underwatering were observed last month but are now resolved.',
     'No evidence that the sprinkler heads are not reaching the edge.',
     'Monitor for sprinkler heads not reaching the pavement edge.',
   ])('does not invent sprinkler advice from %s', observation => {
@@ -378,6 +380,8 @@ describe('Tan edge wear does not establish a watering problem', () => {
     'The tan patches are caused by underwatering.',
     'Tan patches due to under-watering near the pavement.',
     'Visible underwatering has yet to improve.',
+    'No weeds visible, tan blades and curling point to underwatering.',
+    'No weeds visible and tan blades and curling point to underwatering.',
   ])('preserves moisture evidence in %s', observation => {
     const report = renderObservation(observation);
     expect(report.water.coverageWatch).toBe(true);
