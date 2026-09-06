@@ -573,10 +573,15 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const underwateringSignal = obsText
     .split(/[.!?;]|\b(?:but|however|yet|while|whereas)\b|(?:,|\band\b)\s*(?=(?:the|this|that|these|those)\b)|(?<=\b(?:seen|found|observed|present))\s*(?:,\s*(?:and\s+)?|and\s+)/)
     .some(clause => [...clause.matchAll(/\bunder[\s-]?water(?:ing|ed)\b/g)].some(match => {
-      const before = clause.slice(0, match.index);
+      const before = clause.slice(0, match.index).replace(/\bnot\s+(?:only|just)\b/g, '');
       const after = clause.slice(match.index + match[0].length);
+      // Only the noun shares a predicate: "underwatering and disease were not
+      // observed" differs from "under-watered and no disease was observed".
+      const predicate = match[0].endsWith('ing')
+        ? after.replace(/^\s+(?:and|or|nor)\s+(?:[a-z'’-]+\s+)+?(?=(?:is|was|are|were|has|have|had)\b)/, ' ')
+        : after;
       return !/\b(?:no|not|never|without|isn['’]t|wasn['’]t|aren['’]t|weren['’]t|free of|absence of)\b/.test(before)
-        && !/^\s+(?:(?:is|was|are|were|has|have|had)\s+)?(?:been\s+)?(?:absent|unlikely|ruled out|(?:not|never|isn['’]t|wasn['’]t|hasn['’]t)\s+(?:been\s+)?(?:(?:a|an|the)\s+)?(?:seen|observed|visible|present|evident|indicated|detected|found|identified|documented|supported|suspected|likely|concern|issue|problem|cause))\b/.test(after);
+        && !/^\s+(?:(?:is|was|are|were|has|have|had)\s+)?(?:been\s+)?(?:absent|unlikely|ruled out|(?:not|never|isn['’]t|wasn['’]t|hasn['’]t)\b(?!\s+(?:only|just|due to|caused by|because of|from|limited to)\b))\b/.test(predicate);
     }));
   const drySignal = underwateringSignal || /\b(dry|drier|drought|wilt)\b/.test(obsText)
     || /\buneven\s+(?:irrigation|water(?:ing)?|sprinkler|moisture)\b/.test(obsText)
