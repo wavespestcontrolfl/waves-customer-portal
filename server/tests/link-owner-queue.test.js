@@ -868,14 +868,20 @@ test('an unsent contacted placement cannot approve a deferred execution', async 
 });
 
 
-test('an exhausted automatic initial draft becomes an owner card without undoing the acquired placement', async () => {
-  const s = scenario({ make: outreachPath, domain: { agent_state: 'acquired' } });
+test.each(['placed', 'live', 'indexed'])('exhausted %s drafts require a submit-first path, including on cards with other actions', async (status) => {
+  const s = scenario({ make: outreachPath, domain: { agent_state: 'acquired' }, path: { acquisition_type: 'content_submission', execution_after_send: true } });
   const id = uid();
-  placements(s.db).push({ id, domain_id: s.d.id, path_id: s.p.id, status: 'live', link_type: 'resource', outreach_status: 'none', outreach_draft_attempts: 4 });
+  placements(s.db).push({ id, domain_id: s.d.id, path_id: s.p.id, status, link_type: 'resource', outreach_status: 'none', outreach_draft_attempts: 4 });
   rows(s.db).push({ id: uid(), prospect_id: id, path_id: s.p.id, dimension: 'communication', instance_kind: '-', level: 'AUTO_OUTREACH', satisfied_at: null });
+  expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
+  const followup = { id: uid(), prospect_id: id, path_id: s.p.id, dimension: 'communication', instance_kind: 'followup', level: 'OWNER_OUTREACH', satisfied_at: null };
+  rows(s.db).push(followup);
+  expect((await Q.listOwnerQueue(s.db)).cards[0]).toMatchObject({ outreach_draft_exhausted: false });
+  rows(s.db).pop();
+  storedPath(s.db).execution_after_send = false;
   const result = await Q.listOwnerQueue(s.db);
   expect(result.cards).toHaveLength(1);
-  expect(result.cards[0]).toMatchObject({ outreach_draft_exhausted: true, placement: { status: 'live' } });
+  expect(result.cards[0]).toMatchObject({ outreach_draft_exhausted: true, placement: { status } });
   placements(s.db)[0].outreach_status = 'sent';
   expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
 });
@@ -896,4 +902,10 @@ test.each(['placed', 'live', 'indexed'])('late initial %s cards require submit-f
   storedPath(s.db).execution_after_send = true;
   row.instance_kind = 'followup';
   expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(1);
+});
+
+test.each(['prospect', 'awaiting_owner'])('exhausted open %s drafts remain recoverable on send-first paths', async (status) => {
+  const s = scenario({ make: outreachPath });
+  placements(s.db).push({ id: uid(), domain_id: s.d.id, path_id: s.p.id, status, outreach_status: 'none', outreach_draft_attempts: 4 });
+  expect((await Q.listOwnerQueue(s.db)).cards[0]).toMatchObject({ outreach_draft_exhausted: true });
 });

@@ -236,7 +236,9 @@ async function listOwnerQueue(db) {
   const pathById = new Map(paths.map((p) => [p.id, p]));
   // a parked prospect is a card outright; a checkout / placed placement only while an OPEN owner-level row it decides
   // here exists — otherwise every placed link would be a card with nothing to click
-  const exhaustedDraft = (p) => Number(p.outreach_draft_attempts) >= require('./link-prospect-worker').MAX_ATTEMPTS
+  const { SENDABLE_STATUSES, lateSend } = require('./link-prospect-outreach');
+  const exhaustedDraft = (p) => (SENDABLE_STATUSES.includes(p.status) || lateSend(p, pathById.get(p.path_id)))
+    && Number(p.outreach_draft_attempts) >= require('./link-prospect-worker').MAX_ATTEMPTS
     && !['drafted', 'sending', 'sent', 'send_error'].includes(p.outreach_status);
   const parked = candidates.filter((p) => (p.quality_signals?.outreach_match_ambiguous || exhaustedDraft(p) || uncertainById.has(p.id) || (p.status === PARKED ? p.parked_from_status === PARKABLE
     : liveRows.some((r) => r.prospect_id === p.id && !r.satisfied_at && isOwner(r.level) && whyNotHere(p, r, pathById.get(p.path_id)) === null))));
