@@ -209,6 +209,30 @@ describe('the conversation side', () => {
     }
   });
 
+  test.each([['nonce-1', true], ['replacement', false]])('slow registration retries the floor only for the proven owner %s', async (owner, expected) => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb({ firstRow: { metadata: { relay_session_claim_owner: owner } } });
+    const convo = convoWithTurns();
+    await convo._contextReady;
+    convo._callerVerified = true;
+    convo.leadCaptured = false;
+    convo._sessionSuperseded = RelayConversation.prototype._sessionSuperseded.bind(convo);
+    convo._runCaptureFloor = jest.fn(async () => { convo.leadCaptured = true; });
+    let register;
+    convo._segmentRegistration = new Promise((resolve) => { register = resolve; });
+    jest.useFakeTimers();
+    try {
+      const closing = convo.end('ws_close');
+      await jest.advanceTimersByTimeAsync(2100);
+      expect(convo._runCaptureFloor).not.toHaveBeenCalled();
+      register(true);
+      await jest.advanceTimersByTimeAsync(0);
+      await closing;
+      expect(convo._runCaptureFloor).toHaveBeenCalledTimes(expected ? 1 : 0);
+      expect(convo.leadCaptured).toBe(expected);
+    } finally { jest.useRealTimers(); }
+  });
+
   test('a capture finishing after the close deadline triggers reporting repair', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     primeDb();
@@ -303,7 +327,7 @@ describe('the conversation side', () => {
 
   test('a superseded socket whose late segment lands after the resumed socket\'s floor wrote a no-transcript lead refreshes THAT lead\'s summary from the whole call (compare-and-set on the placeholder) (hook r22 P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
-    const { db, builder, updates } = primeDb({ firstRow: { id: 'L-linked', transcript_summary: 'Inbound voice call (auto-captured on hangup). No transcript captured.', transcription: 'Caller: my ants are back', metadata: { relay_session_claim_owner: 'nonce-2', relay_reconnects: 1, relay_lead_id: 'L-linked', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }, { generation: 2, text: 'Agent: Sorry, I lost you for a second.' }] } } });
+    const { db, builder, updates } = primeDb({ firstRow: { id: 'L-linked', relay_lead_id: 'L-linked', transcript_summary: 'Inbound voice call (auto-captured on hangup). No transcript captured.', transcription: 'Caller: my ants are back', metadata: { relay_session_claim_owner: 'nonce-2', relay_reconnects: 1, relay_lead_id: 'L-linked', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }, { generation: 2, text: 'Agent: Sorry, I lost you for a second.' }] } } });
     const convo = convoWithTurns();
     convo._sessionSuperseded = jest.fn(async () => true);
     await convo.end('ws_close');

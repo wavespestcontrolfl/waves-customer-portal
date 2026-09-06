@@ -338,7 +338,7 @@ describe('the conversation side', () => {
 
   test('a superseded socket whose late segment lands after the resumed socket\'s floor wrote a no-transcript lead refreshes THAT lead\'s summary from the whole call (compare-and-set on the placeholder) (hook r22 P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
-    const { db, builder, updates } = primeDb({ firstRow: { id: 'L-linked', transcript_summary: 'Inbound voice call (auto-captured on hangup). No transcript captured.', transcription: 'Caller: my ants are back', metadata: { relay_session_claim_owner: 'nonce-2', relay_reconnects: 1, relay_lead_id: 'L-linked', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }, { generation: 2, text: 'Agent: Sorry, I lost you for a second.' }] } } });
+    const { db, builder, updates } = primeDb({ firstRow: { id: 'L-linked', relay_lead_id: 'L-linked', transcript_summary: 'Inbound voice call (auto-captured on hangup). No transcript captured.', transcription: 'Caller: my ants are back', metadata: { relay_session_claim_owner: 'nonce-2', relay_reconnects: 1, relay_lead_id: 'L-linked', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }, { generation: 2, text: 'Agent: Sorry, I lost you for a second.' }] } } });
     const convo = convoWithTurns();
     convo._sessionSuperseded = jest.fn(async () => true);
     await convo.end('ws_close');
