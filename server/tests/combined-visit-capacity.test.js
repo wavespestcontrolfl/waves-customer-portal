@@ -16,6 +16,9 @@ beforeEach(() => { process.env.GATE_SEPARATE_COMBO_VISITS = 'true'; });
 afterEach(() => { delete process.env.GATE_VISIT_COMBINED_CAPACITY; delete process.env.GATE_SEPARATE_COMBO_VISITS; });
 
 describe('combined visit booking capacity', () => {
+  test.each(['foam_recurring', 'foam recurring', 'Recurring Termite Foam Service'])('recurring foam identity %s retains its termite capability category', (identity) => {
+    expect(require('../services/auto-dispatch/service-category').classifyServiceCategory(identity)).toBe('termite');
+  });
   test.each([2, 3, 4])('%i selected services reserve one hour each without the old 180-minute cap', (count) => {
     process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
     const profile = resolveEstimateSlotProfile(estimateFor(services.slice(0, count)), { durationMinutes: 30 });

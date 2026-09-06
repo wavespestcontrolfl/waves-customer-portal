@@ -26,6 +26,9 @@ selected application has its own service record. Creation defaults off.
 - `services/visit-groups.js`: stop identity, membership locks, frozen membership,
   movement, reminder fanout, and refusal of legacy completion when a packet exists.
 - `services/visit-combine.js`: office grouping and sequential service placement.
+- `services/appointment-reminders.js` and its existing database sync/promotion
+  functions: one shared arrival promise, reminder ownership, and cancellation
+  handoff, including customers outside the Phase 1 visit-grouping cohort.
 - `services/complete-scheduled-service.js`: canonical single-service validation,
   ownership, completion claims, durable writes, and resumable side effects.
 - `services/completion-attempts.js`: existing idempotency and recovery protocol.

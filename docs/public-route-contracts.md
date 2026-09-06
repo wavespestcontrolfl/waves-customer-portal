@@ -80,7 +80,11 @@ not included in public slot metadata. `/api/estimates/:token/accept`
 revalidates the selection, technician and complete occupancy under the existing
 transaction locks, then assigns separate 60-minute member windows. A stamped
 reservation retains this policy when the creation gate turns off; missing or
-unmatched members abort acceptance. Individual service histories, cadences,
+unmatched members abort acceptance. Confirmations and reminders resolve the
+shared arrival from the persisted allocation, including when visit grouping is
+off or the customer uses Auto Pay. The existing reminder sync and sibling
+promotion functions retain that promise through cancellation; an individually
+moved service uses its newly booked arrival. Individual service histories, cadences,
 invoice and Auto Pay policies remain unchanged in this capacity prerequisite),
 `/api/reports/:token/*` (the
 service-report V1 payload — `/data`, the PDF at `/:token`, `/map.svg`, and

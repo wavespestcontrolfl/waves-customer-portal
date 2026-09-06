@@ -17,6 +17,8 @@ const { addETDays, etDateString, etParts } = require('../utils/datetime-et');
 const { capacityForServices } = require('../services/combined-visit-capacity');
 const converter = require('../services/estimate-converter');
 const { commitReservation } = require('../services/slot-reservation');
+const AppointmentReminders = require('../services/appointment-reminders');
+const migration = require('../models/migrations/20260906000010_reservation_service_mix');
 const connection = process.env.COMBINED_VISIT_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 let mockPg;
@@ -65,13 +67,14 @@ const options = { skipSetupInvoice: true, autoSendInvoice: false, skipMembership
   deferFollowUpReminderRegistration: true, deferCommercialScheduleNotification: true };
 
 postgres('combined capacity conversion on the migrated application schema', () => {
-  beforeAll(() => {
+  beforeAll(async () => {
     const url = new URL(connection);
     const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) && url.pathname === '/waves_test';
     if (!local && !/^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname)) throw new Error('Use the verified private dev database');
     mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 4 } });
     process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
     process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+    await migration.up(mockPg);
   });
   afterAll(async () => {
     delete process.env.GATE_VISIT_COMBINED_CAPACITY;
@@ -90,6 +93,7 @@ postgres('combined capacity conversion on the migrated application schema', () =
     try {
       const count = selected.length;
       const f = await fixture(trx, selected);
+      await trx('customers').where({ id: f.customerId }).update({ autopay_enabled: true });
       // Exercise the real public-accept transaction boundary: graduate the
       // hold, then convert using that same transaction.
       delete process.env.GATE_VISIT_COMBINED_CAPACITY;
@@ -103,6 +107,29 @@ postgres('combined capacity conversion on the migrated application schema', () =
       expect(parents.map((p) => p.estimated_duration_minutes)).toEqual(selected.map(() => 60));
       const stamp = parents.find((p) => p.id === f.anchor.id).reservation_service_mix;
       expect(new Set(stamp.allocatedServiceIds)).toEqual(new Set(parents.map((p) => p.id)));
+      for (const parent of parents) {
+        await expect(AppointmentReminders.resolveCommittedVisitTime(parent.id, {}, trx))
+          .resolves.toEqual({ appointmentTime: `${f.date}T09:00`, windowless: false });
+        // The public accept registrar uses registerAppointment after commit.
+        // Point its shared connection at this test transaction so the real
+        // registrar and confirmation formatter see the synthetic rows.
+        const pool = mockPg;
+        mockPg = trx;
+        try {
+          const registered = await AppointmentReminders.registerAppointment(
+            parent.id, f.customerId, `${f.date}T${parent.window_start}`,
+            parent.service_type, 'estimate_accept_slot',
+            { sendConfirmation: false, fromCommittedRow: true },
+          );
+          expect(registered).not.toBeNull();
+          await expect(AppointmentReminders.confirmationArrivalWindow({ scheduledServiceId: parent.id, windowStart: parent.window_start }))
+            .resolves.toBe('between 9:00 AM and 11:00 AM');
+        } finally { mockPg = pool; }
+      }
+      const reminders = await trx('appointment_reminders').where({ customer_id: f.customerId });
+      expect(reminders).toHaveLength(count);
+      expect(new Set(reminders.map((r) => r.appointment_time.toISOString())).size).toBe(1);
+      expect(reminders.filter((r) => !r.suppressed_by_sibling)).toHaveLength(1);
       for (const line of selected) {
         const catalog = await trx('services').where({ service_key: line.catalog }).first('id');
         const parent = parents.find((p) => p.service_id === catalog.id);
@@ -112,6 +139,44 @@ postgres('combined capacity conversion on the migrated application schema', () =
         expect(children.length).toBeGreaterThan(0);
         expect(children.every((row) => row.service_id === catalog.id && row.recurring_pattern === line.pattern)).toBe(true);
       }
+    } finally { await trx.rollback(); }
+  });
+
+  test('reminder functions survive migration rollback and reapplication', async () => {
+    const trx = await mockPg.transaction();
+    try {
+      await migration.down(trx);
+      await migration.up(trx);
+      await migration.up(trx);
+      const result = await trx.raw('SELECT reservation_arrival_start(?) AS start', [randomUUID()]);
+      expect(result.rows[0].start).toBeNull();
+    } finally { await trx.rollback(); }
+  });
+
+  test('cancelling the reminder owner promotes its sibling; moving that sibling gives it its new arrival', async () => {
+    const trx = await mockPg.transaction();
+    try {
+      const f = await fixture(trx, lines.slice(0, 2));
+      await commitReservation({ scheduledServiceId: f.anchor.id, customerId: f.customerId, trx });
+      await converter.convertEstimate(f.estimateId, { ...options, database: trx });
+      const parents = await trx('scheduled_services').where({ source_estimate_id: f.estimateId })
+        .whereNull('recurring_parent_id').orderBy('window_start');
+      for (const parent of parents) await AppointmentReminders.registerVisitReminderInTx(trx, {
+        scheduledServiceId: parent.id, customerId: f.customerId,
+        appointmentTime: `${f.date}T${parent.window_start}`, serviceType: parent.service_type,
+      });
+      await trx('scheduled_services').where({ id: parents[0].id }).update({ status: 'cancelled' });
+      let sibling = await trx('appointment_reminders').where({ scheduled_service_id: parents[1].id }).first();
+      expect(sibling.suppressed_by_sibling).toBe(false);
+      expect(sibling.cancelled).toBe(false);
+      await expect(AppointmentReminders.resolveCommittedVisitTime(parents[1].id, {}, trx))
+        .resolves.toMatchObject({ appointmentTime: `${f.date}T09:00` });
+      await trx('scheduled_services').where({ id: parents[1].id }).update({ window_start: '13:00', window_end: '14:00' });
+      sibling = await trx('appointment_reminders').where({ scheduled_service_id: parents[1].id }).first();
+      const { parseETDateTime } = require('../utils/datetime-et');
+      expect(sibling.appointment_time).toEqual(parseETDateTime(`${f.date}T13:00`));
+      await expect(AppointmentReminders.resolveCommittedVisitTime(parents[1].id, {}, trx))
+        .resolves.toMatchObject({ appointmentTime: `${f.date}T13:00` });
     } finally { await trx.rollback(); }
   });
 

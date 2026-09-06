@@ -3795,7 +3795,7 @@ async function registerSeededFollowUpReminders(rows = [], customerId) {
         `${scheduledDate}T${windowStart}`,
         row.service_type || 'Quarterly Pest Control',
         'estimate_followup',
-        { sendConfirmation: false },
+        { sendConfirmation: false, fromCommittedRow: true },
       );
     }
   } catch (err) {
@@ -5819,7 +5819,12 @@ const EstimateConverter = {
         VisitCapacity.assertCapacityServices(reservedStart, capacityMembers);
         const allocation = {
           ...VisitCapacity.windowForCapacityService(reservedStart, 0),
-          reservation_service_mix: { ...combinedCapacity, allocatedServiceIds: capacityMembers.map((row) => row.id) },
+          reservation_service_mix: {
+            ...combinedCapacity,
+            scheduledDate: scheduledDateOnly(reservedStart.scheduled_date),
+            arrivalWindowStart: String(reservedStart.window_start).slice(0, 5),
+            allocatedServiceIds: capacityMembers.map((row) => row.id),
+          },
         };
         await database('scheduled_services').where({ id: reservedStart.id }).update(allocation);
         Object.assign(reservedStart, allocation);

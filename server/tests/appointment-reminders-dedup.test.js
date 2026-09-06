@@ -60,7 +60,8 @@ describe('appointment reminder registration deduplication', () => {
       returning: jest.fn().mockResolvedValue([{ id: 'rem-1' }]),
     });
     const queue = [estimateLookup, lookup, sameTime, insertRow];
-    const conn = jest.fn(() => queue.shift());
+    const conn = jest.fn((table) => table === 'scheduled_services'
+      ? chain({ first: jest.fn().mockResolvedValue(null) }) : queue.shift());
     conn.raw = jest.fn().mockResolvedValue();
 
     const result = await AppointmentReminders.registerVisitReminderInTx(conn, {
@@ -99,7 +100,8 @@ describe('appointment reminder registration deduplication', () => {
       returning: jest.fn().mockResolvedValue([{ id: 'rem-suppressed' }]),
     });
     const queue = [estimateLookup, lookup, sameTime, labelRows, mergeUpdate, insertSuppressed];
-    const conn = jest.fn(() => queue.shift());
+    const conn = jest.fn((table) => table === 'scheduled_services'
+      ? chain({ first: jest.fn().mockResolvedValue(null) }) : queue.shift());
     conn.raw = jest.fn().mockResolvedValue();
 
     const result = await AppointmentReminders.registerVisitReminderInTx(conn, {
@@ -128,7 +130,8 @@ describe('appointment reminder registration deduplication', () => {
     const estimateLookup = chain({ first: jest.fn().mockResolvedValue(null) });
     const lookup = chain({ first: jest.fn().mockResolvedValue({ id: 'rem-existing' }) });
     const queue = [estimateLookup, lookup];
-    const conn = jest.fn(() => queue.shift() || lookup);
+    const conn = jest.fn((table) => table === 'scheduled_services'
+      ? chain({ first: jest.fn().mockResolvedValue(null) }) : queue.shift() || lookup);
     conn.raw = jest.fn().mockResolvedValue();
 
     const result = await AppointmentReminders.registerVisitReminderInTx(conn, {

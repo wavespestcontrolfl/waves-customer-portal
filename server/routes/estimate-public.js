@@ -277,7 +277,7 @@ async function registerAcceptedEstimateAppointmentReminder({
     `${date}T${scheduledTimeOnly(appointment.window_start)}`,
     serviceType || appointment.service_type || 'Pest Control',
     'estimate_accept_slot',
-    { sendConfirmation: false },
+    { sendConfirmation: false, fromCommittedRow: true },
   );
 }
 

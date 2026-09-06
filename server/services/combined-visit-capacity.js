@@ -51,7 +51,15 @@ function assertCapacityServices(anchor, members) {
       || String(row.customer_id) !== String(anchor.customer_id))) throw capacityUnavailable();
 }
 
+// The DB reminder trigger consumes the same resolver on moves/cancellations.
+// Legacy rows have no estimate source and keep their ordinary work start.
+async function arrivalStartForService(conn, row) {
+  if (!row?.id || !row.source_estimate_id) return row?.window_start || null;
+  const result = await conn.raw('SELECT reservation_arrival_start(?) AS window_start', [row.id]);
+  return result.rows[0]?.window_start || row.window_start || null;
+}
+
 module.exports = {
   capacityForServices, capacityFromReservation, windowForCapacityService,
-  assertCapacityServices, capacityUnavailable,
+  assertCapacityServices, capacityUnavailable, arrivalStartForService,
 };

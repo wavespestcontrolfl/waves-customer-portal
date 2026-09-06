@@ -158,6 +158,21 @@ postgres('combined booking capacity on PostgreSQL', () => {
     expect((await mockPg('scheduled_services').where({ id: held.scheduledServiceId }).first()).customer_id).toBeNull();
   });
 
+  test('recurring foam uses the termite capability for offers, reservation and acceptance', async () => {
+    await mockPg('estimates').where({ id: firstEstimateId }).update({ estimate_data: estimateData(['foam_recurring', 'pest_control']) });
+    await mockPg('technician_capabilities').insert({ technician_id: technicianId, service_category: 'termite', active: false });
+    const slot = { date, windowStart: '09:00', windowEnd: '11:00', techId: technicianId };
+    expect(await filterCollidingSlots([slot], { dateFrom: date, dateTo: date,
+      serviceMix: { services: ['foam_recurring', 'pest_control'] } })).toEqual([]);
+    await expect(reserveSlot({ estimateId: firstEstimateId, slotId: signedSlot(firstEstimateId) }))
+      .rejects.toMatchObject({ code: 'COMBINED_VISIT_UNAVAILABLE' });
+    await mockPg('technician_capabilities').del();
+    const held = await reserveSlot({ estimateId: firstEstimateId, slotId: signedSlot(firstEstimateId) });
+    await mockPg('technician_capabilities').insert({ technician_id: technicianId, service_category: 'termite', active: false });
+    await expect(commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId }))
+      .rejects.toMatchObject({ code: 'COMBINED_VISIT_UNAVAILABLE' });
+  });
+
   test('offer filtering excludes unassigned and category-disabled technicians', async () => {
     const slot = { date, windowStart: '09:00', windowEnd: '11:00', techId: technicianId };
     const opts = { dateFrom: date, dateTo: date, serviceMix: { services: ['pest_control', 'lawn_care'] } };
