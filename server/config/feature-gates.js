@@ -2066,6 +2066,11 @@ const gates = {
   // stay individually available regardless of this gate.
   prepaidInvoiceReceipt: isProd ? process.env.GATE_PREPAID_INVOICE === 'true' : true,
 
+  // Record collected annual prepay: commit a receipt job with the payment,
+  // then deliver through the standard receipt queue. Customer communications
+  // stay off in every environment until explicitly enabled.
+  recordedAnnualPrepayReceipt: process.env.GATE_RECORDED_ANNUAL_PREPAY_RECEIPT === 'true',
+
   // Zelle payment-notice reconciler — the Gmail sync recognises Capital One
   // "Someone sent you money with Zelle" notices (forwarded from the owner's
   // personal inbox to contact@), matches the payer + exact amount to ONE open
