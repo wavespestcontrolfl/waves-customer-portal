@@ -93,6 +93,8 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
+  customerRecurringDispatch: gateEnvValue('GATE_CUSTOMER_RECURRING_DISPATCH'),
   // Payer Phase 2 — NET-terms consolidated statements (accrual core).
   // OFF unless explicitly enabled, in dev AND prod (unlike the dev-open gates
   // below): flipping it on changes invoice behaviour for net15/net30 payers

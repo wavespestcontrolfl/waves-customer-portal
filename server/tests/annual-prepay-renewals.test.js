@@ -1636,6 +1636,7 @@ describe('annual prepay renewal helpers', () => {
       service_type: 'Quarterly Pest Control',
       status: 'pending',
       window_start: null,
+      recurring_dispatch_due_date: '2026-08-01',
       estimated_duration_minutes: 90,
       window_display: '10:00-11:30 AM',
     };
@@ -1665,6 +1666,7 @@ describe('annual prepay renewal helpers', () => {
     expect(retimeUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
       window_start: '08:00',
       window_end: '09:30',
+      recurring_dispatch_due_date: null,
       time_window: null,
       window_display: null,
     }));
