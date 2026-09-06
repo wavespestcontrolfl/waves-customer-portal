@@ -79,7 +79,7 @@ describe('the conversation side', () => {
       await convo.end('ws_close');
       expect(append).toHaveBeenCalledWith(expect.anything(), 'CA-rec', expect.objectContaining({
         session_key: 'nonce-1', text: '', turns: 0,
-      }));
+      }), { allowUnclaimed: false });
     } finally { append.mockRestore(); }
   });
 
@@ -106,6 +106,21 @@ describe('the conversation side', () => {
     expect(updates.some((u) => u.metadata && String(u.metadata.sql).includes('relay_segments'))).toBe(false);
     expect(updates[0]).toEqual(expect.objectContaining({ call_outcome: 'ai_handled' }));
     expect(typeof updates[0].transcription).toBe('string');
+  });
+
+  test('a call-token-authenticated unverified first leg preserves text after reconnect supersedes it', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { updates } = primeDb();
+    const convo = convoWithTurns({ callTokenVerified: true });
+    convo._callerVerified = false;
+    expect(convo._callTokenVerified).toBe(true);
+    convo._sessionSuperseded.mockResolvedValue(true);
+    await convo.end('ws_close');
+    const append = updates.find((patch) => JSON.stringify(patch.metadata).includes('relay_segments'));
+    expect(append).toBeDefined();
+    expect(JSON.stringify(append)).toContain('my ants are back');
+    expect(convo._buildToolCtx().callerVerified).toBe(false);
+    expect(convo._buildToolCtx().sessionKey).toBeNull();
   });
 
   test('an unconfirmed append never publishes an unscrubbed local/older-leg composite', async () => {
@@ -290,6 +305,6 @@ describe('the conversation side', () => {
       convo._runCaptureFloor = jest.fn(async () => {});
       await convo.end('ws_close');
       expect(register).toHaveBeenCalledWith(expect.anything(), 'CA-silent', 'silent');
-      expect(append).toHaveBeenCalledWith(expect.anything(), 'CA-silent', expect.objectContaining({ session_key: 'silent', text: '', turns: 0 }));
+      expect(append).toHaveBeenCalledWith(expect.anything(), 'CA-silent', expect.objectContaining({ session_key: 'silent', text: '', turns: 0 }), { allowUnclaimed: true });
     } finally { register.mockRestore(); append.mockRestore(); }
   });

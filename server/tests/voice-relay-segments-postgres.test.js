@@ -67,6 +67,18 @@ postgres('atomic relay segment append and composition', () => {
     expect(row.transcription_provider).toBe('fixture_recording');
   });
 
+  test('only trusted call-token evidence permits an unclaimed segment; it never claims account ownership', async () => {
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', metadata: {} });
+    const segment = buildSegment({ generation: 1, sessionKey: 'first', text: 'Caller: ants' });
+    expect(await appendSegment(db, 'CA-fixture', segment)).toBe(0);
+    expect(await appendSegment(db, 'CA-fixture', segment, { allowUnclaimed: true })).toBe(1);
+    const row = await db('call_log').first();
+    expect(row.metadata.relay_segments[0].text).toBe('Caller: ants');
+    expect(row.metadata.relay_session_claim_owner).toBeUndefined();
+    await db('call_log').update({ metadata: { relay_session_claim_owner: 'foreign' } });
+    expect(await appendSegment(db, 'CA-fixture', segment, { allowUnclaimed: true })).toBe(0);
+  });
+
   test.each([{ relay_handoff: {} }, { relay_transfer_ring_at: '2026-01-01T00:00:00Z' }])('late append restores the AI half of a transfer that never reconnected: %j', async (evidence) => {
     await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture',
       metadata: { relay_session_claim_owner: 'first', ...evidence },

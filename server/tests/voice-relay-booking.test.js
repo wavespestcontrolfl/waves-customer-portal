@@ -386,6 +386,41 @@ describe('BOTH GATES ON — request_booking behavior', () => {
     delete process.env.VOICE_RELAY_ALLOW_THIRD_PARTY_WRITES;
   });
 
+  test('accepting an offer from before reconnect requests the original slot with its search context', async () => {
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    const recovery = require('../services/voice-agent/relay-recovery');
+    // Hydration is exercised explicitly; these registry instances do not start caller lookups.
+    delete process.env.VOICE_RELAY_CONTEXT_ENABLED;
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    try {
+      const first = new RelayConversation({ sessionGeneration: 1, send: jest.fn() });
+      const ref = first._buildToolCtx().rememberSlot(SLOT, {
+        lat: 27.4, lng: -82.5, duration: 60, timeOfDay: 'morning', expandOpenDays: true,
+      });
+      const segment = JSON.parse(JSON.stringify(require('../services/voice-agent/relay-segments').buildSegment({ generation: 1, slotRefs: [...first._slotRefs] })));
+      const fixtureDb = () => ({ where: () => ({ first: async () => ({ metadata: {
+        relay_session_claim_owner: 'resumed', relay_reconnects: 1, relay_segments: [segment],
+      } }) }) });
+      const state = await recovery.loadResumeState(fixtureDb, 'CA-relay-1', { sessionKey: 'resumed' });
+      const resumed = new RelayConversation({ sessionGeneration: 2, send: jest.fn() });
+      await resumed._applyResumeState(state);
+      process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+      await executeTool('request_booking', { ...GOOD_INPUT, slot_ref: ref }, slotCtx({
+        resolveSlotRef: resumed._buildToolCtx().resolveSlotRef,
+      }));
+      expect(trxBuilders.scheduled_services.insert).toHaveBeenCalledWith(expect.objectContaining({
+        scheduled_date: BOOK_DATE, window_start: '09:00', status: 'pending',
+      }));
+      expect(booking.buildBookingAvailability).toHaveBeenCalledWith(expect.objectContaining({
+        rangeFrom: BOOK_DATE, rangeTo: BOOK_DATE, timeOfDay: 'morning', expandOpenDays: true,
+      }));
+      assertNoComms();
+    } finally {
+      delete process.env.GATE_VOICE_RELAY_RECOVERY;
+      process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
+    }
+  });
+
   test('creates a PENDING voice_agent row — never confirmed, no comms, no confirm-hook side effects', async () => {
     const out = await executeTool('request_booking', GOOD_INPUT, CTX);
 

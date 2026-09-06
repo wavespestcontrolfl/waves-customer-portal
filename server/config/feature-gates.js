@@ -680,9 +680,15 @@ const gates = {
   // status/log listing. Kill switch: unset.
   voiceRelayTransfer: process.env.GATE_VOICE_RELAY_TRANSFER === 'true',
 
-  // Durable capture evidence for voice-session recovery. Strict opt-in,
-  // read at write time; unset is the kill switch. Reconnect behavior follows
-  // in the recovery PR built on this prerequisite.
+  // Sandy PR 2B — voice-session recovery. On, a relay socket that fails
+  // mid-call is reconnected ONCE (/relay-complete re-renders the relay with
+  // a resumed greeting; the new socket takes the claim), every socket's
+  // transcript lands as a segment (metadata.relay_segments) and the owning
+  // close composes the whole call; a second failure hands the caller to the
+  // office (transfer gate, office open) or voicemail. Off ⇒
+  // /relay-complete and the close-time writes are byte-identical to today.
+  // Read at CALL time (services/voice-agent/relay-recovery.js, exact
+  // 'true'); this entry is the status/log listing. Kill switch: unset.
   voiceRelayRecovery: process.env.GATE_VOICE_RELAY_RECOVERY === 'true',
 
   // AI Assistant — auto-sends AI replies to customers via SMS

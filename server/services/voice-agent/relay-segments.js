@@ -7,7 +7,7 @@ const SEGMENT_SEPARATOR = '\n\n[Reconnected]\n';
 const MAX_SEGMENT_TEXT_CHARS = require('./relay-transcript').MAX_TRANSCRIPT_CHARS;
 
 /** One socket's close record — played text only (buildTranscriptText reads played text). */
-function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, reserviceFiled, noLeadCreated, promises = [], holdOpen, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [], slotRefs = [] }) {
+function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, leadId = null, reserviceFiled, noLeadCreated, promises = [], holdOpen, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [], slotRefs = [] }) {
   return {
     slot_refs: slotRefs,
     lookup_refs: lookupRefs,
@@ -45,6 +45,7 @@ function buildSegment({ generation, sessionKey, reason, text, turns, latency, ve
     latency: latency || null,
     versions: versions || null,
     lead_captured: leadCaptured === true,
+    lead_id: leadId,
     ended_at: new Date().toISOString(),
   };
 }
@@ -101,13 +102,15 @@ async function registerSegmentSession(db, callSid, sessionKey) {
  * leg in one transaction, so no reader sees a reconstructed card number and
  * a concurrent late close cannot reintroduce a fragment from a stale read.
  */
-async function appendSegment(db, callSid, segment) {
+async function appendSegment(db, callSid, segment, { allowUnclaimed = false } = {}) {
   return db.transaction(async (trx) => {
     const query = trx('call_log').where('twilio_call_sid', callSid)
-      .where((q) => q
-        .whereRaw("(metadata->>'relay_session_claim_owner') = ?", [segment.session_key || ''])
+      .where((q) => {
+        q.whereRaw("(metadata->>'relay_session_claim_owner') = ?", [segment.session_key || ''])
         .orWhereRaw("metadata->'relay_segment_owners' @> ?::jsonb", [JSON.stringify([segment.session_key || ''])])
-        .orWhereRaw("(COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 AND (COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) > ? OR (COALESCE((metadata->>'relay_session_claim_gen')::bigint, 0) = ? AND COALESCE(metadata->>'relay_session_claim_owner', '') > ?)))", [segment.generation || 0, segment.generation || 0, segment.session_key || '']));
+        .orWhereRaw("(COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 AND (COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) > ? OR (COALESCE((metadata->>'relay_session_claim_gen')::bigint, 0) = ? AND COALESCE(metadata->>'relay_session_claim_owner', '') > ?)))", [segment.generation || 0, segment.generation || 0, segment.session_key || '']);
+        if (allowUnclaimed) q.orWhereRaw("metadata->>'relay_session_claim_owner' IS NULL");
+      });
     const row = await query.clone().forUpdate().first('metadata');
     if (!row) return 0;
     const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
