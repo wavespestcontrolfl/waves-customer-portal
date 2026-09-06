@@ -58,7 +58,8 @@ function isCustomerRecurringDispatchEnabled() {
   const config = getAutoDispatchConfig();
   return gateEnvValue('GATE_CUSTOMER_RECURRING_DISPATCH')
     && isEnabled('cronJobs') && isEnabled('autoDispatch')
-    && config.mode === 'apply' && config.maxChangesPerRun > 0;
+    && config.mode === 'apply' && config.maxChangesPerRun > 0
+    && !config.requirePortalPreferences;
 }
 
 /**
