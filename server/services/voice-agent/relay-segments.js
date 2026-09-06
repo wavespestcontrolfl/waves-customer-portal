@@ -7,16 +7,15 @@ const SEGMENT_SEPARATOR = '\n\n[Reconnected]\n';
 const MAX_SEGMENT_TEXT_CHARS = require('./relay-transcript').MAX_TRANSCRIPT_CHARS;
 
 /** One socket's close record — played text only (buildTranscriptText reads played text). */
-function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, leadId = null, reserviceFiled, noLeadCreated, promises = [], holdOpen, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [], slotRefs = [], modelFailures = 0, toolFailures = 0 }) {
+function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, leadId = null, reserviceFiled, noLeadCreated, promises = [], holdOpen, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [], slotRefs = [], modelFailures = 0, toolFailures = 0, turnCounts = null, turnStats = null }) {
   return {
-    model_failures: Number(modelFailures) || 0,
-    tool_failures: Number(toolFailures) || 0,
+    ...Object.fromEntries(Object.entries({ model_failures: modelFailures, tool_failures: toolFailures,
+      lookups_used: lookupsUsed, generation, turns }).map(([key, value]) => [key, Number(value) || 0])),
+    ...Object.fromEntries(Object.entries({ session_key: sessionKey, reason, latency, versions })
+      .map(([key, value]) => [key, value || null])),
     slot_refs: slotRefs,
     lookup_refs: lookupRefs,
     lookup_results: lookupResults,
-    // Customer-book lookups consumed on this leg — the per-call anti-fishing
-    // budget continues across the reconnect (codex r4 P2).
-    lookups_used: Number(lookupsUsed) || 0,
     // When this leg's session started (the first leg's is the CALL's start —
     // restored on the resumed leg so duration_seconds covers the whole call,
     // hook r25 P1).
@@ -39,13 +38,9 @@ function buildSegment({ generation, sessionKey, reason, text, turns, latency, ve
       expectation: p.expectation || null,
       at: p.at instanceof Date ? p.at.toISOString() : (p.at || null),
     })).filter((p) => p.kind),
-    generation: Number(generation) || 0,
-    session_key: sessionKey || null,
-    reason: reason || null,
     text: String(text || '').slice(0, MAX_SEGMENT_TEXT_CHARS),
-    turns: Number(turns) || 0,
-    latency: latency || null,
-    versions: versions || null,
+    turn_counts: turnCounts,
+    turn_stats: turnStats,
     lead_captured: leadCaptured === true,
     lead_id: leadId,
     ended_at: new Date().toISOString(),
@@ -149,8 +144,7 @@ async function sealSegmentsForExtraction(db, callId, processingToken) {
     if (!row) return { status: 'ownership_lost' };
     const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
     const owners = meta.relay_segment_owners;
-    const segments = Array.isArray(meta.relay_segments) ? meta.relay_segments : [];
-    if (Array.isArray(owners) && owners.some((owner) => !segments.some((segment) => segment.session_key === owner))) {
+    if (Array.isArray(owners) && !hasCompleteSegments(meta)) {
       return { status: 'pending' };
     }
     await query.update({ metadata: trx.raw(
@@ -158,6 +152,33 @@ async function sealSegmentsForExtraction(db, callId, processingToken) {
     ) });
     return { status: 'ready', row };
   });
+}
+
+/** A silent close counts; absent registration cannot prove completion. */
+function hasCompleteSegments(meta, excludedOwner = null) {
+  const owners = meta?.relay_segment_owners;
+  const segments = Array.isArray(meta?.relay_segments) ? meta.relay_segments : [];
+  return Array.isArray(owners) && owners.every((owner) => owner === excludedOwner
+    || segments.some((segment) => segment.session_key === owner));
+}
+
+/** Recompute percentiles from observations, never from per-socket percentiles. */
+function summarizeSegments(meta) {
+  const legs = Array.isArray(meta?.relay_segments) ? meta.relay_segments : [];
+  if (!legs.length) return null;
+  // Old durable records remain readable; missing observations are unknown,
+  // not zero-latency samples or a complete recovery evaluation.
+  const countKeys = ['caller_turns', 'agent_turns', 'tool_calls'];
+  const telemetryComplete = legs.every((leg) => Array.isArray(leg.turn_stats)
+    && countKeys.every((key) => Number.isFinite(leg.turn_counts?.[key])));
+  const counts = Object.fromEntries(countKeys.map((key) => [key,
+    telemetryComplete ? legs.reduce((sum, leg) => sum + leg.turn_counts[key], 0) : null,
+  ]));
+  return {
+    ...counts,
+    latency: telemetryComplete ? require('./relay-transcript').summarizeTurnStats(legs.flatMap((leg) => leg.turn_stats)) : null,
+    segments: { count: legs.length, complete: hasCompleteSegments(meta), telemetry_complete: telemetryComplete },
+  };
 }
 
 /** metadata := metadata || { relay_segments: existing || [segment] } — an append, never an overwrite. */
@@ -297,6 +318,6 @@ function latestPromises(segments) {
 
 
 module.exports = {
-  compareSegments, appendSegment, registerSegmentSession, sealSegmentsForExtraction, scrubStoredSegments, closeFenceSql, latestPromises, SEGMENT_SEPARATOR, buildSegment, nonEmptyFields, appendSegmentSql,
+  summarizeSegments, hasCompleteSegments, compareSegments, appendSegment, registerSegmentSession, sealSegmentsForExtraction, scrubStoredSegments, closeFenceSql, latestPromises, SEGMENT_SEPARATOR, buildSegment, nonEmptyFields, appendSegmentSql,
   appendSegmentPatch, composeSegmentsSql, segmentsText, callerTurnsFromText,
 };

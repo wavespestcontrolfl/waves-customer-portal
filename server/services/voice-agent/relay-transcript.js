@@ -351,6 +351,20 @@ function countBy(values) {
   return out;
 }
 
+/** Numeric timing observations only; live stats also contain raw utterance objects. */
+function storedTurnStats(stats = []) {
+  const numeric = ['callerSpeechStoppedAt', 'promptAt', 'firstSendAt', 'firstTokenAt', 'agentSpeakingStartAt',
+    'modelMs', 'toolMs', 'toolCount', 'rounds', 'partialCount'];
+  const flags = ['interrupted', 'interruptWithoutFollowupTranscript', 'timedOut'];
+  return stats.map((turn) => ({
+    ...Object.fromEntries(numeric.map((key) => [key, Number.isFinite(turn[key]) ? turn[key] : null])),
+    ...Object.fromEntries(flags.map((key) => [key, turn[key] === true])),
+    effort: ['low', 'medium', 'high'].includes(turn.effort) ? turn.effort : null,
+    renderer: ['block', 'clause'].includes(turn.renderer) ? turn.renderer : null,
+    playedSource: ['assumed', 'interrupt_truncation', 'twilio_event'].includes(turn.playedSource) ? turn.playedSource : null,
+  }));
+}
+
 function summarizeTurnStats(stats = []) {
   const turns = (Array.isArray(stats) ? stats : []).filter((t) => t && typeof t === 'object');
   const nonNull = (arr) => arr.filter((v) => v != null);
@@ -399,6 +413,7 @@ module.exports = {
   buildCallSummary,
   buildTranscriptUpdate,
   summarizeTurnStats,
+  storedTurnStats,
   TRANSCRIPTION_PROVIDER,
   MAX_TRANSCRIPT_CHARS,
   CALLER_LABEL,
