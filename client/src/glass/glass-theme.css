@@ -111,11 +111,10 @@ html[data-glass-theme] [data-gt="h3x"] {
   letter-spacing: -0.02em !important;
   color: var(--brand) !important;
 }
-html[data-glass-theme] button,
-html[data-glass-theme] button * {
-  font-weight: 600 !important;
-  letter-spacing: 0 !important;
-}
+/* Buttons keep their own weights (owner 2026-09-06): the former
+   `button, button * { font-weight: 600 !important }` normalisation flattened
+   any name/detail hierarchy inside button-shaped controls (property picker,
+   next-visit chips) and is removed. */
 /* Anchor CTAs styled as buttons (gold accents, chips) get the same type
    normalization as real buttons — mixed inline weights (700/800/850) read
    as different fonts when they sit side by side. */

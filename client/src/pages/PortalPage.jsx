@@ -2769,13 +2769,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
       .catch(() => {});
   }, []);
 
-  const formatTime = (t) => {
-    if (!t) return 'TBD';
-    const [h, m] = t.split(':').map(Number);
-    const ampm = h >= 12 ? 'PM' : 'AM';
-    return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${ampm}`;
-  };
-
   const handleSatRating = async (rating) => {
     setSatRating(rating);
     setSatError('');
@@ -4010,7 +4003,195 @@ const APPOINTMENT_CHANNEL_KEYS = [
   // bulk "updates by email" shortcut must not claim to route it to email.
 ];
 
-function ScheduleTab({ customer, properties = [], onRequestVisit }) {
+// Gold on/off switch — the ONE toggle idiom for customer notification rows
+// (owner 2026-08-28: keep the gold on/off look; 2026-09-06: switches, never
+// pill buttons). 44x44 hit target around the 44x24 track. `locked` renders
+// the always-on state without a handler.
+function GoldSwitch({ on, onChange, label, disabled = false, locked = false }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      disabled={disabled || locked}
+      onClick={locked ? undefined : onChange}
+      style={{
+        width: 44, height: 44, border: 'none', padding: 0,
+        background: 'transparent',
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        cursor: locked ? 'default' : disabled ? 'wait' : 'pointer',
+        opacity: locked ? 0.85 : disabled ? 0.6 : 1,
+        flexShrink: 0,
+      }}
+    >
+      <span aria-hidden="true" style={{
+        width: 44, height: 24, borderRadius: 12, flexShrink: 0,
+        // Gold = on, pale gold = off (owner 2026-08-28)
+        background: on ? B.yellow : `${B.yellow}55`,
+        position: 'relative', display: 'inline-block', transition: 'background 0.3s',
+      }}>
+        <span style={{
+          position: 'absolute', top: 2, width: 20, height: 20,
+          borderRadius: '50%', background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
+          left: on ? 22 : 2, transition: 'left 0.3s',
+        }} />
+      </span>
+    </button>
+  );
+}
+
+// Square glass icon tile — the one icon treatment on the Visits tab.
+function GlassTile({ name, size = 36 }) {
+  return (
+    <span className="glass-tile" style={{
+      width: size, height: size, borderRadius: 8, background: GLASS_SUBTLE,
+      border: '1px solid #E7E2D7', color: B.glassNavy, display: 'inline-flex',
+      alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+    }}>
+      <Icon name={name} size={Math.round(size / 2)} strokeWidth={1.75} />
+    </span>
+  );
+}
+
+// "9:00 AM" from a Postgres time-of-day string — shared by the Visits tab's
+// cards and the account-wide next-visit chips.
+function formatTime(t) {
+  if (!t) return 'TBD';
+  const [h, m] = t.split(':').map(Number);
+  return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+}
+
+// "Thu, Sep 10 · 9:00 AM – 11:00 AM" for an account-next row, or the empty copy.
+function nextVisitLabel(next) {
+  if (!next) return 'No visit scheduled';
+  const day = parseDate(next.date).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  const time = next.windowStart ? `${formatTime(next.windowStart)} – ${formatTime(arrivalWindowEnd(next.windowStart))}` : 'Time TBD';
+  return `${day} · ${time}`;
+}
+
+// Glass property picker for accounts with more than one property. It is the
+// account-menu "Service Property" switcher surfaced where the customer is
+// looking: choosing a property calls the same selectProperty → switchProperty
+// path, so every tab re-scopes. The listbox is portalled to <body> — rendered
+// inside a [data-glass="card"] it is clipped by the card and the glass theme
+// forces its surface translucent.
+function PropertyScopeSelect({ id, properties, currentId, onSelect, switchingId, nextById, compact = false }) {
+  const [open, setOpen] = useState(false);
+  const [rect, setRect] = useState(null);
+  const ref = useRef(null);
+  const popRef = useRef(null);
+  const current = properties.find((p) => p.id === currentId) || properties[0];
+  const place = useCallback(() => { if (ref.current) setRect(ref.current.getBoundingClientRect()); }, []);
+  useEffect(() => {
+    if (!open) return undefined;
+    place();
+    const onDoc = (e) => { if (!ref.current?.contains(e.target) && !popRef.current?.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('mousedown', onDoc);
+    document.addEventListener('touchstart', onDoc);
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('scroll', place, true);
+    window.addEventListener('resize', place);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('touchstart', onDoc);
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('resize', place);
+    };
+  }, [open, place]);
+  if (!current) return null;
+  const label = (p) => p.profileLabel || (p.isPrimaryProfile ? 'Primary' : 'Property');
+  const busy = !!switchingId;
+  return (
+    <div ref={ref} style={{ position: 'relative', minWidth: 0 }}>
+      <button
+        id={id}
+        type="button"
+        data-glass="chip"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label="Choose which property you are viewing"
+        disabled={busy}
+        onClick={() => setOpen((o) => !o)}
+        className="waves-focus-ring"
+        style={{
+          width: '100%', display: 'flex', alignItems: 'center', gap: 12,
+          padding: compact ? '10px 12px' : '12px 14px', minHeight: 56,
+          borderRadius: 12, border: `1px solid ${open ? B.yellow : '#E7E2D7'}`,
+          background: GLASS_SUBTLE, cursor: busy ? 'wait' : 'pointer', textAlign: 'left',
+          fontFamily: FONTS.body, color: B.glassNavy, opacity: busy ? 0.7 : 1,
+        }}
+      >
+        <GlassTile name={current.isPrimaryProfile ? 'home' : 'building'} />
+        {/* The glass theme flattens every weight inside a button to 600, so the
+            hierarchy here is size + colour only — same scale as the visit
+            cards (16 navy name, 14 muted detail). */}
+        <span style={{ minWidth: 0, flex: 1 }}>
+          <span style={{ display: 'block', fontSize: 16, fontWeight: 700, lineHeight: 1.25 }}>
+            {busy ? 'Switching…' : label(current)}
+          </span>
+          <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {current.isPrimaryProfile ? 'Primary residence · ' : ''}{formatPropertyAddress(current) || 'No address on file'}
+          </span>
+        </span>
+        <span style={{ display: 'inline-flex', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }}>
+          <Icon name="chevronDown" size={20} strokeWidth={2} />
+        </span>
+      </button>
+      {open && rect && createPortal(
+        <div
+          ref={popRef}
+          role="listbox"
+          aria-label="Your properties"
+          style={{
+            position: 'fixed', zIndex: 9999, top: rect.bottom + 8, left: rect.left, width: rect.width,
+            background: 'rgba(255,255,255,0.96)',
+            backdropFilter: 'blur(24px) saturate(160%)', WebkitBackdropFilter: 'blur(24px) saturate(160%)',
+            border: '1px solid #E7E2D7', borderRadius: 14, boxShadow: '0 18px 45px rgba(4,57,94,0.18)',
+            padding: 6, display: 'grid', gap: 4, fontFamily: FONTS.body,
+          }}
+        >
+          {properties.map((p) => {
+            const active = p.id === currentId;
+            return (
+              <button
+                key={p.id}
+                type="button"
+                role="option"
+                aria-selected={active}
+                onClick={() => { setOpen(false); if (!active) onSelect(p.id); }}
+                className="waves-focus-ring"
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 12, width: '100%', padding: '10px 12px',
+                  borderRadius: 10, border: `1px solid ${active ? B.yellow : 'transparent'}`,
+                  background: active ? `${B.yellow}33` : 'transparent', cursor: active ? 'default' : 'pointer',
+                  textAlign: 'left', fontFamily: 'inherit', color: B.glassNavy,
+                }}
+              >
+                <GlassTile name={p.isPrimaryProfile ? 'home' : 'building'} />
+                <span style={{ minWidth: 0, flex: 1 }}>
+                  <span style={{ display: 'block', fontSize: 16, fontWeight: 700, lineHeight: 1.25 }}>{label(p)}</span>
+                  <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 3 }}>{p.isPrimaryProfile ? 'Primary residence · ' : ''}{formatPropertyAddress(p) || 'No address on file'}</span>
+                  {nextById && (
+                    <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: '#475569', marginTop: 2 }}>
+                      {nextById[p.id] ? `Next visit ${nextVisitLabel(nextById[p.id])}` : 'No visit scheduled'}
+                    </span>
+                  )}
+                </span>
+                {active && <span style={{ display: 'inline-flex' }}><Icon name="check" size={20} strokeWidth={2.25} /></span>}
+              </button>
+            );
+          })}
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+}
+
+function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProperty, switchingPropertyId }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   // C4: a cancelled account keeps the schedule READS; every notification /
@@ -4022,6 +4203,11 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   // when GATE_RESERVICE_SELF_SERVE is on AND the customer's live plan grants
   // a lane — absent, the CTA card below simply doesn't render.
   const [reservice, setReservice] = useState(null);
+  // Does this property have a plan at all (recurring series, upcoming rows,
+  // monthly billing or a live prepay term — the schedule payload's
+  // hasCancellableWork)? A property with none gets no "request a visit"
+  // empty state (owner 2026-09-06: only recurring customers see it).
+  const [hasPlanWork, setHasPlanWork] = useState(true);
   const [prefs, setPrefs] = useState(null);
   const [prefsError, setPrefsError] = useState(false);
   const [propertyPrefs, setPropertyPrefs] = useState([]);
@@ -4034,6 +4220,29 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   // Per-property attestation that listed on-location contacts agreed to
   // receive service texts. Re-attested on every contact save.
   const [contactConsent, setContactConsent] = useState({});
+  // Multi-property accounts: every property's next visit for the picker and
+  // the "next visit at each property" chips. Independent of the schedule
+  // load so a failure here never blanks the tab; null = still loading.
+  const multiProperty = properties.length > 1;
+  // null = loading, [] / rows = loaded; a failed read is tracked separately
+  // so it renders as "unavailable + retry", never as "Checking…" forever or
+  // as "no visit scheduled" (pre-push codex P1).
+  const [accountNext, setAccountNext] = useState(null);
+  const [accountNextFailed, setAccountNextFailed] = useState(false);
+  const [accountNextAttempt, setAccountNextAttempt] = useState(0);
+  useEffect(() => {
+    if (!multiProperty) { setAccountNext(null); setAccountNextFailed(false); return undefined; }
+    let alive = true;
+    setAccountNext(null);
+    setAccountNextFailed(false);
+    api.getAccountUpcoming()
+      .then((res) => { if (alive) setAccountNext(Array.isArray(res?.properties) ? res.properties : []); })
+      .catch((err) => { console.error(err); if (alive) setAccountNextFailed(true); });
+    return () => { alive = false; };
+  }, [multiProperty, customer?.id, accountNextAttempt]);
+  const nextById = multiProperty && accountNext
+    ? Object.fromEntries(properties.map((p) => [p.id, accountNext.find((row) => row.id === p.id)?.next || null]))
+    : null;
 
   const loadSchedule = useCallback(() => {
     setLoading(true);
@@ -4059,6 +4268,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     ]).then(([schedData, prefsResult, propertyPrefsData]) => {
       setUpcoming(schedData.upcoming || []);
       setReservice(schedData.reservice || null);
+      setHasPlanWork(schedData.hasCancellableWork !== false);
       setPrefsError(prefsResult.failed);
       if (prefsResult.data) setPrefs(prefsResult.data);
       // A failed refresh must not keep rendering stale interactive settings
@@ -4271,12 +4481,6 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     }
   };
 
-  const formatTime = (t) => {
-    if (!t) return 'TBD';
-    const [h, m] = t.split(':').map(Number);
-    return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
-  };
-
   const formatConfirmTs = (ts) => {
     if (!ts) return '';
     return ts.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' at ' +
@@ -4373,7 +4577,11 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const pulsingDotCss = `@keyframes schedPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(1.3); } }
 @media (prefers-reduced-motion: reduce) {
   [data-sched-pulse] { animation: none !important; }
-}`;
+}
+  /* GlassTile inside a gold accent chip: the theme's [data-glass-accent] *
+     rule fills every svg shape navy — keep the lucide strokes as strokes. */
+  [data-glass-accent] .glass-tile svg * { fill: none !important; }
+`;
 
   // Time TBD note helper
   const renderTimeTBD = (s) => {
@@ -4395,7 +4603,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       return (
         <span style={{
           flex: compact ? undefined : 1,
-          padding: compact ? '7px 12px' : '10px 14px',
+          padding: compact ? '9px 14px' : '10px 14px',
           borderRadius: 8, background: GLASS_SUBTLE,
           color: B.glassNavy, border: '1px solid #E7E2D7', fontSize: 14, fontWeight: 700, textAlign: 'center',
           display: 'inline-flex', alignItems: 'center', gap: 4,
@@ -4411,7 +4619,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
     const busy = !!confirmingIds[s.id];
     return (
       <button type="button" onClick={() => handleConfirm(s.id)} disabled={busy} data-glass-accent="" style={{
-        ...primaryButton, padding: compact ? '7px 12px' : '10px 14px', flex: compact ? undefined : 1,
+        ...primaryButton, padding: compact ? '9px 14px' : '10px 14px', flex: compact ? undefined : 1,
         fontSize: 14,
         opacity: busy ? 0.6 : 1, cursor: busy ? 'wait' : 'pointer',
       }}>{busy ? 'Confirming...' : 'Confirm'}</button>
@@ -4560,13 +4768,14 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           Visit #{s.visitNum} — {s.description}
         </div>
         {renderTimeTBD(s)}
-        <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 14, color: muted, fontWeight: 700 }}>In {s.daysUntil} {s.daysUntil === 1 ? 'day' : 'days'}</span>
+        {/* Actions only — the "In N days" countdown is gone (owner 2026-09-06:
+            the date tile already says when). */}
+        <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           {renderConfirmBtn(s, true)}
           {/* C4: no Reschedule mutation control for a cancelled session. */}
           {!cancelledAccount && (
             <a href={s.rescheduleUrl || `sms:+19412975749?body=Hi Waves, I'd like to reschedule my ${s.serviceType} on ${s.svcDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}. What's available?`} data-glass-accent="" style={{
-              ...secondaryButton, padding: '7px 12px', textDecoration: 'none',
+              ...secondaryButton, padding: '9px 14px', textDecoration: 'none',
               fontSize: 14, position: 'relative',
             }}>Reschedule</a>
           )}
@@ -4584,10 +4793,14 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           <div style={{ minWidth: 0, flex: compact ? '1 1 100%' : '1 1 auto' }}>
             <div style={sectionTitle}><Icon name="calendar" size={14} strokeWidth={2} />Upcoming Visits</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>
-              {upcomingOnly.length ? `${upcomingOnly.length} scheduled` : 'Schedule status'}
+              {upcomingOnly.length
+                ? `${upcomingOnly.length} ${upcomingOnly.length === 1 ? 'visit' : 'visits'} scheduled${multiProperty ? ` at ${customer.profileLabel || 'this property'}` : ''}`
+                : multiProperty ? `Nothing scheduled at ${customer.profileLabel || 'this property'}` : 'Schedule status'}
             </div>
-            <div style={{ marginTop: 5, fontSize: 14, color: B.grayDark, lineHeight: 1.55 }}>
-              Appointment timing, confirmation status, reminders, and reschedule options.
+            <div style={{ marginTop: 5, fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
+              {multiProperty
+                ? 'Pick a property below to see its visits, reminders and text settings.'
+                : 'Appointment timing, confirmation status, reminders, and reschedule options.'}
             </div>
           </div>
           {/* Requests create work — a cancelled account (C4) passes no
@@ -4598,12 +4811,78 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
             </button>
           )}
         </div>
+        {/* More than one property on the account: the picker (the account-menu
+            Service Property switcher, surfaced here) and each property's next
+            visit. Choosing one re-scopes the whole portal to that property. */}
+        {multiProperty && (
+          <div style={{ marginTop: 18, display: 'grid', gap: 14 }}>
+            <div style={{ display: 'grid', gap: 6 }}>
+              <span data-gt="eyebrow" style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: '0.11em' }}>You're viewing</span>
+              <PropertyScopeSelect
+                id="visits-property-scope"
+                properties={properties}
+                currentId={customer.id}
+                onSelect={onSelectProperty}
+                switchingId={switchingPropertyId}
+                nextById={nextById}
+                compact={compact}
+              />
+            </div>
+            <div style={{ display: 'grid', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                <span data-gt="eyebrow" style={{ fontSize: 14, fontWeight: 700, color: muted, textTransform: 'uppercase', letterSpacing: '0.11em' }}>Next visit at each property</span>
+                {accountNextFailed && (
+                  <span role="alert" style={{ display: 'inline-flex', alignItems: 'center', gap: 10, fontSize: 14, color: muted }}>
+                    Next visits couldn&rsquo;t be loaded.
+                    <button type="button" onClick={() => setAccountNextAttempt((n) => n + 1)} className="waves-focus-ring" style={{ border: 'none', background: 'none', color: B.wavesBlue, fontWeight: 700, fontSize: 14, cursor: 'pointer', padding: '8px 4px', fontFamily: 'inherit' }}>Try again</button>
+                  </span>
+                )}
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(auto-fit, minmax(240px, 1fr))', gap: 10 }}>
+                {properties.map((p) => {
+                  const active = p.id === customer.id;
+                  const n = nextById ? nextById[p.id] : undefined;
+                  return (
+                    <button
+                      key={p.id}
+                      type="button"
+                      // The glass theme owns a chip's surface colour, so the
+                      // current property uses the theme's gold accent surface
+                      // instead of an inline background it would override.
+                      {...(active ? { 'data-glass-accent': '' } : { 'data-glass': 'chip' })}
+                      aria-current={active ? 'true' : undefined}
+                      disabled={!!switchingPropertyId}
+                      onClick={() => !active && onSelectProperty && onSelectProperty(p.id)}
+                      className="waves-focus-ring"
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', borderRadius: 12,
+                        border: `1px solid ${active ? B.yellow : '#E7E2D7'}`, background: active ? B.yellow : subtle,
+                        cursor: active ? 'default' : 'pointer', textAlign: 'left', color: B.glassNavy,
+                      }}
+                    >
+                      <GlassTile name="calendar" />
+                      <span style={{ minWidth: 0 }}>
+                        <span style={{ display: 'block', fontSize: 15, fontWeight: 700, lineHeight: 1.25 }}>{p.profileLabel || (p.isPrimaryProfile ? 'Primary' : 'Property')}</span>
+                        <span style={{ display: 'block', fontSize: 14, fontWeight: 600, color: n || active ? B.glassNavy : muted, marginTop: 4 }}>
+                          {n === undefined ? (accountNextFailed ? 'Next visit unavailable' : 'Checking…') : nextVisitLabel(n)}
+                        </span>
+                        {n?.serviceType && <span style={{ display: 'block', fontSize: 14, fontWeight: 400, color: active ? B.glassNavy : muted, marginTop: 2 }}>{n.serviceType}</span>}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
       </section>
 
       {/* Empty state — the schedule API is the only source of truth; never
           invent a next-treatment month or mosquito restart the customer's
           plan may not include (tranche-1 truth fix) */}
-      {upcomingOnly.length === 0 && (
+      {/* resolveActiveTierName, not raw tier truthiness: 'One-Time' / 'Commercial'
+          are non-member tiers and must not resurrect the panel (codex P2). */}
+      {upcomingOnly.length === 0 && (hasPlanWork || !!resolveActiveTierName(customer)) && (
         // A cancelled account (C4) can't create requests — every
         // request-creation route is blocked for this session, so the copy
         // must not instruct an impossible action (codex GH r14 P2).
@@ -4790,8 +5069,10 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                       <Icon name={p.icon} size={18} strokeWidth={1.75} />
                     </span>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: 14, color: B.glassNavy, fontWeight: 700 }}>{p.label}</div>
-                      <div style={{ fontSize: 14, color: muted, whiteSpace: 'normal' }}>{p.desc}</div>
+                      {/* 16/14 — the same scale as the per-property rows below
+                          (owner 2026-09-06: one size for both lists, not 14/12). */}
+                      <div style={{ fontSize: 16, color: B.glassNavy, fontWeight: 700 }}>{p.label}</div>
+                      <div style={{ fontSize: 14, color: muted, whiteSpace: 'normal', marginTop: 1 }}>{p.desc}</div>
                       {p.locked && (
                         <div style={{ fontSize: 14, color: B.orange, marginTop: 2, fontWeight: 700 }}>Required for service coordination</div>
                       )}
@@ -4838,36 +5119,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, flexShrink: 0 }}>
                     {/* Real switch semantics: the old plain div was invisible
                         to keyboards and screen readers. */}
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={isOn}
-                      aria-label={p.label}
-                      disabled={p.locked}
-                      onClick={p.locked ? undefined : () => handleToggle(p.key)}
-                      style={{
-                        // 44x44 hit target; the gold 44x24 track is the inner
-                        // visual (owner 2026-08-28: keep the gold on/off look).
-                        width: 44, height: 44, border: 'none', padding: 0,
-                        background: 'transparent',
-                        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                        cursor: p.locked ? 'default' : 'pointer',
-                        opacity: p.locked ? 0.85 : 1,
-                      }}
-                    >
-                      <span aria-hidden="true" style={{
-                        width: 44, height: 24, borderRadius: 12, flexShrink: 0,
-                        // Gold = on, pale gold = off (owner 2026-08-28)
-                        background: isOn ? B.yellow : `${B.yellow}55`,
-                        position: 'relative', display: 'inline-block', transition: 'background 0.3s',
-                      }}>
-                        <span style={{
-                          position: 'absolute', top: 2, width: 20, height: 20,
-                          borderRadius: '50%', background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
-                          left: isOn ? 22 : 2, transition: 'left 0.3s',
-                        }} />
-                      </span>
-                    </button>
+                    <GoldSwitch on={isOn} onChange={() => handleToggle(p.key)} label={p.label} locked={p.locked} />
                     {p.locked && (
                       <span style={{ fontSize: 14, color: muted, textTransform: 'uppercase', letterSpacing: 0 }}>Locked</span>
                     )}
@@ -4895,9 +5147,22 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
             {propertyPrefs.length > 1 ? (
               <>
                 <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Property Notifications</div>
-                <div style={{ marginTop: 6, fontSize: 20, fontWeight: 700, color: B.glassNavy }}>Notifications by property</div>
-                <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
-                  Choose which service texts each property receives.
+                <div style={{ marginTop: 6, fontSize: 22, fontWeight: 700, color: B.glassNavy }}>Appointment texts</div>
+                <div style={{ marginTop: 12 }}>
+                  <PropertyScopeSelect
+                    id="notifications-property-scope"
+                    properties={properties}
+                    currentId={customer.id}
+                    onSelect={onSelectProperty}
+                    switchingId={switchingPropertyId}
+                    nextById={nextById}
+                    compact
+                  />
+                </div>
+                <div style={{ fontSize: 15, color: muted, marginTop: 10 }}>
+                  {customer.isPrimaryProfile
+                    ? 'Your primary residence gets every alert unless you turn one off.'
+                    : 'Other properties start quiet. Turn on what you want to hear about here.'}
                 </div>
               </>
             ) : (
@@ -4911,17 +5176,20 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
             )}
           </div>
           <div style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {propertyPrefs.map((property) => {
+            {(propertyPrefs.length > 1 ? propertyPrefs.filter((p) => p.id === customer.id) : propertyPrefs).map((property) => {
               const label = property.profileLabel || 'Service property';
               const address = formatPropertyAddress(property);
+              // One distinct icon per alert (2026-09-06: no repeats, one tile style).
               const options = [
-                { key: 'appointmentConfirmation', label: 'New appt' },
-                { key: 'serviceReminder72h', label: '72 hr' },
-                { key: 'serviceReminder24h', label: '24 hr' },
-                { key: 'techEnRoute', label: 'En route' },
-                { key: 'techArrived', label: 'Arrived' },
-                { key: 'appointmentNotifyPrimary', label: 'Me too' },
+                { key: 'appointmentConfirmation', label: 'New appointment', desc: 'Heads-up when a visit is booked', icon: 'calendar' },
+                { key: 'serviceReminder72h', label: '72-hour reminder', desc: '3 days before a visit', icon: 'clock' },
+                { key: 'serviceReminder24h', label: '24-hour reminder', desc: 'The day before a visit', icon: 'bell' },
+                { key: 'techEnRoute', label: 'Tech en route', desc: 'Live GPS, about an hour out', icon: 'truck' },
+                { key: 'techArrived', label: 'Tech arrived', desc: 'The moment we reach the property', icon: 'door' },
+                { key: 'appointmentNotifyPrimary', label: 'Send these to me too', desc: 'Copy this property\'s texts to your phone as well as the on-location contacts', icon: 'smartphone' },
               ];
+              const onCount = options.filter((o) => o.key !== 'appointmentNotifyPrimary' && property.preferences?.[o.key] !== false).length;
+              const alertCount = options.length - 1;
               const contacts = displayContacts(property);
               const contactLockKey = `${property.id}:contact`;
               const multiProperty = propertyPrefs.length > 1;
@@ -4932,45 +5200,36 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
                   padding: 14,
                   background: property.id === customer.id ? '#F8FCFE' : subtle,
                 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', marginBottom: 10 }}>
-                    <div>
-                      <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>{label}</div>
+                  {!multiProperty && (
+                    <div style={{ marginBottom: 10 }}>
+                      <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{label}</div>
                       <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>{address || 'No address on file'}</div>
                     </div>
-                    {property.id === customer.id && multiProperty && (
-                      <span style={{
-                        fontSize: 14, fontWeight: 700, color: B.wavesBlue,
-                        background: '#fff', border: `1px solid ${B.wavesBlue}22`,
-                        borderRadius: 8, padding: '4px 8px', whiteSpace: 'nowrap',
-                      }}>Current</span>
-                    )}
-                  </div>
+                  )}
                   {multiProperty && (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(86px, 1fr))', gap: 8 }}>
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', paddingBottom: 6 }}>
+                        <span style={{ fontSize: 15, fontWeight: 700, color: B.glassNavy, background: onCount ? B.yellow : `${B.yellow}55`, borderRadius: 999, padding: '8px 14px', whiteSpace: 'nowrap' }}>
+                          {onCount === alertCount ? 'All alerts on' : onCount ? `${onCount} ${onCount === 1 ? 'alert' : 'alerts'} on` : 'All alerts off'}
+                        </span>
+                      </div>
                       {options.map((option) => {
                         const on = property.preferences?.[option.key] !== false;
                         const lockKey = `${property.id}:${option.key}`;
                         return (
-                          <button data-glass-accent={on ? '' : undefined}
-                            key={option.key}
-                            type="button"
-                            disabled={!!prefsLocked[lockKey]}
-                            onClick={() => handlePropertyPrefToggle(property.id, option.key)}
-                            style={{
-                              border: `1px solid ${on ? B.yellow : '#D8D0C0'}`,
-                              borderRadius: 8,
-                              padding: '9px 6px',
-                              background: on ? '#fff' : B.white,
-                              color: on ? B.glassNavy : muted,
-                              fontSize: 14,
-                              fontWeight: 700,
-                              cursor: prefsLocked[lockKey] ? 'wait' : 'pointer',
-                              opacity: prefsLocked[lockKey] ? 0.6 : 1,
-                            }}
-                          >
-                            {option.label}
-                            <div style={{ fontSize: 14, marginTop: 2, color: on ? B.glassNavy : muted }}>{on ? 'On' : 'Off'}</div>
-                          </button>
+                          <div key={option.key} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 0', borderTop: '1px solid #E7E2D7' }}>
+                            <GlassTile name={option.icon} />
+                            <span style={{ flex: 1, minWidth: 0 }}>
+                              <span style={{ display: 'block', fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{option.label}</span>
+                              <span style={{ display: 'block', fontSize: 14, color: muted, marginTop: 1 }}>{option.desc}</span>
+                            </span>
+                            <GoldSwitch
+                              on={on}
+                              disabled={!!prefsLocked[lockKey]}
+                              onChange={() => handlePropertyPrefToggle(property.id, option.key)}
+                              label={`${option.label} for ${label}`}
+                            />
+                          </div>
                         );
                       })}
                     </div>
@@ -14695,7 +14954,7 @@ function MoreSheet({ activeTab, onSelect, onClose, onRequest, onChat, tabs = MOR
 // Wraps ScheduleTab (upcoming) + ServicesTab (completed) behind a single
 // "Visits" surface — a visit is one object moving from upcoming → completed,
 // so customers shouldn't have to know which tab holds which state.
-function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onRequestVisit }) {
+function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onRequestVisit, onSelectProperty, switchingPropertyId }) {
   const compact = useIsMobile(760);
   const active = subTab === 'completed' ? 'completed' : 'upcoming';
   const card = {
@@ -14762,7 +15021,7 @@ function VisitsTab({ customer, properties = [], subTab, onSubTabChange, onReques
           </div>
         </div>
       </section>
-      {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} onRequestVisit={onRequestVisit} /> : <ServicesTab />}
+      {active === 'upcoming' ? <ScheduleTab customer={customer} properties={properties} onRequestVisit={onRequestVisit} onSelectProperty={onSelectProperty} switchingPropertyId={switchingPropertyId} /> : <ServicesTab />}
     </div>
   );
 }
@@ -15250,7 +15509,9 @@ export default function PortalPage() {
   const portalProperties = Array.isArray(properties) ? properties : [];
   const canSwitchProperties = portalProperties.length > 1;
   const propertyRenderKey = `${customer.id}:${requestRefreshKey}`;
-  const selectProperty = async (propertyId) => {
+  // `stayOnVisits`: the Visits-tab picker keeps the customer on Visits after
+  // the switch instead of the default hop to Home.
+  const selectProperty = async (propertyId, { stayOnVisits = false } = {}) => {
     if (!propertyId || propertyId === customer.id || switchingPropertyId) return;
     setSwitchingPropertyId(propertyId);
     // Flush PropertyTab's debounced edits BEFORE switchProperty replaces the
@@ -15269,11 +15530,12 @@ export default function PortalPage() {
     const switched = await switchProperty(propertyId);
     setSwitchingPropertyId(null);
     if (switched) {
-      setActiveTab('dashboard');
+      setActiveTab(stayOnVisits ? 'visits' : 'dashboard');
       // Replace, not push: the prior tab history belongs to the PREVIOUS
       // property's session — Back must not restore a stale tab context
       // against the newly selected property.
-      if (window.location.pathname + window.location.search !== '/') navigate('/', { replace: true });
+      const target = stayOnVisits ? '/?tab=schedule' : '/';
+      if (window.location.pathname + window.location.search !== target) navigate(target, { replace: true });
       setVisitsSubTab('upcoming');
       setShowMenu(false);
       setShowMoreSheet(false);
@@ -15827,7 +16089,7 @@ export default function PortalPage() {
           // same sub-tab; replace (not push) so pill toggles don't stack
           // history entries.
           navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
-        }} onRequestVisit={cancelledAccount ? null : () => setShowReportIssue(true)} />}
+        }} onRequestVisit={cancelledAccount ? null : () => setShowReportIssue(true)} onSelectProperty={(id) => selectProperty(id, { stayOnVisits: true })} switchingPropertyId={switchingPropertyId} />}
         {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
