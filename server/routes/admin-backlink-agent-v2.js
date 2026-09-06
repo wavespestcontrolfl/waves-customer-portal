@@ -701,6 +701,14 @@ router.patch('/prospects/:id', async (req, res, next) => {
         const taken = await findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id, location: current.location_key });
         if (taken) return { taken };
       }
+      // Ordinary URL edits must not rewrite the evidence a held verdict compares.
+      // Preserve domain → row lock order and re-read after acquiring the lock.
+      if (verdict === undefined && 'live_url' in patch) {
+        await lockProspectDomain(trx, current.target_domain);
+        const locked = await trx('seo_link_prospects').where({ id: current.id }).forUpdate().first('live_url');
+        const held = await trx('seo_link_attempts').where({ prospect_id: current.id, action: 'submit', outcome: 'submit_ambiguous' }).first('id');
+        if (held && patch.live_url !== locked.live_url) return { reconciliationError: 'Resolve the held submission before changing its publisher URL' };
+      }
       if (negativeVerdict || ['placed', 'live', 'indexed'].includes(patch.status)) {
         await lockProspectDomain(trx, current.target_domain);
         const confirmed = await require('../services/seo/link-execution-authority').reconcileOwnerPlacement(trx, { prospectId: current.id, status: patch.status, attemptId: req.body.submission_attempt_id || null, notSubmitted: negativeVerdict, liveUrl: patch.live_url || current.live_url, targetPage: patch.target_page, actorId: req.technician?.id || null });
@@ -768,13 +776,13 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
     // Submit-first placements keep their verified lifecycle while their initial pitch awaits approval.
     const { BRIDGE_STATES } = require('../services/seo/link-authority-selection');
     const domainIds = [...new Set(drafts.map((p) => p.domain_id).filter(Boolean))];
-    const eligibleDomains = new Set((domainIds.length ? await db('seo_link_domains').whereIn('id', domainIds)
-      .whereIn('agent_state', BRIDGE_STATES).select('id') : []).map((d) => d.id));
+    const eligiblePaths = new Map((domainIds.length ? await db('seo_link_domains').whereIn('id', domainIds)
+      .whereIn('agent_state', BRIDGE_STATES).select('id', 'best_path_id') : []).map((d) => [d.id, d.best_path_id]));
     const executions = drafts.length ? await db('seo_link_placement_authorities').whereIn('prospect_id', drafts.map((p) => p.id))
       .where({ dimension: 'execution', instance_kind: '-' }).whereNull('ended_at').select('prospect_id', 'path_id', 'satisfied_at') : [];
     const executionById = new Map(executions.map((r) => [r.prospect_id, r]));
     const items = drafts.filter((p) => Outreach.SENDABLE_STATUSES.includes(p.status)
-      || (eligibleDomains.has(p.domain_id) && Outreach.lateSend(p, pathById.get(p.path_id))
+      || (p.path_id && eligiblePaths.get(p.domain_id) === p.path_id && Outreach.lateSend(p, pathById.get(p.path_id))
         && !Outreach.submitStepOwed(pathById.get(p.path_id), executionById.get(p.id))));
     // Reconcilable = ambiguous sends: a send_error, OR a 'sending' stuck past the
     // stale window (a crashed mid-send) — both resolvable via reconcileSendError.

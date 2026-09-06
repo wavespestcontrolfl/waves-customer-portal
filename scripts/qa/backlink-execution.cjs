@@ -82,6 +82,19 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
       await trx('seo_link_prospects').where({ id: p.id }).update({ status });
       assert.ok((await pendingIds()).includes(p.id), `${status} late draft must remain available for owner approval`);
     }
+    const alternatePathId = randomUUID();
+    const originalPath = await trx('seo_link_acquisition_paths').where({ id: pathId }).first();
+    await trx('seo_link_acquisition_paths').insert({ ...originalPath, id: alternatePathId, path_key: `test:${alternatePathId}` });
+    for (const best_path_id of [null, alternatePathId]) {
+      await trx('seo_link_domains').where({ id }).update({ best_path_id });
+      for (const status of ['placed', 'live', 'indexed']) {
+        await trx('seo_link_prospects').where({ id: p.id }).update({ status });
+        assert.equal((await pendingIds()).includes(p.id), false, `${status} late approval requires the current best path`);
+      }
+    }
+    await trx('seo_link_domains').where({ id }).update({ best_path_id: pathId });
+    assert.ok((await pendingIds()).includes(p.id));
+    console.log('PASS late approvals hide changed/cleared best paths and return when the original path is restored');
     for (const agent_state of ['rejected', 'watching', 'not_reproducible']) {
       await trx('seo_link_domains').where({ id }).update({ agent_state });
       for (const status of ['placed', 'live', 'indexed']) {
@@ -188,6 +201,9 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
         await check('seo_link_prospects').where({ id: p.id }).update({ status, indexing_status: 'indexed', last_index_check: new Date(), last_live_check: new Date() });
         const beforePlacement = await check('seo_link_prospects').where({ id: p.id }).first();
         const beforeAttempt = await check('seo_link_attempts').where({ id: rejectedAttempt }).first();
+        const editUrl = live_url => new Promise((resolve, reject) => edit({ params: { id: p.id }, body: { live_url } }, { json: resolve, status(code) { return { json: body => reject(Error(`${code}: ${JSON.stringify(body)}`)) }; } }, reject));
+        await assert.rejects(editUrl(`https://${domain}/different-page`), /409.*held submission/);
+        await assert.rejects(editUrl(null), /409.*held submission/);
         await assert.rejects(confirm({ live_url: `https://${domain}/different-page` }), /409.*verified publisher URL/);
         assert.deepEqual(await check('seo_link_prospects').where({ id: p.id }).first(), beforePlacement);
         assert.deepEqual(await check('seo_link_attempts').where({ id: rejectedAttempt }).first(), beforeAttempt);
