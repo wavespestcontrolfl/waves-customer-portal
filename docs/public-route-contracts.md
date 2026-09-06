@@ -96,7 +96,14 @@ The lawn assessment payload also carries `droughtStress` (`none`, `minor`,
 stored `composite_scores.drought_stress`. Missing or invalid historical
 values yield `null`; raw model responses and the full composite are never
 projected. The existing customer/visit linkage and signed assessment pin
-requirements apply to this field too),
+requirements apply to this field too. Localized watering advice uses this
+structured severity, overridden by an explicit boolean
+`scores.stressFlags.drought_stress` from the same confirmed assessment.
+Without either signal, observation/summary wording cannot trigger sprinkler
+advice or an unqualified "no action needed" reassurance. Measured water
+deficits/surpluses and eligible stored water snapshots
+retain their existing behavior. Lawn PDF render strategy `p4` regenerates
+older cached PDFs to match this evidence rule),
 the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),

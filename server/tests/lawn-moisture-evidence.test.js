@@ -4,6 +4,7 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: () => false }));
 const { mergePhotoComposites } = require('../services/lawn-photo-merge');
 const { mapToDisplayScores, applySeasonalAdjustment } = require('../services/lawn-assessment');
 const { buildLawnAssessmentReportData } = require('../services/service-report/report-data');
+const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
 
 const SERVICE = { id: 'record-1', customer_id: 'customer-1', scheduled_service_id: 'visit-1' };
 const ASSESSMENT = {
@@ -49,6 +50,7 @@ describe('moisture evidence survives assessment persistence and report projectio
       adjusted_scores: JSON.stringify(adjusted),
     });
     expect(report.droughtStress).toBe(severity);
+    expect(buildLawnReportV2({ lawnAssessment: report }).water.coverageWatch).toBe(severity !== 'none');
   });
 
   test('a localized severe photo survives the multi-photo merge and persistence', async () => {
@@ -82,6 +84,7 @@ describe('moisture evidence survives assessment persistence and report projectio
     });
     expect(report.droughtStress).toBe('severe');
     expect(report.scores.stressFlags.drought_stress).toBe(false);
+    expect(buildLawnReportV2({ lawnAssessment: report }).water.coverageWatch).toBe(false);
     expect(JSON.stringify(report)).not.toContain('INTERNAL_MODEL_DETAILS');
     expect(report).not.toHaveProperty('composite_scores');
   });

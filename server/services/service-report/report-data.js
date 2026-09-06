@@ -2188,7 +2188,9 @@ class PinnedAssessmentUnavailable extends Error {
 // Bumping forces those lawn PDFs through one fresh render.
 // p3: signature composition gained the portal irrigation stamp (explicit or
 // derived inches + system toggle) — prefs edits must invalidate cached PDFs.
-const LAWN_RENDER_STRATEGY = 'p3';
+// p4: watering advice resolves structured moisture evidence, not observation
+// wording. Regenerate older lawn PDFs so they agree with the current report.
+const LAWN_RENDER_STRATEGY = 'p4';
 
 async function resolveCanonicalLawnRender(service, knex = db) {
   const line = service?.service_line || detectServiceLine(service?.service_type);

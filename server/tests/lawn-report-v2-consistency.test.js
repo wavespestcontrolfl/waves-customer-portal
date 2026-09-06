@@ -20,6 +20,7 @@ function baseAssessment(overrides = {}) {
   return {
     scores: { turfDensity: 73, weedSuppression: 81, colorHealth: 77, stressDamage: 35, fungusControl: 95, overallScore: 68, season: 'peak' },
     overwateringSignal: false,
+    droughtStress: 'minor',
     turfProfile: { grassType: 'st_augustine' },
     observations: 'This lawn shows mild drought stress or slightly uneven irrigation coverage in the mid-lawn zone.',
     aiSummary: 'Good overall condition with a few light-tan mid-lawn areas suggesting uneven irrigation coverage.',
@@ -46,6 +47,7 @@ const CASES = {
   balancedDryCoverage: baseAssessment(),
   overWatered: baseAssessment({
     overwateringSignal: true,
+    droughtStress: 'none',
     observations: 'Mushrooms and damp patches indicate too much water.',
     scores: { turfDensity: 58, weedSuppression: 44, colorHealth: 49, stressDamage: 35, fungusControl: 40, overallScore: 54, season: 'peak' },
     waterContext: { rainfallInches7d: 1.6, irrigationInchesPerWeek: 1.2, effectiveInches7d: 2.8, targetInchesPerWeek: 1.25, irrigationAdvice: { status: 'surplus', rainKnown: true, profileMissing: false, recommendedInchesPerWeek: 1.25 } },
@@ -55,12 +57,138 @@ const CASES = {
     waterContext: { rainfallInches7d: 0.1, irrigationInchesPerWeek: 0.3, effectiveInches7d: 0.4, targetInchesPerWeek: 1.25, irrigationAdvice: { status: 'deficit', rainKnown: true, profileMissing: false, recommendedInchesPerWeek: 1.25 } },
   }),
   healthy: baseAssessment({
+    droughtStress: 'none',
     observations: 'Thick, healthy, even turf with strong color and no visible stress.',
     aiSummary: 'Lawn is in excellent shape with strong density and color.',
     scores: { turfDensity: 88, weedSuppression: 92, colorHealth: 86, stressDamage: 90, fungusControl: 95, overallScore: 89, season: 'peak' },
     recommendations: {},
   }),
 };
+
+describe('structured moisture evidence owns sprinkler advice', () => {
+  const render = (overrides = {}) => buildLawnReportV2({
+    lawnAssessment: baseAssessment({ ...CASES.healthy, ...overrides }),
+  });
+  const waterCard = report => report.insights.find(card => card.category === 'water');
+
+  // Counterexamples from every hosted review of #3952. The categorical finding
+  // travels separately from these captions; grammar cannot add or erase it.
+  test.each([
+    'Tan blades and curling point to under-watering.',
+    'No weed activity is evident and mild underwatering is visible along the pavement.',
+    'Tan blades and curling at the pavement edge suggest the sprinkler is not reaching that zone.',
+    "Tan blades and curling suggest the sprinkler heads aren't reaching that zone.",
+    'Tan patches are consistent with insufficient irrigation along the pavement.',
+    'There is underwatering along the pavement edge.',
+    'Localized underwatering persists along the pavement edge.',
+    'Visible signs of underwatering have not yet resolved.',
+    'Underwatering symptoms have never cleared.',
+    'No weeds visible, tan blades and curling point to underwatering.',
+    'Underwatering has resolved in the center; the edges remain under-watered.',
+  ])('retains structured drought evidence with caption: %s', observations => {
+    const report = render({ droughtStress: 'minor', observations });
+    expect(report.water.coverageWatch).toBe(true);
+    expect(waterCard(report).customerAction).toMatch(/Check sprinkler coverage/);
+    expect(report.snapshot.rootCause).toMatch(/uneven sprinkler coverage/);
+    expect(report.water.status).toBe('balanced');
+  });
+
+  test.each([
+    'Minor tan patches near pavement are normal wear. No watering problems are visible.',
+    'No signs of underwatering are visible.',
+    'The lawn is not under-watered.',
+    'Underwatering was excluded based on the even turf color.',
+    'The photo is inconsistent with underwatering.',
+    'Underwatering was considered but excluded after reviewing the even turf color.',
+    'No visible moisture stress. Continue monitoring for underwatering during hot weather.',
+    'Previously under-watered turf has recovered.',
+    'It is unclear whether underwatering is present.',
+    'There is insufficient evidence to conclude the lawn is under-watered.',
+    'Signs of underwatering: not observed.',
+    'Signs of underwatering have yet to be observed.',
+    'Signs of underwatering were suspected but later ruled out.',
+    'Signs of underwatering were observed last month but have now resolved.',
+    'Let the damp areas dry out between waterings.',
+  ])('does not invent advice when the structured finding is none: %s', observations => {
+    const report = render({ droughtStress: 'none', observations });
+    expect(report.water.coverageWatch).toBe(false);
+    expect(waterCard(report)).toBeUndefined();
+    expect(report.snapshot.customerAction).toBeNull();
+    expect(report.snapshot.noActionNeeded).toBe(true);
+    expect(report.smsSummary).not.toMatch(/sprinkler|watching watering/i);
+  });
+
+  test.each(['minor', 'moderate', 'severe'])('%s moisture stress works even without a caption', droughtStress => {
+    const report = render({ droughtStress, observations: '', aiSummary: '' });
+    expect(report.water.coverageWatch).toBe(true);
+    expect(waterCard(report)).toBeDefined();
+  });
+
+  test.each([undefined, null, '', 'unknown', true, ['severe']])('absent or unusable evidence %j cannot be replaced by prose or an unrelated stress score', droughtStress => {
+    const report = render({
+      droughtStress,
+      observations: 'There is underwatering along the pavement edge.',
+      aiSummary: 'Dry tan areas show drought stress and uneven sprinkler coverage.',
+      scores: { ...CASES.healthy.scores, stressDamage: 35 },
+    });
+    expect(report.water.coverageWatch).toBe(false);
+    expect(waterCard(report)).toBeUndefined();
+    expect(report.snapshot.noActionNeeded).toBe(false);
+  });
+
+  test('missing historical moisture evidence does not promise no action is needed', () => {
+    const report = render({ droughtStress: null });
+    expect(report.snapshot.noActionNeeded).toBe(false);
+    expect(report.smsSummary).not.toMatch(/No action needed/);
+  });
+
+  test.each([
+    [true, 'none'],
+    [true, null],
+    [false, 'severe'],
+  ])('an explicit technician flag %s overrides photo severity %s', (flag, droughtStress) => {
+    const report = render({
+      droughtStress,
+      scores: { ...CASES.healthy.scores, stressFlags: { drought_stress: flag } },
+    });
+    expect(report.water.coverageWatch).toBe(flag);
+    expect(!!waterCard(report)).toBe(flag);
+  });
+
+  test.each([undefined, {}, { shade_stress: true }, { drought_stress: 'true' }])('other or malformed technician flags %j cannot create a drought diagnosis', stressFlags => {
+    const report = render({ droughtStress: null, scores: { ...CASES.healthy.scores, stressFlags } });
+    expect(report.water.coverageWatch).toBe(false);
+    expect(waterCard(report)).toBeUndefined();
+  });
+
+  test.each([null, 'minor'])('measured water deficit gives amount advice with drought evidence %s', droughtStress => {
+    const report = render({ droughtStress, waterContext: CASES.deficit.waterContext });
+    expect(report.water.coverageWatch).toBe(false);
+    expect(waterCard(report).headline).toBe('The lawn is running a little dry');
+  });
+
+  test('measured surplus and overwatering keep their advice with no drought evidence', () => {
+    const report = render({ ...CASES.overWatered, droughtStress: null });
+    expect(report.water.coverageWatch).toBe(false);
+    expect(waterCard(report).headline).toBe('The lawn is likely getting too much water');
+    expect(waterCard(report).customerAction).not.toMatch(/Check sprinkler coverage/);
+  });
+
+  test('an eligible stored coverage snapshot still supplies evidence for an older assessment', () => {
+    const report = buildLawnReportV2({
+      lawnAssessment: baseAssessment({
+        ...CASES.healthy, droughtStress: null,
+        waterContext: { ...CASES.healthy.waterContext, rainfallInches7d: null },
+      }),
+      waterSnapshot: {
+        status: 'balanced', interpretation: 'coverage_issue_possible',
+        rain_7day_inches: 0.9, irrigation_inches_per_week: 0.7,
+        total_water_7day_inches: 1.6, target_water_inches_per_week: 1.25,
+      },
+    });
+    expect(waterCard(report).customerAction).toMatch(/Check sprinkler coverage/);
+  });
+});
 
 function collectStrings(value, acc = []) {
   if (typeof value === 'string') { acc.push(value); return acc; }
@@ -199,6 +327,7 @@ describe('Lawn Report V2 — property rainfall is authoritative over the area sn
     // Strip property rainfall so clientRainKnown is false → snapshot is authoritative.
     const assessment = baseAssessment({
       overwateringSignal: false,
+      droughtStress: 'none',
       observations: 'Damp, spongy turf with a few mushrooms.',
       aiSummary: 'Soil reads wet; some fungal pressure.',
       waterContext: {

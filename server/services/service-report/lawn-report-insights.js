@@ -87,7 +87,7 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
         : 'Recheck moisture and color next visit to confirm the added water is landing.',
     });
   } else if (water.localizedDry) {
-    // Localized dry evidence (dry-signal observations or a coverage-issue
+    // Localized dry evidence (structured drought signal or a coverage-issue
     // snapshot) with a non-deficit total — coverage, NOT "water more".
     cards.push({
       category: 'water', status: 'watch', confidence: 'area_estimated',
