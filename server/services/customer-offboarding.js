@@ -443,9 +443,14 @@ async function cancelSignupAndRefundDeposit(customerId, { actorId = null } = {})
   // 2. Stop any recurring series BEFORE sweeping visits (mirrors
   // cancellation-processor): a racing completion reads recurring_ongoing
   // and would otherwise mint a fresh pending visit behind the sweep.
-  await db('scheduled_services')
-    .where({ customer_id: customerId, recurring_ongoing: true })
-    .update({ recurring_ongoing: false, updated_at: db.fn.now() });
+  await db.transaction(async trx => {
+    const rows = await trx('scheduled_services').where({ customer_id: customerId, is_recurring: true })
+      .select('id', 'recurring_parent_id', 'customer_id', 'recurring_pattern');
+    await require('./recurring-plan-decisions').recordRecurringSeriesStops(trx, rows, actorId);
+    await trx('scheduled_services')
+      .where({ customer_id: customerId, recurring_ongoing: true })
+      .update({ recurring_ongoing: false, updated_at: trx.fn.now() });
+  });
 
   // Cancel every cancellable visit. Per-visit failure isolation (mirrors
   // schedule bulk-cancel); failures and invoices the void sweep could not

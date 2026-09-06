@@ -104,6 +104,7 @@ jest.mock('../models/db', () => {
   dbFn.transaction = async (cb) => {
     state.writes.push({ table: '<trx>', op: 'begin' });
     const trx = (table) => makeBuilder(table);
+    trx.fn = dbFn.fn;
     trx.raw = async () => ({});
     trx.schema = dbFn.schema;
     try {
@@ -214,6 +215,11 @@ test('an unpaid series still cancels through the same branch (guard is not a bla
   const ops = db.__state.writes.map((w) => `${w.table}:${w.op}`);
   expect(ops).toContain('<trx>:commit');
   expect(db.__state.writes.some((w) => w.table === 'scheduled_services' && w.op === 'update' && w.u.recurring_ongoing === false)).toBe(true);
+  const stopIndex = db.__state.writes.findIndex(w => w.table === 'recurring_plan_alerts' && w.op === 'insert');
+  const commitIndex = db.__state.writes.findIndex(w => w.op === 'commit');
+  expect(stopIndex).toBeGreaterThan(-1);
+  expect(stopIndex).toBeLessThan(commitIndex);
+  expect(db.__state.writes[stopIndex].r).toMatchObject({ recurring_parent_id: 'parent', resolved_action: 'cancel_series' });
 });
 
 test("POST /admin/schedule/:id/prepaid refuses a cancelled visit with 409 visit_terminal (the writer side of the race — Codex #3878 r1 P1)", async () => {
