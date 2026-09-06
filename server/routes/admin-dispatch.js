@@ -3779,15 +3779,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
           // plan stop.
           // Record the explicit series decision in the existing renewal ledger.
           // Appointment statuses cannot distinguish this from this_only cancels.
-          await trx('recurring_plan_alerts').insert({
-            recurring_parent_id: parentId,
-            customer_id: svc.customer_id,
-            alert_type: 'plan_lapsed',
-            recurring_pattern: svc.recurring_pattern,
-            resolved_at: trx.fn.now(),
-            resolved_action: 'cancel_series',
-            resolved_by: req.technicianId,
-          });
+          await require('../services/recurring-plan-decisions').recordRecurringSeriesStops(trx, [{
+            id: parentId, customer_id: svc.customer_id, recurring_pattern: svc.recurring_pattern,
+          }], req.technicianId);
           const cols = await trx('scheduled_services').columnInfo().catch(() => ({}));
           if (cols.recurring_ongoing) {
             ongoingStopped = await trx('scheduled_services')
