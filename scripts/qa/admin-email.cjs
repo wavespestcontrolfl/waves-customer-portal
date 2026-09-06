@@ -1,0 +1,165 @@
+'use strict';
+// SYNTHETIC UI QA. Managed local frontend only; all APIs are intercepted.
+// Mocked send/AI/read requests never reach a provider or application server.
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { previewServer, launchBrowser, waitForFonts, evidence } = require('./browser');
+const root = path.resolve(__dirname, '../..');
+const output = path.join(root, '.tmp/email-browser');
+const a = { id: '00000000-0000-4000-8000-000000000001', gmail_thread_id: 'thread-a', from_address: 'a@example.invalid', subject: 'First fixture message', is_read: true, received_at: new Date().toISOString(), body_text: 'First fixture body' };
+const b = { ...a, id: '00000000-0000-4000-8000-000000000002', gmail_thread_id: 'thread-b', from_address: 'b@example.invalid', subject: 'Second fixture message', body_text: 'Second fixture body' };
+
+async function main() {
+  fs.mkdirSync(output, { recursive: true });
+  const report = { ...evidence(root), scenarios: [], requests: [], unmatched: [], pageErrors: [], screenshots: [] };
+  let server;
+  let browser;
+  let stage = 'startup';
+  let failSend = false;
+  async function openPage(role = 'admin', width = 1440) {
+    const page = await browser.newPage({ viewport: { width, height: 1000 }, timezoneId: 'America/New_York', serviceWorkers: 'block' });
+    page.setDefaultTimeout(15000);
+    await page.addInitScript(() => {
+      localStorage.setItem('waves_admin_token', 'fixture-token');
+      localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'fixture-owner', role: 'admin' }));
+      const realFetch = window.fetch.bind(window);
+      window.fetch = (url, options) => String(url).endsWith('/admin/usage/track')
+        ? Promise.resolve(new Response('{}', { headers: { 'Content-Type': 'application/json' } })) : realFetch(url, options);
+      if (navigator.serviceWorker) navigator.serviceWorker.register = async () => ({ scope: 'fixture' });
+    });
+    page.on('pageerror', (error) => report.pageErrors.push({ stage, message: error.message }));
+    page.on('dialog', (dialog) => dialog.accept());
+    await page.route('**/*', async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (url.origin !== server.baseUrl) return route.abort();
+      if (!url.pathname.startsWith('/api/')) return route.continue();
+      const api = url.pathname.slice(4);
+      report.requests.push({ stage, method: request.method(), path: api, search: url.search });
+      let body;
+      let status = 200;
+      if (api === '/admin/auth/me') body = { id: 'fixture-owner', name: 'Fixture operator', email: 'operator@example.invalid', role };
+      else if (api === '/admin/feature-flags') body = { flags: {} };
+      else if (api === '/admin/notifications/unread-count') body = { count: 0 };
+      else if (api === '/admin/email/oauth/status') body = { connected: true };
+      else if (api === '/admin/email/inbox') body = { emails: [b], total: 1 };
+      else if (api === '/admin/email/stats') body = { total: 1, unread: 0 };
+      else if (api === '/admin/email/daily-digest') body = { total_received: 0 };
+      else if (api === '/admin/email/blocked') body = { blocked: [] };
+      else if (api === '/admin/email/send' && request.method() === 'POST') { body = failSend ? { error: 'Synthetic send failure' } : { success: true }; status = failSend ? 503 : 200; }
+      else if (api === `/admin/email/message/${a.id}`) body = a;
+      else if (api === `/admin/email/message/${b.id}`) body = b;
+      else if (api === '/admin/email/thread/thread-a') body = { thread: [a] };
+      else if (api === '/admin/email/thread/thread-b') body = { thread: [b] };
+      else if (api === '/admin/communications/log') body = { messages: [], page: 1, hasMore: false };
+      else if (api === '/admin/communications/stats') body = {};
+      else if (api === '/admin/communications/ai-auto-reply-status') body = { enabled: false };
+      else if (api === '/admin/communications/agent-draft') body = { draft: null };
+      else if (api === '/admin/customers') body = { customers: [] };
+      else { report.unmatched.push({ stage, method: request.method(), path: api }); body = { error: 'Unmatched synthetic request' }; status = 500; }
+      return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+    });
+    return page;
+  }
+  const channel = (page, name) => page.getByRole('navigation', { name: 'Communications section', exact: true }).getByRole('button', { name, exact: true });
+  async function scenario(name, work) { stage = name; console.log(`Checking: ${name}`); await work(); report.scenarios.push({ name, passed: true }); }
+  async function shot(page, name) {
+    await waitForFonts(page);
+    const file = `${name}.png`;
+    await page.screenshot({ path: path.join(output, file), fullPage: true });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, 'Page must fit the viewport');
+    report.screenshots.push(file);
+  }
+  try {
+    server = await previewServer(root);
+    browser = await launchBrowser();
+    const page = await openPage();
+    await scenario('legacy Email links open off-list messages with all URL context', async () => {
+      await page.goto(`${server.baseUrl}/admin/email?id=${a.id}&tag=a&tag=b#source=bell`);
+      await page.getByText(a.body_text, { exact: true }).waitFor();
+      assert.equal(new URL(page.url()).pathname, '/admin/communications');
+      assert.deepEqual(new URL(page.url()).searchParams.getAll('tag'), ['a', 'b']);
+      assert.equal(new URLSearchParams(new URL(page.url()).hash.slice(1)).get('source'), 'bell');
+      assert.equal(await channel(page, 'Email').getAttribute('aria-current'), 'page');
+      assert.equal(await page.locator('h1').count(), 1);
+      await shot(page, 'email-desktop-1440');
+    });
+    await scenario('Email reply and SMS composer both survive channel switches', async () => {
+      await page.getByRole('textbox', { name: 'Reply' }).fill('Synthetic reply to A');
+      await channel(page, 'SMS').click();
+      await page.getByPlaceholder('Type your message…', { exact: true }).fill('Synthetic unsent SMS');
+      await channel(page, 'Email').click();
+      await page.getByRole('textbox', { name: 'Reply' }).waitFor();
+      assert.equal(await page.getByRole('textbox', { name: 'Reply' }).inputValue(), 'Synthetic reply to A');
+      await channel(page, 'SMS').click();
+      assert.equal(await page.getByPlaceholder('Type your message…', { exact: true }).inputValue(), 'Synthetic unsent SMS');
+      await page.goBack();
+      await page.getByRole('textbox', { name: 'Reply' }).waitFor();
+      assert.equal(await channel(page, 'Email').getAttribute('aria-current'), 'page');
+    });
+    await scenario('Email reply recovery survives a real reload', async () => {
+      await page.reload();
+      await page.getByRole('textbox', { name: 'Reply' }).waitFor();
+      assert.equal(await page.getByRole('textbox', { name: 'Reply' }).inputValue(), 'Synthetic reply to A');
+    });
+    await scenario('compose recovers after reload and a failed send; explicit success clears it', async () => {
+      await page.getByRole('button', { name: 'New Email', exact: true }).click();
+      await page.getByLabel('To *', { exact: true }).fill('recipient@example.invalid');
+      await page.getByLabel('Subject', { exact: true }).fill('Synthetic subject');
+      await page.getByLabel('Message *', { exact: true }).fill('Synthetic compose text');
+      await page.reload();
+      await page.getByRole('button', { name: 'Resume draft', exact: true }).click();
+      assert.equal(await page.getByLabel('Message *', { exact: true }).inputValue(), 'Synthetic compose text');
+      failSend = true;
+      await page.getByRole('dialog').getByRole('button', { name: 'Send', exact: true }).click();
+      await page.getByRole('dialog').getByRole('button', { name: 'Send', exact: true }).waitFor();
+      assert.equal(await page.getByLabel('Message *', { exact: true }).inputValue(), 'Synthetic compose text');
+      await shot(page, 'compose-desktop-1440');
+      failSend = false;
+      await page.getByRole('dialog').getByRole('button', { name: 'Send', exact: true }).click();
+      await page.getByRole('dialog').waitFor({ state: 'hidden' });
+      assert.equal(await page.getByRole('button', { name: 'Resume draft', exact: true }).count(), 0);
+      assert.equal(report.requests.filter((r) => r.path === '/admin/email/send').length, 2);
+    });
+    await scenario('blocked senders remains in the Email sub-section', async () => {
+      await page.getByRole('navigation', { name: 'Email section', exact: true }).getByRole('button', { name: 'Blocked Senders' }).click();
+      await page.getByPlaceholder('Block domain or email (e.g. spammer.com or bad@example.com)').waitFor();
+    });
+    const mobile = await openPage('admin', 390);
+    await scenario('mobile Email keeps one header and a recoverable full-screen composer', async () => {
+      await mobile.goto(`${server.baseUrl}/admin/communications?id=${a.id}#tab=email`);
+      await mobile.getByText(a.body_text, { exact: true }).waitFor();
+      await shot(mobile, 'email-mobile-390');
+      await mobile.getByRole('button', { name: 'New Email', exact: true }).click();
+      await mobile.getByLabel('Message *', { exact: true }).fill('Synthetic mobile draft');
+      await shot(mobile, 'compose-mobile-390');
+      await mobile.getByRole('button', { name: 'Close', exact: true }).first().click();
+      await channel(mobile, 'SMS').click();
+      await channel(mobile, 'Email').click();
+      await mobile.getByRole('button', { name: 'Resume draft', exact: true }).click();
+      assert.equal(await mobile.getByLabel('Message *', { exact: true }).inputValue(), 'Synthetic mobile draft');
+    });
+    const tech = await openPage('technician', 390);
+    await scenario('verified technician role blocks Email despite a forged stored admin role', async () => {
+      await tech.goto(`${server.baseUrl}/admin/communications#tab=email`);
+      await channel(tech, 'SMS').waitFor();
+      assert.equal(await channel(tech, 'Email').count(), 0);
+      assert.equal(report.requests.filter((r) => r.stage === stage && r.path.startsWith('/admin/email/')).length, 0);
+      await shot(tech, 'communications-technician-mobile-390');
+    });
+    assert.deepEqual(report.unmatched, []);
+    assert.deepEqual(report.pageErrors, []);
+    assert.deepEqual(report.requests.filter((r) => r.method !== 'GET' && r.path !== '/admin/email/send'), []);
+    report.passed = true;
+  } catch (error) {
+    report.failure = { stage, message: error.message };
+    throw error;
+  } finally {
+    fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
+    try { for (const context of browser?.contexts() || []) await context.setOffline(true); await browser?.close(); }
+    finally { await server?.close(); }
+  }
+  console.log(`Synthetic Email QA passed: ${report.scenarios.length} scenarios.`);
+}
+main().catch((error) => { console.error(error); process.exitCode = 1; });

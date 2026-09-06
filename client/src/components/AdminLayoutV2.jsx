@@ -36,6 +36,7 @@ import {
 } from "../config/adminNavigation";
 import NotificationBell from "./NotificationBell";
 import GlobalCommandPalette from "./admin/GlobalCommandPalette";
+import { clearEmailDrafts } from "../lib/emailDrafts";
 
 function initialsFor(name) {
   if (!name) return "•";
@@ -151,6 +152,7 @@ export default function AdminLayoutV2() {
   }, [authStatus, location.pathname, location.search]);
 
   const handleLogout = () => {
+    clearEmailDrafts();
     localStorage.removeItem("waves_admin_token");
     localStorage.removeItem("waves_admin_user");
     refetchFlags().catch(() => {});
@@ -683,7 +685,7 @@ export default function AdminLayoutV2() {
       )}
 
       {/* Global ⌘K palette */}
-      <GlobalCommandPalette ref={paletteRef} />
+      <GlobalCommandPalette ref={paletteRef} user={user} />
     </div>
     </IntelligenceBarPageDataProvider>
   );

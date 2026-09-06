@@ -1,8 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
+import { useLocation, useNavigate, useOutletContext, useSearchParams } from "react-router-dom";
 import useIsMobile from "../../hooks/useIsMobile";
-import { Ban, Inbox, Mail, Plus, Send } from "lucide-react";
+import useModalFocus from "../../hooks/useModalFocus";
+import { Ban, Inbox, Plus, Send } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { loadEmailDrafts, subscribeEmailDrafts, updateEmailDrafts } from "../../lib/emailDrafts";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 function adminFetch(path, options = {}) {
@@ -129,8 +132,26 @@ function timeAgo(dateStr) {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
-export default function EmailPage() {
+export default function EmailPage({ navigation }) {
   const isMobile = useIsMobile();
+  const { user } = useOutletContext();
+  const [searchParams] = useSearchParams();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const selectMessageId = (id, replace = false) => {
+    const next = new URLSearchParams(searchParams);
+    if (id) next.set("id", id); else next.delete("id");
+    navigate({ pathname: location.pathname, search: `?${next}`, hash: location.hash }, { replace });
+  };
+  const [draftSession] = useState(() => loadEmailDrafts(user.id));
+  const [drafts, setDrafts] = useState(draftSession.drafts);
+  const [storageError, setStorageError] = useState(!draftSession.saved);
+  useEffect(() => subscribeEmailDrafts(draftSession, () => {
+    setDrafts(draftSession.drafts);
+    setStorageError(!draftSession.saved);
+  }), [draftSession]);
+  const composeForm = drafts.compose;
+  const changeDrafts = (update) => updateEmailDrafts(draftSession, update);
   const [status, setStatus] = useState(null);
   const [stats, setStats] = useState(null);
   const [emails, setEmails] = useState([]);
@@ -140,7 +161,10 @@ export default function EmailPage() {
   const [page, setPage] = useState(1);
   const [selectedEmail, setSelectedEmail] = useState(null);
   const [thread, setThread] = useState([]);
-  const [replyText, setReplyText] = useState("");
+  const replyText = drafts.replies[selectedEmail?.id] || "";
+  const selectedIdRef = useRef(null);
+  selectedIdRef.current = selectedEmail?.id;
+  const setReplyDraft = (id, text) => changeDrafts((current) => ({ ...current, replies: { ...current.replies, [id]: text } }));
   const [sending, setSending] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [digest, setDigest] = useState(null);
@@ -150,12 +174,9 @@ export default function EmailPage() {
   const [drafting, setDrafting] = useState(false);
   const [draftResult, setDraftResult] = useState(null);
   const [showCompose, setShowCompose] = useState(false);
-  const [composeForm, setComposeForm] = useState({
-    to: "",
-    subject: "",
-    body: "",
-  });
+  const setComposeForm = (update) => changeDrafts((current) => ({ ...current, compose: update(current.compose) }));
   const [composeSending, setComposeSending] = useState(false);
+  const composeRef = useModalFocus(showCompose, () => { if (!composeSending) setShowCompose(false); });
   const [connecting, setConnecting] = useState(false);
   // Customer search for the compose "To" field — type a name (or partial
   // email) to look up a customer and drop their email into the recipient.
@@ -163,6 +184,13 @@ export default function EmailPage() {
   const [toSearching, setToSearching] = useState(false);
   const [toDropdownOpen, setToDropdownOpen] = useState(false);
   const toFieldRef = useRef(null);
+  const hasDrafts = Object.values(composeForm).some(Boolean) || Object.values(drafts.replies).some(Boolean);
+  useEffect(() => {
+    if (!(storageError && hasDrafts) && !sending && !composeSending) return undefined;
+    const warnBeforeReload = (event) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warnBeforeReload);
+    return () => window.removeEventListener("beforeunload", warnBeforeReload);
+  }, [storageError, hasDrafts, sending, composeSending]);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -254,28 +282,35 @@ export default function EmailPage() {
     }
   }, [status, loadStats, loadEmails, loadDigest]);
 
-  // Deep link from the "Email from <customer>" bell: /admin/email?id=<uuid>
-  // opens that message (it may be off the first page or archived, so it is
-  // fetched directly rather than looked up in the list). Runs once.
-  const deepLinkedRef = useRef(false);
+  // Old bells/OAuth returns keep working through /admin/email's alias.
+  // Observe query changes as well as mount so Back/Forward can select mail.
   useEffect(() => {
-    if (!status?.connected || deepLinkedRef.current) return;
-    const id = new URLSearchParams(window.location.search).get("id");
-    if (!id) return;
-    deepLinkedRef.current = true;
+    if (!status?.connected) return;
+    const id = searchParams.get("id");
+    if (!id) { setSelectedEmail(null); setThread([]); return; }
+    if (id === selectedIdRef.current) return;
+    let cancelled = false;
     (async () => {
       try {
-        const r = await adminFetch(`/api/admin/email/message/${id}`);
+        const r = await adminFetch(`/api/admin/email/message/${encodeURIComponent(id)}`);
         // GET /message/:id already marked it read server-side; hand openEmail
         // the read state so it does not toggle it back (codex P2).
-        if (r.ok) openEmail({ ...(await r.json()), is_read: true });
+        if (!r.ok) return;
+        const email = await r.json();
+        if (!cancelled) await openEmail({ ...email, is_read: true });
       } catch { /* the inbox still renders */ }
     })();
-  }, [status]);
+    return () => { cancelled = true; };
+  }, [status, searchParams]);
 
   const openEmail = async (email) => {
+    selectedIdRef.current = email.id;
     setSelectedEmail(email);
-    setReplyText("");
+    setThread([]);
+    setDraftResult(null);
+    if (searchParams.get("id") !== email.id) {
+      selectMessageId(email.id);
+    }
     try {
       if (!email.is_read) {
         await adminFetch(`/api/admin/email/message/${email.id}/read`, {
@@ -290,10 +325,17 @@ export default function EmailPage() {
         `/api/admin/email/thread/${email.gmail_thread_id}`,
       );
       const d = await r.json();
-      setThread(d.thread || []);
+      if (selectedIdRef.current === email.id) setThread(d.thread || []);
     } catch {
       /* ignore */
     }
+  };
+
+  const closeEmail = () => {
+    selectedIdRef.current = null;
+    setSelectedEmail(null);
+    setThread([]);
+    selectMessageId(null, true);
   };
 
   const handleStar = async (e, email) => {
@@ -319,7 +361,7 @@ export default function EmailPage() {
         method: "POST",
       });
       setEmails((prev) => prev.filter((e) => e.id !== emailId));
-      if (selectedEmail?.id === emailId) setSelectedEmail(null);
+      if (selectedIdRef.current === emailId) closeEmail();
       loadStats();
     } catch {
       /* ignore */
@@ -332,7 +374,7 @@ export default function EmailPage() {
         method: "POST",
       });
       setEmails((prev) => prev.filter((e) => e.id !== emailId));
-      if (selectedEmail?.id === emailId) setSelectedEmail(null);
+      if (selectedIdRef.current === emailId) closeEmail();
       loadStats();
     } catch {
       /* ignore */
@@ -376,12 +418,15 @@ export default function EmailPage() {
         }),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      setReplyText("");
+      changeDrafts((current) => ({ ...current, replies: {
+        ...current.replies,
+        [selectedEmail.id]: current.replies[selectedEmail.id] === replyText ? "" : current.replies[selectedEmail.id],
+      } }));
       const threadResponse = await adminFetch(
         `/api/admin/email/thread/${selectedEmail.gmail_thread_id}`,
       );
       const d = await threadResponse.json();
-      setThread(d.thread || []);
+      if (selectedIdRef.current === selectedEmail.id) setThread(d.thread || []);
     } catch (err) {
       window.alert("Failed to send reply: " + err.message);
     }
@@ -398,9 +443,9 @@ export default function EmailPage() {
         { method: "POST" },
       );
       const d = await r.json();
-      if (d.reply_draft) {
-        setReplyText(d.reply_draft);
-        setDraftResult(d);
+      if (d.reply_draft && (draftSession.drafts.replies[selectedEmail.id] || "") === replyText) {
+        setReplyDraft(selectedEmail.id, d.reply_draft);
+        if (selectedIdRef.current === selectedEmail.id) setDraftResult(d);
       }
     } catch {
       /* ignore */
@@ -421,8 +466,12 @@ export default function EmailPage() {
         }),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      setShowCompose(false);
-      setComposeForm({ to: "", subject: "", body: "" });
+      // A response can arrive after channel navigation or another edit. Clear
+      // only the submitted snapshot, including in the recovery store.
+      if (JSON.stringify(draftSession.drafts.compose) === JSON.stringify(composeForm)) {
+        setComposeForm(() => ({ to: "", subject: "", body: "" }));
+        setShowCompose(false);
+      }
       loadStats();
     } catch (err) {
       window.alert("Failed to send: " + err.message);
@@ -551,8 +600,7 @@ export default function EmailPage() {
       <div style={{ maxWidth: 1300, margin: "0 auto" }}>
         {" "}
         <AdminCommandHeader
-          title="Email"
-          icon={Mail}
+          {...navigation}
           action={{
             label: connecting ? "Connecting..." : "Connect Gmail",
             icon: Send,
@@ -623,7 +671,7 @@ export default function EmailPage() {
     return (
       <div style={{ maxWidth: 1300, margin: "0 auto" }}>
         {" "}
-        <AdminCommandHeader title="Email" icon={Mail} />{" "}
+        <AdminCommandHeader {...navigation} />{" "}
         <div style={{ padding: 40, color: D.muted }}>Loading...</div>{" "}
       </div>
     );
@@ -643,27 +691,35 @@ export default function EmailPage() {
     { key: "inbox", label: "Inbox", Icon: Inbox },
     { key: "blocked", label: "Blocked Senders", Icon: Ban },
   ];
+  // Direct links may point to an archived or off-page message. Keep the
+  // selected card visible while the inbox retains its current filters.
+  const visibleEmails = selectedEmail && !emails.some((email) => email.id === selectedEmail.id)
+    ? [selectedEmail, ...emails] : emails;
+  const recoveryNotice = storageError
+    ? "Draft recovery is unavailable. Your text stays while navigating here; copy it before reloading or closing this tab."
+    : "Drafts are saved in this browser tab until you send, discard, or sign out.";
 
   return (
     <div style={{ maxWidth: 1300, margin: "0 auto" }}>
       {" "}
       <AdminCommandHeader
-        title="Email"
-        icon={Mail}
-        sections={emailSections}
-        activeKey={tab}
-        onSectionChange={(key) => {
+        {...navigation}
+        secondarySections={emailSections}
+        secondaryActiveKey={tab}
+        onSecondaryChange={(key) => {
           setTab(key);
           if (key === "blocked") loadBlocked();
         }}
-        ariaLabel="Email section"
-        navGridClassName="grid-cols-2"
+        secondaryAriaLabel="Email section"
+        secondaryNavGridClassName="grid-cols-2"
         action={{
-          label: "New Email",
+          label: Object.values(composeForm).some(Boolean) ? "Resume draft" : "New Email",
           icon: Plus,
           onClick: () => setShowCompose(true),
         }}
       />
+      {(hasDrafts || storageError) && <p role={storageError ? "alert" : "status"}
+        style={{ fontSize: 14, color: storageError ? D.red : D.muted }}>{recoveryNotice}</p>}
       {/* Daily digest card */}
       {digest && digest.total_received > 0 && (
         <div
@@ -979,7 +1035,7 @@ export default function EmailPage() {
               overflow: "hidden",
             }}
           >
-            {emails.length === 0 ? (
+            {visibleEmails.length === 0 ? (
               <div
                 style={{
                   padding: 40,
@@ -991,7 +1047,7 @@ export default function EmailPage() {
                 No emails found
               </div>
             ) : (
-              emails.map((email) => {
+              visibleEmails.map((email) => {
                 const isSelected = selectedEmail?.id === email.id;
                 let extractedData = null;
                 try {
@@ -1073,6 +1129,7 @@ export default function EmailPage() {
                             }}
                           >
                             {email.from_name || email.from_address}
+                            {drafts.replies[email.id] && <span style={{ fontSize: 14, marginLeft: 8 }}>Draft</span>}
                           </div>{" "}
                           <div
                             style={{
@@ -1421,7 +1478,8 @@ export default function EmailPage() {
                           </div>{" "}
                           <textarea
                             value={replyText}
-                            onChange={(e) => setReplyText(e.target.value)}
+                            aria-label="Reply"
+                            onChange={(e) => setReplyDraft(selectedEmail.id, e.target.value)}
                             placeholder="Type your reply..."
                             rows={4}
                             style={{
@@ -1451,6 +1509,8 @@ export default function EmailPage() {
                               before sending
                             </div>
                           )}
+                          {replyText && <button type="button" onClick={() => setReplyDraft(selectedEmail.id, "")}
+                            disabled={sending} style={{ fontSize: 14, color: D.muted, marginBottom: 8, padding: "8px 12px", border: `1px solid ${D.border}`, borderRadius: 6, background: "transparent", cursor: "pointer" }}>Discard reply</button>}
                           <div
                             style={{
                               display: "flex",
@@ -1572,6 +1632,10 @@ export default function EmailPage() {
           {" "}
           <div
             onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            ref={composeRef}
+            aria-modal="true"
+            aria-labelledby="email-compose-title"
             style={{
               background: D.card,
               border: `1px solid ${D.border}`,
@@ -1608,6 +1672,7 @@ export default function EmailPage() {
             >
               {" "}
               <h2
+                id="email-compose-title"
                 style={{
                   fontSize: 18,
                   fontWeight: 500,
@@ -1637,6 +1702,7 @@ export default function EmailPage() {
               <div>
                 {" "}
                 <label
+                  htmlFor="email-compose-to"
                   style={{
                     display: "block",
                     fontSize: 11,
@@ -1651,6 +1717,7 @@ export default function EmailPage() {
                 <div ref={toFieldRef} style={{ position: "relative" }}>
                   {" "}
                   <input
+                    id="email-compose-to"
                     type="email"
                     value={composeForm.to}
                     onChange={(e) => {
@@ -1764,6 +1831,7 @@ export default function EmailPage() {
               <div>
                 {" "}
                 <label
+                  htmlFor="email-compose-subject"
                   style={{
                     display: "block",
                     fontSize: 11,
@@ -1776,6 +1844,7 @@ export default function EmailPage() {
                   Subject
                 </label>{" "}
                 <input
+                  id="email-compose-subject"
                   value={composeForm.subject}
                   onChange={(e) =>
                     setComposeForm((f) => ({ ...f, subject: e.target.value }))
@@ -1796,6 +1865,7 @@ export default function EmailPage() {
               <div>
                 {" "}
                 <label
+                  htmlFor="email-compose-body"
                   style={{
                     display: "block",
                     fontSize: 11,
@@ -1808,6 +1878,7 @@ export default function EmailPage() {
                   Message *
                 </label>{" "}
                 <textarea
+                  id="email-compose-body"
                   rows={8}
                   value={composeForm.body}
                   onChange={(e) =>
@@ -1829,6 +1900,7 @@ export default function EmailPage() {
                 />{" "}
               </div>{" "}
             </div>{" "}
+            <p role={storageError ? "alert" : "status"} style={{ fontSize: 14, color: storageError ? D.red : D.muted }}>{recoveryNotice}</p>
             <div
               style={{
                 display: "flex",
@@ -1851,8 +1923,11 @@ export default function EmailPage() {
                   color: D.muted,
                 }}
               >
-                Cancel
+                Close
               </button>{" "}
+              <button type="button" disabled={composeSending}
+                onClick={() => { setComposeForm(() => ({ to: "", subject: "", body: "" })); setShowCompose(false); }}
+                style={{ fontSize: 14, color: D.muted, padding: "8px 12px", border: `1px solid ${D.border}`, borderRadius: 6, background: "transparent", cursor: "pointer" }}>Discard draft</button>
               <button
                 onClick={handleComposeSend}
                 disabled={

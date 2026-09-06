@@ -10,6 +10,23 @@ vi.mock('../../hooks/useIsMobile', () => ({ default: vi.fn(() => false) }));
 vi.mock('../tech/DictationButton', () => ({ default: () => null }));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
+test.each([["admin", "email"], ["technician", "comms"]])("Email tab keeps the permitted tool context for %s", async (role, expectedContext) => {
+  useIsMobile.mockReturnValue(false);
+  vi.stubGlobal("localStorage", { getItem: () => "fixture-token", setItem() {}, removeItem() {} });
+  vi.stubGlobal("fetch", vi.fn(async (url) => String(url).endsWith("/query")
+    ? { ok: true, json: async () => ({ response: "Synthetic context response", conversationHistory: [] }) }
+    : { ok: false, status: 404, json: async () => ({}) }));
+  const ref = createRef();
+  render(<MemoryRouter initialEntries={["/admin/communications#tab=email"]}><GlobalCommandPalette ref={ref} user={{ id: "fixture-user", role }} /></MemoryRouter>);
+  act(() => ref.current.open());
+  const input = screen.getByPlaceholderText(/Ask anything/);
+  fireEvent.change(input, { target: { value: "Show the inbox summary" } });
+  fireEvent.keyDown(input, { key: "Enter" });
+  await screen.findByText("Synthetic context response");
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/query"));
+  expect(JSON.parse(request[1].body).context).toBe(expectedContext);
+});
+
 test.each([[false, 200], [true, 200], [false, 409], [true, 409]])('failure stays settled across a follow-up (mobile=%s, HTTP=%s)', async (mobile, status) => {
   useIsMobile.mockReturnValue(mobile);
   const store = new Map([['waves_admin_token', 'fixture-token']]);

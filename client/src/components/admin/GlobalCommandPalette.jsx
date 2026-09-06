@@ -137,7 +137,9 @@ const CONTEXT_COLORS = {
   estimates: D.teal,
 };
 
-function detectContext(pathname, search = "") {
+function detectContext(pathname, search = "", hash = "", user) {
+  if (pathname === "/admin/communications" && user?.role === "admin"
+    && new URLSearchParams(hash.replace(/^#/, "")).get("tab") === "email") return "email";
   // /admin/pipeline hosts both the Leads pipeline and the consolidated
   // Estimates workspace (the old /admin/estimates now redirects here with
   // ?tab=…), so pathname alone can't pick the context — the tab query
@@ -148,32 +150,27 @@ function detectContext(pathname, search = "") {
   if (pathname === "/admin/pipeline" || pathname.startsWith("/admin/pipeline/")) {
     const params = new URLSearchParams(search);
     const tab = params.get("tab");
-    if (tab === "estimates" || tab === "new" || tab === "pricing") {
+    if (["estimates", "new", "pricing"].includes(tab)) {
       return "estimates";
     }
     if (!tab && params.get("estimateId")) return "estimates";
     return "leads";
   }
   if (ROUTE_CONTEXT_MAP[pathname]) return ROUTE_CONTEXT_MAP[pathname];
-  const routes = Object.entries(ROUTE_CONTEXT_MAP).sort(
+  const routes = Object.entries(ROUTE_CONTEXT_MAP).filter(([route]) => route !== "/admin").sort(
     (a, b) => b[0].length - a[0].length,
   );
   // The exact "/admin" catch-all must not shadow the role-aware fallback
   // below — for a technician it would map every unmapped page (Settings,
   // Reports, Equipment, Knowledge, Staff) to `dashboard`, which the IB
   // rejects for that role (codex P2).
-  let catchAll = null;
   for (const [route, ctx] of routes) {
-    if (route === "/admin") { catchAll = ctx; continue; }
     if (pathname.startsWith(route)) return ctx;
   }
   // Fallback context: the IB rejects `dashboard` for non-admin roles
   // (server pins them to the tech toolset anyway).
-  try {
-    const role = JSON.parse(localStorage.getItem("waves_admin_user") || "null")?.role;
-    if (role && role !== "admin") return "customers";
-  } catch { /* fall through */ }
-  return catchAll || "dashboard";
+  if (user && user.role !== "admin") return "customers";
+  return ROUTE_CONTEXT_MAP["/admin"];
 }
 
 function loadRecents() {
@@ -300,7 +297,7 @@ function renderInline(text) {
 }
 
 // ─── MAIN COMPONENT ─────────────────────────────────────────────
-function GlobalCommandPalette(_props, ref) {
+function GlobalCommandPalette({ user }, ref) {
   const [open, setOpen] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(false);
@@ -358,7 +355,7 @@ function GlobalCommandPalette(_props, ref) {
       ? { ...item, resolvedStatus: status, resolvedWarning: warning } : item));
   }, []);
   const ibPageData = useIntelligenceBarPageData();
-  const context = detectContext(location.pathname, location.search);
+  const context = detectContext(location.pathname, location.search, location.hash, user);
   const accentColor = CONTEXT_COLORS[context] || D.teal;
   const contextLabel = CONTEXT_LABELS[context] || "Admin";
 
