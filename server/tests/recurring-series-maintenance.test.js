@@ -1151,8 +1151,10 @@ describe('renewal banner revalidates historical recurring alerts', () => {
   test('does not pair a historical customer identity with a reassigned plan', async () => {
     expect(await refreshRecurringPlanAlert(scenario({ parent: { customer_id: 'customer-b' } }), alert)).toBeNull();
   });
-  test('fails closed when catalog resolution fails', async () => {
+  test('omits only the affected alert when catalog resolution fails', async () => {
     profileResolver.mockRejectedValueOnce(new Error('catalog unavailable'));
-    await expect(refreshRecurringPlanAlert(scenario(), alert)).rejects.toThrow('catalog unavailable');
+    await expect(refreshRecurringPlanAlert(scenario(), alert)).resolves.toBeNull();
+    await expect(refreshRecurringPlanAlert(scenario(), { ...alert, id: 2 }))
+      .resolves.toMatchObject({ id: 2, remainingVisits: 1 });
   });
 });
