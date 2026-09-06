@@ -214,7 +214,7 @@ async function appointmentPropertyPreview(conn, plan) {
       status: row.status, service_type: row.service_type,
       current_address: formatAddress(effectiveServiceAddress(row, customer)),
     })),
-    effects: 'Changes the destination and map coordinates for these service lines; regroups their visit at the destination and clears the route position and cached pre-service brief. Preserves the primary customer address, future visits, schedule times, status, and billing. Sends no messages.',
+    effects: 'Changes the destination and map coordinates for these service lines and clears the route position and cached pre-service brief. The visit keeps its current grouping and is not combined with other stops at the destination; regroup from Dispatch if needed. Preserves the primary customer address, future visits, schedule times, status, and billing. Sends no messages.',
     navigation: 'An already-open navigation app may need its destination refreshed separately.',
   };
 }
