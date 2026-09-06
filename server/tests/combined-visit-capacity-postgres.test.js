@@ -123,6 +123,23 @@ postgres('combined booking capacity on PostgreSQL', () => {
     expect((await mockPg('scheduled_services').whereNotNull('reservation_expires_at')).length).toBe(0);
   });
 
+  test('selected lawn cadence replaces a retired stored tier during reservation and acceptance', async () => {
+    const data = estimateData();
+    data.result.recurring.services[1].visitsPerYear = 4;
+    data.result.results = { lawn: [
+      { name: 'Standard', v: 6, mo: 60, ann: 720, pa: 120 },
+      { name: 'Enhanced', v: 9, mo: 90, ann: 1080, pa: 120 },
+    ] };
+    await mockPg('estimates').where({ id: firstEstimateId }).update({ estimate_data: data });
+    const selection = { selectedFrequency: 'quarterly', serviceCadences: { lawn_care: 'standard' } };
+    const held = await reserveSlot({ estimateId: firstEstimateId, slotId: signedSlot(firstEstimateId), ...selection });
+    const booked = await commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId, ...selection });
+    expect(booked.window_end).toBe('11:00:00');
+    expect(booked.reservation_service_mix.services).toEqual(['pest_control', 'lawn_care']);
+    expect(booked.notes).toContain('6x');
+    expect((await mockPg('estimates').where({ id: firstEstimateId }).first()).estimate_data).toEqual(data);
+  });
+
   test('concurrent reservations cannot both claim the combined block', async () => {
     const results = await Promise.allSettled([firstEstimateId, secondEstimateId].map((estimateId) => reserveSlot({ estimateId, slotId: signedSlot(estimateId) })));
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);

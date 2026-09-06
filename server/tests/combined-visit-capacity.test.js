@@ -87,6 +87,33 @@ describe('combined visit booking capacity', () => {
     expect(profile.durationMinutes).toBe(120);
   });
 
+  test.each([
+    ['lawn_care', 'lawn', 'standard', 6],
+    ['lawn_care', 'lawn', 'enhanced', 9],
+    ['lawn_care', 'lawn', 'premium', 12],
+    ['tree_shrub', 'ts', 'light', 4],
+    ['tree_shrub', 'ts', 'standard', 6],
+  ])('the selected %s %s tier %s overrides stored cadence before capacity validation', (service, resultKey, tier, visits) => {
+    process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
+    const estimate = estimateFor(['pest_control', service]);
+    estimate.estimate_data.result.recurring.services[1].visitsPerYear = service === 'lawn_care' ? 4 : 9;
+    estimate.estimate_data.result.results = { [resultKey]: [
+      { name: 'Light', v: 4, mo: 40, ann: 480, pa: 120 },
+      { name: 'Standard', v: 6, mo: 60, ann: 720, pa: 120 },
+      { name: 'Enhanced', v: 9, mo: 90, ann: 1080, pa: 120 },
+      { name: 'Premium', v: 12, mo: 120, ann: 1440, pa: 120 },
+    ] };
+    const before = structuredClone(estimate);
+    const profile = resolveEstimateSlotProfile(estimate, {
+      selectedFrequency: 'quarterly', serviceCadences: { [service]: tier },
+    });
+    expect(profile.services.map((row) => [row.service, row.visitsPerYear])).toEqual([
+      ['pest_control', 4], [service, visits],
+    ]);
+    expect(profile.durationMinutes).toBe(120);
+    expect(estimate).toEqual(before);
+  });
+
   test('a persisted combined reservation keeps the accepted mix sized after the gate is off', () => {
     const profile = resolveEstimateSlotProfile(estimateFor(services.slice(0, 2)), { preserveCombinedCapacity: true });
     expect(profile.durationMinutes).toBe(120);

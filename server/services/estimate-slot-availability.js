@@ -426,7 +426,7 @@ function selectedPricingFrequency(estimate = {}, estData = {}, selectedFrequency
   return selectedGeneratedPricingFrequency(estimate, estData, selectedFrequency);
 }
 
-function recurringRowsForEstimate(estimate = {}, estData = {}, selectedFrequency = '') {
+function recurringRowsForEstimate(estimate = {}, estData = {}, selectedFrequency = '', serviceCadences = null) {
   const frequency = selectedPricingFrequency(estimate, estData, selectedFrequency);
   const stored = storedRecurringRowsForEstimate(estimate, estData);
   const selected = Array.isArray(frequency?.perServiceTreatments)
@@ -438,14 +438,35 @@ function recurringRowsForEstimate(estimate = {}, estData = {}, selectedFrequency
         .filter((row) => isPestServiceName(row.name || row.label || row.service));
     }
   }
-  if (!selected.length) return stored;
-
   // A generated lawn tier describes only lawn. Apply its selected cadence
   // without interpreting omitted companions as customer removals. Keep the
   // converter's precise identities: bait, rental and bond are distinct rows.
   const { recurringServiceKey } = require('./estimate-converter');
   const selectedKeys = new Set(selected.map(recurringServiceKey));
-  return [...selected, ...stored.filter((row) => !selectedKeys.has(recurringServiceKey(row)))];
+  const rows = [...selected, ...stored.filter((row) => !selectedKeys.has(recurringServiceKey(row)))];
+  if (!serviceCadences || typeof serviceCadences !== 'object' || Array.isArray(serviceCadences)) return rows;
+
+  // Bundle selectedFrequency owns pest; the other axes must be restamped
+  // BEFORE the converter decides which physical programs it can schedule.
+  // Reuse acceptance's offered-tier ladder and row writers, including the
+  // real catalog identity and cadence aliases (not just visitsPerYear).
+  const acceptance = require('../routes/estimate-public');
+  const writers = {
+    lawn_care: acceptance.applySelectedLawnTierToEstimateData,
+    tree_shrub: acceptance.applySelectedTreeShrubTierToEstimateData,
+    mosquito: acceptance.applySelectedMosquitoTierToEstimateData,
+  };
+  return Object.entries(serviceCadences).reduce((current, [service, tierKey]) => {
+    const writer = writers[service];
+    const row = current.find((candidate) => recurringServiceKey(candidate) === service);
+    if (!writer || !row) return current;
+    const ladder = acceptance.bundleSectionLadderForService(service, estData, row, estData?.result?.recurring?.discount);
+    // A single-tier section has no ladder and acceptance retains its row.
+    if (!ladder) return current;
+    const tier = ladder.find((entry) => entry.key === String(tierKey).trim());
+    if (!tier) throw require('./combined-visit-capacity').capacityUnavailable();
+    return writer({ recurring: { services: current } }, tier).recurring.services;
+  }, rows);
 }
 
 function compactServiceLabel(label) {
@@ -717,7 +738,7 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   const combinedPolicy = serviceMode !== 'one_time'
     && (process.env.GATE_VISIT_COMBINED_CAPACITY === 'true' || userOpts.preserveCombinedCapacity === true);
   let recurringSelection = serviceMode === 'one_time' ? []
-    : recurringRowsForEstimate(estimate, estData, selectedFrequency);
+    : recurringRowsForEstimate(estimate, estData, selectedFrequency, combinedPolicy ? userOpts.serviceCadences : null);
   if (combinedPolicy) {
     const converter = require('./estimate-converter');
     const isLegacyRodentRow = require('./billing-cadence').legacyRodentRowPredicateFor(estData);
@@ -1572,6 +1593,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     serviceProfile.serviceMode,
     serviceProfile.selectedFrequency || 'default',
     serviceProfile.mosquitoCadence || 'noaxis',
+    JSON.stringify(serviceProfile.services),
     serviceProfile.durationMinutes,
     opts.minimumLeadMinutes,
     opts.dateFrom || 'auto',
