@@ -101,8 +101,9 @@ function frontendSourceCensus(source, relative) {
       const identity = `${relative}|${handler}|${method}|${endpoint || (localExport ? 'local export' : 'dynamic endpoint')}`;
       const occurrence = (occurrences.get(identity) || 0) + 1;
       occurrences.set(identity, occurrence);
-      const fingerprint = crypto.createHash('sha256').update(source.slice(node.start, node.end).replace(/\s+/g, ' ')).digest('hex');
-      out.push({ id: `${identity}|${occurrence}`, module: relative.split('/admin/')[1]?.split('/')[0] || 'shared admin',
+      const fingerprint = crypto.createHash('sha256').update(source.slice(node.start, node.end).replace(/\s+/g, ' ')).digest('base64url');
+      const id = crypto.createHash('sha256').update(`${identity}|${occurrence}`).digest('hex').slice(0, 24);
+      out.push({ id, module: relative.split('/admin/')[1]?.split('/')[0] || 'shared admin',
         ui: { file: relative, line: node.loc.start.line, handler },
         operation: { method, endpoint, resolution: endpoint ? 'literal_or_template' : localExport ? 'local_export' : 'unresolved' },
         fingerprint,
@@ -119,20 +120,20 @@ function frontendCensus(ref) {
 }
 
 function backendCensus(ref) {
-  const out = [];
+  const out = {};
   for (const file of sourceFiles(path.join(ROOT, 'server/routes'), ref).filter(f => path.basename(f).startsWith('admin-'))) {
     const { source, ast } = parseFile(file, ref);
+    const routes = [];
     walk(ast, (node) => {
       if (node.type !== 'CallExpression') return;
       const method = named(node.callee).match(/^router\.(get|post|put|patch|delete)$/)?.[1];
       const endpoint = expressionText(node.arguments[0]);
       if (!method || !endpoint) return;
       const routeGuards = node.arguments.slice(1).filter(a => a.type === 'Identifier').map(named);
-      out.push({ file: path.relative(ROOT, file), line: node.loc.start.line, method: method.toUpperCase(), path: endpoint,
-        guards: routeGuards, routerGuard: source.includes('router.use(adminAuthenticate, requireAdmin)') ? 'admin'
-          : source.includes('router.use(adminAuthenticate, requireTechOrAdmin)') ? 'technician_or_admin' : 'review_route_guards',
-      });
+      routes.push({ line: node.loc.start.line, method: method.toUpperCase(), path: endpoint, guards: routeGuards });
     });
+    out[path.relative(ROOT, file)] = { routerGuard: source.includes('router.use(adminAuthenticate, requireAdmin)') ? 'admin'
+      : source.includes('router.use(adminAuthenticate, requireTechOrAdmin)') ? 'technician_or_admin' : 'review_route_guards', routes };
   }
   return out;
 }
@@ -158,15 +159,17 @@ function main() {
   const backend = backendCensus(baselineRef);
   if (process.argv.includes('--snapshot')) {
     if (fs.existsSync(MANIFEST)) throw new Error('Baseline already exists. Map changes; do not erase uncovered actions.');
-    const manifest = { version: 1, baselineCommit: 'a2bb0bc49',
+    const manifest = { version: 1, baselineCommit: 'a2bb0bc49', fingerprintEncoding: 'sha256-base64url',
       meaning: 'Source census awaiting capability review. Unmapped baseline rows remain unsupported/unverified, not reviewed exceptions.',
-      actions: current.map(a => ({ ...a, baselineFingerprint: a.fingerprint, status: 'unmapped', tools: [], evidence: [],
+      unmappedDefaults: { tools: [], evidence: [],
         permission: 'requires_action_review', approval: 'requires_action_review', inputsAndEffects: 'requires_action_review',
-      })), backend };
+      },
+      actions: current.map(({ fingerprint, ...a }) => ({ ...a, baselineFingerprint: fingerprint, status: 'unmapped' })), backend };
     // Compact records keep this machine-maintained denominator reviewable.
     const encoded = compactManifest(manifest);
     fs.writeFileSync(MANIFEST, encoded + '\n');
-    console.log(`Initial census: ${current.length} UI request/export sites, ${backend.length} backend route registrations. Zero actions claimed verified.`);
+    const routeCount = Object.values(backend).reduce((n, group) => n + group.routes.length, 0);
+    console.log(`Initial census: ${current.length} UI request/export sites, ${routeCount} backend route registrations. Zero actions claimed verified.`);
     return;
   }
   const manifest = JSON.parse(fs.readFileSync(MANIFEST, 'utf8'));
@@ -182,7 +185,7 @@ function compactManifest(manifest) {
   const { actions, backend, ...header } = manifest;
   return JSON.stringify(header, null, 2).replace(/\n}$/, ',\n')
     + `  "actions": [\n${actions.map(a => `    ${JSON.stringify(a)}`).join(',\n')}\n  ],\n`
-    + `  "backend": [\n${backend.map(a => `    ${JSON.stringify(a)}`).join(',\n')}\n  ]\n}`;
+    + `  "backend": {\n${Object.entries(backend).map(([file, group]) => `    ${JSON.stringify(file)}: ${JSON.stringify(group)}`).join(',\n')}\n  }\n}`;
 }
 
 if (require.main === module) main();
