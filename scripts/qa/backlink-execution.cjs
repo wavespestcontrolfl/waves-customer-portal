@@ -170,8 +170,61 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
     assert.equal((await trx('seo_link_placement_authorities').where({ id: authority.id }).first()).satisfied_at, null);
     assert.equal((await trx('audit_log').where({ resource_id: p.id, action: 'backlink.submission.confirm' })).length, 0);
     // A snapshot recorded at the mutation boundary remains authoritative after the same board edit.
-    await trx('seo_link_attempts').where({ id: rejectedAttempt }).update({ detail: { ...unresolved.detail, citation: { website: 'https://wavespestcontrol.com', location: p.location_key } } });
+    await trx('seo_link_attempts').where({ id: rejectedAttempt }).update({ detail: { ...unresolved.detail, execution_revision: authority.path_revision, citation: { website: 'https://wavespestcontrol.com', location: p.location_key } } });
     console.log('PASS legacy hold refuses mutable board identity without writes; boundary snapshot survives the edit');
+    for (const changedInputs of [{ submission_url: `https://${domain}/new-form` }, { account_required: true }]) {
+      for (const runBridge of [false, true]) {
+        const check = await trx.transaction(); active = check;
+        try {
+          await check('seo_link_acquisition_paths').where({ id: pathId }).update({ ...changedInputs, revision: 2, revision_execution: 2 });
+          if (runBridge) {
+            const result = await B.runAuthorityBridge(check, { domainIds: [id], autoSend: false, exclusive: (_key, fn) => fn(), notify: async () => {} });
+            assert.equal(result.errors.length, 0);
+            assert.equal((await check('seo_link_placement_authorities').where({ id: authority.id }).first()).path_revision, 2);
+          }
+          const beforeAttempt = await check('seo_link_attempts').where({ id: rejectedAttempt }).first();
+          const beforePlacement = await check('seo_link_prospects').where({ id: p.id }).first();
+          const beforeAuthority = await check('seo_link_placement_authorities').where({ id: authority.id }).first();
+          await assert.rejects(confirm(), /409.*execution revision/);
+          assert.deepEqual(await check('seo_link_attempts').where({ id: rejectedAttempt }).first(), beforeAttempt);
+          assert.deepEqual(await check('seo_link_prospects').where({ id: p.id }).first(), beforePlacement);
+          assert.deepEqual(await check('seo_link_placement_authorities').where({ id: authority.id }).first(), beforeAuthority);
+          assert.equal((await check('audit_log').where({ resource_id: p.id, action: 'backlink.submission.confirm' })).length, 0);
+        } finally { await check.rollback(); active = trx; }
+      }
+    }
+    console.log('PASS URL/account execution revisions refuse confirmation before and after real bridge redecision');
+    for (const sibling of [
+      { target_domain: domain, target_page: '/venice-pest-control/' },
+      { target_domain: `www.${domain}`, target_page: 'https://www.wavespestcontrol.com/venice-pest-control/' },
+    ]) {
+      const check = await trx.transaction(); active = check;
+      try {
+        await check('seo_link_prospects').insert({ ...sibling, location_key: p.location_key, status: 'live', link_type: 'directory' });
+        const beforePlacement = await check('seo_link_prospects').where({ id: p.id }).first();
+        await assert.rejects(confirm(), /409.*Another placement/);
+        assert.deepEqual(await check('seo_link_prospects').where({ id: p.id }).first(), beforePlacement);
+        assert.equal((await check('seo_link_attempts').where({ id: rejectedAttempt }).first()).outcome, 'submit_ambiguous');
+        assert.equal((await check('seo_link_placement_authorities').where({ id: authority.id }).first()).satisfied_at, null);
+        assert.equal((await check('audit_log').where({ resource_id: p.id, action: 'backlink.submission.confirm' })).length, 0);
+      } finally { await check.rollback(); active = trx; }
+    }
+    // A legacy status edit may move the page and confirm in one PATCH: probe the resulting identity too.
+    const moving = await trx.transaction(); active = moving;
+    try {
+      await moving('seo_link_prospects').insert({ target_domain: domain, target_page: 'https://wavespestcontrol.com/pest-control/', location_key: p.location_key, status: 'live', link_type: 'directory' });
+      const beforePlacement = await moving('seo_link_prospects').where({ id: p.id }).first();
+      await assert.rejects(confirm({ submission_verdict: undefined, status: 'placed', target_page: 'https://wavespestcontrol.com/pest-control/' }), /409.*Another placement/);
+      assert.deepEqual(await moving('seo_link_prospects').where({ id: p.id }).first(), beforePlacement);
+      assert.equal((await moving('seo_link_attempts').where({ id: rejectedAttempt }).first()).outcome, 'submit_ambiguous');
+      assert.equal((await moving('audit_log').where({ resource_id: p.id, action: 'backlink.submission.confirm' })).length, 0);
+      // A move away from a collision must update page + restored location atomically, without an intermediate unique violation.
+      await moving('seo_link_prospects').insert({ target_domain: domain, target_page: beforePlacement.target_page, location_key: p.location_key, status: 'live', link_type: 'directory' });
+      const moved = await confirm({ submission_verdict: undefined, status: 'placed', target_page: 'https://wavespestcontrol.com/mosquito-control/' });
+      assert.equal(moved.prospect.target_page, 'https://wavespestcontrol.com/mosquito-control/');
+      assert.equal(moved.prospect.location_key, p.location_key);
+    } finally { await moving.rollback(); active = trx; }
+    console.log('PASS exact/canonical restored-location collisions and simultaneous page move return 409 without writes');
     assert.equal((await confirm({ live_url: `https://www.${domain}/confirmed` })).prospect.status, 'live');
     assert.equal((await trx('seo_link_domains').where({ id }).first()).agent_state, 'rejected');
     assert.equal((await Q.listOwnerQueue(proxy)).cards.length, 0);
