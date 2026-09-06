@@ -232,6 +232,10 @@ describe('Tan edge wear does not establish a watering problem', () => {
 
   test.each([
     'Tan patches near the pavement look dry.',
+    'Tan blades and curling point to under-watering.',
+    'Tan blades and curling point to underwatering.',
+    'Tan blades and curling point to under watering.',
+    'The tan turf looks under-watered.',
     'Tan patches suggest uneven irrigation coverage.',
     'No weeds were seen and uneven irrigation coverage is visible near the driveway.',
   ])('preserves moisture evidence in %s', observation => {

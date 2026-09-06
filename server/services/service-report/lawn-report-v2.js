@@ -564,7 +564,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // match converted non-moisture observations into customer-facing drought
   // claims (codex P1 r22).
   // Tan color alone can be ordinary edge wear; it does not establish dryness.
-  const drySignal = /\b(dry|drier|drought|wilt)\b/.test(obsText)
+  // Preserve the vision scorer's explicit under-watering diagnosis without
+  // treating tan color or curling alone as moisture evidence.
+  const drySignal = /\b(dry|drier|drought|wilt|under[\s-]?water(?:ing|ed))\b/.test(obsText)
     || /\buneven\s+(?:irrigation|water(?:ing)?|sprinkler|moisture)\b/.test(obsText)
     // Reversed order — "irrigation is uneven across the west side"
     // (codex P2 r36). Bounded gap so the subject and qualifier stay in
