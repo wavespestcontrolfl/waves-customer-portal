@@ -691,6 +691,25 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // Deliberately keyed on the customer and default estimate only.
   }, [selectedCustomer?.id, defaultEstimateId]);
 
+  // True once a Find-a-Time result or best-time chip filled the time/tech —
+  // that pair was scored at ONE address and is dropped on a property switch.
+  const appliedSuggestionRef = useRef(false);
+  // Everything derived from the service address, dropped on EVERY property
+  // change (initial default, operator pick, estimate-driven switch): the
+  // in-flight / shown Find-a-Time results and an already-applied suggestion.
+  const resetAddressDerivedState = () => {
+    findTimesRequestRef.current += 1;
+    setTimeSlots(null);
+    setFindingTimes(false);
+    if (appliedSuggestionRef.current) {
+      // The adopted technician/time was a detour scored at the previous
+      // address; back to auto-assign so the save re-evaluates at this one.
+      appliedSuggestionRef.current = false;
+      setTechMode('auto');
+      setTechId('');
+    }
+  };
+
   useEffect(() => {
     const customerId = selectedCustomer?.id;
     setBookingProperties([]);
@@ -712,9 +731,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // Same invalidation as applyBookingProperty: a Find-a-Time search
           // started before this list arrived was scored at the primary, and
           // the default here may be a complete SECONDARY.
-          findTimesRequestRef.current += 1;
-          setTimeSlots(null);
-          setFindingTimes(false);
+          resetAddressDerivedState();
           setSelectedPropertyId(defaultBookingPropertyId(complete));
           setBookingPropertyState('ready');
         } else {
@@ -732,9 +749,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // previous address, so drop what is shown AND invalidate any search still
   // in flight (handleFindTimes checks this counter before applying its
   // response).
-  // True once a Find-a-Time result or best-time chip filled the time/tech —
-  // that pair was scored at ONE address and is dropped on a property switch.
-  const appliedSuggestionRef = useRef(false);
   const applyBookingProperty = (propertyId) => {
     if (String(propertyId) === String(selectedPropertyId)) return false;
     // After a partial split save (one cadence group committed, a later one
@@ -742,23 +756,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // address now would split one booking across two properties.
     if (createdGroupKeysRef.current.size > 0) return false;
     setSelectedPropertyId(String(propertyId));
-    findTimesRequestRef.current += 1;
-    setTimeSlots(null);
-    setFindingTimes(false);
-    if (appliedSuggestionRef.current) {
-      // The adopted technician/time was a detour scored at the previous
-      // address; back to auto-assign so the save re-evaluates at this one.
-      appliedSuggestionRef.current = false;
-      setTechMode('auto');
-      setTechId('');
-    }
+    resetAddressDerivedState();
     return true;
   };
 
   useEffect(() => {
     if (!propertyPickerActive || !linkedEstimate?.propertyId) return;
     const match = bookingProperties.find((p) => String(p.id) === String(linkedEstimate.propertyId));
-    if (match) applyBookingProperty(match.id);
+    // Never land the picker on a row the server would refuse (incomplete
+    // address → 422 on every save); the note under the picker says why.
+    if (match && isBookableProperty(match)) applyBookingProperty(match.id);
     // Runs when the link or the picker readiness changes — never on the
     // operator's own picker change (that path clears a mismatched link).
   }, [propertyPickerActive, linkedEstimate?.propertyId]);
@@ -2450,6 +2457,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   );
                 })}
               </div>
+              {linkedEstimate?.propertyId && bookingProperties.some((p) => String(p.id) === String(linkedEstimate.propertyId) && !isBookableProperty(p)) && (
+                <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
+                  This quote's property has an incomplete address. Finish it on the customer profile to book the quote there.
+                </div>
+              )}
               {createdGroupKeysRef.current.size > 0 && (
                 <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
                   Part of this booking is already saved at this address. Book the remaining services here, or start a new appointment for another address.
@@ -3412,10 +3424,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             )}
           </div>
           {!isMobile && (
-            <button disabled={!selectedCustomer || !selectedService || saving} onClick={handleSubmit} style={{
+            <button disabled={!canSubmit} onClick={handleSubmit} style={{
               width: '100%', padding: '14px 20px', background: D.text, color: D.white,
               border: 'none', borderRadius: 8, fontSize: 15, fontWeight: 500, cursor: 'pointer',
-              minHeight: 52, opacity: (!selectedCustomer || !selectedService || saving) ? 0.5 : 1,
+              minHeight: 52, opacity: canSubmit ? 1 : 0.5,
               transition: 'opacity 0.15s',
             }}>
               {saving ? 'Scheduling…' : 'Schedule appointment'}
