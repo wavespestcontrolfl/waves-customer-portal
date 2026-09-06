@@ -36,6 +36,7 @@ import SlotConflictNotice from './SlotConflictNotice';
 import { useSlotConflicts } from './useSlotConflicts';
 import BestTimeHint from './BestTimeHint';
 import { useBestTimes } from './useBestTimes';
+import { propertyRelationshipChip } from '../../lib/contact-roles';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -411,6 +412,66 @@ export function quickAddConfirmFlags(conflict, { separateAccount = false } = {})
     : { confirmAttach: true, confirmMatchedAccountId: conflict?.match?.accountId };
 }
 
+// Multi-property booking helpers (pure — unit-tested).
+// The picker defaults to the customer's PRIMARY property (customers.address_*
+// mirrors it, so this is the address every other reader already assumes).
+export function defaultBookingPropertyId(properties = []) {
+  const primary = properties.find((p) => p && p.is_primary) || properties[0];
+  return primary ? String(primary.id) : '';
+}
+
+// Estimates quoted for a specific property are offered only when THAT
+// property is the one being booked; a quote with no property link stays
+// bookable at every address (the server refuses a mismatch either way).
+export function filterScheduleEstimatesForProperty(estimates = [], propertyId) {
+  if (!propertyId) return estimates;
+  return estimates.filter((e) => !e?.propertyId || String(e.propertyId) === String(propertyId));
+}
+
+// Only a property with a complete street address can be booked — the server
+// refuses anything less (bookingPropertyStamp 422). The picker lists EVERY
+// active row so the operator sees the whole account, but an incomplete legacy
+// row renders disabled and is never the default; with no complete row at all
+// the picker hides and the server's sole-property anchor / profile address
+// applies exactly as before.
+export function isBookableProperty(property) {
+  return !!property && ['address_line1', 'city', 'state', 'zip']
+    .every((field) => typeof property[field] === 'string' && property[field].trim());
+}
+
+export function bookableProperties(properties = []) {
+  return (properties || []).filter(isBookableProperty);
+}
+
+// Slot-search target for the chosen property: coords when the row carries
+// them (fastest), else its address for the server to geocode. Either wins
+// over the customer's primary in resolveFindTimeTarget.
+export function bookingPropertyTarget(property) {
+  if (!property) return {};
+  // NULL / '' coordinates (not yet geocoded) stay ABSENT — Number(null) is 0,
+  // and a 0,0 pair would be accepted by the server as a real location.
+  const coord = (value) => {
+    if (value === null || value === undefined || value === '') return undefined;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const lat = coord(property.latitude);
+  const lng = coord(property.longitude);
+  const { street, locality } = formatBookingPropertyAddress(property);
+  return {
+    address: [street, locality].filter(Boolean).join(', ') || undefined,
+    lat: lat !== undefined && lng !== undefined ? lat : undefined,
+    lng: lat !== undefined && lng !== undefined ? lng : undefined,
+  };
+}
+
+export function formatBookingPropertyAddress(property) {
+  if (!property) return '';
+  const street = [property.address_line1, property.address_line2].filter(Boolean).join(', ');
+  const locality = [property.city, [property.state, property.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  return { street, locality };
+}
+
 export function buildFindTimeRequestBody({
   customerId,
   serviceName,
@@ -419,9 +480,17 @@ export function buildFindTimeRequestBody({
   dateTo,
   technicianId,
   horizonDays = 7,
+  // Chosen service address (bookingPropertyTarget); absent → the server
+  // resolves the customer's primary as before.
+  address,
+  lat,
+  lng,
 }) {
   return {
     customerId,
+    address: address || undefined,
+    lat: lat ?? undefined,
+    lng: lng ?? undefined,
     serviceType: serviceName,
     durationMinutes,
     dateFrom,
@@ -460,6 +529,21 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // In-flight guard: a double-click on a confirm action must not pass the
   // same confirmation twice and insert two profiles.
   const [quickAddSubmitting, setQuickAddSubmitting] = useState(false);
+  // Service-address picker for a multi-property customer. `bookingProperties`
+  // is the customer's active customer_properties list; the picker renders
+  // only when the address lane is enabled server-side
+  // (canChangeAppointmentAddress — GATE_EDIT_APPT_ADDRESS) AND there is a
+  // real choice (2+ properties). Otherwise the server's sole-property anchor
+  // applies exactly as before. `propertyRefresh` re-reads the list after a
+  // quick-add "Attach as additional property" on the same customer.
+  const [bookingProperties, setBookingProperties] = useState([]);
+  const [bookingPropertyState, setBookingPropertyState] = useState('idle'); // idle | loading | ready | hidden | error
+  const [selectedPropertyId, setSelectedPropertyId] = useState('');
+  const [propertyRefresh, setPropertyRefresh] = useState(0);
+  const propertyPickerActive = bookingPropertyState === 'ready';
+  const selectedBookingProperty = propertyPickerActive
+    ? bookingProperties.find((p) => String(p.id) === String(selectedPropertyId)) || null
+    : null;
   // A pending confirmation is only valid for the phone/address it was shown
   // for — editing either invalidates it.
   const setQuickAddField = (k, v) => {
@@ -607,8 +691,125 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // Deliberately keyed on the customer and default estimate only.
   }, [selectedCustomer?.id, defaultEstimateId]);
 
+  // True once a Find-a-Time result or best-time chip filled the time/tech —
+  // that pair was scored at ONE address and is dropped on a property switch.
+  const appliedSuggestionRef = useRef(false);
+  // Everything derived from the service address, dropped on EVERY property
+  // change (initial default, operator pick, estimate-driven switch): the
+  // in-flight / shown Find-a-Time results and an already-applied suggestion.
+  const resetAddressDerivedState = () => {
+    findTimesRequestRef.current += 1;
+    setTimeSlots(null);
+    setFindingTimes(false);
+    if (appliedSuggestionRef.current) {
+      // The adopted technician/time was a detour scored at the previous
+      // address; back to auto-assign so the save re-evaluates at this one.
+      appliedSuggestionRef.current = false;
+      setTechMode('auto');
+      setTechId('');
+    }
+  };
+
+  useEffect(() => {
+    const customerId = selectedCustomer?.id;
+    setBookingProperties([]);
+    setSelectedPropertyId('');
+    if (!customerId) { setBookingPropertyState('idle'); return undefined; }
+    let cancelled = false;
+    setBookingPropertyState('loading');
+    adminFetch(`/admin/customers/${customerId}/properties?context=appointment_address`)
+      .then((data) => {
+        if (cancelled) return;
+        const all = Array.isArray(data?.properties) ? data.properties : [];
+        const complete = bookableProperties(all);
+        setBookingProperties(all);
+        // 2+ ACTIVE rows is the choice; the default is the primary when it is
+        // complete, else the first complete row (an incomplete legacy primary
+        // must not hide a bookable secondary — the server's sole-property
+        // anchor sees both rows and would fall back to the profile address).
+        if (data?.canChangeAppointmentAddress === true && all.length > 1 && complete.length > 0) {
+          // Same invalidation as applyBookingProperty: a Find-a-Time search
+          // started before this list arrived was scored at the primary, and
+          // the default here may be a complete SECONDARY.
+          resetAddressDerivedState();
+          setSelectedPropertyId(defaultBookingPropertyId(complete));
+          setBookingPropertyState('ready');
+        } else {
+          setBookingPropertyState('hidden');
+        }
+      })
+      .catch(() => { if (!cancelled) setBookingPropertyState('error'); });
+    return () => { cancelled = true; };
+  }, [selectedCustomer?.id, propertyRefresh]);
+
+  // Opened to book a quote that was priced for one specific property: land the
+  // picker on that property so the estimate stays selectable.
+  // EVERY property change — the operator's pick or the estimate-driven
+  // switch below — goes through here: slot suggestions were scored at the
+  // previous address, so drop what is shown AND invalidate any search still
+  // in flight (handleFindTimes checks this counter before applying its
+  // response).
+  const applyBookingProperty = (propertyId) => {
+    if (String(propertyId) === String(selectedPropertyId)) return false;
+    // After a partial split save (one cadence group committed, a later one
+    // failed) the retry posts only the remaining groups — changing the
+    // address now would split one booking across two properties.
+    if (createdGroupKeysRef.current.size > 0) return false;
+    setSelectedPropertyId(String(propertyId));
+    resetAddressDerivedState();
+    return true;
+  };
+
+  useEffect(() => {
+    if (!propertyPickerActive || !linkedEstimate?.propertyId) return;
+    const match = bookingProperties.find((p) => String(p.id) === String(linkedEstimate.propertyId));
+    // Never land the picker on a row the server would refuse (incomplete
+    // address → 422 on every save); the note under the picker says why.
+    if (match && isBookableProperty(match)) applyBookingProperty(match.id);
+    // Runs when the link or the picker readiness changes — never on the
+    // operator's own picker change (that path clears a mismatched link).
+  }, [propertyPickerActive, linkedEstimate?.propertyId]);
+
+  const chooseBookingProperty = (propertyId) => {
+    if (!applyBookingProperty(propertyId)) return;
+    // A quote priced for another property cannot ride this booking — drop the
+    // link AND the lines it filled (they carry sourceEstimateId), otherwise
+    // the submit would book the other property at the quote's prices as a
+    // manual appointment and skip the server's mismatch check.
+    if (linkedEstimate?.propertyId && String(linkedEstimate.propertyId) !== String(propertyId)) {
+      setLinkedEstimate(null);
+    }
+    // Lines keep their sourcePropertyId after "No estimate" unlinks the quote,
+    // so lines priced for another property go regardless of the link state;
+    // address-agnostic quote lines and manual lines stay.
+    setServices((arr) => arr.filter((line) => !line.sourcePropertyId || String(line.sourcePropertyId) === String(propertyId)));
+  };
+
+  // Property list failed to load: a property-scoped quote (or its lines) can
+  // no longer be matched to the address being booked, and booking without
+  // propertyId would skip the server's mismatch check — drop them.
+  useEffect(() => {
+    if (bookingPropertyState !== 'error') return;
+    if (linkedEstimate?.propertyId) setLinkedEstimate(null);
+    setServices((arr) => arr.filter((line) => !line.sourcePropertyId));
+  }, [bookingPropertyState, linkedEstimate?.propertyId]);
+  // Memoized: it is a dependency of the auto-apply effect below, so a fresh
+  // array every render would re-run that effect on every keystroke.
+  const visibleScheduleEstimates = useMemo(
+    () => ((bookingPropertyState === 'error' || bookingPropertyState === 'loading')
+      // Addresses unknown (failed) or not yet known (loading) → a
+      // property-scoped quote cannot be matched to the address being booked,
+      // and auto-applying one while the list loads would let network order
+      // decide the address. Only address-agnostic quotes are offered until
+      // the property state resolves; the ready state then filters normally.
+      ? scheduleEstimates.filter((e) => !e?.propertyId)
+      : filterScheduleEstimatesForProperty(scheduleEstimates, propertyPickerActive ? selectedPropertyId : '')),
+    [scheduleEstimates, propertyPickerActive, selectedPropertyId, bookingPropertyState],
+  );
+
   // Find-a-Time state
   const [findingTimes, setFindingTimes] = useState(false);
+  const findTimesRequestRef = useRef(0);
   const [timeSlots, setTimeSlots] = useState(null); // null = hidden, [] = searched but none, [...] = results
   const [slotError, setSlotError] = useState('');
   const [findTimeHorizonDays, setFindTimeHorizonDays] = useState(7);
@@ -793,6 +994,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const applyScheduleEstimate = (estimateId) => {
     if (!estimateId) {
       setLinkedEstimate(null);
+      // Lines priced for a property other than the one being booked cannot
+      // ride an unlinked (manual) booking either — the server's mismatch
+      // check only sees linked quotes. Lines for the selected property and
+      // address-agnostic quote lines stay editable as before.
+      if (propertyPickerActive) {
+        setServices((arr) => arr.filter((line) => !line.sourcePropertyId || String(line.sourcePropertyId) === String(selectedPropertyId)));
+      }
       return;
     }
     const estimate = findScheduleEstimateById(scheduleEstimates, estimateId);
@@ -828,6 +1036,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         weekday: 3,
         boosterMonths: [],
         sourceEstimateId: estimate.id,
+        // Which property the quote was priced for (null = address-agnostic).
+        // Survives an unlink so a later property switch can still drop lines
+        // priced for another address.
+        sourcePropertyId: estimate.propertyId || null,
       };
     });
     if (nextLines.length > 0) {
@@ -842,7 +1054,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const customerId = selectedCustomer?.id;
     const auto = pickAutoScheduleEstimate({
       customerId,
-      estimates: scheduleEstimates,
+      // Property-filtered: a quote for another property must never auto-fill.
+      estimates: visibleScheduleEstimates,
       isLoading: scheduleEstimatesLoading,
       error: scheduleEstimateError,
       linkedEstimate,
@@ -853,7 +1066,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     autoAppliedScheduleEstimateRef.current = auto.key;
     applyScheduleEstimate(auto.estimate.id);
     // Deliberately keyed on the schedule-estimate pipeline state only.
-  }, [scheduleEstimates, scheduleEstimatesLoading, scheduleEstimateError, linkedEstimate, selectedCustomer?.id, services.length]);
+  }, [visibleScheduleEstimates, scheduleEstimatesLoading, scheduleEstimateError, linkedEstimate, selectedCustomer?.id, services.length]);
 
   const defaultEstimateAppliedRef = useRef(false);
   useEffect(() => {
@@ -1126,6 +1339,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       if (r.customer) {
         setQuickAddConflict(null);
         selectCustomer(r.customer);
+        setPropertyRefresh((n) => n + 1);
         setShowQuickAdd(false);
         setQuickAdd({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', state: 'FL', zip: '', profileLabel: '' });
       }
@@ -1152,6 +1366,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Find best times — calls /api/admin/schedule/find-time
   const handleFindTimes = async ({ horizonDays = 7 } = {}) => {
     if (!selectedCustomer || !selectedService) return;
+    // Version the request: a property switch (or a newer search) while this
+    // one is in flight bumps the counter, and the stale response is dropped
+    // instead of repopulating slots scored at the previous address.
+    const requestId = findTimesRequestRef.current + 1;
+    findTimesRequestRef.current = requestId;
     setFindTimeHorizonDays(horizonDays);
     setFindingTimes(true);
     setSlotError('');
@@ -1167,6 +1386,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         method: 'POST',
         body: JSON.stringify(buildFindTimeRequestBody({
           customerId: selectedCustomer.id,
+          ...bookingPropertyTarget(selectedBookingProperty),
           serviceName: selectedService.name,
           durationMinutes: dur,
           dateFrom: searchFrom,
@@ -1175,11 +1395,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           horizonDays,
         })),
       });
+      if (findTimesRequestRef.current !== requestId) return;
       setTimeSlots((r.slots || [])
         .filter((slot) => isHourTime(slot.start_time))
         .slice(0, 8)
         .map((slot, index) => ({ ...slot, rank: index + 1 })));
     } catch (e) {
+      if (findTimesRequestRef.current !== requestId) return;
       setSlotError(e.message || 'Failed to find times');
       setTimeSlots(null);
     }
@@ -1191,6 +1413,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setWindowStart(normalizeHourTime(slot.start_time, windowStart));
     setTechMode('choose');
     setTechId(slot.technician.id);
+    appliedSuggestionRef.current = true;
     setTimeSlots(null);
   };
 
@@ -1510,9 +1733,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Advisory drive-detour suggestions for the picked day — a chip only sets
   // the start time (window end is derived from durations at submit), and is
   // separate from the ranged "Find best times" panel above.
+  const bestTimesTarget = bookingPropertyTarget(selectedBookingProperty);
   const { bestTimes } = useBestTimes({
     date: apptDate ? String(apptDate).split('T')[0] : null,
     customerId: selectedCustomer?.id,
+    // Rank at the CHOSEN property, not the customer's primary.
+    address: bestTimesTarget.address,
+    lat: bestTimesTarget.lat,
+    lng: bestTimesTarget.lng,
     durationMinutes: slotCheckDuration,
     // Same tech scoping as the ranged search — auto mode searches all techs.
     technicianId: techMode === 'choose' && techId ? techId : undefined,
@@ -1520,7 +1748,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   // Submit
   const handleSubmit = async () => {
-    if (!selectedCustomer || services.length === 0) return;
+    if (!selectedCustomer || services.length === 0 || bookingPropertyState === 'loading') return;
     // An auto-priced mosquito line must not be booked until the live server
     // quote resolved — otherwise the operator confirms a total that omits (or
     // misstates) what the server will stamp. On a failed quote, clear the
@@ -1665,6 +1893,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // and then links, or — for estimate shapes that can't be auto-
           // accepted — books without the link and returns a warning.
           sourceEstimateId: linkedEstimate?.id || undefined,
+          // Only sent when the picker is live — otherwise the server's
+          // sole-property anchor decides, exactly as before this picker.
+          propertyId: propertyPickerActive && selectedPropertyId ? selectedPropertyId : undefined,
           urgency: 'routine',
           notes: customerNotes || undefined,
           internalNotes: internalNotes || undefined,
@@ -1928,7 +2159,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   };
   const mobileTopInset = 'max(8px, env(safe-area-inset-top, 0px))';
 
-  const canSubmit = !!selectedCustomer && !!selectedService && !saving;
+  // While the property list is loading a multi-property customer has no
+  // resolved address yet — a submit then would omit propertyId and book the
+  // primary before the operator was shown the choice.
+  const canSubmit = !!selectedCustomer && !!selectedService && !saving && bookingPropertyState !== 'loading';
   const hasRecurringServices = services.some((s) => s.cadence && s.cadence !== 'one_time');
   const firstCustomRecurringIndex = services.findIndex((s) => s.cadence === 'custom');
   const weekendRuleValue = skipWeekends ? weekendShift : 'allow';
@@ -2186,6 +2420,74 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               <button onClick={() => { setSelectedCustomer(null); setCustomerSearch(''); }} style={{ background: 'none', border: 'none', color: D.muted, cursor: 'pointer', fontSize: 16, minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
             </div>
           )}
+          {selectedCustomer && propertyPickerActive && (
+            <div role="radiogroup" aria-label="Service address" style={{ margin: '14px 0 0' }} data-testid="booking-property-picker">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ ...labelStyle, fontSize: 14, marginBottom: 0 }}>Service address</span>
+                <span style={{ fontSize: 14, color: D.muted }}>{bookingProperties.length} saved</span>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {bookingProperties.map((property) => {
+                  const selected = String(property.id) === String(selectedPropertyId);
+                  const bookable = isBookableProperty(property);
+                  const address = formatBookingPropertyAddress(property);
+                  const chip = propertyRelationshipChip(property);
+                  return (
+                    <label
+                      key={property.id}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 12, padding: 12, borderRadius: 8, cursor: bookable ? 'pointer' : 'not-allowed',
+                        border: selected ? `2px solid ${D.text}` : `1px solid ${D.border}`,
+                        background: selected ? D.bg : D.card, minHeight: 44, boxSizing: 'border-box',
+                        opacity: bookable ? 1 : 0.6,
+                      }}
+                    >
+                      <input
+                        type="radio"
+                        name="booking-property"
+                        value={String(property.id)}
+                        checked={selected}
+                        disabled={!bookable || createdGroupKeysRef.current.size > 0}
+                        onChange={() => chooseBookingProperty(property.id)}
+                        aria-label={`Service address ${address.street}`}
+                        style={{ width: 18, height: 18, margin: 0, accentColor: D.text, flexShrink: 0 }}
+                      />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 14, color: D.text, fontWeight: 500 }}>{address.street}</div>
+                        <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>
+                          {bookable ? address.locality : 'Address incomplete — finish it on the customer profile to book here'}
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+                        {chip && <span style={{ fontSize: 14, padding: '2px 8px', borderRadius: 6, background: '#F4F4F5', color: '#52525B', fontWeight: 500 }}>{chip}</span>}
+                        {property.label && property.label !== 'Primary' && <span style={{ fontSize: 14, color: D.muted }}>{property.label}</span>}
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+              {linkedEstimate?.propertyId && bookingProperties.some((p) => String(p.id) === String(linkedEstimate.propertyId) && !isBookableProperty(p)) && (
+                <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
+                  This quote's property has an incomplete address. Finish it on the customer profile to book the quote there.
+                </div>
+              )}
+              {createdGroupKeysRef.current.size > 0 && (
+                <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
+                  Part of this booking is already saved at this address. Book the remaining services here, or start a new appointment for another address.
+                </div>
+              )}
+              {selectedBookingProperty && !selectedBookingProperty.is_primary && (
+                <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
+                  Auto-priced services (one-time mosquito) still use the primary property's lot size. Enter a price for this address if it differs.
+                </div>
+              )}
+            </div>
+          )}
+          {selectedCustomer && bookingPropertyState === 'error' && (
+            <div role="alert" style={{ fontSize: 14, color: D.muted, marginTop: 10 }}>
+              Saved addresses could not be loaded — this appointment books to the customer's primary address.
+            </div>
+          )}
         </div>
 
         {/* Section 2: Services — invoice-style line items. Service rows
@@ -2223,13 +2525,18 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     style={inputStyle}
                   >
                     <option value="">{MANUAL_SERVICE_ENTRY_LABEL}</option>
-                    {scheduleEstimates.map((estimate) => (
+                    {visibleScheduleEstimates.map((estimate) => (
                       <option key={estimate.id} value={String(estimate.id)}>
                         {formatScheduleEstimateLabel(estimate)}
                         {estimate.linkedAppointment ? ' (already linked)' : ''}
                       </option>
                     ))}
                   </select>
+                  {selectedBookingProperty && visibleScheduleEstimates.length !== scheduleEstimates.length && (
+                    <div style={{ fontSize: 14, color: D.muted, marginTop: 6 }}>
+                      Showing estimates for {formatBookingPropertyAddress(selectedBookingProperty).street} only.
+                    </div>
+                  )}
                   {linkedEstimate && (
                     <>
                       {/* Acceptance status — spells out whether the customer
@@ -3063,6 +3370,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               if (slot.technicianId) {
                 setTechMode('choose');
                 setTechId(slot.technicianId);
+                appliedSuggestionRef.current = true;
               }
             }}
             style={{ marginBottom: 10 }}
@@ -3125,10 +3433,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             )}
           </div>
           {!isMobile && (
-            <button disabled={!selectedCustomer || !selectedService || saving} onClick={handleSubmit} style={{
+            <button disabled={!canSubmit} onClick={handleSubmit} style={{
               width: '100%', padding: '14px 20px', background: D.text, color: D.white,
               border: 'none', borderRadius: 8, fontSize: 15, fontWeight: 500, cursor: 'pointer',
-              minHeight: 52, opacity: (!selectedCustomer || !selectedService || saving) ? 0.5 : 1,
+              minHeight: 52, opacity: canSubmit ? 1 : 0.5,
               transition: 'opacity 0.15s',
             }}>
               {saving ? 'Scheduling…' : 'Schedule appointment'}

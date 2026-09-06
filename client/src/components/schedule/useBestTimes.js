@@ -18,7 +18,11 @@ function authHeaders() {
   };
 }
 
-export function useBestTimes({ date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds, arrivalWindows = false, enabled = true }) {
+// `address` / `lat` / `lng` pin the search to a specific service address (the
+// create modal's property picker); the server prefers coords, then geocodes
+// the address, and only falls back to the customer's primary when both are
+// absent — exactly the resolveFindTimeTarget order.
+export function useBestTimes({ date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds, arrivalWindows = false, enabled = true, address, lat, lng }) {
   const [bestTimes, setBestTimes] = useState([]);
   const [checking, setChecking] = useState(false);
   // Stable dep for the (usually tiny) id array.
@@ -45,6 +49,9 @@ export function useBestTimes({ date, serviceId, customerId, durationMinutes, tec
             // not the customer's primary home.
             serviceId: serviceId || undefined,
             customerId,
+            address: address || undefined,
+            lat: lat ?? undefined,
+            lng: lng ?? undefined,
             dateFrom: date,
             dateTo: date,
             durationMinutes,
@@ -86,6 +93,6 @@ export function useBestTimes({ date, serviceId, customerId, durationMinutes, tec
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, serviceId, customerId, durationMinutes, technicianId, excludeKey, arrivalWindows]);
+  }, [enabled, date, serviceId, customerId, durationMinutes, technicianId, excludeKey, arrivalWindows, address, lat, lng]);
   return { bestTimes, checking };
 }
