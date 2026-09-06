@@ -73,7 +73,7 @@ describe('rolling-deploy compatibility of the board unique key', () => {
   test('the PATCH page-move probe is scoped to the row\'s OWN location_key (step 2 dropped the legacy 2-column key: identity is (domain, page, location))', () => {
     const s = fs.readFileSync(path.join(__dirname, '..', 'routes/admin-backlink-agent-v2.js'), 'utf8');
     expect(s).toMatch(/findPlacementRow\(trx, current\.target_domain, patch\.target_page, \{ excludeId: current\.id, location: current\.location_key \}\)/);
-    expect(s).toMatch(/first\('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'follow_up_status', 'follow_up_due_at', 'conversation_closed_at', 'path_id'\)/);
+    expect(s).toMatch(/first\('id', 'status', 'target_domain', 'target_page', 'live_url', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'follow_up_status', 'follow_up_due_at', 'conversation_closed_at', 'path_id'\)/);
   });
 });
 

@@ -115,7 +115,7 @@ describe('every board writer takes the shared lock inside its check+insert trans
     const s = src('routes/admin-backlink-agent-v2.js');
     const block = s.slice(s.indexOf("router.patch('/prospects/:id'"), s.indexOf("router.post('/prospects/:id/recheck'"));
     const iTrx = block.indexOf('db.transaction(async (trx)');
-    const iRead = block.indexOf("trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'follow_up_status', 'follow_up_due_at', 'conversation_closed_at', 'path_id')");
+    const iRead = block.indexOf("trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'live_url', 'link_type', 'location_key', 'parked_from_status', 'outreach_status', 'follow_up_status', 'follow_up_due_at', 'conversation_closed_at', 'path_id')");
     const iGate = block.indexOf("&& !inOutreach(current.status, current.link_type)");
     // a link_type change out of the signup lane (directory/citation/social → outreach type) is an admission too
     expect(block).toMatch(/const inOutreach = \(status, type\) => ACTIVE_OUTREACH_STATUSES\.includes\(status\) && !SIGNUP_TYPES\.includes\(type \|\| ''\);/);
