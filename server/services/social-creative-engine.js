@@ -99,7 +99,6 @@ const SCENE_LIBRARY = {
     { key: 'mosquito-gutter', scene: 'close-up of a clogged house gutter holding stagnant water and leaves, bright blue sky behind the roofline' },
     { key: 'mosquito-birdbath', scene: 'a stone birdbath full of still water in a landscaped Southwest Florida yard, hibiscus flowers, late-afternoon golden light' },
     { key: 'mosquito-bromeliad-cup', scene: 'macro of rainwater held in the central cup of a red bromeliad in a Florida landscape bed, tropical foliage around it' },
-    { key: 'mosquito-screen-cranefly', scene: 'a large gangly crane fly resting on a lanai screen backlit by evening light, pool and palms blurred behind' },
     { key: 'mosquito-rain-barrel', scene: 'a rain barrel beside a stucco Florida home with water at the rim after a storm, wet pavers and bright clearing sky' },
     { key: 'mosquito-boat-tarp', scene: 'a boat on a trailer in a Florida driveway with rainwater pooled in the folds of its tarp, palm trees and blue sky' },
     { key: 'mosquito-mangrove-dusk', scene: 'a calm Southwest Florida mangrove shoreline at dusk, still water reflecting pink sky, no people' },

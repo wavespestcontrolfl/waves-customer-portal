@@ -226,7 +226,7 @@ const SEASONAL_AUTONOMOUS_TOPICS = {
     { topic: 'spring lawn green-up problems', service: 'lawn care', angle: 'signs to check', cta: 'request estimate' },
     { topic: 'large patch fungus in cool, wet turf', service: 'lawn care', angle: 'what we are seeing', cta: 'read guide' },
     { topic: 'discarded termite wings on windowsills', service: 'termite', angle: 'signs to check', cta: 'book inspection' },
-    { topic: 'spring cleanup and pest harborage around the house', service: 'general pest', angle: 'myth/fact', cta: 'read guide' },
+    { topic: 'spring cleanup: ants and roaches in mulch against the house', service: 'general pest', angle: 'myth/fact', cta: 'book inspection' },
     { topic: 'hibiscus and ixora pests waking up', service: 'tree and shrub', angle: 'signs to check', cta: 'request estimate' },
   ],
   3: [
@@ -234,7 +234,7 @@ const SEASONAL_AUTONOMOUS_TOPICS = {
     { topic: 'chinch bug pressure starting early', service: 'lawn care', angle: 'myth/fact', cta: 'read guide' },
     { topic: 'spring weeds before the rains', service: 'lawn care', angle: 'what we are seeing', cta: 'request estimate' },
     { topic: 'paper wasps building under eaves', service: 'general pest', angle: 'signs to check', cta: 'book inspection' },
-    { topic: 'first mosquitoes of spring', service: 'mosquito', angle: 'new Florida homeowner', cta: 'request estimate' },
+    { topic: 'mosquito activity climbing as March warms up', service: 'mosquito', angle: 'new Florida homeowner', cta: 'request estimate' },
     { topic: 'whitefly on gumbo limbo and ficus', service: 'tree and shrub', angle: 'signs to check', cta: 'request estimate' },
   ],
   4: [
@@ -298,13 +298,13 @@ const SEASONAL_AUTONOMOUS_TOPICS = {
     { topic: 'winter weed prevention', service: 'lawn care', angle: 'what we are seeing', cta: 'read guide' },
     { topic: 'attic noises at night in November', service: 'rodent', angle: 'signs to check', cta: 'book inspection' },
     { topic: 'dry-season watering and dollarweed', service: 'lawn care', angle: 'myth/fact', cta: 'read guide' },
-    { topic: 'firewood, boxes, and hitchhiking pests', service: 'general pest', angle: 'new Florida homeowner', cta: 'read guide' },
+    { topic: 'firewood, boxes, and the roaches that ride in', service: 'general pest', angle: 'new Florida homeowner', cta: 'book inspection' },
     { topic: 'mosquitoes on warm winter evenings', service: 'mosquito', angle: 'what we are seeing', cta: 'request estimate' },
   ],
   12: [
     { topic: 'holiday-ready pest control', service: 'general pest', angle: 'new Florida homeowner', cta: 'book inspection' },
     { topic: 'winter lawn weed pressure', service: 'lawn care', angle: 'myth/fact', cta: 'request estimate' },
-    { topic: 'live trees, wreaths, and the bugs that ride in', service: 'general pest', angle: 'signs to check', cta: 'read guide' },
+    { topic: 'holiday wreaths and garlands: the spiders and ants that ride in', service: 'general pest', angle: 'signs to check', cta: 'book inspection' },
     { topic: 'rodents in garages and storage over the holidays', service: 'rodent', angle: 'signs to check', cta: 'book inspection' },
     { topic: 'cool-season fungus rings on St. Augustine', service: 'lawn care', angle: 'what we are seeing', cta: 'read guide' },
     { topic: 'year-end lanai and screen check for pest entry', service: 'general pest', angle: 'what we are seeing', cta: 'book inspection' },
@@ -380,7 +380,7 @@ const PEST_VERSUS_PAIRS = [
     key: 'bigheaded_ant_vs_fire_ant',
     service: 'general pest',
     left: { name: 'Bigheaded Ant', points: ['Two worker sizes; big square heads', 'Loose dirt piles along pavers', 'Trails follow walls and edges'] },
-    right: { name: 'Fire Ant', points: ['One size, reddish-brown', 'Dome mounds in open sun', 'Swarms up anything that disturbs the mound'] },
+    right: { name: 'Fire Ant', points: ['Workers vary in size; no giant heads', 'Dome mounds in open sun', 'Swarms up anything that disturbs the mound'] },
     verdict: 'Dirt piles by the pavers usually mean bigheaded ants, not fire ants.',
   },
   {
@@ -439,7 +439,7 @@ const PEST_VERSUS_PAIRS = [
     service: 'termite',
     left: { name: 'Drywood Termite Frass', points: ['Six-sided pellets, all one size', 'Tiny piles below a pinhole', 'Looks like coarse sand or coffee grounds'] },
     right: { name: 'Carpenter Ant Frass', points: ['Fibrous wood shavings', 'Mixed with insect parts', 'Pushed out of nest openings'] },
-    verdict: 'Pellets or shavings? The pile names the pest.',
+    verdict: 'Pellets or shavings? The pile is your first clue; an inspection confirms it.',
   },
   {
     key: 'mosquito_vs_crane_fly',
@@ -486,7 +486,7 @@ const PEST_VERSUS_PAIRS = [
   {
     key: 'whitefly_vs_mealybug',
     service: 'tree and shrub',
-    left: { name: 'Whitefly', points: ['Cloud of tiny white flyers when leaves shake', 'Spiral egg patterns under leaves', 'Sticky leaves and sooty mold below'] },
+    left: { name: 'Spiraling Whitefly', points: ['Cloud of tiny white flyers when leaves shake', 'White spiral egg patterns under leaves', 'Sticky leaves and sooty mold below'] },
     right: { name: 'Mealybug', points: ['White cottony clumps in leaf joints', 'Barely moves', 'Sticky residue on stems'] },
     verdict: 'Flies off or stays cottony? Different shrub pest.',
   },
@@ -1324,9 +1324,16 @@ function selectAutonomousCampaign(now = new Date()) {
   // Anchor seasonal topic + city rotation to Eastern business dates, not UTC
   // (Railway runs TZ=UTC, which would flip topics a few hours early each day).
   const { month, day } = etParts(now);
-  const city = WAVES_LOCATIONS[day % WAVES_LOCATIONS.length]?.name || 'Sarasota';
+  // Campaign days are mostly the ODD ET days (reviews take day % 4 === 0,
+  // versus day % 4 === 2), so any index sharing that stride's parity —
+  // day % 6 for topics, day % 4 for cities — reaches only half of each bank
+  // (topics 1/3/5, cities 1/3): the same aliasing #3651 fixed in the versus
+  // lane. These parity-free indexes walk all six topics and all four cities
+  // across a month's odd days with no topic+city pair repeated, and no two
+  // consecutive days share a topic when an even-day lane yields to campaign.
   const seasonal = SEASONAL_AUTONOMOUS_TOPICS[month] || SEASONAL_AUTONOMOUS_TOPICS[6];
-  const topic = seasonal[day % seasonal.length];
+  const topic = seasonal[(day + Math.floor(day / 4)) % seasonal.length];
+  const city = WAVES_LOCATIONS[(Math.floor(day / 2) + Math.floor(day / 8)) % WAVES_LOCATIONS.length]?.name || 'Sarasota';
   return {
     ...topic,
     city,
@@ -1795,16 +1802,16 @@ function hashtags({ topic, city, service }) {
 const SERVICE_INTENT_KEYWORDS = [
   { match: ['lawn', 'turf', 'grass', 'weed', 'fungus', 'fertilizer', 'fertilize', 'fertilizing', 'fertilization', 'chinch', 'st. augustine'] },
   { match: ['termite', 'swarm', 'swarming', 'wdo', 'wood destroying'] },
-  { match: ['mosquito', 'standing water'] },
+  { match: ['mosquito', 'standing water', 'no-see-um', 'no-see-ums'] },
   { match: ['rodent', 'rat', 'rats', 'mouse', 'mice'] },
   { match: ['roach', 'cockroach', 'palmetto bug'] },
   { match: ['ant', 'ants'] },
   { match: ['flea', 'fleas'] },
   { match: ['bed bug', 'bedbug'] },
   { match: ['spider', 'spiders', 'black widow', 'brown widow'] },
-  { match: ['wasp', 'hornet', 'yellow jacket', 'yellowjacket', 'bee', 'bees'] },
-  { match: ['silverfish', 'earwig', 'millipede', 'centipede'] },
-  { match: ['tree', 'shrub', 'ornamental', 'palm', 'tree and shrub', 'tree & shrub', 'whitefly', 'scale insect'] },
+  { match: ['wasp', 'hornet', 'yellow jacket', 'yellowjacket', 'bee', 'bees', 'mud dauber'] },
+  { match: ['silverfish', 'earwig', 'millipede', 'centipede', 'springtail'] },
+  { match: ['tree', 'shrub', 'ornamental', 'palm', 'tree and shrub', 'tree & shrub', 'whitefly', 'scale insect', 'mealybug', 'sooty mold'] },
 ];
 
 // Boundary-aware keyword test shared by the requested topic/service and the

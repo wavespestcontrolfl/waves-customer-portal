@@ -939,3 +939,22 @@ describe('content bank refill (2026-09-06)', () => {
     }
   });
 });
+
+describe('campaign lane rotation is parity-free (Codex r1 on #3990)', () => {
+  const etNoonLocal = (iso) => new Date(`${iso}T16:00:00Z`);
+
+  test('odd ET days (the campaign lane\'s days) reach all six topics and all four cities with no topic+city repeat', () => {
+    const odd = [...Array(31)].map((_, i) => i + 1).filter((d) => d % 2 === 1);
+    const plans = odd.map((d) => Studio.selectAutonomousCampaign(etNoonLocal(`2026-07-${String(d).padStart(2, '0')}`)));
+    expect(new Set(plans.map((p) => p.topic)).size).toBe(6);
+    expect(new Set(plans.map((p) => p.city)).size).toBe(4);
+    const combos = plans.map((p) => `${p.topic}|${p.city}`);
+    expect(new Set(combos).size).toBe(combos.length);
+  });
+
+  test('no two consecutive days share a topic (an even-day lane yielding to campaign never repeats yesterday)', () => {
+    const all = [...Array(31)].map((_, i) => i + 1);
+    const topics = all.map((d) => Studio.selectAutonomousCampaign(etNoonLocal(`2026-07-${String(d).padStart(2, '0')}`)).topic);
+    for (let i = 1; i < topics.length; i++) expect(topics[i]).not.toBe(topics[i - 1]);
+  });
+});
