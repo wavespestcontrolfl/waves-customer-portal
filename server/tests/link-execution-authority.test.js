@@ -171,19 +171,17 @@ test('submission without a durable citation snapshot cannot cross the mutation b
 });
 
 
-test.each([
-  ['sarasota', '/pest-control/', 'sarasota'],
-  ['-', '/venice-pest-control/', 'venice'],
-  ['-', '/pest-control/', 'bradenton'],
-])('legacy runner hold recovers citation identity for %s / %s', async (location_key, target_page, expectedLocation) => {
-  const s = scenario({ placement: { location_key, target_page } });
+test.each(['-', 'sarasota'])('legacy hold with location key %s cannot infer citation identity from a moved board target', async (location_key) => {
+  const s = scenario({ placement: { location_key, target_page: '/sarasota-pest-control/' } });
   s.db._tables.audit_log = [];
-  s.db._tables.seo_link_prospects[0].claimed_at = null;
+  const placement = s.db._tables.seo_link_prospects[0];
+  placement.claimed_at = null;
   const attempt = { id: uid(), prospect_id: s.placement.id, path_id: s.path.id, provider: 'deterministic_runner', action: 'submit', outcome: 'submit_ambiguous', lease_token: s.token, detail: { authority_id: s.authority.id } };
   s.db._tables.seo_link_attempts.push(attempt);
-  expect(await E.reconcileOwnerPlacement(s.db, { prospectId: s.placement.id, attemptId: attempt.id, status: 'placed', liveUrl: 'https://www.publisher.example/confirmed' })).toMatchObject({ ok: true });
-  expect(s.db._tables.seo_link_prospects[0]).toMatchObject({ location_key: expectedLocation, quality_signals: { cited_homepage: true, location: expectedLocation, submitted_website: 'https://wavespestcontrol.com' } });
-  expect(attempt).toMatchObject({ outcome: 'placed', detail: { citation: { website: 'https://wavespestcontrol.com', location: expectedLocation } } });
+  placement.target_page = '/venice-pest-control/';
+  const before = JSON.stringify(s.db._tables);
+  expect(await E.reconcileOwnerPlacement(s.db, { prospectId: s.placement.id, attemptId: attempt.id, status: 'placed', liveUrl: 'https://www.publisher.example/confirmed' })).toMatchObject({ ok: false, error: expect.stringMatching(/identity/) });
+  expect(JSON.stringify(s.db._tables)).toBe(before);
 });
 
 test('a hold with unknown provider identity remains unresolved', async () => {
@@ -199,7 +197,7 @@ test('a hold with unknown provider identity remains unresolved', async () => {
 
 
 test.each(['prospect', 'live', 'indexed'])('confirmation preserves %s lifecycle and original submission boundary', async (status) => {
-  const s = scenario({ placement: { status } });
+  const s = scenario({ placement: { status, location_key: '-', target_page: '/venice-pest-control/' } });
   s.db._tables.audit_log = [];
   const submitted_at = new Date(Date.now() - 5 * 86400000).toISOString();
   const attempt = { id: uid(), prospect_id: s.placement.id, path_id: s.path.id, provider: 'deterministic_runner', action: 'submit', outcome: 'submit_ambiguous', lease_token: s.token, detail: { authority_id: s.authority.id, submitted_at, citation: { website: 'https://wavespestcontrol.com', location: 'sarasota' } } };
@@ -209,4 +207,5 @@ test.each(['prospect', 'live', 'indexed'])('confirmation preserves %s lifecycle 
   expect(result).toEqual({ ok: true, status: status === 'prospect' ? 'placed' : status });
   expect(s.db._tables.seo_link_prospects[0].quality_signals.submitted_at).toBe(submitted_at);
   expect(attempt.detail.submitted_at).toBe(submitted_at);
+  expect(s.db._tables.seo_link_prospects[0].location_key).toBe('sarasota');
 });

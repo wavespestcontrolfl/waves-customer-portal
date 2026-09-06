@@ -626,7 +626,7 @@ async function acquireAnyway(db, { domainId, actor, note = null, now = new Date(
   // failure reports an unavailable summary — never a failed click that invites a retry (which would only write an
   // audited replacement waiver).
   try {
-    const mine = await db('seo_link_prospects').where({ domain_id: result.domainId }).select('id', 'status', 'parked_from_status', 'claimed_at', 'path_id');
+    const mine = await db('seo_link_prospects').where({ domain_id: result.domainId }).select('id', 'status', 'parked_from_status', 'claimed_at', 'path_id', 'outreach_status');
     const pathIds = [...new Set(mine.map((p) => p.path_id).filter(Boolean))];
     const paths = pathIds.length ? await db('seo_link_acquisition_paths').whereIn('id', pathIds) : [];
     const pathById = new Map(paths.map((p) => [p.id, p]));

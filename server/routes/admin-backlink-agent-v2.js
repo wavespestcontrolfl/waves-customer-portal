@@ -766,7 +766,12 @@ router.get('/prospects/outreach/pending', async (req, res, next) => {
     const pathIds = [...new Set(drafts.map((p) => p.path_id).filter(Boolean))];
     const pathById = new Map((pathIds.length ? await db('seo_link_acquisition_paths').whereIn('id', pathIds) : []).map((p) => [p.id, p]));
     // Submit-first placements keep their verified lifecycle while their initial pitch awaits approval.
-    const items = drafts.filter((p) => Outreach.SENDABLE_STATUSES.includes(p.status) || Outreach.lateSend(p, pathById.get(p.path_id)));
+    const { BRIDGE_STATES } = require('../services/seo/link-authority-selection');
+    const domainIds = [...new Set(drafts.map((p) => p.domain_id).filter(Boolean))];
+    const eligibleDomains = new Set((domainIds.length ? await db('seo_link_domains').whereIn('id', domainIds)
+      .whereIn('agent_state', BRIDGE_STATES).select('id') : []).map((d) => d.id));
+    const items = drafts.filter((p) => Outreach.SENDABLE_STATUSES.includes(p.status)
+      || (eligibleDomains.has(p.domain_id) && Outreach.lateSend(p, pathById.get(p.path_id))));
     // Reconcilable = ambiguous sends: a send_error, OR a 'sending' stuck past the
     // stale window (a crashed mid-send) — both resolvable via reconcileSendError.
     // WHATEVER the lifecycle status reads: an ambiguous send holds its recipient's inbox until it is reconciled

@@ -759,6 +759,18 @@ describe('acquireAnyway', () => {
     expect((await Q.listOwnerQueue(s.db)).cards).toHaveLength(0);
   });
 
+  test.each(['contacted', 'negotiating'])('Acquire anyway counts sent %s execution cards in its summary', async (status) => {
+    const s = scenario({ make: outreachPath, path: { acquisition_type: 'content_submission', submission_url: 'https://example.org/submit' }, domain: { spam_score: 30, score: 40 } });
+    await nightly(s.db);
+    Object.assign(placements(s.db)[0], { status, outreach_status: 'sent' });
+    expect(domainState(s.db)).toBe('rejected');
+    const result = await Q.acquireAnyway(s.db, { domainId: s.d.id, actor: ACTOR, now: NOW, bridge: inline });
+    const { cards } = await Q.listOwnerQueue(s.db);
+    expect(cards).toHaveLength(1);
+    expect(cards[0].rows.some((r) => r.dimension === 'execution' && r.approvable)).toBe(true);
+    expect(result).toMatchObject({ awaiting: 1, summary_unavailable: false });
+  });
+
   test('INVALID is never waivable; passing floors leave nothing to waive; no path refuses', async () => {
     const inv = scenario({ domain: { agent_state: 'rejected', rejected_by: 'owner' }, path: { last_investigated_at: null } });
     await expect(Q.acquireAnyway(inv.db, { domainId: inv.d.id, actor: ACTOR, now: NOW, bridge: inline })).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/not actionable/) });

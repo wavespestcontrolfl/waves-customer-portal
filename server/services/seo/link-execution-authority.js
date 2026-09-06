@@ -145,12 +145,8 @@ async function reconcileOwnerPlacement(trx, { prospectId, status, attemptId = nu
     return { ok: false, error: 'Confirmed URL must belong to this publisher' };
   }
   for (const attempt of held) {
-    let citation = attempt.detail?.citation;
-    // The parent runner submitted this same homepage/location but did not snapshot it.
-    if (!citation && attempt.provider === 'deterministic_runner') {
-      const profile = require('./link-prospect-worker').businessProfile();
-      citation = { website: profile.website, location: require('./signup-runner').pickLocation(profile, prospect).id };
-    }
+    // Only the attempt snapshot establishes what reached the publisher; board fields can change during a hold.
+    const citation = attempt.detail?.citation;
     if (!citation?.website || !citation?.location) return { ok: false, error: 'Submission identity is unavailable; verify the original citation before confirming placement' };
     // Old holds predate the boundary snapshot; their lease still bounds submission freshness.
     const submittedAt = new Date(attempt.detail?.submitted_at || attempt.lease_token || attempt.created_at);

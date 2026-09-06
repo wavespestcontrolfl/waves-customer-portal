@@ -82,6 +82,20 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
       await trx('seo_link_prospects').where({ id: p.id }).update({ status });
       assert.ok((await pendingIds()).includes(p.id), `${status} late draft must remain available for owner approval`);
     }
+    for (const agent_state of ['rejected', 'watching', 'not_reproducible']) {
+      await trx('seo_link_domains').where({ id }).update({ agent_state });
+      for (const status of ['placed', 'live', 'indexed']) {
+        await trx('seo_link_prospects').where({ id: p.id }).update({ status });
+        assert.equal((await pendingIds()).includes(p.id), false, `${agent_state} domain must not offer ${status} late approval`);
+      }
+      // Ambiguous sends remain recoverable even when their domain cannot acquire.
+      await trx('seo_link_prospects').where({ id: p.id }).update({ outreach_status: 'send_error' });
+      const response = await new Promise((resolve, reject) => pending({}, { json: resolve }, reject));
+      assert.ok(response.needsReconcile.some(row => row.id === p.id));
+      await trx('seo_link_prospects').where({ id: p.id }).update({ outreach_status: 'drafted' });
+    }
+    await trx('seo_link_domains').where({ id }).update({ agent_state: 'acquiring' });
+    assert.ok((await pendingIds()).includes(p.id));
     await trx('seo_link_acquisition_paths').where({ id: pathId }).update({ execution_after_send: true });
     assert.equal((await pendingIds()).includes(p.id), false);
     await trx('seo_link_acquisition_paths').where({ id: pathId }).update({ execution_after_send: false });
@@ -146,6 +160,18 @@ const migration = require(`${root}/server/models/migrations/20260905000090_link_
       assert.equal((await trx('seo_link_placement_authorities').where({ id: authority.id }).first()).satisfied_at, null);
       assert.equal((await trx('audit_log').where({ resource_id: p.id, action: 'backlink.submission.confirm' })).length, 0);
     }
+    await trx('seo_link_prospects').where({ id: p.id }).update({ location_key: '-', target_page: '/sarasota-pest-control/' });
+    await new Promise((resolve, reject) => edit({ params: { id: p.id }, body: { target_page: '/venice-pest-control/' } }, { json: resolve }, reject));
+    const beforeRefusal = await trx('seo_link_prospects').where({ id: p.id }).first();
+    await assert.rejects(confirm(), /409.*identity/);
+    assert.deepEqual(await trx('seo_link_prospects').where({ id: p.id }).first(), beforeRefusal);
+    const unresolved = await trx('seo_link_attempts').where({ id: rejectedAttempt }).first();
+    assert.equal(unresolved.outcome, 'submit_ambiguous');
+    assert.equal((await trx('seo_link_placement_authorities').where({ id: authority.id }).first()).satisfied_at, null);
+    assert.equal((await trx('audit_log').where({ resource_id: p.id, action: 'backlink.submission.confirm' })).length, 0);
+    // A snapshot recorded at the mutation boundary remains authoritative after the same board edit.
+    await trx('seo_link_attempts').where({ id: rejectedAttempt }).update({ detail: { ...unresolved.detail, citation: { website: 'https://wavespestcontrol.com', location: p.location_key } } });
+    console.log('PASS legacy hold refuses mutable board identity without writes; boundary snapshot survives the edit');
     assert.equal((await confirm({ live_url: `https://www.${domain}/confirmed` })).prospect.status, 'live');
     assert.equal((await trx('seo_link_domains').where({ id }).first()).agent_state, 'rejected');
     assert.equal((await Q.listOwnerQueue(proxy)).cards.length, 0);
