@@ -26,7 +26,9 @@ describe('every booking path stamps or deliberately skips', () => {
 
   test('admin-schedule.js stamps all eight insert sites', () => {
     const src = read('routes/admin-schedule.js');
-    expect((src.match(/maybeGroupRow\(/g) || []).length).toBe(8);
+    // Insert seams pass the inserted row's id. The address-edit regroup
+    // loop passes an existing id and is covered by update-details tests.
+    expect((src.match(/maybeGroupRow\(\w+\.id,/g) || []).length).toBe(8);
   });
 
   test('estimate-converter stamps BOTH paths (standalone + recurring unit)', () => {
