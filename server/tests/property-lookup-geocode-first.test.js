@@ -83,7 +83,7 @@ describe('canonicalLookupAddress', () => {
 
   it('strips a trailing "United States" too', () => {
     const geo = { formattedAddress: '100 Main St, Venice, FL 34285, United States', partialMatch: false };
-    expect(canonicalLookupAddress(typed, geo)).toBe('100 Main St, Venice, FL 34285');
+    expect(canonicalLookupAddress('100 Main St, Venice, FL 34285', geo)).toBe('100 Main St, Venice, FL 34285');
   });
 
   it('keeps the typed address on partial matches', () => {

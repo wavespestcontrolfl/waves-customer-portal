@@ -201,7 +201,8 @@ function lookupCoalesceKey(address, options) {
   if (options.refresh || options.cacheOnly === true || options.persist === false) return null;
   if (typeof cacheAddressKey !== 'function') return null;
   try {
-    return cacheAddressKey(address)?.hash || null;
+    const hash = cacheAddressKey(address)?.hash;
+    return hash ? `${hash}${options.prioritizeAccuracy ? ':full-analysis' : ''}` : null;
   } catch {
     return null;
   }
@@ -468,7 +469,7 @@ async function performPropertyLookupCore(address, options = {}) {
   };
 
   const timing = getLookupTimingConfig();
-  result.meta.budgetMs = timing.totalBudgetMs;
+  result.meta.budgetMs = options.prioritizeAccuracy ? null : timing.totalBudgetMs;
 
   // ── STEP 0: Geocode ──
   // The canonical Google address + county steer the county-record gates and
@@ -492,7 +493,7 @@ async function performPropertyLookupCore(address, options = {}) {
   // internally, so it reports suspected per-leg timeouts through this
   // out-param (observational only — feeds the finalize stamp below).
   const lookupDiag = {};
-  const aiProperty = await lookupPropertyFromAITrio(address, geo, lookupDiag).catch((err) => {
+  const aiProperty = await lookupPropertyFromAITrio(address, geo, lookupDiag, { prioritizeAccuracy: options.prioritizeAccuracy }).catch((err) => {
     result.errors.push({ source: 'ai-property', message: err?.message || String(err) });
     return null;
   });
@@ -659,8 +660,11 @@ async function performPropertyLookupCore(address, options = {}) {
 
   // ── STEP 3: Trio AI Vision Analysis (Claude + OpenAI + Gemini) ──
   const visionBudgetMs = Math.max(0, remainingLookupMs(t0, timing) - timing.responseMarginMs);
-  const visionTimeoutMs = Math.min(timing.visionProviderTimeoutMs, visionBudgetMs);
-  if (result.satellite?._closeB64 && result.satellite?._wideB64 && visionBudgetMs >= timing.visionMinRemainingMs) {
+  const visionTimeoutMs = options.prioritizeAccuracy
+    ? timing.visionProviderTimeoutMs
+    : Math.min(timing.visionProviderTimeoutMs, visionBudgetMs);
+  if (result.satellite?._closeB64 && result.satellite?._wideB64
+      && (options.prioritizeAccuracy || visionBudgetMs >= timing.visionMinRemainingMs)) {
     const visionContext = buildVisionContext(result.satellite, result.propertyRecord?._parcel);
     const [claudeResult, openaiResult, geminiResult] = await Promise.allSettled([
       // Claude Vision
@@ -830,9 +834,9 @@ async function performPropertyLookupCore(address, options = {}) {
       };
       const storyBudgetMs = Math.max(0, remainingLookupMs(t0, timing) - timing.responseMarginMs);
       let aiStories = null;
-      if (storyBudgetMs >= timing.storiesMinRemainingMs) {
+      if (options.prioritizeAccuracy || storyBudgetMs >= timing.storiesMinRemainingMs) {
         aiStories = await lookupStoriesEvidenceFromAI(canonicalLookupAddress(address, geo), hints, {
-          timeoutMs: Math.min(storyBudgetMs, timing.storiesTimeoutMs),
+          timeoutMs: options.prioritizeAccuracy ? timing.storiesTimeoutMs : Math.min(storyBudgetMs, timing.storiesTimeoutMs),
         }).catch((err) => {
           result.errors.push({ source: 'ai-stories', message: err?.message || String(err) });
           return null;
@@ -929,7 +933,7 @@ async function performPropertyLookupCore(address, options = {}) {
       || result.errors.some((e) => /timeout|timed out|abort/i.test(String(e.message)))
       // Whole-budget exhaustion stays as the coarse fallback signal; the
       // trio's per-leg diag above is the precise one (codex r3 P2).
-      || (Number(timing?.totalBudgetMs) > 0 && result.meta.lookupMs >= Number(timing.totalBudgetMs))) {
+      || (!options.prioritizeAccuracy && Number(timing?.totalBudgetMs) > 0 && result.meta.lookupMs >= Number(timing.totalBudgetMs))) {
       status = 'provider_timeout';
       reason = (lookupDiag.providerTimeouts || []).join(',')
         || result.errors.map((e) => e.source).join(',')
@@ -968,7 +972,7 @@ function buildResultFromCachedLookup(address, row, verifiedOverrides, t0) {
       timestamp: new Date().toISOString(),
       lookupMs: Date.now() - t0,
       cache: 'hit',
-      cachedAt: row.updated_at || null,
+      cachedAt: row.data_saved_at || row.updated_at || null,
     },
   };
   return result;
@@ -1002,7 +1006,9 @@ router.post('/property-lookup', async (req, res) => {
     return res.status(400).json({ error: 'Address required' });
   }
   try {
-    const result = await performPropertyLookup(address, { refresh: refresh === true });
+    // The estimator needs the evidence to price the property. A slow record
+    // search must not skip vision/stories; each provider still has a timeout.
+    const result = await performPropertyLookup(address, { refresh: refresh === true, prioritizeAccuracy: true });
     result.meta.providerStatus = buildProviderStatus();
     res.json(result);
   } catch (err) {
@@ -3330,12 +3336,12 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
       priority: 'HIGH',
     });
   } else if (addressAudit && addressAudit.streetExists && !addressAudit.hasExactMatch) {
-    const nearest = addressAudit.nearestNumbers.length
-      ? ` — nearest existing: ${addressAudit.nearestNumbers.join(', ')}`
+    const context = addressAudit.nearestNumbers.length
+      ? ` The county lists other house numbers${addressAudit.typedZip ? ` in ZIP ${addressAudit.typedZip}` : ''}: ${addressAudit.nearestNumbers.join(', ')}. These are context only, not confirmed corrections.`
       : '';
     flags.push({
       field: 'address',
-      reason: `House number ${addressAudit.houseNumber} is not on the ${addressAudit.county} county roll, but ${addressAudit.streetLabel} exists (${addressAudit.parcelCount} parcels)${nearest}. Likely a typo or misheard digits — verify the address before pricing`,
+      reason: `The ${addressAudit.county} county roll could not match house number ${addressAudit.houseNumber} on ${addressAudit.streetLabel}. Confirm the house number, street suffix, direction, and ZIP before pricing.${context}`,
       priority: 'HIGH',
     });
   } else if (addressAudit && !addressAudit.streetExists) {
