@@ -1129,10 +1129,10 @@ function frozenResumeCompletionState(frozenStructuredNotes, { requestBackfill = 
   };
 }
 
-async function loadSubmittedCatalogProducts(submittedProducts = []) {
+async function loadSubmittedCatalogProducts(submittedProducts = [], database = db) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p?.productId).filter(Boolean))];
   if (!productIds.length) return [];
-  return db('products_catalog')
+  return database('products_catalog')
     .whereIn('id', productIds)
     .select('*')
     .catch(() => []);
@@ -1153,16 +1153,16 @@ function treeShrubPhotoUploadRequiredError(uploadResult, minimum = TREE_SHRUB_MI
 // send — that path now routes through admin-schedule's
 // sendRescheduleNoticeForVisit (recipient routing + arrival-window copy).
 
-async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
+async function actualProductBlackoutBlocks(svc, submittedProducts = [], database = db) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
   if (!productIds.length) return [];
 
   const [profile, catalogProducts] = await Promise.all([
-    db('customer_turf_profiles')
+    database('customer_turf_profiles')
       .where({ customer_id: svc.customer_id, active: true })
       .first()
       .catch(() => null),
-    db('products_catalog')
+    database('products_catalog')
       .whereIn('id', productIds)
       .select('id', 'name', 'analysis_n', 'analysis_p')
       .catch(() => []),
@@ -1191,7 +1191,7 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
   const city = stampedCity || profileCity || customerCity;
   if (!county && !city) return [];
 
-  let ordinanceQuery = db('municipality_ordinances').where({ active: true });
+  let ordinanceQuery = database('municipality_ordinances').where({ active: true });
   ordinanceQuery = ordinanceQuery.where(function () {
     if (county) this.orWhere(function () {
       this.where({ jurisdiction_type: 'county' }).whereILike('county', county);
@@ -1303,11 +1303,11 @@ async function productIdentityEvidence(knex, submittedProducts = []) {
   }));
 }
 
-async function actualProductInventoryBlocks(submittedProducts = []) {
+async function actualProductInventoryBlocks(submittedProducts = [], database = db) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
   if (!productIds.length) return [];
 
-  const catalogProducts = await db('products_catalog')
+  const catalogProducts = await database('products_catalog')
     .whereIn('id', productIds)
     .select('id', 'name', 'active', 'inventory_on_hand', 'inventory_unit')
     .catch(() => []);
@@ -3921,7 +3921,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     // finalizing the visit unbilled.
 
     if (claim.action === 'proceed' && treeShrubCloseoutRequired) {
-      const treeShrubProductRows = await loadSubmittedCatalogProducts(products);
+      const treeShrubProductRows = await loadSubmittedCatalogProducts(products, db);
       const treeShrubValidation = validateTreeShrubCloseout({
         service: svc,
         serviceLine: reportServiceLine,
@@ -4063,6 +4063,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
 
     if (claim.action === 'proceed' && !isIncompleteVisit && isWaveGuardLawnCompletion(svc)) {
       const plan = await buildPlanForService(svc.id, {
+        db,
         equipmentSystemId: waveguardEquipmentSystemId || null,
         calibrationId: waveguardCalibrationId || null,
       });
@@ -4093,7 +4094,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
       }
       const blackoutBlocks = [
         ...blackoutLockoutBlocks(plan),
-        ...await actualProductBlackoutBlocks(svc, products),
+        ...await actualProductBlackoutBlocks(svc, products, db),
       ];
       // Advisory, not a lockout (owner directive 2026-07-29: approval
       // ceremonies removed from the closeout). Approval semantics require
@@ -4209,7 +4210,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
       // was never overdrawn (codex P2 r2 on #3179). What was actually
       // submitted (here) plus what was actually deducted (the FOR UPDATE
       // reconcile after the deduction loop) covers every applied product.
-      const inventoryBlocks = await actualProductInventoryBlocks(products);
+      const inventoryBlocks = await actualProductInventoryBlocks(products, db);
       // Advisory, not a lockout (owner directive 2026-08-03: the inventory
       // gate came off the lawn closeout with the other approval ceremonies —
       // a stale stock count must not trap the tech on the screen). The

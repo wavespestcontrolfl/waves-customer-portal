@@ -376,4 +376,29 @@ postgres('visit completion packet records on PostgreSQL', () => {
     }, { packetId: result.body.packetId }))).rejects.toMatchObject({ code: '23505', constraint: 'invoices_visit_packet_owner_unique' });
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
   });
+
+  test('a second lawn member sees the first member’s uncommitted nitrogen and inventory use', async () => {
+    await mockPg('customers').where({ id: fixture.customerId }).update({ waveguard_tier: 'Bronze' });
+    await mockPg('services').where({ id: fixture.catalogId }).update({ name: 'Fixture Lawn Care' });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ service_type: 'WaveGuard Lawn Care' });
+    await mockPg('customer_turf_profiles').insert({ customer_id: fixture.customerId,
+      grass_type: 'st_augustine', lawn_sqft: 1000, annual_n_budget_target: 0.15, active: true });
+    await mockPg('products_catalog').where({ id: fixture.productId }).update({
+      analysis_n: 10, category: 'fertilizer', inventory_unit: 'lb', inventory_on_hand: 1.5,
+    });
+    const input = submission();
+    for (const item of input.items) item.body.products = [{ productId: fixture.productId,
+      totalAmount: 1, amountUnit: 'lb', applicationMethod: 'broadcast', areaValue: 1000, areaUnit: 'sqft' }];
+    const result = await saveVisitCompletionPacket(input);
+    expect(result).toMatchObject({ status: 202, body: { state: 'records_saved' } });
+    const records = await mockPg('service_records').where({ customer_id: fixture.customerId }).orderBy('scheduled_service_id');
+    expect(records[1].structured_notes.waveguardNLimitApproval).toMatchObject({
+      advisory: true, annualN: { used: 0.1 },
+      blocks: expect.arrayContaining([expect.objectContaining({ code: 'actual_annual_n_budget_exceeded' })]),
+    });
+    expect(await mockPg('property_nutrient_ledger').where({ customer_id: fixture.customerId })).toHaveLength(2);
+    expect(Number((await mockPg('products_catalog').where({ id: fixture.productId }).first()).inventory_on_hand)).toBe(-0.5);
+    expect((await saveVisitCompletionPacket(input)).body.replayed).toBe(true);
+    expect(await mockPg('property_nutrient_ledger').where({ customer_id: fixture.customerId })).toHaveLength(2);
+  });
 });
