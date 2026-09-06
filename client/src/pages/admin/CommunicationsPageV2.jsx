@@ -934,16 +934,13 @@ function SmsTab({ active }) {
   }, []);
 
   useEffect(() => {
-    loadData();
-  }, [loadData]);
-
-  useEffect(() => {
     smsSearchRef.current = smsSearch.trim();
+    if (!active) return;
     const t = setTimeout(() => {
       loadData(smsSearch.trim());
     }, 300);
     return () => clearTimeout(t);
-  }, [smsSearch, loadData]);
+  }, [active, smsSearch, loadData]);
 
   const markMessagesRead = useCallback(
     async (thread) => {
@@ -3495,7 +3492,9 @@ export default function CommunicationsPageV2() {
     applyHashTab();
     window.addEventListener("hashchange", applyHashTab);
     return () => window.removeEventListener("hashchange", applyHashTab);
-  }, [tabs, location.hash]);
+    // Router transitions can skip an intermediate channel URL. A new query
+    // with the same final hash still needs to synchronize the rendered tab.
+  }, [tabs, location]);
 
   // Record the leaf that actually renders, including role fallbacks and the
   // raw hash links from NotificationEventsTabV2 that bypass router navigation.

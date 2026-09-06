@@ -12,12 +12,13 @@ const a = { id: "00000000-0000-4000-8000-000000000001", gmail_thread_id: "thread
 const b = { ...a, id: "00000000-0000-4000-8000-000000000002", gmail_thread_id: "thread-b", from_address: "b@example.invalid", subject: "Second fixture message", body_text: "Second fixture body" };
 let sendResponse;
 let draftResponse;
+let messageResponse;
 let inbox;
 const response = (body, status = 200) => ({ ok: status < 400, status, json: async () => body });
 beforeEach(() => {
   clearEmailDrafts(); sessionStorage.clear(); localStorage.setItem("waves_admin_token", "fixture-token");
   window.history.replaceState({}, "", "/admin/communications#tab=email");
-  inbox = [a, b]; sendResponse = null; draftResponse = null;
+  inbox = [a, b]; sendResponse = null; draftResponse = null; messageResponse = null;
   vi.spyOn(window, "alert").mockImplementation(() => {});
   vi.stubGlobal("fetch", vi.fn(async (input, options = {}) => {
     const url = new URL(input, "https://fixture.invalid");
@@ -26,7 +27,9 @@ beforeEach(() => {
     if (url.pathname.endsWith("/send")) return sendResponse ? sendResponse(options) : response({ success: true });
     if (url.pathname.endsWith("/ai-draft")) return draftResponse ? draftResponse() : response({ reply_draft: "Synthetic AI suggestion" });
     if (url.pathname.includes("/thread/")) return response({ thread: [url.pathname.endsWith("thread-a") ? a : b] });
-    if (url.pathname.includes("/message/")) return response(url.pathname.endsWith(a.id) ? a : b);
+    if (url.pathname.endsWith("/star")) return response({ is_starred: true });
+    if (url.pathname.endsWith("/reclassify")) return response({ classification: { category: "customer", summary: "Synthetic classification detail" } });
+    if (url.pathname.includes("/message/")) return messageResponse ? messageResponse(url) : response(url.pathname.endsWith(a.id) ? a : b);
     if (url.pathname.endsWith("/stats")) return response({ total: inbox.length, unread: 0 });
     if (url.pathname.endsWith("/daily-digest")) return response({ total_received: 0 });
     if (url.pathname.endsWith("/customers")) return response({ customers: [] });
@@ -81,6 +84,35 @@ describe("Email draft and navigation preservation", () => {
     mount();
     expect(await screen.findByText(a.body_text)).toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Reply" })).toBeInTheDocument();
+  });
+
+  it.each([404, 503, "network"])("clears the previous message while a changed link loads or fails (%s)", async (failure) => {
+    mount();
+    fireEvent.change(await open(a), { target: { value: "Unsent reply for A" } });
+    let finish;
+    messageResponse = () => new Promise((resolve, reject) => { finish = () => failure === "network" ? reject(new Error("Synthetic fetch failure")) : resolve(response({}, failure)); });
+    act(() => {
+      window.history.pushState({}, "", `/admin/communications?id=${b.id}#tab=email`);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.endsWith(`/message/${b.id}`))).toBe(true));
+    expect(screen.queryByRole("textbox", { name: "Reply" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Archive$/ })).not.toBeInTheDocument();
+    await act(async () => finish());
+    expect(screen.queryByRole("textbox", { name: "Reply" })).not.toBeInTheDocument();
+    messageResponse = null;
+    expect(await open(a)).toHaveValue("Unsent reply for A");
+  });
+
+  it("updates the visible star and classification for an off-list message", async () => {
+    inbox = [];
+    window.history.replaceState({}, "", `/admin/communications?id=${a.id}#tab=email`);
+    mount();
+    await screen.findByText(a.body_text);
+    fireEvent.click(screen.getByText("☆", { exact: true }));
+    expect(await screen.findByText("⭐", { exact: true })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Reclassify/ }));
+    expect(await screen.findByText("AI classification:")).toBeInTheDocument();
   });
 
   it("retains a failed compose and clears it only after a confirmed send", async () => {

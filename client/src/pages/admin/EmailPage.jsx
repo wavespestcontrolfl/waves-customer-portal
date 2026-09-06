@@ -165,6 +165,7 @@ export default function EmailPage({ navigation, active }) {
   const [thread, setThread] = useState([]);
   const replyText = drafts.replies[selectedEmail?.id] || "";
   const selectedIdRef = useRef(null);
+  const wasActiveRef = useRef(false);
   selectedIdRef.current = selectedEmail?.id;
   const setReplyDraft = (id, text) => changeDrafts((current) => ({ ...current, replies: { ...current.replies, [id]: text } }));
   const [sending, setSending] = useState(draftSession.sending.reply);
@@ -271,20 +272,28 @@ export default function EmailPage({ navigation, active }) {
     loadStatus();
   }, [loadStatus]);
   useEffect(() => {
-    if (status?.connected) {
+    if (active && status?.connected) {
       loadStats();
       loadEmails();
       loadDigest();
     }
-  }, [status, loadStats, loadEmails, loadDigest]);
+  }, [active, status, loadStats, loadEmails, loadDigest]);
 
   // Old bells/OAuth returns keep working through /admin/email's alias.
   // Observe query changes as well as mount so Back/Forward can select mail.
   useEffect(() => {
+    const activated = active && !wasActiveRef.current;
+    wasActiveRef.current = active;
     if (!active || !status?.connected) return;
     const id = searchParams.get("id");
-    if (!id) { setSelectedEmail(null); setThread([]); return; }
-    if (id === selectedIdRef.current) return;
+    if (id && id === selectedIdRef.current && !activated) return;
+    if (id !== selectedIdRef.current) {
+      selectedIdRef.current = null;
+      setSelectedEmail(null);
+      setThread([]);
+      setDraftResult(null);
+    }
+    if (!id) return;
     let cancelled = false;
     (async () => {
       try {
@@ -346,6 +355,7 @@ export default function EmailPage({ navigation, active }) {
           em.id === email.id ? { ...em, is_starred: d.is_starred } : em,
         ),
       );
+      setSelectedEmail((current) => current?.id === email.id ? { ...current, is_starred: d.is_starred } : current);
     } catch {
       /* ignore */
     }
@@ -384,17 +394,11 @@ export default function EmailPage({ navigation, active }) {
         { method: "POST" },
       );
       const d = await r.json();
+      const classification = { classification: d.classification?.category, extracted_data: d.classification };
       setEmails((prev) =>
-        prev.map((e) =>
-          e.id === emailId
-            ? {
-                ...e,
-                classification: d.classification?.category,
-                extracted_data: d.classification,
-              }
-            : e,
-        ),
+        prev.map((e) => e.id === emailId ? { ...e, ...classification } : e),
       );
+      setSelectedEmail((current) => current?.id === emailId ? { ...current, ...classification } : current);
     } catch {
       /* ignore */
     }

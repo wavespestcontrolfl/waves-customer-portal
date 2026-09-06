@@ -138,7 +138,7 @@ const CONTEXT_COLORS = {
 };
 
 function detectContext(pathname, search = "", hash = "", user) {
-  if (pathname === "/admin/communications" && user?.role === "admin"
+  if (pathname.replace(/\/+$/, "") === "/admin/communications" && user?.role === "admin"
     && new URLSearchParams(hash.replace(/^#/, "")).get("tab") === "email") return "email";
   // /admin/pipeline hosts both the Leads pipeline and the consolidated
   // Estimates workspace (the old /admin/estimates now redirects here with

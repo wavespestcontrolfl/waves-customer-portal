@@ -10,14 +10,16 @@ vi.mock('../../hooks/useIsMobile', () => ({ default: vi.fn(() => false) }));
 vi.mock('../tech/DictationButton', () => ({ default: () => null }));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
-test.each([["admin", "email"], ["technician", "comms"]])("Email tab keeps the permitted tool context for %s", async (role, expectedContext) => {
+test.each([["admin", "email"], ["technician", "comms"]].flatMap(([role, context]) =>
+  ["/admin/communications", "/admin/communications/"].map((pathname) => [role, context, pathname]),
+))("Email tab keeps the permitted tool context for %s (%s at %s)", async (role, expectedContext, pathname) => {
   useIsMobile.mockReturnValue(false);
   vi.stubGlobal("localStorage", { getItem: () => "fixture-token", setItem() {}, removeItem() {} });
   vi.stubGlobal("fetch", vi.fn(async (url) => String(url).endsWith("/query")
     ? { ok: true, json: async () => ({ response: "Synthetic context response", conversationHistory: [] }) }
     : { ok: false, status: 404, json: async () => ({}) }));
   const ref = createRef();
-  render(<MemoryRouter initialEntries={["/admin/communications#tab=email"]}><GlobalCommandPalette ref={ref} user={{ id: "fixture-user", role }} /></MemoryRouter>);
+  render(<MemoryRouter initialEntries={[`${pathname}#tab=email`]}><GlobalCommandPalette ref={ref} user={{ id: "fixture-user", role }} /></MemoryRouter>);
   act(() => ref.current.open());
   const input = screen.getByPlaceholderText(/Ask anything/);
   fireEvent.change(input, { target: { value: "Show the inbox summary" } });

@@ -268,3 +268,39 @@ The production build and prebuild gates pass; scoped lint has zero errors and
 three pre-existing warnings inside the unchanged SMS implementation. Nine focused client suites / 88 tests pass, including the SMS link-prefill and usage-leaf contracts in addition
 to the seven Email/navigation/sign-out suites. No backend, provider or database
 operation was added.
+
+## GitHub review remediation
+
+Codex's review of `cf7e5adee5` identified one P1 (retained SMS did not refresh
+on return) and three P2s (trailing-slash Email tool context, stale selection
+while resolving a changed message link, and off-list star/classification
+updates). All four are fixed in the existing components:
+
+- SMS uses its existing debounced loader on activation and search changes,
+  retaining the composer and cancelling hidden search timers. The same
+  retention defect was reproduced for Email; its inbox, statistics and selected
+  message now refresh on return while preserving reply text.
+- Email's context recognizes trailing slashes with the same verified-role
+  restriction. Failed or pending changed message links clear prior message
+  actions; selecting the prior message again restores its reply draft.
+- Star and classification responses update both inbox and selected-message
+  state, including messages outside the current page or filter.
+- A fast Email-to-SMS compose link exposed a router transition that skipped an
+  intermediate hash. Channel synchronization now follows every router location
+  change, so the visible channel and explicit SMS recipient follow the URL.
+
+Nine focused suites / **94 tests**, the production build and all prebuild
+checks pass. **Fourteen synthetic browser scenarios** pass with no page errors
+or unmatched APIs. Scoped lint has zero errors and eight existing warnings
+across the three legacy components. Logs are
+`.tmp/email-review-3-all-focused.log`, `.tmp/email-review-3-build.log`,
+`.tmp/email-review-3-lint.log` and `.tmp/email-review-3-browser-verified.log`.
+
+The new component regressions reproduced five failures before fixes. Browser
+regressions separately reproduced stale SMS and Email data; the SMS test waits
+for its initial search debounce before simulating another channel so an initial
+request cannot mask the defect. The first Email test selectors were corrected
+to distinguish Archive from the Archived filter and inspect the rendered
+classification fields. The fast-navigation failure was traced to a visible
+Email tab despite an SMS URL, and the complete browser run passes after its
+router synchronization fix. Debugging scripts remain ignored local evidence.

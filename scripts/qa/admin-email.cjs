@@ -22,6 +22,7 @@ async function main() {
   let draftHold;
   let releaseDraft;
   let smsMessages = [];
+  let refreshedEmail = false;
   async function openPage(role = 'admin', width = 1440) {
     const page = await browser.newPage({ viewport: { width, height: 1000 }, timezoneId: 'America/New_York', serviceWorkers: 'block' });
     page.setDefaultTimeout(15000);
@@ -56,9 +57,9 @@ async function main() {
       else if (api === '/admin/email/send' && request.method() === 'POST') { await sendHold; body = failSend ? { error: 'Synthetic send failure' } : { success: true }; status = failSend ? 503 : 200; }
       else if (api === `/admin/email/message/${a.id}/ai-draft` && request.method() === 'POST') { await draftHold; body = { reply_draft: 'Synthetic delayed suggestion' }; }
       else if (api === `/admin/email/message/${a.id}`) body = a;
-      else if (api === `/admin/email/message/${b.id}`) body = b;
+      else if (api === `/admin/email/message/${b.id}`) body = refreshedEmail ? { ...b, body_text: 'Synthetic updated Email body' } : b;
       else if (api === '/admin/email/thread/thread-a') body = { thread: [a] };
-      else if (api === '/admin/email/thread/thread-b') body = { thread: [b] };
+      else if (api === '/admin/email/thread/thread-b') body = { thread: [refreshedEmail ? { ...b, body_text: 'Synthetic updated Email body' } : b] };
       else if (api === '/admin/communications/log') body = { messages: smsMessages, page: 1, hasMore: false };
       else if (api === '/admin/communications/stats') body = {};
       else if (api === '/admin/communications/ai-auto-reply-status') body = { enabled: false };
@@ -167,6 +168,15 @@ async function main() {
       await page.getByText(b.body_text, { exact: true }).waitFor();
       assert.equal(report.requests.filter((r) => r.path === `/admin/email/message/${b.id}`).length, before + 1);
     });
+    await scenario('returning to Email refreshes the selected message and preserves its reply', async () => {
+      await page.getByRole('textbox', { name: 'Reply' }).fill('Synthetic reply preserved during Email refresh');
+      await channel(page, 'SMS').click();
+      refreshedEmail = true;
+      await channel(page, 'Email').click();
+      await page.getByText('Synthetic updated Email body', { exact: true }).waitFor();
+      assert.equal(await page.getByRole('textbox', { name: 'Reply' }).inputValue(), 'Synthetic reply preserved during Email refresh');
+      refreshedEmail = false;
+    });
     await scenario('retained SMS follows new notification and compose targets without losing channel-switch drafts', async () => {
       const sms = await openPage();
       smsMessages = [
@@ -182,13 +192,18 @@ async function main() {
       await sms.goto(`${server.baseUrl}/admin/communications?thread=fixture-customer-a#tab=sms`);
       await recipient.waitFor();
       await sms.waitForFunction(() => document.querySelector('input[placeholder="Search by name or enter phone number…"]')?.value === '+19415550101');
+      // Let the existing 300ms search debounce settle before simulating time
+      // in another channel, so an initial request cannot mask stale data.
+      await sms.waitForTimeout(400);
       await composer.fill('Synthetic draft for first recipient');
       await channel(sms, 'Email').click();
       await navigate('id=' + a.id, 'email');
       await sms.getByText(a.body_text, { exact: true }).waitFor();
+      smsMessages.push({ ...smsMessages[0], id: 'fixture-sms-new', body: 'Synthetic SMS received while in Email', createdAt: new Date().toISOString() });
       await channel(sms, 'SMS').click();
       assert.equal(await recipient.inputValue(), '+19415550101');
       assert.equal(await composer.inputValue(), 'Synthetic draft for first recipient');
+      await sms.getByText('Synthetic SMS received while in Email', { exact: true }).first().waitFor();
       await channel(sms, 'Email').click();
       const reads = report.requests.filter((r) => r.path === '/admin/communications/log').length;
       await navigate('thread=fixture-customer-b', 'email');
@@ -297,6 +312,10 @@ async function main() {
     report.passed = true;
   } catch (error) {
     report.failure = { stage, message: error.message };
+    report.failure.pages = await Promise.all((browser?.contexts() || []).flatMap((context) => context.pages()).map(async (page) => ({
+      url: page.url(),
+      recipient: await page.getByPlaceholder('Search by name or enter phone number…', { exact: true }).inputValue({ timeout: 500 }).catch(() => null),
+    })));
     throw error;
   } finally {
     releaseSend?.();
