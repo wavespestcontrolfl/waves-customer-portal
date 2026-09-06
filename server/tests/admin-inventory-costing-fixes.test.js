@@ -371,8 +371,9 @@ describe('recalcBestPrice', () => {
   test('COUNT-BASED product: rows rank by LANDED per-unit — a $10/10 pack with $20 shipping does not beat a delivered $20/10 pack; the sticker per-unit is what persists', async () => {
     const { catalogUpdates } = wireBestPrice({
       rows: [
-        { id: 'vp-cheap', vendor_id: 'v-cheap', price: 10, quantity: '10 stations', landed_cost: 30, normalized_unit_price: null, price_per_oz: null, vendor_name: 'Cheap Sticker' },
-        { id: 'vp-deliv', vendor_id: 'v-deliv', price: 20, quantity: '10 stations', landed_cost: 20, normalized_unit_price: null, price_per_oz: null, vendor_name: 'Delivered' },
+        // landed is REBUILT from shipping/tax on the current price (r2 P1): a stale stored landed_cost must not decide
+        { id: 'vp-cheap', vendor_id: 'v-cheap', price: 10, quantity: '10 stations', shipping_cost: 20, landed_cost: 12, normalized_unit_price: null, price_per_oz: null, vendor_name: 'Cheap Sticker' },
+        { id: 'vp-deliv', vendor_id: 'v-deliv', price: 20, quantity: '10 stations', shipping_cost: 0, landed_cost: 999, normalized_unit_price: null, price_per_oz: null, vendor_name: 'Delivered' },
       ],
       product: { unit_size_oz: null, best_price: null, container_size: '1 station', cost_unit: null },
     });
@@ -450,6 +451,69 @@ describe('recalcBestPrice', () => {
     expect(best.best_price_status).toBe('current');
     expect(best.best_price).toBe(31.16);
     expect(best.cost_per_unit).toBe(2.5967);
+  });
+
+  test('approvals clear the stored pack-level landed total along with the landed per-oz (r2 P1)', () => {
+    const { approvedPerOzFields } = inventoryRouter._test;
+    const f = approvedPerOzFields(20.07, '20 count');
+    expect(f.landed_unit_price).toBeNull();
+    expect(f.landed_cost).toBeNull();
+    expect(f.approval_status).toBe('approved');
+  });
+
+  test('a stored landed_cost with NO shipping/tax components is ignored by count ranking — the sticker per-unit decides', () => {
+    const { scoreVendorRows } = inventoryRouter;
+    const out = scoreVendorRows([
+      { id: 'stale', price: 10, quantity: '10 stations', landed_cost: 999 },
+      { id: 'fresh', price: 12, quantity: '10 stations' },
+    ], { unit_size_oz: null, container_size: '1 station' });
+    expect(out.mode).toBe('count');
+    expect(out.ranked[0].row.id).toBe('stale');
+    expect(out.ranked[0].rank).toBe(1);
+  });
+
+  test('PUT /:id decides the size change on the LOCKED row, not the pre-transaction snapshot (r2 P1)', async () => {
+    // Snapshot read before the transaction already says "12 count" (a concurrent edit landed), the locked row says "1 count":
+    // the write of "12 count" IS a change and must recalculate.
+    const snapshot = { id: 'prod-1', container_size: '12 count', unit_size_oz: null, best_price: 31.16, cost_unit: null, inventory_on_hand: null, inventory_unit: null, low_stock_threshold: null };
+    const locked = { ...snapshot, container_size: '1 count' };
+    const rows = [{ id: 'vp-s1', vendor_id: 'v-s1', price: 31.16, quantity: '12 count', normalized_unit_price: null, price_per_oz: null, vendor_name: 'SiteOne' }];
+    const catalogUpdates = [];
+    const trx = (table) => db(table);
+    trx.raw = jest.fn(async () => ({}));
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    db.mockImplementation((table) => makeChain(table, (q) => {
+      if (table === 'vendor_pricing') return q.called('update') ? 1 : rows;
+      if (table === 'products_catalog') {
+        if (q.called('update')) { const u = q.args('update')[0]; catalogUpdates.push(u); Object.assign(locked, u); return 1; }
+        return q.called('forUpdate') ? { ...locked } : { ...snapshot, ...locked, container_size: catalogUpdates.length ? locked.container_size : snapshot.container_size };
+      }
+      throw new Error(`Unexpected table ${table}`);
+    }));
+    await withServer(async (baseUrl) => {
+      const r = await fetch(`${baseUrl}/admin/inventory/prod-1`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ containerSize: '12 count' }) });
+      expect(r.status).toBe(200);
+    });
+    const best = catalogUpdates.find((u) => u.best_price_status);
+    expect(best).toBeDefined();
+    expect(best.best_price_status).toBe('current');
+  });
+
+  test('Intelligence Bar compare_vendor_pricing reports a count-based product on a per-UNIT basis (r2 P2)', async () => {
+    const tools = require('../services/intelligence-bar/procurement-tools');
+    const product = { id: 'prod-1', name: 'Summit Mosquito Dunk Tablets', category: 'mosquito', container_size: '20 count', unit_size_oz: null, best_price: 26.88, best_vendor: 'Amazon' };
+    const rows = [
+      { id: 'vp-amz', vendor_id: 'v-amz', price: 26.88, quantity: '20 count', vendor_name: 'Amazon', is_best_price: true },
+      { id: 'vp-s1', vendor_id: 'v-s1', price: 20.07, quantity: '20 count', vendor_name: 'SiteOne', is_best_price: false },
+    ];
+    db.mockImplementation((table) => makeChain(table, () => (table === 'products_catalog' ? product : rows)));
+    const out = await tools.executeProcurementTool('compare_vendor_pricing', { product_id: 'prod-1' });
+    expect(out.cheapest_vendor).toBe('SiteOne');
+    expect(out.comparison_basis).toMatch(/per-unit/);
+    expect(out.price_range).toMatch(/\/unit spread/);
+    expect(out.cheapest_price_per_unit).toBe(1.0035);
+    expect(out.vendor_prices[0].price_per_oz).toBeNull();
   });
 
   test('parsePackCount reads count packs with their noun; countUnitsCompatible refuses container-vs-item scaling', () => {

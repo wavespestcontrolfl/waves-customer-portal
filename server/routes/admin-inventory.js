@@ -99,6 +99,9 @@ function approvedPerOzFields(price, quantity) {
     // an approval, so clear it; ranking falls back to the fresh sticker
     // per-oz until a price-sync snapshot re-supplies the landed cost.
     landed_unit_price: null,
+    // …and the pack-level landed total for the same reason (Codex #3974 r2
+    // P1): count-based ranking must never read a total built on the OLD price.
+    landed_cost: null,
     // These writes ARE approvals; without this a new insert keeps the
     // column default approval_status='pending' and recalcBestPrice
     // (which only trusts approved rows) would never see it.
@@ -3290,7 +3293,8 @@ function vendorRowPricePerOz(row) {
 //             per-oz (the r22 / landed contracts unchanged);
 //   'count' — no measured row, the catalog container reads as a count, and a
 //             row's count noun is compatible with it: rank by landed per-UNIT
-//             ((landed_cost ?? price) / pack count — a $10/10 pack with $20
+//             (landed total rebuilt from shipping/tax on the current price,
+//             else price, / pack count — a $10/10 pack with $20
 //             shipping must not beat a delivered $20/10 pack), persist the
 //             sticker per-unit;
 //   'raw'   — nothing scalable: rank by raw price (the r19 guard decides).
@@ -3306,7 +3310,13 @@ function scoreVendorRows(rows, product) {
     const price = numberOrNull(row.price_amount) ?? numberOrNull(row.price);
     const pack = perOz == null ? parsePackCount(row.quantity) : null;
     const countable = !!(pack && catalog && price != null && countUnitsCompatible(pack.unit, catalog.unit));
-    const landedTotal = numberOrNull(row.landed_cost);
+    // Landed total for a count row is REBUILT from the row's shipping / tax
+    // components against the CURRENT price (Codex #3974 r2 P1): the stored
+    // landed_cost can outlive the price it was computed from (approvals and
+    // imports replace price + pack without it), and a stale total would rank
+    // the wrong vendor and persist the wrong best_price / cost_per_unit.
+    const hasLandedParts = row.shipping_cost != null || row.tax_rate != null;
+    const landedTotal = countable && hasLandedParts ? calcLandedCost(price, row.shipping_cost, row.tax_rate) : null;
     return {
       row,
       perOz,
@@ -3665,6 +3675,12 @@ router.put('/:id', async (req, res, next) => {
         upd.inventory_unit = nextUnit;
       }
 
+      // The size decision is taken on the row this write actually replaces
+      // (Codex #3974 r2 P1): two overlapping edits each compared against
+      // their own pre-transaction snapshot could skip the recalculation for
+      // a change that did commit.
+      const lockedSizeChanged = (upd.container_size !== undefined && (upd.container_size || null) !== (locked.container_size || null))
+        || (upd.unit_size_oz !== undefined && numberOrNull(upd.unit_size_oz) !== numberOrNull(locked.unit_size_oz));
       await trx('products_catalog').where({ id: req.params.id }).update(upd);
       if (stockChanged) {
         const before = stockBefore || 0;
@@ -3684,16 +3700,14 @@ router.put('/:id', async (req, res, next) => {
           },
         });
       }
-      return trx('products_catalog').where({ id: req.params.id }).first();
+      return { row: await trx('products_catalog').where({ id: req.params.id }).first(), sizeChanged: lockedSizeChanged };
     });
     // A changed catalog size changes how vendor rows scale (per-oz size or
     // count) — recalculate so the fix lands without an operator re-saving a
     // vendor price (Codex #3974 r1 P2). Own serialized transaction, after the
     // product write committed.
-    const sizeChanged = (upd.container_size !== undefined && (upd.container_size || null) !== (product.container_size || null))
-      || (upd.unit_size_oz !== undefined && numberOrNull(upd.unit_size_oz) !== numberOrNull(product.unit_size_oz));
-    if (sizeChanged) await recalcBestPrice(req.params.id);
-    res.json({ success: true, product: sizeChanged ? await db('products_catalog').where({ id: req.params.id }).first() : updated });
+    if (updated.sizeChanged) await recalcBestPrice(req.params.id);
+    res.json({ success: true, product: updated.sizeChanged ? await db('products_catalog').where({ id: req.params.id }).first() : updated.row });
   } catch (err) {
     if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);
@@ -3881,6 +3895,8 @@ router._test = {
   vendorNeedsLoginDiscovery,
   recalcBestPrice,
   vendorRowPricePerOz,
+  approvedPerOzFields,
+  scoreVendorRows,
 };
 
 // The ONE best-price writer (codex #3465 r2 P1): every approval surface —

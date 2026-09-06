@@ -50,7 +50,7 @@ Use for: "which vendors do we use?", "how many products does SiteOne carry?", "w
   },
   {
     name: 'compare_vendor_pricing',
-    description: `Compare prices for a specific product across all vendors. Shows each vendor's price, price-per-oz, and identifies the cheapest.
+    description: `Compare prices for a specific product across all vendors. Shows each vendor's price, price per oz (per unit for count-based products such as stations or traps), and identifies the cheapest.
 Use for: "compare SiteOne vs LESCO on Bifen IT", "where's the cheapest Demand CS?", "pricing breakdown for Prodiamine"`,
     input_schema: {
       type: 'object',
@@ -363,8 +363,17 @@ function rankVendorRows(rows, product) {
   // the catalog. Entries keep { row, perOz, rank, price }; rank is on the
   // chosen basis (null when unrankable) and unrankable rows sort last.
   const adminInventoryRoute = require('../../routes/admin-inventory');
-  return adminInventoryRoute.scoreVendorRows(rows, product).ranked;
+  return adminInventoryRoute.scoreVendorRows(rows, product);
 }
+
+// The basis a ranking was decided on, in words the model can repeat (Codex
+// #3974 r2 P2): a count-based product's spread is dollars per UNIT, not per oz.
+const BASIS_TEXT = {
+  oz: 'per-oz unit cost (landed when known)',
+  count: 'per-unit cost for a count-based product (landed when shipping/tax are known)',
+  raw: 'raw pack price (no comparable size on the rows)',
+};
+const basisUnit = (mode) => (mode === 'count' ? 'unit' : 'oz');
 
 async function compareVendorPricing(input) {
   const { product_name, product_id } = input;
@@ -383,10 +392,10 @@ async function compareVendorPricing(input) {
 
   // Ordered by UNIT cost, not raw pack price — a $40/32 oz offer must not
   // present as "cheaper" than a $50/64 oz one.
-  const ranked = rankVendorRows(rows, product);
+  const { mode, ranked } = rankVendorRows(rows, product);
   const cheapest = ranked.length > 0 ? ranked[0] : null;
   const dearest = ranked.length > 0 ? ranked[ranked.length - 1] : null;
-  const perOzSpread = cheapest?.rank != null && dearest?.rank != null && ranked.length > 1
+  const spread = cheapest?.rank != null && dearest?.rank != null && ranked.length > 1
     ? dearest.rank - cheapest.rank
     : 0;
 
@@ -397,11 +406,12 @@ async function compareVendorPricing(input) {
       current_best_price: product.best_price ? parseFloat(product.best_price) : null,
       current_best_vendor: product.best_vendor,
     },
-    vendor_prices: ranked.map(({ row: p, perOz }) => ({
+    vendor_prices: ranked.map(({ row: p, perOz, perUnit }) => ({
       vendor: p.vendor_name,
       price: parseFloat(p.price_amount ?? p.price ?? 0),
       quantity: p.quantity,
       price_per_oz: perOz != null ? Math.round(perOz * 10000) / 10000 : null,
+      price_per_unit: perUnit != null ? Math.round(perUnit * 10000) / 10000 : null,
       landed_price_per_oz: (() => {
         const adminInventoryRoute2 = require('../../routes/admin-inventory');
         return adminInventoryRoute2.storedUnitCostPerOz(p.landed_unit_price, p.unit_normalized);
@@ -413,9 +423,10 @@ async function compareVendorPricing(input) {
     cheapest_vendor: cheapest?.row.vendor_name,
     cheapest_price: cheapest ? parseFloat(cheapest.row.price_amount ?? cheapest.row.price ?? 0) : null,
     cheapest_price_per_oz: cheapest?.perOz != null ? Math.round(cheapest.perOz * 10000) / 10000 : null,
-    price_range: perOzSpread > 0 ? `$${perOzSpread.toFixed(4)}/oz spread across ${ranked.length} vendors` : null,
+    cheapest_price_per_unit: cheapest?.perUnit != null ? Math.round(cheapest.perUnit * 10000) / 10000 : null,
+    price_range: spread > 0 ? `$${spread.toFixed(4)}/${basisUnit(mode)} spread across ${ranked.length} vendors` : null,
     vendor_count: ranked.length,
-    comparison_basis: 'per-oz unit cost (landed when known)',
+    comparison_basis: BASIS_TEXT[mode],
   };
 }
 
@@ -442,12 +453,16 @@ async function findCheapestVendor(input) {
       .join('vendors', 'vendor_pricing.vendor_id', 'vendors.id')
       .select('vendor_pricing.*', 'vendors.name as vendor_name');
 
-    // Same per-oz basis as compareVendorPricing (GH r3 P1).
-    const ranked = rankVendorRows(rows, p).slice(0, 3);
+    // Same basis as compareVendorPricing (GH r3 P1) — per oz, or per unit
+    // for a count-based product (Codex #3974 r2 P2).
+    const scored = rankVendorRows(rows, p);
+    const ranked = scored.ranked.slice(0, 3);
+    const savingsKey = scored.mode === 'count' ? 'savings_per_unit_vs_next' : 'savings_per_oz_vs_next';
     const asEntry = (r) => (r ? {
       vendor: r.row.vendor_name,
       price: parseFloat(r.row.price_amount ?? r.row.price ?? 0),
       price_per_oz: r.perOz != null ? Math.round(r.perOz * 10000) / 10000 : null,
+      price_per_unit: r.perUnit != null ? Math.round(r.perUnit * 10000) / 10000 : null,
     } : null);
     results.push({
       product: p.name,
@@ -458,13 +473,14 @@ async function findCheapestVendor(input) {
       // Savings on the SAME basis the ranking used (r16-push P1): rank is
       // landed per-oz when known — sticker deltas could go negative under
       // heavy shipping despite a correct winner.
-      savings_per_oz_vs_next: ranked.length >= 2 && ranked[0].rank != null && ranked[1].rank != null
+      comparison_basis: BASIS_TEXT[scored.mode],
+      [savingsKey]: ranked.length >= 2 && ranked[0].rank != null && ranked[1].rank != null
         ? Math.round((ranked[1].rank - ranked[0].rank) * 10000) / 10000
         : null,
     });
   }
 
-  return { results, total: results.length, comparison_basis: 'per-oz unit cost (landed when known)' };
+  return { results, total: results.length, comparison_basis: 'per-oz unit cost (landed when known); per-unit for count-based products — see each result' };
 }
 
 
