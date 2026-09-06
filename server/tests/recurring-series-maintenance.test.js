@@ -499,7 +499,8 @@ describe('runRecurringSeriesMaintenance — ongoing auto-extend', () => {
     expect(helperBody).toContain(".where('is_recurring', true)");
     // 4th consumer: planUpdateDetailsRecurrenceDates (update-details' pre-trx
     // rung-1 date peek) anchors its extend plan on the same helper.
-    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(4);
+    // Lapse-alert display also uses the shared current-series end.
+    expect((src.match(/await latestLiveSeriesVisit\(/g) || []).length).toBe(5);
     // The occupied-dates preload is shared the same way (same 4th consumer).
     expect((src.match(/await loadActiveSeriesDates\(/g) || []).length).toBe(4);
   });
@@ -655,6 +656,13 @@ describe('recurring-alerts derived scan — exhausted ongoing plans (source guar
     // POST /recurring-alerts/:id/action (extend / convert_ongoing) works.
     const matches = src.match(/id: `derived-\$\{plan\.id\}`/g) || [];
     expect(matches.length).toBe(2);
+  });
+
+  test('both derived scans deduplicate only queue rows belonging to the current owner', () => {
+    const route = src.slice(src.indexOf("router.get('/recurring-alerts'"), src.indexOf("router.post('/recurring-alerts/:id/action'"));
+    const queueChecks = route.match(/where\(\{ recurring_parent_id: plan.id, customer_id: plan.customer_id \}\)\.whereNull\('resolved_at'\)\.first\(\)/g) || [];
+    expect(queueChecks).toHaveLength(2);
+    expect(route).not.toContain("where({ recurring_parent_id: plan.id }).whereNull('resolved_at').first()");
   });
 
   test('schedule status route still runs the maintenance after completion', () => {
@@ -1310,7 +1318,7 @@ describe('renewal banner revalidates historical recurring alerts', () => {
   test('keeps explicit lapse holds visible regardless of refill, date, or paid coverage', async () => {
     AnnualPrepayRenewals.annualPrepayCoversVisit.mockResolvedValue(true);
     expect(await refreshRecurringPlanAlert(scenario({ upcoming: 2, lastDate: daysOut(90) }), { ...alert, alertType: 'plan_lapsed' }))
-      .toMatchObject({ remainingVisits: 2, alertType: 'plan_lapsed' });
+      .toMatchObject({ remainingVisits: 2, lastVisitDate: daysOut(90), alertType: 'plan_lapsed' });
     expect(AnnualPrepayRenewals.annualPrepayCoversVisit).not.toHaveBeenCalled();
   });
   test('drops a queued alert once two appointments exist', async () => {

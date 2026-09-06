@@ -16626,7 +16626,9 @@ async function refreshRecurringPlanAlert(conn, alert, cols) {
     // A lapse is an explicit operational hold, not an ending reminder. Keep
     // its resolution available even after visits are added or prepaid.
     if (alert.alertType === 'plan_lapsed') {
-      return { ...alert, remainingVisits: await countUpcomingSeriesVisits(conn, parent.id),
+      const latest = await latestLiveSeriesVisit(conn, parent.id);
+      return { ...alert, lastVisitDate: dateOnly(latest?.scheduled_date),
+        remainingVisits: await countUpcomingSeriesVisits(conn, parent.id),
         serviceType: template.service_type, pattern: template.recurring_pattern };
     }
 
@@ -16738,9 +16740,9 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
           const pendingCount = await countUpcomingSeriesVisits(db, plan.id);
           if (pendingCount > 1) continue;
 
-          // Skip if already queued
+          // An old owner's queue row cannot suppress this owner's derived alert.
           const q = await db('recurring_plan_alerts')
-            .where({ recurring_parent_id: plan.id }).whereNull('resolved_at').first();
+            .where({ recurring_parent_id: plan.id, customer_id: plan.customer_id }).whereNull('resolved_at').first();
           if (q) continue;
 
           alerts.push({
@@ -16790,9 +16792,9 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
           // what counts as "upcoming") before alerting.
           const pendingCount = await countUpcomingSeriesVisits(db, plan.id);
           if (pendingCount > 0) continue;
-          // Skip if already queued
+          // An old owner's queue row cannot suppress this owner's derived alert.
           const q = await db('recurring_plan_alerts')
-            .where({ recurring_parent_id: plan.id }).whereNull('resolved_at').first();
+            .where({ recurring_parent_id: plan.id, customer_id: plan.customer_id }).whereNull('resolved_at').first();
           if (q) continue;
           // Last date that actually occupied a slot = the plan's last activity.
           const lastRow = await db('scheduled_services')
