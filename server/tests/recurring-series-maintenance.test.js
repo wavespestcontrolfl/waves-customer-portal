@@ -1135,10 +1135,11 @@ describe('renewal banner revalidates historical recurring alerts', () => {
   ])('omits former/deleted customers: %j', async (customer) => {
     expect(await refreshRecurringPlanAlert(scenario({ customer }), alert)).toBeNull();
   });
-  test.each(['cancelled', 'rescheduled'])('keeps a %s anchor with an upcoming recurring child', async (status) => {
+  test.each(['cancelled', 'rescheduled'])('keeps a %s anchor whose children are ending or finished', async (status) => {
     expect(await refreshRecurringPlanAlert(scenario({ parent: { status } }), alert))
       .toMatchObject({ remainingVisits: 1 });
-    expect(await refreshRecurringPlanAlert(scenario({ parent: { status }, upcoming: 0 }), alert)).toBeNull();
+    expect(await refreshRecurringPlanAlert(scenario({ parent: { status }, upcoming: 0 }), alert))
+      .toMatchObject({ remainingVisits: 0 });
   });
   test.each(['new_lead', null])('keeps a serviced recurring plan despite stale CRM stage %j', async (pipeline_stage) => {
     expect(await refreshRecurringPlanAlert(scenario({ customer: { pipeline_stage } }), alert))

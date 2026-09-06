@@ -16618,8 +16618,6 @@ async function refreshRecurringPlanAlert(conn, alert) {
 
     const remainingVisits = await countUpcomingSeriesVisits(conn, parent.id);
     if (remainingVisits > (parent.recurring_ongoing ? 0 : 1)) return null;
-    // A this-only cancellation of the anchor leaves its later children live.
-    if (remainingVisits === 0 && ['cancelled', 'rescheduled'].includes(parent.status)) return null;
     const lastVisit = await conn('scheduled_services')
       .where(function () { this.where('recurring_parent_id', parent.id).orWhere('id', parent.id); })
       .where('is_recurring', true)
