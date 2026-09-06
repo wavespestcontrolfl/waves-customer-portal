@@ -109,7 +109,8 @@ const SCENE_LIBRARY = {
     { key: 'lawn-fungus-rings', scene: 'brown circular patches on an otherwise green Florida lawn after summer rain, soft overcast light' },
     { key: 'lawn-property-line', scene: 'a property line where one lawn is thick deep-green St. Augustine and the neighboring side is patchy and yellowed, palm trees and blue sky' },
     { key: 'lawn-sprinkler-sunrise', scene: 'irrigation sprinklers running over a healthy green Florida lawn at sunrise, backlit water droplets and long shadows' },
-    { key: 'lawn-webworm-moth', scene: 'a small tan lawn moth resting on a St. Augustine grass blade at dusk, shallow depth of field, warm light', only: ['webworm', 'armyworm', 'caterpillar'] },
+    { key: 'lawn-webworm-moth', scene: 'a small tan lawn moth resting on a St. Augustine grass blade at dusk, shallow depth of field, warm light', only: ['webworm'] },
+    { key: 'lawn-armyworm-caterpillar', scene: 'macro of a striped green-brown caterpillar with a pale inverted Y on its head crawling along a St. Augustine grass blade, morning light', only: ['armyworm', 'caterpillar'] },
     { key: 'lawn-sedge-patch', scene: 'a cluster of bright yellow-green nutsedge shooting above a darker St. Augustine lawn in a low wet corner, midday sun', only: ['sedge', 'weed', 'soggy'] },
     { key: 'lawn-dollarweed-cluster', scene: 'close-up of round coin-shaped dollarweed leaves spreading through damp St. Augustine turf near a sprinkler head', only: ['dollarweed', 'weed', 'wet', 'irrigation'] },
     { key: 'lawn-peeled-sod', scene: 'a corner of St. Augustine sod lifted back like carpet to show bare soil and roots beneath, bright Florida daylight', only: ['grub', 'root', 'chinch', 'peel'] },
@@ -171,6 +172,8 @@ const SCENE_LIBRARY = {
     { key: 'id-garage-corner', scene: 'a clean, bright garage corner where the drywall meets the slab, an open garage door letting in daylight' },
     { key: 'id-front-step', scene: 'a Florida front entry step and door threshold with a potted plant beside it, soft morning light' },
     { key: 'id-garden-bed-edge', scene: 'the edge of a tropical landscape bed against a stucco wall, mulch and crotons, dappled light' },
+    { key: 'id-window-sill', scene: 'an interior window sill and track of a Florida home with bright daylight through the glass and palms blurred outside, empty and clean' },
+    { key: 'id-pool-cage-post', scene: 'the base of an aluminum pool cage post where it meets sun-warmed pavers, pool water and palms softly blurred behind' },
   ],
 };
 

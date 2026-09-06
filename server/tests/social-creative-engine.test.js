@@ -386,6 +386,15 @@ describe('diagnostic scenes apply only to matching topics (Codex r3 on #3990)', 
     expect(drywood).not.toContain('termite-porch-light-swarm');
   });
 
+  test('an armyworm campaign never gets the webworm moth; a webworm topic never gets the armyworm caterpillar', () => {
+    const army = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.lawn, { service: 'lawn care', topic: 'fall armyworms moving across lawns' }).map((c) => c.key);
+    expect(army).not.toContain('lawn-webworm-moth');
+    expect(army).toContain('lawn-armyworm-caterpillar');
+    const web = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.lawn, { service: 'lawn care', topic: 'sod webworm moths at dusk' }).map((c) => c.key);
+    expect(web).toContain('lawn-webworm-moth');
+    expect(web).not.toContain('lawn-armyworm-caterpillar');
+  });
+
   test('every bank keeps service-wide (unrestricted) concepts so a generic topic always has a scene', () => {
     for (const [bucket, bank] of Object.entries(Engine.SCENE_LIBRARY)) {
       const generic = Engine.conceptsApplicableTo(bank, { service: bucket, topic: 'seasonal pressure' });

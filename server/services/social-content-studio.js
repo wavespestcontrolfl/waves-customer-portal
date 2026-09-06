@@ -437,7 +437,7 @@ const PEST_VERSUS_PAIRS = [
   {
     key: 'termite_frass_vs_carpenter_ant_frass',
     service: 'termite',
-    left: { name: 'Drywood Termite Frass', points: ['Six-sided pellets, all one size', 'Tiny piles below a pinhole', 'Looks like coarse sand or coffee grounds'] },
+    left: { name: 'Drywood Pellets', points: ['Six-sided pellets, all one size', 'Tiny piles below a pinhole', 'Looks like coarse sand or coffee grounds'] },
     right: { name: 'Carpenter Ant Frass', points: ['Fibrous wood shavings', 'Mixed with insect parts', 'Pushed out of nest openings'] },
     verdict: 'Pellets or shavings? The pile is your first clue; an inspection confirms it.',
   },
@@ -1455,12 +1455,15 @@ function selectAutonomousCampaign(now = new Date(), { recent = new Set() } = {})
   // outright — see isCampaignSlotDay), never from the raw day: indexing by
   // day aliased to the lanes' parity (day % 6 reached topics 1/3/5, day % 4
   // cities 1/3), the same defect #3651 fixed in the versus lane. A yielded
-  // day is not a slot: it takes the state half a cycle ahead (farthest from
-  // its neighbours), and the recent-cards skip below keeps that state from
-  // being replayed when the walk reaches it.
+  // day is not a slot: it takes the state half a cycle ahead PLUS ONE
+  // (farthest from its neighbours by city, and — since half a cycle is a
+  // whole number of topic cycles — one topic over, so a yielded day never
+  // posts the same subject as the owned slot before or after it). The
+  // recent-cards skip below keeps that state from being replayed when the
+  // walk reaches it.
   const cycle = seasonal.length * WAVES_LOCATIONS.length;
   const slotsBefore = campaignSlotsBefore(year, month, day);
-  const start = isCampaignSlotDay(day) ? slotsBefore : slotsBefore + Math.floor(cycle / 2);
+  const start = isCampaignSlotDay(day) ? slotsBefore : slotsBefore + Math.floor(cycle / 2) + 1;
   let card = campaignCardAt(seasonal, start);
   for (let step = 0; step < cycle; step += 1) {
     const candidate = campaignCardAt(seasonal, start + step);
@@ -1944,7 +1947,10 @@ const SERVICE_INTENT_KEYWORDS = [
   { match: ['flea', 'fleas'] },
   { match: ['bed bug', 'bedbug'] },
   { match: ['spider', 'spiders', 'black widow', 'brown widow'] },
-  { match: ['wasp', 'hornet', 'yellow jacket', 'yellowjacket', 'bee', 'bees', 'mud dauber'] },
+  { match: ['wasp', 'hornet', 'yellow jacket', 'yellowjacket', 'bee', 'bees'] },
+  // Mud daubers stand alone: the August "mud daubers on the lanai ceiling"
+  // topic asks for a guide, and a yellowjacket or bee page is not that guide.
+  { match: ['mud dauber', 'dirt dauber'] },
   { match: ['silverfish', 'earwig', 'millipede', 'centipede', 'springtail'] },
   { match: ['tree', 'shrub', 'ornamental', 'palm', 'tree and shrub', 'tree & shrub', 'whitefly', 'scale insect', 'mealybug', 'sooty mold'] },
 ];

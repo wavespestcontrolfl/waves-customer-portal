@@ -834,6 +834,13 @@ describe('studio link relevance + legacy-card alert predicates', () => {
     // Previously-unlisted intents now resolve, so an exact live post can be linked.
     expect(Studio.serviceIntentKeywords({ topic: 'black widow vs brown widow', service: 'general pest' })).toEqual(expect.arrayContaining(['spider']));
     expect(Studio.serviceIntentKeywords({ topic: 'wasps nesting under eaves' })).toEqual(expect.arrayContaining(['wasp', 'hornet']));
+    // Mud daubers stand alone (Codex r3 on #3990): a bee or yellowjacket page is not a mud-dauber guide.
+    const dauber = Studio.serviceIntentKeywords({ topic: 'mud daubers on the lanai ceiling', service: 'general pest' });
+    expect(dauber).toEqual(expect.arrayContaining(['mud dauber']));
+    expect(dauber).not.toContain('wasp');
+    expect(dauber).not.toContain('bee');
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Yellowjackets around the pool deck' }, dauber)).toBe(false);
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Mud dauber nests on lanai ceilings' }, dauber)).toBe(true);
     expect(Studio.serviceIntentKeywords({ topic: 'palmetto bugs in the garage' })).toEqual(expect.arrayContaining(['roach']));
     // End-to-end: the resolved keywords select the right row and reject the look-alike.
     const kws = Studio.serviceIntentKeywords({ topic: 'summer roaches moving indoors', service: 'general pest' });
@@ -1010,6 +1017,17 @@ describe('campaign lane skips recently published cards (Codex r3 on #3990)', () 
     for (let d = 5; d <= 31; d += 2) {
       const p = Studio.selectAutonomousCampaign(etNoonLocal(`2026-07-${String(d).padStart(2, '0')}`), { recent });
       expect(`${p.topic}|${p.city}`).not.toBe(`${yielded.topic}|${yielded.city}`);
+    }
+    delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
+  });
+
+  test('a yielded day changes the topic, not just the city, against both neighbouring owned slots', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    // 2026-07-04 (review day) and 2026-07-06 (versus day) are not slots; 3/5/7 are.
+    for (const [before, yielded, after] of [[3, 4, 5], [5, 6, 7], [7, 8, 9]]) {
+      const topicOn = (d) => Studio.selectAutonomousCampaign(etNoonLocal(`2026-07-${String(d).padStart(2, '0')}`)).topic;
+      expect(topicOn(yielded)).not.toBe(topicOn(before));
+      expect(topicOn(yielded)).not.toBe(topicOn(after));
     }
     delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
   });
