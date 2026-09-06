@@ -291,7 +291,8 @@ def drain_group(pid, stamp, process=None):
         process.poll()
     if not group_exists(pid):
         return
-    current = process_stamp(pid)
+    # An unreaped Popen child is still ours even if the ps identity read failed.
+    current = None if process is not None and process.returncode is None else process_stamp(pid)
     if current and current != stamp:
         raise RuntimeError('Worker PID was reused; refusing to signal an unrelated group')
     if current and (os.getpgid(pid) != pid or os.getsid(pid) != pid):
@@ -345,8 +346,9 @@ def resume(root, key, job):
         process = subprocess.Popen(argv, cwd=job['worktree'], env=environment(),
                                    stdin=subprocess.PIPE, stdout=output, stderr=subprocess.DEVNULL,
                                    start_new_session=True)
-        stamp = process_stamp(process.pid)
+        stamp = None
         try:
+            stamp = process_stamp(process.pid)
             if not update_job(root, key, job['revision'], {'status': 'running', 'worker_pid': process.pid,
                                                           'worker_stamp': stamp,
                                                           'launch_pending': False}):
@@ -372,6 +374,7 @@ def resume(root, key, job):
             drain_group(process.pid, stamp, process)
             process.wait()
             clear_worker(root, key, process.pid, stamp)
+            update_job(root, key, job['revision'], {'launch_pending': False})
 
 
 def inspect_job(job, now):
@@ -468,8 +471,7 @@ def tick(root, execute=False):
                     result['reason'] = 'owner_decision'
             except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
                 status, result = 'blocked', {'reason': 'invalid_or_failed_resume'}
-            update_job(root, key, job['revision'], {'status': status, 'reason': result['reason'],
-                                                    'launch_pending': False})
+            update_job(root, key, job['revision'], {'status': status, 'reason': result['reason']})
             break  # One model process per tick, bounded and visible.
 
 

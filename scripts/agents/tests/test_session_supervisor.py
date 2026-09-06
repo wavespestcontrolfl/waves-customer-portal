@@ -254,6 +254,28 @@ class SupervisorTests(unittest.TestCase):
         self.assertFalse(any('bypass' in value or 'last' in value or 'model' in value for value in argv))
         self.assertEqual(result, {'state': 'waiting', 'reason': 'waiting_ci'})
 
+    def test_identity_read_failure_after_spawn_reaps_child_before_clearing_fence(self):
+        self.store()
+        process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                                   stdin=subprocess.PIPE, start_new_session=True)
+        self.addCleanup(lambda: process.poll() is None and process.kill())
+        with patch.object(supervisor, 'inspect_job', return_value={'action': 'resume', 'reason': 'pr_ready'}), \
+                patch.object(supervisor.subprocess, 'Popen', return_value=process), \
+                patch.object(supervisor, 'process_stamp', side_effect=OSError('ps unavailable')):
+            supervisor.tick(self.root, execute=True)
+        self.assertIsNotNone(process.poll())
+        self.assertFalse(supervisor.group_exists(process.pid))
+        job = supervisor.read_jobs(self.root)[self.key]
+        self.assertEqual(job['status'], 'blocked')
+        self.assertFalse(job['launch_pending'])
+
+    def test_unconfirmed_cleanup_retains_launch_fence(self):
+        self.store()
+        with patch.object(supervisor, 'inspect_job', return_value={'action': 'resume', 'reason': 'pr_ready'}), \
+                patch.object(supervisor, 'resume', side_effect=OSError('cleanup unconfirmed')):
+            supervisor.tick(self.root, execute=True)
+        self.assertTrue(supervisor.read_jobs(self.root)[self.key]['launch_pending'])
+
     def test_exited_cli_leader_does_not_leave_its_tool_process_running(self):
         self.store()
         executable = self.root / 'codex'
