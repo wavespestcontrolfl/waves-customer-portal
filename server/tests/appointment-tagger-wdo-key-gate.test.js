@@ -34,6 +34,9 @@ function chain() {
 const service = {
   id: 'svc-wdo-1',
   customer_id: 'cust-wdo-1',
+  service_id: 'catalog-wdo',
+  service_type: 'WDO Inspection',
+  status: 'confirmed',
   address_line1: '100 Unit Test Way',
   city: 'Venice',
   zip: '34285',
@@ -92,6 +95,32 @@ describe('triggerWDOPrep provider-key gate', () => {
     expect(require('../services/property-lookup/ai-property-lookup').lookupPropertyFromAITrio)
       .toHaveBeenCalledWith('200 Example Road, Example, FL 00000');
     expect(c.where).toHaveBeenCalledWith(expect.objectContaining({ property_id: 'new', service_address_line1: '200 Example Road' }));
+    expect(c.insert).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['service_id', 'catalog-pest'],
+    ['service_type', 'General Pest Control'],
+    ['status', 'cancelled'],
+  ])('discards research when %s changes during the provider call', async (field, value) => {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    const live = { ...service };
+    const c = chain();
+    let publication;
+    c.where.mockImplementation((where) => { publication = where; return c; });
+    c.update.mockImplementation(async (patch) => {
+      const matches = Object.entries(publication).every(([key, expected]) => (live[key] ?? null) === expected);
+      if (matches) Object.assign(live, patch);
+      return matches ? 1 : 0;
+    });
+    db.mockReturnValue(c);
+    require('../services/property-lookup/ai-property-lookup').lookupPropertyFromAITrio
+      .mockImplementationOnce(async () => { live[field] = value; return null; });
+
+    await tagger.triggerWDOPrep({ ...service });
+
+    expect(live.pre_service_brief).toBeUndefined();
     expect(c.insert).not.toHaveBeenCalled();
   });
 

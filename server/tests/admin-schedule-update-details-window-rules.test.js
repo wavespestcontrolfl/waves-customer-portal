@@ -427,3 +427,25 @@ test('address regrouping uses final edit values inside the transaction', () => {
   expect(regroup).toBeLessThan(postCommit);
   expect(handler.slice(regroup, postCommit)).toContain("maybeGroupRow(id, { database: trx, createdBy: 'dispatch' })");
 });
+
+// These ordering guards cover the modal's transaction wiring; real PostgreSQL
+// concurrency remains a separate dev-database verification requirement.
+test('address saves fence destination partner technicians and reject changed snapshots before writes', () => {
+  const handler = src.slice(src.indexOf("router.put('/:id/update-details'"));
+  const partnerRead = handler.indexOf('const addressPartnersQuery =');
+  const partnerFence = handler.indexOf('for (const partner of addressPartners)');
+  const fence = handler.indexOf('await lockTechDays(trx, preFence)');
+  const stops = handler.indexOf('await lockAppointmentAddress(trx,');
+  const recheck = handler.indexOf('const lockedPartners =');
+  const write = handler.indexOf('await applyAppointmentAddress(trx,');
+  expect(partnerRead).toBeGreaterThan(handler.indexOf('await acquireOccupancyLocks(trx,'));
+  expect(partnerFence).toBeGreaterThan(partnerRead);
+  expect(fence).toBeGreaterThan(partnerFence);
+  expect(stops).toBeGreaterThan(fence);
+  expect(recheck).toBeGreaterThan(stops);
+  expect(write).toBeGreaterThan(recheck);
+  expect(handler.slice(partnerRead, partnerFence)).toContain("whereIn('scheduled_date', [...lockedRecurrenceDates])");
+  expect(handler.slice(partnerFence, fence)).toContain('techId: partner.technician_id, date: dateOnly(partner.scheduled_date)');
+  expect(handler.slice(recheck, write)).toContain('JSON.stringify(lockedPartners) !== JSON.stringify(addressPartners)');
+  expect(handler.slice(recheck, write)).toContain('throw httpError(409,');
+});

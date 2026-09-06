@@ -183,8 +183,11 @@ class AppointmentTagger {
         brief = this.generateWDOBriefTemplate(service, propertyData);
       }
 
-      // A later address edit invalidates this research while providers run.
+      // Address, service and lifecycle edits invalidate research while providers run.
       const written = await db('scheduled_services').where({ id: service.id,
+        service_id: service.service_id ?? null,
+        service_type: service.service_type ?? null,
+        status: service.status ?? null,
         property_id: service.property_id ?? null,
         service_address_line1: service.service_address_line1 ?? null,
         service_address_line2: service.service_address_line2 ?? null,

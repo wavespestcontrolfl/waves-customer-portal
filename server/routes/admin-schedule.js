@@ -8560,6 +8560,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       } else if (occupancyWindowTouched && occupancyDateKey) {
         await acquireOccupancyLock(trx, occupancyDateKey);
       }
+      // Regrouping can adopt a destination partner's technician. Include all
+      // destination rows (eligibility may change during this save), then
+      // revalidate after locking: an assignment may finish while we wait.
+      const addressPartnersQuery = addressPlan ? trx('scheduled_services')
+        .where({ customer_id: addressPlan.anchor.customer_id, property_id: addressPlan.propertyId })
+        .whereIn('scheduled_date', [...lockedRecurrenceDates])
+        .select('id', 'technician_id', 'scheduled_date').orderBy('id') : null;
+      const addressPartners = addressPartnersQuery ? await addressPartnersQuery.clone() : [];
       // Every save pre-acquires its complete tech-day fence before stop and
       // maintenance locks, including same-slot assignment echoes from the modal.
       // Otherwise an ordinary save and an address save can deadlock.
@@ -8567,6 +8575,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const preFence = addressPlan ? addressPlan.rows.flatMap((row) =>
           [row.technician_id, requestedTechnicianId].flatMap((techId) =>
             [row.scheduled_date, updates.scheduled_date].filter(Boolean).map((date) => ({ techId, date: dateOnly(date) })))) : [];
+        for (const partner of addressPartners) {
+          preFence.push({ techId: partner.technician_id, date: dateOnly(partner.scheduled_date) });
+        }
         if (assignmentShouldRun) {
           const { targetIds: preTargetIds } = await getAssignmentTargetIds(trx, req.params.id, normalizedAssignmentScope);
           const preRows = await trx('scheduled_services').whereIn('id', preTargetIds)
@@ -8609,6 +8620,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
       if (commsPeek) await lockCustomerComms(trx, commsPeek.customer_id);
       if (addressPlan) await lockAppointmentAddress(trx, addressPlan, updates);
+      if (addressPartnersQuery) {
+        const lockedPartners = await addressPartnersQuery.clone();
+        if (JSON.stringify(lockedPartners) !== JSON.stringify(addressPartners)) {
+          throw httpError(409, 'Appointments changed while saving. Reload and choose the address again.');
+        }
+      }
       if (preReadVisitId) {
         try {
           await require('../services/visit-groups').lockStopForRow(trx, req.params.id);
