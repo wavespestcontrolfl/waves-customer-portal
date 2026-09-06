@@ -4510,7 +4510,8 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
           notificationSent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
-            return renderRequiredTemplate('appointment_series_rescheduled', {
+            return renderRequiredTemplate(result.futurePlacementDays === 3
+              ? 'appointment_recurring_placement_confirmed' : 'appointment_series_rescheduled', {
               first_name: firstName,
               start_date: displayDate,
               window_text: windowText,

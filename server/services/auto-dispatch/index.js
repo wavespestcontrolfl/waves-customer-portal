@@ -114,6 +114,7 @@ function loadEligibleServices(lockBoundary, lookaheadEnd, today) {
       'customers.first_name',
       'customers.last_name',
     )
+    .orderByRaw('(scheduled_services.recurring_dispatch_due_date IS NOT NULL AND scheduled_services.window_start IS NULL) DESC')
     .orderBy('scheduled_services.scheduled_date', 'asc')
     .limit(5000);
 }

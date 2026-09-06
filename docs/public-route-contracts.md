@@ -908,7 +908,10 @@ server-side):
     pages omitting it retain legacy behavior only while deferral is off;
     otherwise they refresh and re-disclose. SMS retains its existing
     series policy until it has a placement disclosure. Success copy keeps
-    the unchanged-commitment caveat. Authentication is unchanged. Untimed
+    the unchanged-commitment caveat. The confirmation SMS uses the separate
+    `appointment_recurring_placement_confirmed` template when the recorded
+    operation has deferred placement, including on retries; it states the
+    ±3-day placement and unchanged-commitment caveat. Authentication is unchanged. Untimed
     reminder windows are preclosed atomically until placement. Gate off
     preserves legacy conflict checks; already-recorded due dates remain
     dispatchable and bounded. Treat any widening of this

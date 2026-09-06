@@ -32,10 +32,9 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
     db.connection = trx;
     await trx.raw(`
       CREATE TEMP TABLE scheduled_services AS
-        SELECT id, customer_id, status, window_start, recurring_dispatch_due_date
-        FROM public.scheduled_services WITH NO DATA;
+        SELECT * FROM public.scheduled_services WITH NO DATA;
       CREATE TEMP TABLE customers AS
-        SELECT id, active, deleted_at FROM public.customers WITH NO DATA;
+        SELECT * FROM public.customers WITH NO DATA;
       CREATE TEMP TABLE notifications AS
         SELECT recipient_type, category, title, body, metadata, read_at
         FROM public.notifications WITH NO DATA;
@@ -89,5 +88,29 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
       'schedule_conflict', 'Recurring visit still needs a time', expect.any(String),
       expect.objectContaining({ dedupeKey: `recurring-dispatch:${ids.unplaced}:${due}`, refreshOnDedupe: true }),
     );
+  });
+
+  test('loads an unplaced visit before the 5000-row cap despite earlier ordinary visits', async () => {
+    await trx('scheduled_services').where({ id: ids.unplaced }).update({
+      is_recurring: true, recurring_parent_id: randomUUID(), scheduled_date: '2099-02-02',
+    });
+    await trx.raw(`INSERT INTO scheduled_services
+      (id, customer_id, is_recurring, recurring_parent_id, status, scheduled_date, window_start)
+      SELECT gen_random_uuid(), ?::uuid, true, ?::uuid, 'pending', DATE '2099-02-01', TIME '09:00'
+      FROM generate_series(1, 5000)`, [customerId, randomUUID()]);
+    const { loadEligibleServices } = require('../services/auto-dispatch');
+    const rows = await loadEligibleServices('2099-01-20', '2099-03-01', '2099-01-20');
+    expect(rows).toHaveLength(5000);
+    expect(rows[0].id).toBe(ids.unplaced);
+  });
+
+  test('seeds separate truthful SMS copy and preserves administrator edits on rerun', async () => {
+    const migration = require('../models/migrations/20260906000040_recurring_dispatch_sms');
+    const row = await trx('sms_templates').where({ template_key: migration.TEMPLATE.template_key }).first();
+    expect(row.body).toBe(migration.TEMPLATE.body);
+    expect(row.variables).toEqual(['first_name', 'start_date', 'window_text']);
+    await trx('sms_templates').where({ id: row.id }).update({ body: 'Administrator test edit' });
+    await migration.up(trx);
+    expect((await trx('sms_templates').where({ id: row.id }).first()).body).toBe('Administrator test edit');
   });
 });

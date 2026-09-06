@@ -1,4 +1,5 @@
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/appointment-reminders', () => ({ safeSendAppointment: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 
@@ -45,4 +46,33 @@ describe('preserved recurring visit staff alert', () => {
       expect(markerWrites.some((row) => Object.hasOwn(row, 'conflict_card_at'))).toBe(!!notification?.id);
     },
   );
+});
+
+describe('recurring confirmation describes the recorded placement policy', () => {
+  test.each([
+    [3, 'appointment_recurring_placement_confirmed'],
+    [null, 'appointment_series_rescheduled'],
+  ])('placement policy %s selects %s', async (futurePlacementDays, templateKey) => {
+    const templates = require('../routes/admin-sms-templates');
+    const reminders = require('../services/appointment-reminders');
+    const render = jest.spyOn(templates, 'getTemplate').mockResolvedValue('Synthetic confirmation');
+    reminders.safeSendAppointment.mockImplementation(async (_customer, _prefs, message) => {
+      await message({ name: 'Test' });
+      return false; // Exercise rendering without sending any communication.
+    });
+    db.mockImplementation((table) => ({
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        scheduled_services: { customer_id: 'customer-1', scheduled_date: '2099-01-01', window_start: '09:00' },
+        customers: { id: 'customer-1', first_name: 'Test' },
+        notification_prefs: {},
+      }[table]),
+    }));
+    await applySeriesMoveEffects({
+      result: { seriesMoveId: null, notifyRequested: true, rescheduledOccurrences: [], futurePlacementDays },
+      serviceId: 'visit-1', newDate: '2099-01-01', newWindow: { start: '09:00', end: '10:00' },
+    });
+    expect(render).toHaveBeenCalledWith(templateKey, expect.objectContaining({ first_name: 'Test' }), expect.any(Object));
+    render.mockRestore();
+  });
 });
