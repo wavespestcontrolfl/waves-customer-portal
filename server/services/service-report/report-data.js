@@ -2863,6 +2863,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     }
   }
 
+  const droughtStress = parseJsonObject(assessment.composite_scores).drought_stress;
   return {
     assessmentId: assessment.id,
     serviceRecordId: assessment.service_record_id || null,
@@ -2881,6 +2882,9 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // report. Older assessments lack it → client also falls back to a low
     // fungus_control score as fungal/mushroom evidence.
     overwateringSignal: parseJsonObject(assessment.composite_scores).overwatering_signal === true,
+    // Only this visit's tech-confirmed assessment reaches this projection.
+    // Legacy rows lack the separate cause; never recover it from free text.
+    droughtStress: ['none', 'minor', 'moderate', 'severe'].includes(droughtStress) ? droughtStress : null,
     fawnSnapshot,
     waterContext,
     // NOT reproducible: the week was fetched but could not be frozen, so a

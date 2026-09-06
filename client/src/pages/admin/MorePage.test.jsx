@@ -32,8 +32,10 @@ describe("MorePage — the mobile Settings tab", () => {
     renderMore();
     expect(screen.getByRole("heading", { level: 1, name: "Settings" })).toBeInTheDocument();
     // Inline leaves deep-link into SettingsPage tabs…
-    expect(screen.getByRole("link", { name: /Team/ })).toHaveAttribute("href", "/admin/settings?tab=team");
+    expect(screen.getByRole("link", { name: /^Account$/ })).toHaveAttribute("href", "/admin/settings?tab=general");
     expect(screen.getByRole("link", { name: /Blackout Days/ })).toHaveAttribute("href", "/admin/settings?tab=blackout-days");
+    expect(screen.getAllByRole("link", { name: /^Integrations$/ })).toHaveLength(1);
+    expect(screen.queryByRole("link", { name: /^Tap to Pay$/ })).not.toBeInTheDocument();
     // …and there is no single "Settings" row pointing at a second index page.
     expect(screen.queryByRole("link", { name: /^Settings$/ })).not.toBeInTheDocument();
     // Standalone leaves that only the old mobile Settings index linked survive…
@@ -46,7 +48,7 @@ describe("MorePage — the mobile Settings tab", () => {
 
   it("hides owner-only Settings leaves from a technician", () => {
     renderMore("tech");
-    expect(screen.getByRole("link", { name: /Team/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /^Account$/ })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /Blackout Days/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /KPI Targets/ })).not.toBeInTheDocument();
   });

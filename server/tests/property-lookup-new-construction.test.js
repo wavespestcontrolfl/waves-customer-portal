@@ -178,7 +178,7 @@ describe('saveLookup — vacant-parcel TTL (write side)', () => {
   it('keeps the full TTL for records with building facts', async () => {
     const writes = [];
     mockDbHandler = () => fakeTable({ writes });
-    await saveLookup('100 Main St', lookupResult(vacantRecord({ squareFootage: 1800 })));
+    await saveLookup('100 Main St', lookupResult(vacantRecord({ squareFootage: 1800, propertyType: 'Single Family' })));
     expect(daysUntil(writes[0].expires_at)).toBeGreaterThan(179);
   });
 
@@ -231,7 +231,7 @@ describe('getCachedLookup — vacant-parcel TTL (read side)', () => {
 
   it('leaves built-record rows on the stored expiry', async () => {
     mockDbHandler = () => fakeTable({
-      row: cachedRow({ record: vacantRecord({ squareFootage: 1800 }), savedDaysAgo: 90 }),
+      row: cachedRow({ record: vacantRecord({ squareFootage: 1800, propertyType: 'Single Family' }), savedDaysAgo: 90 }),
     });
     expect(await getCachedLookup('100 Main St')).toBeTruthy();
   });

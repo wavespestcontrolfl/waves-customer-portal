@@ -1925,6 +1925,9 @@ const gates = {
   // Current-visit procedure and readable SOP sheet inside the Job Card drawer.
   // Uses the same visit resolver; unset restores the legacy protocol tabs.
   protocolSop: gateEnvValue('GATE_PROTOCOL_SOP'),
+  // Schedule day-view exceptions from the Job Card; no paragraph generation
+  // or cache writes. Requires GATE_JOB_CARD too; unset removes the strips.
+  dispatchReadiness: gateEnvValue('GATE_DISPATCH_READINESS'),
   // The wrapped-van scene on the appointment page + booking step 4 (owner
   // 2026-09-03). Rides the existing page payloads (appointment `vanScene`,
   // booking config `van_scene`) — no extra client fetch. Kill switch: unset
