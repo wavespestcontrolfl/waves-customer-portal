@@ -69,6 +69,20 @@ async function stampSeriesPrepaid(db, {
   note,
   useExistingTransaction = false,
 }) {
+  const amount = Number(totalAmount);
+  if (totalAmount == null || typeof totalAmount === 'boolean' || String(totalAmount).trim() === ''
+    || !Number.isFinite(amount) || amount <= 0) {
+    const err = new Error('Series prepayment must be a positive amount');
+    err.status = 400;
+    throw err;
+  }
+  // Annual coverage is applied by annual-prepay-renewals after its funding
+  // and service-scope checks. A manual stamp cannot manufacture that evidence.
+  if (method === 'annual_prepay_invoice') {
+    const err = new Error('Use the annual prepay workflow to apply annual coverage');
+    err.status = 409;
+    throw err;
+  }
   const anchor = await db('scheduled_services')
     .where({ id: anchorServiceId })
     .first();
@@ -100,7 +114,24 @@ async function stampSeriesPrepaid(db, {
       err.status = 400;
       throw err;
     }
-    slices = splitTotalAcrossVisits(Number(totalAmount), eligible.length);
+    if (eligible.some((row) => row.customer_id !== anchor.customer_id)) {
+      const err = new Error('Series contains visits for another customer; reconcile the series before recording prepayment');
+      err.status = 409;
+      throw err;
+    }
+    // Never replace even pending/stale annual linkage with a cash stamp:
+    // that changes which coverage authority the completion billing gate trusts.
+    if (eligible.some((row) => row.annual_prepay_term_id || row.prepaid_method === 'annual_prepay_invoice')) {
+      const err = new Error('Series has annual prepay coverage; reconcile that term before recording a manual prepayment');
+      err.status = 409;
+      throw err;
+    }
+    if (Math.round(amount * 100) < eligible.length) {
+      const err = new Error('Series prepayment must allocate at least one cent to every covered visit');
+      err.status = 400;
+      throw err;
+    }
+    slices = splitTotalAcrossVisits(amount, eligible.length);
     for (let i = 0; i < eligible.length; i++) {
       const row = eligible[i];
       const amt = slices[i];
@@ -113,7 +144,8 @@ async function stampSeriesPrepaid(db, {
           prepaid_at: now,
         })
         .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at', 'scheduled_date']);
-      if (updated) updatedRows.push(updated);
+      if (!updated) throw new Error('Series prepayment did not update every locked visit');
+      updatedRows.push(updated);
     }
   });
   return {
