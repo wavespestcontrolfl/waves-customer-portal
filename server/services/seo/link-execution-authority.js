@@ -122,17 +122,16 @@ async function reconcileOwnerPlacement(trx, { prospectId, status, attemptId = nu
   if ((held.length || attemptId) && (held.length !== 1 || held[0].id !== attemptId)) return { ok: false, error: 'Held submission changed; reload before recording a verdict' };
   if (!held.length) return { ok: true };
   if (status === 'placed' && ['live', 'indexed'].includes(prospect.status)) status = prospect.status;
+  const attempt = held[0];
+  const detail = attempt.detail || {};
   const authorities = await trx(AUTH).where({ prospect_id: prospectId, dimension: 'execution', instance_kind: '-' }).forUpdate();
-  for (const attempt of held) {
-    if (attempt.path_id !== prospect.path_id || !authorities.some((r) => r.id === attempt.detail?.authority_id && r.path_id === attempt.path_id)) {
-      return { ok: false, error: 'Held submission no longer matches this acquisition path; review its original authority' };
-    }
+  if (attempt.path_id !== prospect.path_id || !authorities.some((r) => r.id === detail.authority_id && r.path_id === attempt.path_id)) {
+    return { ok: false, error: 'Held submission no longer matches this acquisition path; review its original authority' };
   }
   if (notSubmitted) {
-    const attempt = held[0];
-    await trx(ATTEMPTS).where({ id: attempt.id }).update({ outcome: 'slot_released', idempotency_key: null, detail: { ...attempt.detail, owner_verdict: 'not_submitted', owner_confirmed_at: now.toISOString() }, updated_at: now });
+    await trx(ATTEMPTS).where({ id: attempt.id }).update({ outcome: 'slot_released', idempotency_key: null, detail: { ...detail, owner_verdict: 'not_submitted', owner_confirmed_at: now.toISOString() }, updated_at: now });
     await trx('seo_link_prospects').where({ id: prospectId }).update({
-      ...(prospect.automation_policy === 'skip' && ['submit_rejected', 'submit_blocked'].includes(attempt.detail?.error_code)
+      ...(prospect.automation_policy === 'skip' && ['submit_rejected', 'submit_blocked'].includes(detail.error_code)
         ? { automation_policy: null, last_classified_at: null } : {}), updated_at: now });
     await require('../audit-log').recordAuditEvent({ actor_type: 'technician', actor_id: actorId, action: 'backlink.submission.not_submitted', resource_type: 'seo_link_prospect', resource_id: prospectId, metadata: { attempt_id: attempt.id }, critical: true, trx });
     return { ok: true };
@@ -147,31 +146,29 @@ async function reconcileOwnerPlacement(trx, { prospectId, status, attemptId = nu
   if (['live', 'indexed'].includes(prospect.status) && liveUrl !== prospect.live_url) {
     return { ok: false, error: 'This placement has a verified publisher URL; use that existing URL to confirm the held submission' };
   }
-  for (const attempt of held) {
-    // Only the attempt snapshot establishes what reached the publisher; board fields can change during a hold.
-    const citation = attempt.detail?.citation;
-    if (!citation?.website || !citation?.location) return { ok: false, error: 'Submission identity is unavailable; verify the original citation before confirming placement' };
-    const path = await trx('seo_link_acquisition_paths').where({ id: attempt.path_id }).forUpdate().first();
-    const revision = attempt.detail.execution_revision;
-    const settled = authorities.filter((r) => r.path_id === attempt.path_id && (r.id === attempt.detail.authority_id || !r.ended_at));
-    // The bridge can rewrite the same authority id in place; check the attempt against both the live path and its rows.
-    if (!Number.isSafeInteger(revision) || revision < 1 || Number(path?.revision_execution) !== revision
-      || settled.some((r) => Number(r.path_revision) !== revision)) {
-      return { ok: false, error: 'Submission execution revision is unavailable or changed; review the original attempt before confirming placement' };
-    }
-    const taken = await findPlacementRow(trx, prospect.target_domain, targetPage ?? prospect.target_page, { excludeId: prospectId, location: citation.location });
-    if (taken) return { ok: false, error: 'Another placement already represents this publisher, target page and submission location; reconcile that placement before confirming' };
-    // Old holds predate the boundary timestamp; their lease still bounds submission freshness.
-    const submittedAt = new Date(attempt.detail?.submitted_at || attempt.lease_token || attempt.created_at);
-    if (!Number.isFinite(submittedAt.getTime())) return { ok: false, error: 'Submission time is unavailable; verify the original attempt before confirming placement' };
-    const quality = typeof prospect.quality_signals === 'string' ? JSON.parse(prospect.quality_signals) : (prospect.quality_signals || {});
-    await trx('seo_link_prospects').where({ id: prospectId }).update({ target_page: targetPage ?? prospect.target_page, quality_signals: { ...quality, cited_homepage: true, submitted_at: submittedAt.toISOString(), submitted_website: citation.website, location: citation.location }, location_key: locationKeyOf(citation.location), updated_at: now });
-    await trx(ATTEMPTS).where({ id: attempt.id }).update({ outcome: 'placed', detail: { ...attempt.detail, citation, submitted_at: submittedAt.toISOString(), owner_confirmed_at: now.toISOString() }, updated_at: now });
-    // Only decisions for the submitted execution revision can be satisfied by this attempt.
-    await trx(AUTH).whereIn('id', settled.map((r) => r.id)).whereNull('satisfied_at').update({ satisfied_at: now, satisfied_reason: 'placed', updated_at: now });
-    if (attempt.detail.approval_id) await trx('seo_link_approvals').where({ id: attempt.detail.approval_id, prospect_id: prospectId, dimension: 'execution', action: 'acquire' }).whereNull('consumed_at').update({ consumed_at: now, updated_at: now });
+  // Only the attempt snapshot establishes what reached the publisher; board fields can change during a hold.
+  const citation = detail.citation;
+  if (!citation?.website || !citation?.location) return { ok: false, error: 'Submission identity is unavailable; verify the original citation before confirming placement' };
+  const path = await trx('seo_link_acquisition_paths').where({ id: attempt.path_id }).forUpdate().first();
+  const revision = detail.execution_revision;
+  const settled = authorities.filter((r) => r.path_id === attempt.path_id && (r.id === detail.authority_id || !r.ended_at));
+  // The bridge can rewrite the same authority id in place; check the attempt against both the live path and its rows.
+  if (!Number.isSafeInteger(revision) || revision < 1 || Number(path?.revision_execution) !== revision
+    || settled.some((r) => Number(r.path_revision) !== revision)) {
+    return { ok: false, error: 'Submission execution revision is unavailable or changed; review the original attempt before confirming placement' };
   }
-  await require('../audit-log').recordAuditEvent({ actor_type: 'technician', actor_id: actorId, action: 'backlink.submission.confirm', resource_type: 'seo_link_prospect', resource_id: prospectId, metadata: { attempt_ids: held.map((a) => a.id), status }, critical: true, trx });
+  const taken = await findPlacementRow(trx, prospect.target_domain, targetPage ?? prospect.target_page, { excludeId: prospectId, location: citation.location });
+  if (taken) return { ok: false, error: 'Another placement already represents this publisher, target page and submission location; reconcile that placement before confirming' };
+  // Old holds predate the boundary timestamp; their lease still bounds submission freshness.
+  const submittedAt = new Date(detail.submitted_at || attempt.lease_token || attempt.created_at);
+  if (!Number.isFinite(submittedAt.getTime())) return { ok: false, error: 'Submission time is unavailable; verify the original attempt before confirming placement' };
+  const quality = typeof prospect.quality_signals === 'string' ? JSON.parse(prospect.quality_signals) : (prospect.quality_signals || {});
+  await trx('seo_link_prospects').where({ id: prospectId }).update({ target_page: targetPage ?? prospect.target_page, quality_signals: { ...quality, cited_homepage: true, submitted_at: submittedAt.toISOString(), submitted_website: citation.website, location: citation.location }, location_key: locationKeyOf(citation.location), updated_at: now });
+  await trx(ATTEMPTS).where({ id: attempt.id }).update({ outcome: 'placed', detail: { ...detail, citation, submitted_at: submittedAt.toISOString(), owner_confirmed_at: now.toISOString() }, updated_at: now });
+  // Only decisions for the submitted execution revision can be satisfied by this attempt.
+  await trx(AUTH).whereIn('id', settled.map((r) => r.id)).whereNull('satisfied_at').update({ satisfied_at: now, satisfied_reason: 'placed', updated_at: now });
+  if (detail.approval_id) await trx('seo_link_approvals').where({ id: detail.approval_id, prospect_id: prospectId, dimension: 'execution', action: 'acquire' }).whereNull('consumed_at').update({ consumed_at: now, updated_at: now });
+  await require('../audit-log').recordAuditEvent({ actor_type: 'technician', actor_id: actorId, action: 'backlink.submission.confirm', resource_type: 'seo_link_prospect', resource_id: prospectId, metadata: { attempt_ids: [attempt.id], status }, critical: true, trx });
   return { ok: true, status };
 }
 

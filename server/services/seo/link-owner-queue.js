@@ -260,6 +260,8 @@ async function listOwnerQueue(db) {
   // (ON DELETE SET NULL): a substituted path would show the replacement's price or terms as the card's, and the click
   // refuses it anyway; the card reads as awaiting the bridge's rotation instead
   const heldDomain = new Set(domains.filter((d) => heldFor(d, pathById.get(d.best_path_id), allPlacements.filter((p) => p.domain_id === d.id), paid)).map((d) => d.id));
+  // the cards whose approve / draft / match / decide controls apply: a card status on a bridge-eligible domain — a
+  // held-submission card outside that set carries only its verdict controls
   const cardIds = new Set(cardsFor.filter((p) => eligibleDomains.has(p.domain_id) && CARD_STATUSES.includes(p.status)).map((p) => p.id));
   const rows = await loadApprovals(db, liveRows.filter((r) => cardIds.has(r.prospect_id)));
   const waivers = await db('seo_link_floor_waivers').whereIn('domain_id', domains.map((d) => d.id)).whereNull('invalidated_at').orderBy('approved_at', 'desc')
@@ -286,7 +288,7 @@ async function listOwnerQueue(db) {
     // a LEASED card cannot be the primary: its click is the lease 409 and every unleased sibling would defer to it
     if (p.claimed_at || !path || path.id !== d.best_path_id) return false;
     const ctx = { path, domain: d, policy, score: d.score, draftClean: M.draftReview(p).clean };
-    return rows.some((r) => r.prospect_id === p.id && r.dimension === 'payment' && r.path_id === path.id && whyNotApprovable(r, path) === null && whyNotHere(p, r, pathById.get(p.path_id), executionById.get(p.id)) === null && !stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null, heldDomain.has(d.id)).reason);
+    return rows.some((r) => r.prospect_id === p.id && r.dimension === 'payment' && r.path_id === path.id && whyNotApprovable(r, path) === null && whyNotHere(p, r, path, executionById.get(p.id)) === null && !stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null, heldDomain.has(d.id)).reason);
   };
   const groupPrimary = new Map();
   const byId = [...cardsFor].sort((a, b) => String(a.id).localeCompare(String(b.id)));
@@ -298,7 +300,6 @@ async function listOwnerQueue(db) {
   const coveredByGroup = new Map();
   for (const [groupId, primaryId] of groupPrimary) {
     const p = cardsFor.find((x) => x.id === primaryId);
-    const d = domainById.get(p.domain_id);
     const path = pathById.get(p.path_id) || null;
     const lead = path ? rows.find((r) => r.prospect_id === p.id && r.dimension === 'payment' && !r.satisfied_at) : null;
     const attachable = (s) => s.payment_group_id === groupId && s.path_id === path.id && !s.claimed_at
@@ -349,7 +350,7 @@ async function listOwnerQueue(db) {
       // against nothing here — the click's explicit row-path check refuses it, so the card never offers it
       let whyNot = !onBestPath ? 'placement is not on the domain\'s current best path — the nightly bridge rotates it'
         : r.path_id !== path.id ? 'the step was decided on a prior path — the nightly bridge rotates it'
-          : (whyNotApprovable(r, path) || whyNotHere(p, r, pathById.get(p.path_id), executionById.get(p.id)) || (p.claimed_at ? 'leased to a worker — refresh after it reports' : null));
+          : (whyNotApprovable(r, path) || whyNotHere(p, r, path, executionById.get(p.id)) || (p.claimed_at ? 'leased to a worker — refresh after it reports' : null));
       // a follow-up closed above (or by the sender) for a customer recipient says so, not "no draft"
       if (!whyNot && isFollowUp(r) && p.follow_up_status === 'skipped' && p.follow_up_skipped_reason === 'customer_recipient') whyNot = 'the recipient is a customer contact — the follow-up is closed (the thread\'s recipient cannot change)';
       // a send needs a draft to send (the bridge parks the row only once one exists; a re-draft in flight clears it)
@@ -376,8 +377,8 @@ async function listOwnerQueue(db) {
     });
     return {
       submission_ambiguity: uncertainById.get(p.id) || null,
-      outreach_draft_exhausted: eligibleDomains.has(d.id) && CARD_STATUSES.includes(p.status) && exhaustedDraft(p),
-      backlink_match: eligibleDomains.has(d.id) && CARD_STATUSES.includes(p.status) ? matchById.get(p.quality_signals?.outreach_match_ambiguous) || null : null,
+      outreach_draft_exhausted: cardIds.has(p.id) && exhaustedDraft(p),
+      backlink_match: cardIds.has(p.id) ? matchById.get(p.quality_signals?.outreach_match_ambiguous) || null : null,
       placement: { id: p.id, target_page: p.target_page, live_url: p.live_url, location_key: p.location_key, link_type: p.link_type, status: p.status, outreach_status: p.outreach_status, follow_up_status: p.follow_up_status, claimed_at: p.claimed_at, updated_at: p.updated_at, payment_group_id: p.payment_group_id },
       domain: { id: d.id, domain: d.domain, agent_state: d.agent_state, score: d.score, score_reasons: d.score_reasons, spam_score: d.spam_score, domain_rating: d.domain_rating, organic_traffic: d.organic_traffic, referring_domains: d.referring_domains, competitors_linked: d.competitors_linked, source: d.source, discovery_priority: d.discovery_priority },
       path: path ? {
@@ -397,7 +398,7 @@ async function listOwnerQueue(db) {
       } : null,
       // Reject / Watch apply while the domain is still the owner's to decide; once a sibling is approved or in flight
       // (lane-owned) those buttons would only ever 409 — the card says so instead
-      decidable: eligibleDomains.has(d.id) && CARD_STATUSES.includes(p.status) && !R.LANE_OWNED_STATES.includes(d.agent_state),
+      decidable: cardIds.has(p.id) && !R.LANE_OWNED_STATES.includes(d.agent_state),
       // shown only while the bridge would still honour it: the same floors-hash test approveRow / activeWaiver apply
       waiver: path && activeWaiverFor.has(`${d.id}|${path.id}`) ? waiverFor.get(`${d.id}|${path.id}`) : null,
       d30_confidence: null, // step 7 (D30 loop) — no evidence yet
