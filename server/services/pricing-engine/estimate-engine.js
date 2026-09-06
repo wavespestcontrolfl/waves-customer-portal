@@ -93,7 +93,7 @@ const {
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
   resolvePalmCount,
-  normalizeRoachType,
+  normalizeRoachType, assertFinitePriceFields,
 } = require('./service-pricing');
 const {
   determineWaveGuardTier, getEffectiveDiscount, applyDiscount, applyMarginGuard, lineFlagsBlockPercentDiscount,
@@ -968,7 +968,10 @@ function generateEstimate(input) {
       palmCount: palmCountResolution.palmCount,
     });
     attachPalmCountMetadata(result, palmCountResolution);
-    result.annual = Math.round(result.annual);
+    // Historical quotes rounded this annualized value to whole dollars.
+    // Replay derives that mode from saved output; fresh quotes retain cents.
+    result.annualRounding = input.palmAnnualRounding === 'whole' ? 'whole' : 'cents';
+    result.annual = result.annualRounding === 'whole' ? Math.round(result.annual) : roundMoney(result.annual);
     result.monthly = Math.round(result.annual / 12 * 100) / 100;
     result.annualBeforeCredits = result.annual;
     result.monthlyBeforeCredits = result.monthly;
@@ -1964,6 +1967,8 @@ function generateEstimate(input) {
     }
   }
 
+  assertFinitePriceFields(lineItems);
+
   // ── 4. Determine WaveGuard tier ────────────────────────────
   // Combine this estimate's services with any prior qualifying services the
   // existing customer already holds, deduped by key so a re-quote of a service
@@ -2578,6 +2583,8 @@ function generateEstimate(input) {
   ))?.renewal || 0;
   const year2WithRenewal = year2Total + trenchingRenewal;
 
+  assertFinitePriceFields(lineItems);
+
   // ── 6b. Hoist per-line review reasons to the estimate level ─
   // Historically only dethatching hoisted its reasons, so missing-footprint,
   // proxy-mosquito, and fallback-bed reviews stayed buried on the line item
@@ -2646,8 +2653,8 @@ function generateEstimate(input) {
       rodentBaitSetupTotal,
       specialtyTotal,
       installationTotal,
-      year1Total: Math.round(year1Total),
-      year2Annual: Math.round(year2WithRenewal),
+      year1Total: roundMoney(year1Total),
+      year2Annual: roundMoney(year2WithRenewal),
       year2Monthly: Math.round(year2WithRenewal / 12 * 100) / 100,
     },
 

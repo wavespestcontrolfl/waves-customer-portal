@@ -130,7 +130,7 @@ function makeMetadataRun(overrides = {}) {
 function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [], newerRun = null, publishedTodayCount = 0, runFirst } = {}) {
   const queueRows = queue !== undefined ? queue : pending
     .filter((r) => r.opportunity_id)
-    .map((r) => ({ id: r.opportunity_id, status: 'pending_review', skip_reason: r.skip_reason || 'astro_pr_pending_merge' }));
+    .map((r) => ({ id: r.opportunity_id, claim_id: r.queue_claim_id || null, status: 'pending_review', skip_reason: r.skip_reason || 'astro_pr_pending_merge' }));
   const updates = [];
   db.mockImplementation((table) => {
     const q = {
@@ -226,7 +226,7 @@ function runUpdates(updates) {
   return updates.filter((u) => {
     if (u.table !== 'autonomous_runs') return false;
     return Object.keys(u.updates).some(
-      (k) => k !== 'updated_at' && k !== 'astro_pr_merged_at' && !k.startsWith('poll_pending'),
+      (k) => k !== 'updated_at' && k !== 'astro_pr_merged_at' && k !== 'astro_pr_retired_at' && !k.startsWith('poll_pending'),
     );
   });
 }
@@ -726,7 +726,7 @@ describe('post-merge social share (new on-hub blog posts)', () => {
 describe('closed-unmerged reconciliation', () => {
   test('fails the run terminally with a clear message; no publish side effects', async () => {
     const updates = setupDb({ pending: [makeRun()] });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: false, merged_at: null });
+    gh.getPr.mockResolvedValue({ head: { ref: 'content/closed-test', sha: 'closed-head' }, number: 42, state: 'closed', merged: false, merged_at: null });
 
     const res = await poller.pollPending();
 
@@ -1197,7 +1197,8 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
     jest.clearAllMocks();
     setupDb({ pending: [parked] });
-    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: false });
+    gh.getPr.mockResolvedValueOnce({ head: { ref: 'content/closed-test', sha: 'closed-head' }, number: 42, state: 'closed', merged: false })
+      .mockResolvedValueOnce({ head: { ref: 'content/closed-test', sha: 'closed-head' }, number: 42, state: 'closed', merged: false });
     const r2 = await poller._internals.reconcileTopicBlockedPrs(gh);
     expect(r2).toMatchObject({ count: 1, retired: 0 });
     expect(gh.closePr).not.toHaveBeenCalled();
@@ -1273,7 +1274,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
       // Closed PR: the marker stamp must NOT land.
       const parked = makeRun({ id: 'run-parked', skip_reason: 'topic_targeting_blocked', outcome: 'completed_pending_review', created_at: '2026-08-28T04:00:00Z' });
       let updates = setupDb({ pending: [parked] });
-      gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: false });
+      gh.getPr.mockResolvedValueOnce({ head: { ref: 'content/closed-test', sha: 'closed-head' }, number: 42, state: 'closed', merged: false });
       await poller._internals.reconcileTopicBlockedPrs(gh);
       expect(updates.find((u) => u.table === 'autonomous_runs')).toBeUndefined();
       // Merged + opportunity moved on: no supersede either.
@@ -1318,7 +1319,8 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
     jest.clearAllMocks();
     updates = setupDb({ pending: [parked] });
-    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: false });
+    gh.getPr.mockResolvedValueOnce({ head: { ref: 'content/closed-test', sha: 'closed-head' }, number: 42, state: 'closed', merged: false })
+      .mockResolvedValueOnce({ head: { ref: 'content/closed-test', sha: 'closed-head' }, number: 42, state: 'closed', merged: false });
     const r2 = await poller._internals.reconcileTopicBlockedPrs(gh);
     expect(r2).toMatchObject({ count: 1, retired: 0, unparked: 0 });
     expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'closed')).toBeDefined();
@@ -2000,12 +2002,12 @@ describe('review-queue supersession (requeue/dismiss)', () => {
       pending: [makeRun()],
       queue: [{ id: 'opp-1', status: 'skipped', skip_reason: 'manual_dismiss' }],
     });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: false });
+    gh.getPr.mockResolvedValue({ head: { ref: 'content/closed-test', sha: 'closed-head' }, number: 42, state: 'closed', merged: false });
 
     const res = await poller.pollPending();
 
     expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
-    expect(gh.getPr).toHaveBeenCalledTimes(1); // best-effort terminal-stamp observation only
+    expect(gh.getPr).toHaveBeenCalledTimes(2); // closed observation + verified retirement recheck
     const annotate = runUpdates(updates)[0];
     expect(annotate.updates).not.toMatchObject({ outcome: 'failed' });
     expect(annotate.updates.skip_reason).toBe('superseded_by_review_queue_action');
@@ -2018,7 +2020,7 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     const res = await poller.pollPending();
 
     expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
-    expect(gh.getPr).toHaveBeenCalledTimes(1); // best-effort terminal-stamp observation only
+    expect(gh.getPr).toHaveBeenCalledTimes(1); // merged observation keeps the publication fence
   });
 
   test('run with no opportunity_id has nothing to cross-check and reconciles normally', async () => {
@@ -2057,7 +2059,7 @@ describe('review-queue supersession (requeue/dismiss)', () => {
       pending: [makeRun()],
       queueFirst: { id: 'opp-1', status: 'skipped', skip_reason: 'manual_dismiss' },
     });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: false });
+    gh.getPr.mockResolvedValue({ head: { ref: 'content/closed-test', sha: 'closed-head' }, number: 42, state: 'closed', merged: false });
 
     const res = await poller.pollPending();
 
@@ -2099,7 +2101,7 @@ describe('review-queue supersession (requeue/dismiss)', () => {
     const res = await poller.pollPending();
 
     expect(res.results[0]).toMatchObject({ skipped: true, reason: 'queue_row_moved_on' });
-    expect(gh.getPr).toHaveBeenCalledTimes(1); // best-effort terminal-stamp observation only
+    expect(gh.getPr).toHaveBeenCalledTimes(1); // merged observation keeps the publication fence
   });
 });
 
@@ -2221,7 +2223,7 @@ describe('metadata_pr_pending_merge lane', () => {
 
   test('closed-unmerged metadata PR fails terminally with the metadata closed reason', async () => {
     const updates = setupDb({ pending: [makeMetadataRun()] });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: false, merged_at: null });
+    gh.getPr.mockResolvedValue({ head: { ref: 'content/closed-test', sha: 'closed-head' }, number: 42, state: 'closed', merged: false, merged_at: null });
 
     const res = await poller.pollPending();
 
@@ -2601,7 +2603,7 @@ describe('terminal-write hygiene (claim clears tracker + remediation row retired
 
   test('finalizeClosed claim clears poll_pending_* and stamps the remediation row closed', async () => {
     const updates = setupDb({ pending: [makeRun()] });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: false });
+    gh.getPr.mockResolvedValue({ head: { ref: 'content/closed-test', sha: 'closed-head' }, number: 42, state: 'closed', merged: false });
 
     await poller.pollPending();
 
@@ -2665,7 +2667,7 @@ describe('closed-PR terminal stamp ordering', () => {
       pending: [makeRun()],
       queueFirst: { id: 'opp-1', status: 'done', skip_reason: null },
     });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: false });
+    gh.getPr.mockResolvedValue({ head: { ref: 'content/closed-test', sha: 'closed-head' }, number: 42, state: 'closed', merged: false });
 
     await poller.pollPending();
 
@@ -2687,7 +2689,7 @@ describe('tick-start supersede terminal stamp', () => {
       pending: [makeRun()],
       queue: [{ id: 'opp-1', status: 'done', skip_reason: null }],
     });
-    gh.getPr.mockResolvedValue({ number: 42, state: 'closed', merged: false });
+    gh.getPr.mockResolvedValue({ head: { ref: 'content/closed-test', sha: 'closed-head' }, number: 42, state: 'closed', merged: false });
 
     await poller.pollPending();
 
@@ -2719,4 +2721,75 @@ describe('tick-start supersede terminal stamp', () => {
     expect(res.count).toBe(1);
     expect(runUpdates(updates).find((u) => u.updates.skip_reason)).toBeDefined();
   });
+});
+
+
+describe('durable queue ownership and historical retirement', () => {
+  const claim = 'd0059611-8e7e-4cab-8d2f-6c3c69fca979';
+  const closed = { number: 42, state: 'closed', merged: false, head: { ref: 'content/retired', sha: 'head-a' } };
+
+  test('a current claim identity survives the poll selection and reconciles normally', async () => {
+    const updates = setupDb({ pending: [makeRun({ queue_claim_id: claim })] });
+    gh.getPr.mockResolvedValue(closed);
+    const result = await poller.pollPending();
+    expect(result.results[0].closed).toBe(true);
+    expect(updates.find((u) => u.table === 'opportunity_queue').filters.claim_id).toBe(claim);
+    expect(updates.find((u) => u.updates.astro_pr_retired_at)).toBeDefined();
+  });
+
+  test('a replacement owner cannot be finalized by an older run with the same parked status', async () => {
+    const updates = setupDb({ pending: [makeRun({ queue_claim_id: claim })], queue: [
+      { id: 'opp-1', status: 'pending_review', skip_reason: 'astro_pr_pending_merge', claim_id: 'new-owner' },
+    ] });
+    gh.getPr.mockResolvedValue(closed);
+    const result = await poller.pollPending();
+    expect(result.results[0].reason).toBe('queue_row_moved_on');
+    expect(updates.some((u) => u.table === 'opportunity_queue')).toBe(false);
+  });
+
+  test('a historical closed PR receives retirement evidence without changing the newer queue', async () => {
+    const updates = setupDb({ pending: [makeRun({ outcome: 'failed' })], queue: [
+      { id: 'opp-1', status: 'pending_review', skip_reason: 'affiliate_review', claim_id: claim },
+    ] });
+    gh.getPr.mockResolvedValue(closed);
+    const result = await poller.pollPending();
+    expect(result.results[0].retired).toBe(true);
+    expect(updates.find((u) => u.updates.astro_pr_retired_at)).toBeDefined();
+    expect(updates.some((u) => u.table === 'opportunity_queue')).toBe(false);
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a historical retirement retries failed terminal bookkeeping before releasing its fence', async () => {
+    const rem = require('../services/content/codex-remediation');
+    const stamp = jest.spyOn(rem, 'markPrTerminal').mockResolvedValueOnce({ error: 'db down' });
+    try {
+      const updates = setupDb({ pending: [makeRun({ outcome: 'failed' })], queue: [
+        { id: 'opp-1', status: 'pending_review', skip_reason: 'affiliate_review', claim_id: claim },
+      ] });
+      gh.getPr.mockResolvedValue(closed);
+
+      const failed = await poller.pollPending();
+      expect(failed.results[0].retired).toBe(false);
+      expect(updates.some((u) => u.updates.astro_pr_retired_at)).toBe(false);
+      expect(gh.retireBranch).not.toHaveBeenCalled();
+
+      const retried = await poller.pollPending();
+      expect(retried.results[0].retired).toBe(true);
+      expect(stamp).toHaveBeenCalledTimes(2);
+      expect(updates.find((u) => u.table === 'codex_remediation_state').updates.status).toBe('closed');
+      expect(updates.some((u) => u.updates.astro_pr_retired_at)).toBe(true);
+      expect(updates.some((u) => u.table === 'opportunity_queue')).toBe(false);
+      expect(gh.mergePr).not.toHaveBeenCalled();
+    } finally { stamp.mockRestore(); }
+  });
+
+  test.each([null, { ...closed, state: 'open' }, { ...closed, merged: true }, { ...closed, head: { ref: 'other', sha: 'other' } }])(
+    'does not release a historical fence when the post-deletion recheck is inconclusive or changed (%j)', async (after) => {
+      const updates = setupDb({ pending: [makeRun({ outcome: 'failed' })] });
+      gh.getPr.mockResolvedValueOnce(closed).mockResolvedValue(after);
+      const result = await poller.pollPending();
+      expect(result.results[0].retired).toBe(false);
+      expect(updates.some((u) => u.updates.astro_pr_retired_at)).toBe(false);
+    },
+  );
 });

@@ -637,7 +637,7 @@ function expectPalm({ treatmentType = 'nutrition', palmCount = 1, palmSize, apps
   const rawPerVisit = round2(perPalm * palmCount);
   const perVisit = Math.max(rawPerVisit, P.minPerVisit);
   // the engine rounds the palm line's annual to whole dollars (estimate-engine.js)
-  const annual = Math.round(round2(perVisit * apps));
+  const annual = round2(perVisit * apps);
   return { perPalm, apps, rawPerVisit, perVisit, annual, minimumApplied: perVisit > rawPerVisit };
 }
 
@@ -1204,7 +1204,11 @@ function runTreeShrubMatrix() {
   const withPalms = line(runEngine({ ...BASE, bedArea: 2000, palmCount: 30, services: { treeShrub: { tier: 'standard', treeCount: 6 } } }).result, 'tree_shrub');
   const withPalmsServiceLine = line(runEngine({ ...BASE, bedArea: 2000, services: { treeShrub: { tier: 'standard', treeCount: 6, palmCount: 30 } } }).result, 'tree_shrub');
   scenarios.push({ section, name: 'palm count contribution (30 palms): property-level vs service-line', expected: null, actual: null, status: 'engine_only', extra: { monthlyNoPalms: noPalm.monthly, monthlyPropertyPalms: withPalms.monthly, monthlyServiceLinePalms: withPalmsServiceLine.monthly, propertyPalmSource: withPalms.palmCountSource, serviceLinePalmSource: withPalmsServiceLine.palmCountSource } });
-  flagIf(withPalms.monthly === noPalm.monthly && withPalmsServiceLine.monthly !== noPalm.monthly, 'P1', section, 'palm count ignored when supplied at property level', `30 palms at property level: ${withPalms.monthly}/mo (source ${withPalms.palmCountSource}); as service-line: ${withPalmsServiceLine.monthly}/mo; no palms: ${noPalm.monthly}/mo`);
+  // Property-only palms retain historical quote replay. The current admin
+  // translator sends an explicit service-line count, verified against the
+  // independent modern reserve formula here.
+  const expectedServicePalms = expectTreeShrub({ tier: 'standard', bedArea: 2000, treeCount: 6, palmCount: 30 }).monthly;
+  flagIf(withPalms.monthly !== noPalm.monthly || withPalmsServiceLine.monthly !== expectedServicePalms, 'P1', section, 'legacy palm replay and explicit service-line palm reserve', `Legacy property-only ${withPalms.monthly}/mo; baseline ${noPalm.monthly}/mo; service-line ${withPalmsServiceLine.monthly}/mo; expected service-line ${expectedServicePalms}/mo`);
   // missing bed area / tree count fallbacks
   const noBed = line(runEngine({ ...BASE, lotSqFt: undefined, services: { treeShrub: { tier: 'standard' } } }).result, 'tree_shrub');
   scenarios.push({ section, name: 'no bed area and no lot: fallback', expected: null, actual: noBed ? noBed.monthly : null, status: 'engine_only', extra: { bedArea: noBed?.bedArea, bedAreaSource: noBed?.bedAreaSource, treeCount: noBed?.treeCount, treeCountSource: noBed?.treeCountSource, review: noBed?.requiresManualReview, reasons: noBed?.manualReviewReasons } });

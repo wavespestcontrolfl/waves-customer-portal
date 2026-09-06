@@ -133,6 +133,7 @@ describe('rewrite_title_meta live adapter', () => {
           id: 'opp_meta_1',
           action_type: 'rewrite_title_meta',
           claimed_at: claimedAt,
+          claim_id: 'd0059611-8e7e-4cab-8d2f-6c3c69fca979',
         }),
         complete: jest.fn().mockResolvedValue(true),
         pendingReview: jest.fn().mockResolvedValue(true),
@@ -186,6 +187,9 @@ describe('rewrite_title_meta live adapter', () => {
 
       const result = await runner.runNext();
 
+      expect(result.queue_claim_id).toBe('d0059611-8e7e-4cab-8d2f-6c3c69fca979');
+      const inserts = require('../models/db').mock.results.flatMap((call) => call.value.insert?.mock.calls || []);
+      expect(inserts).toContainEqual([expect.objectContaining({ queue_claim_id: result.queue_claim_id })]);
       expect(result.outcome).toBe('completed_pending_review');
       expect(result.skip_reason).toBe('metadata_pr_pending_merge');
       expect(result.astro_pr_url).toBe('https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/55');

@@ -572,6 +572,12 @@ class RelayConversation {
     // unmatched-but-real caller is verified; a WS client that declared an ANI
     // is not. Read by the tool ctx below.
     this._callTokenVerified = callTokenVerified === true;
+    // Authenticated socket evidence is independent of caller/account identity.
+    // Keep the underlying promise for a close that outlives its deadline.
+    this._segmentRegistration = process.env.GATE_VOICE_RELAY_RECOVERY === 'true'
+      && this._callTokenVerified && this.callSid && this.sessionKey
+      ? segmentStore.registerSegmentSession(db, this.callSid, this.sessionKey).catch(() => false)
+      : null;
     this._callerVerified = false;
     this._contextReady = null;
     // Session language PROOF (codex #3561 r3). `this.language` is the setup
@@ -1696,6 +1702,7 @@ class RelayConversation {
 
   async _sessionSuperseded() {
     if (!this.sessionKey || !this.callSid) return false;
+    if (this._segmentRegistration && !await withTimeout(this._segmentRegistration, 2000, false)) return true;
     // ⭐ ONLY A CLAIMED SESSION CAN BE SUPERSEDED. An UNVERIFIED session never
     // held privileged context: it is capture-only by construction, its writes
     // are unlinked, and killing it on a foreign owner terminated the one
@@ -1705,7 +1712,7 @@ class RelayConversation {
     // closed: it must still prove the claim is exactly its own.
     if (this._callerVerified !== true) return false;
     const { relaySessionClaimOwner } = require('./relay-context');
-    const res = await relaySessionClaimOwner(this.callSid);
+    const res = await withTimeout(relaySessionClaimOwner(this.callSid), 2000, { ok: false });
     return !(res && res.ok === true && res.owner === this.sessionKey);
   }
 
@@ -2115,7 +2122,7 @@ class RelayConversation {
     // has since taken over. A server-verified call token also permits storing
     // this socket's own text when ANI verification cannot claim the row; it
     // grants no account access or permission to load prior dialogue.
-    if (recoveryOn && this.callSid && this._transcript.length && (this._callerVerified === true || this._callTokenVerified)) {
+    if (recoveryOn && this.callSid && (this._callerVerified === true || this._callTokenVerified)) {
       try {
         const { buildTranscriptText, summarizeTurnStats } = require('./relay-transcript');
         segment = segmentStore.buildSegment({
@@ -2141,7 +2148,8 @@ class RelayConversation {
           lookupResults: this._lookupResults,
           slotRefs: [...this._slotRefs],
         });
-        segmentWrite = segmentStore.appendSegment(db, this.callSid, segment, { allowUnclaimed: this._callTokenVerified });
+        segmentWrite = (this._segmentRegistration || Promise.resolve(true)).then((registered) => registered
+          ? segmentStore.appendSegment(db, this.callSid, segment, { allowUnclaimed: this._callTokenVerified }) : 0);
         const appended = await withTimeout(
           segmentWrite,
           WRITE_DRAIN_TIMEOUT_MS,
@@ -2242,7 +2250,7 @@ class RelayConversation {
         // a socket older than the row's latest reconnect stamp writes no
         // columns (its segment is already appended); the resumed socket's
         // generation is ≥ the stamp and composes the whole call.
-        const fenceOwner = (q) => (recoveryOn ? segmentStore.generationFenceSql(this._fenceOwner(q), this.sessionGeneration) : this._fenceOwner(q));
+        const fenceOwner = (q) => (recoveryOn ? segmentStore.closeFenceSql(q, this.sessionGeneration, this.sessionKey) : this._fenceOwner(q));
         // …and the transcript column is composed from ALL segments (in
         // generation order, `[Reconnected]` between them) when this socket's
         // segment landed; a call with one segment reads exactly as before.
