@@ -85,7 +85,7 @@ function isEligibleForAutoDispatch(service, ctx = {}) {
  * Is the recurring plan behind this service still active?
  *
  * Signal: an unresolved plan_lapsed alert on this series (joinable
- * directly on recurring_parent_id). We deliberately do NOT veto on
+ * on recurring_parent_id and the current customer_id). We deliberately do NOT veto on
  * customer_subscriptions: active recurring plans in this app are driven by the
  * scheduled_services rows themselves (the future recurring row loadEligible-
  * Services already found), while customer_subscriptions is a legacy/Square
@@ -106,6 +106,7 @@ async function isRecurringPlanActive(service, db) {
   try {
     const alert = await db('recurring_plan_alerts')
       .where('recurring_parent_id', parentId)
+      .where('customer_id', service.customer_id)
       .where('alert_type', 'plan_lapsed')
       .whereNull('resolved_at')
       .first('id', 'alert_type');

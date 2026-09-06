@@ -16816,8 +16816,11 @@ router.get('/recurring-alerts', requireAdmin, async (req, res, next) => {
     } catch (e) { logger.warn(`[recurring-alerts] derived scan failed: ${e.message}`); }
 
     const currentAlerts = [];
-    const alertCols = alerts.length ? await db('scheduled_services').columnInfo() : {};
-    for (let offset = 0; offset < alerts.length; offset += 5) {
+    const alertCols = alerts.length ? await db('scheduled_services').columnInfo().catch(() => {
+      logger.warn('[recurring-alerts] schema lookup failed; skipping recurring alerts');
+      return null;
+    }) : {};
+    for (let offset = 0; alertCols && offset < alerts.length; offset += 5) {
       const batch = await Promise.all(alerts.slice(offset, offset + 5)
         .map(alert => refreshRecurringPlanAlert(db, alert, alertCols).catch(() => {
           logger.warn(`[recurring-alerts] revalidation failed for alert ${alert.id}`);
