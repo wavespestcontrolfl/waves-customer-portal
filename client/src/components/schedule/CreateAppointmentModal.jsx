@@ -714,6 +714,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // the default here may be a complete SECONDARY.
           findTimesRequestRef.current += 1;
           setTimeSlots(null);
+          setFindingTimes(false);
           setSelectedPropertyId(defaultBookingPropertyId(complete));
           setBookingPropertyState('ready');
         } else {
@@ -733,6 +734,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // response).
   const applyBookingProperty = (propertyId) => {
     if (String(propertyId) === String(selectedPropertyId)) return false;
+    // After a partial split save (one cadence group committed, a later one
+    // failed) the retry posts only the remaining groups — changing the
+    // address now would split one booking across two properties.
+    if (createdGroupKeysRef.current.size > 0) return false;
     setSelectedPropertyId(String(propertyId));
     findTimesRequestRef.current += 1;
     setTimeSlots(null);
@@ -756,9 +761,21 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // manual appointment and skip the server's mismatch check.
     if (linkedEstimate?.propertyId && String(linkedEstimate.propertyId) !== String(propertyId)) {
       setLinkedEstimate(null);
-      setServices((arr) => arr.filter((line) => !line.sourceEstimateId));
     }
+    // Lines keep their sourcePropertyId after "No estimate" unlinks the quote,
+    // so lines priced for another property go regardless of the link state;
+    // address-agnostic quote lines and manual lines stay.
+    setServices((arr) => arr.filter((line) => !line.sourcePropertyId || String(line.sourcePropertyId) === String(propertyId)));
   };
+
+  // Property list failed to load: a property-scoped quote (or its lines) can
+  // no longer be matched to the address being booked, and booking without
+  // propertyId would skip the server's mismatch check — drop them.
+  useEffect(() => {
+    if (bookingPropertyState !== 'error') return;
+    if (linkedEstimate?.propertyId) setLinkedEstimate(null);
+    setServices((arr) => arr.filter((line) => !line.sourcePropertyId));
+  }, [bookingPropertyState, linkedEstimate?.propertyId]);
   // Memoized: it is a dependency of the auto-apply effect below, so a fresh
   // array every render would re-run that effect on every keystroke.
   const visibleScheduleEstimates = useMemo(
@@ -993,6 +1010,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         weekday: 3,
         boosterMonths: [],
         sourceEstimateId: estimate.id,
+        // Which property the quote was priced for (null = address-agnostic).
+        // Survives an unlink so a later property switch can still drop lines
+        // priced for another address.
+        sourcePropertyId: estimate.propertyId || null,
       };
     });
     if (nextLines.length > 0) {
@@ -2396,7 +2417,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         name="booking-property"
                         value={String(property.id)}
                         checked={selected}
-                        disabled={!bookable}
+                        disabled={!bookable || createdGroupKeysRef.current.size > 0}
                         onChange={() => chooseBookingProperty(property.id)}
                         aria-label={`Service address ${address.street}`}
                         style={{ width: 18, height: 18, margin: 0, accentColor: D.text, flexShrink: 0 }}
@@ -2415,6 +2436,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   );
                 })}
               </div>
+              {createdGroupKeysRef.current.size > 0 && (
+                <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
+                  Part of this booking is already saved at this address. Book the remaining services here, or start a new appointment for another address.
+                </div>
+              )}
               {selectedBookingProperty && !selectedBookingProperty.is_primary && (
                 <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
                   Auto-priced services (one-time mosquito) still use the primary property's lot size. Enter a price for this address if it differs.
