@@ -31,7 +31,8 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 
 ## Merge authorization
 - [ ] Blast-radius diff? Check the diff against the FULL CLAUDE.md rule-18 list (money, customer comms, schema/CHECK values, public token routes, every webhook payload, admin auth, iOS/Android-consumed endpoints, astro spoke-fleet form posts and feeds, retained V1 exports, persisted identifiers) plus AGENTS.md P0 domains → Adam's in-session authorization is REQUIRED; standing "merge when clean" does not apply
-- [ ] Otherwise: Adam authorized this merge in-session, OR a standing "merge when clean" applies AND the Codex gate above passed (a rebutted round qualifies only once its P0/P1 rebuttals are confirmed or Adam-accepted; an unevaluated or re-disputed P0/P1 rebuttal does not)
+- [ ] Otherwise: merge when clean is the standing default (owner ruling 2026-09-05) — the Codex gate above passed on the final HEAD (a rebutted round qualifies only once its P0/P1 rebuttals are confirmed or Adam-accepted; an unevaluated or re-disputed P0/P1 rebuttal does not). A waves-ship §4 stop reason is the only thing that holds a clean PR
+- [ ] Lane continuation: if another PR in this lane is planned or stacked, it is started in this session after the post-merge checks below
 - [ ] If the PR was just un-drafted: the deeper un-draft review has completed on the final HEAD
 - [ ] Squash commit message checked — it comes from the commit message (written from a file), not the PR title
 
