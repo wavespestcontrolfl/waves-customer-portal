@@ -732,6 +732,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // previous address, so drop what is shown AND invalidate any search still
   // in flight (handleFindTimes checks this counter before applying its
   // response).
+  // True once a Find-a-Time result or best-time chip filled the time/tech —
+  // that pair was scored at ONE address and is dropped on a property switch.
+  const appliedSuggestionRef = useRef(false);
   const applyBookingProperty = (propertyId) => {
     if (String(propertyId) === String(selectedPropertyId)) return false;
     // After a partial split save (one cadence group committed, a later one
@@ -742,6 +745,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     findTimesRequestRef.current += 1;
     setTimeSlots(null);
     setFindingTimes(false);
+    if (appliedSuggestionRef.current) {
+      // The adopted technician/time was a detour scored at the previous
+      // address; back to auto-assign so the save re-evaluates at this one.
+      appliedSuggestionRef.current = false;
+      setTechMode('auto');
+      setTechId('');
+    }
     return true;
   };
 
@@ -1387,6 +1397,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setWindowStart(normalizeHourTime(slot.start_time, windowStart));
     setTechMode('choose');
     setTechId(slot.technician.id);
+    appliedSuggestionRef.current = true;
     setTimeSlots(null);
   };
 
@@ -1721,7 +1732,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   // Submit
   const handleSubmit = async () => {
-    if (!selectedCustomer || services.length === 0) return;
+    if (!selectedCustomer || services.length === 0 || bookingPropertyState === 'loading') return;
     // An auto-priced mosquito line must not be booked until the live server
     // quote resolved — otherwise the operator confirms a total that omits (or
     // misstates) what the server will stamp. On a failed quote, clear the
@@ -2132,7 +2143,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   };
   const mobileTopInset = 'max(8px, env(safe-area-inset-top, 0px))';
 
-  const canSubmit = !!selectedCustomer && !!selectedService && !saving;
+  // While the property list is loading a multi-property customer has no
+  // resolved address yet — a submit then would omit propertyId and book the
+  // primary before the operator was shown the choice.
+  const canSubmit = !!selectedCustomer && !!selectedService && !saving && bookingPropertyState !== 'loading';
   const hasRecurringServices = services.some((s) => s.cadence && s.cadence !== 'one_time');
   const firstCustomRecurringIndex = services.findIndex((s) => s.cadence === 'custom');
   const weekendRuleValue = skipWeekends ? weekendShift : 'allow';
@@ -3335,6 +3349,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               if (slot.technicianId) {
                 setTechMode('choose');
                 setTechId(slot.technicianId);
+                appliedSuggestionRef.current = true;
               }
             }}
             style={{ marginBottom: 10 }}
