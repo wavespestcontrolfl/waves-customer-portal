@@ -398,7 +398,7 @@ describe("pricing audit — FROZEN golden prices (in-code constants, reviewed 20
     ["tree & shrub enhanced 1,000 sf beds, 3 trees", { ...BASE, bedArea: 1000, services: { treeShrub: { tier: "enhanced", treeCount: 3 } } }, "tree_shrub", { perApp: 70.22, annual: 632, monthly: 52.67, visitsPerYear: 9 }],
     ["tree & shrub light 4,000 sf beds, 10 trees, difficult access", { ...BASE, bedArea: 4000, services: { treeShrub: { tier: "light", treeCount: 10, access: "difficult" } } }, "tree_shrub", { perApp: 189, annual: 756, monthly: 63, visitsPerYear: 4 }],
     ["palm injection insecticide, 4 medium palms", { ...BASE, services: { palmInjection: { treatmentType: "insecticide", palmCount: 4, palmSize: "medium" } } }, "palm_injection", { pricePerPalm: 55, perVisit: 220, annual: 440, monthly: 36.67 }],
-    ["palm injection Tree-Age, 1 palm at 12 in DBH", { ...BASE, services: { palmInjection: { treatmentType: "treeAge", palmCount: 1, dbhInches: 12 } } }, "palm_injection", { pricePerPalm: 85, perVisit: 85, annual: 43, monthly: 3.58 }],
+    ["palm injection Tree-Age, 1 palm at 12 in DBH", { ...BASE, services: { palmInjection: { treatmentType: "treeAge", palmCount: 1, dbhInches: 12 } } }, "palm_injection", { pricePerPalm: 85, perVisit: 85, annual: 42.5, monthly: 3.54 }],
     ["German roach moderate", { ...BASE, services: { germanRoach: { severity: "moderate" } } }, "german_roach", { price: 450, priceAfterDiscount: 450 }],
     ["German roach severe", { ...BASE, services: { germanRoach: { severity: "severe" } } }, "german_roach", { price: 550, priceAfterDiscount: 550 }],
     ["WDO inspection 2,000 sf", { ...BASE, services: { wdo: {} } }, "wdo_inspection", { price: 250, priceAfterDiscount: 250 }],

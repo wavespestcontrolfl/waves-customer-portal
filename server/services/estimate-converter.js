@@ -3874,6 +3874,14 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
     const lawnField = lawnCadenceFieldForService(svc);
     if (mapped && (lawnField == null || lawnField === mapped)) return mapped;
   }
+  // The existing service resolver distinguishes a numeric-nine ornamental
+  // program from legacy nine-application mosquito/count-only rows.
+  if (seedingFamilyKey(svc, parentRow) === 'tree_shrub'
+    && explicitServiceCadence(svc) === 'every_6_weeks') {
+    if (visitCountFieldsConflict(svc) || visitCountFieldsInvalid(svc)
+      || svc.isCommercial === true || isCommercialRecurringLine(svc, parentRow)) return null;
+    return supportsConverterFollowUpSeeding(svc, parentRow, 'every_6_weeks') ? 'every_6_weeks' : null;
+  }
   const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
     service: { ...svc, service_type: parentRow?.service_type },
     fallbackFrequency: cadenceFallbackForSeeding(svc, fallbackFrequency),
@@ -3922,10 +3930,23 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
     const lawnField = lawnCadenceFieldForService(svc);
     if (mapped && (lawnField == null || lawnField === mapped)) return mapped;
   }
+  if (seedingFamilyKey(svc) === 'tree_shrub'
+    && explicitServiceCadence(svc) === 'every_6_weeks') {
+    if (visitCountFieldsConflict(svc) || visitCountFieldsInvalid(svc)
+      || visitsPerYearForRecurringService(svc) !== 9
+      || svc.isCommercial === true || isCommercialRecurringLine(svc)) return PREPAY_COVERAGE_INVALID;
+    return 'every_6_weeks';
+  }
   const inferred = RecurringAppointmentSeeder.inferRecurringPattern({
     service: svc,
     fallbackFrequency,
   }) || null;
+  if (seedingFamilyKey(svc) === 'tree_shrub') {
+    const visits = visitsPerYearForRecurringService(svc);
+    if (CADENCE_FIELD_SENTINELS.has(explicitServiceCadence(svc))
+      || visitCountFieldsConflict(svc) || visitCountFieldsInvalid(svc)
+      || (visits != null && visitsPerYearForCadence(inferred) !== visits)) return PREPAY_COVERAGE_INVALID;
+  }
   // Palm validation mirror (pre-push P1): the seeding gate refuses any
   // non-semiannual palm cadence, contradictory visit counts, and
   // commercial lines — the prepay term must not record a cadence the
