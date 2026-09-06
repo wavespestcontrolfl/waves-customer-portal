@@ -374,3 +374,28 @@ describe('scene library refill (2026-09-06)', () => {
     expect(Engine.resolveSceneBucket({ topic: 'Drywood Termite Frass vs Carpenter Ant Frass', service: 'termite' })).toBe('termite');
   });
 });
+
+describe('diagnostic scenes apply only to matching topics (Codex r3 on #3990)', () => {
+  test('a swarmer campaign never gets the pellet-pile or mud-tube-in-garage scene; a drywood topic can', () => {
+    const swarm = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.termite, { service: 'termite', topic: 'peak termite swarm month' }).map((c) => c.key);
+    expect(swarm).not.toContain('termite-pellet-pile');
+    expect(swarm).not.toContain('termite-garage-baseboard');
+    expect(swarm).toContain('termite-porch-light-swarm');
+    const drywood = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.termite, { service: 'termite', topic: 'drywood termite pellets in the garage' }).map((c) => c.key);
+    expect(drywood).toContain('termite-pellet-pile');
+    expect(drywood).not.toContain('termite-porch-light-swarm');
+  });
+
+  test('every bank keeps service-wide (unrestricted) concepts so a generic topic always has a scene', () => {
+    for (const [bucket, bank] of Object.entries(Engine.SCENE_LIBRARY)) {
+      const generic = Engine.conceptsApplicableTo(bank, { service: bucket, topic: 'seasonal pressure' });
+      expect({ bucket, generic: generic.length }).toEqual({ bucket, generic: expect.any(Number) });
+      expect(generic.length).toBeGreaterThanOrEqual(4);
+    }
+  });
+
+  test('pickConcepts honours applicability', () => {
+    const picked = Engine.pickConcepts({ service: 'termite', topic: 'peak termite swarm month', count: 10, now: new Date('2026-03-02T16:00:00Z') });
+    expect(picked.map((c) => c.key)).not.toContain('termite-pellet-pile');
+  });
+});

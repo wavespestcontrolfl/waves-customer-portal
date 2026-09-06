@@ -1138,7 +1138,10 @@ function buildVersusCardInput(pair = {}, input = {}) {
   return {
     variant: 'versus',
     city: input.city,
-    service: titleCase(input.service || pair.service || 'Pest ID'),
+    // General-pest comparisons carry a neutral ID label: several pairs (German
+    // roach, flea, honey bee) belong to specialty services, and stamping
+    // "General Pest" on them would imply the recurring program covers them.
+    service: (input.service || pair.service) === 'general pest' ? 'Pest ID' : titleCase(input.service || pair.service || 'Pest ID'),
     left: pair.left,
     right: pair.right,
     verdict: pair.verdict,
@@ -1343,31 +1346,71 @@ function campaignSlotsBefore(year, month, day) {
   return count;
 }
 
-function selectAutonomousCampaign(now = new Date()) {
+// Cards the campaign lane ACTUALLY published recently — topic|city of the
+// last `limit` autonomous campaign runs, whichever lane's day they landed on.
+// The static slot walk cannot see a fire that happened because another lane
+// yielded (no review candidate, pair out of season), so the walk skips any
+// state still inside this window instead of repeating it weeks later.
+// Fail-open: no table / query error → empty set → the plain walk.
+async function recentCampaignCards(limit = 24) {
+  if (!(await hasTable('social_content_studio_runs'))) return new Set();
+  try {
+    const rows = await db('social_content_studio_runs')
+      .where({ run_type: 'autonomous' })
+      .whereIn('status', ['published', 'draft_created', 'dry_run'])
+      .orderBy('started_at', 'desc')
+      .limit(Math.max(1, Math.min(120, Number(limit) * 3 || 72)))
+      .select('topic', 'city', 'input');
+    const cards = [];
+    for (const row of rows) {
+      const input = toJson(row.input, {}) || {};
+      if (input.versusPair || input.reviewGraphic || input.milestone) continue; // other lanes
+      if (row.topic && row.city) cards.push(`${row.topic}|${row.city}`);
+      if (cards.length >= limit) break;
+    }
+    return new Set(cards);
+  } catch {
+    return new Set();
+  }
+}
+
+// The campaign card at walk position `slot` for a month's bank: topic index
+// walks the bank, the city is phase-shifted one step per topic cycle, so
+// every topic×city combination (6 × 4 = 24 positions) occurs before any
+// repeat.
+function campaignCardAt(seasonal, slot) {
+  const topic = seasonal[slot % seasonal.length];
+  const topicCycle = Math.floor(slot / seasonal.length);
+  const city = WAVES_LOCATIONS[(slot + topicCycle) % WAVES_LOCATIONS.length]?.name || 'Sarasota';
+  return { topic, city };
+}
+
+// `recent` = recentCampaignCards(): states already published inside the
+// last full cycle are skipped, so a fire on a day another lane yielded can
+// neither repeat a recent card nor be repeated by the next owned slot.
+function selectAutonomousCampaign(now = new Date(), { recent = new Set() } = {}) {
   // Anchor seasonal topic + city rotation to Eastern business dates, not UTC
   // (Railway runs TZ=UTC, which would flip topics a few hours early each day).
   const { year, month, day } = etParts(now);
   const seasonal = SEASONAL_AUTONOMOUS_TOPICS[month] || SEASONAL_AUTONOMOUS_TOPICS[6];
-  // Both rotations advance one step per campaign SLOT (the days this lane
-  // owns outright — see isCampaignSlotDay), never from the raw day: indexing
-  // by day aliased to the lanes' parity (day % 6 reached topics 1/3/5, day % 4
-  // cities 1/3), the same defect #3651 fixed in the versus lane. Walking the
-  // slot sequence with the city phase-shifted one step per topic cycle visits
-  // every topic×city combination (6 × 4 = 24 slots) before any repeat, over
-  // exactly the days that fire.
+  // The walk advances one step per campaign SLOT (the days this lane owns
+  // outright — see isCampaignSlotDay), never from the raw day: indexing by
+  // day aliased to the lanes' parity (day % 6 reached topics 1/3/5, day % 4
+  // cities 1/3), the same defect #3651 fixed in the versus lane. A yielded
+  // day is not a slot: it takes the state half a cycle ahead (farthest from
+  // its neighbours), and the recent-cards skip below keeps that state from
+  // being replayed when the walk reaches it.
+  const cycle = seasonal.length * WAVES_LOCATIONS.length;
   const slotsBefore = campaignSlotsBefore(year, month, day);
-  // A day another lane yielded (no review candidate, versus pair out of
-  // season) is not a slot. Pick half a cycle ahead so the extra fire lands
-  // farthest from its neighbours in the walk instead of duplicating the next
-  // slot's card a day or two later.
-  const halfCycle = Math.floor((seasonal.length * WAVES_LOCATIONS.length) / 2);
-  const slot = isCampaignSlotDay(day) ? slotsBefore : slotsBefore + halfCycle;
-  const topic = seasonal[slot % seasonal.length];
-  const topicCycle = Math.floor(slot / seasonal.length);
-  const city = WAVES_LOCATIONS[(slot + topicCycle) % WAVES_LOCATIONS.length]?.name || 'Sarasota';
+  const start = isCampaignSlotDay(day) ? slotsBefore : slotsBefore + Math.floor(cycle / 2);
+  let card = campaignCardAt(seasonal, start);
+  for (let step = 0; step < cycle; step += 1) {
+    const candidate = campaignCardAt(seasonal, start + step);
+    if (!recent.has(`${candidate.topic.topic}|${candidate.city}`)) { card = candidate; break; }
+  }
   return {
-    ...topic,
-    city,
+    ...card.topic,
+    city: card.city,
     channels: AUTONOMOUS_FLAGS.channels,
   };
 }
@@ -1785,7 +1828,7 @@ async function selectAutonomousPlan(now = new Date()) {
   const versusPlan = selectAutonomousVersusPlan(now);
   if (versusPlan) return versusPlan;
 
-  const input = selectAutonomousCampaign(now);
+  const input = selectAutonomousCampaign(now, { recent: await recentCampaignCards() });
   const preview = await previewCampaign(input);
   return {
     ...input,

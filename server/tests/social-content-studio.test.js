@@ -998,3 +998,35 @@ describe('campaign lane rotation walks the slot sequence (Codex r1 + r2 on #3990
     }
   });
 });
+
+describe('campaign lane skips recently published cards (Codex r3 on #3990)', () => {
+  const etNoonLocal = (iso) => new Date(`${iso}T16:00:00Z`);
+
+  test('a yielded review day whose card was published is not replayed when the walk reaches it', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    const yielded = Studio.selectAutonomousCampaign(etNoonLocal('2026-07-04')); // review day, no candidate
+    const recent = new Set([`${yielded.topic}|${yielded.city}`]);
+    // Every owned slot in the following month walks past that state instead of repeating it.
+    for (let d = 5; d <= 31; d += 2) {
+      const p = Studio.selectAutonomousCampaign(etNoonLocal(`2026-07-${String(d).padStart(2, '0')}`), { recent });
+      expect(`${p.topic}|${p.city}`).not.toBe(`${yielded.topic}|${yielded.city}`);
+    }
+    delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
+  });
+
+  test('the skip walks forward to the next unpublished state and never leaves the month bank', () => {
+    const first = Studio.selectAutonomousCampaign(etNoonLocal('2026-07-01'));
+    const next = Studio.selectAutonomousCampaign(etNoonLocal('2026-07-01'), { recent: new Set([`${first.topic}|${first.city}`]) });
+    expect(`${next.topic}|${next.city}`).not.toBe(`${first.topic}|${first.city}`);
+    expect(Studio.SEASONAL_AUTONOMOUS_TOPICS[7].some((t) => t.topic === next.topic)).toBe(true);
+  });
+});
+
+describe('versus card label (Codex r3 on #3990)', () => {
+  test('general-pest pairs render a neutral Pest ID label; service pairs keep their service', () => {
+    const roach = Studio.PEST_VERSUS_PAIRS.find((p) => p.key === 'german_roach_vs_american_roach');
+    expect(Studio.buildVersusCardInput(roach, { city: 'Venice', service: roach.service }).service).toBe('Pest ID');
+    const lawn = Studio.PEST_VERSUS_PAIRS.find((p) => p.key === 'chinch_bug_vs_drought_stress');
+    expect(Studio.buildVersusCardInput(lawn, { city: 'Venice', service: lawn.service }).service).toBe('Lawn Care');
+  });
+});
