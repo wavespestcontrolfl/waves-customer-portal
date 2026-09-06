@@ -488,6 +488,7 @@ describe('codex r3 follow-ups', () => {
     const revertHandoff = jest.fn(async () => { await new Promise((r) => setTimeout(r, 20)); reverted = true; return 1; });
     const { ctx } = ctxFor({ writeHandoff, revertHandoff, sessionEnded: () => ended });
     expect(await executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx)).toMatch(/call has ended/);
+    expect(ctx.toolFailed).toBe(true);
     expect(reverted).toBe(true); // AWAITED: end()'s reconcile (which resumes when the tool returns) sees the reverted row
     expect(triggerNotification).not.toHaveBeenCalled();
     expect(revertHandoff).toHaveBeenCalledWith(writeHandoff.mock.calls[0][0].attempt);
@@ -503,6 +504,7 @@ describe('codex r3 follow-ups', () => {
     const p2 = executeTool('transfer_to_office', { intent: 'cancel', summary: 'x' }, ctx2);
     await jest.advanceTimersByTimeAsync(4010);
     expect(await p2).toMatch(/call has ended/);
+    expect(ctx2.toolFailed).toBe(true);
     await jest.advanceTimersByTimeAsync(0);
     expect(triggerNotification).not.toHaveBeenCalled(); // the no-context stamp landed, but the transfer was abandoned ⇒ no bell (codex r4 P2)
     settleFull({ rows: 1, contextAvailable: true });
