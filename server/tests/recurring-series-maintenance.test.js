@@ -1089,8 +1089,9 @@ describe('runRecurringAlertAction — locked + idempotent alert actions (P0)', (
 
 describe('renewal banner revalidates historical recurring alerts', () => {
   const profileResolver = require('../services/service-completion-profiles').resolveCompletionProfileForScheduledService;
+  const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
   const alert = { id: 1, parentId: 'series-a', customerId: 'customer-a', remainingVisits: 0 };
-  function scenario({ parent = {}, customer = { billing_mode: 'per_application' }, upcoming = 1, lastDate = daysOut(7), completed = true } = {}) {
+  function scenario({ parent = {}, customer = { billing_mode: 'per_application' }, upcoming = 1, lastDate = daysOut(7), completed = true, lastVisit = {} } = {}) {
     return makeConn(({ table, calls, op }) => {
       if (op === 'columnInfo') return { recurring_template_overrides: {} };
       if (table === 'customers') {
@@ -1111,16 +1112,19 @@ describe('renewal banner revalidates historical recurring alerts', () => {
       }
       if (calls.some(([op, fields]) => op === 'where' && fields?.status === 'completed')) return completed ? { id: 'completed-a' } : null;
       if (calls.some(([op]) => op === 'count')) return { c: String(upcoming) };
-      if (calls.some(([op]) => op === 'orderBy')) return { scheduled_date: lastDate };
+      if (calls.some(([op]) => op === 'orderBy')) return { id: 'last-visit', customer_id: 'customer-a', scheduled_date: lastDate, ...lastVisit };
       return { id: 'series-a', customer_id: 'customer-a', is_recurring: true,
         recurring_pattern: 'quarterly', recurring_ongoing: false, status: 'completed',
         service_type: 'Quarterly Pest Control Service', ...parent };
     });
   }
-  beforeEach(() => profileResolver.mockResolvedValue({ billingType: 'recurring' }));
+  beforeEach(() => {
+    profileResolver.mockResolvedValue({ billingType: 'recurring' });
+    jest.spyOn(AnnualPrepayRenewals, 'annualPrepayCoversVisit').mockResolvedValue(false);
+  });
+  afterEach(() => jest.restoreAllMocks());
   test.each([
     { is_recurring: false }, { recurring_pattern: 'one_time' },
-    { annual_prepay_term_id: 'term-a' },
   ])('omits an ineligible series: %j', async (parent) => {
     expect(await refreshRecurringPlanAlert(scenario({ parent }), alert)).toBeNull();
   });
@@ -1139,6 +1143,22 @@ describe('renewal banner revalidates historical recurring alerts', () => {
   test.each(['new_lead', null])('keeps a serviced recurring plan despite stale CRM stage %j', async (pipeline_stage) => {
     expect(await refreshRecurringPlanAlert(scenario({ customer: { pipeline_stage } }), alert))
       .toMatchObject({ remainingVisits: 1 });
+  });
+  test('only live annual coverage suppresses a linked recurring plan', async () => {
+    const lastVisit = { annual_prepay_term_id: 'term-a', prepaid_method: 'annual_prepay_invoice', prepaid_amount: 90 };
+    AnnualPrepayRenewals.annualPrepayCoversVisit.mockResolvedValueOnce(true);
+    expect(await refreshRecurringPlanAlert(scenario({ lastVisit }), alert)).toBeNull();
+    // A refunded/cancelled allocation keeps its ID but is no longer covered.
+    expect(await refreshRecurringPlanAlert(scenario({ lastVisit }), alert))
+      .toMatchObject({ remainingVisits: 1 });
+    AnnualPrepayRenewals.annualPrepayCoversVisit.mockRejectedValueOnce(new Error('coverage unavailable'));
+    expect(await refreshRecurringPlanAlert(scenario({ lastVisit }), alert)).toBeNull();
+  });
+  test('an old prepaid anchor cannot hide a later per-application series end', async () => {
+    AnnualPrepayRenewals.annualPrepayCoversVisit.mockImplementationOnce(async (visit) => visit?.prepaid_method === 'annual_prepay_invoice');
+    expect(await refreshRecurringPlanAlert(scenario({ parent: {
+      annual_prepay_term_id: 'old-term', prepaid_method: 'annual_prepay_invoice', prepaid_amount: 90,
+    } }), alert)).toMatchObject({ remainingVisits: 1 });
   });
   test('keeps a separate non-prepaid series on an annual-prepay customer', async () => {
     expect(await refreshRecurringPlanAlert(scenario({ customer: { billing_mode: 'annual_prepay' } }), alert))

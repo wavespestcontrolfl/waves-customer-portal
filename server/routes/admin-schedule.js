@@ -16604,8 +16604,7 @@ async function refreshRecurringPlanAlert(conn, alert) {
       .where(function () {
         this.whereNull('pipeline_stage').orWhereNotIn('pipeline_stage', FORMER_CUSTOMER_STAGES);
       }).first('id');
-    // Annual coverage belongs to a service/series, not every plan on the account.
-    if (!customer || parent.annual_prepay_term_id) return null;
+    if (!customer) return null;
     const cols = await conn('scheduled_services').columnInfo();
     const template = overlayRecurringTemplateOverrides(parent, cols);
     const profile = await resolveCompletionProfileForScheduledService(template, conn, { strict: true });
@@ -16627,7 +16626,11 @@ async function refreshRecurringPlanAlert(conn, alert) {
       .modify((query) => remainingVisits > 0
         ? query.whereIn('status', UPCOMING_VISIT_STATUSES)
         : query.whereNotIn('status', ['cancelled', 'rescheduled']))
-      .orderBy('scheduled_date', 'desc').first('scheduled_date');
+      .orderBy('scheduled_date', 'desc').first();
+    // Use the current end of the series, not the historical anchor's paid
+    // allocation. A term ID can survive refunds or a switch to per-application.
+    const { annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
+    if (await annualPrepayCoversVisit(lastVisit, conn, { throwOnError: true })) return null;
     const lastVisitDate = dateOnly(lastVisit?.scheduled_date);
     if (remainingVisits > 0 && lastVisitDate > etDateString(addETDays(new Date(), 14))) return null;
     // A queue row left behind by an ownership correction must not display
