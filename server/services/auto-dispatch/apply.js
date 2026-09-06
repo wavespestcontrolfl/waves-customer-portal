@@ -17,6 +17,7 @@ const logger = require('../logger');
 const { toDateStr } = require('./dates');
 const routeTiers = require('./route-tiers');
 const { classifyServiceCategory } = require('./service-category');
+const { assertCapabilitiesActive } = require('../technician-capabilities');
 const { etDateString } = require('../../utils/datetime-et');
 const { violatesPreferredTime, _internals: { isSaturday } } = require('./candidate-slots');
 const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('./eligibility');
@@ -138,32 +139,6 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
  *     the rebooker checks time/technician occupancy, so a different-time
  *     duplicate of the series would otherwise commit
  */
-/**
- * Apply-time capability fence, run INSIDE the move transaction for every row
- * that lands on `technicianId` (the tapped row via options.moveGuard, grouped
- * members via options.memberGuard). The run's capability map is a start-of-run
- * snapshot; the Team tab can turn a category Off mid-run, and Off is a HARD
- * constraint — so the last fence reads the committed rows, never the snapshot,
- * and regardless of whether the technician changed.
- * Resolves, or throws `refuse(rowId, why)` for the first deactivated row.
- */
-async function assertCapabilitiesActive(trx, technicianId, rows, refuse) {
-  if (!technicianId) return;
-  const categories = [...new Set(rows.map((r) => classifyServiceCategory(r.service_type)).filter(Boolean))];
-  if (!categories.length) return;
-  // Serialize with the Team tab's editor, which writes capabilities under
-  // FOR UPDATE on the technician row: a share lock here holds until this move
-  // commits, so an Off cannot land between the read below and the commit (the
-  // same technician-row lock assertAssignableTechnician takes).
-  await trx('technicians').where({ id: technicianId }).forShare().first('id');
-  const caps = await trx('technician_capabilities')
-    .where({ technician_id: technicianId }).whereIn('service_category', categories)
-    .select('service_category', 'active');
-  const deactivated = new Set(caps.filter((c) => c.active === false).map((c) => c.service_category));
-  const hit = rows.find((r) => deactivated.has(classifyServiceCategory(r.service_type)));
-  if (hit) throw refuse(hit.id, `cannot be assigned to a technician deactivated for ${classifyServiceCategory(hit.service_type)}`);
-}
-
 // Per-row fence run on the transaction that commits each row's placement:
 // the rebooker calls it for the row it moves (standalone, or each grouped
 // member — the unit mover forwards it), and the unit mover calls it again in
@@ -503,4 +478,4 @@ async function unitMoveSize(service, best = null) {
   }
 }
 
-module.exports = { applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement, unitMoveSize, makeMemberGuard, makeMoveGuard, assertCapabilitiesActive };
+module.exports = { applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement, unitMoveSize, makeMemberGuard, makeMoveGuard };
