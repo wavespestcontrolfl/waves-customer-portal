@@ -169,7 +169,7 @@ function summarizeSegments(meta) {
   // Old durable records remain readable; missing observations are unknown,
   // not zero-latency samples or a complete recovery evaluation.
   const countKeys = ['caller_turns', 'agent_turns', 'tool_calls'];
-  const telemetryComplete = legs.every((leg) => Array.isArray(leg.turn_stats)
+  const telemetryComplete = hasCompleteSegments(meta) && legs.every((leg) => Array.isArray(leg.turn_stats)
     && countKeys.every((key) => Number.isFinite(leg.turn_counts?.[key])));
   const counts = Object.fromEntries(countKeys.map((key) => [key,
     telemetryComplete ? legs.reduce((sum, leg) => sum + leg.turn_counts[key], 0) : null,

@@ -22,7 +22,7 @@ describe('relay segment storage representation', () => {
       segments: { count: 2, complete: true, telemetry_complete: true },
     });
     expect(JSON.stringify(earlier)).not.toContain('NEVER STORE');
-    expect(segments.summarizeSegments({ relay_segment_owners: ['earlier', 'later'], relay_segments: [earlier] }).segments.complete).toBe(false);
+    expect(segments.summarizeSegments({ relay_segment_owners: ['earlier', 'later'], relay_segments: [earlier] })).toMatchObject({ caller_turns: null, latency: null, segments: { complete: false, telemetry_complete: false } });
   });
 
   test('legacy segments keep unknown aggregate metrics instead of claiming zero or averaging percentiles', () => {
