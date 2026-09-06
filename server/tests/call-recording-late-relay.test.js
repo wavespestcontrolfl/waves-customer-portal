@@ -13,7 +13,7 @@ const processor = require('../services/call-recording-processor');
 const recorded = 'Caller: Please call me back about the details I gave Sandy.';
 const composite = `[AI segment]\nCaller: I need a termite inspection.\n\n[Voicemail segment]\n${recorded}`;
 
-function primeDb({ loseOwnership = false, emptyRecording = false, pendingSegment = false, recordingUrl = null, attempts = 0 } = {}) {
+function primeDb({ loseOwnership = false, emptyRecording = false, pendingSegment = false, recordingUrl = null, attempts = 0, silentRegistered = false } = {}) {
   const row = {
     extraction_attempts: attempts,
     id: 'late-relay-fixture', twilio_call_sid: 'CA00000000000000000000000000000123',
@@ -32,6 +32,11 @@ function primeDb({ loseOwnership = false, emptyRecording = false, pendingSegment
   if (emptyRecording) {
     row.transcription = null;
   }
+  if (silentRegistered) {
+    row.metadata = { relay_segment_owners: ['silent'], relay_segments: [{ session_key: 'silent', text: '' }] };
+    row.recording_duration_seconds = 1;
+    row.transcription = 'Caller: ' + 'implausible recording '.repeat(300);
+  }
   let appended = false;
   db.mockImplementation((table) => {
     const builder = {};
@@ -41,7 +46,7 @@ function primeDb({ loseOwnership = false, emptyRecording = false, pendingSegment
       for (const arg of args) if (typeof arg === 'function') arg.call(builder, builder);
       return builder;
     };
-    for (const method of ['where', 'whereRaw', 'whereNull', 'whereNotNull', 'whereIn', 'orWhere', 'orWhereRaw', 'andWhere', 'select', 'orderBy', 'limit', 'leftJoin', 'forUpdate', 'clone', 'onConflict', 'ignore']) builder[method] = chain;
+    for (const method of ['where', 'whereRaw', 'whereNull', 'whereNotNull', 'whereIn', 'whereNotIn', 'orWhere', 'orWhereRaw', 'andWhere', 'select', 'orderBy', 'limit', 'leftJoin', 'forUpdate', 'clone', 'onConflict', 'ignore']) builder[method] = chain;
     builder.first = async () => {
       return table === 'call_log' && (!owner || owner === row.processing_token) ? { ...row } : null;
     };
@@ -64,7 +69,7 @@ function primeDb({ loseOwnership = false, emptyRecording = false, pendingSegment
   db.raw = jest.fn((sql) => sql);
   db.transaction = async (fn) => fn(db);
   syncVoiceMessageForCall.mockImplementation(async () => {
-    if (appended) return;
+    if (appended || silentRegistered) return;
     appended = true;
     // appendSegmentPatch has repaired the column AFTER writeTranscript
     // returned the recording-only value. The processor's local copy is stale.
@@ -144,6 +149,14 @@ describe('late relay transcript at the extraction boundary', () => {
       const payload = JSON.parse(opts.body);
       return payload.contents?.[0]?.parts?.[0]?.text?.includes('Extract');
     })).toBe(false);
+  });
+
+  test('a silent registered socket retains whole-call rejection and skips extraction', async () => {
+    const row = primeDb({ silentRegistered: true });
+    expect(await processor.processRecording(row.twilio_call_sid))
+      .toMatchObject({ success: true, skipped: true, reason: 'transcription_rejected_implausible' });
+    expect(row.processing_status).toBe('voicemail');
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   test('a reclaimed worker stops before extracting the replacement transcript', async () => {
