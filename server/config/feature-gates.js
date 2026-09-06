@@ -93,8 +93,6 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
-  // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
-  customerRecurringDispatch: gateEnvValue('GATE_CUSTOMER_RECURRING_DISPATCH'),
   // Payer Phase 2 — NET-terms consolidated statements (accrual core).
   // OFF unless explicitly enabled, in dev AND prod (unlike the dev-open gates
   // below): flipping it on changes invoice behaviour for net15/net30 payers
@@ -464,6 +462,12 @@ const gates = {
   // silently ignoring one (an ignored count reads to the office as a plan they
   // capped). Kill switch: unset or any non-'true' value; visits already added
   // or cancelled are not reversed when it flips.
+  // GATE_EDIT_APPT_ADDRESS also admits the New Appointment "Service address"
+  // picker (POST / with propertyId) — one flag for "the office chooses which
+  // of a multi-property customer's addresses a visit lands on". Off: the
+  // properties read answers canChangeAppointmentAddress:false, the modal
+  // hides the picker, and a propertyId on create is refused (409), so a
+  // stale tab cannot book to a secondary address while the lane is dark.
   editApptAddress: process.env.GATE_EDIT_APPT_ADDRESS === 'true',
   editApptVisitCount: process.env.GATE_EDIT_APPT_VISIT_COUNT === 'true',
 
@@ -2067,11 +2071,6 @@ const gates = {
   // or sent. The mint/credit/send building blocks (Charge-now, send-receipt)
   // stay individually available regardless of this gate.
   prepaidInvoiceReceipt: isProd ? process.env.GATE_PREPAID_INVOICE === 'true' : true,
-
-  // Record collected annual prepay: commit a receipt job with the payment,
-  // then deliver through the standard receipt queue. Customer communications
-  // stay off in every environment until explicitly enabled.
-  recordedAnnualPrepayReceipt: process.env.GATE_RECORDED_ANNUAL_PREPAY_RECEIPT === 'true',
 
   // Zelle payment-notice reconciler — the Gmail sync recognises Capital One
   // "Someone sent you money with Zelle" notices (forwarded from the owner's

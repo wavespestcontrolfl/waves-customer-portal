@@ -98,11 +98,27 @@ async function resolveFindTimeTarget({ serviceId, customerId, address, lat, lng 
     }
   }
 
+  // An EXPLICIT request address (the create modal's service-address picker
+  // sending a secondary property without stored coords) is authoritative
+  // over the customer's primary: geocode it here, and never let the
+  // customer-coords fallback below re-center the search on the wrong house.
+  let explicitAddressAttempted = false;
+  if (!serviceId && address && (targetLat == null || targetLng == null)) {
+    explicitAddressAttempted = true;
+    const geocoded = await geocodeAddress(address);
+    if (geocoded) {
+      targetLat = geocoded.lat;
+      targetLng = geocoded.lng;
+      source = 'address_geocoded_now';
+    }
+  }
+
   // With a serviceId in hand the visit resolution above is authoritative —
   // falling through to the customer's PRIMARY coords here would re-center a
   // divergent (coordless) stamp on the wrong house; the stamped address
-  // geocodes below instead.
-  if (!serviceId && customerId && (targetLat == null || targetLng == null)) {
+  // geocodes below instead. Likewise an explicit request address that failed
+  // to geocode fails closed (400 below) rather than scoring at the primary.
+  if (!serviceId && customerId && !address && (targetLat == null || targetLng == null)) {
     customer = await db('customers')
       .where({ id: customerId })
       .first('id', 'latitude', 'longitude', 'address_line1', 'city', 'state', 'zip', 'profile_label');
@@ -124,7 +140,11 @@ async function resolveFindTimeTarget({ serviceId, customerId, address, lat, lng 
     }
   }
 
-  if ((targetLat == null || targetLng == null) && targetAddress) {
+  // A transient geocoder miss is deliberately not memoized (geocoder.js), so
+  // the explicit-address attempt above must not be repeated here for the
+  // same string — one Find-a-Time request, one attempt per address.
+  if ((targetLat == null || targetLng == null) && targetAddress
+    && !(explicitAddressAttempted && targetAddress === address)) {
     const geocoded = await geocodeAddress(targetAddress);
     if (geocoded) {
       targetLat = geocoded.lat;

@@ -554,6 +554,38 @@ async function soleActivePropertyId(customerId, conn = db) {
  * linkage owns those rows.
  * Cols-guarded like the stamp copy; best-effort (null on error).
  */
+/**
+ * Resolve the operator's EXPLICIT property choice for a NEW booking into the
+ * scheduled_services address stamp (the same field set applyAppointmentAddress
+ * writes on an edit, minus the reset columns an edit clears). Returns null
+ * when no property was chosen so callers fall through to the sole-property
+ * anchor. Throws an operational 422 when the id is not one of this
+ * customer's ACTIVE properties or the row has no complete street address —
+ * a booking must never land on a half-recorded address.
+ */
+async function bookingPropertyStamp({ customerId, propertyId }, conn = db) {
+  if (propertyId === undefined || propertyId === null || propertyId === '') return null;
+  const refuse = (message) => Object.assign(new Error(message), { statusCode: 422, isOperational: true, code: 'INVALID_BOOKING_PROPERTY' });
+  if (typeof propertyId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(propertyId)) {
+    throw refuse('Choose a saved customer address.');
+  }
+  const property = await conn('customer_properties').where({ id: propertyId, customer_id: customerId, active: true }).first();
+  if (!property || !['address_line1', 'city', 'state', 'zip'].every((field) =>
+    typeof property[field] === 'string' && property[field].trim())) {
+    throw refuse('Choose an active customer address with a street, city, state and ZIP code.');
+  }
+  return {
+    property_id: property.id,
+    service_address_line1: property.address_line1,
+    service_address_line2: property.address_line2 || '',
+    service_address_city: property.city,
+    service_address_state: property.state,
+    service_address_zip: property.zip,
+    lat: property.latitude ?? null,
+    lng: property.longitude ?? null,
+  };
+}
+
 async function anchorSoleProperty(target, cols, conn = db) {
   if (!target || !cols || !cols.property_id) return;
   if (target.property_id != null || !target.customer_id) return;
@@ -565,6 +597,7 @@ async function anchorSoleProperty(target, cols, conn = db) {
 module.exports = {
   soleActivePropertyId,
   anchorSoleProperty,
+  bookingPropertyStamp,
   OCCUPANCY_TYPES,
   normStreet,
   addressKey,
