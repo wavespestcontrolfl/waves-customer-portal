@@ -8,6 +8,9 @@ describe('quoted Eastern deadlines', () => {
     ['2026-09-10 at 15:00', '2026-09-10T19:00:00.000Z'],
     ['9/10 at 03:00', '2026-09-10T07:00:00.000Z'],
     ['9/10/2026 at 12am', '2026-09-10T04:00:00.000Z'],
+    ['tomorrow at noon', '2026-09-06T16:00:00.000Z'],
+    ['tomorrow at midnight', '2026-09-06T04:00:00.000Z'],
+    ['September 10 at noon ET', '2026-09-10T16:00:00.000Z'],
     ['tomorrow at 9am', '2026-09-06T13:00:00.000Z'],
     ['Sunday at 10am ET', '2026-09-06T14:00:00.000Z'],
     ['today at 11pm', '2026-09-06T03:00:00.000Z'],
@@ -16,7 +19,7 @@ describe('quoted Eastern deadlines', () => {
   });
 
   test.each([
-    'tomorrow morning', '3pm', 'September 10 at 3', 'September 10 at 13pm',
+    'tomorrow morning', 'noon', 'midnight', '3pm', 'September 10 at 3', 'September 10 at 13pm',
     'September 10 at 15:70', 'September 31 at 3pm', 'February 29 at 3pm',
     'August 10 at 3pm', 'next Sunday at 10am', 'September 10 at 3pm Pacific',
     'September 10 or September 11 at 3pm', 'tomorrow at 9am or 10am',

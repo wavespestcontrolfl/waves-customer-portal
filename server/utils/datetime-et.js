@@ -87,7 +87,9 @@ function addETDays(date, days) {
 // Unknown wording, past yearless dates and DST gaps/folds require review.
 function parseQuotedETDeadline(text, reference) {
   if (!text || !(reference instanceof Date) || Number.isNaN(reference.getTime())) return null;
-  const match = /^(?:(?:by|on|before)\s+)?(.+?)\s+(?:(?:at|by)\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?(?:\s+(?:ET|Eastern(?: time)?))?[.!]?$/i.exec(text.trim());
+  const explicitClock = text.trim().replace(/\b(noon|midnight)\b/gi,
+    (clock) => ({ noon: '12:00pm', midnight: '12:00am' }[clock.toLowerCase()]));
+  const match = /^(?:(?:by|on|before)\s+)?(.+?)\s+(?:(?:at|by)\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?(?:\s+(?:ET|Eastern(?: time)?))?[.!]?$/i.exec(explicitClock);
   if (!match) return null;
   const [, dayText, hourText, minuteText, meridiem] = match;
   const rawHour = Number(hourText);

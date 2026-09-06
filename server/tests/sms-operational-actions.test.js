@@ -107,6 +107,17 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.dropped).toBe(1);
   });
 
+  test.each([['noon', '16:00:00.000Z'], ['midnight', '05:00:00.000Z']])(
+    'a grounded named clock resolves without an invented reminder hour: %s', (clock, utcTime) => {
+      const message = source(`Please call tomorrow at ${clock}`);
+      const result = groundExtraction(extracted([obligation(message.message_body, {
+        kind: 'callback', due_text: `tomorrow at ${clock}`,
+      })]), { message, properties });
+      expect(result.obligations[0]).toMatchObject({ due_at: `2040-03-11T${utcTime}`, timing_unverified: false });
+      expect(result.dropped).toBe(0);
+    },
+  );
+
   test('a shortened quote or invalid model timestamp cannot hide explicit timing', () => {
     const message = source('Please call tomorrow at 9am');
     for (const item of [obligation('Please call', { kind: 'callback' }),
@@ -276,6 +287,36 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.facts.map((f) => f.value)).toEqual(['Do not treat the barn']);
     expect(result.dropped).toBe(2);
   });
+
+  test.each([';', '\n'])(
+    'a quote cannot drop a condition or negation across a continuation boundary: %s', (separator) => {
+      const quote = `Treat the yard${separator}`;
+      const body = `${quote} only when the pets are inside.`;
+      const result = groundExtraction(extracted([], [
+        fact({ field: 'special_instructions', quote, value: quote }),
+        fact({ field: 'special_instructions', quote: body, value: body }),
+      ]), { message: source(body), properties });
+      expect(result.facts.map((item) => item.value)).toEqual([body]);
+      expect(result.dropped).toBe(1);
+      const negated = `Do not${separator} treat the yard.`;
+      const tail = 'treat the yard.';
+      expect(groundExtraction(extracted([], [fact({ field: 'special_instructions', quote: tail, value: tail })]), {
+        message: source(negated), properties,
+      }).facts).toEqual([]);
+    },
+  );
+
+  test.each(['Only when the pets are inside.', 'Unless the gate is locked.', 'But avoid the barn.'])(
+    'a full stop cannot hide the following qualifier: %s', (condition) => {
+      const quote = 'Treat the yard.';
+      const body = `${quote} ${condition}`;
+      const result = groundExtraction(extracted([], [
+        fact({ field: 'special_instructions', quote, value: quote }),
+        fact({ field: 'special_instructions', quote: body, value: body }),
+      ]), { message: source(body), properties });
+      expect(result.facts.map((item) => item.value)).toEqual([body]);
+    },
+  );
 
   test('a complete punctuated sentence stays valid when another sentence follows', () => {
     const message = source('Do not treat the barn. The dog stays inside.');
