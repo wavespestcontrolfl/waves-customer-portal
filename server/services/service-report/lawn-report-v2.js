@@ -568,17 +568,17 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // treating tan color or curling alone as moisture evidence.
   // Check each explicit moisture observation locally: a negated diagnosis must not
   // create advice or suppress a separate affirmative observation.
-  // A comma/"and" can join a negated list; split only when it starts a new
-  // subject or follows a completed observation ("no weeds seen, ...").
+  // A comma/"and the" can join a negated noun list; split only between
+  // finite predicates or after a completed observation ("no weeds seen, ...").
   const explicitMoistureSignal = obsText
     .replace(/\b(not|never|[a-z]+n['’]t)\s+yet\b/g, '$1')
     // A trailing passive dismissal still belongs to the same diagnosis.
     // Keep an explicit different object ("but excluded disease") separate.
     .replace(/(?:,\s*)?\b(?:but|however|yet)\b(?=\s+(?:it\s+)?(?:(?:was|is|has|had|been|currently|actually|yet|ever|previously)\s+)*(?:(?:excluded|ruled out)(?:\s+(?:after|based|because|following|on|once|when)\b|[.!?;]|$)|(?:not|never|[a-z]+n['’]t)\s+(?:been\s+)?(?:(?:currently|actually|yet|ever|previously)\s+)*(?:observed|seen|visible|evident|present|detected|found|supported|confirmed|verified|proven)\b))/g, ' ')
-    // Two finite predicates joined by "and" are separate observations, unlike
+    // Two finite predicates joined by "and" or a comma are separate observations, unlike
     // a shared subject list ("no signs of overwatering and underwatering").
-    .replace(/(\b(?:is|are|was|were|has|have|had|do|does|did)\b[^.!?;,]*?)\band\b(?=[^.!?;,]*\b(?:is|are|was|were|has|have|had|points? to|suggests?|indicates?|shows?|appears?|looks?|remains?|persists?)\b)/g, '$1;')
-    .split(/[.!?;]|\b(?:but|however|yet|while|whereas)\b|(?:,|\band\b)\s*(?=(?:the|this|that|these|those)\b)|(?<=\b(?:seen|found|observed|present))\s*(?:,\s*(?:and\s+)?|and\s+)/)
+    .replace(/(\b(?:is|are|was|were|has|have|had|do|does|did)\b[^.!?;,]*?)(?:\band\b|,)(?=[^.!?;,]*\b(?:is|are|was|were|has|have|had|points? to|suggests?|indicates?|shows?|appears?|looks?|remains?|persists?)\b)/g, '$1;')
+    .split(/[.!?;]|\b(?:but|however|yet|while|whereas)\b|(?<=\b(?:seen|found|observed|present))\s*(?:,\s*(?:and\s+)?|and\s+)/)
     .some(clause => [...clause.matchAll(/\b(?:under[\s-]?water(?:ing|ed)|(?:sprinklers?|irrigation)(?:\s+heads?)?\s+(?:(?:is|are|does|do)\s+)?(?:not|[a-z]+n['’]t)\s+(?:reach(?:ing)?|cover(?:ing)?))\b/g)].some(match => {
       const before = clause.slice(0, match.index).replace(/\bnot\s+(?:only|just)\b/g, '');
       const after = clause.slice(match.index + match[0].length);
