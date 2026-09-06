@@ -20,7 +20,7 @@ const enabled = () => gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS');
 const SOURCE_COLUMNS = ['id', 'customer_id', 'direction', 'message_body', 'message_type', 'created_at', 'from_phone', 'to_phone', 'status'];
 const EXCLUDED_TYPES = ['opt_out', 'opt_in', 'sms_reaction', 'help_request'];
 const tail = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-function eligibleMessage(message) {
+function eligibleMessage(message = {}) {
   const ourNumber = message.direction === 'inbound' ? message.to_phone : message.from_phone;
   return !!message.customer_id && !!message.message_body
     && !isInternalTestCustomerId(message.customer_id)
@@ -105,7 +105,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     if (!customer) return { skipped: 'customer_unavailable' };
     const live = await trx('sms_log').where({ id: message.id }).forUpdate().first();
     if (!enabled()) return { skipped: 'gate_off' };
-    if (!live || live.customer_id !== message.customer_id || live.message_body !== message.message_body) return { skipped: 'source_changed' };
+    if (!eligibleMessage(live) || live.customer_id !== message.customer_id || live.message_body !== message.message_body) return { skipped: 'source_changed' };
     if (live.operational_analysis?.version === VERSION) return { skipped: 'already_processed' };
     const properties = await trx('customer_properties').where({ customer_id: customer.id, active: true }).select('id');
     const current = await trx('property_preferences').where({ customer_id: customer.id }).forUpdate().first();
