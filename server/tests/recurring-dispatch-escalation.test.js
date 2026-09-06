@@ -58,6 +58,8 @@ test('a pass with no pending placement still retires obsolete lane alerts', asyn
   expect(sql).toContain("s.id::text = notifications.metadata->>'scheduledServiceId'");
   expect(sql).toContain("s.recurring_dispatch_due_date::text = notifications.metadata->>'dueDate'");
   expect(sql).toContain('"s"."window_start" is null');
+  expect(sql).not.toContain('"read_at" is null');
+  expect(sql).toContain('not "title" = ?');
   expect(bindings).toEqual(expect.arrayContaining(['admin', 'schedule_conflict', 'recurring-dispatch:%', 'pending', 'confirmed']));
 });
 

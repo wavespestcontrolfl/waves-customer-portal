@@ -80,13 +80,21 @@ describeWithDatabase('recurring placement alert retirement on PostgreSQL', () =>
       expect(byService[ids[name]].read_at).toBeNull();
     }
 
-    // A later successful placement retires an earlier pending card too.
+    // Staff can acknowledge the pending card before placement. Its content
+    // must still retire, or a recurrence will look unchanged to the deduper.
+    await trx('notifications').whereRaw("metadata->>'scheduledServiceId' = ?", [ids.unplaced])
+      .update({ read_at: new Date('2099-01-19T16:00:00Z') });
     await trx('scheduled_services').where({ id: ids.unplaced }).update({ window_start: '09:00' });
     await flagUnplacedVisits({ lockWindowDays: 14 }, now);
     const closed = await trx('notifications')
       .whereRaw("metadata->>'scheduledServiceId' = ?", [ids.unplaced]).first();
     expect(closed.read_at).toEqual(now);
     expect(closed.title).toBe('Recurring placement alert resolved');
+
+    await flagUnplacedVisits({ lockWindowDays: 14 }, new Date('2099-01-21T16:00:00Z'));
+    const stillClosed = await trx('notifications')
+      .whereRaw("metadata->>'scheduledServiceId' = ?", [ids.unplaced]).first();
+    expect(stillClosed.read_at).toEqual(now); // no daily rewrite of resolved history
 
     await trx('scheduled_services').where({ id: ids.unplaced }).update({ window_start: null });
     notifications.notifyAdmin.mockClear();

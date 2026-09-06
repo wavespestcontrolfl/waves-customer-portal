@@ -151,12 +151,13 @@ async function completeRun(runId, { status, totals, error = null }) {
 async function flagUnplacedVisits(config, nowDate = new Date()) {
   const { etDateString, addETDays } = require('../../utils/datetime-et');
   const { toDateStr } = require('./dates');
-  // This audit runs after placement and on later apply passes, so cleanup
-  // retries after a failure and also catches staff placement/cancellation.
-  // Keep the card unread only while its recorded due visit is still unplaced.
+  // Retire obsolete content even if staff already acknowledged the card:
+  // the shared deduper needs changed content to reopen a later recurrence.
+  // Skip resolved cards so repeated recovery passes do not rewrite history.
+  const resolvedTitle = 'Recurring placement alert resolved';
   await db('notifications')
     .where({ recipient_type: 'admin', category: 'schedule_conflict' })
-    .whereNull('read_at')
+    .whereNot('title', resolvedTitle)
     .whereRaw("metadata->>'dedupeKey' LIKE ?", ['recurring-dispatch:%'])
     .whereNotExists(function stillUnplaced() {
       this.select('s.id').from('scheduled_services as s')
@@ -170,7 +171,7 @@ async function flagUnplacedVisits(config, nowDate = new Date()) {
     })
     .update({
       read_at: nowDate,
-      title: 'Recurring placement alert resolved',
+      title: resolvedTitle,
       body: 'This visit is no longer awaiting placement for the recorded due date.',
     });
   const cutoff = etDateString(addETDays(nowDate, Math.max(14, config.lockWindowDays + 4)));
