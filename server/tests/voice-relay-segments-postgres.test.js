@@ -66,6 +66,14 @@ postgres('atomic relay segment append and composition', () => {
     expect(row.transcription_provider).toBe('fixture_recording');
   });
 
+  test.each([{ relay_handoff: {} }, { relay_transfer_ring_at: '2026-01-01T00:00:00Z' }])('late append restores the AI half of a transfer that never reconnected: %j', async (evidence) => {
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture',
+      metadata: { relay_session_claim_owner: 'first', ...evidence },
+      transcription: 'Recorded caller message.', transcription_provider: 'fixture_recording', call_outcome: 'voicemail' });
+    await appendSegment(db, 'CA-fixture', buildSegment({ generation: 1, sessionKey: 'first', text: 'Caller: ants' }));
+    expect((await db('call_log').first()).transcription).toBe('[AI segment]\nCaller: ants\n\n[Voicemail segment]\nRecorded caller message.');
+  });
+
   test.each(['voicemail', 'ai_transferred'])('late text composes around a provider-null rejected recording (%s)', async (outcome) => {
     const sentinel = '[Recording had no usable speech; an implausible transcription was rejected.]';
     await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture',
