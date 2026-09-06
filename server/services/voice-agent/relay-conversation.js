@@ -546,6 +546,7 @@ class RelayConversation {
     this._inheritedFailures = { model: 0, tool: 0 };
     this._clearedFailures = { model: false, tool: false };
     this._handoffForFailure = false; // the provider-failure handoff ran (once per call)
+    this._failureCallbackPromised = false;
     this._eventShapesSeen = new Set();
     // Telemetry labels the rendering TwiML put on its <Parameter>s (the
     // active relay profile and the voice it rendered) — stamped into the
@@ -1625,12 +1626,17 @@ class RelayConversation {
       }
     }
     if (!superseded) {
-      const filed = await this._fileFailureCallback();
+      const filed = this._failureCallbackPromised || await this._fileFailureCallback();
       superseded = await this._sessionSuperseded();
-      if (![superseded, this.ended, this._ending].some(Boolean)) this.say(copy(filed ? 'troubleCallback' : 'troubleNoCallback', this.language));
+      if (![superseded, this.ended, this._ending].some(Boolean)) {
+        // Once the callback copy can reach the caller, its office task must
+        // survive end-frame failure and every later retry on this socket.
+        this._failureCallbackPromised = filed;
+        this.say(copy(filed ? 'troubleCallback' : 'troubleNoCallback', this.language));
+      }
     }
     const sent = this._endForHandoff(superseded ? 'superseded' : 'provider_failure');
-    const retainCallback = [sent, !superseded].every(Boolean);
+    const retainCallback = this._failureCallbackPromised || [sent, !superseded].every(Boolean);
     this._failureCallbackEndDecision?.(retainCallback);
     this._handoffForFailure = sent;
     if (!retainCallback) {
@@ -1771,7 +1777,7 @@ class RelayConversation {
       let resolveBell;
       const bell = new Promise((resolve) => { resolveBell = resolve; });
       const deadline = Date.now() + 3000;
-      const endedCleanly = new Promise((resolve) => { this._failureCallbackEndDecision = resolve; });
+      const callbackRetained = new Promise((resolve) => { this._failureCallbackEndDecision = resolve; });
       const delivery = triggerNotification('customer_voicemail_callback', {
         name: this._estimateFields?.first_name || null,
         phone,
@@ -1786,7 +1792,7 @@ class RelayConversation {
           onCommitted: (receipt) => { this._failureCallbackReceipt = receipt; },
         },
         onBell: resolveBell,
-        beforePush: async () => (await endedCleanly) && !(await this._sessionSuperseded()),
+        beforePush: async () => (await callbackRetained) && !(await this._sessionSuperseded()),
       });
       void delivery.then((result) => resolveBell(result?.bellWritten === true)).catch(() => resolveBell(false));
       return await withTimeout(bell, 3000, false);

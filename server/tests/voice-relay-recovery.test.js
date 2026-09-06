@@ -1279,16 +1279,22 @@ describe('the conversation side', () => {
       } finally { settle(); jest.useRealTimers(); }
     });
 
-    test.each(['false', 'throw'])('an unsent end frame retracts the callback and allows another caller turn (%s)', async (failure) => {
+    test.each([
+      ['false', 'hangup'], ['throw', 'hangup'],
+      ['false', 'retry'], ['throw', 'retry'],
+      ['false', 'superseded'], ['throw', 'superseded'],
+    ])('a promised callback survives an unsent end frame and %s / %s', async (failure, next) => {
       process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
-      const { Convo, dbIso } = isolated({ streamImpl: jest.fn(), executeToolImpl: jest.fn() });
+      const { Convo, dbIso, leadWriter } = isolated({ streamImpl: jest.fn(), executeToolImpl: jest.fn() });
       primeDb({ db: dbIso, firstRow: { id: 'call-fixture', metadata: {} } });
+      leadWriter.mockResolvedValue(null); // a known customer's floor produces no fallback lead
       const service = require('../services/notification-service');
       service.revertRelayFailureCallback = jest.fn(async () => {});
       const receipt = { callSid: 'CA-end-failure', callbackStamp: 'stamp-fixture', notificationId: 'bell-fixture' };
       const pushed = jest.fn();
       const pushes = [];
-      require('../services/notification-triggers').triggerNotification.mockImplementation((_key, _payload, opts) => {
+      const trigger = require('../services/notification-triggers').triggerNotification;
+      trigger.mockImplementation((_key, _payload, opts) => {
         opts.relayFailureCall.onCommitted(receipt);
         opts.onBell(true);
         const delivery = opts.beforePush().then((allowed) => { if (allowed) pushed(); return { bellWritten: true }; });
@@ -1299,18 +1305,26 @@ describe('the conversation side', () => {
         if (failure === 'throw') throw new Error('socket send failed');
         return false;
       }).mockReturnValue(true);
-      const convo = new Convo({ callSid: 'CA-end-failure', from: '+19415551234', send: jest.fn(), endSession });
+      const send = jest.fn();
+      const convo = new Convo({ callSid: 'CA-end-failure', from: '+19415551234', send, endSession });
       convo._modelFailures = 2;
       await convo._maybeHandoffForFailure(null);
       await pushes[0];
-      expect(service.revertRelayFailureCallback).toHaveBeenCalledWith(receipt);
-      expect(pushed).not.toHaveBeenCalled();
+      expect(send).toHaveBeenCalledWith(expect.stringContaining('call you back'));
+      expect(service.revertRelayFailureCallback).not.toHaveBeenCalled();
+      expect(pushed).toHaveBeenCalledTimes(1);
       expect(convo._ending).toBe(false);
       expect(convo._handoffForFailure).toBe(false);
-      await convo._runLoop('are you still there');
-      await pushes[1];
-      expect(endSession).toHaveBeenCalledTimes(2);
-      expect(convo._ending).toBe(true);
+      if (next === 'hangup') await convo.end('ws_close');
+      else {
+        if (next === 'superseded') convo._sessionSuperseded = jest.fn(async () => true);
+        await convo._runLoop('are you still there');
+        expect(endSession).toHaveBeenCalledTimes(2);
+        expect(convo._ending).toBe(true);
+      }
+      expect(service.revertRelayFailureCallback).not.toHaveBeenCalled();
+      expect(trigger).toHaveBeenCalledTimes(1); // retry keeps its own promised receipt
+      expect(convo._failureCallbackReceipt).toEqual(receipt);
       expect(pushed).toHaveBeenCalledTimes(1);
     });
 

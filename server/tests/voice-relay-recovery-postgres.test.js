@@ -173,6 +173,37 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     expect((await mockPg('notifications').first()).id).toBe(convo._failureCallbackReceipt.notificationId);
   });
 
+  test.each(['false', 'throw'])('a promised callback remains durable when the end frame %s fails', async (failure) => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { triggerNotification } = require('../services/notification-triggers');
+    triggerNotification.mockImplementationOnce(async (_key, _payload, options) => {
+      const result = await NotificationService.notifyAdmin('voicemail_callback', 'Callback fixture', 'Callback required', {
+        dedupeKey: `relay-failure:${callSid}`, relayFailureCall: options.relayFailureCall,
+      });
+      const bellWritten = Boolean(result && !result.suppressed);
+      options.onBell(bellWritten);
+      return { bellWritten };
+    });
+    const service = require('../services/notification-service');
+    service.revertRelayFailureCallback = jest.fn(NotificationService.revertRelayFailureCallback.bind(NotificationService));
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    const convo = Object.assign(Object.create(RelayConversation.prototype), {
+      callSid, sessionKey: 'old', from: '+19415550123', _callerVerified: true,
+      _inFlightWrites: new Map(), _modelFailures: 2,
+      _sessionSuperseded: jest.fn(async () => false), say: jest.fn(),
+      _endSession: jest.fn(() => { if (failure === 'throw') throw new Error('fixture end frame failure'); return false; }),
+    });
+    await convo._maybeHandoffForFailure(null);
+    expect(convo.say).toHaveBeenCalledWith(expect.stringContaining('call you back'));
+    expect(service.revertRelayFailureCallback).not.toHaveBeenCalled();
+    const receipt = convo._failureCallbackReceipt;
+    expect((await mockPg('notifications').first()).id).toBe(receipt.notificationId);
+    expect((await mockPg('call_log').first()).metadata.relay_failure_callback_filed_at).toBe(receipt.callbackStamp);
+    convo.ended = true; // no further caller turn is required to retain the office task
+    expect(await convo._maybeHandoffForFailure(null)).toBe(false);
+    expect(await mockPg('notifications')).toHaveLength(1);
+  });
+
   test('post-commit takeover permits compensation without changing the replacement owner', async () => {
     let receipt;
     await NotificationService.notifyAdmin('voicemail_callback', 'Callback fixture', 'Callback required', {
