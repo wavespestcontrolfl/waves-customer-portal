@@ -2618,7 +2618,7 @@ async function reconcileAutonomousPr(options, deps = {}) {
   const parsed = fm.parse(candidate.content);
   // Operator repairs may correct presentation, dates and declarations, never
   // move a route, change author identity, add a spoke, or change image paths.
-  const editable = new Set(['title', 'meta_description', 'schema_types', 'updated', 'modified', 'hero_image']);
+  const editable = new Set(['title', 'meta_description', 'reading_time_min', 'schema_types', 'updated', 'modified', 'hero_image']);
   for (const key of new Set([...Object.keys(before), ...Object.keys(parsed.data)])) {
     if (!editable.has(key) && canonValue(before[key]) !== canonValue(parsed.data[key])) {
       throw new Error(`operator recovery cannot change frontmatter ${key}`);

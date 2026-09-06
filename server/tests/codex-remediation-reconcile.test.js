@@ -12,7 +12,7 @@ const SLUG = 'pest-control/reconciliation-fixture';
 const PATH = `src/content/blog/${SLUG}.mdx`;
 const OPTIONS = { runId: RUN, prNumber: 999, headSha: HEAD, approvedBy: 'test-operator' };
 const META = { title: 'Original title', slug: `/${SLUG}/`, canonical: `https://www.wavespestcontrol.com/${SLUG}/`,
-  category: 'pest-control', domains: ['wavespestcontrol.com'], schema_types: ['Article', 'BreadcrumbList'],
+  reading_time_min: 7, category: 'pest-control', domains: ['wavespestcontrol.com'], schema_types: ['Article', 'BreadcrumbList'],
   hero_image: { src: `/images/blog/${SLUG}/hero.webp`, alt: 'Original alt' } };
 
 function fixture() {
@@ -58,7 +58,7 @@ function fixture() {
     tables = local;
     return result;
   };
-  let candidate = fm.stringify({ ...META, title: 'Repaired title', updated: '2026-09-06',
+  let candidate = fm.stringify({ ...META, title: 'Repaired title', reading_time_min: 9, updated: '2026-09-06',
     meta_description: 'Repaired summary', hero_image: { ...META.hero_image, alt: 'Refreshed photo' },
     schema_types: ['Article', 'BreadcrumbList', 'FAQPage'] }, 'Repaired body with refreshed image references.');
   const pr = { state: 'open', head: { sha: HEAD, ref: BRANCH }, base: { ref: 'main' } };
@@ -96,7 +96,7 @@ test('synchronizes full article and image alt, preserves governance and rounds, 
   const run = f.tables.autonomous_runs[0]; const draft = JSON.parse(run.draft_payload);
   expect(draft).toMatchObject({ autopublish_head_sha: PIN, trust_build_approved_head_sha: HEAD,
     title: 'Repaired title', body: 'Repaired body with refreshed image references.',
-    frontmatter: { hero_image: { alt: 'Refreshed photo' }, schema_types: ['Article', 'BreadcrumbList', 'FAQPage'] } });
+    frontmatter: { reading_time_min: 9, hero_image: { alt: 'Refreshed photo' }, schema_types: ['Article', 'BreadcrumbList', 'FAQPage'] } });
   expect(JSON.parse(run.comparison_table_result).requiresHumanReview).toBe(true);
   expect(run.trust_build_approved_by).toBe('test-operator');
   expect(f.tables.codex_remediation_state[0]).toMatchObject({ rounds: 2, last_push_sha: HOLD, synced_sha: HEAD, sync_pending_sha: null });
