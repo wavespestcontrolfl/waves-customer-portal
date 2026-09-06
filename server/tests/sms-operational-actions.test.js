@@ -41,6 +41,25 @@ describe('SMS operational evidence and ownership', () => {
     })).toMatchObject({ facts: [], dropped: 1 });
   });
 
+  test.each([
+    'Are the dogs kept inside', 'Are the dogs kept inside？',
+    'The dogs stay inside. However, could they escape',
+    'Where is the irrigation controller', 'Do we leave the gate open',
+    'The controller is outside\nIs it beside the garage',
+  ])('unpunctuated and Unicode questions require review: %s', (quote) => {
+    expect(groundExtraction(extracted([], [fact({ field: 'pet_details', quote, value: quote })]), {
+      message: source(quote), properties,
+    })).toEqual({ facts: [], dropped: 1 });
+  });
+
+  test.each(['unknown', 'none', 'not known', 'not available', 'unsure', 'N A'])('missing access code remains empty: %s', (value) => {
+    const quote = `Lockbox code is ${value}`;
+    const item = fact({ field: 'lockbox_code', quote, value });
+    expect(groundExtraction(extracted([], [item]), { message: source(quote), properties }))
+      .toEqual({ facts: [], dropped: 1 });
+    expect(factVerdict(item, { properties, senderIsPrimary: true })).toBe('code_uncertain');
+  });
+
   test('overlong sources create review exceptions without a provider call', async () => {
     dispatchWithFallback.mockClear();
     expect(await extractSmsOperations({ message: source('Keep the pets inside. '.repeat(30)), properties }))
