@@ -16596,7 +16596,7 @@ router.get('/recommend-slots', async (req, res, next) => {
 // derived rows too, so both sources share the same customer/catalog fences.
 async function refreshRecurringPlanAlert(conn, alert) {
   try {
-    const parent = await conn('scheduled_services').where({ id: alert.parentId }).first();
+    let parent = await conn('scheduled_services').where({ id: alert.parentId }).first();
     if (!parent?.is_recurring || !parent.recurring_pattern
       || parent.recurring_pattern === 'one_time'
       || ['cancelled', 'rescheduled'].includes(parent.status)) return null;
@@ -16604,6 +16604,8 @@ async function refreshRecurringPlanAlert(conn, alert) {
       .where({ id: parent.customer_id }).first('id');
     // Annual coverage belongs to a service/series, not every plan on the account.
     if (!customer || parent.annual_prepay_term_id) return null;
+    const cols = await conn('scheduled_services').columnInfo();
+    parent = overlayRecurringTemplateOverrides(parent, cols);
     const profile = await resolveCompletionProfileForScheduledService(parent, conn, { strict: true });
     if (profile.billingType === 'one_time') return null;
 

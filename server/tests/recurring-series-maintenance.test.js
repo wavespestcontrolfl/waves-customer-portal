@@ -1091,7 +1091,8 @@ describe('renewal banner revalidates historical recurring alerts', () => {
   const profileResolver = require('../services/service-completion-profiles').resolveCompletionProfileForScheduledService;
   const alert = { id: 1, parentId: 'series-a', customerId: 'customer-a', remainingVisits: 0 };
   function scenario({ parent = {}, customer = { billing_mode: 'per_application' }, upcoming = 1, lastDate = daysOut(7), completed = true } = {}) {
-    return makeConn(({ table, calls }) => {
+    return makeConn(({ table, calls, op }) => {
+      if (op === 'columnInfo') return { recurring_template_overrides: {} };
       if (table === 'customers') {
         if (!customer) return null;
         const row = { id: 'customer-a', active: true, pipeline_stage: 'active_customer', ...customer };
@@ -1129,6 +1130,22 @@ describe('renewal banner revalidates historical recurring alerts', () => {
   test('keeps a separate non-prepaid series on an annual-prepay customer', async () => {
     expect(await refreshRecurringPlanAlert(scenario({ customer: { billing_mode: 'annual_prepay' } }), alert))
       .toMatchObject({ id: 1, remainingVisits: 1 });
+  });
+  test('uses the saved recurring template after a parent-only service edit', async () => {
+    const { gates } = require('../config/feature-gates');
+    const previousGate = gates.editApptPriceServiceScope;
+    gates.editApptPriceServiceScope = true;
+    profileResolver.mockImplementationOnce(async (row) => ({
+      billingType: row.service_id === 'recurring-service' ? 'recurring' : 'one_time',
+    }));
+    try {
+      expect(await refreshRecurringPlanAlert(scenario({ parent: {
+        service_id: 'one-time-service', service_type: 'Cockroach Control',
+        recurring_template_overrides: { service_id: 'recurring-service', service_type: 'Quarterly Pest Control Service' },
+      } }), alert)).toMatchObject({ serviceType: 'Quarterly Pest Control Service', remainingVisits: 1 });
+    } finally {
+      gates.editApptPriceServiceScope = previousGate;
+    }
   });
   test('rejects catalog one-time work even with legacy recurring flags', async () => {
     profileResolver.mockResolvedValue({ billingType: 'one_time' });
