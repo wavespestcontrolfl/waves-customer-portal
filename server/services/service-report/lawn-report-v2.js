@@ -603,13 +603,16 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
         && !nonCurrent
         && !/^\s+(?:(?!(?:and|or|nor|with|without|because|due|from|not|never|neither)\b)[a-z'’-]+\s+)*?(?:absent|unlikely|excluded|resolved|recovered|cleared|corrected|unconfirmed|unclear|uncertain|inconclusive|inconsistent with|ruled out|no longer|(?:not|never|neither|[a-z]+n['’]t|cannot)\b(?!\s+(?:only|just|due to|caused by|because of|from|limited to)\b))\b/.test(predicate);
     }));
-  const drySignal = explicitMoistureSignal || /\b(dry|drier|drought|wilt)\b/.test(obsText)
-    || /\buneven\s+(?:irrigation|water(?:ing)?|sprinkler|moisture)\b/.test(obsText)
+  const dryPatterns = [
+    /\b(dry|drier|drought|wilt)\b/,
+    /\buneven\s+(?:irrigation|water(?:ing)?|sprinkler|moisture)\b/,
     // Reversed order — "irrigation is uneven across the west side"
     // (codex P2 r36). Bounded gap so the subject and qualifier stay in
     // the same clause.
-    || /\b(?:irrigation|water(?:ing)?|sprinkler|moisture)\b[^.!?]{0,30}\buneven\b/i.test(obsText)
-    || /\b(?:sprinkler|irrigation|water)\s+coverage\b/.test(obsText);
+    /\b(?:irrigation|water(?:ing)?|sprinkler|moisture)\b[^.!?]{0,30}\buneven\b/i,
+    /\b(?:sprinkler|irrigation|water)\s+coverage\b/,
+  ];
+  const drySignal = explicitMoistureSignal || dryPatterns.some(pattern => pattern.test(obsText));
   // The Water/Coverage score is derived from fungus/over-water signals and ignores
   // drought — so a dry/uneven photo read must downgrade it regardless of the weekly
   // amount (this is the "95 Strong vs photo says drought" contradiction).
