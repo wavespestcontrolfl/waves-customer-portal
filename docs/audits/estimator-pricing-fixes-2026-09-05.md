@@ -7,6 +7,7 @@ User authorization: “ok go” following the full estimator audit. The subseque
 ## Implemented
 
 - Invalid monetary results are rejected before discounts and mapping. Invalid turf area/spacing, stinging tiers and one-time lawn treatment keys return pricing validation errors. The engine also rejects nonfinite results from retained specialty calculators.
+- One-time lawn validation preserves the `fertilizer` token produced by the call intent schema and lead mapper by normalizing it to `fert`. `estimator-pricing-correctness.test.js` feeds the schema's treatment enum and the lead mapper's fertilization output through the real pricing engine, guarding producer/validator compatibility.
 - Pricing validation errors use the existing `failClosed` mechanism, so the authoritative save path cannot persist a client-supplied price after the engine rejects the calculation. Other existing engine-error behavior is unchanged.
 - Numeric-nine Tree & Shrub fields use the existing service-specific cadence resolver for 42-day followups and annual-prepay coverage. Contradictory fields/counts refuse coverage. Count-only legacy T&S remains office-scheduled; inconsistent count-only nine prepay is rejected. Mosquito's seasonal calendar and generic numeric cadence inference remain intact.
 - Large-sanitation scope advisories now survive mapping via existing review reasons/warnings. The current over-50-cu-ft threshold and quoted amounts are preserved.
@@ -25,6 +26,7 @@ User authorization: “ok go” following the full estimator audit. The subseque
 - `check:domain-rules`: clean, 1,925 files scanned.
 - ESLint: zero errors; legacy warnings remain in the large existing modules. No new dependencies or UI files changed.
 - `git diff --check`: clean.
+- Fertilizer compatibility regression: the schema and lead-mapper cases reproduced the validation failure before the fix; six suites / 1,226 tests passed afterward, including estimator-engine, lead automation, authoritative save and both independent golden suites. Domain checks passed. These checks used the unchanged lockfile's installed dependencies from an existing isolated checkout, with production DB variables unset.
 
 Commands:
 

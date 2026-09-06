@@ -5751,7 +5751,7 @@ function priceOneTimeLawn(property, options = {}) {
     // the priceLawnCare call below.
   } = options;
 
-  const normalizedTreatment = treatmentType === 'fertilization' ? 'fert' : treatmentType;
+  const normalizedTreatment = ['fertilization', 'fertilizer'].includes(treatmentType) ? 'fert' : treatmentType;
   assertEnum(normalizedTreatment, Object.keys(ONE_TIME.lawn.treatmentMultipliers), 'treatmentType');
   const lawnResult = priceLawnCare(property, {
     track,

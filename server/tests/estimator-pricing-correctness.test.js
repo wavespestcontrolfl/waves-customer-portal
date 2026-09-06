@@ -2,6 +2,8 @@ const { generateEstimate, quickQuote } = require('../services/pricing-engine/est
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 const { SPECIALTY } = require('../services/pricing-engine/constants');
 const { deriveModifiers } = require('../services/pricing-engine/modifiers');
+const { SERVICE_OPTION_SCHEMAS } = require('../services/estimator-engine/intent-schema');
+const { mapServiceInterestToEstimateServices } = require('../services/lead-estimate-automation');
 
 const property = { homeSqFt: 2000, stories: 1, lotSqFt: 10000, lawnSqFt: 4500 };
 const estimate = services => generateEstimate({ ...property, services });
@@ -48,6 +50,22 @@ describe('estimator rejects failed monetary calculations', () => {
     expect(() => estimate({ oneTimeLawn: { treatmentType: 'pest_control' } })).toThrow(/treatmentType/);
     expect(estimate({ oneTimeLawn: { treatmentType: 'pest' } }).lineItems[0].price).toBe(150);
     expect(estimate({ oneTimeLawn: { treatmentType: 'fertilization' } }).lineItems[0].price).toBe(115);
+  });
+
+  test.each(SERVICE_OPTION_SCHEMAS.oneTimeLawn.properties.treatmentType.enum)(
+    'one-time lawn accepts the intent schema treatment %s', treatmentType => {
+      expect(estimate({ oneTimeLawn: { treatmentType } }).lineItems[0]).toMatchObject({
+        service: 'one_time_lawn', price: { fertilizer: 115, weed: 129 }[treatmentType],
+      });
+    },
+  );
+
+  test('lead fertilization intent produces a priced lawn line through mapping', () => {
+    const { services, supported } = mapServiceInterestToEstimateServices('One-time lawn fertilization');
+    expect(supported).toBe(true);
+    const raw = estimate(services);
+    expect(raw.lineItems[0]).toMatchObject({ service: 'one_time_lawn', treatmentType: 'fert', price: 115 });
+    expect(mapV1ToLegacyShape(raw).totals.year1).toBe(115);
   });
 });
 
