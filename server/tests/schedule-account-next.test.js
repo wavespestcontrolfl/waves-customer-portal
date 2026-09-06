@@ -83,6 +83,16 @@ describe('GET /schedule/account-next — every property on the account with its 
       const visitsChain = db.mock.results.find((r, i) => calls[i] === 'scheduled_services').value;
       expect(visitsChain.whereIn).toHaveBeenCalledWith('scheduled_services.customer_id', ['cust-1', 'cust-2', 'cust-3']);
       expect(visitsChain.whereIn).toHaveBeenCalledWith('scheduled_services.status', ['pending', 'confirmed']);
+      // Same horizon as GET / — a lower AND an upper date bound.
+      const dateBounds = visitsChain.where.mock.calls.filter((c) => c[0] === 'scheduled_services.scheduled_date').map((c) => c[1]);
+      expect(dateBounds.sort()).toEqual(['<=', '>=']);
+    });
+  });
+
+  test('rejects a horizon outside the list route\'s bounds', async () => {
+    await withServer(async (base) => {
+      expect((await fetch(`${base}/schedule/account-next?days=0`)).status).toBe(400);
+      expect((await fetch(`${base}/schedule/account-next?days=400`)).status).toBe(400);
     });
   });
 

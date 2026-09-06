@@ -560,6 +560,12 @@ router.post('/:id/reschedule', async (req, res, next) => {
 // per-property behind the session switch).
 router.get('/account-next', async (req, res, next) => {
   try {
+    // Same `days` horizon as GET / (default 90): a visit beyond it is not on
+    // the property's Visits tab, so it must not appear as that property's
+    // "next visit" either (codex r2 P2).
+    const { value, error } = listQuerySchema.validate(req.query, { stripUnknown: true });
+    if (error) return res.status(400).json({ error: error.details[0].message });
+    const cutoffDate = etDateString(addETDays(new Date(), value.days));
     const ids = await accountPropertyIds(req);
     const properties = await db('customers')
       .whereIn('id', ids)
@@ -575,6 +581,7 @@ router.get('/account-next', async (req, res, next) => {
         .orWhereNot('scheduled_services.status', 'pending')
         .orWhere('scheduled_services.customer_confirmed', true))
       .where('scheduled_services.scheduled_date', '>=', etDateString())
+      .where('scheduled_services.scheduled_date', '<=', cutoffDate)
       .select('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.scheduled_date', 'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.service_type', 'scheduled_services.status', 'scheduled_services.customer_confirmed')
       .orderBy('scheduled_services.scheduled_date', 'asc')
       .orderBy('scheduled_services.window_start', 'asc');

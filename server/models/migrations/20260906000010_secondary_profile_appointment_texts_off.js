@@ -39,7 +39,6 @@ exports.up = async function up(knex) {
     return;
   }
 
-  const flippedAt = new Date();
   await knex.transaction(async (trx) => {
     // Snapshot BEFORE writing so `down` can restore each row's real prior
     // values (a rental the owner had already tuned by hand must come back
@@ -58,6 +57,11 @@ exports.up = async function up(knex) {
       console.log('[20260906000010] every secondary profile already had its appointment texts off');
       return;
     }
+    // Stamp AFTER the locked snapshot: a preference save that held a row lock
+    // when the migration started commits before our SELECT returns, and its
+    // updated_at must read as "before the flip" so `down` still restores the
+    // row (codex r2 P2).
+    const flippedAt = new Date();
     const ids = before.map((r) => r.customer_id);
     const off = Object.fromEntries(COLUMNS.map((c) => [c, false]));
     await trx('notification_prefs').whereIn('customer_id', ids).update(off);
