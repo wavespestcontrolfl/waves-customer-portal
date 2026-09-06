@@ -298,52 +298,16 @@ export const ADMIN_NAV_ITEMS = {
   },
 };
 
+// Group by operational responsibility; individual leaf roles remain authoritative.
 const NAV_SECTION_DEFINITIONS = [
   { section: "Overview", itemIds: ["dashboard"] },
-  {
-    section: "Operations",
-    itemIds: [
-      "schedule",
-      "jobs",
-      "assessments",
-      "services",
-      "equipment",
-      "inventory",
-      "priceMatch",
-    ],
-  },
-  {
-    section: "Customers & Sales",
-    itemIds: [
-      "customers",
-      "pipeline",
-      "communications",
-      "contracts",
-      "reviews",
-      "referrals",
-    ],
-  },
-  {
-    section: "Marketing",
-    itemIds: ["email", "ppc", "seo", "social", "blog", "newsletter"],
-  },
-  { section: "Team & Automation", itemIds: ["staff", "recruiting", "agents", "agentEstimate"] },
-  {
-    section: "Billing & Finance",
-    itemIds: [
-      "invoices",
-      "recovery",
-      "payers",
-      "banking",
-      "taxes",
-      "pricing",
-    ],
-  },
-  { section: "Resources", itemIds: ["knowledge"] },
-  {
-    section: "Administration",
-    itemIds: ["compliance", "toolHealth", "settings"],
-  },
+  { section: "Service operations", itemIds: ["schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
+  { section: "Customers & Sales", itemIds: ["customers", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
+  { section: "Communications", itemIds: ["communications", "email"] },
+  { section: "Billing & Finance", itemIds: ["invoices", "recovery", "payers", "banking", "taxes"] },
+  { section: "People", itemIds: ["staff", "recruiting"] },
+  { section: "Marketing", itemIds: ["ppc", "seo", "social", "blog", "newsletter", "reviews", "referrals"] },
+  { section: "System", itemIds: ["agents", "toolHealth", "settings"] },
 ];
 
 const MOBILE_TAB_IDS = [

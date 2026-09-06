@@ -588,6 +588,31 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
   return smsOk;
 }
 
+// Serialize the reminder's delivery with recurring-series deferral. The
+// existing customer-comms lock spans EVERY channel, including fallback and
+// multi-contact sends. Take it after visit claims/copy preparation (their
+// scheduling locks precede comms), then reject any stale scan under the lock.
+// null means defer without closing flags or finalizing a visit claim as sent.
+async function withReminderSendFence(row, tier, send) {
+  const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
+  const { getHeldConnection } = require('../utils/cron-lock');
+  return withCustomerCommsLock(db, row.customer_id, async (trx) => {
+    const current = await trx('appointment_reminders')
+      .where({
+        id: row.id,
+        customer_id: row.customer_id,
+        appointment_time: row.appointment_time,
+        cancelled: false,
+        confirmation_sent: true,
+        windows_preclosed: false,
+        [`reminder_${tier}_sent`]: false,
+      })
+      .first('id');
+    if (!current) return null;
+    return send();
+  }, { connection: getHeldConnection() });
+}
+
 // Reconstruct an appointment's ET instant from its scheduled_services row —
 // scheduled_date (DATE) + window_start (TIME) composed into the naive shape
 // parseETDateTime expects. Returns null when the row or fields are missing.
@@ -3084,7 +3109,7 @@ const AppointmentReminders = {
               continue;
             }
             const smsOutcome72 = {};
-            const reached72 = await deliverAppointmentNotice({
+            const reached72 = await withReminderSendFence(r, '72h', () => deliverAppointmentNotice({
               channel: channel72,
               kind: '72h',
               customerId: r.customer_id,
@@ -3103,7 +3128,8 @@ const AppointmentReminders = {
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
               }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy72 ? apptCopy72.getTime() : undefined }, { sendOutcome: smsOutcome72 }),
-            });
+            }));
+            if (reached72 === null) smsOutcome72.blockedCode = 'MOVE_HOLD';
 
             // Boundary hold — leave the row UNMARKED, same as the pre-check
             // defer: the 15-minute cron re-selects it and the reminder goes
@@ -3261,7 +3287,7 @@ const AppointmentReminders = {
                   logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} — visit claim lease lost before send; row left unmarked`);
                   continue;
                 }
-                const emailRes = await sendAppointmentNoticeEmail({
+                const emailRes = await withReminderSendFence(r, '24h', () => sendAppointmentNoticeEmail({
                   kind: '24h',
                   customerId: r.customer_id,
                   scheduledServiceId: r.scheduled_service_id,
@@ -3269,14 +3295,14 @@ const AppointmentReminders = {
                   serviceLabel: nightLabel,
                   cardHoldNote: nightCopy ? nightCopy.holdNote : null,
                   emailIdempotencyKey: ownsNight ? visitReminderEmailKey('24h', nightClaim.dedupeKey) : null,
-                });
+                })) ?? { held: true };
                 // A move-hold at the email handoff is a DEFERRAL (GH codex
                 // r2 P1): finalizing it terminally would mark the whole
                 // visit's only deliverable leg taken. Release the claim as
                 // retryable, leave the row unmarked, let the post-move
                 // scan re-decide.
-                if (emailRes?.held && ownsNight) {
-                  await vgNight.finalizeVisitNotification(svcVisitId, 'reminder_24h', 'retry', new Date(), nightClaim.token, { dedupeKey: nightClaim.dedupeKey });
+                if (emailRes?.held) {
+                  if (ownsNight) await vgNight.finalizeVisitNotification(svcVisitId, 'reminder_24h', 'retry', new Date(), nightClaim.token, { dedupeKey: nightClaim.dedupeKey });
                   logger.info(`[appt-remind] 24h night-skip email for ${r.scheduled_service_id} held by a grouped move — claim released, row left unmarked`);
                   continue;
                 }
@@ -3355,7 +3381,7 @@ const AppointmentReminders = {
               continue;
             }
             const smsOutcome24 = {};
-            const reached24 = await deliverAppointmentNotice({
+            const reached24 = await withReminderSendFence(r, '24h', () => deliverAppointmentNotice({
               channel: channel24,
               kind: '24h',
               customerId: r.customer_id,
@@ -3384,7 +3410,8 @@ const AppointmentReminders = {
                 );
               }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id, rendered_slot_ms: apptCopy24 ? apptCopy24.getTime() : undefined }, { sendOutcome: smsOutcome24 }),
               smsOutcome: smsOutcome24,
-            });
+            }));
+            if (reached24 === null) smsOutcome24.blockedCode = 'MOVE_HOLD';
 
             // Boundary hold — leave the row UNMARKED and let the next
             // 15-minute tick re-decide: its pre-check above applies the
@@ -5362,6 +5389,7 @@ AppointmentReminders._test = {
   resolve72hChannel,
   isOneTimeVisit,
   deliverAppointmentNotice,
+  withReminderSendFence,
   deliverConfirmationByChannel,
   scheduledServiceApptTime,
   sendAppointmentNoticeEmail,

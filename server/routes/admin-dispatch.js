@@ -4111,6 +4111,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
   // for, or drop one it did).
   const notify = typeof result.notifyRequested === 'boolean' ? result.notifyRequested : notifyArg;
   const seriesMoveId = result.seriesMoveId || null;
+  const preserved = Array.isArray(result.preservedOccurrences) ? result.preservedOccurrences : [];
   const conflicts = occurrences
     .filter((occ) => occ.conflicted)
     .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
@@ -4193,28 +4194,33 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // tech are kept; the operator sets a time from dispatch. Those rows often
     // land outside the reloaded week view — surface them in the response AND
     // ring the bell so a series move can't silently leave untimed visits.
-    if ((dueConflicts.length || (!cardOnly && overlapDates.length)) && !markers.conflict_card_at) {
+    if ((dueConflicts.length || (!cardOnly && (overlapDates.length || preserved.length))) && !markers.conflict_card_at) {
       try {
         const NotificationService = require('../services/notification-service');
         const parts = [];
+        if (!cardOnly && preserved.length) parts.push(`${preserved.length} future visit(s) kept existing appointments because of staff locks, reschedule holds, confirmed timing, or visit commitments (${preserved.map((c) => c.date).join(', ')}) — review their cadence in dispatch`);
         if (dueConflicts.length) parts.push(`${dueConflicts.length} future visit(s) landed on already-booked windows and kept their date and technician but have NO time window (${dueConflicts.map((c) => c.date).join(', ')}) — set a time from dispatch`);
         if (!cardOnly && overlapDates.length) parts.push(result.arrivalWindowDates?.length
           ? `${overlapDates.length} occurrence(s) need route review to keep every promised arrival window (${overlapDates.join(', ')}) — check those days' routes`
           : `${overlapDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${overlapDates.join(', ')}) — check those days' routes`);
         const notif = await NotificationService.notifyAdmin(
           'schedule_conflict',
-          dueConflicts.length ? 'Series move left visits without a time window'
-            : (result.arrivalWindowDates?.length ? 'Series move needs route review' : 'Series move overlaps other visits'),
+          preserved.length ? 'Recurring move needs a future visit review'
+            : dueConflicts.length ? 'Series move left visits without a time window'
+              : (result.arrivalWindowDates?.length ? 'Series move needs route review' : 'Series move overlaps other visits'),
           `A series move shifted a recurring plan: ${parts.join('; ')}.`,
-          { metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates } }
+          { bell: true, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates, preservedOccurrences: preserved } }
         );
-        if (!notif) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
+        if (!notif?.id) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
         else await stampMarker('conflict_card_at');
       } catch (err) {
         logger.error(`[dispatch] schedule_conflict notification failed for ${serviceId}: ${err.message}`);
       }
     }
 
+    // The successor owns preserved commitments and accepted overlaps. With
+    // no still-untimed conflict, this superseded operation owes no old card.
+    if (cardOnly && !dueConflicts.length && !markers.conflict_card_at) await stampMarker('conflict_card_at');
     if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };
     const seriesReminderGuards = [];
     let seriesGuardSnapshotFailed = false;
@@ -4447,7 +4453,8 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
           notificationSent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
-            return renderRequiredTemplate('appointment_series_rescheduled', {
+            return renderRequiredTemplate(result.futurePlacementDays === 3
+              ? 'appointment_recurring_placement_confirmed' : 'appointment_series_rescheduled', {
               first_name: firstName,
               start_date: displayDate,
               window_text: windowText,

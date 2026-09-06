@@ -267,6 +267,38 @@ describe('violatesPreferredTime', () => {
 });
 
 
+describe('customer recurring due-date placement', () => {
+  beforeEach(() => { findAvailableSlots.mockReset().mockResolvedValue({ slots: [] }); });
+
+  test.each([null, { dateFrom: '2026-07-20', dateTo: '2026-08-15' }])('keeps the original ±3-day bound with tier window %j', async (tierWindow) => {
+    await findValidCandidateSlots({
+      ...SERVICE, scheduled_date: '2026-08-06', recurring_dispatch_due_date: '2026-08-04',
+    }, { service_category: 'general' }, { ...ctx(), tierWindow });
+    expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({
+      dateFrom: '2026-08-01', dateTo: '2026-08-07',
+    }));
+  });
+
+  test('an untimed visit inside the lock window can be placed tomorrow without inventing a current appointment', async () => {
+    await findValidCandidateSlots({
+      ...SERVICE, scheduled_date: '2026-06-21', recurring_dispatch_due_date: '2026-06-21',
+      window_start: null, window_end: null,
+    }, { service_category: 'general' }, ctx());
+    expect(findAvailableSlots).toHaveBeenCalledWith(expect.objectContaining({
+      dateFrom: '2026-06-20', dateTo: '2026-06-24',
+    }));
+  });
+
+  test('no available date in the bounded period returns no candidates', async () => {
+    const result = await findValidCandidateSlots({
+      ...SERVICE, scheduled_date: '2026-06-10', recurring_dispatch_due_date: '2026-06-10',
+      window_start: null, window_end: null,
+    }, { service_category: 'general' }, ctx());
+    expect(result.candidates).toEqual([]);
+    expect(findAvailableSlots).not.toHaveBeenCalled();
+  });
+});
+
 test('current placement excludes an ungeocoded secondary-property neighbor', async () => {
   const { computeCurrentPlacement } = require('../services/auto-dispatch/candidate-slots');
   const selected = [];

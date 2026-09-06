@@ -90,7 +90,13 @@ snapshot leg that could not be frozen (missing customer or technician row)
 is omitted and that leg stays live. The PDF filename and the canonical lawn
 pin read the same overlaid row. Presentation (technician photo URL, copy
 config) and the deliberately live sections (next visit, review CTA,
-cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`),
+cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`.
+The lawn assessment payload also carries `droughtStress` (`none`, `minor`,
+`moderate`, `severe`, or `null`) from the linked, tech-confirmed assessment's
+stored `composite_scores.drought_stress`. Missing or invalid historical
+values yield `null`; raw model responses and the full composite are never
+projected. The existing customer/visit linkage and signed assessment pin
+requirements apply to this field too),
 the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
@@ -905,9 +911,34 @@ server-side):
     "only this visit moves" note for the series-shift warning before
     Confirm (the GET's threshold drives it; the POST decides
     authoritatively). The anchor keeps the offered tech under the same
-    advisory-lock overlap guard; shifted siblings that would double-book
-    a route are committed UNASSIGNED inside the trx and parked as a
-    `schedule_conflict` admin notification. Treat any widening of this
+    advisory-lock overlap guard. With `GATE_CUSTOMER_RECURRING_DISPATCH`
+    and the existing `cronJobs`/`autoDispatch` scheduler gates active plus
+    effective `AUTO_DISPATCH_MODE=apply` (`AUTO_DISPATCH_ALLOW_APPLY=true`)
+    with `AUTO_DISPATCH_MAX_CHANGES_PER_RUN > 0` and
+    `AUTO_DISPATCH_REQUIRE_PORTAL_PREFERENCES=false`,
+    only the selected appointment must fit: later cadence visits keep their
+    projected due dates with NULL time/display windows and a durable
+    `recurring_dispatch_due_date`. Future overlap, blackout, and same-plan
+    date collisions cannot reject that selection. Auto-dispatch places these
+    visits within ±3 calendar days of the due date, honoring preferences;
+    initial placement bypasses improvement thresholds, with unresolved
+    visits escalated through `schedule_conflict`. Future staff-locked,
+    customer-confirmed, reschedule-held, reminder-frozen or committed/grouped visits stay
+    unchanged and are flagged for staff review instead of blocking the
+    selected appointment. GET/POST add optional `futurePlacementDays: 3`
+    for disclosure. Web POST echoes `disclosed_future_placement_days`
+    (`3` or `null`); a mismatch with the effective mode returns 409
+    `SCOPE_CHANGED` before writing, including a rebooker recheck. Older
+    pages omitting it retain legacy behavior only while deferral is off;
+    otherwise they refresh and re-disclose. SMS retains its existing
+    series policy until it has a placement disclosure. Success copy keeps
+    the unchanged-commitment caveat. The confirmation SMS uses the separate
+    `appointment_recurring_placement_confirmed` template when the recorded
+    operation has deferred placement, including on retries; it states the
+    ±3-day placement and unchanged-commitment caveat. Authentication is unchanged. Untimed
+    reminder windows are preclosed atomically until placement. Gate off
+    preserves legacy conflict checks; already-recorded due dates remain
+    dispatchable and bounded. Treat any widening of this
     scope (other customers' rows, live visits, non-cadence rows) as P0.
 A pending/confirmed visit whose time already passed is MISSED (rebookable
 via the same link — eligibility `missed:true`); terminal/live/no_show
