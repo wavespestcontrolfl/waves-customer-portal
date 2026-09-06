@@ -233,13 +233,15 @@ async function listOwnerQueue(db) {
   const executionById = new Map(liveRows.filter((r) => r.dimension === 'execution' && r.instance_kind === '-').map((r) => [r.prospect_id, r]));
   const domains = await db('seo_link_domains').whereIn('id', [...new Set(candidates.map((p) => p.domain_id))])
     .select('id', 'domain', 'agent_state', 'score', 'score_reasons', 'spam_score', 'domain_rating', 'organic_traffic', 'referring_domains', 'competitors_linked', 'best_path_id', 'source', 'discovery_priority');
+  const domainById = new Map(domains.map((d) => [d.id, d]));
   const pathIds = [...new Set([...domains.map((d) => d.best_path_id), ...candidates.map((p) => p.path_id)].filter(Boolean))];
   const paths = pathIds.length ? await db('seo_link_acquisition_paths').whereIn('id', pathIds) : [];
   const pathById = new Map(paths.map((p) => [p.id, p]));
   // a parked prospect is a card outright; a checkout / placed placement only while an OPEN owner-level row it decides
   // here exists — otherwise every placed link would be a card with nothing to click
   const { SENDABLE_STATUSES, lateSend, submitStepOwed } = require('./link-prospect-outreach');
-  const exhaustedDraft = (p) => (SENDABLE_STATUSES.includes(p.status) || (lateSend(p, pathById.get(p.path_id)) && !submitStepOwed(pathById.get(p.path_id), executionById.get(p.id))))
+  const exhaustedDraft = (p) => p.path_id && domainById.get(p.domain_id)?.best_path_id === p.path_id
+    && (SENDABLE_STATUSES.includes(p.status) || (lateSend(p, pathById.get(p.path_id)) && !submitStepOwed(pathById.get(p.path_id), executionById.get(p.id))))
     && Number(p.outreach_draft_attempts) >= require('./link-prospect-worker').MAX_ATTEMPTS
     && !['drafted', 'sending', 'sent', 'send_error'].includes(p.outreach_status);
   const parked = candidates.filter((p) => (p.quality_signals?.outreach_match_ambiguous || exhaustedDraft(p) || uncertainById.has(p.id) || (p.status === PARKED ? p.parked_from_status === PARKABLE
@@ -248,7 +250,6 @@ async function listOwnerQueue(db) {
   const matchIds = [...new Set(parked.map((p) => p.quality_signals?.outreach_match_ambiguous).filter(Boolean))];
   const matchRows = matchIds.length ? await db('seo_backlinks').whereIn('id', matchIds).where({ status: 'active' }).select('id', 'source_url') : [];
   const matchById = new Map(matchRows.map((b) => [b.id, b]));
-  const domainById = new Map(domains.map((d) => [d.id, d]));
   const eligibleDomains = new Set(domains.filter((d) => BRIDGE_STATES.includes(d.agent_state)).map((d) => d.id));
   const cardsFor = parked.filter((p) => domainById.has(p.domain_id) && (eligibleDomains.has(p.domain_id) || uncertainById.has(p.id)));
   if (!cardsFor.length) return { cards: [] };

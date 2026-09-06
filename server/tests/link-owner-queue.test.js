@@ -939,4 +939,13 @@ test.each(['prospect', 'awaiting_owner'])('exhausted open %s drafts remain recov
   const s = scenario({ make: outreachPath });
   placements(s.db).push({ id: uid(), domain_id: s.d.id, path_id: s.p.id, status, outreach_status: 'none', outreach_draft_attempts: 4 });
   expect((await Q.listOwnerQueue(s.db)).cards[0]).toMatchObject({ outreach_draft_exhausted: true });
+  const domain = s.db._tables.seo_link_domains[0];
+  const alternate = outreachPath(domain);
+  s.db._tables.seo_link_acquisition_paths.push(alternate);
+  for (const bestPath of [alternate.id, null]) {
+    domain.best_path_id = bestPath;
+    expect((await Q.listOwnerQueue(s.db)).cards.some((card) => card.outreach_draft_exhausted)).toBe(false);
+  }
+  domain.best_path_id = s.p.id;
+  expect((await Q.listOwnerQueue(s.db)).cards[0]).toMatchObject({ outreach_draft_exhausted: true });
 });
