@@ -13,6 +13,7 @@ const NotificationService = require('./notification-service');
 const { hashExtractionSource, recordExtractionAttempt } = require('./data-hygiene/source-extraction-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
 const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode } = require('./sms-operational-extractor');
+const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 
 const enabled = () => gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS');
@@ -57,7 +58,11 @@ async function applyFacts(trx, message, facts, context) {
   let persistedCurrent = context.current;
   for (const fact of facts) {
     const duplicateField = facts.filter((f) => f.field === fact.field).length > 1;
-    const verdict = duplicateField ? 'conflicting_facts' : factVerdict(fact, context);
+    // A negated or uncertain report does not establish an active system.
+    // Keep these as review exceptions before the shared companion write.
+    const uncertainIrrigation = IRRIGATION_INPUT_FIELDS.includes(fact.field)
+      && /\b(?:no|not|never|without|unsure|uncertain|maybe|perhaps|might|removed|lack(?:s|ing)?)\b|n['’]t/i.test(message.message_body);
+    const verdict = duplicateField ? 'conflicting_facts' : uncertainIrrigation ? 'irrigation_needs_review' : factVerdict(fact, context);
     if (verdict !== 'apply') { outcomes.push({ ...fact, outcome: verdict }); continue; }
     const proposal = { scope_id: message.customer_id, field: fact.field, resource_id: persistedCurrent?.id || null };
     const target = await resolvePropertyPreferencesTarget({ trx, proposal, currentRaw: persistedCurrent?.[fact.field] ?? null });

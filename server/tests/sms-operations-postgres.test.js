@@ -95,6 +95,23 @@ postgres('SMS operations on PostgreSQL', () => {
     });
   });
 
+  test.each([
+    'We do not have an irrigation system.', "We don't have sprinklers.",
+    'There is no controller here.', 'The irrigation system was removed.',
+    'Maybe this house has irrigation.',
+  ])('an uncertain irrigation report cannot enable a system: %s', async (quote) => {
+    await mockPg('property_preferences').insert({ customer_id: message.customer_id, irrigation_system: false });
+    context = await loadMessageContext(mockPg, message);
+    message.message_body = quote;
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: quote });
+    result.facts = [{ field: 'irrigation_issues', quote, value: quote,
+      property_id: context.properties[0].id, duration: 'durable' }];
+    await recordMessageOperations(mockPg, message, result, context);
+    expect((await mockPg('property_preferences').first()).irrigation_system).toBe(false);
+    expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('irrigation_needs_review');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalled();
+  });
+
   test('access-code audits contain only ids and field provenance', async () => {
     message.message_body = 'Lockbox code is #0123';
     await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
