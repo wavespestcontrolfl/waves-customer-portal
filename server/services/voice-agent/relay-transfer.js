@@ -267,6 +267,7 @@ async function transferToOfficeText(input = {}, ctx = {}) {
   // this very tool chain before it can stamp the close — so the row would
   // stay a transfer nobody rang. Undo the stamp (detached) and abort.
   if (typeof ctx.sessionEnded === 'function' && ctx.sessionEnded() === true) {
+    ctx.toolFailed = true;
     logger.warn(`[voice-relay] transfer abandoned — session ended during the packet write callSid=${require('../twilio-failure-alerts').maskSid(ctx.callSid)}`);
     // AWAITED (bounded): end() resumes when this tool returns and reconciles
     // the row at once — a detached revert would race it (an ai_transferred
