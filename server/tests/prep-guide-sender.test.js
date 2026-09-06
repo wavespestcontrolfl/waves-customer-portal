@@ -481,14 +481,13 @@ describe('sendPrepToCustomer', () => {
       && q.update.mock.calls.some(([p]) => p && p.prep_template_key === null))).toBe(true);
 
     serviceUpdates = [];
-    TwilioService.findOutboundMessageSince.mockResolvedValue({ found: false });
-  renderSmsTemplate.mockResolvedValue('Prep text...');
+    renderSmsTemplate.mockResolvedValue('Prep text...');
     // sendCustomerMessage swallows provider failures; a throw WITHOUT a
     // provider outcome happened before the handoff — definite, claim released.
     sendCustomerMessage.mockRejectedValueOnce(new Error('socket hang up'));
     const preHandoff = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'termite', channel: 'sms' });
     expect(preHandoff).toMatchObject({ ok: false, reason: 'send_failed', smsSent: false });
-    expect(preHandoff.smsUncertain).toBeUndefined();
+    expect(preHandoff.smsUncertain).toBe(false);
     expect(serviceUpdates[serviceUpdates.length - 1]).toEqual({ prep_template_key: null });
 
     // A throw while persisting the audit carries the KNOWN outcome: an
@@ -542,7 +541,7 @@ describe('sendPrepToCustomer', () => {
     const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' });
 
     expect(result).toMatchObject({ ok: true, reason: 'partial', failedChannel: 'sms', emailUncertain: false });
-    expect(result.smsUncertain).toBeUndefined();
+    expect(result.smsUncertain).toBe(false);
   });
 
   test('a claim that already matched (another same-guide attempt made it) is never released', async () => {
@@ -927,16 +926,14 @@ describe('sendPrepToCustomer', () => {
     jest.clearAllMocks();
     EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({ sent: false, reason: 'blocked' });
     sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM123' });
-    TwilioService.findOutboundMessageSince.mockResolvedValue({ found: false });
-  renderSmsTemplate.mockResolvedValue('Prep text...');
+    renderSmsTemplate.mockResolvedValue('Prep text...');
     const emailDown = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' });
     expect(emailDown).toMatchObject({ ok: true, emailSent: false, smsSent: true, reason: 'partial', failedChannel: 'email' });
 
     // A clean Both carries no reason at all.
     jest.clearAllMocks();
     EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true });
-    TwilioService.findOutboundMessageSince.mockResolvedValue({ found: false });
-  renderSmsTemplate.mockResolvedValue('Prep text...');
+    renderSmsTemplate.mockResolvedValue('Prep text...');
     const clean = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'flea', channel: 'both' });
     expect(clean.ok).toBe(true);
     expect(clean.reason).toBeUndefined();
@@ -1255,6 +1252,26 @@ describe('sprinkler timer guide', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     },
   );
+
+  test.each(['returned', 'audit throws'])('an uncertain SMS %s retains the claim for reconciliation', async (mode) => {
+    mockNotificationPrefsRow = { seasonal_tips: true };
+    const outcome = { sent: false, code: 'PROVIDER_FAILURE', retryable: true };
+    if (mode === 'returned') sendCustomerMessage.mockResolvedValueOnce(outcome);
+    else sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit write failed'), { providerOutcome: outcome }));
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
+    expect(result).toMatchObject({ ok: false, smsSent: false, smsUncertain: true });
+    expect(interactionDeletes).toBe(0);
+    expect(interactionUpdates).toEqual([]);
+    interactionMarkerRow = {
+      ...interactionsInsert.mock.calls.at(-1)[0], id: 'uncertain-sms',
+      created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    };
+    TwilioService.findOutboundMessageSince.mockResolvedValueOnce({ found: true });
+    const retry = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
+    expect(retry).toMatchObject({ ok: false, reason: 'guide_already_sent' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(interactionDeletes).toBe(0);
+  });
 
   test('provider reconciliation failure preserves the stale claim; confirmed absence permits retry', async () => {
     mockNotificationPrefsRow = { seasonal_tips: true };

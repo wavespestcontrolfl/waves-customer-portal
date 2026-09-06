@@ -709,10 +709,9 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
 // The SMS leg. Outcome { sent }. sendCustomerMessage swallows provider
 // failures itself and throws in exactly two places: BEFORE the handoff
 // (definite — nothing reached Twilio) or while persisting the final audit,
-// carrying the KNOWN provider outcome on the error. So a throw is never
-// uncertain: providerOutcome.sent === true is a send (the caller stamps the
-// page and writes the tagger-compatible marker exactly as for a returned
-// send), anything else a plain failure (GH Codex #3856 r9 P2).
+// carrying the provider outcome on the error. Acceptance is a send; a
+// provider failure can include a timeout after acceptance, so standalone
+// guides retain their claim until provider reconciliation proves absence.
 async function sendPrepSms({ customer, firstName, phone, templateKey, vars, variant, purpose = 'appointment', consentBasis = null, pestType, actorId }) {
   let body;
   try {
@@ -754,15 +753,15 @@ async function sendPrepSms({ customer, firstName, phone, templateKey, vars, vari
       },
     });
   } catch (err) {
-    const accepted = err?.providerOutcome?.sent === true;
+    const accepted = err.providerOutcome?.sent === true;
     logger.warn(`[prep-guide-sender] prep SMS wrapper threw for customer ${customer.id} (${err?.code || err?.name || 'Error'}, providerAccepted=${accepted})`);
-    return { sent: accepted };
+    return { sent: accepted, uncertain: err.providerOutcome?.sent === false };
   }
   // sent:true with a suppression sentinel (gate off, template disabled, owner
   // SMS kill) means nothing left — never record that as a delivery.
   if (!isRealProviderSend(res)) {
     logger.warn(`[prep-guide-sender] prep SMS not sent for customer ${customer.id}: ${res.code || res.reason || res.providerMessageId || 'unknown'}`);
-    return { sent: false };
+    return { sent: false, uncertain: res.code === 'PROVIDER_FAILURE' };
   }
   return { sent: true };
 }
@@ -850,6 +849,7 @@ async function deliverPrep({ customer, config, contacts, page, smsPlan, pestType
       customer, firstName: contacts.smsFirstName, phone: contacts.phone, pestType, actorId, ...smsPlan,
     });
     result.smsSent = sms.sent;
+    result.smsUncertain = !!sms.uncertain;
     if (sms.sent && smsPlan.variant === 'guide_link' && !result.emailSent) await stampPrepSent(stampVisit, config);
   }
   result.ok = result.emailSent || result.smsSent;
@@ -1024,7 +1024,9 @@ async function settleGuideClaim({ claimId, customer, config, contacts, result, p
       });
     } else if (result.emailUncertain) {
       await row.update({ body: 'Prep email dispatched via Communications — delivery uncertain (provider response lost); not resent.' });
-    } else {
+    } else if (!result.smsUncertain) {
+      // Provider failures include lost responses after acceptance. Keep
+      // those claims dispatching until reconciliation proves no text went.
       await row.del();
     }
   } catch (err) {
