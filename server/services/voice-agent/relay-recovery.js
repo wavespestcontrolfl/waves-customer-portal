@@ -11,7 +11,7 @@
  * at call time so unsetting it is the live kill switch.
  */
 const logger = require('../logger');
-const { segmentsText, callerTurnsFromText, nonEmptyFields, latestPromises } = require('./relay-segments');
+const { compareSegments, segmentsText, callerTurnsFromText, nonEmptyFields, latestPromises } = require('./relay-segments');
 
 const RECONNECT_LIMIT = 1;
 const RESUME_STATE_TIMEOUT_MS = 2000;
@@ -131,7 +131,7 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
       const promises = latestPromises(meta.relay_segments);
       const callerTurns = callerTurnsFromText(full);
       const legs = Array.isArray(meta.relay_segments) ? meta.relay_segments.filter((seg) => seg && typeof seg === 'object') : [];
-      const latest = [...legs].sort((a, b) => (Number(b.generation) || 0) - (Number(a.generation) || 0))[0] || null;
+      const latest = [...legs].sort(compareSegments).at(-1) || null;
       return {
         reconnects,
         reconnectMs: Number(meta.relay_reconnect_ms) || null,

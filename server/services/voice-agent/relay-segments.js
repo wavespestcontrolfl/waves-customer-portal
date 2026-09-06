@@ -256,6 +256,6 @@ function latestPromises(segments) {
 
 
 module.exports = {
-  appendSegment, scrubStoredSegments, generationFenceSql, latestPromises, SEGMENT_SEPARATOR, buildSegment, nonEmptyFields, appendSegmentSql,
+  compareSegments, appendSegment, scrubStoredSegments, generationFenceSql, latestPromises, SEGMENT_SEPARATOR, buildSegment, nonEmptyFields, appendSegmentSql,
   appendSegmentPatch, composeSegmentsSql, segmentsText, callerTurnsFromText,
 };

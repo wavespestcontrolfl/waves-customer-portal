@@ -1370,7 +1370,7 @@ async function executeTool(name, input = {}, ctx = {}) {
       // deliberately gets NO lead (leadId null), but a HOT call from them still
       // owes the owner a page — the obligation marker must not depend on a lead
       // existing, or a crashed page for an existing customer never sweeps.
-      if (capturedLeadId && ctx.callSid) await require('./relay-context').stampCallLeadLinkage(ctx.callSid, capturedLeadId);
+      if (capturedLeadId && ctx.callSid) await require('./relay-context').stampCallLeadLinkage(ctx.callSid, capturedLeadId, { sessionKey: ctx.sessionKey || null });
       // capture_lead usually runs AFTER request_booking (the prompt says so),
       // so back-fill the card that was already written for this call.
       if (capturedLeadId && typeof ctx.bookingRequested === 'function' && ctx.bookingRequested()) {
