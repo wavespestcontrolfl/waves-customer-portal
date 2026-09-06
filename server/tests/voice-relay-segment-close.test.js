@@ -120,6 +120,49 @@ describe('the conversation side', () => {
     } finally { append.mockRestore(); jest.useRealTimers(); }
   });
 
+  test('an append settling during the capture floor records commitments after the outcome is final', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const row = { call_outcome: null, transcription: null, metadata: { relay_session_claim_owner: 'nonce-1' } };
+    primeDb({ firstRow: row, updateImpl: jest.fn(async (patch) => {
+      if (patch.call_outcome) row.call_outcome = patch.call_outcome;
+      return 1;
+    }) });
+    let settleAppend;
+    const append = jest.spyOn(segmentStore, 'appendSegment').mockImplementationOnce(async (_db, _sid, segment) => {
+      await new Promise((resolve) => { settleAppend = resolve; });
+      row.metadata.relay_segments = [segment];
+      return 1;
+    });
+    let finishFloor;
+    const convo = convoWithTurns();
+    convo._runCaptureFloor = jest.fn(() => new Promise((resolve) => { finishFloor = resolve; }));
+    convo._promises.set('send_estimate', { verdict: true, expectation: 'about_15_minutes', at: new Date() });
+    const owed = [];
+    const { recordRelayCommitments } = require('../services/call-commitments');
+    recordRelayCommitments.mockImplementation(async (_db, evidence) => {
+      // Mirrors the separately PostgreSQL-tested durable eligibility guard.
+      if (row.call_outcome === 'ai_handled') owed.push(evidence);
+      return { found: owed.length, written: owed.length };
+    });
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'queueMicrotask'] });
+    try {
+      const closing = convo.end('ws_close');
+      await jest.advanceTimersByTimeAsync(10010);
+      expect(convo._runCaptureFloor).toHaveBeenCalled();
+      settleAppend();
+      await jest.advanceTimersByTimeAsync(0);
+      expect(owed).toEqual([]);
+      finishFloor();
+      await closing;
+      await jest.advanceTimersByTimeAsync(0);
+      expect(owed).toEqual([expect.objectContaining({ sessionKey: 'nonce-1', estimateQueued: true })]);
+    } finally {
+      append.mockRestore();
+      recordRelayCommitments.mockImplementation(async () => ({ found: true, written: 1 }));
+      jest.useRealTimers();
+    }
+  });
+
   test('gate off ⇒ no segment append and no generation fence (today\'s statements)', async () => {
     const { builder, updates } = primeDb();
     const convo = convoWithTurns();

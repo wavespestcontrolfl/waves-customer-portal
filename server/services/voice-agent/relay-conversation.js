@@ -1948,25 +1948,19 @@ class RelayConversation {
     // An unconfirmed append cannot safely union local text with older legs:
     // only the transaction has scrubbed their cross-socket turn sequence.
     const deferTranscript = Boolean(segment && !segmentAppended);
-    if (deferTranscript && segmentWrite) {
-      // The deadline bounds end(), not the database transaction. A confirmed
-      // late write still owns a finalization pass after this socket closes.
-      void segmentWrite.then(async (rows) => {
-        if (Number(rows) > 0) await this._reconcileLateSegment();
-      }).catch((err) => logger.warn(`[voice-relay] late segment failed callSid=${maskSid(this.callSid)}: ${err.message}`));
-    }
-    const supersededAtClose = await this._sessionSuperseded().catch(() => false);
-    if (supersededAtClose) {
-      logger.warn(`[voice-relay] close-time writes skipped — session superseded callSid=${this.callSid} (the replacement session owns the record)`);
-      // …except that this socket's segment may just have RECOMPOSED a call
-      // the replacement already finalized (appendSegmentPatch): the unified
-      // message row follows it. Bounded, best-effort.
-      if (segmentAppended) await this._reconcileLateSegment();
-      return;
-    }
+    try {
+      const supersededAtClose = await this._sessionSuperseded().catch(() => false);
+      if (supersededAtClose) {
+        logger.warn(`[voice-relay] close-time writes skipped — session superseded callSid=${this.callSid} (the replacement session owns the record)`);
+        // …except that this socket's segment may just have RECOMPOSED a call
+        // the replacement already finalized (appendSegmentPatch): the unified
+        // message row follows it. Bounded, best-effort.
+        if (segmentAppended) await this._reconcileLateSegment();
+        return;
+      }
 
-    await this._runCaptureFloor(reason);
-    if (!this.callSid) return;
+      await this._runCaptureFloor(reason);
+      if (!this.callSid) return;
 
     // Reconcile call reporting: this call was handled by the AI agent, not
     // voicemail. The /voice answers-first and /call-complete backstop paths
@@ -1976,7 +1970,6 @@ class RelayConversation {
     // calls don't linger as ringing/no-answer/null, then resync the unified
     // message row. Keyed by CallSid — a no-op (0 rows) when no call_log row
     // exists for the session (a call answered outside the signed webhooks).
-    try {
         // RACE: end() runs on EVERY WebSocket close, including a relay failure
         // (rejected upgrade / WS error / transient disconnect). On failure Twilio
         // also hits /relay-complete, which stamps call_outcome='voicemail' as the
@@ -2208,6 +2201,16 @@ class RelayConversation {
         }
     } catch (err) {
       logger.warn(`[voice-relay] outcome reconcile failed callSid=${this.callSid}: ${err.message}`);
+    } finally {
+      if (deferTranscript && segmentWrite) {
+        // Attach only after the outcome reconcile: a write that settled
+        // during the capture floor must not check commitment eligibility
+        // against the still-null outcome and lose its sole repair pass.
+        // The deadline still bounds end(); an unsettled append stays detached.
+        void segmentWrite.then(async (rows) => {
+          if (Number(rows) > 0) await this._reconcileLateSegment();
+        }).catch((err) => logger.warn(`[voice-relay] late segment failed callSid=${maskSid(this.callSid)}: ${err.message}`));
+      }
     }
 
   }
