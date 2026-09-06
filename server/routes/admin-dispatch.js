@@ -2427,70 +2427,16 @@ router.put('/:serviceId/status', async (req, res, next) => {
         });
       } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
 
-      // Void any still-open invoice pre-minted for this visit so dunning
-      // doesn't chase a cancelled job. Money-state rules live in the shared
-      // helper (skips applied payments / live PaymentIntents); best-effort.
-      try {
-        const InvoiceService = require('../services/invoice');
-        // Inspection-credit reversal runs inside the void helper (after the
-        // voids restore any applied credit) — shared hook, can't be forgotten.
-        await InvoiceService.voidOpenInvoicesForCancelledService(svc.id);
-      } catch (e) { logger.error(`[admin-dispatch] cancellation invoice void sweep failed: ${e.message}`); }
-
-      // One-time card-on-file hold: a cancellation inside the window charges the
-      // flat late-cancel fee against the saved card; outside it the hold is
-      // released free. waiveCardHoldFee (body) is the business-initiated escape
-      // hatch — WE cancelled, so the hold releases with no fee. Admin-only:
-      // this route is technician-reachable (requireTechOrAdmin) and a fee
-      // waiver is a billing decision, so non-admin JWTs can't release an
-      // in-window hold free. Dark until ONE_TIME_CARD_HOLD; no-op when no
-      // hold exists. Best-effort — never block the committed status change.
-      try {
-        const CardHolds = require('../services/estimate-card-holds');
-        const waiveFee = req.techRole === 'admin' && req.body?.waiveCardHoldFee === true;
-        const holdResult = await CardHolds.handleCardHoldCancellation({
-          scheduledServiceId: svc.id,
-          waiveFee,
-        });
-        // Appointment-card fee rail fallback for visits with no hold row
-        // (mutually exclusive lanes — the rail re-checks). Same waive flag.
-        if (holdResult?.reason === 'no_hold') {
-          const ApptCardRequests = require('../services/appointment-card-request');
-          const apptFeeOutcome = await ApptCardRequests.handleAppointmentCardCancellation({
-            scheduledServiceId: svc.id,
-            waiveFee,
-          });
-          // Unresolved (non-released) fee outcomes must reach the office
-          // (Codex #3153 r16 P1) — never a silent successful cancel.
-          await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: apptFeeOutcome });
-        }
-      } catch (e) {
-        // Thrown fee step = unresolved lane ownership (Codex #3153 r22 P1).
-        logger.error(`[admin-dispatch] cancel card-hold handling failed: ${e.message}`);
-        await require('../services/appointment-card-request')
-          .alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: { released: false, reason: 'fee_step_error' } });
-      }
-
-      try {
-        const result = await trackTransitions.cancel(svc.id, {
-          reason: notes || null,
-          actorId: req.technicianId,
-        });
-        await recordTrackTransitionResultFailure({
-          jobId: svc.id,
-          action: 'cancel',
-          actorId: req.technicianId,
-          result,
-        });
-      } catch (e) {
-        logger.error(`[admin-dispatch] cancel failed: ${e.message}`);
-        await recordTrackTransitionFailure({
-          jobId: svc.id,
-          action: 'cancel',
-          actorId: req.technicianId,
-          error: e,
-        });
-      }
+      // Share fee outcome alerts, invoice cleanup, and tracker updates with
+      // series cancellations. The helper uses the committed cancellation time
+      // so retrying a failed fee check never moves a timely cancel into the window.
+      await require('../services/visit-cancellation-followthrough').runVisitCancellationFollowThrough({
+        targetIds: [svc.id],
+        actorId: req.technicianId,
+        waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true,
+        reason: notes || null,
+        source: 'admin-dispatch',
+      });
     } else if (toStatus === 'no_show') {
       // Free the tech on the dispatch roster. A no-show marked after the
       // job already went en_route/on_site leaves tech_status.current_job_id
