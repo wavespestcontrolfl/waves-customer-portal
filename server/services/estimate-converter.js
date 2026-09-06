@@ -11,6 +11,7 @@ const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('./logger');
 const { isAssignable } = require('./technician-eligibility');
+const VisitCapacity = require('./combined-visit-capacity');
 const AvailabilityEngine = require('./availability');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pricing-engine/constants');
 // Canonical service-key tier membership (aliased: this module's local
@@ -4957,6 +4958,9 @@ const EstimateConverter = {
         .whereNull('reservation_expires_at')
         .orderBy('scheduled_date', 'asc')
       : [];
+    const capacitySnapshot = VisitCapacity.capacityFromReservation(reservedRows[0]);
+    const combinedCapacity = capacitySnapshot && !capacitySnapshot.allocatedServiceIds ? capacitySnapshot : null;
+    if (combinedCapacity && !database.isTransaction) throw VisitCapacity.capacityUnavailable();
 
     // ——— Multi-unit lock-order pre-pass (P1: cross-conversion deadlock) ———
     // Only the CALLER-TRANSACTION path needs it: with a caller-provided trx
@@ -5039,7 +5043,7 @@ const EstimateConverter = {
               // Mirrors promotedRetiredPestUnits below (audit P0): the
               // promoted pest program takes its series lock in the sorted
               // pre-pass union like every other promotion.
-              if (key === 'pest_control' && prePassRetiredPestPair) {
+              if (key === 'pest_control' && (prePassRetiredPestPair || combinedCapacity)) {
                 const svcName = svc.name || svc.serviceName || svc.service_name || 'Pest Control';
                 const pestPattern = converterFollowUpSeedingPattern(
                   svc, { service_type: svcName }, inferredFrequencyKey,
@@ -5082,6 +5086,7 @@ const EstimateConverter = {
                 && process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
                 && (() => {
                   if (visitCountFieldsConflict(svc) || visitCountFieldsInvalid(svc)) return false;
+                  if (combinedCapacity) return true;
                   const tsVisits = visitsPerYearForRecurringService(svc);
                   return !!tsVisits && remaining.some(
                     (other) => seedingFamilyKey(other) === 'lawn_care'
@@ -5132,6 +5137,7 @@ const EstimateConverter = {
       );
       // reservedRows hoisted above the branch (lock pre-pass needs it).
       const reservedStart = reservedRows[0] || null;
+      const capacityMembers = combinedCapacity ? [reservedStart] : [];
       termStartDate = reservedStart?.scheduled_date || null;
       firstScheduledServiceId = reservedStart?.id || null;
       scheduledCount = Number(existingFromReservation?.count || 0);
@@ -5340,7 +5346,7 @@ const EstimateConverter = {
         const retiredPestPairPresent = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
           && ((reservedStandalone || []).some((unit) => unit.catalogServiceKey === 'termite_bait')
             || (combos || []).some((combo) => combo.route.primaryKey === 'termite_bait'));
-        const promotedRetiredPestUnits = !retiredPestPairPresent ? [] : (remaining || [])
+        const promotedRetiredPestUnits = !retiredPestPairPresent && !combinedCapacity ? [] : (remaining || [])
           .filter((line) => {
             if (String(recurringServiceKey(line) || '') !== 'pest_control') return false;
             const lineName = line.name || line.serviceName || line.service_name || 'Pest Control';
@@ -5367,7 +5373,7 @@ const EstimateConverter = {
           .filter((line) => {
             const fam = seedingFamilyKey(line);
             if (!promotableFamilies.includes(fam)) return false;
-            if (fam === 'tree_shrub') {
+            if (fam === 'tree_shrub' && !combinedCapacity) {
               // Only the retired lawn+T&S PAIR promotes (audit P1): an
               // unrelated pest+T&S estimate never used the retired route,
               // and its T&S line keeps the adjudicated office-scheduled
@@ -5620,6 +5626,10 @@ const EstimateConverter = {
               const recomputedEnd = windowEndFromStart(standaloneRow.window_start, standaloneRow.estimated_duration_minutes);
               if (recomputedEnd) standaloneRow.window_end = recomputedEnd;
             }
+            if (combinedCapacity && sameTrip) {
+              Object.assign(standaloneRow, VisitCapacity.windowForCapacityService(reservedStart, capacityMembers.length));
+              standaloneRow.service_key_snapshot = unit.catalogServiceKey;
+            }
             // Duplicate-series guard (P0): this standalone creator was the
             // third unguarded converter seeding path — a customer already
             // holding an active bait-station series would get a second
@@ -5697,6 +5707,7 @@ const EstimateConverter = {
                   estimatedPrice: reservedPerVisitSplit?.byUnit.get(unit),
                 });
               } catch (seedErr) {
+                if (combinedCapacity) throw seedErr;
                 logger.error(`[estimate-converter] standalone bait follow-up seeding failed for estimate ${estimateId}: ${seedErr.message}`);
               }
               return { parentRow, seedResult };
@@ -5716,6 +5727,7 @@ const EstimateConverter = {
               continue;
             }
             const { parentRow, seedResult } = outcome;
+            if (combinedCapacity && sameTrip) capacityMembers.push(parentRow);
             scheduledCount += 1;
             // The reserved row's reminders were registered by the public
             // accept route; this added row needs its own (Codex r2) —
@@ -5741,6 +5753,7 @@ const EstimateConverter = {
             // — swallowing it would complete acceptance/billing without
             // scheduling the sold palm program, exactly what the throw
             // exists to prevent (same contract as the follow-up catch).
+            if (combinedCapacity) throw standaloneErr;
             if (standaloneErr.code === 'PALM_RECURRING_CATALOG_MISSING'
               || standaloneErr.code === 'PALM_RECURRING_LINE_INVALID') throw standaloneErr;
             logger.error(`[estimate-converter] standalone bait scheduling failed for estimate ${estimateId}: ${standaloneErr.message}`);
@@ -5795,10 +5808,21 @@ const EstimateConverter = {
         // Palm identity aborts must reach the caller (codex r24 pre-push
         // P0): this fail-soft catch would otherwise complete
         // acceptance/billing without the sold palm series.
+        if (combinedCapacity) throw comboErr;
         if (comboErr.code === 'PALM_RECURRING_CATALOG_MISSING'
           || comboErr.code === 'PALM_RECURRING_LINE_INVALID'
           || comboErr.code === 'RESERVED_CATALOG_IDENTITY_UNKNOWN') throw comboErr;
         logger.warn(`[estimate-converter] combined routing on reserved rows failed: ${comboErr.message}`);
+      }
+
+      if (combinedCapacity) {
+        VisitCapacity.assertCapacityServices(reservedStart, capacityMembers);
+        const allocation = {
+          ...VisitCapacity.windowForCapacityService(reservedStart, 0),
+          reservation_service_mix: { ...combinedCapacity, allocatedServiceIds: capacityMembers.map((row) => row.id) },
+        };
+        await database('scheduled_services').where({ id: reservedStart.id }).update(allocation);
+        Object.assign(reservedStart, allocation);
       }
 
       if (reservedStart) {
@@ -5997,6 +6021,7 @@ const EstimateConverter = {
             }
           }
         } catch (seedErr) {
+          if (combinedCapacity) throw seedErr;
           // The palm identity abort must surface — swallowing it would
           // complete the acceptance around the very rollback it exists to
           // force (codex r17 pre-push P0).

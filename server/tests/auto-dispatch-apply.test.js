@@ -301,7 +301,9 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
       let techFilter = null;
       const api = {
         where: (w) => { if (typeof w === 'function') w.call(api); else if (w && w.technician_id) techFilter = w.technician_id; return api; },
-        orWhere: () => api, whereIn: () => api, whereNotIn: () => api, whereNull: () => api, leftJoin: () => api,
+        orWhere: () => api,
+        whereIn: (column, values) => { if (column === 'technician_id') [techFilter] = values; return api; },
+        whereNotIn: () => api, whereNull: () => api, leftJoin: () => api,
         forShare: () => api,
         select: async () => (isSS ? siblings : (capsByTech ? (capsByTech[techFilter] || []) : caps)),
         first: async () => (table === 'recurring_plan_alerts' ? planAlert : (probe ? seriesClash : null)),

@@ -1,0 +1,129 @@
+/** Real conversion on the migrated dev schema; each synthetic case rolls back. */
+jest.mock('../models/db', () => new Proxy((...args) => mockPg(...args), {
+  get: (_, key) => typeof mockPg[key] === 'function' ? mockPg[key].bind(mockPg) : mockPg[key],
+}));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/new-recurring-welcome-sms', () => ({
+  isNewRecurringSignupCandidate: async () => false, sendNewRecurringWelcome: jest.fn(),
+}));
+jest.mock('../services/account-membership-email', () => ({ sendMembershipStarted: jest.fn() }));
+jest.mock('../services/tech-visit-notifications', () => ({ notifyTechVisitChange: async () => {} }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: async () => {} }));
+jest.mock('../services/inspection-credit', () => ({ markBookingForInspectionCredit: async () => {} }));
+
+const knex = require('knex');
+const { randomUUID } = require('node:crypto');
+const { addETDays, etDateString, etParts } = require('../utils/datetime-et');
+const { capacityForServices } = require('../services/combined-visit-capacity');
+const converter = require('../services/estimate-converter');
+const { commitReservation } = require('../services/slot-reservation');
+const connection = process.env.COMBINED_VISIT_TEST_DATABASE_URL;
+const postgres = connection ? describe : describe.skip;
+let mockPg;
+jest.setTimeout(120000);
+
+const lines = [
+  { service: 'pest_control', name: 'Quarterly Pest Control', visitsPerYear: 4, frequency: 'quarterly', catalog: 'pest_general_quarterly', pattern: 'quarterly' },
+  { service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 6, frequency: 'bimonthly', catalog: 'lawn_care_recurring', pattern: 'bimonthly' },
+  { service: 'tree_shrub', name: 'Tree & Shrub', visitsPerYear: 9, frequency: 'every_6_weeks', catalog: 'tree_shrub_6week', pattern: 'every_6_weeks' },
+  { service: 'mosquito', name: 'Monthly Mosquito Control', visitsPerYear: 12, frequency: 'monthly', catalog: 'mosquito_monthly', pattern: 'monthly' },
+];
+
+async function fixture(trx, selected) {
+  const customerId = randomUUID();
+  const technicianId = randomUUID();
+  const estimateId = randomUUID();
+  let visitDate = addETDays(new Date(), 14);
+  while ([0, 6].includes(etParts(visitDate).dayOfWeek)) visitDate = addETDays(visitDate, 1);
+  const date = etDateString(visitDate);
+  await trx('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Fixture',
+    email: `${customerId}@example.invalid`, phone: '+19415550100', active: true, property_type: 'residential',
+    address_line1: '100 Example Court', city: 'Parrish', state: 'FL', zip: '34219',
+    pipeline_stage: 'active_customer', autopay_enabled: false });
+  await trx('technicians').insert({ id: technicianId, name: 'Synthetic Technician',
+    email: `${technicianId}@example.invalid`, password_hash: 'synthetic-not-a-login-hash', role: 'technician', active: true,
+    employment_status: 'active', field_dispatchable: true });
+  await trx('estimates').insert({ id: estimateId, customer_id: customerId, status: 'accepted',
+    token: randomUUID().replaceAll('-', '') + randomUUID().replaceAll('-', ''),
+    category: 'RESIDENTIAL', monthly_total: selected.length * 50, annual_total: selected.length * 600,
+    estimate_data: { result: { recurring: { services: selected.map(({ catalog, pattern, ...line }) => ({
+      ...line, annual: 600, mo: 50, perTreatment: 600 / line.visitsPerYear,
+    })) } } } });
+  const service = await trx('services').where({ service_key: selected[0].catalog }).first();
+  if (!service) throw new Error('Migrated fixture catalog is missing');
+  const [anchor] = await trx('scheduled_services').insert({ customer_id: null, technician_id: technicianId,
+    source_estimate_id: estimateId, service_id: service.id, service_key_snapshot: service.service_key,
+    service_type: selected[0].name, scheduled_date: date, window_start: '09:00',
+    window_end: `${String(9 + selected.length).padStart(2, '0')}:00`, status: 'pending',
+    reservation_expires_at: new Date(Date.now() + 15 * 60000),
+    estimated_duration_minutes: selected.length * 60, reservation_service_mix: capacityForServices(selected),
+  }).returning('*');
+  return { customerId, estimateId, anchor, date };
+}
+
+const options = { skipSetupInvoice: true, autoSendInvoice: false, skipMembershipEmail: true,
+  deferFollowUpReminderRegistration: true, deferCommercialScheduleNotification: true };
+
+postgres('combined capacity conversion on the migrated application schema', () => {
+  beforeAll(() => {
+    const url = new URL(connection);
+    const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) && url.pathname === '/waves_test';
+    if (!local && !/^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname)) throw new Error('Use the verified private dev database');
+    mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 4 } });
+    process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+  });
+  afterAll(async () => {
+    delete process.env.GATE_VISIT_COMBINED_CAPACITY;
+    delete process.env.GATE_SEPARATE_COMBO_VISITS;
+    if (mockPg) await mockPg.destroy();
+  });
+
+  test.each([
+    ['two services', lines.slice(0, 2)],
+    ['three services', lines.slice(0, 3)],
+    ['four services', lines],
+    ['lawn and tree with different cadences', [lines[1], lines[2]]],
+    ['pest and tree without lawn', [lines[0], lines[2]]],
+  ])('%s keep separate identities, sequential hours and their own cadences', async (_, selected) => {
+    const trx = await mockPg.transaction();
+    try {
+      const count = selected.length;
+      const f = await fixture(trx, selected);
+      // Exercise the real public-accept transaction boundary: graduate the
+      // hold, then convert using that same transaction.
+      delete process.env.GATE_VISIT_COMBINED_CAPACITY;
+      await commitReservation({ scheduledServiceId: f.anchor.id, customerId: f.customerId, trx });
+      await converter.convertEstimate(f.estimateId, { ...options, database: trx });
+      const parents = await trx('scheduled_services').where({ source_estimate_id: f.estimateId })
+        .whereNull('recurring_parent_id').orderBy('window_start');
+      expect(parents).toHaveLength(count);
+      expect(parents.map((p) => p.window_start)).toEqual(['09:00:00', '10:00:00', '11:00:00', '12:00:00'].slice(0, count));
+      expect(parents.map((p) => p.window_end)).toEqual(['10:00:00', '11:00:00', '12:00:00', '13:00:00'].slice(0, count));
+      expect(parents.map((p) => p.estimated_duration_minutes)).toEqual(selected.map(() => 60));
+      const stamp = parents.find((p) => p.id === f.anchor.id).reservation_service_mix;
+      expect(new Set(stamp.allocatedServiceIds)).toEqual(new Set(parents.map((p) => p.id)));
+      for (const line of selected) {
+        const catalog = await trx('services').where({ service_key: line.catalog }).first('id');
+        const parent = parents.find((p) => p.service_id === catalog.id);
+        expect(parent).toBeDefined();
+        expect(parent.recurring_pattern).toBe(line.pattern);
+        const children = await trx('scheduled_services').where({ recurring_parent_id: parent.id });
+        expect(children.length).toBeGreaterThan(0);
+        expect(children.every((row) => row.service_id === catalog.id && row.recurring_pattern === line.pattern)).toBe(true);
+      }
+    } finally { await trx.rollback(); }
+  });
+
+  test('an unfulfillable member rolls back the graduated hold and every seeded row', async () => {
+    let f;
+    const invalidTree = { ...lines[2], visitsPerYear: 5, frequency: 'unresolved' };
+    await expect(mockPg.transaction(async (trx) => {
+      f = await fixture(trx, [lines[0], lines[1], invalidTree]);
+      await commitReservation({ scheduledServiceId: f.anchor.id, customerId: f.customerId, trx });
+      await converter.convertEstimate(f.estimateId, { ...options, database: trx });
+    })).rejects.toMatchObject({ code: 'COMBINED_VISIT_UNAVAILABLE' });
+    expect(await mockPg('scheduled_services').where({ source_estimate_id: f.estimateId })).toHaveLength(0);
+    expect(await mockPg('customers').where({ id: f.customerId })).toHaveLength(0);
+  });
+});

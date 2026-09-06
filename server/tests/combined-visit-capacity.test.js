@@ -1,0 +1,92 @@
+jest.mock('../models/db', () => jest.fn());
+
+const { resolveEstimateSlotProfile } = require('../services/estimate-slot-availability');
+const {
+  capacityForServices, capacityFromReservation, windowForCapacityService, assertCapacityServices,
+} = require('../services/combined-visit-capacity');
+
+const services = ['pest_control', 'lawn_care', 'tree_shrub', 'mosquito'];
+function estimateFor(keys) {
+  return {
+    estimate_data: { result: { recurring: { services: keys.map((service) => ({ service, name: service, visitsPerYear: 6 })) } } },
+  };
+}
+
+beforeEach(() => { process.env.GATE_SEPARATE_COMBO_VISITS = 'true'; });
+afterEach(() => { delete process.env.GATE_VISIT_COMBINED_CAPACITY; delete process.env.GATE_SEPARATE_COMBO_VISITS; });
+
+describe('combined visit booking capacity', () => {
+  test.each([2, 3, 4])('%i selected services reserve one hour each without the old 180-minute cap', (count) => {
+    process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
+    const profile = resolveEstimateSlotProfile(estimateFor(services.slice(0, count)), { durationMinutes: 30 });
+    expect(profile.durationMinutes).toBe(count * 60);
+    expect(profile.reservationServiceMix.services).toEqual(services.slice(0, count));
+  });
+
+  test('dark creation keeps the existing single-block policy', () => {
+    expect(resolveEstimateSlotProfile(estimateFor(services)).durationMinutes).toBe(60);
+    expect(resolveEstimateSlotProfile(estimateFor(services), { durationMinutes: 90 }).durationMinutes).toBe(90);
+    expect(resolveEstimateSlotProfile(estimateFor(services)).reservationServiceMix).toBeUndefined();
+  });
+
+  test('a persisted combined reservation keeps the accepted mix sized after the gate is off', () => {
+    const profile = resolveEstimateSlotProfile(estimateFor(services.slice(0, 2)), { preserveCombinedCapacity: true });
+    expect(profile.durationMinutes).toBe(120);
+    expect(profile.reservationServiceMix.services).toEqual(['pest_control', 'lawn_care']);
+  });
+
+  test('the separate-service routing prerequisite fails closed', () => {
+    process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
+    delete process.env.GATE_SEPARATE_COMBO_VISITS;
+    expect(() => resolveEstimateSlotProfile(estimateFor(services))).toThrow(
+      expect.objectContaining({ code: 'COMBINED_VISIT_UNAVAILABLE' }),
+    );
+  });
+
+  test('one selected service keeps its existing booking policy', () => {
+    process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
+    const profile = resolveEstimateSlotProfile(estimateFor(['lawn_care']));
+    expect(profile.durationMinutes).toBe(60);
+    expect(profile.reservationServiceMix).toBeUndefined();
+  });
+
+  test('duplicate service-family selections refuse instead of promising an unfulfillable extra application', () => {
+    process.env.GATE_VISIT_COMBINED_CAPACITY = 'true';
+    expect(() => resolveEstimateSlotProfile(estimateFor(['pest_control', 'pest_control'])))
+      .toThrow(expect.objectContaining({ code: 'COMBINED_VISIT_UNAVAILABLE' }));
+  });
+
+  test('one held block becomes sequential on-the-hour service windows', () => {
+    const anchor = {
+      window_start: '09:00:00',
+      reservation_service_mix: capacityForServices(services.map((service) => ({ service }))),
+    };
+    expect(services.map((_, index) => windowForCapacityService(anchor, index))).toEqual([
+      { window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 },
+      { window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 },
+      { window_start: '11:00', window_end: '12:00', estimated_duration_minutes: 60 },
+      { window_start: '12:00', window_end: '13:00', estimated_duration_minutes: 60 },
+    ]);
+    expect(() => windowForCapacityService(anchor, 4)).toThrow();
+    expect(() => windowForCapacityService({ ...anchor, window_start: '09:30' }, 0)).toThrow();
+  });
+
+  test('corrupt capacity stamps fail closed', () => {
+    expect(() => capacityFromReservation({ reservation_service_mix: { version: 1, services: ['lawn_care', 'pest_control'], durationMinutes: 60 } }))
+      .toThrow(expect.objectContaining({ code: 'COMBINED_VISIT_UNAVAILABLE' }));
+    expect(capacityFromReservation({})).toBeNull();
+  });
+
+  test('allocation requires every selected identity on the same customer and technician', () => {
+    const anchor = {
+      id: 'primary', customer_id: 'customer', technician_id: 'tech', service_id: 'pest-id',
+      service_key_snapshot: 'pest_general_quarterly', service_type: 'Renamed service',
+      reservation_service_mix: capacityForServices([{ service: 'pest_control' }, { service: 'lawn_care' }]),
+    };
+    const lawn = { id: 'lawn', customer_id: 'customer', technician_id: 'tech', service_id: 'lawn-id', service_key_snapshot: 'lawn_6step' };
+    expect(() => assertCapacityServices(anchor, [anchor, lawn])).not.toThrow();
+    for (const members of [[anchor], [anchor, anchor], [anchor, { ...lawn, technician_id: null }], [anchor, { ...lawn, service_id: null }]]) {
+      expect(() => assertCapacityServices(anchor, members)).toThrow(expect.objectContaining({ code: 'COMBINED_VISIT_UNAVAILABLE' }));
+    }
+  });
+});

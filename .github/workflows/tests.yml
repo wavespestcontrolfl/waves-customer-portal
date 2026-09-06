@@ -74,6 +74,11 @@ jobs:
         # above still runs every server test; this step adds the coverage gate.
         working-directory: server
         run: npm run test:customer-coverage
+      - name: Combined reservation capacity on PostgreSQL
+        working-directory: server
+        env:
+          COMBINED_VISIT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/combined-visit-capacity-postgres.test.js tests/combined-visit-conversion-postgres.test.js
       - name: DB-gated suites (serial, against the migrated database)
         working-directory: server
         env:
