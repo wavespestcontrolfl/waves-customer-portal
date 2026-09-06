@@ -680,6 +680,14 @@ customer's last selection once the route writes it back (validation audit
 SEC-001, 2026-09-02; before it the ceiling applied only to opted-out
 estimates). A membership reconcile that reprices the mix refreshes the
 opt-out stamp with the row tier.
+Appointment reminders registered by `/accept` derive their date and arrival
+from the committed service row. A server-owned `reservation_service_mix`
+allocation can preserve one booked arrival across sequential member work
+windows, including when grouping is disabled. The existing reminder dedupe,
+reschedule sync, sibling promotion, and send-time hold checks use that arrival;
+a member moved away from its allocated date/start returns to its own arrival.
+Registration still suppresses immediate confirmation delivery. This metadata
+is internal and adds no request field or public payload field.
 `/accept` existing-appointment adoption (`existingAppointmentId` in the
 body, offered by the view contract instead of the slot picker): the row
 must belong to this customer, be unclaimed or claimed by THIS estimate,

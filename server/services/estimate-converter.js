@@ -3794,7 +3794,7 @@ async function registerSeededFollowUpReminders(rows = [], customerId) {
         `${scheduledDate}T${windowStart}`,
         row.service_type || 'Quarterly Pest Control',
         'estimate_followup',
-        { sendConfirmation: false },
+        { sendConfirmation: false, fromCommittedRow: true },
       );
     }
   } catch (err) {

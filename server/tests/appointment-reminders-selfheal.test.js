@@ -175,7 +175,8 @@ describe('selfHealMissingReminderRows', () => {
       returning: jest.fn().mockResolvedValue([{ id: 'rem-9' }]),
     };
     const queue = [estimateLookup, lookup, sameTime, insertRow];
-    const conn = jest.fn(() => queue.shift());
+    const conn = jest.fn((table) => table === 'scheduled_services'
+      ? { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) } : queue.shift());
     conn.raw = jest.fn().mockResolvedValue();
 
     await AppointmentReminders.registerVisitReminderInTx(conn, {
@@ -342,7 +343,8 @@ describe('owner ruling 2026-08-17 — no catch-up texts for the healed backlog',
       returning: jest.fn().mockResolvedValue([{ id: 'rem-x' }]),
     };
     const queue = [estimateLookup, lookup, sameTime, insertRow];
-    const conn = jest.fn(() => queue.shift());
+    const conn = jest.fn((table) => table === 'scheduled_services'
+      ? { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) } : queue.shift());
     conn.raw = jest.fn().mockResolvedValue();
     return conn;
   };
