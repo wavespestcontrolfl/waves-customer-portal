@@ -69,6 +69,20 @@ describe('the conversation side', () => {
     expect(builder.whereRaw).toHaveBeenCalledWith("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [1725500001000]);
   });
 
+  test('a silent claimed socket appends an empty durable close for the extraction barrier', async () => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    primeDb();
+    const convo = convoWithTurns();
+    convo._transcript = [];
+    const append = jest.spyOn(segmentStore, 'appendSegment').mockResolvedValueOnce(1);
+    try {
+      await convo.end('ws_close');
+      expect(append).toHaveBeenCalledWith(expect.anything(), 'CA-rec', expect.objectContaining({
+        session_key: 'nonce-1', text: '', turns: 0,
+      }), { allowUnclaimed: false });
+    } finally { append.mockRestore(); }
+  });
+
   test('a resumed close refreshes its stale summary from the durable earlier leg', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     const { updates } = primeDb({ firstRow: { metadata: { relay_segments: [

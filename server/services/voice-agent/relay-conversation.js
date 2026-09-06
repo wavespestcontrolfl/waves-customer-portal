@@ -2224,7 +2224,7 @@ class RelayConversation {
         // a socket older than the row's latest reconnect stamp writes no
         // columns (its segment is already appended); the resumed socket's
         // generation is ≥ the stamp and composes the whole call.
-        const fenceOwner = (q) => (recoveryOn ? segmentStore.generationFenceSql(this._fenceOwner(q), this.sessionGeneration) : this._fenceOwner(q));
+        const fenceOwner = (q) => (recoveryOn ? segmentStore.closeFenceSql(q, this.sessionGeneration, this.sessionKey) : this._fenceOwner(q));
         // …and the transcript column is composed from ALL segments (in
         // generation order, `[Reconnected]` between them) when this socket's
         // segment landed; a call with one segment reads exactly as before.

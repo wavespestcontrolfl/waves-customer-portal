@@ -13,41 +13,48 @@ const processor = require('../services/call-recording-processor');
 const recorded = 'Caller: Please call me back about the details I gave Sandy.';
 const composite = `[AI segment]\nCaller: I need a termite inspection.\n\n[Voicemail segment]\n${recorded}`;
 
-function primeDb({ loseOwnership = false, extractionRead = null, emptyRecording = false } = {}) {
+function primeDb({ loseOwnership = false, emptyRecording = false, pendingSegment = false, recordingUrl = null, attempts = 0 } = {}) {
   const row = {
+    extraction_attempts: attempts,
     id: 'late-relay-fixture', twilio_call_sid: 'CA00000000000000000000000000000123',
     direction: 'inbound', from_phone: '+19415550123', to_phone: '+19415550124',
-    recording_url: null, recording_duration_seconds: 90, duration_seconds: 90,
+    recording_url: recordingUrl, recording_duration_seconds: 90, duration_seconds: 90,
     transcription: recorded, transcription_provider: 'twilio_builtin', call_outcome: 'voicemail',
-    created_at: new Date(), metadata: { relay_reconnects: 1, relay_reconnect_ms: 2, relay_session_claim_gen: 2 },
+    created_at: new Date(), metadata: {
+      relay_reconnects: 1, relay_reconnect_ms: 2, relay_session_claim_gen: 2,
+      relay_segment_owners: ['first', 'second'],
+      relay_segments: [
+        ...(!pendingSegment ? [{ session_key: 'first', generation: 1, text: 'Caller: I need a termite inspection.' }] : []),
+        { session_key: 'second', generation: 2, text: '' },
+      ],
+    },
   };
   if (emptyRecording) {
     row.transcription = null;
-    row.metadata.relay_segments = [{ generation: 1, text: 'Caller: I need a termite inspection.' }];
   }
   let appended = false;
   db.mockImplementation((table) => {
     const builder = {};
     let owner;
-    let lockRequested = false;
     const chain = (...args) => {
       if (args[0] === 'processing_token') owner = args[1];
       for (const arg of args) if (typeof arg === 'function') arg.call(builder, builder);
       return builder;
     };
-    for (const method of ['where', 'whereRaw', 'whereNull', 'whereNotNull', 'whereIn', 'orWhere', 'orWhereRaw', 'andWhere', 'select', 'orderBy', 'limit', 'leftJoin', 'forUpdate']) builder[method] = chain;
-    builder.forUpdate = () => { lockRequested = true; return builder; };
-    builder.first = async (...columns) => {
-      if (table === 'call_log' && owner && columns[0] === 'transcription' && extractionRead) return extractionRead({ lockRequested, owner });
+    for (const method of ['where', 'whereRaw', 'whereNull', 'whereNotNull', 'whereIn', 'orWhere', 'orWhereRaw', 'andWhere', 'select', 'orderBy', 'limit', 'leftJoin', 'forUpdate', 'clone', 'onConflict', 'ignore']) builder[method] = chain;
+    builder.first = async () => {
       return table === 'call_log' && (!owner || owner === row.processing_token) ? { ...row } : null;
     };
+    builder.insert = jest.fn(() => builder);
     builder.update = (patch, returning) => {
       if (table === 'call_log') {
+        if (patch.extraction_attempts !== undefined) row.extraction_attempts += 1;
+        if (patch.processing_status !== undefined) row.processing_status = patch.processing_status;
         if (patch.processing_token !== undefined) row.processing_token = patch.processing_token;
         if (patch.transcription) row.transcription = recorded; // no relay segment existed at the UPDATE
       }
       return {
-        returning: async () => [{ extraction_attempts: 1 }],
+        returning: async () => [{ extraction_attempts: row.extraction_attempts }],
         then: (resolve, reject) => Promise.resolve(returning?.includes('transcription') ? [{ transcription: row.transcription }] : 1).then(resolve, reject),
       };
     };
@@ -61,7 +68,7 @@ function primeDb({ loseOwnership = false, extractionRead = null, emptyRecording 
     appended = true;
     // appendSegmentPatch has repaired the column AFTER writeTranscript
     // returned the recording-only value. The processor's local copy is stale.
-    if (!extractionRead) row.transcription = composite;
+    row.transcription = composite;
     if (loseOwnership) row.processing_token = 'replacement-worker';
   });
   return row;
@@ -99,59 +106,44 @@ describe('late relay transcript at the extraction boundary', () => {
     expect(prompt).toContain('I need a termite inspection.');
   });
 
-  const postgres = process.env.VOICE_RECOVERY_TEST_DATABASE_URL ? test : test.skip;
-  postgres('extraction waits for a segment writer holding the call row lock', async () => {
-    const knex = require('knex');
-    const connection = process.env.VOICE_RECOVERY_TEST_DATABASE_URL;
-    if (!['localhost', '127.0.0.1', '[::1]'].includes(new URL(connection).hostname)) throw new Error('Use isolated loopback PostgreSQL');
-    const pg = knex({ client: 'pg', connection, pool: { min: 0, max: 3 } });
-    const table = `extraction_lock_${require('crypto').randomUUID().replaceAll('-', '')}`;
-    let writer;
-    let release;
-    let processing;
-    try {
-      await pg.schema.createTable(table, (t) => { t.text('id').primary(); t.text('transcription'); t.text('processing_token'); });
-      await pg(table).insert({ id: 'fixture', transcription: recorded });
-      let started;
-      const pending = new Promise((resolve) => { started = resolve; });
-      const finish = new Promise((resolve) => { release = resolve; });
-      writer = pg.transaction(async (trx) => {
-        await trx(table).where('id', 'fixture').update({ transcription: composite });
-        started();
-        await finish;
-      });
-      await pending;
-      let reading;
-      const reachedRead = new Promise((resolve) => { reading = resolve; });
-      const row = primeDb({ extractionRead: async ({ lockRequested }) => {
-        const query = pg(table).where('id', 'fixture');
-        if (lockRequested) query.forUpdate();
-        reading();
-        return query.first('transcription');
-      } });
-      processing = processor.processRecording(row.twilio_call_sid);
-      await reachedRead;
-      // Wait until PostgreSQL reports the extraction read blocked on the
-      // writer. An unlocked read instead proceeds to the intercepted model.
-      let waited = false;
-      for (let attempt = 0; attempt < 50 && !fetchSpy.mock.calls.length; attempt += 1) {
-        const locks = await pg('pg_stat_activity').where('wait_event_type', 'Lock').where('query', 'like', `%${table}%`).first('pid');
-        if (locks) { waited = true; break; }
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-      release();
-      await writer;
-      await processing;
-      expect(waited).toBe(true);
-      const prompt = JSON.parse(fetchSpy.mock.calls[0][1].body).contents[0].parts[0].text;
-      expect(prompt).toContain(composite);
-    } finally {
-      release?.();
-      await writer?.catch(() => {});
-      await processing?.catch(() => {});
-      await pg.schema.dropTableIfExists(table);
-      await pg.destroy();
-    }
+  test('a predecessor starting after the checkpoint defers processing until its close is durable', async () => {
+    const row = primeDb({ pendingSegment: true });
+    await expect(processor.processRecording(row.twilio_call_sid))
+      .rejects.toThrow('Relay close records are missing');
+    expect(row.processing_status).toBe('extraction_failed');
+    expect(row.processing_token).toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    row.metadata.relay_segments.push({ session_key: 'first', generation: 1, text: 'Caller: I need a termite inspection.' });
+    const result = await processor.processRecording(row.twilio_call_sid);
+    expect(result.error).toContain('fixture extraction boundary');
+    const prompt = JSON.parse(fetchSpy.mock.calls[0][1].body).contents[0].parts[0].text;
+    expect(prompt).toContain('I need a termite inspection.');
+  });
+
+  test('an abandoned socket reaches the existing exhausted-retry triage instead of retrying indefinitely', async () => {
+    const row = primeDb({ pendingSegment: true, attempts: processor.CALL_EXTRACTION_MAX_ATTEMPTS - 1 });
+    await expect(processor.processRecording(row.twilio_call_sid))
+      .rejects.toThrow('Relay close records are missing');
+    expect(row.extraction_attempts).toBe(processor.CALL_EXTRACTION_MAX_ATTEMPTS);
+    expect(row.processing_status).toBe('extraction_failed');
+    expect(db).toHaveBeenCalledWith('triage_items');
+    const index = db.mock.calls.findIndex(([table]) => table === 'triage_items');
+    expect(db.mock.results[index].value.insert).toHaveBeenCalledWith(expect.objectContaining({
+      call_log_id: row.id, reason_code: 'extraction_failed_permanent',
+    }));
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test('an unavailable recorded leg remains retryable even when durable relay text exists', async () => {
+    const row = primeDb({ emptyRecording: true, recordingUrl: 'https://api.twilio.com/fixture-recording' });
+    const result = await processor.processRecording(row.twilio_call_sid);
+    expect(result.error || result.reason).toMatch(/transcription/i);
+    expect(row.processing_status).toBe('no_transcription');
+    expect(fetchSpy.mock.calls.some(([, opts]) => {
+      if (!opts?.body) return false;
+      const payload = JSON.parse(opts.body);
+      return payload.contents?.[0]?.parts?.[0]?.text?.includes('Extract');
+    })).toBe(false);
   });
 
   test('a reclaimed worker stops before extracting the replacement transcript', async () => {

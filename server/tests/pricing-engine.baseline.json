@@ -3,7 +3,7 @@
     "summary": {
       "recurringAnnualAfterDiscount": 932.4,
       "recurringMonthlyAfterDiscount": 77.7,
-      "year1Total": 932
+      "year1Total": 932.4
     },
     "waveGuard": {
       "tier": "silver",
@@ -25,7 +25,7 @@
     "summary": {
       "recurringAnnualAfterDiscount": 1822.18,
       "recurringMonthlyAfterDiscount": 151.85,
-      "year1Total": 1822
+      "year1Total": 1822.18
     },
     "waveGuard": {
       "tier": "silver",
@@ -47,7 +47,7 @@
     "summary": {
       "recurringAnnualAfterDiscount": 1797.92,
       "recurringMonthlyAfterDiscount": 149.83,
-      "year1Total": 1798
+      "year1Total": 1797.92
     },
     "waveGuard": {
       "tier": "gold",
@@ -73,7 +73,7 @@
     "summary": {
       "recurringAnnualAfterDiscount": 835.2,
       "recurringMonthlyAfterDiscount": 69.6,
-      "year1Total": 835
+      "year1Total": 835.2
     },
     "waveGuard": {
       "tier": "silver",
@@ -113,7 +113,7 @@
     "summary": {
       "recurringAnnualAfterDiscount": 4580.19,
       "recurringMonthlyAfterDiscount": 381.68,
-      "year1Total": 4580
+      "year1Total": 4580.19
     },
     "waveGuard": {
       "tier": "platinum",
@@ -179,7 +179,7 @@
     "summary": {
       "recurringAnnualAfterDiscount": 2013.6,
       "recurringMonthlyAfterDiscount": 167.8,
-      "year1Total": 2014
+      "year1Total": 2013.6
     },
     "waveGuard": {
       "tier": "platinum",
@@ -292,7 +292,7 @@
     "summary": {
       "recurringAnnualAfterDiscount": 403.2,
       "recurringMonthlyAfterDiscount": 33.6,
-      "year1Total": 403
+      "year1Total": 403.2
     },
     "waveGuard": {
       "tier": "bronze",

@@ -85,6 +85,18 @@ function scrubStoredSegments(segments) {
   return ordered.map((segment, index) => ({ ...segment, text: texts[index].join('\n') }));
 }
 
+/** Called only for a server-authenticated socket, before it can run a model turn. */
+async function registerSegmentSession(db, callSid, sessionKey) {
+  if (!callSid || !sessionKey) return false;
+  const written = await db('call_log').where('twilio_call_sid', callSid)
+    .whereRaw("COALESCE(metadata->>'relay_segments_sealed', 'false') <> 'true'")
+    .update({ metadata: db.raw(
+      "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_segment_owners', COALESCE(metadata->'relay_segment_owners', '[]'::jsonb) || ?::jsonb)",
+      [JSON.stringify([sessionKey])],
+    ) });
+  return Number(written) > 0;
+}
+
 /**
  * Serialize closes on the call row. Repair prior fragments and append the new
  * leg in one transaction, so no reader sees a reconstructed card number and
@@ -95,6 +107,7 @@ async function appendSegment(db, callSid, segment, { allowUnclaimed = false } = 
     const query = trx('call_log').where('twilio_call_sid', callSid)
       .where((q) => {
         q.whereRaw("(metadata->>'relay_session_claim_owner') = ?", [segment.session_key || ''])
+        .orWhereRaw("metadata->'relay_segment_owners' @> ?::jsonb", [JSON.stringify([segment.session_key || ''])])
         .orWhereRaw("(COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 AND (COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) > ? OR (COALESCE((metadata->>'relay_session_claim_gen')::bigint, 0) = ? AND COALESCE(metadata->>'relay_session_claim_owner', '') > ?)))", [segment.generation || 0, segment.generation || 0, segment.session_key || '']);
         if (allowUnclaimed) q.orWhereRaw("metadata->>'relay_session_claim_owner' IS NULL");
       });
@@ -103,6 +116,10 @@ async function appendSegment(db, callSid, segment, { allowUnclaimed = false } = 
     const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
     const prior = Array.isArray(meta.relay_segments) ? meta.relay_segments : [];
     if (prior.some((s) => s.session_key === segment.session_key)) return 1;
+    // Extraction seals only a complete registered set. No later socket may
+    // change the evidence after either extractor or routing has started.
+    if (meta.relay_segments_sealed === true) return 0;
+    if (Array.isArray(meta.relay_segment_owners) && !meta.relay_segment_owners.includes(segment.session_key)) return 0;
     const scrubbed = scrubStoredSegments([...prior, segment]);
     const next = scrubbed.find((s) => s.session_key === segment.session_key);
     const repaired = scrubbed.filter((s) => s !== next);
@@ -115,6 +132,29 @@ async function appendSegment(db, callSid, segment, { allowUnclaimed = false } = 
       ) });
     }
     return query.update(appendSegmentPatch(trx, next));
+  });
+}
+
+/**
+ * Close the existing claim/append lifecycle before recording extraction.
+ * Every claimed socket, including a silent one, must have a durable close.
+ * The same call-row lock orders this seal against appends and new claims.
+ */
+async function sealSegmentsForExtraction(db, callId, processingToken) {
+  return db.transaction(async (trx) => {
+    const query = trx('call_log').where({ id: callId }).where('processing_token', processingToken);
+    const row = await query.clone().forUpdate().first();
+    if (!row) return { status: 'ownership_lost' };
+    const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+    const owners = meta.relay_segment_owners;
+    const segments = Array.isArray(meta.relay_segments) ? meta.relay_segments : [];
+    if (Array.isArray(owners) && owners.some((owner) => !segments.some((segment) => segment.session_key === owner))) {
+      return { status: 'pending' };
+    }
+    await query.update({ metadata: trx.raw(
+      "COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('relay_segments_sealed', true)",
+    ) });
+    return { status: 'ready', row };
   });
 }
 
@@ -144,7 +184,7 @@ function composeSegmentsSql(db, segment = null) {
     ? `${keyed ? `(SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM jsonb_array_elements(${rowSegments}) e WHERE COALESCE(e->>'session_key', '') <> ?)` : rowSegments} || ?::jsonb`
     : rowSegments;
   return db.raw(
-    `(SELECT string_agg(seg->>'text', ? ORDER BY (seg->>'generation')::bigint, COALESCE(seg->>'session_key', ''), ord) FROM jsonb_array_elements(${source}) WITH ORDINALITY AS s(seg, ord) WHERE COALESCE(seg->>'text', '') <> '')`,
+    `(SELECT left(string_agg(seg->>'text', ? ORDER BY (seg->>'generation')::bigint, COALESCE(seg->>'session_key', '') COLLATE \"C\", ord), ${MAX_SEGMENT_TEXT_CHARS}) FROM jsonb_array_elements(${source}) WITH ORDINALITY AS s(seg, ord) WHERE COALESCE(seg->>'text', '') <> '')`,
     segment ? [SEGMENT_SEPARATOR, ...(keyed ? [String(segment.session_key)] : []), JSON.stringify([segment])] : [SEGMENT_SEPARATOR],
   );
 }
@@ -212,18 +252,18 @@ const FILL_EMPTY_SQL = "(COALESCE(transcription, '') = '' AND transcription_prov
 // A recorded transcript on a reconnected call or a durably proven transfer: the
 // processor finished before this segment landed (a silent resumed leg wrote
 // no stash). The recording is preserved; the AI segment goes ahead of it.
-const RECORDED_ONLY_SQL = "((transcription_provider <> ? OR (transcription_provider IS NULL AND transcription_metadata->'recorded_segment_rejected' IS NOT NULL)) AND COALESCE(transcription, '') <> '' AND transcription NOT LIKE '[AI segment]%' AND (COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 OR call_outcome = 'ai_transferred' OR jsonb_typeof(metadata->'relay_handoff') = 'object' OR metadata->>'relay_transfer_ring_at' IS NOT NULL))";
+const RECORDED_ONLY_SQL = "((transcription_provider <> ? OR (transcription_provider IS NULL AND transcription_metadata->'recorded_segment_rejected' IS NOT NULL)) AND COALESCE(transcription, '') <> '' AND transcription NOT LIKE '[AI segment]%' AND (COALESCE((metadata->>'relay_reconnects')::int, 0) > 0 OR call_outcome = 'ai_transferred' OR jsonb_typeof(metadata->'relay_handoff') = 'object' OR metadata->>'relay_transfer_ring_at' IS NOT NULL OR jsonb_array_length(COALESCE(metadata->'relay_segment_owners', '[]'::jsonb)) > 0))";
 const RELAY_PROVIDER = require('./relay-transcript').TRANSCRIPTION_PROVIDER;
 // The recorded half of a processor composite, from its segment header to the end (non-capturing!).
 const COMPOSITE_RECORDED_RE = '\\n\\n\\[(?:Staff|Voicemail) segment\\]\\n[\\s\\S]*$';
 
 /** Order segments the way the SQL does; the in-memory twin for summaries/tests. */
 function segmentsText(segments = []) {
-  return [...(Array.isArray(segments) ? segments : [])]
+  return Array.from([...(Array.isArray(segments) ? segments : [])]
     .filter((s) => s && String(s.text || '').trim())
     .sort(compareSegments)
     .map((s) => String(s.text))
-    .join(SEGMENT_SEPARATOR);
+    .join(SEGMENT_SEPARATOR)).slice(0, MAX_SEGMENT_TEXT_CHARS).join('');
 }
 
 /** The caller's lines of a played-text transcript (the capture floor's summary is built from these). */
@@ -233,9 +273,10 @@ function callerTurnsFromText(text) {
 }
 
 
-/** The close-time column-write fence: a socket older than the latest reconnect never writes columns. */
-function generationFenceSql(q, generation) {
-  return q.whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [Number(generation) || 0]);
+/** A close must remain both the current owner and no older than a pending reconnect. */
+function closeFenceSql(q, generation, sessionKey) {
+  return q.whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [Number(generation) || 0])
+    .whereRaw("((metadata->>'relay_session_claim_owner') IS NULL OR (metadata->>'relay_session_claim_owner') = ?)", [sessionKey || '']);
 }
 
 /** The latest promise per kind across a row's segments, in generation order. */
@@ -254,6 +295,6 @@ function latestPromises(segments) {
 
 
 module.exports = {
-  appendSegment, scrubStoredSegments, generationFenceSql, latestPromises, SEGMENT_SEPARATOR, buildSegment, nonEmptyFields, appendSegmentSql,
+  appendSegment, registerSegmentSession, sealSegmentsForExtraction, scrubStoredSegments, closeFenceSql, latestPromises, SEGMENT_SEPARATOR, buildSegment, nonEmptyFields, appendSegmentSql,
   appendSegmentPatch, composeSegmentsSql, segmentsText, callerTurnsFromText,
 };

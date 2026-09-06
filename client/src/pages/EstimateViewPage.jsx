@@ -82,7 +82,7 @@ import useModalFocus from '../hooks/useModalFocus';
 import { canonicalShareUrl, shareDocumentLink } from '../components/DocumentActionBar';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { proposalHasAuthoredTerms } from '../lib/proposal-sections';
-import { etParts, formatETDate, formatETDateTime } from '../lib/timezone';
+import { formatETDate, formatETDateTime } from '../lib/timezone';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
 import { PRICE_FONT, W, waveGuardChipStyle } from '../components/estimate/tokens';
 import { DOC_COLUMN_MAX, DOC_FONT, docTransition } from '../theme-doc';
@@ -4392,47 +4392,26 @@ export function EstimateReferralCard({ referral, token, staffView = false }) {
   );
 }
 
-// Lawn program seasons (GATE_ESTIMATE_LAWN_CALENDAR): the four SWFL turf
-// seasons in order from the current month, each with a one-line focus and
-// how many of the program's applications the scheduler puts in it.
-// Replaces the 12-month pill strip (owner 2026-09-02: twelve pills with N
-// filled read as noise, not a program). The cadence line and the projected
-// months arrive on the /data payload (`lawnCalendar.programs[frequencyKey]`)
-// from the scheduling catalog — this block only buckets months into
-// seasons, so it can never promise an interval the scheduler does not keep
-// (GH Codex P1). The season bands and their focus copy are the same
-// customer-facing seasonal context the lawn health widget already uses
-// (server/services/fawn-weather.js getSeasonalContext): spring green-up
-// Mar–Apr, summer peak May–Sep, fall transition Oct–Nov, winter dormancy
-// Dec–Feb. The summer note stays jurisdiction-neutral on purpose: the
-// fertilizer restriction window differs by county and city (pre-push Codex
-// P1), so the row says we work around it rather than naming dates.
-// No product, step, or fertilizer names — the per-visit program is
-// owner-owned business logic; this block only says what each season is
-// FOR and how many of the program's visits the cadence puts in it.
+// Lawn program seasons (GATE_ESTIMATE_LAWN_CALENDAR): what each of the four
+// SWFL turf seasons is FOR, as customer-facing education under the lawn
+// price card. Owner 2026-09-05: the per-season application counts, month
+// ranges, "now" marker, and the interval line read as a schedule promise
+// and crowded the summer row on phones — the block now keeps only the
+// program's annual count and four plain rows in calendar order. The count
+// still comes from the /data payload (`lawnCalendar.programs[frequencyKey]`,
+// built from the scheduling catalog) so the page never derives a program
+// itself. No product, step, or fertilizer names — the per-visit program is
+// owner-owned business logic, and the summer row stays jurisdiction-neutral
+// because the fertilizer restriction window differs by county and city.
 const LAWN_SEASONS = [
-  { key: 'spring', label: 'Spring', range: 'Mar – Apr', months: [2, 3], focus: 'Green-up as the lawn comes out of dormancy and the soil warms.' },
-  { key: 'summer', label: 'Summer', range: 'May – Sep', months: [4, 5, 6, 7, 8], focus: 'Peak growth, with the year’s heaviest insect and fungus pressure.', note: 'We work around the summer fertilizer restrictions in your county.' },
-  { key: 'fall', label: 'Fall', range: 'Oct – Nov', months: [9, 10], focus: 'Weed prevention while growth slows.' },
-  { key: 'winter', label: 'Winter', range: 'Dec – Feb', months: [11, 0, 1], focus: 'Root strength while the lawn rests.' },
+  { key: 'spring', label: 'Spring', focus: 'Support new growth', detail: 'Assess winter stress, manage weeds, and provide nutrition suited to your lawn as growth resumes.' },
+  { key: 'summer', label: 'Summer', focus: 'Manage seasonal stress', detail: 'Monitor insects, disease, and irrigation stress. During local fertilizer restrictions, use permitted nutrients and targeted treatments as conditions warrant.' },
+  { key: 'fall', label: 'Fall', focus: 'Adjust as conditions change', detail: 'Reassess nutrition as fertilizer restrictions lift, manage weeds, and monitor disease as temperatures change.' },
+  { key: 'winter', label: 'Winter', focus: 'Maintain lawn health', detail: 'Adjust care for slower growth, manage weeds where needed, and monitor turf condition and irrigation needs.' },
 ];
+const LAWN_SEASONS_INTRO = 'We inspect your lawn at each application and select treatments for your grass type, current conditions, and local fertilizer rules. What we apply changes throughout the year.';
 
-// `months` are the server-projected 0-based month indices of the program's
-// applications, first one first. Returns the four seasons starting with the
-// one containing the first month, each stamped { ...season, current,
-// applications }; the counts sum to months.length by construction.
-export function lawnProgramSeasons(months) {
-  const hits = (Array.isArray(months) ? months : []).map((m) => Number(m)).filter((m) => Number.isInteger(m) && m >= 0 && m < 12);
-  const start = hits.length ? hits[0] : etParts(new Date()).month - 1;
-  const first = Math.max(0, LAWN_SEASONS.findIndex((s) => s.months.includes(start)));
-  return LAWN_SEASONS.map((_, i) => LAWN_SEASONS[(first + i) % LAWN_SEASONS.length]).map((s, i) => ({
-    ...s,
-    current: i === 0,
-    applications: hits.filter((m) => s.months.includes(m)).length,
-  }));
-}
-
-// `program` = { visitsPerYear, cadence, months } from the /data payload.
+// `program` = { visitsPerYear, ... } from the /data payload.
 export function LawnProgramCalendar({ program }) {
   const [open, setOpen] = useState(false);
   // The browser print path keeps whatever is on screen: open the seasons
@@ -4446,15 +4425,18 @@ export function LawnProgramCalendar({ program }) {
     return () => window.removeEventListener('beforeprint', onBeforePrint);
   }, []);
   const n = Math.round(Number(program?.visitsPerYear) || 0);
-  if (!(n > 0) || !program?.cadence) return null;
-  const seasons = lawnProgramSeasons(program.months);
+  if (!(n > 0)) return null;
+  // Softer than the card hairline so four stacked rows read as one list, not
+  // four boxes; the block keeps clearance below it so the approval button
+  // does not sit on the last row.
+  const rowDivider = '1px solid rgba(4, 57, 94, 0.12)';
   return (
-    <div aria-label="Your lawn program calendar" style={{ borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14 }}>
+    <div aria-label="Your lawn program calendar" style={{ borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 16, paddingTop: 14, marginBottom: 8 }}>
       <div style={{ fontSize: 14, fontWeight: 700, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
         Your program
       </div>
       <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 4, lineHeight: 1.5 }}>
-        {n} applications a year — {program.cadence}
+        {n} applications a year
       </div>
       <button
         type="button"
@@ -4472,37 +4454,23 @@ export function LawnProgramCalendar({ program }) {
         </svg>
       </button>
       <div id="lawn-program-seasons" hidden={!open}>
-        <div role="list" style={{ marginTop: 6 }}>
-          {seasons.map((s, i) => (
-            <div
-              key={s.key}
-              role="listitem"
-              data-season={s.key}
-              data-current={s.current ? 'true' : 'false'}
-              style={{
-                display: 'grid', gridTemplateColumns: '4px minmax(0, 1fr)', columnGap: 12,
-                padding: '10px 0', borderTop: i === 0 ? 'none' : `1px solid ${ESTIMATE_BORDER}`,
-              }}
-            >
-              <div aria-hidden="true" style={{ borderRadius: 2, background: s.current ? COLORS.glassNavy : ESTIMATE_BORDER }} />
-              <div style={{ minWidth: 0 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, fontSize: 16, lineHeight: 1.4 }}>
-                  <div style={{ fontWeight: 600, color: ESTIMATE_BODY }}>
-                    {s.label}
-                    <span style={{ fontWeight: 400, color: ESTIMATE_MUTED, whiteSpace: 'nowrap' }}> {s.range}{s.current ? ' · now' : ''}</span>
-                  </div>
-                  <div style={{ fontWeight: 600, color: s.applications > 0 ? ESTIMATE_BODY : ESTIMATE_MUTED, whiteSpace: 'nowrap' }}>
-                    {s.applications} {s.applications === 1 ? 'application' : 'applications'}
-                  </div>
-                </div>
-                <div style={{ fontSize: 14, color: ESTIMATE_MUTED, lineHeight: 1.5, marginTop: 2 }}>
-                  {s.focus}{s.note ? ` ${s.note}` : ''}
-                </div>
+        <p style={{ fontSize: 15, color: ESTIMATE_BODY, lineHeight: 1.55, margin: '10px 0 4px' }}>
+          {LAWN_SEASONS_INTRO}
+        </p>
+        <div role="list">
+          {LAWN_SEASONS.map((s, i) => (
+            <div key={s.key} role="listitem" data-season={s.key} style={{ padding: '12px 0', borderTop: i === 0 ? 'none' : rowDivider }}>
+              <div style={{ fontSize: 16, lineHeight: 1.4, color: ESTIMATE_BODY }}>
+                <span style={{ fontWeight: 600 }}>{s.label}</span>
+                <span style={{ color: ESTIMATE_MUTED }}> · {s.focus}</span>
+              </div>
+              <div style={{ fontSize: 15, color: ESTIMATE_MUTED, lineHeight: 1.55, marginTop: 4 }}>
+                {s.detail}
               </div>
             </div>
           ))}
         </div>
-        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.5 }}>
+        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 4, lineHeight: 1.5 }}>
           Timing shifts a little with weather and turf condition.
         </div>
       </div>
