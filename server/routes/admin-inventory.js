@@ -63,7 +63,7 @@ router.use((req, res, next) => (
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Label review remains owner-only under STAFF_INVENTORY_REQUEST above.
-// Reading the gate or opening a product never downloads a label or calls AI.
+// Opening a product validates any active EPA source; only explicit extract calls AI.
 const { gateEnvValue } = require('../config/feature-gates');
 const labelReview = require('../services/product-label-review');
 const labelExtractLimiter = require('express-rate-limit')({

@@ -1,5 +1,5 @@
 const { PDFDocument } = require('pdf-lib');
-const { findEpaLabel, selectEpaSource, downloadEpaLabel } = require('../services/epa-product-label');
+const { findEpaLabel, selectEpaSource, downloadEpaLabel, currentEpaSourceStatus } = require('../services/epa-product-label');
 const row = () => ({ eparegno: '123-456', productname: 'Synthetic product', product_status: 'Active', cancel_flag: 'No', pdffiles: [
   { epa_reg_num: '123-456', pdffile: '000123-00456-20250101.pdf' },
   { epa_reg_num: '123-456', pdffile: '000123-00456-20260101.pdf' },
@@ -41,4 +41,28 @@ test('rejects HTML and oversized PDFs', async () => {
   await expect(downloadEpaLabel(source)).rejects.toThrow('did not return a PDF');
   fetchMock.mockResolvedValue(new Response('%PDF-test', { headers: { 'content-length': String(9 * 1024 * 1024) } }));
   await expect(downloadEpaLabel(source)).rejects.toThrow('exceeds the supported size');
+});
+
+test('source checks coalesce, then invalidate a superseded label after at most 60 seconds', async () => {
+  const pdf = await PDFDocument.create(); pdf.addPage(); const bytes = Buffer.from(await pdf.save());
+  const source = { ...selectEpaSource({ items: [row()] }, '123-456'), sha256: require('crypto').createHash('sha256').update(bytes).digest('hex') };
+  let latest = row();
+  const clock = jest.spyOn(Date, 'now').mockReturnValue(2000000);
+  const fetched = jest.spyOn(global, 'fetch').mockImplementation(async url => new Response(url.includes('/ords/') ? JSON.stringify({ items: [latest] }) : bytes));
+  expect(await Promise.all([currentEpaSourceStatus(source), currentEpaSourceStatus(source)])).toEqual(['current', 'current']);
+  expect(fetched).toHaveBeenCalledTimes(2);
+  latest = { ...row(), pdffiles: [{ epa_reg_num: '123-456', pdffile: '000123-00456-20260202.pdf' }] };
+  clock.mockReturnValue(2060001);
+  expect(await currentEpaSourceStatus(source)).toBe('superseded');
+  expect(fetched).toHaveBeenCalledTimes(3);
+});
+
+test('a changed PDF checksum and an unavailable EPA lookup never count as current', async () => {
+  const pdf = await PDFDocument.create(); pdf.addPage(); const bytes = Buffer.from(await pdf.save());
+  const source = { ...selectEpaSource({ items: [row()] }, '123-456'), sha256: 'older-pdf-bytes' };
+  const clock = jest.spyOn(Date, 'now').mockReturnValue(3000000);
+  const fetched = jest.spyOn(global, 'fetch').mockImplementation(async url => new Response(url.includes('/ords/') ? JSON.stringify({ items: [row()] }) : bytes));
+  expect(await currentEpaSourceStatus(source)).toBe('superseded');
+  clock.mockReturnValue(3060001); fetched.mockRejectedValue(new Error('EPA unavailable'));
+  expect(await currentEpaSourceStatus(source)).toBe('unavailable');
 });

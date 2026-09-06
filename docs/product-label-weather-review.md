@@ -14,7 +14,8 @@ re-enable; revoke an individual review to withdraw its evidence.
 ## Review flow
 
 1. An authenticated admin chooses **Find & read EPA label**. Opening Inventory
-   or a product only reads availability/evidence; it never runs extraction.
+   only reads availability; opening a product also verifies any approved EPA
+   source. Neither action runs model extraction.
 2. The server finds a single active PPLS registration and its newest matching
    PDF. Registration transfers, distributor suffixes, exempt products, missing
    documents, oversized files, and uncertain identity require manual source
@@ -24,8 +25,8 @@ re-enable; revoke an individual review to withdraw its evidence.
    or not stated. Numeric/conditional facts carry a source quote and physical
    PDF page. These are candidates, never automatic approvals.
 4. The admin compares the exact catalog product/formulation and source pages,
-   then approves or rejects the candidate. Approval re-downloads the source and
-   checks its SHA-256, rechecks product identity and the candidate under a row
+   then approves or rejects the candidate. Approval fetches the latest PPLS label
+   and checks its filename and SHA-256, rechecks product identity and the candidate under a row
    lock, and writes the decision with a critical transactional audit event.
    Candidates expire after seven days; stale candidates can still be rejected.
 5. **Revoke weather review** withdraws the active evidence on the next Job Card
@@ -44,10 +45,18 @@ weather columns, protocol data, or pricing. The general verification stamp also
 authorizes mixing, so using it here would accidentally certify unrelated rates.
 The Job Card's one spray-check builder consumes the scoped weather evidence.
 An identity/formulation or legacy weather edit invalidates the active snapshot.
-Inventory marks that stored approval STALE / INACTIVE and prompts source review
+Inventory marks that stored approval INACTIVE / REVIEW REQUIRED and prompts source review
 again; product refreshes also clear the source-confirmation checkbox.
 No active review (or a disabled gate) retains existing behavior. A revoked or
 stale active review stays UNKNOWN instead of falling back to an older stamp.
+
+Inventory, Job Card, and mix-calculator reads validate active evidence against
+the latest PPLS filename and PDF checksum. A newer document, changed bytes,
+cancelled registration, or unavailable EPA source makes the review inactive and
+the weather verdict UNKNOWN. Checks are coalesced in a bounded 128-entry cache
+for at most 60 seconds; no PDF bytes are retained there. Approval always bypasses
+that cache. Source requests happen outside catalog transactions and perform no
+database writes or model calls.
 
 Conditional restrictions remain UNKNOWN unless another reviewed limit already
 establishes HOLD. If no numeric limit is established, the card stays UNKNOWN.

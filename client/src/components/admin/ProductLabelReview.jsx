@@ -39,6 +39,7 @@ function Evidence({ entry }) {
 export default function ProductLabelReview({ product }) {
   const [review, setReview] = useState(null);
   const [activeCurrent, setActiveCurrent] = useState(false);
+  const [activeReason, setActiveReason] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -47,7 +48,7 @@ export default function ProductLabelReview({ product }) {
   useEffect(() => {
     let cancelled = false;
     setLoading(true); setConfirmed(false); setError(""); setNotice("");
-    request(product.id).then((data) => { if (!cancelled) { setReview(data.review); setActiveCurrent(data.activeCurrent === true); } })
+    request(product.id).then((data) => { if (!cancelled) { setReview(data.review); setActiveCurrent(data.activeCurrent === true); setActiveReason(data.activeReason || ""); } })
       .catch((err) => { if (!cancelled) setError(err.message); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
@@ -56,8 +57,9 @@ export default function ProductLabelReview({ product }) {
   async function act(action, body) {
     setBusy(true); setError(""); setNotice("");
     try {
-      const data = await request(product.id, action, body);
-      setReview(data.review); setActiveCurrent(data.activeCurrent === true); setConfirmed(false);
+      await request(product.id, action, body);
+      const data = await request(product.id);
+      setReview(data.review); setActiveCurrent(data.activeCurrent === true); setActiveReason(data.activeReason || ""); setConfirmed(false);
       setNotice(action === "/extract" ? "Candidate ready for source review." : "Review saved. Reopen the Job Card to use the current evidence.");
     } catch (err) { setError(err.message); }
     finally { setBusy(false); }
@@ -72,8 +74,8 @@ export default function ProductLabelReview({ product }) {
     {error && <p role="alert" style={{ color: D.red }}>{error}</p>}
     {notice && <p role="status">{notice}</p>}
     {active && <details style={{ margin: "12px 0", borderBottom: `1px solid ${D.border}`, paddingBottom: 12 }}>
-      <summary style={{ minHeight: 44, cursor: "pointer" }}>Current weather review · {active.status === "approved" ? (activeCurrent ? "APPROVED" : "STALE · INACTIVE") : "REVOKED"}</summary>
-      {active.status === "approved" && !activeCurrent && <p role="status">Product details changed. Find and read the label again, then review the new candidate. Discard any outdated candidate first.</p>}
+      <summary style={{ minHeight: 44, cursor: "pointer" }}>Current weather review · {active.status === "approved" ? (activeCurrent ? "APPROVED" : "INACTIVE · REVIEW REQUIRED") : "REVOKED"}</summary>
+      {active.status === "approved" && !activeCurrent && <p role="status">{activeReason}. Discard any outdated candidate before reading the label again.</p>}
       <Evidence entry={active} />
       <p style={{ color: D.muted }}>Reviewed {new Date(active.reviewedAt).toLocaleString("en-US", { timeZone: "America/New_York" })} ET</p>
       {active.status === "approved" && <button disabled={disabled} style={button} onClick={() => act("/revoke", { reviewId: active.id })}>REVOKE WEATHER REVIEW</button>}

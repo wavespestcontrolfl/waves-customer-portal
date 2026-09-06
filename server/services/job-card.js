@@ -22,7 +22,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { gateEnvValue } = require('../config/feature-gates');
-const { reviewedWeather } = require('./product-label-weather');
+const { reviewedWeather, checkReviewedWeatherSources } = require('./product-label-weather');
 const { dispatchWithFallback } = require('./llm/call');
 const { getHourlyRainOutlook } = require('./weather-forecast');
 // The classifier that stamps service_records.service_line — a callback
@@ -741,7 +741,7 @@ function maxOrNull(values) {
   return known.length ? Math.max(...known) : null;
 }
 
-function buildSprayCheck({ products = [], hourly = null, now = new Date() } = {}) {
+function buildSprayCheck({ products = [], hourly = null, now = new Date(), labelSources = {} } = {}) {
   const start = now.getTime();
   const window = Array.isArray(hourly)
     ? hourly.filter((h) => {
@@ -780,8 +780,8 @@ function buildSprayCheck({ products = [], hourly = null, now = new Date() } = {}
   };
 
   const verdicts = products.map((product) => {
-    const review = reviewedWeather(product);
-    if (review && !review.verified) return { productId: product.id, verdict: 'unknown', reason: 'Label review revoked or product changed' };
+    const review = reviewedWeather(product, labelSources[product.id]);
+    if (review && !review.verified) return { productId: product.id, verdict: 'unknown', reason: review.reason };
     const limits = review?.limits || productLimits(product);
     const hasLimits = [limits.minTempF, limits.maxTempF, limits.maxWindMph, limits.rainFreeHours].some((v) => v != null);
     if (!hasLimits) return { productId: product.id, verdict: 'unknown', reason: review?.unresolved ? 'Conditional label restrictions need review' : 'No limit on file' };
@@ -1438,7 +1438,8 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   const products = lines.map((l) => l.product);
   // Limits are judged from the appointment start (now once the window has
   // begun): a 3 pm stop opened at 8 am is checked against the 3 pm hours.
-  const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant });
+  const labelSources = await checkReviewedWeatherSources(products);
+  const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources });
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
   const cards = await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, blocked: blocks.length > 0, tankReason: tank.calibrated ? null : tank.reason, includePricing, dbh });
 
@@ -1573,7 +1574,8 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   const coords = propertyCoords(svc.latitude, svc.longitude);
   const { isToday, hourly } = await forecastAt({ coords, scheduledDate: etCalendarDayOf(svc.scheduled_date || now), now, deps });
   // Limits are judged from the appointment start, as on the card.
-  const sprayVerdict = buildSprayCheck({ products: [product], hourly, now: serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now, svc.window_start) }).verdicts[0];
+  const labelSources = await checkReviewedWeatherSources([product]);
+  const sprayVerdict = buildSprayCheck({ products: [product], hourly, labelSources, now: serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now, svc.window_start) }).verdicts[0];
   const sprayCheck = !isToday
     ? { verdict: 'unknown', reason: 'Judged on the visit day' }
     : (!coords ? { verdict: 'unknown', reason: 'No property pin on file — no forecast' } : { verdict: sprayVerdict.verdict, reason: sprayVerdict.reason });

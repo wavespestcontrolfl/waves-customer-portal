@@ -5,12 +5,12 @@ jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../services/epa-product-label', () => ({
   ...jest.requireActual('../services/epa-product-label'),
-  findEpaLabel: jest.fn(), downloadEpaLabel: jest.fn(),
+  findEpaLabel: jest.fn(), currentEpaSourceStatus: jest.fn(),
 }));
 const db = require('../models/db');
 const { recordAuditEvent } = require('../services/audit-log');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { findEpaLabel, downloadEpaLabel } = require('../services/epa-product-label');
+const { findEpaLabel, currentEpaSourceStatus } = require('../services/epa-product-label');
 const { extractionError, getLabelReview, extractLabelReview, decideLabelReview, revokeLabelReview } = require('../services/product-label-review');
 const { labelProductSnapshot, reviewedWeather } = require('../services/product-label-weather');
 
@@ -35,7 +35,7 @@ beforeEach(() => {
   });
   db.transaction = async fn => fn(db);
   findEpaLabel.mockResolvedValue({ source: { registration: '123-456', productName: row.name, filename: '000123-00456-20260101.pdf', url: 'https://www3.epa.gov/pesticides/chem_search/ppls/000123-00456-20260101.pdf' }, bytes: Buffer.from('%PDF-test'), pageCount: 3, sha256: 'source-hash' });
-  downloadEpaLabel.mockResolvedValue({ sha256: 'source-hash' });
+  currentEpaSourceStatus.mockResolvedValue('current');
   dispatchWithFallback.mockResolvedValue({ ok: true, json: extraction() });
 });
 afterEach(() => { delete process.env.GATE_LABEL_PIPELINE; });
@@ -49,13 +49,13 @@ test('gate off makes no database, source, or model call', async () => {
 test('extract → explicit source review → active weather; no general stamp or dose changes', async () => {
   const result = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
   expect(result.review.active).toBeUndefined();
-  expect(reviewedWeather(row)).toBeNull();
+  expect(reviewedWeather(row, 'current')).toBeNull();
   expect(dispatchWithFallback.mock.calls[0][1].documents[0].data).toBe(Buffer.from('%PDF-test').toString('base64'));
   expect(JSON.stringify(dispatchWithFallback.mock.calls[0][1].jsonSchema)).not.toMatch(/maxLength|minLength|minimum/);
   const candidateId = result.review.draft.id;
   await expect(decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId, decision: 'approve' })).rejects.toMatchObject({ statusCode: 400 });
   await decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId, decision: 'approve', identityConfirmed: true });
-  expect(reviewedWeather(row)).toMatchObject({ verified: true, limits: { maxWindMph: 10 } });
+  expect(reviewedWeather(row, 'current')).toMatchObject({ verified: true, limits: { maxWindMph: 10 } });
   expect(row.label_verified_at).toBeNull(); expect(row.default_rate_per_1000).toBe(42);
   expect(changes.every(p => Object.keys(p).sort().join(',') === 'label_weather_review,updated_at')).toBe(true);
   expect(recordAuditEvent).toHaveBeenLastCalledWith(expect.objectContaining({ trx: db, critical: true, action: 'product_label.approved' }));
@@ -70,24 +70,23 @@ test('an existing pending candidate is returned without another model call', asy
 });
 test('review responses distinguish stored approval from currently effective evidence', async () => {
   const candidate = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
-  expect(candidate.activeCurrent).toBe(false);
-  const approved = await decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId: candidate.review.draft.id, decision: 'approve', identityConfirmed: true });
-  expect(approved.activeCurrent).toBe(true);
+  expect((await getLabelReview(PRODUCT_ID)).activeCurrent).toBe(false);
+  await decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId: candidate.review.draft.id, decision: 'approve', identityConfirmed: true });
+  expect((await getLabelReview(PRODUCT_ID)).activeCurrent).toBe(true);
   row.formulation = 'WG';
   const stale = await getLabelReview(PRODUCT_ID);
   expect(stale.review.active.status).toBe('approved');
   expect(stale.activeCurrent).toBe(false);
-  const next = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
-  expect(next.activeCurrent).toBe(false);
-  expect((await extractLabelReview(PRODUCT_ID, ACTOR_ID)).activeCurrent).toBe(false);
+  await extractLabelReview(PRODUCT_ID, ACTOR_ID);
+  expect((await getLabelReview(PRODUCT_ID)).activeCurrent).toBe(false);
 });
 
 test('source changes or product changes block approval', async () => {
   const { review } = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
   const body = { candidateId: review.draft.id, decision: 'approve', identityConfirmed: true };
-  downloadEpaLabel.mockResolvedValue({ sha256: 'different-document' });
+  findEpaLabel.mockResolvedValueOnce({ source: { filename: review.draft.source.filename }, sha256: 'different-document' });
   await expect(decideLabelReview(PRODUCT_ID, ACTOR_ID, body)).rejects.toMatchObject({ statusCode: 409 });
-  downloadEpaLabel.mockResolvedValue({ sha256: 'source-hash' });
+  currentEpaSourceStatus.mockResolvedValue('current');
   row.epa_reg_number = '123-457';
   await expect(decideLabelReview(PRODUCT_ID, ACTOR_ID, body)).rejects.toMatchObject({ statusCode: 409 });
   expect(row.label_weather_review.active).toBeUndefined();
@@ -99,11 +98,27 @@ test('stale extraction never overwrites a concurrent catalog edit', async () => 
   expect(changes).toHaveLength(0);
 });
 
+test('a newly published EPA filename blocks approval even when the old PDF checksum still matches', async () => {
+  const { review } = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
+  findEpaLabel.mockResolvedValueOnce({ source: { filename: '000123-00456-20260202.pdf' }, sha256: 'source-hash' });
+  await expect(decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId: review.draft.id, decision: 'approve', identityConfirmed: true })).rejects.toMatchObject({ statusCode: 409 });
+});
+
+test.each(['superseded', 'unavailable'])('approved evidence becomes inactive when EPA source is %s without any catalog edit', async status => {
+  const { review } = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
+  await decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId: review.draft.id, decision: 'approve', identityConfirmed: true });
+  currentEpaSourceStatus.mockResolvedValue(status);
+  const result = await getLabelReview(PRODUCT_ID);
+  expect(result.review.active.status).toBe('approved');
+  expect(result.activeCurrent).toBe(false);
+  expect(result.activeReason).toMatch(/EPA/);
+});
+
 test('revoke preserves the decision trail but withdraws weather verification', async () => {
   const { review } = await extractLabelReview(PRODUCT_ID, ACTOR_ID);
   await decideLabelReview(PRODUCT_ID, ACTOR_ID, { candidateId: review.draft.id, decision: 'approve', identityConfirmed: true });
   await revokeLabelReview(PRODUCT_ID, ACTOR_ID, review.draft.id);
-  expect(reviewedWeather(row)).toMatchObject({ verified: false });
+  expect(reviewedWeather(row, 'current')).toMatchObject({ verified: false });
   expect(row.label_weather_review.active.facts.maxWindMph.quote).toContain('Synthetic');
   await expect(revokeLabelReview(PRODUCT_ID, ACTOR_ID, review.draft.id)).rejects.toMatchObject({ statusCode: 409 });
 });
@@ -134,9 +149,9 @@ test.each([
 
 test('identity or legacy weather edits invalidate an already approved snapshot', () => {
   row.label_weather_review = { active: { status: 'approved', productSnapshot: labelProductSnapshot(row), facts: facts() } };
-  expect(reviewedWeather(row).verified).toBe(true);
+  expect(reviewedWeather(row, 'current').verified).toBe(true);
   row.max_wind_mph = 9;
-  expect(reviewedWeather(row).verified).toBe(false);
+  expect(reviewedWeather(row, 'current').verified).toBe(false);
   delete process.env.GATE_LABEL_PIPELINE;
-  expect(reviewedWeather(row)).toBeNull();
+  expect(reviewedWeather(row, 'current')).toBeNull();
 });

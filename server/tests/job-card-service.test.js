@@ -31,7 +31,7 @@ describe('reviewed EPA weather evidence is separate from rate verification', () 
   }
   const now = new Date('2030-01-01T12:00:00Z');
   const hourly = Array.from({ length: 4 }, (_, i) => ({ startTime: new Date(now.getTime() + i * 3600000).toISOString(), temperatureF: 80, windMph: 5, rainChance: 0 }));
-  const verdict = p => jobCard.buildSprayCheck({ products: [p], hourly, now }).verdicts[0].verdict;
+  const verdict = p => jobCard.buildSprayCheck({ products: [p], hourly, now, labelSources: { [p.id]: 'current' } }).verdicts[0].verdict;
   test('reviewed limits enable weather only; gate off preserves the existing unknown', () => {
     const p = product(); expect(verdict(p)).toBe('unknown');
     process.env.GATE_LABEL_PIPELINE = 'true'; expect(verdict(p)).toBe('ok'); expect(p.label_verified_at).toBeNull();
@@ -46,7 +46,11 @@ describe('reviewed EPA weather evidence is separate from rate verification', () 
   test('conditional-only evidence keeps its actionable warning without numeric limits', () => {
     process.env.GATE_LABEL_PIPELINE = 'true'; const p = product();
     p.label_weather_review.active.facts.maxWindMph = { ...absent, status: 'conditional', quote: 'Synthetic site-specific limit.', page: 1 };
-    expect(jobCard.buildSprayCheck({ products: [p], hourly, now }).verdicts[0]).toMatchObject({ verdict: 'unknown', reason: 'Conditional label restrictions need review' });
+    expect(jobCard.buildSprayCheck({ products: [p], hourly, now, labelSources: { [p.id]: 'current' } }).verdicts[0]).toMatchObject({ verdict: 'unknown', reason: 'Conditional label restrictions need review' });
+  });
+  test.each(['superseded', 'unavailable', undefined])('reviewed limits require a current source check (%s)', source => {
+    process.env.GATE_LABEL_PIPELINE = 'true'; const p = product();
+    expect(jobCard.buildSprayCheck({ products: [p], hourly, now, labelSources: { [p.id]: source } }).verdicts[0]).toMatchObject({ verdict: 'unknown', reason: expect.stringContaining('EPA') });
   });
   test('revoked or identity-stale evidence never falls back to a previously trusted general stamp', () => {
     process.env.GATE_LABEL_PIPELINE = 'true'; const p = product(); p.label_verified_at = '2030-01-01';

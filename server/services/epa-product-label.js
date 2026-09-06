@@ -7,6 +7,8 @@ const REGISTRATION_RE = /^[1-9]\d{0,5}-[1-9]\d{0,5}$/;
 const PDF_RE = /^(\d{6})-(\d{5})-(\d{8})\.pdf$/;
 const PDF_BASE = 'https://www3.epa.gov/pesticides/chem_search/ppls/';
 const MAX_PDF_BYTES = 8 * 1024 * 1024;
+// Cache status promises only, never PDF bytes; recheck within 60 seconds.
+const sourceChecks = new Map();
 
 function labelError(message, statusCode = 422) {
   return Object.assign(new Error(message), { statusCode, isOperational: true });
@@ -59,13 +61,34 @@ async function downloadEpaLabel(source) {
   return { bytes, pageCount, sha256: createHash('sha256').update(bytes).digest('hex') };
 }
 
-async function findEpaLabel(registration) {
+async function findEpaSource(registration) {
   if (!REGISTRATION_RE.test(registration || '')) {
     throw labelError('An exact two-part EPA registration is required. Transferred, distributor, and exempt products need manual source review.');
   }
   const bytes = await readBounded(`https://ordspub.epa.gov/ords/pesticides/cswu/ppls/${registration}`, 1024 * 1024);
-  const source = selectEpaSource(JSON.parse(bytes.toString('utf8')), registration);
+  return selectEpaSource(JSON.parse(bytes.toString('utf8')), registration);
+}
+
+async function findEpaLabel(registration) {
+  const source = await findEpaSource(registration);
   return { source, ...await downloadEpaLabel(source) };
 }
 
-module.exports = { findEpaLabel, downloadEpaLabel, selectEpaSource, labelError };
+async function currentEpaSourceStatus(source) {
+  const key = `${source?.registration}:${source?.filename}:${source?.sha256}`;
+  const cached = sourceChecks.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.promise;
+  const promise = (async () => {
+    try {
+      const latest = await findEpaSource(source?.registration);
+      if (latest.filename !== source.filename) return 'superseded';
+      const document = await downloadEpaLabel(latest);
+      return document.sha256 === source.sha256 ? 'current' : 'superseded';
+    } catch { return 'unavailable'; }
+  })();
+  sourceChecks.set(key, { promise, expiresAt: Date.now() + 60000 });
+  if (sourceChecks.size > 128) sourceChecks.delete(sourceChecks.keys().next().value);
+  return promise;
+}
+
+module.exports = { findEpaLabel, downloadEpaLabel, selectEpaSource, currentEpaSourceStatus, labelError };
