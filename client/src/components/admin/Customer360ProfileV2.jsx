@@ -48,6 +48,7 @@
 
 import { useState, useEffect, useRef, useId } from "react";
 import { createPortal } from "react-dom";
+import AddressAutocomplete from "../AddressAutocomplete";
 import {
   Bell,
   CheckCircle2,
@@ -8272,14 +8273,42 @@ export default function Customer360ProfileV2({
                   <label className="u-label text-ink-secondary block mb-1">
                     {f.label}
                   </label>{" "}
-                  <input
+                  {f.key === "addressLine1" ? (
+                    <AddressAutocomplete
+                      id="customer-edit-addressLine1"
+                      aria-label="Address"
+                      enabled={import.meta.env.VITE_GATE_ADMIN_ADDRESS_AUTOCOMPLETE === "true"}
+                      appearance="admin"
+                      geocodeOnBlur={false}
+                      placeholder="Start typing an address…"
+                      value={editForm.addressLine1}
+                      onChange={(value) => setEditForm((p) => ({ ...p, addressLine1: value }))}
+                      onSelect={(parts) => {
+                        setEditForm((p) => ({
+                          ...p,
+                          addressLine1: parts.line1,
+                          addressLine2: parts.line2 || (
+                            parts.line1.toLowerCase() === (c.address?.line1 || "").toLowerCase()
+                              ? p.addressLine2 : ""
+                          ),
+                          city: parts.city,
+                          state: parts.state,
+                          zip: parts.zip,
+                        }));
+                        document.getElementById("customer-edit-addressLine2")?.focus();
+                      }}
+                      className="w-full h-10 px-2.5 text-16 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+                    />
+                  ) : <input
+                    id={`customer-edit-${f.key}`}
+                    aria-label={f.label}
                     type={f.type || "text"}
                     value={editForm[f.key] ?? ""}
                     onChange={(e) =>
                       setEditForm((p) => ({ ...p, [f.key]: e.target.value }))
                     }
                     className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
-                  />{" "}
+                  />}{" "}
                 </div>
               ))}
               <div>

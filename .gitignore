@@ -21,3 +21,7 @@ reports/
 # Local live-edit stubs (real payloads) must never ship — served verbatim from the public web root
 client/public/__stub/
 .ui-verify/
+
+# Local synthetic UI verification fixtures and screenshots
+/client/.qa/
+/.qa/

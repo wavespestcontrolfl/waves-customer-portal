@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import AddressAutocomplete from "../AddressAutocomplete";
 import { Button, Card, CardBody } from "../ui";
 import { OCCUPANCY_OPTIONS } from "../../lib/contact-roles";
 import { adminFetch } from "../../utils/admin-fetch";
@@ -285,12 +286,27 @@ export default function CustomerPropertiesPanelV2({
               <label className="u-label text-ink-secondary block mb-1" htmlFor="cp-line1">
                 Street address
               </label>
-              <input
+              <AddressAutocomplete
+                enabled={import.meta.env.VITE_GATE_ADMIN_ADDRESS_AUTOCOMPLETE === "true"}
+                appearance="admin"
+                geocodeOnBlur={false}
+                placeholder="Start typing an address…"
                 id="cp-line1"
-                className={inputCls}
+                className={`${inputCls} text-16`}
                 maxLength={LIMITS.address_line1}
                 value={form.address_line1}
-                onChange={(e) => setForm((f) => ({ ...f, address_line1: e.target.value }))}
+                onChange={(value) => setForm((f) => ({ ...f, address_line1: value }))}
+                onSelect={(parts) => {
+                  setForm((f) => ({
+                    ...f,
+                    address_line1: parts.line1,
+                    address_line2: parts.line2 || f.address_line2,
+                    city: parts.city,
+                    state: parts.state,
+                    zip: parts.zip,
+                  }));
+                  document.getElementById("cp-line2")?.focus();
+                }}
               />
             </div>
             <div className="sm:col-span-2">
