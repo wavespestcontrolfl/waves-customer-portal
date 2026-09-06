@@ -384,3 +384,14 @@ describe('versus + milestone runs on the engine (2026-09-06)', () => {
     );
   });
 });
+
+describe('versus scene selection (Codex r2 on #3987)', () => {
+  test('general-pest comparisons take the pest-neutral ID bank, service pairs keep their bank', () => {
+    expect(Engine.resolveSceneBucket({ variant: 'versus', service: 'general pest', topic: 'Paper Wasp vs Mud Dauber' })).toBe('pest_id');
+    expect(Engine.resolveSceneBucket({ variant: 'versus', service: 'lawn care', topic: 'Chinch Bug Damage vs Drought Stress' })).toBe('lawn');
+    expect(Engine.resolveSceneBucket({ variant: 'versus', service: 'termite', topic: 'Subterranean Termite vs Drywood Termite' })).toBe('termite');
+    // Campaign runs are unchanged: general pest still gets the general bank.
+    expect(Engine.resolveSceneBucket({ variant: 'campaign', service: 'general pest', topic: 'ants moving around lanais' })).toBe('general');
+    for (const c of Engine.SCENE_LIBRARY.pest_id) expect(c.scene).not.toMatch(/\b(?:ant|ants|roach|wasp|spider|termite|rat|mosquito)\b/i);
+  });
+});

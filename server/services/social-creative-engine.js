@@ -127,6 +127,17 @@ const SCENE_LIBRARY = {
     { key: 'review-front-entry', scene: 'a welcoming Florida front entry with potted plants and a clean walkway, soft morning light' },
     { key: 'review-coastal-street', scene: 'a quiet Southwest Florida residential street lined with palms and tidy lawns under a blue sky with puffy clouds' },
   ],
+  // Pest-neutral ID contexts for versus cards: the places a homeowner FINDS
+  // and compares pests, with no insect drawn — so the card's two named pests
+  // are never contradicted by a third one in the photo.
+  pest_id: [
+    { key: 'id-eave-corner', scene: 'the underside of a stucco Florida home eave at the corner where the soffit meets the wall, bright morning light, empty' },
+    { key: 'id-lanai-screen-corner', scene: 'the corner of a screened lanai frame with the pool and palms blurred behind, golden hour, empty' },
+    { key: 'id-foundation-edge', scene: 'the base of a pale concrete block foundation wall meeting a mulch bed on a Florida home, raking afternoon light' },
+    { key: 'id-garage-corner', scene: 'a clean, bright garage corner where the drywall meets the slab, an open garage door letting in daylight' },
+    { key: 'id-front-step', scene: 'a Florida front entry step and door threshold with a potted plant beside it, soft morning light' },
+    { key: 'id-garden-bed-edge', scene: 'the edge of a tropical landscape bed against a stucco wall, mulch and crotons, dappled light' },
+  ],
 };
 
 // Mirrors the studio's SERVICE_INTENT_KEYWORDS buckets (kept local so the
@@ -155,6 +166,12 @@ function resolveSceneBucket({ service, topic, variant } = {}) {
   for (const group of BUCKET_KEYWORDS) {
     if (group.match.some((keyword) => text.includes(keyword))) return group.bucket;
   }
+  // A versus card compares two pests; the general bank's scenes each show ONE
+  // specific pest (an ant trail under "Paper Wasp vs Mud Dauber" would read
+  // as the wrong insect), so general-pest comparisons take the pest-neutral
+  // ID bank instead. Service-specific pairs (lawn, termite, …) matched above
+  // and keep their bank — those scenes show the damage both sides share.
+  if (variant === 'versus') return 'pest_id';
   return 'general';
 }
 
