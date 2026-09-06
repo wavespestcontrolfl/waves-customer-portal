@@ -22,6 +22,17 @@ jest.mock('../services/short-url', () => ({
 }));
 
 const db = require('../models/db');
+
+// Match knex's transaction identity; the root client is not its own trx.
+async function mockTransaction(callback) {
+  const trx = (...args) => db(...args);
+  trx.isTransaction = true;
+  trx.raw = db.raw;
+  trx.fn = db.fn;
+  trx.transaction = async (inner) => inner(trx);
+  return callback(trx);
+}
+
 const DiscountEngine = require('../services/discount-engine');
 const InvoiceService = require('../services/invoice');
 
@@ -155,7 +166,7 @@ function setupDb({
   // same table-routed mock through as the trx client. The lock-order guard
   // takes the customer key-share via raw SQL before the row lock.
   db.raw = jest.fn().mockResolvedValue({ rows: [] });
-  db.transaction = jest.fn(async (callback) => callback(db));
+  db.transaction = jest.fn(mockTransaction);
 
   return {
     getInsertedInvoice: () => insertedInvoice,
@@ -547,7 +558,8 @@ describe('invoice tier discounts', () => {
     expect(DiscountEngine.recordInvoiceDiscounts).toHaveBeenCalledWith(
       'invoice-1',
       [expect.objectContaining({ id: 'silver-id', discount_dollars: 10 })],
-      'system'
+      'system',
+      expect.objectContaining({ isTransaction: true }),
     );
   });
 

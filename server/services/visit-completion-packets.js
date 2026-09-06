@@ -1,9 +1,9 @@
 'use strict';
 
 /**
- * The record phase of grouped closeout (visit-closeout-phase2.md, stage 3).
- * No route or worker invokes this prerequisite yet. Billing and delivery must
- * own the saved packet before a production entry point is connected.
+ * The durable phase of grouped closeout (visit-closeout-phase2.md, stages 3–4).
+ * No route or worker invokes this prerequisite yet. Shared effects and delivery
+ * must be complete before a production entry point is connected.
  *
  * The existing stop lock serializes membership, legacy claims and packets.
  * Every member uses the canonical completion validator/writer on one outer
@@ -40,15 +40,15 @@ function packetRequest({ visitId, idempotencyKey, items }) {
   return { visitId, key: idempotencyKey.trim(), items: ordered, hash };
 }
 
-function recordsResult(packet, items, replayed = false) {
+function recordsResult(packet, items, billing, replayed = false) {
   return { status: 202, body: {
-    visitId: packet.visit_id, packetId: packet.id, state: 'records_saved', replayed,
+    visitId: packet.visit_id, packetId: packet.id, state: 'records_saved', replayed, billing,
     items: items.map((item) => ({ serviceId: item.scheduled_service_id, serviceRecordId: item.service_record_id })),
   } };
 }
 
 /** Authenticated actor is supplied by the caller, separately from the forms. */
-async function saveVisitCompletionRecords(input, database = db) {
+async function saveVisitCompletionPacket(input, database = db) {
   const request = packetRequest(input);
   if (request.error) return request.error;
   const uploadedPhotoRows = [];
@@ -57,6 +57,10 @@ async function saveVisitCompletionRecords(input, database = db) {
     return await database.transaction(async (trx) => {
       const peek = await trx('service_visits').where({ id: request.visitId }).first();
       if (!peek) return failure(404, 'visit_not_found', 'Visit not found.');
+      // Same mint identities/order as invoice creation. The member comparison
+      // below refuses a stale submitted set after the stop lock is acquired.
+      const { acquireScheduledInvoiceMintLock } = require('./scheduled-invoice-mint');
+      for (const item of request.items) await acquireScheduledInvoiceMintLock(trx, item.serviceId);
       // Same customer -> stop -> visit/member order as grouping. Customer
       // identity and assignment cannot change while the records are written.
       await trx('customers').where({ id: peek.customer_id }).forNoKeyUpdate().first('id');
@@ -92,7 +96,8 @@ async function saveVisitCompletionRecords(input, database = db) {
         if (saved.length !== members.length || saved.some((item) => !item.service_record_id)) {
           return failure(409, 'visit_closeout_pending', 'The saved closeout has not finished recording its services.');
         }
-        return recordsResult(existing, saved, true);
+        const billing = await require('./visit-completion-invoice').createVisitCompletionInvoice(existing.id, trx);
+        return recordsResult(existing, saved, billing, true);
       }
       if (visit.status !== 'open') return failure(409, 'visit_not_open', 'This visit is no longer open for closeout.');
       const keyOwner = await trx('visit_completion_packets').where({ idempotency_key: request.key }).first('id');
@@ -125,8 +130,9 @@ async function saveVisitCompletionRecords(input, database = db) {
         }).returning('*');
         recorded.push(saved);
       }
+      const billing = await require('./visit-completion-invoice').createVisitCompletionInvoice(packet.id, trx);
       readyToCommit = true;
-      return recordsResult(packet, recorded);
+      return recordsResult(packet, recorded, billing);
     });
   } catch (err) {
     // S3 objects are external to PostgreSQL. Earlier successful members must
@@ -143,4 +149,4 @@ async function saveVisitCompletionRecords(input, database = db) {
   }
 }
 
-module.exports = { saveVisitCompletionRecords };
+module.exports = { saveVisitCompletionPacket };
