@@ -1,0 +1,200 @@
+'use strict';
+
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
+jest.mock('../services/llm/call', () => ({ dispatch: jest.fn() }));
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => work()) }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+
+const { groundExtraction, extractSmsOperations } = require('../services/sms-operational-extractor');
+const { eligibleMessage, factVerdict, runSmsOperationalActions } = require('../services/sms-operational-actions');
+const { groundFulfillment, admissibleWitness, verifySmsFulfillment } = require('../services/sms-commitment-fulfillment');
+const { dispatch } = require('../services/llm/call');
+const numbers = require('../config/twilio-numbers');
+const CUSTOMER_ID = '00000000-0000-4000-8000-000000000101';
+const PROPERTY_ID = '00000000-0000-4000-8000-000000000102';
+const properties = [{ id: PROPERTY_ID }];
+const source = (message_body, direction = 'inbound') => ({
+  id: '00000000-0000-4000-8000-000000000103', customer_id: CUSTOMER_ID, message_body, direction,
+  created_at: '2040-03-10T15:00:00Z', from_phone: '+12025550101', to_phone: numbers.locations.parrish.number,
+});
+const obligation = (quote, extra = {}) => ({
+  party: 'waves', kind: 'send_estimate', description: 'Send the requested estimate', quote,
+  basis: 'request', property_id: PROPERTY_ID, due_text: null, due_at: null, ...extra,
+});
+const fact = (extra = {}) => ({ field: 'irrigation_controller_location', value: 'side of the house',
+  quote: 'The controller is on the side of the house', property_id: PROPERTY_ID, duration: 'durable', ...extra });
+const extracted = (obligations = [], facts = []) => ({ obligations, facts });
+
+describe('SMS operational evidence and ownership', () => {
+  test('keeps an inbound request before staff promises anything', () => {
+    const message = source('Please send the lawn estimate');
+    const result = groundExtraction(extracted([obligation(message.message_body)]), { message, properties });
+    expect(result.obligations).toHaveLength(1);
+    expect(result.obligations[0]).toMatchObject({ party: 'waves', basis: 'request', due_at: null });
+  });
+
+  test('customer promises stay customer-owned, with no staff callback invented', () => {
+    const message = source("I'll send photos tomorrow");
+    const result = groundExtraction(extracted([
+      obligation(message.message_body, { party: 'customer', kind: 'send_photos', basis: 'promise' }),
+      obligation(message.message_body, { kind: 'callback', basis: 'promise' }),
+    ]), { message, properties });
+    expect(result.obligations).toHaveLength(1);
+    expect(result.obligations[0].party).toBe('customer');
+  });
+
+  test('outbound staff promise is tracked; outgoing profile guesses are not facts', () => {
+    const message = source("I'll send the estimate. The controller is on the side of the house", 'outbound');
+    const result = groundExtraction(extracted([
+      obligation("I'll send the estimate", { basis: 'promise' }),
+    ], [fact()]), { message, properties });
+    expect(result.obligations).toHaveLength(1);
+    expect(result.facts).toEqual([]);
+  });
+
+  test('drops hallucinated evidence and foreign property ids', () => {
+    const message = source('Please send the lawn estimate');
+    const result = groundExtraction(extracted([
+      obligation('Schedule tomorrow at ten'),
+      obligation(message.message_body, { property_id: 'not-a-property-on-this-account' }),
+    ]), { message, properties });
+    expect(result.obligations).toEqual([]);
+    expect(result.dropped).toBe(2);
+  });
+
+  test('does not repeat an older promise just because it appears in history', () => {
+    const message = source('Thanks');
+    const result = groundExtraction(extracted([obligation("I'll send the estimate", { basis: 'promise' })]), {
+      message, properties, history: [source("I'll send the estimate", 'outbound')],
+    });
+    expect(result.obligations).toEqual([]);
+  });
+
+  test('keeps two distinct deliverables from a single message', () => {
+    const message = source('Please send the report to the realtor and send me a payment link');
+    const result = groundExtraction(extracted([
+      obligation('send the report to the realtor', { kind: 'send_report', description: 'Send the report to the realtor' }),
+      obligation('send me a payment link', { kind: 'other', description: 'Send the customer a payment link' }),
+    ]), { message, properties });
+    expect(result.obligations).toHaveLength(2);
+  });
+
+  test('ungrounded due wording cannot establish a deadline', () => {
+    const message = source('Please send the report');
+    const result = groundExtraction(extracted([obligation(message.message_body, {
+      due_text: 'tomorrow at 9am', due_at: '2040-03-11T09:00:00-04:00',
+    })]), { message, properties });
+    expect(result.obligations[0]).toMatchObject({ due_text: null, due_at: null });
+  });
+
+  test('tomorrow without a clock time does not acquire a model-invented time', () => {
+    const message = source("I'll call tomorrow", 'outbound');
+    const result = groundExtraction(extracted([obligation(message.message_body, {
+      basis: 'promise', kind: 'callback', due_text: 'tomorrow', due_at: '2040-03-11T09:00:00-04:00',
+    })]), { message, properties });
+    expect(result.obligations[0]).toMatchObject({ due_text: 'tomorrow', due_at: null });
+  });
+
+  test('preserves access-code symbols and case exactly as supplied', () => {
+    const message = source('Lockbox code is #aB12*');
+    const result = groundExtraction(extracted([], [
+      fact({ field: 'lockbox_code', quote: message.message_body, value: '#aB12*' }),
+      fact({ field: 'lockbox_code', quote: message.message_body, value: '#AB12*' }),
+    ]), { message, properties });
+    expect(result.facts.map((f) => f.value)).toEqual(['#aB12*']);
+  });
+
+  test('unknown fields fail schema validation and provider failures are retryable', async () => {
+    expect(() => groundExtraction(extracted([], [fact({ field: 'payment_method' })]), {
+      message: source(fact().quote), properties,
+    })).toThrow('invalid_schema');
+    dispatch.mockResolvedValueOnce({ ok: false, reason: 'timeout' });
+    await expect(extractSmsOperations({ message: source('Please send the estimate'), properties }))
+      .rejects.toThrow('provider_failed');
+  });
+});
+
+describe('private profile writes', () => {
+  const context = { properties, current: {}, senderIsPrimary: true };
+  test('allows a clear empty-field update but preserves conflicts and temporary instructions', () => {
+    expect(factVerdict(fact(), context)).toBe('apply');
+    expect(factVerdict(fact(), { ...context, current: { irrigation_controller_location: 'garage' } }))
+      .toBe('existing_value_conflict');
+    expect(factVerdict(fact({ duration: 'visit_only' }), context)).toBe('temporary_instruction');
+  });
+  test('never guesses a property or a service contact’s authority', () => {
+    expect(factVerdict(fact(), { ...context, properties: [...properties, { id: 'second' }] })).toBe('property_ambiguous');
+    expect(factVerdict(fact({ property_id: null }), context)).toBe('property_ambiguous');
+    expect(factVerdict(fact(), { ...context, senderIsPrimary: false })).toBe('contact_authority');
+  });
+  test('an edit made while extraction ran is preserved, including clearing an old value', () => {
+    expect(factVerdict(fact(), { ...context, current: {}, expectedCurrent: { irrigation_controller_location: 'garage' } }))
+      .toBe('changed_during_extraction');
+  });
+  test('does not turn a one-off request to text into a permanent preference', () => {
+    expect(factVerdict(fact({ field: 'contact_preference', value: 'text', quote: 'Text me when you get here' }), context))
+      .toBe('preference_uncertain');
+    expect(factVerdict(fact({ field: 'contact_preference', value: 'text', quote: 'Text only please' }), context)).toBe('apply');
+  });
+});
+
+describe('fulfillment proof', () => {
+  const commitment = { kind: 'send_estimate', sms_context: { property_id: PROPERTY_ID } };
+  const record = { id: 'estimate-id', ref: 'estimate:estimate-id', type: 'estimate', property_id: PROPERTY_ID,
+    text: 'Quarterly lawn estimate', sent_at: '2040-03-11T15:00:00Z', status: 'sent' };
+  const verdict = { verdict: 'fulfilled', record_ref: record.ref, quote: record.text };
+
+  test('accepts a grounded relevant sent estimate and refuses an invented witness', () => {
+    expect(groundFulfillment(verdict, { records: [record], failures: [] }, commitment)).toMatchObject({ verdict: 'fulfilled' });
+    expect(groundFulfillment({ ...verdict, record_ref: 'estimate:invented' }, { records: [record], failures: [] }, commitment))
+      .toMatchObject({ verdict: 'uncertain' });
+    expect(groundFulfillment(verdict, { records: [{ ...record, property_id: 'another-property' }], failures: [] }, commitment))
+      .toMatchObject({ verdict: 'uncertain' });
+  });
+
+  test('an invoice record or an automatic reminder cannot clear the question', () => {
+    expect(admissibleWitness({ ...record, type: 'invoice' }, { kind: 'other' })).toBe(false);
+    expect(admissibleWitness({ type: 'sms', status: 'delivered', message_type: 'appointment_reminder' }, commitment)).toBe(false);
+    expect(admissibleWitness({ type: 'sms', status: 'queued', message_type: 'manual' }, commitment)).toBe(false);
+  });
+
+  test('a text cannot fulfill a promised phone call', () => {
+    expect(admissibleWitness({ type: 'sms', status: 'delivered', message_type: 'manual' }, { kind: 'callback' })).toBe(false);
+    expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 0 }, { kind: 'callback' })).toBe(false);
+  });
+  test('a staff claim of sending or completing work is not the deliverable itself', () => {
+    const reply = { type: 'sms', status: 'delivered', message_type: 'manual', text: 'I sent the estimate' };
+    expect(admissibleWitness(reply, { kind: 'send_estimate' })).toBe(false);
+    expect(admissibleWitness({ type: 'call', status: 'completed', duration_seconds: 90 }, { kind: 'technician_follow_up' })).toBe(false);
+    expect(admissibleWitness({ type: 'visit', status: 'confirmed', property_id: PROPERTY_ID }, {
+      kind: 'technician_follow_up', sms_context: { property_id: PROPERTY_ID },
+    })).toBe(false);
+  });
+
+  test('missing sources and unsupported quotes remain unverified', async () => {
+    expect(groundFulfillment(verdict, { records: [record], failures: ['email'] }, commitment))
+      .toMatchObject({ verdict: 'uncertain', reason: 'incomplete_sources' });
+    expect(groundFulfillment({ ...verdict, quote: 'I answered the invoice dispute' }, { records: [record], failures: [] }, commitment))
+      .toMatchObject({ verdict: 'uncertain', reason: 'ungrounded_witness' });
+    await expect(verifySmsFulfillment(commitment, { records: [], failures: [] })).resolves.toEqual({ verdict: 'open' });
+  });
+});
+
+describe('activation and intake', () => {
+  afterEach(() => { delete process.env.GATE_SMS_OPERATIONAL_ACTIONS; delete process.env.GATE_SMS_OPERATIONAL_ACTIONS_SINCE; });
+  test('gate off and missing activation epoch perform no database work', async () => {
+    const conn = jest.fn();
+    expect(await runSmsOperationalActions({ conn })).toEqual({ skipped: 'gate_off' });
+    process.env.GATE_SMS_OPERATIONAL_ACTIONS = 'true';
+    expect(await runSmsOperationalActions({ conn })).toEqual({ skipped: 'activation_time_required' });
+    expect(conn).not.toHaveBeenCalled();
+  });
+  test('excludes automated outbound messages, reactions and the AI number', () => {
+    expect(eligibleMessage(source('Please send the estimate'))).toBe(true);
+    expect(eligibleMessage({ ...source('Reminder', 'outbound'), from_phone: numbers.locations.parrish.number,
+      message_type: 'appointment_reminder', status: 'delivered' })).toBe(false);
+    expect(eligibleMessage({ ...source('Liked a message'), message_type: 'sms_reaction' })).toBe(false);
+    expect(eligibleMessage({ ...source('Please send the estimate'), to_phone: numbers.tollFree.number })).toBe(false);
+  });
+});

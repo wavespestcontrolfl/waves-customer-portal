@@ -1384,10 +1384,21 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // Overdue promises to callers (call_commitments) — daily 7:20am ET, one
-  // exception bell per overdue promise per ET day. No-op while
-  // GATE_CALL_COMMITMENTS is off. See services/call-commitments-watchdog.js.
-  cron.schedule('0 20 7 * * *', async () => {
+  // Extend the existing commitment watcher to SMS. SMS receipts are replayed
+  // every five minutes; the call lane retains its daily 7:20am ET cadence.
+  cron.schedule('0 */5 * * * *', async () => {
+    const et = etParts();
+    const smsWork = (async () => {
+      if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;
+      try {
+        const { runSmsOperationalActions, refreshSmsCommitments } = require('./sms-operational-actions');
+        await runSmsOperationalActions();
+        await runExclusive('sms-commitment-fulfillment', () => refreshSmsCommitments());
+      } catch {
+        logger.error('[sms-operations] commitment watcher did not complete');
+      }
+    })();
+    if (et.hour !== 7 || et.minute !== 20) { await smsWork; return; }
     try {
       const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
       const result = await runCallCommitmentsWatchdog();
@@ -1408,6 +1419,8 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Call-commitments watchdog tick failed: ${err.message}`);
+    } finally {
+      await smsWork;
     }
   }, { timezone: 'America/New_York' });
 
