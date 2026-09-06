@@ -56,7 +56,11 @@ export async function adminFetch(path, options = {}) {
     });
 
     if (r.status === 401) {
-      window.location.href = '/admin/login';
+      const { pathname, search, hash } = window.location;
+      const next = `${pathname}${search}${hash}`;
+      window.location.href = pathname === '/admin/login'
+        ? next
+        : `/admin/login?next=${encodeURIComponent(next)}`;
       const err = new Error('Session expired');
       err.status = 401;
       err.code = 'UNAUTHENTICATED';

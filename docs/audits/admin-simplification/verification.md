@@ -190,3 +190,36 @@ tests; focused coverage passed 57 tests; build and lint checks above completed.
 The final synthetic browser run passed all nine scenarios and captured 13 images.
 No required implementation work remains in the selected subset. Broader merges
 remain explicitly deferred for the parity/decision gaps above.
+# PR review follow-up
+
+PR #3980 reviewed commit `205f7b5ec6f3d7dc97d190b3e898fed958b30ab3`.
+Review found that the real shared `adminFetch` hard redirect could race the
+shell's contextual login navigation. The helper now preserves the document's
+full path, repeated query parameters and fragment; an existing login return
+target is retained. Both new helper tests failed before the fix and passed
+after it. Browser QA now drives both guest and expired-token login through
+the actual helper, with only HTTP responses mocked.
+
+The browser startup path now acquires both Vite and Chromium inside its
+cleanup scope. A missing-Chromium regression test proves the preview server
+is closed even when launch fails. Server cleanup also runs if browser cleanup
+throws. No broad cleanup or process-by-port termination is used.
+
+After these source edits: client coverage passed **265 suites / 2,518 tests**
+with two workers; the production build and prebuild gates passed; the
+startup-failure Node test passed; synthetic browser QA passed **10 scenarios**
+with the same 13 screenshots. The two focused helper/layout suites passed
+15 tests. These supersede the earlier local results for the changed paths.
+
+GitHub CI passed all seven jobs on the earlier published head, including its
+disposable-database and native build jobs. That is not CI evidence for the
+unpublished review fixes. Final-commit CI and Codex review remain required.
+
+Opening the PR also invoked the repository's existing Railway integration,
+which automatically created a PR preview. Read-only configuration inspection
+confirmed a dedicated preview Postgres connection, `GATE_CRON_JOBS=false`,
+`GATE_TWILIO_SMS=false` and `SMS_PREVIEW_MODE=true`. No credentials were printed
+or copied to a checkout, and no database/provider request was made by this
+session. This automatic preview is separate from local frontend verification;
+it must not be described as "no deployment occurred." Production and merge
+operations remain outside the task's authorization.

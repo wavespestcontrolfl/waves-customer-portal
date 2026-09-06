@@ -20,8 +20,8 @@ const catalog = { integrations: [{ id: 'fixture-provider', name: 'Synthetic prov
 async function main() {
   fs.mkdirSync(output, { recursive: true });
   const report = { ...evidence(root), scenarios: [], requests: [], unmatched: [], blockedExternal: [], consoleErrors: [], pageErrors: [], screenshots: [] };
-  const server = await previewServer(root);
-  const browser = await launchBrowser();
+  let server;
+  let browser;
   let stage = 'startup';
   let failCatalog = false;
   async function openPage(role = 'admin', width = 1440) {
@@ -58,7 +58,8 @@ async function main() {
       report.requests.push({ stage, method: request.method(), path: api, search: url.search });
       let body;
       let status = 200;
-      if (api === '/admin/auth/me') body = { id: 'fixture-user', name: 'Fixture operator', email: 'operator@example.invalid', role: profileRole };
+      if (api === '/admin/auth/me' && profileRole === 'expired') { body = { error: 'Synthetic expired session' }; status = 401; }
+      else if (api === '/admin/auth/me') body = { id: 'fixture-user', name: 'Fixture operator', email: 'operator@example.invalid', role: profileRole };
       else if (api === '/admin/auth/login' && request.method() === 'POST') {
         profileRole = 'admin';
         body = { token: 'synthetic-login-token', user: { id: 'fixture-user', name: 'Fixture operator', role: profileRole } };
@@ -113,6 +114,8 @@ async function main() {
     report.scenarios.push({ name, passed: true });
   }
   try {
+    server = await previewServer(root);
+    browser = await launchBrowser();
     const page = await openPage();
     await scenario('legacy Team link retains Account identity and URL', async () => {
       await page.goto(`${server.baseUrl}/admin/settings?tab=team&source=bookmark#profile`);
@@ -235,8 +238,9 @@ async function main() {
       assert.equal(report.requests.filter((r) => r.stage === stage && r.path === '/admin/integrations/health').length, 0);
       await shot(tech, 'account-technician-mobile-390');
     });
-    const guest = await openPage(null);
-    await scenario('guest alias returns to its original status and fragment after mocked login', async () => {
+    for (const session of [null, 'expired']) {
+    const guest = await openPage(session);
+    await scenario(`${session || 'guest'} alias returns to its original status and fragment after mocked login`, async () => {
       await guest.goto(`${server.baseUrl}/admin/data-hygiene?status=auto_applied#evidence`);
       await guest.waitForURL('**/admin/login?next=**');
       assert.equal(new URL(guest.url()).searchParams.get('next'), '/admin/data-hygiene?status=auto_applied#evidence');
@@ -251,6 +255,7 @@ async function main() {
       assert.equal(url.hash, '#evidence');
       assert.equal(report.requests.filter((r) => r.stage === stage && r.path === '/admin/auth/login').length, 1);
     });
+    }
     assert.equal(report.unmatched.length, 0, JSON.stringify(report.unmatched));
     assert.equal(report.pageErrors.length, 0, JSON.stringify(report.pageErrors));
     assert.deepEqual(report.requests.filter((r) => r.method !== 'GET' && ![
@@ -263,9 +268,12 @@ async function main() {
   } finally {
     report.finishedAt = new Date().toISOString();
     fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
-    for (const context of browser.contexts()) await context.setOffline(true);
-    await browser.close();
-    await server.close();
+    try {
+      for (const context of browser?.contexts() || []) await context.setOffline(true);
+      await browser?.close();
+    } finally {
+      await server?.close();
+    }
   }
   console.log(`Synthetic admin QA passed: ${report.scenarios.length} scenarios. Evidence: ${path.relative(root, output)}`);
 }
