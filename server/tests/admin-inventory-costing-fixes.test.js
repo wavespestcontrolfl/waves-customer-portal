@@ -458,7 +458,50 @@ describe('recalcBestPrice', () => {
     const f = approvedPerOzFields(20.07, '20 count');
     expect(f.landed_unit_price).toBeNull();
     expect(f.landed_cost).toBeNull();
+    // …and the shipping / tax inputs the count ranking would rebuild a landed total from (r3 P1)
+    expect(f.shipping_cost).toBeNull();
+    expect(f.tax_rate).toBeNull();
+    expect(f.shipping_estimate).toBeNull();
     expect(f.approval_status).toBe('approved');
+  });
+
+  test('leaving count mode clears count-derived COGS — a per-station cost_per_unit does not survive a measured recalculation; measured cost units are left alone (r3 P1)', async () => {
+    const rows = [{ id: 'vp-a', vendor_id: 'v-a', price: 100, quantity: '128 oz', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor A' }];
+    const wasCount = wireBestPrice({ rows, product: { unit_size_oz: 64, best_price: 8.69, container_size: '64 oz', cost_unit: 'station' } });
+    await recalcBestPrice('prod-1');
+    expect(wasCount.catalogUpdates[0].best_price).toBe(50);
+    expect(wasCount.catalogUpdates[0].cost_per_unit).toBeNull();
+    expect(wasCount.catalogUpdates[0].cost_unit).toBeNull();
+    const measured = wireBestPrice({ rows, product: { unit_size_oz: 64, best_price: 50, container_size: '64 oz', cost_unit: 'oz' } });
+    await recalcBestPrice('prod-1');
+    expect(measured.catalogUpdates[0]).not.toHaveProperty('cost_per_unit');
+    expect(measured.catalogUpdates[0]).not.toHaveProperty('cost_unit');
+  });
+
+  test('PUT /:id with a measured containerSize and no unitSizeOz re-derives unit_size_oz — "64 oz" → "32 oz" scales best_price to 32 (r3 P1)', async () => {
+    const product = { id: 'prod-1', container_size: '64 oz', unit_size_oz: 64, best_price: 50, cost_unit: 'oz', inventory_on_hand: null, inventory_unit: null, low_stock_threshold: null };
+    const rows = [{ id: 'vp-a', vendor_id: 'v-a', price: 100, quantity: '128 oz', normalized_unit_price: null, price_per_oz: null, vendor_name: 'Vendor A' }];
+    const catalogUpdates = [];
+    const trx = (table) => db(table);
+    trx.raw = jest.fn(async () => ({}));
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    db.mockImplementation((table) => makeChain(table, (q) => {
+      if (table === 'vendor_pricing') return q.called('update') ? 1 : rows;
+      if (table === 'products_catalog') {
+        if (q.called('update')) { const u = q.args('update')[0]; catalogUpdates.push(u); Object.assign(product, u); return 1; }
+        return { ...product };
+      }
+      throw new Error(`Unexpected table ${table}`);
+    }));
+    await withServer(async (baseUrl) => {
+      const r = await fetch(`${baseUrl}/admin/inventory/prod-1`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ containerSize: '32 oz' }) });
+      expect(r.status).toBe(200);
+    });
+    expect(catalogUpdates[0].unit_size_oz).toBe(32);
+    const best = catalogUpdates.find((u) => u.best_price_status);
+    expect(best.best_price).toBe(25);
+    expect(best.best_price_status).toBe('current');
   });
 
   test('a stored landed_cost with NO shipping/tax components is ignored by count ranking — the sticker per-unit decides', () => {
@@ -504,8 +547,9 @@ describe('recalcBestPrice', () => {
     const tools = require('../services/intelligence-bar/procurement-tools');
     const product = { id: 'prod-1', name: 'Summit Mosquito Dunk Tablets', category: 'mosquito', container_size: '20 count', unit_size_oz: null, best_price: 26.88, best_vendor: 'Amazon' };
     const rows = [
-      { id: 'vp-amz', vendor_id: 'v-amz', price: 26.88, quantity: '20 count', vendor_name: 'Amazon', is_best_price: true },
+      { id: 'vp-amz', vendor_id: 'v-amz', price: 26.88, quantity: '20 count', shipping_cost: 20, vendor_name: 'Amazon', is_best_price: true },
       { id: 'vp-s1', vendor_id: 'v-s1', price: 20.07, quantity: '20 count', vendor_name: 'SiteOne', is_best_price: false },
+      { id: 'vp-case', vendor_id: 'v-case', price: 5, quantity: '1 case', vendor_name: 'Case Seller', is_best_price: false },
     ];
     db.mockImplementation((table) => makeChain(table, () => (table === 'products_catalog' ? product : rows)));
     const out = await tools.executeProcurementTool('compare_vendor_pricing', { product_id: 'prod-1' });
@@ -514,6 +558,11 @@ describe('recalcBestPrice', () => {
     expect(out.price_range).toMatch(/\/unit spread/);
     expect(out.cheapest_price_per_unit).toBe(1.0035);
     expect(out.vendor_prices[0].price_per_oz).toBeNull();
+    // landed per-unit is what the winner was chosen on (r3 P2): shipping on Amazon makes it dearer still
+    expect(out.vendor_prices[0].landed_price_per_unit).toBe(1.0035);
+    expect(out.vendor_prices[1].landed_price_per_unit).toBe(2.344);
+    // the spread runs to the last COMPARABLE vendor — the incompatible "1 case" row must not null it (r3 P2)
+    expect(out.price_range).toBe('$1.3405/unit spread across 3 vendors'); // landed basis: 2.344 - 1.0035
   });
 
   test('parsePackCount reads count packs with their noun; countUnitsCompatible refuses container-vs-item scaling', () => {

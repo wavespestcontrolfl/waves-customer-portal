@@ -102,6 +102,14 @@ function approvedPerOzFields(price, quantity) {
     // …and the pack-level landed total for the same reason (Codex #3974 r2
     // P1): count-based ranking must never read a total built on the OLD price.
     landed_cost: null,
+    // …and the shipping / tax INPUTS themselves (Codex #3974 r3 P1): the
+    // count-based ranking rebuilds its landed total from them against the
+    // current price, so an obsolete $20 shipping charge left beside a newly
+    // approved price would still decide the vendor. An approval carries no
+    // shipping data; a later manual entry or price-sync snapshot re-supplies it.
+    shipping_cost: null,
+    tax_rate: null,
+    shipping_estimate: null,
     // These writes ARE approvals; without this a new insert keeps the
     // column default approval_status='pending' and recalcBestPrice
     // (which only trusts approved rows) would never see it.
@@ -3430,9 +3438,15 @@ async function recalcBestPriceLocked(productId, dbc) {
   // beside a current best price. The winning STICKER per-unit is written with
   // the price; the existing cost_unit is kept (it names what one unit is —
   // 'tablet'), else the catalog's counted noun, else 'each'.
+  // Leaving count mode (a product corrected to a measured unit_size_oz)
+  // must not keep a per-station / per-tablet figure that costLineFromUsage
+  // would read ahead of the new measured best_price (Codex #3974 r3 P1): a
+  // cost_unit that is a counted noun is count-derived and is cleared; 'each'
+  // and measured units (oz, fl_oz, lb) are left alone.
+  const countDerivedCostUnit = (() => { const c = parsePackCount(`1 ${product?.cost_unit || ''}`); return !!(c && c.unit !== 'each'); })();
   const countCost = countScalable
     ? { cost_per_unit: Math.round(best.perUnit * 10000) / 10000, cost_unit: product?.cost_unit || catalogUnit || 'each' }
-    : {};
+    : countDerivedCostUnit ? { cost_per_unit: null, cost_unit: null } : {};
 
   // Update the control-layer backing/cache fields atomically with the winner:
   // the pricing-engine DB bridge only trusts best_price when
@@ -3629,6 +3643,12 @@ router.put('/:id', async (req, res, next) => {
     for (const [camel, snake] of Object.entries(allowed)) {
       if (req.body[camel] !== undefined) upd[snake] = req.body[camel];
     }
+    // The inline editor sends containerSize alone, and scoreVendorRows treats
+    // a positive unit_size_oz as authoritative (Codex #3974 r3 P1): a
+    // container edit without an explicit unitSizeOz re-derives it from the
+    // new size — the ounces of a measurable size, null for a count size, so
+    // "64 oz" → "32 oz" scales to 32 and "12 count" enters count mode.
+    if (upd.container_size !== undefined && req.body.unitSizeOz === undefined) upd.unit_size_oz = quantityToOz(upd.container_size);
     const nextStock = req.body.inventoryOnHand !== undefined
       ? numberOrNull(req.body.inventoryOnHand)
       : numberOrNull(product.inventory_on_hand);

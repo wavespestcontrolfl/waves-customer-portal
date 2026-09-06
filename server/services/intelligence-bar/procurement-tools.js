@@ -394,10 +394,11 @@ async function compareVendorPricing(input) {
   // present as "cheaper" than a $50/64 oz one.
   const { mode, ranked } = rankVendorRows(rows, product);
   const cheapest = ranked.length > 0 ? ranked[0] : null;
-  const dearest = ranked.length > 0 ? ranked[ranked.length - 1] : null;
-  const spread = cheapest?.rank != null && dearest?.rank != null && ranked.length > 1
-    ? dearest.rank - cheapest.rank
-    : 0;
+  // The spread runs to the last COMPARABLE vendor (Codex #3974 r3 P2): an
+  // incompatible row (rank null) sits last by design and must not null it.
+  const comparable = ranked.filter((r) => r.rank != null);
+  const dearest = comparable.length > 1 ? comparable[comparable.length - 1] : null;
+  const spread = cheapest?.rank != null && dearest ? dearest.rank - cheapest.rank : 0;
 
   return {
     product: {
@@ -406,12 +407,15 @@ async function compareVendorPricing(input) {
       current_best_price: product.best_price ? parseFloat(product.best_price) : null,
       current_best_vendor: product.best_vendor,
     },
-    vendor_prices: ranked.map(({ row: p, perOz, perUnit }) => ({
+    vendor_prices: ranked.map(({ row: p, perOz, perUnit, rankPerUnit }) => ({
       vendor: p.vendor_name,
       price: parseFloat(p.price_amount ?? p.price ?? 0),
       quantity: p.quantity,
       price_per_oz: perOz != null ? Math.round(perOz * 10000) / 10000 : null,
       price_per_unit: perUnit != null ? Math.round(perUnit * 10000) / 10000 : null,
+      // Landed per-unit (shipping / tax on the current price) is what a
+      // count-mode winner was chosen on (Codex #3974 r3 P2).
+      landed_price_per_unit: rankPerUnit != null ? Math.round(rankPerUnit * 10000) / 10000 : null,
       landed_price_per_oz: (() => {
         const adminInventoryRoute2 = require('../../routes/admin-inventory');
         return adminInventoryRoute2.storedUnitCostPerOz(p.landed_unit_price, p.unit_normalized);
@@ -424,6 +428,7 @@ async function compareVendorPricing(input) {
     cheapest_price: cheapest ? parseFloat(cheapest.row.price_amount ?? cheapest.row.price ?? 0) : null,
     cheapest_price_per_oz: cheapest?.perOz != null ? Math.round(cheapest.perOz * 10000) / 10000 : null,
     cheapest_price_per_unit: cheapest?.perUnit != null ? Math.round(cheapest.perUnit * 10000) / 10000 : null,
+    cheapest_landed_price_per_unit: cheapest?.rankPerUnit != null ? Math.round(cheapest.rankPerUnit * 10000) / 10000 : null,
     price_range: spread > 0 ? `$${spread.toFixed(4)}/${basisUnit(mode)} spread across ${ranked.length} vendors` : null,
     vendor_count: ranked.length,
     comparison_basis: BASIS_TEXT[mode],
@@ -463,6 +468,7 @@ async function findCheapestVendor(input) {
       price: parseFloat(r.row.price_amount ?? r.row.price ?? 0),
       price_per_oz: r.perOz != null ? Math.round(r.perOz * 10000) / 10000 : null,
       price_per_unit: r.perUnit != null ? Math.round(r.perUnit * 10000) / 10000 : null,
+      landed_price_per_unit: r.rankPerUnit != null ? Math.round(r.rankPerUnit * 10000) / 10000 : null,
     } : null);
     results.push({
       product: p.name,
