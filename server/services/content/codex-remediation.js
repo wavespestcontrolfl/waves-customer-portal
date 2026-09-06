@@ -1063,8 +1063,12 @@ function prepareFrontmatterFix(originalMd, fixedMd, findings = [], deps = {}) {
     const baseTypes = original.data.schema_types.filter((type) => type !== 'FAQPage');
     try {
       const derive = deps.schemaTypesForContent || require('../content-astro/astro-publisher')._internals.schemaTypesForContent;
-      schemaTypes = derive(fixed.content, baseTypes);
-      if (!Array.isArray(schemaTypes) || schemaTypes.length === 0) throw new Error('empty schema result');
+      const derived = derive(fixed.content, baseTypes);
+      if (!Array.isArray(derived) || derived.length === 0) throw new Error('empty schema result');
+      // The helper appends FAQPage; retain the original order when it was
+      // already present, and change only its presence when the body needs it.
+      schemaTypes = original.data.schema_types.filter((type) => type !== 'FAQPage' || derived.includes(type));
+      if (derived.includes('FAQPage') && !schemaTypes.includes('FAQPage')) schemaTypes.push('FAQPage');
     } catch (_) {
       return { violation: 'body-derived schema types unavailable', changed: {} };
     }

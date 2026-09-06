@@ -1579,6 +1579,21 @@ describe('publisher-derived FAQ schema during remediation', () => {
     expect(rem.prepareFrontmatterFix(unformatted, unformatted).changed).toEqual({});
   });
 
+  test('an existing FAQ in the middle of the schema list preserves order during unrelated repairs', () => {
+    const schema_types = ['Article', 'FAQPage', 'HowTo', 'BreadcrumbList'];
+    const original = fm.stringify({ title: 'T', schema_types }, FAQ_BODY);
+    const fixed = original.replace('Intro paragraph.', 'Corrected introduction.');
+    const prepared = rem.prepareFrontmatterFix(original, fixed, [{ body: 'Correct the introduction.' }]);
+    expect(prepared.violation).toBeNull();
+    expect(prepared.markdown).toBe(fixed);
+    expect(prepared.changed).toEqual({});
+    expect(fm.parse(prepared.markdown).data.schema_types).toEqual(schema_types);
+
+    const removed = rem.prepareFrontmatterFix(original, fm.stringify({ title: 'T', schema_types }, PLAIN_BODY), [{ body: 'Remove the FAQ.' }]);
+    expect(removed.violation).toBeNull();
+    expect(removed.changed.schema_types).toEqual(['Article', 'HowTo', 'BreadcrumbList']);
+  });
+
   test('FAQ schema remains absent when a heading has no visible questions', () => {
     const fixed = fm.stringify(fm.parse(plain).data, PLAIN_BODY + '\n## Frequently Asked Questions\nComing soon.');
     expect(rem.prepareFrontmatterFix(plain, fixed).changed).toEqual({});
