@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useOutletContext, useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
+import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import {
   CheckCircle2,
   ClipboardList,
@@ -213,6 +214,9 @@ const OWNER_ONLY_INVENTORY_TABS = new Set([
 ]);
 
 export default function InventoryPage() {
+  const { lastMutation } = useIntelligenceBarActions();
+  const inventoryRefresh = lastMutation?.domain === 'inventory' ? lastMutation.id : null;
+  const statsSequence = useRef(0);
   const [searchParams] = useSearchParams();
   // Server-verified role from the shell's Outlet context (never localStorage).
   const outletContext = useOutletContext();
@@ -242,17 +246,20 @@ export default function InventoryPage() {
   const [productFilter, setProductFilter] = useState("all");
   const [showAddForm, setShowAddForm] = useState(false);
 
-  const loadStats = () =>
-    adminFetch("/admin/inventory/stats")
-      .then(setStats)
+  const loadStats = useCallback(() => {
+    const sequence = ++statsSequence.current;
+    return adminFetch("/admin/inventory/stats")
+      .then(value => { if (sequence === statsSequence.current) setStats(value); })
       .catch(() => {});
+  }, []);
   useEffect(() => {
     loadStats();
-  }, []);
-  const showToast = (m) => {
+    return () => { statsSequence.current += 1; };
+  }, [loadStats, inventoryRefresh]);
+  const showToast = useCallback((m) => {
     setToast(m);
     setTimeout(() => setToast(""), 3500);
-  };
+  }, []);
 
   const activeGroup =
     visibleGroups.find((g) => g.tabs.includes(tab)) || visibleGroups[0];
@@ -450,6 +457,9 @@ export default function InventoryPage() {
       )}
       {tab === "products" && (
         <ProductsTab
+          refreshId={inventoryRefresh}
+          initialSearch={searchParams.get("search") || ""}
+          initialProductId={searchParams.get("productId")}
           showToast={showToast}
           filter={productFilter}
           onFilterChange={setProductFilter}
@@ -477,9 +487,9 @@ export default function InventoryPage() {
           }
         />
       )}
-      {tab === "forecast" && <WaveGuardForecastTab showToast={showToast} onUpdate={loadStats} />}
+      {tab === "forecast" && <WaveGuardForecastTab showToast={showToast} onUpdate={loadStats} refreshId={inventoryRefresh} />}
       {tab === "unit-review" && <UnitReviewTab showToast={showToast} />}
-      {tab === "restock" && <RestockRequestsTab showToast={showToast} onUpdate={loadStats} canAuthor={isAdminRole} />}
+      {tab === "restock" && <RestockRequestsTab showToast={showToast} onUpdate={loadStats} canAuthor={isAdminRole} refreshId={inventoryRefresh} requestId={searchParams.get("requestId")} />}
       {tab === "margins" && <MarginsTab showToast={showToast} />}
       {tab === "scrape" && <ScrapeTab showToast={showToast} />}
       <div
@@ -1574,27 +1584,30 @@ function PriceSyncTab({ showToast }) {
   );
 }
 
-function WaveGuardForecastTab({ showToast, onUpdate }) {
+function WaveGuardForecastTab({ showToast, onUpdate, refreshId }) {
   const [days, setDays] = useState(14);
   const [forecast, setForecast] = useState(null);
   const [loading, setLoading] = useState(true);
+  const loadSequence = useRef(0);
   const [creatingId, setCreatingId] = useState("");
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setLoading(true);
     try {
       const data = await adminFetch(`/admin/inventory/waveguard-forecast?days=${encodeURIComponent(days)}`);
-      setForecast(data.forecast || null);
+      if (sequence === loadSequence.current) setForecast(data.forecast || null);
     } catch (err) {
-      showToast(`Forecast failed: ${err.message}`);
+      if (sequence === loadSequence.current) showToast(`Forecast failed: ${err.message}`);
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) setLoading(false);
     }
   }, [days, showToast]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    void load();
+    return () => { loadSequence.current += 1; };
+  }, [load, refreshId]);
 
   async function createRestock(product) {
     const qty = Number(product.recommendedOrderQuantity || product.shortfall || 0);
@@ -1948,6 +1961,7 @@ function UnitReviewTab({ showToast }) {
 // PRODUCTS TAB — with inline editing
 // ══════════════════════════════════════════════════════════════
 function ProductsTab({
+  refreshId, initialSearch = "", initialProductId = null,
   showToast,
   filter = "all",
   onFilterChange,
@@ -1968,10 +1982,11 @@ function ProductsTab({
   }, [canAuthor]);
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(initialSearch);
   const [catFilter, setCatFilter] = useState("");
   const [loading, setLoading] = useState(true);
-  const [expanded, setExpanded] = useState(null);
+  const [expanded, setExpanded] = useState(initialProductId);
+  const loadSequence = useRef(0);
   const [editing, setEditing] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [vendors, setVendors] = useState([]);
@@ -1991,6 +2006,7 @@ function ProductsTab({
   const PER_PAGE = 50;
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     const needsPricingParam =
       filter === "needs_price"
         ? "&needsPricing=true"
@@ -2007,6 +2023,7 @@ function ProductsTab({
       // list just hides per-vendor pricing affordances they can't use.
       adminFetch("/admin/inventory/vendors").catch(() => ({ vendors: [] })),
     ]);
+    if (sequence !== loadSequence.current) return;
     setProducts(pData.products || []);
     setCategories(pData.categories || []);
     setTotalProducts(pData.total || 0);
@@ -2015,8 +2032,10 @@ function ProductsTab({
   }, [search, catFilter, page, filter]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    let current = true;
+    void load().catch(() => { if (current) setLoading(false); });
+    return () => { current = false; loadSequence.current += 1; };
+  }, [load, refreshId]);
 
   const savePrice = async (productId, vendorId, price, quantity) => {
     try {
@@ -2785,10 +2804,12 @@ function ProductsTab({
 // Presigned evidence URLs last 1 h server-side; treat them as stale 5 min early.
 const EVIDENCE_LINK_TTL_MS = 55 * 60 * 1000;
 
-function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
+function RestockRequestsTab({ showToast, onUpdate, canAuthor = false, refreshId, requestId = null }) {
+  const [, setSearchParams] = useSearchParams();
   const [requests, setRequests] = useState([]);
-  const [status, setStatus] = useState("active");
+  const [status, setStatus] = useState(requestId ? "all" : "active");
   const [loading, setLoading] = useState(true);
+  const loadSequence = useRef(0);
   const [receivingId, setReceivingId] = useState("");
   const [receiveDrafts, setReceiveDrafts] = useState({});
   // requestId → { screenshots: [{ label, url }], expiresAt } once fetched. The
@@ -2818,20 +2839,22 @@ function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
   };
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
     setLoading(true);
     try {
-      const data = await adminFetch(`/admin/inventory/restock-requests?status=${encodeURIComponent(status)}`);
-      setRequests(data.requests || []);
+      const data = await adminFetch(`/admin/inventory/restock-requests?status=${encodeURIComponent(status)}${requestId ? `&requestId=${encodeURIComponent(requestId)}` : ""}`);
+      if (sequence === loadSequence.current) setRequests(data.requests || []);
     } catch (err) {
-      showToast(`Failed to load restock requests: ${err.message}`);
+      if (sequence === loadSequence.current) showToast(`Failed to load restock requests: ${err.message}`);
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [status, showToast]);
+  }, [status, showToast, requestId]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    void load();
+    return () => { loadSequence.current += 1; };
+  }, [load, refreshId]);
 
   async function runAction(request, action) {
     setReceivingId(request.id);
@@ -2872,7 +2895,10 @@ function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
             Product requests for inventory needs.
           </p>
         </div>
-        <select
+        {requestId ? <button type="button" style={sBtn(D.bg, D.text)} onClick={() => {
+          setSearchParams(params => { const next = new URLSearchParams(params); next.delete("requestId"); return next; });
+          setStatus("active");
+        }}>Show all requests</button> : <select
           value={status}
           onChange={(e) => setStatus(e.target.value)}
           style={{ ...sInput, width: 160 }}
@@ -2883,7 +2909,7 @@ function RestockRequestsTab({ showToast, onUpdate, canAuthor = false }) {
           <option value="received">Received</option>
           <option value="cancelled">Cancelled</option>
           <option value="all">All</option>
-        </select>
+        </select>}
       </div>
       {loading ? (
         <div style={{ color: D.muted, fontSize: 13 }}>Loading restock requests...</div>
@@ -3214,11 +3240,15 @@ function ExpandedProduct({
   onInventoryChanged,
   showToast,
 }) {
+  usePublishIntelligenceBarPageData({ product_id: product.id });
+  const { lastMutation } = useIntelligenceBarActions();
+  const inventoryRefresh = lastMutation?.product_id === product.id ? lastMutation.id : null;
   const [vendorId, setVendorId] = useState(vendors[0]?.id || "");
   const [price, setPrice] = useState("");
   const [qty, setQty] = useState("");
   const [movements, setMovements] = useState([]);
   const [movementLoading, setMovementLoading] = useState(true);
+  const movementSequence = useRef(0);
   const [adjustForm, setAdjustForm] = useState({
     movementType: "restock",
     quantity: "",
@@ -3229,27 +3259,28 @@ function ExpandedProduct({
   });
 
   const loadMovements = useCallback(async () => {
+    const sequence = ++movementSequence.current;
     setMovementLoading(true);
     try {
       // Movements are owner-only (rows carry costUsed) — a technician's
       // expanded product just shows no history instead of erroring.
-      const data = await adminFetch(`/admin/inventory/${product.id}/movements`)
-        .catch(() => ({ movements: [] }));
-      setMovements(data.movements || []);
+      const data = await adminFetch(`/admin/inventory/${product.id}/movements`);
+      if (sequence === movementSequence.current) setMovements(data.movements || []);
     } catch {
-      setMovements([]);
+      if (sequence === movementSequence.current) setMovements([]);
     } finally {
-      setMovementLoading(false);
+      if (sequence === movementSequence.current) setMovementLoading(false);
     }
   }, [product.id]);
 
   useEffect(() => {
-    loadMovements();
+    void loadMovements();
     setAdjustForm((f) => ({
       ...f,
       unit: product.inventoryUnit || f.unit || "oz",
     }));
-  }, [loadMovements, product.inventoryUnit]);
+    return () => { movementSequence.current += 1; };
+  }, [loadMovements, product.inventoryUnit, inventoryRefresh]);
 
   const submitAdjustment = async () => {
     if (!adjustForm.quantity || !adjustForm.unit) {

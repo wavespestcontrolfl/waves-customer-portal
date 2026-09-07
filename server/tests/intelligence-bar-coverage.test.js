@@ -1,5 +1,18 @@
 const { frontendSourceCensus, checkCoverage } = require('../../scripts/check-ib-coverage');
 
+test('partial parity requires reviewed tested scopes and concrete remaining gaps', () => {
+  const action = { id: 'partial', fingerprint: 'changed', ui: { file: 'example.jsx', line: 1 } };
+  const record = { ...action, status: 'partially_verified', reviewedFingerprint: 'changed', tools: ['save'],
+    evidence: ['integration test'], verifiedScopes: ['admin'], remainingScopes: [{ scope: 'technician', reason: 'IB write policy remains read-only' }], review: 'scoped implementation review' };
+  expect(checkCoverage([action], { actions: [record] }, { save: {} })).toEqual([]);
+  for (const change of [{ evidence: [] }, { remainingScopes: [] }, { verifiedScopes: [] }, { review: null },
+    { verifiedScopes: [null] }, { verifiedScopes: [''] }, { verifiedScopes: ['   '] }, { review: ' ' },
+    { remainingScopes: [{ scope: ' ', reason: 'missing' }] }, { remainingScopes: [{ scope: 'technician', reason: '\t' }] }]) {
+    expect(checkCoverage([action], { actions: [{ ...record, ...change }] }, { save: {} })).toHaveLength(1);
+  }
+  expect(['verified', 'reviewed_exception'].includes(record.status)).toBe(false);
+});
+
 const source = `
 const save = async () => {
   await adminPostStrict('/admin/knowledge/sources', body);

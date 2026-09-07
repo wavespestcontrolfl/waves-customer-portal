@@ -642,8 +642,10 @@ function GlobalCommandPalette({ user }, ref) {
 
   const actionEpoch = threadEpochRef.current;
   const onActionResolved = (action, decision, body) => {
-    if (body?.success && body?.result?.verification?.persisted && body.result.customer_id) {
-      notifyMutation?.({ id: action.id, customer_id: body.result.customer_id });
+    if (body?.success && body?.result?.verification?.persisted) {
+      notifyMutation?.({ id: action.id, customer_id: body.result.customer_id,
+        product_id: body.result.verification.product_id,
+        domain: body.result.verification.product_id ? 'inventory' : undefined });
     }
     // A retained legacy card still needs its receipt after navigation. Mapping
     // by ID cannot restore a card removed by Clear or task-context isolation.

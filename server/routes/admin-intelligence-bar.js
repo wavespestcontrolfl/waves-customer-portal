@@ -2065,7 +2065,7 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
     return executeSeoTool(toolName, input, actionContext);
   }
   if (PROCUREMENT_TOOL_NAMES.has(toolName)) {
-    return executeProcurementTool(toolName, input);
+    return executeProcurementTool(toolName, input, actionContext);
   }
   if (REVENUE_TOOL_NAMES.has(toolName)) {
     return executeRevenueTool(toolName, input);
@@ -2450,6 +2450,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
             // authenticated request, never from model-supplied input.
             result = await executeToolByName(toolUse.name, executionInput, techContext, {
               actorId: getAdminActorId(req), readCustomerIds: taskContext?.targets?.map(target => target.customer_id) || [],
+              isAdmin: req.techRole === 'admin', technicianId: req.technicianId,
             });
             if (isToolFailure(result)) {
               failed = true;
@@ -2845,6 +2846,7 @@ router.post('/confirm-action', async (req, res, next) => {
     }
 
     if (ADMIN_ONLY_TOOL_NAMES.has(action.tool_name) && req.techRole !== 'admin') {
+      await PendingActions.recordResult(action.id, { success: false, blocked: true, code: 'permission_denied', error: 'Admin access required for this action' });
       return res.status(403).json({ error: 'Admin access required for this action' });
     }
 
@@ -2852,6 +2854,7 @@ router.post('/confirm-action', async (req, res, next) => {
     // toolset (the tool name rides on the stored pending action). After the
     // admin-only guard so its message wins for the tools it covers.
     if (!isToolAllowedForRole(action.tool_name, req.techRole)) {
+      await PendingActions.recordResult(action.id, { success: false, blocked: true, code: 'permission_denied', error: 'This action is not available to your role' });
       return res.status(403).json({ error: 'This action is not available to your role' });
     }
 
@@ -3039,42 +3042,11 @@ router.post('/confirm-action', async (req, res, next) => {
             execParams._verified_rows_matched = livePreview.rows_matched;
           }
         }
-        // update_restock_request receive: the verified preview's stock
-        // delta rides to the executor to re-assert under the
-        // request+product row locks (GH r11 P1) — the confirmed executor
-        // re-derives the receive amount from unlocked reads, so a request
-        // or product edited after this preflight could otherwise add a
-        // different amount than the card showed.
-        if (action.tool_name === 'update_restock_request' && livePreview?.adds !== undefined) {
-          // stock_before rides too (pre-push r11 P1): the card shows exact
-          // before/after totals, so a concurrent inventory movement must
-          // refuse rather than apply the approved delta to a different
-          // starting balance.
-          execParams._verified_receive = {
-            adds: livePreview.adds,
-            unit: livePreview.unit,
-            stock_before: livePreview.stock_before,
-          };
-        }
-        // Same contract for the OTHER inventory writers (GH r12 P1):
-        // adjust_stock re-derives the movement from the freshly locked
-        // balance, and create_restock_request rereads current_stock/unit/
-        // vendor unlocked — either could apply/store values different
-        // from the card's. The verified preview's snapshot rides to the
-        // executor to re-assert under the product row lock.
-        if (action.tool_name === 'adjust_stock' && livePreview?.stock_after !== undefined) {
-          execParams._verified_adjustment = {
-            stock_before: livePreview.stock_before,
-            stock_after: livePreview.stock_after,
-            unit: livePreview.unit,
-          };
-        }
-        if (action.tool_name === 'create_restock_request' && livePreview?.preview === true) {
-          execParams._verified_request = {
-            current_stock: livePreview.current_stock ?? null,
-            unit: livePreview.unit,
-            vendor: livePreview.vendor ?? null,
-          };
+        // Bind every inventory write to the exact resolved product and
+        // full-precision preview, then recheck that version under domain locks.
+        if (['adjust_stock', 'create_restock_request', 'update_restock_request'].includes(action.tool_name)) {
+          execParams._verified_inventory_version = livePreview?._version;
+          if (livePreview?.product?.id) execParams.product_id = livePreview.product.id;
         }
       }
       // Server-derived confirmation: the operator clicked Confirm. This is

@@ -193,8 +193,10 @@ communication was performed. `GATE_IB_PLATFORM` defaults off.
 ## Outstanding implementation
 
 Phase 2 saved-property creation, labels/occupancy and primary switching are
-implemented in `intelligence-bar-property-workflows.md`. Shared inventory
-operations and existing-customer estimates remain next. Phase 3 remaining domain operations
+implemented in `intelligence-bar-property-workflows.md`. Shared admin inventory
+stock/request/receive operations are verified in `intelligence-bar-inventory-workflows.md`,
+with technician coverage explicitly incomplete. Existing-customer estimates are
+next. Phase 3 remaining domain operations
 are enumerated in `intelligence-bar-remaining-capabilities.md`; this is engineering
 work, not a credential blocker. Compound workflow and comprehensive adversarial
 verification remain incomplete.

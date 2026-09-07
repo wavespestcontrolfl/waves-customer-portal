@@ -144,8 +144,16 @@ function checkCoverage(current, manifest, policy) {
   for (const action of current) {
     const previous = stored.get(action.id);
     if (!previous) { errors.push(`New unmapped UI action: ${action.ui.file}:${action.ui.line}`); continue; }
-    const implemented = previous.tools?.length && previous.tools.every(name => policy[name])
-      && previous.status === 'verified' && previous.evidence?.length;
+    const tested = [previous.tools?.length, previous.tools?.every(name => policy[name]), previous.evidence?.length].every(Boolean);
+    // A reviewed partial delivery may change its UI while outstanding scopes
+    // stay in the unsupported denominator. It must name both tested and missing
+    // scopes; a registered tool or an empty gap list is not parity evidence.
+    const verifiedScopes = Array.isArray(previous.verifiedScopes) ? previous.verifiedScopes : [];
+    const remainingScopes = Array.isArray(previous.remainingScopes) ? previous.remainingScopes : [];
+    const partialText = [previous.review, ...verifiedScopes, ...remainingScopes.flatMap(scope => [scope?.scope, scope?.reason])];
+    const partialReviewed = [verifiedScopes.length, remainingScopes.length,
+      partialText.every(value => typeof value === 'string' && value.trim().length > 0)].every(Boolean);
+    const implemented = tested && (previous.status === 'verified' || (previous.status === 'partially_verified' && partialReviewed));
     const exception = previous.status === 'reviewed_exception' && previous.exception?.review && previous.exception?.reason;
     if ((implemented || exception) && previous.reviewedFingerprint === action.fingerprint) continue;
     if (previous.baselineFingerprint !== action.fingerprint) errors.push(`Changed action needs IB mapping or reviewed exception: ${action.ui.file}:${action.ui.line}`);
