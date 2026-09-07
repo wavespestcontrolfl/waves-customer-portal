@@ -559,7 +559,8 @@ function getHeldConnection() {
  * and the watchers re-alert every pass (ops-inbox triage 2026-09-05 lane
  * 3: voice-profile-distiller, auto-dispatch; 09-07: three rows at 100–240
  * minutes). The advisory lock is the proof of death: it is session-scoped,
- * so a process that exited holds nothing. Every running row whose lock is
+ * so a process that exited holds nothing — read from pg_locks, never by
+ * taking the lock (lockHeldByAnySession). Every running row whose lock is
  * FREE is marked failed with the reason; a row whose lock is HELD is an
  * overlapping instance still in its body and is left alone, and an
  * unknown probe (null) never settles on a guess. The update is pinned to
@@ -567,6 +568,36 @@ function getHeldConnection() {
  * the read and the write keeps its fresh 'running'. Called once at boot
  * from the scheduler; fail-soft, returns the settled job names.
  */
+/**
+ * Whether ANY session holds a job's advisory lock — read from pg_locks,
+ * never by acquiring it. isLocked() probes with pg_try_advisory_lock, which
+ * briefly OWNS the work lease: a real tick colliding with that instant
+ * reads lease_held and skips its body (a skipped daily billing tick misses
+ * its cohort for good — codex P1 on #4103), so the maintenance sweep must
+ * not use it. pg_locks reports an int8 advisory key as (classid = high 32
+ * bits, objid = low 32 bits, objsubid = 1); the shift-or reassembles the
+ * signed key hashtext() produced. Returns true / false, or null when the
+ * probe itself failed.
+ */
+async function lockHeldByAnySession(jobName) {
+  try {
+    const res = await db.raw(
+      `SELECT EXISTS (
+         SELECT 1 FROM pg_locks
+         WHERE locktype = 'advisory' AND granted AND objsubid = 1
+           AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+           AND ((classid::bigint << 32) | objid::bigint) = hashtext(?)::bigint
+       ) AS held`,
+      [`cron:${jobName}`],
+    );
+    const held = res?.rows?.[0]?.held;
+    return typeof held === 'boolean' ? held : null;
+  } catch (err) {
+    logger.warn(`[cron-lock] lockHeldByAnySession(${jobName}) failed: ${err.message}`);
+    return null;
+  }
+}
+
 async function settleDeadRunningJobs() {
   let rows;
   try {
@@ -577,7 +608,7 @@ async function settleDeadRunningJobs() {
   }
   const settled = [];
   for (const row of rows || []) {
-    const held = await isLocked(row.job_name);
+    const held = await lockHeldByAnySession(row.job_name);
     if (held !== false) continue;
     try {
       const now = new Date();
@@ -599,4 +630,4 @@ async function settleDeadRunningJobs() {
   return settled;
 }
 
-module.exports = { runExclusive, isLocked, recordJobStart, recordJobEnd, recordMissedTick, settleDeadRunningJobs, wasLockSkipped, sanitizeJobError, getHeldConnection };
+module.exports = { runExclusive, isLocked, lockHeldByAnySession, recordJobStart, recordJobEnd, recordMissedTick, settleDeadRunningJobs, wasLockSkipped, sanitizeJobError, getHeldConnection };

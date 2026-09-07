@@ -4,6 +4,7 @@
 // A held lock is an overlapping instance still running; an unknown probe
 // never settles on a guess; the update is pinned to the observed
 // last_started_at so a job that restarted in between keeps its fresh row.
+// The probe READS pg_locks (db.raw) — it never takes the work lease.
 const rows = [];
 jest.mock('../models/db', () => {
   const state = { updates: [] };
@@ -22,7 +23,10 @@ jest.mock('../models/db', () => {
     return b;
   });
   fn.client = { acquireConnection: jest.fn(), releaseConnection: jest.fn() };
-  fn.raw = jest.fn((sql) => ({ __raw: sql }));
+  // db.raw serves two callers: the pg_locks probe (async, with bindings)
+  // and the consecutive_failures increment (a raw fragment, no bindings).
+  fn.raw = jest.fn((sql, bindings) => (bindings ? state.probe(bindings[0]) : { __raw: sql }));
+  state.probe = async () => ({ rows: [{ held: false }] });
   fn.__state = state;
   return fn;
 });
@@ -32,14 +36,13 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { settleDeadRunningJobs } = require('../utils/cron-lock');
 
-const lockProbe = (freeByJob) => ({
-  query: jest.fn(async ({ values }) => {
-    const job = String(values[0]).replace(/^cron:/, '');
-    const free = freeByJob[job];
-    if (free === 'throw') throw new Error('probe failed');
-    return { rows: [{ locked: free }] }; // try_lock succeeds ⇒ free
-  }),
-});
+// heldByJob: true = some session holds the lock, false = free, 'throw' =
+// the probe itself fails (never settles on a guess).
+const probe = (heldByJob) => async (key) => {
+  const held = heldByJob[String(key).replace(/^cron:/, '')];
+  if (held === 'throw') throw new Error('probe failed');
+  return { rows: [{ held }] };
+};
 
 describe('settleDeadRunningJobs', () => {
   beforeEach(() => {
@@ -55,7 +58,7 @@ describe('settleDeadRunningJobs', () => {
       { job_name: 'still-running-elsewhere', last_started_at: t },
       { job_name: 'probe-broken', last_started_at: t },
     );
-    db.client.acquireConnection.mockImplementation(async () => lockProbe({ 'price-scan-weekly': true, 'still-running-elsewhere': false, 'probe-broken': 'throw' }));
+    db.__state.probe = probe({ 'price-scan-weekly': false, 'still-running-elsewhere': true, 'probe-broken': 'throw' });
     const settled = await settleDeadRunningJobs();
     expect(settled).toEqual(['price-scan-weekly']);
     expect(db.__state.updates).toHaveLength(1);
@@ -65,11 +68,15 @@ describe('settleDeadRunningJobs', () => {
     expect(patch.last_error).toMatch(/process exited mid-run/);
     expect(patch.consecutive_failures).toEqual({ __raw: 'consecutive_failures + 1' });
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('price-scan-weekly'));
+    // The probe reads pg_locks; it never acquires the job's advisory lock.
+    expect(db.client.acquireConnection).not.toHaveBeenCalled();
+    expect(db.raw.mock.calls.filter(([, b]) => b).map(([sql]) => sql)).toEqual(expect.arrayContaining([expect.stringContaining('FROM pg_locks')]));
+    expect(db.raw.mock.calls.map(([sql]) => sql).join(' ')).not.toMatch(/pg_try_advisory_lock/);
   });
 
   test('a job that restarted between the read and the write keeps its fresh running row', async () => {
     rows.push({ job_name: 'auto-dispatch', last_started_at: new Date('2026-09-07T07:40:00Z'), restarted: true });
-    db.client.acquireConnection.mockImplementation(async () => lockProbe({ 'auto-dispatch': true }));
+    db.__state.probe = probe({ 'auto-dispatch': false });
     expect(await settleDeadRunningJobs()).toEqual([]);
     expect(db.__state.updates).toHaveLength(1); // attempted, pinned, matched 0 rows
   });
@@ -77,18 +84,19 @@ describe('settleDeadRunningJobs', () => {
   test('a lock held at boot (outgoing instance) that is free on a later pass is settled then', async () => {
     const t = new Date('2026-09-07T07:40:00Z');
     rows.push({ job_name: 'voice-profile-distiller', last_started_at: t });
-    db.client.acquireConnection.mockImplementationOnce(async () => lockProbe({ 'voice-profile-distiller': false }));
+    db.__state.probe = probe({ 'voice-profile-distiller': true });
     expect(await settleDeadRunningJobs()).toEqual([]);
     expect(db.__state.updates).toHaveLength(0);
     // The outgoing instance was killed mid-body: its session lock is gone.
-    db.client.acquireConnection.mockImplementationOnce(async () => lockProbe({ 'voice-profile-distiller': true }));
+    db.__state.probe = probe({ 'voice-profile-distiller': false });
     expect(await settleDeadRunningJobs()).toEqual(['voice-profile-distiller']);
     expect(db.__state.updates).toHaveLength(1);
   });
 
-  test('nothing running ⇒ no probes, no writes', async () => {
+  test('nothing running ⇒ no probes, no writes, and the work lease is never taken', async () => {
     expect(await settleDeadRunningJobs()).toEqual([]);
     expect(db.client.acquireConnection).not.toHaveBeenCalled();
+    expect(db.raw).not.toHaveBeenCalled();
     expect(db.__state.updates).toHaveLength(0);
   });
 

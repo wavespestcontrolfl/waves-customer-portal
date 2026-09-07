@@ -52,7 +52,7 @@ test.each([false, true])('handoff alerts stay registered with cronJobs off and a
   await tick();
   // Only the handoff tick and the job_health dead-running settle (ledger
   // maintenance, registered above the cronJobs early return) survive.
-  expect(cron.schedule.mock.calls.map(([expression]) => expression).sort()).toEqual(['*/15 * * * *', '10 4 * * *']);
+  expect(cron.schedule.mock.calls.map(([expression]) => expression).sort()).toEqual(['10 4 * * *', '3,18,33,48 * * * *']);
   expect(flagUnplacedVisits).toHaveBeenCalledTimes(1);
   expect(runAutoDispatch).not.toHaveBeenCalled();
 });
