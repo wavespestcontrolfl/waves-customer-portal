@@ -119,6 +119,7 @@ function discoverAllTools() {
 // attaches confirmed server-side; the boolean is NOT in any model-facing
 // schema. New writes go here + write-gates.js.
 const WRITE_TWO_STEP = [
+  'save_customer_estimate',
   'add_customer_property',
   'update_customer_property',
   'set_primary_property',
@@ -209,6 +210,7 @@ const LEGACY_BARE_WRITES = [
 // (cancel_and_reschedule_far_out) belong here — they return content for the
 // operator, the corresponding send/submit tool is the write.
 const READ_ONLY = [
+  'get_customer_estimate_context',
   'search_field_intelligence',
   'query_customers', 'find_overdue_customers', 'get_customer_detail', 'get_schedule_view',
   'query_revenue', 'compare_technicians', 'find_duplicates', 'draft_sms',
@@ -489,6 +491,11 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     customer_properties: [{ id: 'prop-saved', customer_id: 'cust-property', active: true,
       address_line1: '1 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201', occupancy_type: 'unknown' }] };
   const UNCONFIRMED_CALLS = [
+    ['customer-estimate-tools', 'executeCustomerEstimateTool', 'save_customer_estimate', {
+      customer_id: 'cust-estimate', property_id: '00000000-0000-0000-0000-000000000003', lawn_applications: 9,
+    }, { customers: [{ id: 'cust-estimate', first_name: 'Estimate', last_name: 'Fixture' }],
+      customer_properties: [{ id: '00000000-0000-0000-0000-000000000003', customer_id: 'cust-estimate', address_line1: '1 Example St',
+        city: 'Bradenton', state: 'FL', zip: '34208', property_sqft: 5000, lot_sqft: 10000, lawn_type: 'St. Augustine' }] }],
     ['property-tools', 'executePropertyTool', 'add_customer_property', { customer_id: 'cust-property',
       address_line1: '2 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201' }, propertySeed],
     ['property-tools', 'executePropertyTool', 'update_customer_property', { customer_id: 'cust-property', property_id: 'prop-saved', label: 'Family' }, propertySeed],
@@ -564,7 +571,12 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     dbMock.schema = db.schema;
 
     const executor = require(path.join(TOOLS_DIR, mod))[exec];
-    const result = await executor(toolName, input);
+    // This recorder has no pricing_config rows. Live sync success is a
+    // controlled prerequisite here; the real-DB estimate suite tests outages.
+    const pricingSync = toolName === 'save_customer_estimate'
+      ? jest.spyOn(require('../services/pricing-engine'), 'syncConstantsFromDB').mockResolvedValue(true) : null;
+    let result;
+    try { result = await executor(toolName, input); } finally { pricingSync?.mockRestore(); }
 
     // The executor must have reached its confirmation gate — not an error or
     // "not found" early return — and answered with a preview/proposal.
@@ -689,6 +701,6 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // Existing pure previews remain smokable. The optional address writer
     // explicitly opts out of live smoke; its preview is exercised above.
     const explicitlySkipped = WRITE_TWO_STEP.filter(name => ib.get(name)?.sideEffects === true);
-    expect(explicitlySkipped).toEqual(['switch_appointment_property']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property']);
   });
 });

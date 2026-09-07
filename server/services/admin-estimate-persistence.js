@@ -49,6 +49,15 @@ function estimateEditVersion(row) {
   return crypto.createHash('sha256').update(JSON.stringify(content)).digest('hex');
 }
 
+function assertApprovedEstimatePricing(writeFields, expectedEngineResultDigest) {
+  if (!expectedEngineResultDigest) return;
+  const data = parseStoredEstimateData(writeFields.estimate_data);
+  if (writeFields.pricing_authority !== 'SERVER'
+      || require('./agent-estimate-preview').agentEngineResultDigest(data?.engineResult) !== expectedEngineResultDigest) {
+    throw errorWithStatus('The estimate price or options changed. Review a fresh estimate before saving.', 409);
+  }
+}
+
 // Standard send-time expiry window. Also consumed by the expiration cron
 // to tell an operator EXTENSION (expires_at pushed beyond this window)
 // apart from the stamp every normal send writes.
@@ -1755,6 +1764,7 @@ async function resolveEstimateWritePayload({
   recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
   pricingOut = null, // optional side-channel: { fallbackReason } for post-commit alerts
   storedProposal = null, // revise only: the ROW's estimate_data.proposal (server-owned, see stripClientProposal)
+  requireLivePricing = false,
 }) {
   const {
     showOneTimeOption,
@@ -1786,11 +1796,14 @@ async function resolveEstimateWritePayload({
   // last-synced constants as before.
   let liveConfigVerified = false;
   try {
-    liveConfigVerified = typeof pricingEngine.syncConstantsFromDB === 'function'
-      ? (await pricingEngine.syncConstantsFromDB(database)) !== false
-      : true;
+    const synced = typeof pricingEngine.syncConstantsFromDB === 'function'
+      ? await pricingEngine.syncConstantsFromDB(database) : undefined;
+    liveConfigVerified = requireLivePricing ? synced === true : synced !== false;
   } catch (err) {
     logger.warn(`[admin-estimate] pricing-config sync before floor normalize failed: ${err.message}`);
+  }
+  if (requireLivePricing && !liveConfigVerified) {
+    throw errorWithStatus('Live pricing configuration is unavailable. Retry when pricing is available; no estimate was saved.', 503);
   }
   normalizeClientPestFloorMetadata(trustedEstimateData, { liveConfigVerified });
   assertLivePestBaseForClientPayload(trustedEstimateData, { liveConfigVerified });
@@ -2029,6 +2042,9 @@ async function createOrReuseAdminEstimate({
   now = () => new Date(),
   randomBytes = crypto.randomBytes,
   recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
+  dryRun = false,
+  expectedEngineResultDigest = null,
+  requireLivePricing = false,
 }) {
   const clientDraftId = body.clientDraftId || null;
   if (clientDraftId && !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(clientDraftId)) {
@@ -2044,9 +2060,14 @@ async function createOrReuseAdminEstimate({
     now,
     recompute,
     pricingOut,
+    requireLivePricing,
   });
   const expiresAt = estimateExpiresAt(now);
   const memberLinkageWarning = await detectUnlinkedMemberAddress(database, body);
+
+  assertApprovedEstimatePricing(writeFields, expectedEngineResultDigest);
+  if (dryRun) return { estimate: { ...writeFields, status: 'draft' }, dryRun: true, memberLinkageWarning,
+    pricingFallbackReason: pricingOut.fallbackReason || null };
 
   return database.transaction(async (trx) => {
     // Reuse the estimate's primary identity for a retried create. The lock
@@ -2338,6 +2359,13 @@ function scheduledGroupGuardGroupIds(row, writeFields) {
   return fallbackRevisionGroupIds(row, writeFields);
 }
 
+// Grouped address revisions take this before the send guard and row locks.
+async function lockEstimateGroupAddressRevision(database, groupId) {
+  if (!groupId) return;
+  await database.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+    ['estimate-group-revise', String(groupId)]);
+}
+
 // LOCK ORDER (pre-push codex P1): group advisory xact lock(s) FIRST, then
 // the estimate row FOR UPDATE — the order the schedule route (group lock,
 // then the siblings FOR UPDATE) and the group send claim (group lock, then
@@ -2589,6 +2617,8 @@ async function reviseAdminEstimate({
   // builder preflights an edit-mode save with this so the operator confirms a
   // server-repriced total BEFORE it publishes to the customer's live link.
   dryRun = false,
+  expectedEngineResultDigest = null,
+  requireLivePricing = false,
 }) {
   const estimate = await database('estimates').where({ id: estimateId }).first();
   // The clarify re-price marker this revision OBSERVES before recomputing —
@@ -2675,6 +2705,7 @@ async function reviseAdminEstimate({
     now,
     recompute,
     pricingOut,
+    requireLivePricing,
   });
   // Engine-authoritative pricing on a LIVE link (validation audit SEC-002,
   // pre-push codex P0): a delivered estimate's bearer link renders whatever
@@ -2684,6 +2715,7 @@ async function reviseAdminEstimate({
   // operator fixes the inputs and retries. Drafts keep the fail-open save;
   // the send gate holds them.
   assertNoFallbackRevisionOfLiveLink(estimate, writeFields);
+  assertApprovedEstimatePricing(writeFields, expectedEngineResultDigest);
 
   // A revision that changes or introduces a group id — OR changes the
   // estimate's contact identity while grouped (codex #3244 r5: a lead-only
@@ -2887,10 +2919,7 @@ async function reviseAdminEstimate({
   const updated = await database.transaction(async (trx) => {
     if (groupDuplicateRecheckNeeded) {
       const { normalizedEstimatePropertyKey, samePropertyKey } = require('./estimate-property-linkage');
-      await trx.raw(
-        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['estimate-group-revise', String(writeFields.estimate_group_id)],
-      );
+      await lockEstimateGroupAddressRevision(trx, writeFields.estimate_group_id);
       const revisedKey = normalizedEstimatePropertyKey(writeFields.address);
       if (revisedKey?.street) {
         const members = await trx('estimates')
@@ -3101,6 +3130,7 @@ module.exports = {
 module.exports.stripClientProposal = stripClientProposal;
 module.exports.assertNoFallbackRevisionInScheduledGroup = assertNoFallbackRevisionInScheduledGroup;
 module.exports.lockScheduledGroupGuardGroups = lockScheduledGroupGuardGroups;
+module.exports.lockEstimateGroupAddressRevision = lockEstimateGroupAddressRevision;
 module.exports.scheduledGroupGuardGroupIds = scheduledGroupGuardGroupIds;
 module.exports.assertNoRevisionDuringGroupSend = assertNoRevisionDuringGroupSend;
 module.exports.fallbackRevisionGroupIds = fallbackRevisionGroupIds;

@@ -283,8 +283,10 @@ communication was performed. `GATE_IB_PLATFORM` defaults off.
 Phase 2 saved-property creation, labels/occupancy and primary switching are
 implemented in `intelligence-bar-property-workflows.md`. Shared admin inventory
 stock/request/receive operations are verified in `intelligence-bar-inventory-workflows.md`,
-with technician coverage explicitly incomplete. Existing-customer estimates are
-next. Phase 3 remaining domain operations
+with technician coverage explicitly incomplete. Administrator existing-customer
+residential lawn creation/revision is implemented in
+`intelligence-bar-estimate-workflows.md`; the other estimate programs and lifecycle
+remain incomplete. Phase 3 remaining domain operations
 are enumerated in `intelligence-bar-remaining-capabilities.md`; this is engineering
 work, not a credential blocker. Compound workflow and comprehensive adversarial
 verification remain incomplete.

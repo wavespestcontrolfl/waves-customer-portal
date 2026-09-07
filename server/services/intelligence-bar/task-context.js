@@ -36,7 +36,7 @@ const PAGE_REFERENCE_RE = /\b(?:(?:this|that|current|selected|viewed|open)\s+(?:
 function targetClause(prompt, retainRecordConstraints = false) {
   // Message bodies and replacement values are data, even when they contain
   // another customer's exact name. They never select a recipient/account.
-  let clause = String(prompt).split(/[:;\n“”"]|\b(?:notes?|message|instructions|comments)\s+that\b|\b(?:saying|regarding|about)\b/i)[0];
+  let clause = String(prompt).split(/[:;\n“”"]|\b(?:notes?|message|instructions|comments)\s+(?:that|mentioning|referencing)\b|\b(?:saying|regarding|about)\b/i)[0];
   if (/\b(?:change|update|set|rename|relabel|add|save)\b/i.test(clause)) {
     clause = clause.split(/\b(?:name|address|email|phone|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+/i)[0];
   }
@@ -214,6 +214,20 @@ async function resolve({ prompt, pageData, selectedTarget }) {
     && /\b(?:this|that|current|selected|viewed|open)\s+review\b/i.test(reviewClause) ? page.ids.review_id : null);
   const requestedRecords = Object.fromEntries([...targetClause(prompt, true).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(property|appointment|estimate|invoice|review|email|call|product|lead)\b/gi)]
     .map(match => { const kind = `${match[1].toLowerCase()}_id`; return [kind, page.ids[kind] || null]; }));
+  // Explicit current-request child IDs narrow even same-customer operations.
+  // Keep all deliberately named records for compound requests; body text never
+  // enters this clause and page hints cannot replace the explicit selection.
+  const explicitRecords = {};
+  // A content-introducing noun ends explicit ID authority regardless of the
+  // conjunction or wording that follows it. Deictic constraints above may
+  // still narrow existing customer authority; they never widen this ID set.
+  const explicitRecordClause = targetClause(prompt, true).split(/\b(?:notes?|messages?|instructions|comments)\b/i)[0];
+  for (const match of explicitRecordClause.matchAll(/\b(property|appointment|estimate|invoice|review|email|call|product|lead)\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi)) {
+    (explicitRecords[`${match[1].toLowerCase()}_id`] ||= []).push(match[2].toLowerCase());
+  }
+  for (const [kind, ids] of Object.entries(explicitRecords)) {
+    requestedRecords[kind] = Object.hasOwn(requestedRecords, kind) ? ids.filter(id => id === requestedRecords[kind]) : ids;
+  }
   return { page, candidates, ...selection, requestedRecords, requestPhrase: normalizeName(targetClause(prompt)),
     reviewReference: reviewReference?.toLowerCase() || null,
     bulkLeadRequest: !namesRequested(prompt) && /\b(?:all|bulk)\b.*\bleads\b/i.test(targetClause(prompt)),
@@ -224,7 +238,7 @@ async function resolve({ prompt, pageData, selectedTarget }) {
 }
 
 async function unlinkedRecordIsReferenced(record, context) {
-  if (Object.hasOwn(context.requestedRecords || {}, record.kind) && context.requestedRecords[record.kind] !== record.id) return false;
+  if (Object.hasOwn(context.requestedRecords || {}, record.kind) && ![context.requestedRecords[record.kind]].flat().includes(record.id)) return false;
   if (record.customer_id) return true;
   const { targets = [], requestPhrase = '', explicitEmails = [] } = context;
   const ids = context.page?.ids || {};

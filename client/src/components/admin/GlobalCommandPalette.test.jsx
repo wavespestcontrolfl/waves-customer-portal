@@ -106,7 +106,7 @@ it('close/reopen retains the in-flight request, and double Enter starts only one
   expect(await screen.findByText('Saved request result')).toBeInTheDocument();
 });
 
-it.each(['appointment_id', 'product_id'])('a new selected %s on the same route invalidates a late response', async kind => {
+it.each(['appointment_id', 'product_id', 'property_id', 'estimate_id'])('a new selected %s on the same route invalidates a late response', async kind => {
   const ref = createRef();
   const tree = id => <MemoryRouter initialEntries={[kind === 'product_id' ? '/admin/inventory' : '/admin/dispatch']}>
     <IntelligenceBarPageDataProvider><SelectedRecord kind={kind} id={id} /><GlobalCommandPalette ref={ref} /></IntelligenceBarPageDataProvider>

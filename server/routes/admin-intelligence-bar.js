@@ -186,6 +186,8 @@ const PII_TOOL_NAMES = new Set([
   'switch_appointment_property',
   'update_property_access',
   'add_customer_property',
+  'get_customer_estimate_context',
+  'save_customer_estimate',
   'update_customer_property',
   'set_primary_property',
   // cancel_plan previews/results echo the customer's name and free-text note.
@@ -465,6 +467,7 @@ async function agentEstimateEnabled(req) {
 }
 
 function summarizeProposal(toolName, params, displayParams = params) {
+  if (toolName === 'save_customer_estimate') return params.estimate_id ? 'Revise saved lawn estimate' : 'Save lawn estimate draft';
   // One level of plain-object params flattens into the summary — without it
   // an update_customer card reads "customer_id: X" and hides WHAT is being
   // changed (the confirmation card must show everything the commit will do).
@@ -3049,6 +3052,7 @@ router.post('/confirm-action', async (req, res, next) => {
         if (['add_customer_property', 'update_customer_property', 'set_primary_property'].includes(action.tool_name)) {
           execParams._verified_property_version = livePreview._version;
         }
+        if (action.tool_name === 'save_customer_estimate') execParams._verified_estimate_version = livePreview._version;
         // The fingerprint just bound this preview to the card, so its stop
         // sets ARE the approved ones — hand them to the executor to reassert
         // under its locks (swap_tech_assignments, assign_technician).
@@ -3101,6 +3105,7 @@ router.post('/confirm-action', async (req, res, next) => {
 
     const result = await executeApprovedTool(action.tool_name, execParams, techContextForExecution(req), {
       actorId: getAdminActorId(req),
+      operationId: action.id,
       isAdmin: req.techRole === 'admin',
       technicianId: req.technicianId || req.technician?.id || null,
       confirmed: true,
@@ -3108,7 +3113,11 @@ router.post('/confirm-action', async (req, res, next) => {
         ? { approvedPreviewFingerprint: approvedAgentEstimateFingerprint }
         : {}),
     });
-    const receiptSaved = await PendingActions.recordResult(action.id, result);
+    let receiptSaved = await PendingActions.recordResult(action.id, result);
+    if (receiptSaved === false) {
+      // Some domains save the receipt atomically with their mutation.
+      receiptSaved = !!(await PendingActions.getActionReceipt(action.id, getAdminActorId(req)).catch(() => null))?.result;
+    }
 
     const outcome = executionOutcome(result);
     const success = ['completed', 'partially_completed', 'provider_accepted'].includes(outcome);
@@ -3124,7 +3133,12 @@ router.post('/confirm-action', async (req, res, next) => {
     if (claimedAction) {
       const result = { outcome_unknown: true, code: 'execution_interrupted',
         error: 'The action outcome could not be established. Check its status before taking further action.' };
-      await PendingActions.recordResult(claimedAction.id, result);
+      // A domain transaction may have committed its receipt before the runner
+      // stopped. Never replace that evidence, including if recovery reads fail.
+      const saved = await PendingActions.getActionReceipt(claimedAction.id, getAdminActorId(req)).catch(() => null);
+      if (saved?.result && saved.outcome !== 'outcome_unknown') {
+        return res.status(200).json({ success: saved.success, outcome: saved.outcome, tool: claimedAction.tool_name, result: saved.result });
+      }
       return res.status(200).json({ success: false, outcome: 'outcome_unknown', tool: claimedAction.tool_name, result });
     }
     logger.error(`[intelligence-bar] confirm-action failed (code=${err.code || 'unknown'})`);

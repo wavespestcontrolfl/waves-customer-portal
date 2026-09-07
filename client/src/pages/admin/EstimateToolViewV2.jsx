@@ -26,6 +26,7 @@ import {
   termiteBaitSystemLabel,
 } from "../../lib/estimateEngine";
 import { useNavigate } from "react-router-dom";
+import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { Button, Badge, Card, cn } from "../../components/ui";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
 import { ExternalLink } from "lucide-react";
@@ -1811,6 +1812,17 @@ export default function EstimateToolViewV2({
   const formRef = useRef(form);
   formRef.current = form;
   const dirty = JSON.stringify(form) !== savedFormRef.current;
+  const { lastMutation } = useIntelligenceBarActions();
+  const [latestEstimateMutation, setLatestEstimateMutation] = useState(null);
+  useEffect(() => {
+    if (lastMutation?.domain === "estimate" && lastMutation.estimate_id === editEstimateId) setLatestEstimateMutation(lastMutation);
+  }, [lastMutation, editEstimateId]);
+  const estimateRefresh = latestEstimateMutation?.estimate_id === editEstimateId ? latestEstimateMutation?.id : null;
+  const loadedEstimateRefresh = useRef(null);
+  const viewedEstimateReady = !editEstimateId || editMode?.id === editEstimateId;
+  usePublishIntelligenceBarPageData({ customer_id: viewedEstimateReady ? form.customerId || null : null,
+    property_id: viewedEstimateReady ? form.propertyId || null : null,
+    estimate_id: viewedEstimateReady ? savedId || editMode?.id || editEstimateId || null : null });
   const openMessages = useCustomerSms();
   useEffect(() => {
     if (!dirty) return undefined;
@@ -1934,7 +1946,14 @@ export default function EstimateToolViewV2({
   }, [activeLeadId, groupAnchorId]);
 
   useEffect(() => {
-    if (!editEstimateId || editEstimateId === editMode?.id) return undefined;
+    if (!editEstimateId || (editEstimateId === editMode?.id && (!estimateRefresh || loadedEstimateRefresh.current === estimateRefresh))) return undefined;
+    const refreshing = editEstimateId === editMode?.id;
+    loadedEstimateRefresh.current = estimateRefresh;
+    if (refreshing && dirty) {
+      setSaveError("This estimate changed in the Intelligence Bar. Your unsaved edits are still here. Reload this page to review the saved version.");
+      return undefined;
+    }
+    const observedForm = JSON.stringify(formRef.current);
     let cancelled = false;
     (async () => {
       setEditLoadError(null);
@@ -1951,6 +1970,10 @@ export default function EstimateToolViewV2({
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
         if (cancelled) return;
+        if (refreshing && JSON.stringify(formRef.current) !== observedForm) {
+          setSaveError("This estimate changed in the Intelligence Bar. Your unsaved edits are still here. Reload this page to review the saved version.");
+          return;
+        }
         if (!d.editable) {
           setEditMode(null);
           setEditLoadError(
@@ -1995,7 +2018,7 @@ export default function EstimateToolViewV2({
     return () => {
       cancelled = true;
     };
-  }, [editEstimateId]);
+  }, [editEstimateId, estimateRefresh]);
 
   function exitEditMode() {
     if (dirty && !window.confirm("Start a new estimate with unsaved changes?")) return;

@@ -448,7 +448,7 @@ function GlobalCommandPalette({ user }, ref) {
       threadSeqRef.current = null;
     }
     resetAttachments();
-  }, [location.pathname, location.search, context, ibPageData?.customer_id, ibPageData?.appointment_id, ibPageData?.product_id, ibPageData?.viewed_date, resetAttachments]);
+  }, [location.pathname, location.search, context, ibPageData?.customer_id, ibPageData?.property_id, ibPageData?.estimate_id, ibPageData?.appointment_id, ibPageData?.product_id, ibPageData?.viewed_date, resetAttachments]);
 
   // Load a server thread into the palette (resume-on-open and the picker
   // share this). Shows the thread's last reply — otherwise the palette
@@ -645,8 +645,8 @@ function GlobalCommandPalette({ user }, ref) {
   const onActionResolved = (action, decision, body) => {
     if (body?.success && body?.result?.verification?.persisted) {
       notifyMutation?.({ id: action.id, customer_id: body.result.customer_id,
-        product_id: body.result.verification.product_id,
-        domain: body.result.verification.product_id ? 'inventory' : undefined });
+        product_id: body.result.verification.product_id, estimate_id: body.result.estimate_id,
+        domain: body.result.verification.product_id ? 'inventory' : body.result.estimate_id ? 'estimate' : undefined });
     }
     // A retained legacy card still needs its receipt after navigation. Mapping
     // by ID cannot restore a card removed by Clear or task-context isolation.

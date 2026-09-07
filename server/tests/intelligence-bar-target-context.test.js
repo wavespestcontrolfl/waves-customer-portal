@@ -52,6 +52,32 @@ test('viewed and selected targets retain the database text version without Date 
 });
 const context = (customerId = A) => ({ targets: customerId ? [{ customer_id: customerId }] : [], page: { ids: {} } });
 
+test('explicit child identifiers constrain same-customer choices and exclude message content', async () => {
+  const one = 'abcdef01-0000-4000-8000-000000000001';
+  const two = 'abcdef01-0000-4000-8000-000000000002';
+  rows.estimates = [{ id: one, customer_id: A }, { id: two, customer_id: A }];
+  lookupRows = [rows.customers[0]];
+  const task = await Context.resolve({ prompt: `Revise estimate ${one.toUpperCase()} for Synthetic Person`, pageData: { estimate_id: two } });
+  expect(await Context.validateRecordTarget({ estimate_id: one }, task)).toBeNull();
+  expect(await Context.validateRecordTarget({ estimate_id: two }, task)).toMatchObject({ code: 'target_clarification_required' });
+  const multiple = await Context.resolve({ prompt: `Revise estimate ${one} and estimate ${two} for Synthetic Person`, pageData: {} });
+  expect(await Context.validateRecordTarget({ estimate_id: two }, multiple)).toBeNull();
+  const note = await Context.resolve({ prompt: `Add a note for Synthetic Person saying estimate ${two} needs attention`, pageData: {} });
+  expect(note.requestedRecords).toEqual({});
+  for (const noun of [`this estimate`, `estimate ${one}`]) {
+    for (const content of ['mentioning', 'referencing', 'containing', 'with', 'reading', 'for the office about']) {
+      const inline = await Context.resolve({ prompt: `Revise ${noun} for Synthetic Person and add a note ${content} estimate ${two}`, pageData: { estimate_id: one } });
+      expect(await Context.validateRecordTarget({ estimate_id: one }, inline)).toBeNull();
+      expect(await Context.validateRecordTarget({ estimate_id: two }, inline)).toMatchObject({ code: 'target_clarification_required' });
+    }
+  }
+  const conflicting = await Context.resolve({ prompt: `Revise this estimate or estimate ${two} for Synthetic Person`, pageData: { estimate_id: one } });
+  expect(await Context.validateRecordTarget({ estimate_id: two }, conflicting)).toMatchObject({ code: 'target_clarification_required' });
+  const attachedNote = await Context.resolve({ prompt: `Revise estimate ${one} for Synthetic Person with a note containing estimate ${two}`, pageData: {} });
+  expect(await Context.validateRecordTarget({ estimate_id: one }, attachedNote)).toBeNull();
+  expect(await Context.validateRecordTarget({ estimate_id: two }, attachedNote)).toMatchObject({ code: 'target_clarification_required' });
+});
+
 test.each(['reschedule_appointment', 'move_stops_to_day'])('%s cannot attach a customerless reservation to a customer task', async toolName => {
   const hold = '40000000-0000-4000-8000-000000000001';
   const owned = '40000000-0000-4000-8000-000000000002';
