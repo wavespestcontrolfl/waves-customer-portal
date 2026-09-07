@@ -14,6 +14,26 @@ const { recordAuditEvent } = require('./audit-log');
 // service this row" outcome.
 const TERMINAL_STATUSES = new Set(['completed', 'cancelled', 'no_show', 'rescheduled', 'skipped']);
 
+// The annual-prepay writer's method. Manual writers never create or replace
+// it: annual coverage is applied by annual-prepay-renewals after its funding
+// and service-scope checks, and the completion billing gate trusts that
+// authority only while the method and term link survive.
+const ANNUAL_PREPAY_METHOD = 'annual_prepay_invoice';
+
+function hasAnnualCoverage(row) {
+  return !!(row?.annual_prepay_term_id || row?.prepaid_method === ANNUAL_PREPAY_METHOD);
+}
+
+// Embed the annual-coverage refusal IN a manual single-visit stamp UPDATE
+// (bulk mark-prepaid, POST /:id/prepaid) so an annual activation that lands
+// between a pre-read and the write is never overwritten with a manual method
+// (Codex #4030 r7 P1). IS DISTINCT FROM keeps a NULL method eligible.
+function withoutAnnualCoverage(query) {
+  return query
+    .whereNull('annual_prepay_term_id')
+    .whereRaw('prepaid_method IS DISTINCT FROM ?', [ANNUAL_PREPAY_METHOD]);
+}
+
 // Series rows of the same family share `recurring_parent_id`. The parent row
 // itself has `recurring_parent_id IS NULL` and is identified by its own id
 // matching its children's parent pointer. resolveSeriesParentId() collapses
@@ -28,6 +48,10 @@ function resolveSeriesParentId(service) {
 // `lock: true` (inside a transaction) takes FOR UPDATE on the rows the stamp
 // will UPDATE — the non-terminal family only, filtered in SQL — so the
 // eligibility read and the stamps see one row state (stampSeriesPrepaid).
+// A NULL status is a live visit (service-cadence convention; the annual
+// writer's own predicate) — a bare NOT IN evaluates unknown and would drop a
+// legacy null-status sibling from the locked set, so an annual term or stamp
+// it carries could never refuse the manual write (Codex #4030 r7 P1).
 // Terminal rows are deliberately NOT locked: the series cancel locks its
 // cancellable children first and touches the (possibly completed) parent
 // last for the recurring_ongoing clear; locking the whole family here in
@@ -40,7 +64,10 @@ async function fetchSeriesRows(db, parentId, { lock = false } = {}) {
       this.where('recurring_parent_id', parentId).orWhere('id', parentId);
     })
     .orderBy(['scheduled_date', 'window_start', 'id']);
-  return lock ? q.whereNotIn('status', [...TERMINAL_STATUSES]).forUpdate() : q;
+  if (!lock) return q;
+  return q.where(function liveRows() {
+    this.whereNull('status').orWhereNotIn('status', [...TERMINAL_STATUSES]);
+  }).forUpdate();
 }
 
 // Round to cents so per-visit stamps reconcile to the series total without
@@ -107,7 +134,7 @@ async function stampSeriesPrepaid(db, {
   }
   // Annual coverage is applied by annual-prepay-renewals after its funding
   // and service-scope checks. A manual stamp cannot manufacture that evidence.
-  if (method === 'annual_prepay_invoice') {
+  if (method === ANNUAL_PREPAY_METHOD) {
     const err = new Error('Use the annual prepay workflow to apply annual coverage');
     err.status = 409;
     err.statusCode = 409;
@@ -158,7 +185,7 @@ async function stampSeriesPrepaid(db, {
     }
     // Never replace even pending/stale annual linkage with a cash stamp:
     // that changes which coverage authority the completion billing gate trusts.
-    if (eligible.some((row) => row.annual_prepay_term_id || row.prepaid_method === 'annual_prepay_invoice')) {
+    if (eligible.some(hasAnnualCoverage)) {
       const err = new Error('Series has annual prepay coverage; reconcile that term before recording a manual prepayment');
       err.status = 409;
       err.statusCode = 409;
@@ -336,6 +363,9 @@ async function listCustomerPrepaidPlans(db, customerId) {
 
 module.exports = {
   TERMINAL_STATUSES,
+  ANNUAL_PREPAY_METHOD,
+  hasAnnualCoverage,
+  withoutAnnualCoverage,
   resolveSeriesParentId,
   fetchSeriesRows,
   splitTotalAcrossVisits,

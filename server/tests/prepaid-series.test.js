@@ -3,6 +3,8 @@ const {
   splitTotalAcrossVisits,
   resolveSeriesParentId,
   stampSeriesPrepaid,
+  hasAnnualCoverage,
+  withoutAnnualCoverage,
   TERMINAL_STATUSES,
 } = require('../services/prepaid-series');
 jest.mock('../services/logger', () => ({ error: jest.fn() }));
@@ -59,6 +61,25 @@ describe('prepaid-series helpers', () => {
     });
   });
 
+  describe('manual single-visit guard', () => {
+    test('withoutAnnualCoverage embeds the null-safe annual predicates in the writer query', () => {
+      const query = { whereNull: jest.fn().mockReturnThis(), whereRaw: jest.fn().mockReturnThis() };
+      expect(withoutAnnualCoverage(query)).toBe(query);
+      expect(query.whereNull).toHaveBeenCalledWith('annual_prepay_term_id');
+      expect(query.whereRaw).toHaveBeenCalledWith('prepaid_method IS DISTINCT FROM ?', ['annual_prepay_invoice']);
+    });
+
+    test.each([
+      [{}, false],
+      [{ prepaid_method: null, annual_prepay_term_id: null }, false],
+      [{ prepaid_method: 'cash' }, false],
+      [{ annual_prepay_term_id: 'term-1' }, true],
+      [{ prepaid_method: 'annual_prepay_invoice' }, true],
+    ])('hasAnnualCoverage(%p) is %p', (row, expected) => {
+      expect(hasAnnualCoverage(row)).toBe(expected);
+    });
+  });
+
   describe('stampSeriesPrepaid', () => {
     test.each([null, undefined, '', ' ', false, true, [], [100], {}, NaN, Infinity, -1, 0])('refuses invalid payment %p before any database work', async (totalAmount) => {
       const db = jest.fn();
@@ -90,6 +111,8 @@ describe('prepaid-series helpers', () => {
     test.each([
       [{ customer_id: 'another-customer' }, 200, 409],
       [{ annual_prepay_term_id: 'pending-term' }, 200, 409],
+      // A legacy null-status sibling is live: its annual link refuses the write too.
+      [{ annual_prepay_term_id: 'legacy-term', status: null }, 200, 409],
       [{ prepaid_method: 'annual_prepay_invoice', prepaid_amount: 0 }, 200, 409],
       [{}, 0.01, 400],
     ])('refuses incompatible locked coverage before writing any sibling (%p)', async (overrides, amount, status) => {
@@ -98,6 +121,7 @@ describe('prepaid-series helpers', () => {
       const update = jest.fn();
       const query = { where: jest.fn().mockReturnThis(), orWhere: jest.fn().mockReturnThis(),
         orderBy: jest.fn().mockReturnThis(), whereNotIn: jest.fn().mockReturnThis(),
+        whereNull: jest.fn().mockReturnThis(), orWhereNotIn: jest.fn().mockReturnThis(),
         forUpdate: jest.fn().mockReturnThis(), first: jest.fn(async () => anchor), update,
         then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject) };
       const conn = Object.assign(jest.fn(() => query), { transaction: async (fn) => fn(conn) });
@@ -125,6 +149,8 @@ describe('prepaid-series helpers', () => {
           },
           orWhere() { return this; },
           whereNotIn() { return this; },
+          whereNull() { return this; },
+          orWhereNotIn() { return this; },
           whereIn() { return this; },
           whereRaw() { return this; },
           whereNotExists() { return this; },
@@ -184,6 +210,8 @@ describe('prepaid-series helpers', () => {
           where(arg) { if (typeof arg === 'function') arg.call(builder); this.whereArg = arg; return this; },
           orWhere() { return this; },
           whereNotIn(col, vals) { this.notIn = [col, vals]; return this; },
+          orWhereNotIn(col, vals) { this.notIn = [col, vals]; return this; },
+          whereNull(col) { this.nullCols = [...(this.nullCols || []), col]; return this; },
           whereIn() { return this; },
           whereRaw() { return this; },
           whereNotExists() { return this; },
@@ -194,7 +222,14 @@ describe('prepaid-series helpers', () => {
           update: jest.fn((patch) => { updates.push({ id: builder.whereArg?.id, patch }); return builder; }),
           returning: jest.fn(async () => [{ id: builder.whereArg?.id }]),
           then(resolve, reject) {
-            if (!String(builder._table || '').startsWith('audit_log')) familyReads.push({ locked: builder.locked === true, terminalExcluded: builder.notIn?.[0] === 'status' && builder.notIn[1].includes('cancelled') });
+            if (!String(builder._table || '').startsWith('audit_log')) {
+              familyReads.push({
+                locked: builder.locked === true,
+                terminalExcluded: builder.notIn?.[0] === 'status' && builder.notIn[1].includes('cancelled'),
+                // NULL status is live (Codex #4030 r7 P1): the lock predicate must keep it.
+                nullStatusIncluded: (builder.nullCols || []).includes('status'),
+              });
+            }
             return Promise.resolve(builder._table === 'audit_log' ? [] : lockedFamily).then(resolve, reject);
           },
         };
@@ -210,7 +245,7 @@ describe('prepaid-series helpers', () => {
       // The ONLY family read happens inside the transaction, under FOR UPDATE.
       // ...and locks only the rows it will update — terminal rows are
       // excluded in SQL so the cancel's completed parent is never taken.
-      expect(familyReads).toEqual([{ locked: true, terminalExcluded: true }]);
+      expect(familyReads).toEqual([{ locked: true, terminalExcluded: true, nullStatusIncluded: true }]);
       expect(updates.map((u) => u.id)).toEqual(['svc-1']);
       expect(result.visitsCovered).toBe(1);
       expect(result.perVisitAmount).toBe(200);

@@ -67,6 +67,8 @@ const {
   stampSeriesPrepaid,
   clearSeriesPrepaid,
   buildPrepaidSeriesContext,
+  hasAnnualCoverage,
+  withoutAnnualCoverage,
 } = require('../services/prepaid-series');
 // Single-visit prepaid stamp: refuse only rows that are genuinely over.
 // NOT the series helper's TERMINAL_STATUSES — that set also skips
@@ -75,6 +77,26 @@ const {
 // without a replacement (routes/schedule.js), and staff must still be able
 // to record its payment (pre-push hook on #3878).
 const PREPAID_STAMP_REFUSED_STATUSES = ['completed', 'cancelled', 'no_show', 'skipped'];
+// Why a single-visit stamp UPDATE matched no row, in the order the route
+// reports it: a terminal status, then annual coverage (Codex #4030 r7 P1).
+// Both predicates are embedded in the UPDATE itself; this only names the
+// refusal for the operator.
+const PREPAID_STAMP_REFUSALS = [
+  {
+    refused: (row) => PREPAID_STAMP_REFUSED_STATUSES.includes(String(row.status || '').toLowerCase()),
+    body: (row) => ({
+      error: `This visit is already ${row.status} — it can't be marked prepaid. Refresh and try again.`,
+      code: 'visit_terminal',
+    }),
+  },
+  {
+    refused: hasAnnualCoverage,
+    body: () => ({
+      error: 'This visit has annual prepay coverage — reconcile that term before recording a manual prepayment.',
+      code: 'annual_prepay_coverage',
+    }),
+  },
+];
 const {
   auditRecurringScheduleAnomalies,
 } = require('../services/recurring-schedule-audit');
@@ -7271,17 +7293,22 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
           case 'mark_prepaid': {
             const amt = Number(payload?.totalAmount);
             if (!Number.isFinite(amt) || amt <= 0) throw Object.assign(new Error('totalAmount must be a positive number'), { isValidation: true });
-            const svc = await db('scheduled_services').where({ id }).first('annual_prepay_term_id', 'prepaid_method');
-            if (!svc) throw Object.assign(new Error('Scheduled service not found'), { isValidation: true });
-            if (svc.annual_prepay_term_id || svc.prepaid_method === 'annual_prepay_invoice') {
-              throw Object.assign(new Error('Visit has annual prepay coverage; reconcile that term before recording a manual prepayment'), { isValidation: true });
-            }
-            await db('scheduled_services').where({ id }).update({
-              prepaid_amount: amt,
-              prepaid_method: payload?.method || 'cash',
-              prepaid_note: payload?.note || null,
-              prepaid_at: new Date(),
-            });
+            // Annual coverage is refused IN the UPDATE, not by a pre-read: an
+            // annual-prepay activation stamping the row between a SELECT and
+            // an unconditional UPDATE would be overwritten with a manual
+            // method, and completion would skip the annual coverage
+            // validator for an already-paid visit (Codex #4030 r7 P1).
+            const stamped = await withoutAnnualCoverage(db('scheduled_services').where({ id }))
+              .update({
+                prepaid_amount: amt,
+                prepaid_method: payload?.method || 'cash',
+                prepaid_note: payload?.note || null,
+                prepaid_at: new Date(),
+              })
+              .returning(['id']);
+            const unstamped = stamped.length ? null : await db('scheduled_services').where({ id }).first('id');
+            if (!stamped.length && !unstamped) throw Object.assign(new Error('Scheduled service not found'), { isValidation: true });
+            if (!stamped.length) throw Object.assign(new Error('Visit has annual prepay coverage; reconcile that term before recording a manual prepayment'), { isValidation: true });
             break;
           }
         }
@@ -11264,9 +11291,14 @@ router.post('/:id/prepaid', async (req, res, next) => {
     // skips): a visit cancelled between the ownership read and this write
     // — including by a concurrent series cancel — must not end up holding
     // money for a visit that never runs (Codex #3878 r1 P1 / hook r2).
+    // Annual coverage is refused by the same UPDATE: this is the third
+    // manual writer next to the series fan-out and the bulk action, and a
+    // manual method replacing the annual one would hide paid coverage from
+    // the completion billing gate (Codex #4030 r7 P1).
     const updated = await db('scheduled_services')
       .where({ id: req.params.id })
       .whereNotIn('status', PREPAID_STAMP_REFUSED_STATUSES)
+      .modify(withoutAnnualCoverage)
       .modify((q) => technicianLiveVisitFilter(req, q))
       .update({
         prepaid_amount: amt,
@@ -11276,13 +11308,10 @@ router.post('/:id/prepaid', async (req, res, next) => {
       })
       .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at']);
     if (!updated.length) {
-      const current = await db('scheduled_services').where({ id: req.params.id }).first('status');
-      if (current && PREPAID_STAMP_REFUSED_STATUSES.includes(String(current.status || '').toLowerCase())) {
-        return res.status(409).json({
-          error: `This visit is already ${current.status} — it can't be marked prepaid. Refresh and try again.`,
-          code: 'visit_terminal',
-        });
-      }
+      const current = await db('scheduled_services').where({ id: req.params.id })
+        .first('status', 'annual_prepay_term_id', 'prepaid_method');
+      const refusal = current && PREPAID_STAMP_REFUSALS.find(({ refused }) => refused(current));
+      if (refusal) return res.status(409).json(refusal.body(current));
       return res.status(404).json({ error: 'Scheduled service not found' });
     }
     logger.info(`[schedule] Marked ${req.params.id} prepaid: $${amt} via ${method || 'unspecified'}`);

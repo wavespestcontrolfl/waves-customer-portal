@@ -102,6 +102,10 @@ function isStaleInProgress(row, todayET) {
 // bell.
 const ANNUAL_PREPAY_METHOD = 'annual_prepay_invoice';
 
+// The annual writer's live-status rule: NULL is live, these are not. Shared
+// by the coverage candidate scan and the inferred family-payment groups.
+const LIVE_STATUS_EXCLUSIONS = ['cancelled', 'canceled', 'completed', 'rescheduled', 'skipped', 'no_show'];
+
 function hasOutOfBandPrepaidStamp(row) {
   return toMoney(row?.prepaid_amount) != null
     && row?.prepaid_method !== ANNUAL_PREPAY_METHOD;
@@ -115,15 +119,27 @@ function hasAnnualPrepaidStamp(row) {
 function manualSeriesStampIssue(row) {
   // Explicit allocation audits cover even a one-visit series. Historical rows
   // without audits still require two matching survivors to prove series scope.
-  const evidence = [...(row?.manual_series_payment_evidence || []), ...(row?.manual_series_allocation_evidence || [])];
-  if (!evidence.length) return null;
+  // Inferred groups: [paid_at, method, members, live_members]; allocation
+  // audits: [paid_at, method, audit_id, amount].
+  const inferred = row?.manual_series_payment_evidence || [];
+  const allocations = row?.manual_series_allocation_evidence || [];
+  if (!inferred.length && !allocations.length) return null;
   if (!(Number(row?.prepaid_amount) > 0)) return 'manual_series_stamp_missing';
   // A different payment cannot silently replace the original allocation.
   const stampedAt = new Date(row.prepaid_at).getTime();
-  const matchesPayment = evidence.every(([paidAt, method, , amount]) => method === row.prepaid_method
-    && new Date(paidAt).getTime() === stampedAt
+  const matchesStamp = (paidAt, method) => method === row.prepaid_method
+    && new Date(paidAt).getTime() === stampedAt;
+  const allocationsMatch = allocations.every(([paidAt, method, , amount]) => matchesStamp(paidAt, method)
     && (amount == null || Number(amount) === Number(row.prepaid_amount)));
-  return matchesPayment ? null : 'manual_series_stamp_conflict';
+  // A family payment whose stamped members are all terminal has closed its
+  // books: a live row carrying a later explicit series stamp was amended, not
+  // silently replaced (Codex #4030 r7 P2). A group with a live member still
+  // holds that payment on a sibling sharing this row's coverage, so this
+  // row's different stamp must be reconciled against it.
+  const inferredMatch = inferred
+    .filter(([, , , liveMembers]) => liveMembers == null || Number(liveMembers) > 0)
+    .every(([paidAt, method]) => matchesStamp(paidAt, method));
+  return allocationsMatch && inferredMatch ? null : 'manual_series_stamp_conflict';
 }
 
 function isUnpricedSeriesVisit(row) {
@@ -190,7 +206,7 @@ async function runInner({ now = new Date() } = {}) {
     .leftJoin('annual_prepay_terms as prepay_term', 'prepay_term.id', 'ss.annual_prepay_term_id')
     .leftJoin('invoices as prepay_invoice', 'prepay_invoice.id', 'prepay_term.prepay_invoice_id')
     .where(function whereLive() {
-      this.whereNull('ss.status').orWhereNotIn('ss.status', ['cancelled', 'canceled', 'completed', 'rescheduled', 'skipped', 'no_show']);
+      this.whereNull('ss.status').orWhereNotIn('ss.status', LIVE_STATUS_EXCLUSIONS);
     })
     .where('ss.scheduled_date', '<=', etDateString(horizon))
     .where(function whereRecurring() {
@@ -242,10 +258,15 @@ async function runInner({ now = new Date() } = {}) {
       // Two matching payment stamps prove series scope even if the ROOT's
       // stamp was cleared. Keep every evidentiary tuple version in the key:
       // clearing/restoring a paid sibling must reopen an unchanged gap.
-      db.raw(`(SELECT jsonb_agg(jsonb_build_array(g.prepaid_at, g.prepaid_method, g.members)
+      // live_members counts the group's still-live stamped rows (same
+      // predicate as whereLive) so manualSeriesStampIssue can tell a
+      // closed-books payment from one a live sibling still carries.
+      db.raw(`(SELECT jsonb_agg(jsonb_build_array(g.prepaid_at, g.prepaid_method, g.members, g.live_members)
           ORDER BY g.prepaid_at, g.prepaid_method)
         FROM (SELECT paid.prepaid_at, paid.prepaid_method,
-            jsonb_agg(jsonb_build_array(paid.id, paid.xmin::text) ORDER BY paid.id) AS members
+            jsonb_agg(jsonb_build_array(paid.id, paid.xmin::text) ORDER BY paid.id) AS members,
+            count(*) FILTER (WHERE paid.status IS NULL
+              OR paid.status NOT IN (${LIVE_STATUS_EXCLUSIONS.map(() => '?').join(', ')})) AS live_members
           FROM scheduled_services paid
           WHERE (paid.recurring_parent_id = coalesce(ss.recurring_parent_id, ss.id)
             OR paid.id = coalesce(ss.recurring_parent_id, ss.id))
@@ -254,7 +275,7 @@ async function runInner({ now = new Date() } = {}) {
             AND paid.prepaid_amount > 0
             AND paid.prepaid_method IS DISTINCT FROM 'annual_prepay_invoice'
           GROUP BY paid.prepaid_at, paid.prepaid_method HAVING count(*) >= 2
-        ) g) as manual_series_payment_evidence`),
+        ) g) as manual_series_payment_evidence`, LIVE_STATUS_EXCLUSIONS),
       db.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as service_date"),
     )
     // Preserve near-term coverage alert priority while adding past backlog.

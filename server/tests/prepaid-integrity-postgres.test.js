@@ -11,7 +11,7 @@ jest.mock('../models/db', () => {
   return db;
 });
 const { randomUUID, randomBytes } = require('node:crypto');
-const { stampSeriesPrepaid, clearSeriesPrepaid } = require('../services/prepaid-series');
+const { stampSeriesPrepaid, clearSeriesPrepaid, withoutAnnualCoverage } = require('../services/prepaid-series');
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'synthetic-notification' })) }));
 jest.mock('../services/irrigation-weekly-email', () => ({
   findLawnEmailAudienceGaps: jest.fn(async () => []), findUnstampedRecurringLawnMembers: jest.fn(async () => []),
@@ -331,6 +331,69 @@ postgres('prepaid series integrity against migrated PostgreSQL', () => {
     expect(rows[0].prepaid_amount).toBeNull();
     expect(rows[1].prepaid_method).toBe('annual_prepay_invoice');
     expect(Number(rows[1].prepaid_amount)).toBe(100);
+  });
+
+  test('a null-status sibling carrying annual coverage blocks the manual series write', async () => {
+    const root = await visit();
+    const termId = randomUUID();
+    await trx('annual_prepay_terms').insert({ id: termId, customer_id: customerId,
+      status: 'active', term_start: '2040-01-01', term_end: '2041-01-01', prepay_amount: 400,
+      coverage_service_type: 'Monthly Pest Control Service' });
+    const legacy = await visit({ recurring_parent_id: root.id, scheduled_date: '2040-02-15', status: null, annual_prepay_term_id: termId });
+    await expect(stampSeriesPrepaid(trx, { anchorServiceId: root.id, totalAmount: 200, method: 'cash', useExistingTransaction: true }))
+      .rejects.toMatchObject({ status: 409 });
+    const rows = await trx('scheduled_services').whereIn('id', [root.id, legacy.id]);
+    expect(rows.every((row) => row.prepaid_amount === null)).toBe(true);
+    expect(await trx('audit_log').where({ action: 'prepaid_series.allocated' })
+      .whereRaw("metadata->>'customer_id' = ?", [customerId])).toHaveLength(0);
+  });
+
+  test('a live null-status sibling receives its share of the manual series payment', async () => {
+    const root = await visit();
+    const legacy = await visit({ recurring_parent_id: root.id, scheduled_date: '2040-02-15', status: null });
+    const result = await stampSeriesPrepaid(trx, { anchorServiceId: root.id, totalAmount: 200, method: 'cash', useExistingTransaction: true });
+    expect(result.visitsCovered).toBe(2);
+    expect(Number((await trx('scheduled_services').where({ id: legacy.id }).first()).prepaid_amount)).toBe(100);
+  });
+
+  test('manual single-visit writers refuse annual coverage inside the UPDATE, including a null method', async () => {
+    const termId = randomUUID();
+    await trx('annual_prepay_terms').insert({ id: termId, customer_id: customerId,
+      status: 'active', term_start: '2040-01-01', term_end: '2041-01-01', prepay_amount: 400 });
+    const linked = await visit({ annual_prepay_term_id: termId });
+    const stamped = await visit({ scheduled_date: '2040-02-15', prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100 });
+    const bare = await visit({ scheduled_date: '2040-03-15' });
+    const cash = await visit({ scheduled_date: '2040-04-15', prepaid_method: 'cash', prepaid_amount: 50 });
+    const write = (row) => withoutAnnualCoverage(trx('scheduled_services').where({ id: row.id }))
+      .update({ prepaid_amount: 75, prepaid_method: 'check', prepaid_at: now }).returning(['id']);
+    expect(await write(linked)).toEqual([]);
+    expect(await write(stamped)).toEqual([]);
+    expect(await write(bare)).toEqual([{ id: bare.id }]);
+    expect(await write(cash)).toEqual([{ id: cash.id }]);
+    const kept = await trx('scheduled_services').whereIn('id', [linked.id, stamped.id]).orderBy('scheduled_date');
+    expect(kept[0].prepaid_amount).toBeNull();
+    expect(kept[1].prepaid_method).toBe('annual_prepay_invoice');
+    expect(Number(kept[1].prepaid_amount)).toBe(100);
+  });
+
+  test('completed siblings from an earlier series payment do not conflict with an amended live series', async () => {
+    const { runInner } = require('../services/schedule-integrity-watchdog');
+    const root = await visit({ estimated_price: 100 });
+    const children = [];
+    for (const date of ['2040-02-15', '2040-03-15', '2040-04-15']) {
+      children.push(await visit({ recurring_parent_id: root.id, scheduled_date: date, estimated_price: 100 }));
+    }
+    await stampSeriesPrepaid(trx, { anchorServiceId: root.id, totalAmount: 400, method: 'check', useExistingTransaction: true });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
+    // Two visits complete against the first payment; staff then amend the
+    // remaining live visits, which keep a different timestamp from the
+    // completed rows' closed books.
+    await trx('scheduled_services').whereIn('id', [children[0].id, children[1].id]).update({ status: 'completed' });
+    await stampSeriesPrepaid(trx, { anchorServiceId: root.id, totalAmount: 240, method: 'check', useExistingTransaction: true });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
+    // A live sibling still carrying the earlier payment reopens the conflict.
+    await trx('scheduled_services').where({ id: children[1].id }).update({ status: 'pending' });
+    expect((await runInner({ now })).prepayCoverageGaps).toBeGreaterThan(0);
   });
 
   test('a foreign-customer sibling prevents allocation to the entire locked family', async () => {

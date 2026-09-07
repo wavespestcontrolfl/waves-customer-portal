@@ -381,6 +381,15 @@ describe('prepay coverage detection', () => {
     expect(manualSeriesStampIssue({ ...paid, manual_series_payment_evidence: [
       ...row.manual_series_payment_evidence, ['2040-01-06T16:00:00Z', 'check', [['other-1', '103'], ['other-2', '104']]],
     ] })).toBe('manual_series_stamp_conflict');
+    // A payment whose stamped members have all closed their books (no live
+    // member) was amended, not silently replaced — one live member still
+    // holding it reopens the conflict, and it still proves coverage for a
+    // row with no stamp at all (Codex #4030 r7 P2).
+    const closedBooks = ['2040-01-04T16:00:00Z', 'check', [['done-1', '105'], ['done-2', '106']], 0];
+    expect(manualSeriesStampIssue({ ...paid, manual_series_payment_evidence: [...row.manual_series_payment_evidence, closedBooks] })).toBeNull();
+    expect(manualSeriesStampIssue({ ...paid, manual_series_payment_evidence: [...row.manual_series_payment_evidence, [...closedBooks.slice(0, 3), 1]] }))
+      .toBe('manual_series_stamp_conflict');
+    expect(manualSeriesStampIssue({ ...row, manual_series_payment_evidence: [closedBooks] })).toBe('manual_series_stamp_missing');
     expect(manualSeriesStampIssue({ ...row, recurring_parent_id: null })).toBe('manual_series_stamp_missing');
     expect(manualSeriesStampIssue({ ...row, manual_series_payment_evidence: [] })).toBeNull();
     expect(manualSeriesStampIssue({ ...row, manual_series_payment_evidence: null })).toBeNull();
