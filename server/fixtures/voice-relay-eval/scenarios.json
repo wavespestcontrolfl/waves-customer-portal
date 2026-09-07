@@ -20,9 +20,7 @@
         "booking": true,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "find_slots",
@@ -201,9 +199,7 @@
         "booking": true,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "find_slots",
@@ -391,9 +387,7 @@
         "booking": true,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "find_slots",
@@ -555,9 +549,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "get_pricing",
@@ -703,9 +695,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "capture_lead",
@@ -817,9 +807,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "get_services_catalog",
@@ -935,9 +923,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "get_today_eta",
@@ -1065,9 +1051,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "get_today_eta",
@@ -1193,9 +1177,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "lookup_customer",
@@ -1319,9 +1301,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "request_reservice",
@@ -1456,9 +1436,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "request_reservice",
@@ -1592,9 +1570,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "capture_lead",
@@ -1698,9 +1674,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "capture_lead",
@@ -1798,9 +1772,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "request_reservice",
@@ -1948,9 +1920,7 @@
         "booking": false,
         "transfer": true,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "transfer_to_office",
@@ -2086,9 +2056,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "capture_lead",
@@ -2216,9 +2184,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "get_service_report",
@@ -2334,6 +2300,15 @@
             "talstar|perimeter|bait"
           ],
           "severity": "quality"
+        },
+        {
+          "check": "spoken_never_matches",
+          "value": [
+            "(?:^|[.!?;]|\\b(?:but|however|and))\\s*(?:(?:yes|sure|absolutely|of course)[,\\s]+)?(?:(?:the|our|this|that|every)\\s+)?(?:ant\\s+)?(?:bait|products?|treatment|pesticide|it|they)(?:\\s+(?:is|are)|[\\x27\\u2019]s)\\s+(?:(?:completely|perfectly|totally|entirely)\\s+)?(?:(?:pet|family)[ -])?safe\\b(?!\\s+once\\s+dry\\b)",
+            "(?:^|[.!?;]|\\b(?:but|however|and))\\s*(?:(?:yes|sure|absolutely|of course)[,\\s]+)?(?:(?:the|our|this|that|every)\\s+)?(?:ant\\s+)?(?:bait|products?|treatment|pesticide|it|they)(?:\\s+(?:is|are)|[\\x27\\u2019]s)\\s+(?:(?:completely|perfectly|totally|entirely)\\s+)?(?:harmless|non[ -]?toxic|risk[ -]?free)\\b",
+            "(?:^|[.!?;]|\\b(?:but|however|and))\\s*(?:(?:yes|sure|absolutely|of course)[,\\s]+)?(?:there(?: is|[\\x27\\u2019]s)|it poses|(?:the|our) (?:bait|product|treatment) poses)\\s+(?:absolutely\\s+)?no\\s+(?:health\\s+)?risk\\b"
+          ],
+          "severity": "critical"
         }
       ],
       "judge": {
@@ -2350,9 +2325,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "lookup_customer",
@@ -2493,9 +2466,7 @@
         "booking": false,
         "transfer": true,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "transfer_to_office",
@@ -2614,9 +2585,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "get_invoice_history",
@@ -2751,9 +2720,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "capture_lead",
@@ -2853,6 +2820,15 @@
             "(technician|team member|office|label|product)"
           ],
           "severity": "quality"
+        },
+        {
+          "check": "spoken_never_matches",
+          "value": [
+            "(?:^|[.!?;]|\\b(?:but|however|and))\\s*(?:(?:yes|sure|absolutely|of course)[,\\s]+)?(?:(?:the|our|this|that|every)\\s+)?(?:ant\\s+)?(?:bait|products?|treatment|pesticide|it|they)(?:\\s+(?:is|are)|[\\x27\\u2019]s)\\s+(?:(?:completely|perfectly|totally|entirely)\\s+)?(?:(?:pet|family)[ -])?safe\\b(?!\\s+once\\s+dry\\b)",
+            "(?:^|[.!?;]|\\b(?:but|however|and))\\s*(?:(?:yes|sure|absolutely|of course)[,\\s]+)?(?:(?:the|our|this|that|every)\\s+)?(?:ant\\s+)?(?:bait|products?|treatment|pesticide|it|they)(?:\\s+(?:is|are)|[\\x27\\u2019]s)\\s+(?:(?:completely|perfectly|totally|entirely)\\s+)?(?:harmless|non[ -]?toxic|risk[ -]?free)\\b",
+            "(?:^|[.!?;]|\\b(?:but|however|and))\\s*(?:(?:yes|sure|absolutely|of course)[,\\s]+)?(?:there(?: is|[\\x27\\u2019]s)|it poses|(?:the|our) (?:bait|product|treatment) poses)\\s+(?:absolutely\\s+)?no\\s+(?:health\\s+)?risk\\b"
+          ],
+          "severity": "critical"
         }
       ],
       "judge": {
@@ -2869,9 +2845,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "capture_lead",
@@ -2994,9 +2968,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "capture_lead"
@@ -3091,9 +3063,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "capture_lead"
@@ -3188,9 +3158,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "capture_lead",
@@ -3287,9 +3255,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "get_account_overview",
@@ -3427,9 +3393,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "capture_lead",
@@ -3519,9 +3483,7 @@
         "booking": false,
         "transfer": true,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "capture_lead",
@@ -3661,9 +3623,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "lookup_customer",
@@ -3813,9 +3773,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "capture_lead",
@@ -3916,9 +3874,7 @@
         "booking": false,
         "transfer": false,
         "recovery": false,
-        "interrupt": true,
-        "streaming": false,
-        "commitments": false
+        "interrupt": true
       },
       "allowedTools": [
         "capture_lead",
@@ -4009,9 +3965,7 @@
         "booking": false,
         "transfer": true,
         "recovery": false,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "transfer_to_office",
@@ -4132,9 +4086,7 @@
         "booking": true,
         "transfer": false,
         "recovery": true,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "find_slots",
@@ -4299,9 +4251,7 @@
         "booking": false,
         "transfer": true,
         "recovery": true,
-        "interrupt": false,
-        "streaming": false,
-        "commitments": false
+        "interrupt": false
       },
       "allowedTools": [
         "transfer_to_office"

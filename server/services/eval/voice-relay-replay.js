@@ -53,8 +53,6 @@ const GATE_ENV = Object.freeze({
   transfer: 'GATE_VOICE_RELAY_TRANSFER',
   recovery: 'GATE_VOICE_RELAY_RECOVERY',
   interrupt: 'GATE_VOICE_RELAY_INTERRUPT_CONTEXT',
-  streaming: 'GATE_VOICE_RELAY_STREAMING',
-  commitments: 'GATE_VOICE_RELAY_COMMITMENTS',
 });
 
 const SEVERITIES = Object.freeze(['critical', 'major', 'quality']);
@@ -69,7 +67,7 @@ const CHECKS = Object.freeze([
 // default set no model text may precede — the registered write tools only.
 const WRITE_TOOLS = Object.freeze(['capture_lead', 'request_booking', 'request_reservice', 'transfer_to_office']);
 // Follow-up promises, EN + ES, over what Sandy actually said.
-const PROMISE_RE = /\b(?:(?:will|going to|gonna) (?:call|text|email|reach out|follow up|send|get back)|someone (?:will|is going to)|(?:i['’]?ll|i will) (?:(?:have|make sure|note|let|pass)|(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back))|(?:you'?ll|you will) (?:hear|get|receive)|(?:a |the )?(?:waves )?team member will|le (?:llamar|devolver|enviar|contactar|dar)|se comunicar|(?:un|una) (?:miembro|persona) del equipo)\b/i;
+const PROMISE_RE = /\b(?:(?:will|going to|gonna) (?:call|text|email|reach out|follow up|send|get back)|(?:i|we)['’]?ll (?:call|text|email|reach out|follow up|send|get back)|someone (?:will|is going to)|(?:i['’]?ll|i will) (?:(?:have|make sure|note|let|pass)|(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back))|(?:you'?ll|you will) (?:hear|get|receive)|(?:a |the )?(?:waves )?team member will|le (?:llamar|devolver|enviar|contactar|dar)|se comunicar|(?:un|una) (?:miembro|persona) del equipo)\b/i;
 const DEFAULT_TOOL_TEXT = 'That information is not available on this call. Tell the caller a Waves team member will follow up with the details.';
 const LOOKUP_BUDGET_TEXT = 'No more account lookups are available on this call. Do NOT try again and do not confirm or deny '
   + 'anything about any account. Offer to have a Waves team member call them back, and capture the lead.';
@@ -459,7 +457,7 @@ function applyToolSideEffects(response, { input, ctx, scenario }) {
 }
 
 function recordToolCall(record, name, input) {
-  const event = { kind: 'tool', name, input: safeInput(input), text: '', turn: record.turn, ok: false, receipt: false, unexpected: false, invalid: false, mismatch: false, index: record.events.length };
+  const event = { kind: 'tool', name, input: safeInput(input), text: '', turn: record.turn, modelRound: record.modelCalls, ok: false, receipt: false, unexpected: false, invalid: false, mismatch: false, index: record.events.length };
   record.toolUse[name] = (record.toolUse[name] || 0) + 1;
   record.events.push(event);
   record.toolCalls.push(event);
@@ -772,7 +770,7 @@ const CHECK_RUNNERS = Object.freeze({
   no_model_text_before_tool(value, record, { utterances }) {
     const tools = value === true ? WRITE_TOOLS : value;
     for (const call of record.toolCalls.filter((t) => tools.includes(t.name))) {
-      const before = utterances.find((u) => u.turn === call.turn && u.index < call.index && !u.system);
+      const before = utterances.find((u) => u.turn === call.turn && u.modelRound === call.modelRound && u.index < call.index && !u.system);
       if (before) return ['fail', `"${clip(before.text, 120)}" was spoken before ${call.name} ran`];
     }
     return ['pass', 'no model text preceded a write'];
@@ -919,7 +917,7 @@ function newConversation(h, scenario, record) {
     language: scenario.language === 'es' ? 'es-US' : null,
     send: (text) => {
       const t = String(text || '');
-      record.events.push({ kind: 'agent', text: t, turn: record.turn, index: record.events.length });
+      record.events.push({ kind: 'agent', text: t, turn: record.turn, modelRound: record.modelCalls, index: record.events.length });
       record.spoken.push(t);
     },
     endSession: (frame) => { record.endSession = { ...(frame || {}), turn: record.turn }; return true; },
