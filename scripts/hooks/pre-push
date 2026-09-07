@@ -51,26 +51,32 @@ ZERO_SHA="0000000000000000000000000000000000000000"
 ANY_REFS=0
 HAS_NON_DELETE=0
 # Parallel arrays: REF_LABELS[i] is human-readable, REF_SHAS[i] is what we
-# audit, REF_REMOTE_SHAS[i] is what the remote branch is at now (ZERO_SHA for
-# a new branch) — the applied-migration guard diffs against it.
+# audit (deduped by SHA — the LLM audit of one commit covers every ref it
+# is pushed to). GUARD_* keep EVERY non-delete tuple with its destination's
+# current remote sha (ZERO_SHA for a new branch): the applied-migration
+# guard is per destination, so one commit pushed to a new branch and to an
+# existing one must be checked against both.
 REF_LABELS=()
 REF_SHAS=()
-REF_REMOTE_SHAS=()
+GUARD_LABELS=()
+GUARD_SHAS=()
+GUARD_REMOTE_SHAS=()
 SEEN_SHAS=" "
-while read -r local_ref local_sha _remote_ref remote_sha; do
+while read -r local_ref local_sha remote_ref remote_sha; do
   ANY_REFS=1
   if [ -z "${local_sha:-}" ] || [ "$local_sha" = "$ZERO_SHA" ]; then
     continue
   fi
   HAS_NON_DELETE=1
-  # Dedupe by SHA — multiple refs can point at the same commit.
+  GUARD_LABELS+=("${local_ref:-?} -> ${remote_ref:-?}")
+  GUARD_SHAS+=("$local_sha")
+  GUARD_REMOTE_SHAS+=("${remote_sha:-$ZERO_SHA}")
   case "$SEEN_SHAS" in
     *" $local_sha "*) continue ;;
   esac
   SEEN_SHAS="$SEEN_SHAS$local_sha "
   REF_LABELS+=("${local_ref:-?}")
   REF_SHAS+=("$local_sha")
-  REF_REMOTE_SHAS+=("${remote_sha:-$ZERO_SHA}")
 done
 
 if [ "$ANY_REFS" = "1" ] && [ "$HAS_NON_DELETE" = "0" ]; then
@@ -88,17 +94,21 @@ cd "$REPO_ROOT"
 BASE="${CODEX_REVIEW_BASE:-origin/main}"
 
 # ── Applied-migration guard (deterministic, no LLM) ──────────────────────
-# A migration file that already exists on the branch's REMOTE ref — or, for
-# a brand-new remote branch, on the integration base (merge base with
-# $BASE, default origin/main) — has almost certainly been run by a deploy:
-# every push to an open PR deploys a Railway preview whose Postgres runs
-# the branch's migrations pre-deploy, and main deploys to prod. knex tracks
-# migrations by filename, so modifying that file is a silent no-op in every
-# environment that ran it, and renaming/deleting it fails every later
-# deploy of that environment ("migration directory is corrupt").
-# Supersede with a NEW file instead — .claude/skills/waves-db/SKILL.md §4.
-# Blocks the push (exit 1). A base that is not fetched locally is skipped
-# with a warning (the guard cannot see what it cannot diff).
+# A migration file that already exists on the destination's REMOTE ref, or
+# on the integration base (merge base with $BASE, default origin/main),
+# has almost certainly been run by a deploy: every push to an open PR
+# deploys a Railway preview whose Postgres runs the branch's migrations
+# pre-deploy, and main deploys to prod. knex tracks migrations by
+# filename, so modifying that file is a silent no-op in every environment
+# that ran it, and renaming/deleting it fails every later deploy of that
+# environment ("migration directory is corrupt"). Both baselines are
+# checked for every destination: the remote tip catches the branch's own
+# preview-run files, the merge base catches main's prod-run files even when
+# the branch only just merged them (its old tip never had the file, so
+# the remote diff would read "added"). Supersede with a NEW file instead —
+# .claude/skills/waves-db/SKILL.md §4. Blocks the push (exit 1). A
+# baseline that is not fetched locally is skipped with a warning (the
+# guard cannot see what it cannot diff).
 #
 # The guard sees pushes, not deploys: a pushed file whose deploy failed or
 # never ran its migrations is NOT applied and may be edited in place — a
@@ -108,40 +118,52 @@ BASE="${CODEX_REVIEW_BASE:-origin/main}"
 # hatch; verify first (preview/prod knex_migrations has no row for it):
 #   SKIP_MIGRATION_GUARD=1 git push
 MIGRATIONS_DIR="server/models/migrations"
+guard_diff() {
+  # $1 = baseline sha, $2 = pushed sha. Prints M/D/R/T lines under the
+  # migrations dir, prefixed with the baseline for the message.
+  git diff --name-status --diff-filter=MDRT "$1" "$2" -- "$MIGRATIONS_DIR" 2>/dev/null \
+    | sed "s/^/    vs ${1:0:9}: /"
+}
 if [ "${SKIP_MIGRATION_GUARD:-0}" = "1" ]; then
   echo "[migration-guard] SKIP_MIGRATION_GUARD=1 set — skipping applied-migration guard." >&2
 else
   GUARD_HITS=""
+  BASE_OK=0
+  if git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+    BASE_OK=1
+  else
+    echo "[migration-guard] base '$BASE' not found locally — the integration-base check is skipped for this push (git fetch origin to enable it)." >&2
+  fi
   i=0
-  while [ "$i" -lt "${#REF_SHAS[@]}" ]; do
-    remote="${REF_REMOTE_SHAS[$i]:-$ZERO_SHA}"
-    guard_base=""
+  while [ "$i" -lt "${#GUARD_SHAS[@]}" ]; do
+    pushed="${GUARD_SHAS[$i]}"
+    remote="${GUARD_REMOTE_SHAS[$i]:-$ZERO_SHA}"
+    hits=""
     if [ "$remote" != "$ZERO_SHA" ]; then
       if git cat-file -e "$remote^{commit}" 2>/dev/null; then
-        guard_base="$remote"
+        hits="$(guard_diff "$remote" "$pushed")"
       else
-        echo "[migration-guard] remote sha ${remote:0:9} for ${REF_LABELS[$i]} is not fetched locally — guard skipped for this ref (git fetch origin to enable it)." >&2
+        echo "[migration-guard] remote sha ${remote:0:9} for ${GUARD_LABELS[$i]} is not fetched locally — remote-tip check skipped for this ref (git fetch origin to enable it)." >&2
       fi
-    elif git rev-parse --verify "$BASE" >/dev/null 2>&1; then
-      # New remote branch: nothing has deployed from IT yet, but every
-      # migration it inherits from the integration base has (prod).
-      guard_base="$(git merge-base "$BASE" "${REF_SHAS[$i]}" 2>/dev/null || true)"
-    else
-      echo "[migration-guard] new remote branch and base '$BASE' not found locally — guard skipped for ${REF_LABELS[$i]} (git fetch origin to enable it)." >&2
     fi
-    if [ -n "$guard_base" ]; then
-      changed="$(git diff --name-status --diff-filter=MDRT "$guard_base" "${REF_SHAS[$i]}" -- "$MIGRATIONS_DIR" 2>/dev/null || true)"
-      if [ -n "$changed" ]; then
-        GUARD_HITS="${GUARD_HITS}${REF_LABELS[$i]} (vs ${guard_base:0:9}):
-${changed}
-"
+    if [ "$BASE_OK" = "1" ]; then
+      merge_base="$(git merge-base "$BASE" "$pushed" 2>/dev/null || true)"
+      if [ -n "$merge_base" ] && [ "$merge_base" != "$remote" ]; then
+        base_hits="$(guard_diff "$merge_base" "$pushed")"
+        [ -n "$base_hits" ] && hits="${hits:+$hits
+}$base_hits"
       fi
+    fi
+    if [ -n "$hits" ]; then
+      GUARD_HITS="${GUARD_HITS}  ${GUARD_LABELS[$i]}
+${hits}
+"
     fi
     i=$((i + 1))
   done
   if [ -n "$GUARD_HITS" ]; then
-    echo "[migration-guard] BLOCKED — these migration files already exist on the remote branch (or on $BASE for a new branch), so a deploy has run them; knex tracks by filename and the change is a silent no-op there (rename/delete breaks every later deploy of that environment):" >&2
-    printf '%s' "$GUARD_HITS" | sed 's/^/  /' >&2
+    echo "[migration-guard] BLOCKED — these migration files already exist on the destination branch or on $BASE, so a deploy has run them; knex tracks by filename and the change is a silent no-op there (rename/delete breaks every later deploy of that environment):" >&2
+    printf '%s' "$GUARD_HITS" >&2
     echo "[migration-guard] Supersede with a NEW migration file (.claude/skills/waves-db/SKILL.md §4). Only if you have VERIFIED the file never ran (the deploy failed before migrating — no knex_migrations row) or the preview database was cleaned by hand: SKIP_MIGRATION_GUARD=1 git push" >&2
     exit 1
   fi

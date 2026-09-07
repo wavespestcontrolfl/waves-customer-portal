@@ -124,6 +124,53 @@ describe('pre-push applied-migration guard', () => {
     expect(r.stderr).toContain('M\t' + MIG_A.split(path.sep).join('/'));
   });
 
+  // An existing branch that has just merged main and edits a migration main
+  // brought in: its old remote tip never had the file (diff reads "added"),
+  // but prod has run it — the merge base catches it (local auditor P1).
+  test('an EXISTING branch that merged main and edits a main migration is BLOCKED via the merge base', () => {
+    git(work, ['checkout', '-q', '-b', 'feature-old', 'origin/main']);
+    writeAndCommit(work, { 'server/index.js': "module.exports = 'feature-old';\n" }, 'feature work before main moved');
+    expect(pushResult(work, {}, 'HEAD:refs/heads/feature-old').ok).toBe(true);
+    // main gains a migration the feature branch does not have yet.
+    git(work, ['checkout', '-q', 'main']);
+    const MIG_MAIN = path.join(MIGRATIONS, '20260101000004_landed_on_main.js');
+    writeAndCommit(work, { [MIG_MAIN]: "exports.up = async () => {};\nexports.down = async () => {};\n" }, 'main migration');
+    expect(pushResult(work).ok).toBe(true);
+    git(work, ['fetch', '-q', 'origin']);
+    // The feature branch merges main, then edits the migration it inherited.
+    git(work, ['checkout', '-q', 'feature-old']);
+    git(work, ['merge', '-q', '--no-edit', 'origin/main']);
+    writeAndCommit(work, { [MIG_MAIN]: "exports.up = async () => { /* edited after prod ran it */ };\nexports.down = async () => {};\n" }, 'edit inherited migration');
+    const r = pushResult(work, {}, 'HEAD:refs/heads/feature-old');
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toMatch(/\[migration-guard\] BLOCKED/);
+    expect(r.stderr).toContain('M\t' + MIG_MAIN.split(path.sep).join('/'));
+  });
+
+  // One commit pushed to a new branch AND an existing one: the guard is per
+  // destination, so the existing branch's remote tip must still be checked
+  // (local auditor P1 — SHA dedup used to drop the second tuple).
+  test('one commit pushed to a new ref and an existing ref is BLOCKED when the existing ref has run the file', () => {
+    git(work, ['checkout', '-q', 'main']);
+    git(work, ['reset', '-q', '--hard', 'origin/main']);
+    const MIG_MAIN = path.join(MIGRATIONS, '20260101000004_landed_on_main.js');
+    writeAndCommit(work, { [MIG_MAIN]: "exports.up = async () => { /* edited on main */ };\nexports.down = async () => {};\n" }, 'edit main migration');
+    const r = pushResult(work, {}, 'HEAD:refs/heads/brand-new-first');
+    // Push both refspecs in ONE push, new branch first.
+    let both;
+    try {
+      git(work, ['push', 'origin', 'HEAD:refs/heads/brand-new-second', 'HEAD:main']);
+      both = { ok: true, stderr: '' };
+    } catch (e) {
+      both = { ok: false, stderr: String(e.stderr || '') };
+    }
+    expect(r.ok).toBe(false); // even alone, the new ref is blocked via the merge base
+    expect(both.ok).toBe(false);
+    expect(both.stderr).toContain('refs/heads/main');
+    expect(both.stderr).toContain('M\t' + MIG_MAIN.split(path.sep).join('/'));
+    git(work, ['reset', '-q', '--hard', 'origin/main']);
+  });
+
   test('a NEW remote branch that only adds a migration passes', () => {
     git(work, ['checkout', '-q', '-b', 'feature-add', 'origin/main']);
     writeAndCommit(work, {
