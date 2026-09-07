@@ -70,7 +70,10 @@ const WDO_BRIEF_TYPE = 'wdo_inspection';
 // pre-tightening bodies (e.g. a cached retired-name mention) forever.
 // v4: schema-constrained output (jsonSchema) — separates prompt-only JSON
 // briefs from provider-constrained ones in the cache key.
-const PROMPT_VERSION = 'previsit_brief_v4';
+// v5: the validator repair round. Bumped so templates capped under v4
+// (llm_attempts at the cap, same grounding) hash differently and get their
+// one repair round instead of returning validator_capped forever.
+const PROMPT_VERSION = 'previsit_brief_v5';
 
 // Deterministic validator rejections repeat on every retry while the
 // grounding (and prompt version) are unchanged — the same facts produce the
@@ -2409,6 +2412,22 @@ function repairNote(rejections) {
   ].join('\n');
 }
 
+// The stored brief's cache key: the prompt version plus everything that
+// lands in the brief. A PROMPT_VERSION bump therefore invalidates every
+// cached brief AND every validator-capped template (the cap is keyed on
+// this hash). promptVersion is a parameter only so a test can build the
+// hash a previous version stored.
+function groundingHashFor(g, promptVersion = PROMPT_VERSION) {
+  return crypto.createHash('sha256')
+    .update(`${promptVersion}|${stableStringify({
+      llmFacts: g.llmFacts,
+      access: g.access,
+      productGuidance: g.productGuidance,
+      lastVisitProducts: g.lastVisitProducts,
+    })}`)
+    .digest('hex');
+}
+
 async function generateBriefBody(grounding, deps = {}) {
   // missKind rides back to the generator so deterministic validator
   // rejections can be attempt-capped; anything else keeps retrying.
@@ -2472,7 +2491,9 @@ async function generateBriefBody(grounding, deps = {}) {
     // (09-05..07: 56 of 63 chains). Handing the model the exact rejected
     // terms fixes the draft in place; a second rejection is final.
     if (!(resp?.ok && resp.json && !verdict?.reason) && rejections.length) {
-      logger.info(`[previsit-brief] repair round after validator rejection (${rejections.join(' | ')})`);
+      // Codes only: the term half of a reason is model-derived prose
+      // (mentioned_terms, extracted references) and must not reach logs.
+      logger.info(`[previsit-brief] repair round after validator rejection (${[...new Set(rejections.map((r) => String(r).split(':')[0]))].join(' | ')})`);
       resp = await attempt(rejections);
       verdict = resp?.ok && resp.json ? validateBriefJson(resp.json, grounding) : null;
     }
@@ -2539,14 +2560,7 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
 
   // Input-hash cache: everything that lands in the stored brief hashes in,
   // so any grounding change regenerates and an unchanged route no-ops.
-  const hashOf = (g) => crypto.createHash('sha256')
-    .update(`${PROMPT_VERSION}|${stableStringify({
-      llmFacts: g.llmFacts,
-      access: g.access,
-      productGuidance: g.productGuidance,
-      lastVisitProducts: g.lastVisitProducts,
-    })}`)
-    .digest('hex');
+  const hashOf = groundingHashFor;
   const groundingHash = hashOf(grounding);
 
   const existing = parseStoredBrief(svc.pre_service_brief);
@@ -2802,6 +2816,7 @@ module.exports = {
     generateBriefBody,
     describeRejection,
     repairNote,
+    groundingHashFor,
     buildAccessBlock,
     safeTargets,
     stableStringify,

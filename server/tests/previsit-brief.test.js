@@ -1281,6 +1281,38 @@ describe('validator repair round', () => {
     expect(global.__dispatch.mock.calls[1][1].text).toContain('REPAIR ROUND');
   });
 
+  // A template capped under the previous prompt version must get its
+  // repair round: the cap is keyed on the grounding hash, and the hash
+  // embeds PROMPT_VERSION, so the v5 bump re-opens every v4-capped visit
+  // once (pre-push codex P1).
+  test('a template capped under previsit_brief_v4 is retried (and repaired) under v5', async () => {
+    const { groundingHashFor, assembleGrounding, PROMPT_VERSION } = PrevisitBrief._test;
+    expect(PROMPT_VERSION).not.toBe('previsit_brief_v4');
+    const state1 = useDb(baseResponses({ products_catalog: CATALOG }));
+    const first = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(first.via).toBe('llm');
+    const parsed = JSON.parse(storedBrief(state1).patch.pre_service_brief);
+    // The hash builder reproduces the stored key — so its v4 form is the
+    // key a pre-deploy template carries.
+    useDb(baseResponses({ products_catalog: CATALOG }));
+    const grounding = await assembleGrounding(SVC);
+    expect(groundingHashFor(grounding)).toBe(parsed.grounding_hash);
+    const v4Hash = groundingHashFor(grounding, 'previsit_brief_v4');
+    expect(v4Hash).not.toBe(parsed.grounding_hash);
+    // Park a v4-capped template: same grounding, at the attempt cap.
+    const capped = JSON.stringify({ ...parsed, generated_via: 'template', grounding_hash: v4Hash, llm_miss_kind: 'validator', llm_attempts: 5 });
+    const state2 = useDb(baseResponses({
+      products_catalog: CATALOG,
+      scheduled_services: [{ ...SVC, pre_service_brief: capped, pre_service_brief_type: storedBrief(state1).patch.pre_service_brief_type }],
+    }));
+    global.__dispatch.mockClear();
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.skipped).not.toBe(true);
+    expect(out.via).toBe('llm');
+    expect(global.__dispatch).toHaveBeenCalledTimes(1);
+    expect(storedBrief(state2).brief.grounding_hash).toBe(parsed.grounding_hash);
+  });
+
   test('describeRejection turns every validator code into one plain instruction (unit)', () => {
     const { describeRejection, repairNote } = PrevisitBrief._test;
     expect(describeRejection('ungrounded_novel_term:one-time')).toBe('"one-time" does not appear in the facts — remove it, or replace it with the exact wording the facts use.');
