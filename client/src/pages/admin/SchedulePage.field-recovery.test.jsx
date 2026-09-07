@@ -62,6 +62,40 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(await getCompletionDraft(service.id)).toBeNull();
   });
 
+  it('restores persisted photos with newer fields when the departure write is lost', async () => {
+    await seed();
+    const first = await mount();
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    await getCompletionDraft(service.id);
+    // A departing page can save synchronous metadata without committing IDB.
+    vi.spyOn(completionStore, 'putCompletionDraft').mockResolvedValue(false);
+    fireEvent.change(screen.getByPlaceholderText('Notes about this service...'), { target: { value: 'Latest field note' } });
+    fireEvent(window, new Event('pagehide'));
+    first.unmount();
+    expect(JSON.parse(localStorage.getItem(key)).notes).toBe('Latest field note');
+    await mount();
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    expect(screen.getByPlaceholderText('Notes about this service...').value).toBe('Latest field note');
+    expect(screen.getByAltText('exterior.jpg').getAttribute('src')).toBe(photos[0].data);
+    expect(screen.queryByText(/saved photos could not be restored/)).toBeNull();
+  });
+
+  it('does not restore a removed photo when its departure write is lost', async () => {
+    await seed();
+    const first = await mount();
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    await getCompletionDraft(service.id);
+    vi.spyOn(completionStore, 'putCompletionDraft').mockResolvedValue(false);
+    fireEvent.click(screen.getByAltText('exterior.jpg').parentElement.querySelector('button'));
+    fireEvent.change(screen.getByPlaceholderText('Notes about this service...'), { target: { value: 'Photo removed' } });
+    fireEvent(window, new Event('pagehide'));
+    first.unmount();
+    await mount();
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    expect(screen.getByPlaceholderText('Notes about this service...').value).toBe('Photo removed');
+    expect(screen.queryByAltText('exterior.jpg')).toBeNull();
+  });
+
   it('retains failed uploads across reloads and retries only photos, with one request per double tap', async () => {
     await seed();
     const completion = vi.fn().mockResolvedValue({ serviceRecordId: 'record-1', completionPhotoUpload: { failed: 1 } });

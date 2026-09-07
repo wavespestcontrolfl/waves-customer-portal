@@ -12440,12 +12440,13 @@ export function CompletionPanel({
     } catch { /* Fall back to the full IndexedDB draft. */ }
     void getCompletionDraft(service.id).then((stored) => {
       if (cancelled) return;
-      // A killed page may have written newer metadata before its photo
-      // transaction committed. Never attach older photos to that newer draft.
+      // Metadata can survive a killed page before its IDB write commits.
+      // Reuse persisted photos only when the photo revision still matches.
       const draft = metadata?.serviceId === service.id
-        && metadata.draftId !== stored?.draftId
         && (!stored || String(metadata.savedAt || "") >= String(stored.savedAt || ""))
-        ? metadata : stored || metadata;
+        ? { ...metadata, servicePhotos: metadata.draftId && metadata.draftId === stored?.draftId
+          ? stored.servicePhotos : undefined }
+        : stored || metadata;
       if (draft?.serviceId === service.id) {
         if (draft.pendingPhotoCompletion && draft.servicePhotos?.length) {
           // Closeout already succeeded. Reopen only the outstanding photo
@@ -12537,9 +12538,11 @@ export function CompletionPanel({
       return;
     }
 
+    const photosChanged = draftSnapshotRef.current?.servicePhotos !== servicePhotos;
     const draft = {
         serviceId: service.id,
-        draftId: crypto.randomUUID(),
+        // Field-only edits must not invalidate photos already saved to IDB.
+        draftId: photosChanged ? crypto.randomUUID() : draftSnapshotRef.current.draftId,
         savedAt: new Date().toISOString(),
         servicePhotos,
         notes,
@@ -12652,7 +12655,6 @@ export function CompletionPanel({
         companionState,
       };
     // The departure cleanup reads this snapshot before cancelling autosave.
-    const photosChanged = draftSnapshotRef.current?.servicePhotos !== servicePhotos;
     draftSnapshotRef.current = draft;
     // Start photo persistence immediately, including a photo-only draft.
     if (photosChanged) void saveDraftSnapshot(draft);
