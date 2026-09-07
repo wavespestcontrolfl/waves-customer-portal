@@ -58,10 +58,17 @@ const OPS_HEADING = 'Voice relay conversation eval';
 // The number the synthetic caller "dialled" (555 = fictional). Only a label
 // on the tool ctx: the fixture tools never resolve it.
 const EVAL_CALLER_TO = '+19415550100';
-// A whole eval in the cron's child process: 34 scenarios × a few live turns
-// plus the judge. Generous — the point is that a wedged run cannot hold the
-// runExclusive lock forever.
-const CHILD_TIMEOUT_MS = 40 * 60 * 1000;
+// The child ceiling covers the bounded WORST case, not the typical run — a
+// primary-provider outage is exactly what the two-leg judge exists for, so
+// the ceiling must outlast it: conversations run one at a time (a stalled
+// Sandy model costs the relay's 20 s stream bound per turn, ≈ 80 s for a
+// four-turn scenario, ≈ 45 min over 34), verdicts run JUDGE_CONCURRENCY at a
+// time (each chain ≤ the dispatcher's 4-minute split budget, ≈ 34 min for
+// 34 scenarios four-wide), and the wrapper retries a failed run once. Three
+// hours holds twice that with margin; a wedged run still cannot hold the
+// runExclusive lock past it.
+const CHILD_TIMEOUT_MS = 3 * 60 * 60 * 1000;
+const JUDGE_CONCURRENCY = 4;
 
 // scenario.gates key → the env var the relay reads at call time. Every one of
 // these is read per call (no module-top reads), so a scenario may flip them
@@ -201,11 +208,21 @@ function lintScenario(s, knownTools) {
     [fx.officeHours != null && !['open', 'closed', 'unknown'].includes(fx.officeHours) && typeof fx.officeHours !== 'object', 'fixtures.officeHours must be open | closed | unknown | hours object'],
     [fx.modelFailures != null && !(Number.isInteger(fx.modelFailures) && fx.modelFailures >= 0), 'fixtures.modelFailures must be a non-negative integer'],
     ...Object.keys(fx.toolResponses || {}).map((name) => [!knownTools.has(name), `toolResponses names unknown tool "${name}"`]),
+    [!Array.isArray(s.allowedTools) || !s.allowedTools.length, 'allowedTools must be a non-empty list of the tools this scenario may call'],
+    ...(Array.isArray(s.allowedTools) ? s.allowedTools : []).map((name) => [!knownTools.has(name), `allowedTools names unknown tool "${name}"`]),
     [fx.resume != null && typeof fx.resume.segmentsText !== 'string', 'fixtures.resume.segmentsText must be a string'],
     [!Array.isArray(s.expect), 'expect must be an array'],
   ];
   const problems = rules.filter(([bad]) => bad).map(([, msg]) => msg);
   if (Array.isArray(s.expect)) s.expect.forEach((e, i) => problems.push(...lintExpectation(e, i, knownTools)));
+  // A tool an expectation wants called must be one the scenario allows —
+  // otherwise the allowlist and the expectation contradict each other.
+  const allowed = new Set(Array.isArray(s.allowedTools) ? s.allowedTools : []);
+  for (const e of Array.isArray(s.expect) ? s.expect : []) {
+    if (e && e.check === 'tools_called_include' && Array.isArray(e.value)) {
+      for (const name of e.value) if (!allowed.has(name)) problems.push(`expect tools_called_include names "${name}", which allowedTools does not allow`);
+    }
+  }
   return problems;
 }
 
@@ -498,11 +515,14 @@ function installHarness() {
           stream.finalMessage = () => finalMessage().then(
             (msg) => { record.modelRounds += 1; return msg; },
             (err) => {
-              // A barge-in aborts the stream on purpose; everything else is a
-              // real provider failure, wherever in the call it lands.
+              // The relay aborts the same controller for a caller barge-in AND
+              // for its 20 s stream timeout. Only an abort that lands while the
+              // harness itself is interrupting is deliberate; any other abort
+              // is a stalled provider and a real failure.
               const message = err && err.message ? err.message : String(err);
-              if ((err && err.name === 'AbortError') || /abort/i.test(message)) record.modelAborts += 1;
-              else record.modelErrors.push(message);
+              const aborted = (err && err.name === 'AbortError') || /abort/i.test(message);
+              if (aborted && record.interruptInFlight) record.modelAborts += 1;
+              else record.modelErrors.push(aborted ? `stream aborted by the relay's own bound: ${message}` : message);
               throw err;
             },
           );
@@ -566,7 +586,12 @@ function injectInterrupt(convo, record, spec) {
     const n = spec && typeof spec === 'object' && Number.isInteger(spec.words) ? spec.words : Math.max(1, Math.floor(words.length / 2));
     heard = words.slice(0, n).join(' ');
   }
-  convo.interrupt({ utteranceUntilInterrupt: heard, durationUntilInterruptMs: 1200 });
+  record.interruptInFlight = true;
+  try {
+    convo.interrupt({ utteranceUntilInterrupt: heard, durationUntilInterruptMs: 1200 });
+  } finally {
+    record.interruptInFlight = false;
+  }
   // The conversation rewrote its own record to what was played ("<heard>
   // [interrupted]"); the harness grades that, never the words the caller
   // did not hear. The full model text survives on the event as `planned`.
@@ -626,9 +651,11 @@ function inputIncludes(input = {}, expected = {}) {
 // One runner per expect key: (value, record, view) → { status, detail }.
 // `view` is the record read the way the checks need it.
 const CHECK_RUNNERS = Object.freeze({
-  tools_called_include(value, record, { calledNames }) {
-    const missing = value.filter((n) => !calledNames.includes(n));
-    return missing.length ? ['fail', `never called: ${missing.join(', ')}`] : ['pass', `called: ${value.join(', ')}`];
+  tools_called_include(value, record, { validNames, calledNames }) {
+    const missing = value.filter((n) => !validNames.includes(n));
+    if (!missing.length) return ['pass', `called: ${value.join(', ')}`];
+    const rejected = missing.filter((n) => calledNames.includes(n));
+    return ['fail', `never validly called: ${missing.join(', ')}${rejected.length ? ` (${rejected.join(', ')} called with arguments the tool rejected)` : ''}`];
   },
   tools_never_called(value, record, { calledNames }) {
     const hit = value.filter((n) => calledNames.includes(n));
@@ -699,16 +726,36 @@ function firstRegexHit(sources, spoken) {
   return null;
 }
 
+// A call the fixture REJECTED (missing argument, bad enum, invented ref) is
+// not the tool being called: it did nothing, so it cannot satisfy a
+// tools_called_include expectation. It still counts against never/subset.
+function validCallNames(record) {
+  return record.toolCalls.filter((t) => !t.invalid && !t.unexpected).map((t) => t.name);
+}
+
 function runCheck(expectation, record) {
   const utterances = agentUtterances(record);
-  const view = { calledNames: record.toolCalls.map((t) => t.name), utterances, spoken: utterances.map((u) => u.text) };
+  const view = { calledNames: record.toolCalls.map((t) => t.name), validNames: validCallNames(record), utterances, spoken: utterances.map((u) => u.text) };
   const runner = CHECK_RUNNERS[expectation.check];
   const [status, detail] = runner ? runner(expectation.value, record, view) : ['skip', `unknown check ${expectation.check}`];
   return { check: expectation.check, severity: expectation.severity, adjudicated: expectation.adjudicated === true, status, detail };
 }
 
+// The scenario's allowlist, graded as an implicit CRITICAL check on every
+// scenario: a tool outside `allowedTools` — a stray write above all — is a
+// blocking miss, whatever the fixture happens to answer for it.
+function allowedToolsCheck(scenario, record) {
+  const allowed = new Set(scenario.allowedTools || []);
+  const outside = [...new Set(record.toolCalls.filter((t) => !allowed.has(t.name)).map((t) => t.name))];
+  return {
+    check: 'allowed_tools', severity: 'critical', adjudicated: true,
+    status: outside.length ? 'fail' : 'pass',
+    detail: outside.length ? `called outside allowedTools: ${outside.join(', ')}` : `every call inside {${[...allowed].join(', ')}}`,
+  };
+}
+
 function evaluateChecks(scenario, record) {
-  return (scenario.expect || []).map((e) => runCheck(e, record));
+  return [allowedToolsCheck(scenario, record), ...(scenario.expect || []).map((e) => runCheck(e, record))];
 }
 
 /** The judge's verdict as checks. Fallback-leg verdicts are advisory: never pass/fail. */
@@ -763,7 +810,7 @@ function newRecord(scenario, h) {
   return {
     id: scenario.id, language: scenario.language || 'en', turn: 0, events: [], spoken: [], toolCalls: [], toolUse: {},
     endSession: null, injected: [], dbAttempts: [], warnings: [], toolsAvailable: [], promptSha: null, model: h.MODEL,
-    modelRounds: 0, modelErrors: [], modelCalls: 0, modelAborts: 0,
+    modelRounds: 0, modelErrors: [], modelCalls: 0, modelAborts: 0, interruptInFlight: false,
   };
 }
 
@@ -800,6 +847,33 @@ function officeStatusForJudge(scenario) {
 
 function errorRecord(err) {
   return { name: (err && err.name) || 'Error', message: err && err.message ? err.message : String(err), code: (err && err.code) || null };
+}
+
+/** The judged layer for one finished record (run in a pool after the conversations). */
+async function judgeRecord(scenario, record, judgeFn) {
+  const run = judgeFn || require('./voice-relay-judge').judgeTranscript;
+  const officeHours = officeStatusForJudge(scenario);
+  const callerBlock = scenario.caller && scenario.caller.context ? scenario.caller.context.block : null;
+  record.judge = await run({ spec: scenario.spec || {}, transcript: record.transcript, language: record.language, toolsAvailable: record.toolsAvailable, officeHours, callerBlock })
+    .catch((err) => ({ ok: false, reason: `judge_error:${err && err.message ? err.message : err}` }));
+  record.checks.push(...judgeChecks(scenario, record.judge));
+  record.qualityScore = qualityScore(record.checks);
+  record.status = scenarioStatus(record);
+  return record;
+}
+
+/** Run `fn` over `items` at most `width` at a time, preserving order. */
+async function mapPool(items, width, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(width, items.length) }, worker));
+  return out;
 }
 
 async function runScenario(scenario, { judge = true, judgeFn = null } = {}) {
@@ -853,20 +927,13 @@ async function runScenario(scenario, { judge = true, judgeFn = null } = {}) {
   record.transcript = renderTranscript(record.events);
   record.checks = record.error ? [] : evaluateChecks(scenario, record);
   record.judge = null;
-  if (!record.error && judge) {
-    // The db guard is DISARMED here by design: the judge dispatch is a
-    // ledgered lane and must be free to write its llm_dispatch_log /
-    // llm_call_traces rows under the ledger gates (replay-labelled). Sandy's
-    // own turns above ran with the guard armed.
-    const run = judgeFn || require('./voice-relay-judge').judgeTranscript;
-    const officeHours = officeStatusForJudge(scenario);
-    const callerBlock = scenario.caller && scenario.caller.context ? scenario.caller.context.block : null;
-    record.judge = await run({ spec: scenario.spec || {}, transcript: record.transcript, language: record.language, toolsAvailable: record.toolsAvailable, officeHours, callerBlock })
-      .catch((err) => ({ ok: false, reason: `judge_error:${err && err.message ? err.message : err}` }));
-    record.checks.push(...judgeChecks(scenario, record.judge));
-  }
   record.qualityScore = qualityScore(record.checks);
   record.status = scenarioStatus(record);
+  // The db guard is DISARMED from here on by design: the judge dispatch is a
+  // ledgered lane and must be free to write its llm_dispatch_log /
+  // llm_call_traces rows under the ledger gates (replay-labelled). Sandy's
+  // own turns above ran with the guard armed.
+  if (!record.error && judge) await judgeRecord(scenario, record, judgeFn);
   return record;
 }
 
@@ -876,7 +943,7 @@ function summarize(results, { judge }) {
   const summary = {
     scenarios: results.length, passed: 0, failed: 0, replayErrors: 0, replayErrorIds: [], failedIds: [],
     criticalMisses: 0, adjudicatedMajorMisses: 0, majorMisses: 0, qualityMisses: 0,
-    judge: !!judge, judged: 0, judgeFallbacks: 0, judgeErrors: 0, dbRefusals: 0, unexpectedTools: 0, warnings: 0,
+    judge: !!judge, judged: 0, judgeFallbacks: 0, judgeErrors: 0, dbRefusals: 0, unexpectedTools: 0, invalidInputs: 0, warnings: 0,
     modelRounds: 0, modelErrors: 0, modelUnavailable: 0, qualityScore: null, durationMs: 0,
   };
   const all = [];
@@ -884,6 +951,7 @@ function summarize(results, { judge }) {
     summary.durationMs += r.durationMs || 0;
     summary.dbRefusals += (r.dbAttempts || []).length;
     summary.unexpectedTools += (r.toolCalls || []).filter((t) => t.unexpected).length;
+    summary.invalidInputs += (r.toolCalls || []).filter((t) => t.invalid).length;
     summary.warnings += (r.warnings || []).length;
     summary.modelRounds += r.modelRounds || 0;
     summary.modelErrors += (r.modelErrors || []).length;
@@ -945,10 +1013,18 @@ async function runVoiceRelayReplay({ fixturePath = DEFAULT_FIXTURE_PATH, only = 
   const keepAlive = setInterval(() => {}, 1000);
   const results = [];
   try {
+    // Conversations one at a time (they share the patched world); verdicts
+    // afterwards, JUDGE_CONCURRENCY at a time (independent, and the judge's
+    // fallback budget makes a stalled primary cost minutes per verdict).
     for (const scenario of scenarios) {
-      const record = await runScenario(scenario, { judge, judgeFn });
-      logger.info(`[voice-relay-eval] ${scenario.id}: ${record.status}${record.error ? ` (${record.error.message})` : ''} checks=${record.checks.length} tools=${record.toolCalls.length}${record.judge && record.judge.ok ? ` judge=${record.judge.verdict.pass ? 'pass' : 'fail'}${record.judge.judge_fallback ? '(fallback)' : ''}` : ''} ${record.durationMs}ms`);
+      const record = await runScenario(scenario, { judge: false });
       results.push(record);
+    }
+    if (judge) {
+      await mapPool(scenarios, JUDGE_CONCURRENCY, (scenario, i) => (results[i].error ? results[i] : judgeRecord(scenario, results[i], judgeFn)));
+    }
+    for (const record of results) {
+      logger.info(`[voice-relay-eval] ${record.id}: ${record.status}${record.error ? ` (${record.error.message})` : ''} checks=${record.checks.length} tools=${record.toolCalls.length}${record.judge && record.judge.ok ? ` judge=${record.judge.verdict.pass ? 'pass' : 'fail'}${record.judge.judge_fallback ? '(fallback)' : ''}` : ''} ${record.durationMs}ms`);
     }
   } finally {
     clearInterval(keepAlive);
@@ -1148,7 +1224,7 @@ module.exports = {
   summaryLine,
   isFailedVoiceRun,
   _internals: {
-    PROMISE_RE, DEFAULT_TOOL_TEXT, LOOKUP_BUDGET_TEXT, EVAL_CALLER_TO, CHILD_TIMEOUT_MS,
+    PROMISE_RE, DEFAULT_TOOL_TEXT, LOOKUP_BUDGET_TEXT, EVAL_CALLER_TO, CHILD_TIMEOUT_MS, JUDGE_CONCURRENCY, mapPool, judgeRecord, allowedToolsCheck, validCallNames,
     makeDbGuard, officeHoursFixture, officeStatusForJudge, pickToolResponse, runFixtureTool, applyToolSideEffects, validateToolInput, offeredRefs, applyGates, applyResumeFixture, injectInterrupt, driveTurns,
     renderTranscript, evaluateChecks, runCheck, CHECK_RUNNERS, lintScenario, judgeChecks, scenarioStatus, qualityScore, summarize, failureLines,
     notifyFailure, notifyInconclusive,

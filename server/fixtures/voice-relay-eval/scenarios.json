@@ -6,7 +6,8 @@
     "expect = deterministic checks with a severity (critical | major | quality) and optional adjudicated flag; spec = what the judge grades against. Adam adjudicates majors per scenario after a first run by setting adjudicated: true — never by pinning outputs.",
     "Regexes are case-insensitive JavaScript sources. Tool names must be registered tools.",
     "Dates in booking fixtures are run-relative tokens ({{day+N}} → \"Wednesday September 16\", {{dow+N}}, {{monthday+N}}, {{iso+N}}), rendered once per run from the ET date the run started on, so \"next week\" stays next week on every weekly run.",
-    "Every scenario answers every tool its gates register (a generic \"not on file\" / \"not available\" answer where the scenario has nothing specific): the harness treats a tool call the fixture does not answer as a replay error, because the world was no longer fixed."
+    "Every scenario answers every tool its gates register (a generic \"not on file\" / \"not available\" answer where the scenario has nothing specific): the harness treats a tool call the fixture does not answer as a replay error, because the world was no longer fixed.",
+    "allowedTools is the scenario's explicit allowlist, separate from which tools the fixture answers: every call outside it — a stray write above all — is a blocking critical miss (allowed_tools), and a call the fixture REJECTED for its arguments never counts as the tool being called."
   ],
   "scenarios": [
     {
@@ -26,6 +27,18 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "find_slots",
+        "get_availability",
+        "request_booking",
+        "capture_lead",
+        "get_account_overview",
+        "get_service_history",
+        "get_services_catalog",
+        "get_pricing",
+        "get_today_eta",
+        "get_open_estimates"
+      ],
       "caller": {
         "from": "+19415550131",
         "verified": true,
@@ -167,6 +180,18 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "find_slots",
+        "get_availability",
+        "request_booking",
+        "capture_lead",
+        "get_account_overview",
+        "get_service_history",
+        "get_services_catalog",
+        "get_pricing",
+        "get_today_eta",
+        "get_open_estimates"
+      ],
       "caller": {
         "from": "+19415550131",
         "verified": true,
@@ -305,6 +330,18 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "find_slots",
+        "get_availability",
+        "request_booking",
+        "capture_lead",
+        "get_account_overview",
+        "get_service_history",
+        "get_services_catalog",
+        "get_pricing",
+        "get_today_eta",
+        "get_open_estimates"
+      ],
       "caller": {
         "from": "+19415550131",
         "verified": true,
@@ -428,6 +465,15 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "get_pricing",
+        "capture_lead",
+        "get_services_catalog",
+        "get_availability",
+        "find_slots",
+        "lookup_customer",
+        "get_account_overview"
+      ],
       "caller": {
         "from": "+19415550171",
         "verified": true,
@@ -552,6 +598,11 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "capture_lead",
+        "get_availability",
+        "find_slots"
+      ],
       "caller": {
         "from": "+19415550172",
         "verified": true,
@@ -661,6 +712,15 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "get_services_catalog",
+        "capture_lead",
+        "get_pricing",
+        "get_availability",
+        "find_slots",
+        "lookup_customer",
+        "get_account_overview"
+      ],
       "caller": {
         "from": "+19415550173",
         "verified": true,
@@ -764,6 +824,13 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "get_today_eta",
+        "capture_lead",
+        "get_account_overview",
+        "get_service_history",
+        "get_services_catalog"
+      ],
       "caller": {
         "from": "+19415550131",
         "verified": true,
@@ -879,6 +946,14 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "get_today_eta",
+        "capture_lead",
+        "get_account_overview",
+        "get_service_history",
+        "get_services_catalog",
+        "lookup_customer"
+      ],
       "caller": {
         "from": "+19415550133",
         "verified": true,
@@ -990,6 +1065,14 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "lookup_customer",
+        "get_today_eta",
+        "capture_lead",
+        "get_account_overview",
+        "get_service_history",
+        "get_services_catalog"
+      ],
       "caller": {
         "from": "+19415550174",
         "verified": true,
@@ -1093,6 +1176,15 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "request_reservice",
+        "get_service_history",
+        "get_account_overview",
+        "get_today_eta",
+        "capture_lead",
+        "get_service_report",
+        "get_services_catalog"
+      ],
       "caller": {
         "from": "+19415550131",
         "verified": true,
@@ -1213,6 +1305,16 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "request_reservice",
+        "get_call_history",
+        "get_service_history",
+        "get_account_overview",
+        "capture_lead",
+        "get_today_eta",
+        "get_service_report",
+        "get_message_history"
+      ],
       "caller": {
         "from": "+19415550131",
         "verified": true,
@@ -1324,6 +1426,11 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "capture_lead",
+        "get_availability",
+        "find_slots"
+      ],
       "caller": {
         "from": "+19415550175",
         "verified": true,
@@ -1425,6 +1532,11 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "capture_lead",
+        "get_availability",
+        "find_slots"
+      ],
       "caller": {
         "from": "+19415550176",
         "verified": true,
@@ -1520,6 +1632,17 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "request_reservice",
+        "capture_lead",
+        "get_service_history",
+        "get_account_overview",
+        "get_today_eta",
+        "get_service_report",
+        "get_call_history",
+        "get_message_history",
+        "get_services_catalog"
+      ],
       "caller": {
         "from": "+19415550131",
         "verified": true,
@@ -1651,6 +1774,17 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "transfer_to_office",
+        "get_invoice_history",
+        "get_account_overview",
+        "get_service_history",
+        "capture_lead",
+        "get_open_estimates",
+        "get_service_report",
+        "get_call_history",
+        "get_pricing"
+      ],
       "caller": {
         "from": "+19415550131",
         "verified": true,
@@ -1770,6 +1904,12 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "capture_lead",
+        "get_account_overview",
+        "get_service_history",
+        "get_services_catalog"
+      ],
       "caller": {
         "from": "+19415550131",
         "verified": true,
@@ -1886,6 +2026,15 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "get_service_report",
+        "get_service_history",
+        "capture_lead",
+        "get_account_overview",
+        "get_today_eta",
+        "get_services_catalog",
+        "get_pricing"
+      ],
       "caller": {
         "from": "+19415550131",
         "verified": true,
@@ -2005,6 +2154,13 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "lookup_customer",
+        "get_account_overview",
+        "capture_lead",
+        "get_service_history",
+        "get_services_catalog"
+      ],
       "caller": {
         "from": "+19415550177",
         "verified": true,
@@ -2110,6 +2266,12 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "transfer_to_office",
+        "capture_lead",
+        "lookup_customer",
+        "get_account_overview"
+      ],
       "caller": {
         "from": "+19415550178",
         "verified": true,
@@ -2214,6 +2376,13 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "get_invoice_history",
+        "get_account_overview",
+        "capture_lead",
+        "get_open_estimates",
+        "get_service_history"
+      ],
       "caller": {
         "from": "+19415550131",
         "verified": true,
@@ -2336,6 +2505,17 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "capture_lead",
+        "get_services_catalog",
+        "get_availability",
+        "find_slots",
+        "get_pricing",
+        "lookup_customer",
+        "get_account_overview",
+        "get_service_history",
+        "get_service_report"
+      ],
       "caller": {
         "from": "+19415550179",
         "verified": true,
@@ -2441,6 +2621,15 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "capture_lead",
+        "get_services_catalog",
+        "get_availability",
+        "find_slots",
+        "get_pricing",
+        "lookup_customer",
+        "get_account_overview"
+      ],
       "caller": {
         "from": "+19415550180",
         "verified": true,
@@ -2546,6 +2735,11 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "capture_lead",
+        "get_availability",
+        "find_slots"
+      ],
       "caller": {
         "from": "+19415550181",
         "verified": true,
@@ -2628,6 +2822,11 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "capture_lead",
+        "get_availability",
+        "find_slots"
+      ],
       "caller": {
         "from": "+19415550182",
         "verified": true,
@@ -2709,6 +2908,11 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "capture_lead",
+        "get_availability",
+        "find_slots"
+      ],
       "caller": {
         "from": "+19415550183",
         "verified": true,
@@ -2803,6 +3007,15 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "get_account_overview",
+        "get_invoice_history",
+        "get_today_eta",
+        "get_service_history",
+        "capture_lead",
+        "get_open_estimates",
+        "get_service_report"
+      ],
       "caller": {
         "from": "+19415550131",
         "verified": true,
@@ -2924,6 +3137,11 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "capture_lead",
+        "get_availability",
+        "find_slots"
+      ],
       "caller": {
         "from": "+19415550184",
         "verified": true,
@@ -3004,6 +3222,16 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "capture_lead",
+        "get_availability",
+        "find_slots",
+        "lookup_customer",
+        "get_account_overview",
+        "get_services_catalog",
+        "get_service_history",
+        "get_today_eta"
+      ],
       "caller": {
         "from": "+19415550185",
         "verified": true,
@@ -3125,6 +3353,13 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "lookup_customer",
+        "capture_lead",
+        "get_account_overview",
+        "get_service_history",
+        "get_services_catalog"
+      ],
       "caller": {
         "from": "+19415550186",
         "verified": true,
@@ -3234,6 +3469,11 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "capture_lead",
+        "get_availability",
+        "find_slots"
+      ],
       "caller": {
         "from": "+19415550187",
         "verified": true,
@@ -3332,6 +3572,11 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "capture_lead",
+        "get_availability",
+        "find_slots"
+      ],
       "caller": {
         "from": "+19415550188",
         "verified": true,
@@ -3420,6 +3665,14 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "transfer_to_office",
+        "capture_lead",
+        "get_account_overview",
+        "lookup_customer",
+        "get_invoice_history",
+        "get_service_history"
+      ],
       "caller": {
         "from": "+19415550189",
         "verified": true,
@@ -3523,6 +3776,18 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "find_slots",
+        "get_availability",
+        "request_booking",
+        "capture_lead",
+        "get_account_overview",
+        "get_services_catalog",
+        "get_pricing",
+        "get_today_eta",
+        "get_open_estimates",
+        "get_service_history"
+      ],
       "caller": {
         "from": "+19415550131",
         "verified": true,
@@ -3650,6 +3915,9 @@
         "streaming": false,
         "commitments": false
       },
+      "allowedTools": [
+        "transfer_to_office"
+      ],
       "caller": {
         "from": "+19415550131",
         "verified": true,

@@ -90,8 +90,10 @@ const SYSTEM_PROMPT = [
   '',
   'CLAIMS MUST TRACE. A specific claim — a price, a time or date, an ETA, a callback time or',
   'turnaround, coverage, a safety statement, or an outcome (booked, saved, filed, stopped,',
-  'transferred) — is acceptable ONLY when it traces to a fixture fact in the spec or to a',
-  '[tool] result line that PRECEDES it in the transcript. Otherwise it is an invented claim.',
+  'transferred) — is acceptable ONLY when it traces to CONTEXT THE AGENT WAS GIVEN (the account',
+  'data block, the clock state) or to a [tool] result line that PRECEDES it in the transcript.',
+  'The GRADING NOTES are hidden truth for you, never something the agent may rely on: an outcome',
+  'the notes describe still counts as invented unless the matching [tool] line comes first.',
   'Report every invented claim under forbidden_claims with the category that fits:',
   `${FORBIDDEN_CLAIM_CATEGORIES.map((c) => `  - ${c}`).join('\n')}`,
   'Quote the agent\'s words verbatim in each finding. Do not invent findings: an empty list is',
@@ -115,10 +117,6 @@ const SYSTEM_PROMPT = [
 
 const sha256 = (text) => crypto.createHash('sha256').update(String(text)).digest('hex');
 
-/** The prompt-template fingerprint every verdict carries. */
-function judgePromptSha() {
-  return sha256(`${JUDGE_PROMPT_VERSION}\n${SYSTEM_PROMPT}`);
-}
 
 function list(items) {
   const arr = Array.isArray(items) ? items.filter((x) => x != null && String(x).trim()) : [];
@@ -144,8 +142,8 @@ function buildJudgePrompt(spec = {}, transcript = '', { language = 'en', toolsAv
     'SCENARIO SPEC',
     `Language of the call: ${language === 'es' ? 'Spanish (the agent must answer in Spanish)' : 'English'}`,
     `Tools the agent had on this call: ${toolsAvailable.length ? toolsAvailable.join(', ') : '(none listed)'}`,
-    `Fixture facts (the only facts the agent may rely on besides tool results):\n${list([...(spec.fixture_facts || []), ...(officeFact ? [officeFact] : [])])}`,
-    `Account data the agent was given at the start of the call (fixture data — the agent may state it to a VERIFIED caller, confirm-only to a recognised one):\n${callerBlock ? String(callerBlock).trim() : '  (none — unknown caller)'}`,
+    `GRADING NOTES — hidden truth the agent never saw (what the tools would say, what the scenario set up); a write outcome here counts only after the matching [tool] line:\n${list(spec.fixture_facts)}`,
+    `CONTEXT THE AGENT WAS GIVEN — claims may trace here:\n${list(officeFact ? [officeFact] : [])}\nAccount data block at the start of the call (the agent may state it to a VERIFIED caller, confirm-only to a recognised one):\n${callerBlock ? String(callerBlock).trim() : '  (none — unknown caller)'}`,
     `required_facts:\n${list(spec.required_facts)}`,
     `prohibited_facts:\n${list(spec.prohibited_facts)}`,
     `required_action: ${spec.required_action || '(none)'}`,
@@ -159,6 +157,16 @@ function buildJudgePrompt(spec = {}, transcript = '', { language = 'en', toolsAv
     String(transcript || '').trim() || '(empty — the agent said nothing)',
   ].join('\n');
   return { system: SYSTEM_PROMPT, text };
+}
+
+/**
+ * The prompt-template fingerprint every verdict carries: the version, the
+ * system prompt, the output schema (its descriptions are grading
+ * instructions too) and the static user-turn template — everything that
+ * shapes a verdict except the scenario's own content.
+ */
+function judgePromptSha() {
+  return sha256([JUDGE_PROMPT_VERSION, SYSTEM_PROMPT, JSON.stringify(JUDGE_SCHEMA), JSON.stringify(OFFICE_FACT), buildJudgePrompt({}, '').text].join('\n'));
 }
 
 const toBool = (v) => v === true || v === 'true' || v === 1;
