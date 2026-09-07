@@ -7,6 +7,11 @@ import { MemoryRouter } from 'react-router-dom';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const native = vi.hoisted(() => ({ enabled: false }));
+vi.mock('../native/platform', async (importOriginal) => ({
+  ...await importOriginal(), isNativeApp: () => native.enabled,
+}));
+
 // Any api method not explicitly mocked returns a forever-pending promise, so
 // untested widgets sit in their loading states instead of crashing the render.
 vi.mock('../utils/api', () => {
@@ -23,7 +28,7 @@ vi.mock('../utils/api', () => {
 });
 
 import api from '../utils/api';
-import { ScheduleTab, PropertyTab, ServiceTracker, DashboardTab } from './PortalPage';
+import { ScheduleTab, PropertyTab, ServiceTracker, DashboardTab, ServicesTab } from './PortalPage';
 import NotificationBell from '../components/NotificationBell';
 import InstallPrompt from '../components/InstallPrompt';
 import { PortalReadProvider } from '../hooks/usePortalRead';
@@ -38,6 +43,8 @@ const customer = {
 const futureDate = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
 beforeEach(() => {
+  native.enabled = false;
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
   vi.clearAllMocks();
   vi.spyOn(console, 'error').mockImplementation(() => {});
   api.getSchedule.mockResolvedValue({ upcoming: [] });
@@ -64,6 +71,37 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.useRealTimers();
+});
+
+describe('open service reports', () => {
+  it.each(['refresh', 'offline'])('keeps the existing report iframe mounted during %s', async (transition) => {
+    native.enabled = true;
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {});
+    const visits = { services: [{ id: 'visit-report', date: futureDate, type: 'Fixture treatment', reportUrl: '/report/fixture' }] };
+    let finishRead;
+    api.getServices.mockResolvedValueOnce(visits).mockImplementationOnce(() => new Promise(resolve => { finishRead = resolve; }));
+    render(<PortalReadProvider enabled><PortalRefreshArea><ServicesTab /></PortalRefreshArea></PortalReadProvider>);
+    fireEvent.click(await screen.findByRole('button', { name: /Fixture treatment/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Download', exact: true }));
+    const frame = screen.getByRole('dialog').querySelector('iframe');
+    expect(frame).not.toBeNull();
+    if (transition === 'offline') {
+      Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+      fireEvent(window, new Event('offline'));
+    } else {
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    }
+    expect(screen.getByRole('heading', { name: 'Saved completed visits' })).toBeInTheDocument();
+    expect(screen.getByRole('dialog').querySelector('iframe')).toBe(frame);
+    if (transition === 'offline') {
+      Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+      fireEvent(window, new Event('online'));
+    }
+    await act(async () => finishRead(visits));
+    expect(screen.getByRole('dialog').querySelector('iframe')).toBe(frame);
+    fireEvent.click(screen.getByRole('button', { name: 'Close preview' }));
+    expect(document.body.style.position).not.toBe('fixed');
+  });
 });
 
 describe('dashboard appointment confirmation', () => {

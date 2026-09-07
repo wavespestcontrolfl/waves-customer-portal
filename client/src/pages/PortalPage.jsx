@@ -3525,10 +3525,18 @@ function ServicesTab() {
     display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
   };
 
+  // The stable key keeps an open iframe alive when the list enters saved mode.
+  const previewOverlay = preview && <DocumentPreviewOverlay key="report-preview"
+    preview={preview} onClose={closePreview}
+    onError={(err) => showCustomerAlert(err?.message || 'Could not save this report. Please try again.')} />;
+
   if (historyRead.saved || historyRead.offline) {
-    return <SavedPortalRead title="Saved completed visits" read={historyRead}>
-      <SavedVisitDetails visits={historyRead.data?.services || []} />
-    </SavedPortalRead>;
+    return <div>
+      <SavedPortalRead title="Saved completed visits" read={historyRead}>
+        <SavedVisitDetails visits={historyRead.data?.services || []} />
+      </SavedPortalRead>
+      {previewOverlay}
+    </div>;
   }
 
   if (loading) {
@@ -3898,13 +3906,7 @@ function ServicesTab() {
         </div>
       )}
 
-      {preview && (
-        <DocumentPreviewOverlay
-          preview={preview}
-          onClose={closePreview}
-          onError={(err) => showCustomerAlert(err?.message || 'Could not save this report. Please try again.')}
-        />
-      )}
+      {previewOverlay}
       {lightbox && (
         <div onClick={() => setLightbox(null)}
           style={{
@@ -12994,12 +12996,19 @@ function DocumentsTab({ customer, onSwitchTab }) {
     window.open(`mailto:?subject=${subject}&body=${body}`, '_self');
   };
 
+  const previewOverlay = preview && <DocumentPreviewOverlay key="report-preview"
+    preview={preview} onClose={closePreview}
+    onError={(err) => flash(err?.message || 'Could not save this document. Please try again.', 'error')} />;
+
   if (documentsRead.saved || documentsRead.offline) {
-    return <SavedPortalRead title="Saved documents" titleAs="h1" read={documentsRead}>
-      {Object.values(docs).flat().length ? <ul style={{ paddingLeft: 20, fontSize: 16, lineHeight: 1.6 }}>
-        {Object.values(docs).flat().map(doc => <li key={doc.id}>{doc.title || 'Document'}</li>)}
-      </ul> : <p style={{ fontSize: 16 }}>{documentsRead.data ? 'No documents were listed when last checked.' : 'Open Documents while connected to load your document list.'}</p>}
-    </SavedPortalRead>;
+    return <div>
+      <SavedPortalRead title="Saved documents" titleAs="h1" read={documentsRead}>
+        {Object.values(docs).flat().length ? <ul style={{ paddingLeft: 20, fontSize: 16, lineHeight: 1.6 }}>
+          {Object.values(docs).flat().map(doc => <li key={doc.id}>{doc.title || 'Document'}</li>)}
+        </ul> : <p style={{ fontSize: 16 }}>{documentsRead.data ? 'No documents were listed when last checked.' : 'Open Documents while connected to load your document list.'}</p>}
+      </SavedPortalRead>
+      {previewOverlay}
+    </div>;
   }
 
   if (loading) {
@@ -13365,13 +13374,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         </div>
       </section>
 
-      {preview && (
-        <DocumentPreviewOverlay
-          preview={preview}
-          onClose={closePreview}
-          onError={(err) => flash(err?.message || 'Could not save this document. Please try again.', 'error')}
-        />
-      )}
+      {previewOverlay}
     </div>
   );
 }
