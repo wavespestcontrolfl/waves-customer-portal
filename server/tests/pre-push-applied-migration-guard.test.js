@@ -30,9 +30,9 @@ function git(cwd, args, env = {}) {
   });
 }
 
-function pushResult(cwd, env = {}) {
+function pushResult(cwd, env = {}, target = 'HEAD:main') {
   try {
-    git(cwd, ['push', 'origin', 'HEAD:main'], env);
+    git(cwd, ['push', 'origin', target], env);
     return { ok: true, stderr: '' };
   } catch (e) {
     return { ok: false, stderr: String(e.stderr || '') };
@@ -109,5 +109,27 @@ describe('pre-push applied-migration guard', () => {
     expect(r.stderr).toMatch(/\[migration-guard\] BLOCKED/);
     expect(r.stderr).toContain('D\t' + MIG_A.split(path.sep).join('/'));
     git(work, ['reset', '-q', '--hard', 'HEAD~1']);
+  });
+
+  // A brand-new remote branch has deployed nothing itself, but every
+  // migration it inherits from main has run in prod — the guard falls back
+  // to the merge base with origin/main (Codex r1 P1 on #4047).
+  test('a NEW remote branch that edits a migration inherited from main is BLOCKED via the merge base', () => {
+    git(work, ['fetch', '-q', 'origin']);
+    git(work, ['checkout', '-q', '-b', 'feature-edit', 'origin/main']);
+    writeAndCommit(work, { [MIG_A]: "exports.up = async () => { /* edited on a new branch */ };\nexports.down = async () => {};\n" }, 'edit main migration on new branch');
+    const r = pushResult(work, {}, 'HEAD:refs/heads/feature-edit');
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toMatch(/\[migration-guard\] BLOCKED/);
+    expect(r.stderr).toContain('M\t' + MIG_A.split(path.sep).join('/'));
+  });
+
+  test('a NEW remote branch that only adds a migration passes', () => {
+    git(work, ['checkout', '-q', '-b', 'feature-add', 'origin/main']);
+    writeAndCommit(work, {
+      [path.join(MIGRATIONS, '20260101000003_third.js')]: "exports.up = async () => {};\nexports.down = async () => {};\n",
+    }, 'add migration on new branch');
+    const r = pushResult(work, {}, 'HEAD:refs/heads/feature-add');
+    expect(r.ok).toBe(true);
   });
 });
