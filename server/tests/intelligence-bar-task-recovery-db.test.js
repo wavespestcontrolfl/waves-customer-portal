@@ -9,8 +9,8 @@ suite('IB task recovery and retained approval proof in isolated Postgres', () =>
   let db, Tasks, Pending;
   const actorId = crypto.randomUUID(), sessionId = crypto.randomUUID();
   const originalDatabaseUrl = process.env.DATABASE_URL;
-  const begin = (request = { prompt: 'Synthetic ledger request' }, requestKey = crypto.randomUUID()) =>
-    Tasks.begin({ actorId, sessionId, requestKey, request, pageContext: {} });
+  const begin = (request = { prompt: 'Synthetic ledger request' }, requestKey = crypto.randomUUID(), pageContext = {}) =>
+    Tasks.begin({ actorId, sessionId, requestKey, request, pageContext });
   const proposal = (task, step = 'first') => Pending.createPendingAction({
     toolName: 'send_sms', requestedBy: actorId, taskId: task.id, runnerToken: task.runner_token, stepKey: step,
     summary: 'Synthetic ledger proposal only', params: { phone: '+15550101234', message: 'Synthetic fixture; never sent',
@@ -49,6 +49,17 @@ suite('IB task recovery and retained approval proof in isolated Postgres', () =>
     expect((await Tasks.get(first.task.id, actorId, sessionId)).request).toMatchObject(request);
     expect(await Tasks.get(first.task.id, crypto.randomUUID(), sessionId)).toBeUndefined();
     expect(await Tasks.get(first.task.id, actorId, crypto.randomUUID())).toBeUndefined();
+  });
+
+  test('request replay rejects changed page context but accepts the same context with reordered keys', async () => {
+    const key = crypto.randomUUID(), customer = crypto.randomUUID(), other = crypto.randomUUID();
+    const request = { prompt: 'Update this customer' };
+    const first = await begin(request, key, { customer_id: customer, pathname: '/admin/customers' });
+    expect((await begin(request, key, { pathname: '/admin/customers', customer_id: customer })).task.id).toBe(first.task.id);
+    expect((await begin(request, key, { customer_id: other, pathname: '/admin/customers' })).code).toBe('request_changed');
+    const stored = await Tasks.get(first.task.id, actorId, sessionId);
+    expect(stored.page_context.customer_id).toBe(customer);
+    expect((await db('ib_tasks').where({ actor_id: actorId, request_key: key })).length).toBe(1);
   });
 
   test('one task cannot propose a dependent write before a successful recorded predecessor', async () => {

@@ -37,7 +37,8 @@ async function begin({ actorId, sessionId, requestKey, request, pageContext }) {
   };
   const [created] = await db('ib_tasks').insert(row).onConflict(['actor_id', 'session_id', 'request_key']).ignore().returning('*');
   const task = created || await db('ib_tasks').where({ actor_id: String(actorId), session_id: sessionId, request_key: requestKey }).first();
-  if (!task || task.request_hash !== hash) return { error: 'This request key belongs to different request details', code: 'request_changed' };
+  if (!task || task.request_hash !== hash
+    || stableStringify(task.page_context || {}) !== stableStringify(pageContext || {})) return { error: 'This request key belongs to different request details', code: 'request_changed' };
   return { task, created: !!created };
 }
 
