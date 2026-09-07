@@ -343,12 +343,15 @@ describe('buildMixAmount', () => {
       .toEqual({ amount: 0.75, unit: 'oz', gallons: 1, coversSqft: 500, reason: null });
     // Small doses keep four decimals (Codex r6 P1): 0.113 oz/1,000 at 2 gal/1,000 for 1 gal.
     expect(jobCard.buildMixAmount({ ratePer1000: 0.113, rateUnit: 'oz', carrierGalPer1000: 2, gallons: 1 }).amount).toBe(0.0565);
+    // A full backpack: the same product at the backpack's own 1.33 gal/1,000 over its 4 gal.
+    expect(jobCard.buildMixAmount({ ratePer1000: 0.113, rateUnit: 'oz', carrierGalPer1000: 1.33, gallons: 4 }))
+      .toEqual({ amount: 0.3398, unit: 'oz', gallons: 4, coversSqft: 3008, reason: null });
   });
 
   test.each([
     ['missing rate', { ratePer1000: null, carrierGalPer1000: 2, gallons: 110 }, 'No verified rate on file'],
     ['missing carrier', { ratePer1000: 1.5, carrierGalPer1000: null, gallons: 110 }, 'No carrier rate on file'],
-    ['odd volume', { ratePer1000: 1.5, carrierGalPer1000: 2, gallons: 5 }, 'Pick 110 or 1 gallons'],
+    ['no volume', { ratePer1000: 1.5, carrierGalPer1000: 2, gallons: 0 }, 'Pick a tank volume'],
   ])('%s → null amount with reason', (_l, input, reason) => {
     expect(jobCard.buildMixAmount(input)).toMatchObject({ amount: null, reason });
   });
@@ -392,6 +395,30 @@ describe('tankFromCalibrations', () => {
   });
   test('no rig with a protocol carrier mixes on the protocol default', () => {
     expect(jobCard.tankFromCalibrations([], 2)).toMatchObject({ calibrated: true, source: 'protocol_default', carrierGalPer1000: 2 });
+  });
+});
+
+describe('the Tank section\'s rig list and rig pick', () => {
+  const tank1 = { id: 'cal-1', equipment_system_id: 'sys-1', system_type: 'tank', system_name: '110-Gallon Spray Tank #1', carrier_gal_per_1000: 2, calibration_status: 'field_verified', tank_capacity_gal: '110.00' };
+  const tank2 = { ...tank1, id: 'cal-2', equipment_system_id: 'sys-2', system_name: 'Tank #2', calibration_status: 'estimated_not_field_verified' };
+  const backpack = { id: 'cal-3', equipment_system_id: 'sys-3', system_type: 'backpack', system_name: 'FlowZone Typhoon 3.0 #1', carrier_gal_per_1000: 1.33, calibration_status: 'estimated_not_field_verified', tank_capacity_gal: '4.00' };
+
+  test('rigOptions lists every active rig with a tank capacity, tanks first — 110, 110, 4', () => {
+    // The read orders backpacks before tanks; a rig with no capacity on file cannot be filled.
+    expect(jobCard._test.rigOptions([backpack, tank1, tank2, { ...backpack, id: 'cal-x', tank_capacity_gal: null }])).toEqual([
+      { calibrationId: 'cal-1', name: '110-Gallon Spray Tank #1', tankCapacityGal: 110 },
+      { calibrationId: 'cal-2', name: 'Tank #2', tankCapacityGal: 110 },
+      { calibrationId: 'cal-3', name: 'FlowZone Typhoon 3.0 #1', tankCapacityGal: 4 },
+    ]);
+  });
+
+  test('rigRows narrows to the visit\'s assignment or the section\'s pick; nothing named is every active rig', () => {
+    const rows = [tank1, tank2, backpack];
+    expect(jobCard._test.rigRows(rows, null)).toBe(rows);
+    expect(jobCard._test.rigRows(rows, { equipmentSystemId: 'sys-2', calibrationId: null })).toEqual([tank2]);
+    expect(jobCard._test.rigRows(rows, { calibrationId: 'cal-3' })).toEqual([backpack]);
+    // An assignment whose calibration is no longer active resolves nothing: the protocol carrier applies.
+    expect(jobCard._test.rigRows(rows, { equipmentSystemId: 'sys-2', calibrationId: 'cal-gone' })).toEqual([]);
   });
 });
 
@@ -795,6 +822,24 @@ describe('mixForProduct', () => {
     expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals: approve() }, ...at })).toMatchObject({ amount: 6.215, rateSource: 'catalog' });
   });
 
+  test('a rig pick doses a full tank of that rig on its own carrier and volume; without one the visit\'s rig resolves as the card does', async () => {
+    const tank1 = { id: 'cal-1', equipment_system_id: 'sys-1', system_type: 'tank', system_name: 'Tank #1', carrier_gal_per_1000: 2, calibration_status: 'field_verified', tank_capacity_gal: '110.00' };
+    const backpack = { id: 'cal-3', equipment_system_id: 'sys-3', system_type: 'backpack', system_name: 'FlowZone', carrier_gal_per_1000: 1.33, calibration_status: 'estimated_not_field_verified', tank_capacity_gal: '4.00' };
+    const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [] }, mixCalculator: { items: [], conditionalOptions: [], carrierGalPer1000: 1 } });
+    const opts = { serviceId: 'svc1', dbh: makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [backpack, tank1] }), deps: { buildPlan, evaluateApprovals: approve() }, ...at };
+    // No pick: the tank rig decides and the backpack never does, exactly as the card.
+    expect(await jobCard.mixForProduct('p1', 110, opts)).toMatchObject({ amount: 6.215, gallons: 110, coversSqft: 55000, tank: { source: 'rig', systemName: 'Tank #1', tankCapacityGal: 110 } });
+    // The backpack pick: 0.113 oz/1,000 at ITS 1.33 gal/1,000 over ITS 4 gal — not the truck's 2.0.
+    expect(await jobCard.mixForProduct('p1', null, { ...opts, calibrationId: 'cal-3' }))
+      .toMatchObject({ amount: 0.3398, gallons: 4, coversSqft: 3008, tank: { source: 'rig', carrierGalPer1000: 1.33, tankCapacityGal: 4, systemName: 'FlowZone' } });
+    // A per-gallon dilution fills the picked rig's volume.
+    const demand = { id: 'd', name: 'Demand CS', category: 'insecticide', default_rate_per_1000: null, rate_unit: null, default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    expect(await jobCard.mixForProduct('d', null, { serviceId: 'svc1', dbh: makeDb({ scheduled_services: [visit], products_catalog: [demand], equipment_calibrations: [backpack, tank1] }), calibrationId: 'cal-3', ...at }))
+      .toMatchObject({ amount: 0.8, amountMax: 3.2, gallons: 4, basis: 'per_gallon' });
+    // A pick that is no longer active is not found.
+    expect(await jobCard.mixForProduct('p1', null, { ...opts, calibrationId: 'cal-gone' })).toBeNull();
+  });
+
   test('no visit row → null, never a dose from an unassigned rig (Codex r9 P1)', async () => {
     const dbh = makeDb({
       products_catalog: [product],
@@ -1149,6 +1194,29 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     expect(card.notes.chemicalSensitivity).toBe(sensitivity);
     expect(card.notes.petsSecured).toBe('crated in garage');
     expect(card.notes.instructions).toContain('do not treat the vegetable garden');
+  });
+
+  test('the card lists every active rig with its tank volume for the Tank section, whatever the visit names', async () => {
+    const deps = { getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] } };
+    const rigs = [
+      { id: 'cal-3', equipment_system_id: 'sys-3', system_type: 'backpack', system_name: 'FlowZone Typhoon 3.0 #1', carrier_gal_per_1000: 1.33, calibration_status: 'estimated_not_field_verified', tank_capacity_gal: '4.00' },
+      { id: 'cal-1', equipment_system_id: 'sys-1', system_type: 'tank', system_name: '110-Gallon Spray Tank #1', carrier_gal_per_1000: 2, calibration_status: 'field_verified', tank_capacity_gal: '110.00' },
+      { id: 'cal-2', equipment_system_id: 'sys-2', system_type: 'tank', system_name: 'Tank #2', carrier_gal_per_1000: 2, calibration_status: 'estimated_not_field_verified', tank_capacity_gal: '110.00' },
+    ];
+    const base = factsDb({ 'scheduled_services as ss': { ...visit(false), assigned_equipment_system_id: 'sys-2', assigned_calibration_id: 'cal-2' }, property_preferences: prefs });
+    // The calibration read is awaited as a list (factsDb's chain only answers .first / .catch).
+    const dbh = Object.assign((table) => Object.assign(base(table), {
+      update: () => ({ catch: async () => null }),
+      ...(table === 'equipment_calibrations as ec' ? { then: (res, rej) => Promise.resolve(rigs).then(res, rej) } : {}),
+    }), { raw: base.raw });
+    const card = await jobCard.buildJobCard('svc1', { dbh, deps, now: new Date('2026-09-04T12:00:00Z') });
+    // The visit's own rig still supplies the carrier; the list is the whole fleet, tanks first.
+    expect(card.tank).toMatchObject({ calibrated: true, source: 'rig', systemName: 'Tank #2', tankCapacityGal: 110 });
+    expect(card.tank.rigs).toEqual([
+      { calibrationId: 'cal-1', name: '110-Gallon Spray Tank #1', tankCapacityGal: 110 },
+      { calibrationId: 'cal-2', name: 'Tank #2', tankCapacityGal: 110 },
+      { calibrationId: 'cal-3', name: 'FlowZone Typhoon 3.0 #1', tankCapacityGal: 4 },
+    ]);
   });
 
   test('schedule readiness uses the resolver without generating or caching a paragraph, or returning private facts', async () => {

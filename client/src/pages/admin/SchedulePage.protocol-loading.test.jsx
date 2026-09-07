@@ -246,3 +246,51 @@ describe("ProtocolPanel independent request failures", () => {
     expect(screen.queryByText("Old sprayer")).not.toBeInTheDocument();
   });
 });
+
+describe("Job card Tank section rigs", () => {
+  const rigs = [
+    { calibrationId: "cal-1", name: "110-Gallon Spray Tank #1", tankCapacityGal: 110 },
+    { calibrationId: "cal-2", name: "Tank #2", tankCapacityGal: 110 },
+    { calibrationId: "cal-3", name: "FlowZone Typhoon 3.0 #1", tankCapacityGal: 4 },
+  ];
+  const card = {
+    enabled: true, serviceId: service.id, strip: { name: "Fixture account", program: "Lawn Care" }, products: [], addons: [], planBlocks: [],
+    sprayCheck: { window: "not_today" }, tank: { calibrated: true, source: "rig", rigs },
+  };
+  const mixCalls = () => fetch.mock.calls.map(([url]) => String(url)).filter((url) => url.includes("/job-card/mix"));
+
+  it("lists every rig's gallons as its own section and doses a full tank of the picked rig", async () => {
+    fetch.mockImplementation((url) => {
+      const parsed = new URL(url, "http://localhost");
+      if (parsed.pathname.endsWith("/protocols/job-card/products")) return reply({ products: [{ id: "p1", name: "Celsius WG", category: "herbicide" }] });
+      if (parsed.pathname.endsWith("/protocols/job-card/mix")) {
+        const sprayCheck = { verdict: "unknown", reason: "Judged on the visit day" };
+        return reply(parsed.searchParams.get("rig")
+          ? { enabled: true, amount: 1.36, unit: "oz", gallons: 4, coversSqft: 3008, sprayCheck }
+          : { enabled: true, amount: 6.215, unit: "oz", gallons: 110, coversSqft: 55000, sprayCheck });
+      }
+      if (parsed.pathname.includes("/protocols/job-card/")) return reply(card);
+      return reply(fixture(url));
+    });
+    await act(async () => { render(<ProtocolPanel service={service} onClose={() => {}} />); });
+    expect(await screen.findByText("Rigs · full tank")).toBeVisible();
+    const rows = rigs.map((r) => screen.getByText(r.name).closest("button"));
+    expect(rows.map((row) => row.textContent)).toEqual(["110-Gallon Spray Tank #1110 gal", "Tank #2110 gal", "FlowZone Typhoon 3.0 #14 gal"]);
+
+    fireEvent.change(screen.getByPlaceholderText("Search a product to mix"), { target: { value: "cel" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Celsius WG" }));
+    expect(await screen.findByText("in 110 gal · covers 55,000 sq ft")).toBeVisible();
+    expect(mixCalls().at(-1)).toContain("gallons=110");
+
+    fireEvent.click(rows[2]);
+    expect(await screen.findByText("in 4 gal · FlowZone Typhoon 3.0 #1 · covers 3,008 sq ft")).toBeVisible();
+    expect(mixCalls().at(-1)).toContain("rig=cal-3");
+    expect(mixCalls().at(-1)).not.toContain("gallons=");
+
+    // A preset takes the mix back off the rig.
+    fireEvent.click(screen.getByRole("button", { name: "1 gal" }));
+    expect(await screen.findByText("in 1 gal · covers 55,000 sq ft")).toBeVisible();
+    expect(mixCalls().at(-1)).toContain("gallons=1");
+    expect(mixCalls().at(-1)).not.toContain("rig=");
+  });
+});
