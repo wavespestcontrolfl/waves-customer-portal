@@ -2975,6 +2975,23 @@ describe('rain-out service', () => {
       expect(preview).toEqual({ ok: false, reason: 'note_cap_unavailable' });
     });
 
+    test('gate on: a live snapshot that FAILS to render refuses the move — never an unmeasured send', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      renderSmsTemplate.mockResolvedValueOnce(null);
+      wireSingle();
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
+
+      expect(result).toMatchObject({ ok: false, reason: 'note_cap_unavailable' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+      renderSmsTemplate.mockResolvedValueOnce(null);
+      wireSingle();
+      const preview = await RainOut.previewMovedSms({ serviceId: 'svc-1', reasonCode: 'weather_rain', customMessage: 'x', target: COMMIT_ARGS.target });
+      expect(preview).toEqual({ ok: false, reason: 'note_cap_unavailable' });
+    });
+
     test('gate on: a disabled v3 row is uncapped here — the send path owns that kill switch', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();

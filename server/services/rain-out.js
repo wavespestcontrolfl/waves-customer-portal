@@ -343,7 +343,15 @@ async function previewMovedSms({ serviceId, reasonCode, customMessage, target })
       serviceId,
     })
     : await renderPresetMovedNotice({ service, reasonCode, target, note: message, rescheduleUrl: url, serviceId, templateBody });
-  if (!body) return { ok: false, reason: isCustom ? 'custom_message_unavailable' : 'uncapped' };
+  if (!body) {
+    return {
+      ok: false,
+      // A preset rung with a live snapshot that failed to render is a
+      // transient error, not an uncapped rung — the sheet hides the counter
+      // either way, and commit() refuses the move on the same condition.
+      reason: isCustom ? 'custom_message_unavailable' : (templateBody ? 'note_cap_unavailable' : 'uncapped'),
+    };
+  }
   const seg = measureAsSent(body);
   const perSegment = seg.encoding === 'GSM_7' ? 153 : 67;
   const used = seg.encoding === 'GSM_7' ? seg.gsmSlotCount : seg.sent.length;
@@ -1794,7 +1802,10 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     }
     if (templateBody) {
       const body = await renderPresetMovedNotice({ service, reasonCode, target, note, rescheduleUrl: url, serviceId, templateBody });
-      if (body && measureAsSent(body).segmentCount > MOVED_SMS_MAX_SEGMENTS) {
+      // A live snapshot that fails to render (a transient renderer error —
+      // getTemplate swallows its own) is not an uncapped rung either.
+      if (!body) return { ok: false, reason: 'note_cap_unavailable' };
+      if (measureAsSent(body).segmentCount > MOVED_SMS_MAX_SEGMENTS) {
         return { ok: false, reason: 'note_too_many_segments' };
       }
       prebuiltSms.templateBody = templateBody;
