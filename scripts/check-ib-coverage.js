@@ -74,16 +74,7 @@ function parseFile(file, ref) {
 
 function normalizedEndpoint(text) {
   if (!text || !text.includes('/admin/')) return null;
-  // A trailing interpolation glued to a segment (`/unread-count${scope}`) is a
-  // query or suffix on the base route, not a path parameter.
-  return text.slice(text.indexOf('/admin/')).split('?')[0].replace(/:[a-zA-Z_$][\w$]*/g, ':param').replace(/(?<!\/):param$/, '');
-}
-
-// The tech router is the one literal prefix proven outside this manifest's
-// scope (rule 3: the tech portal is isolated). Admin operations mounted
-// elsewhere (Terminal, dispatch visual moments) stay in the denominator.
-function outOfScopeLiteral(text) {
-  return typeof text === 'string' && /^(?:\/api)?\/tech\//.test(text);
+  return text.slice(text.indexOf('/admin/')).split('?')[0].replace(/:[a-zA-Z_$][\w$]*/g, ':param');
 }
 
 function frontendSourceCensus(source, relative) {
@@ -98,9 +89,7 @@ function frontendSourceCensus(source, relative) {
       // React state setters (`setLinkRequest`) share the suffix but perform no request.
       const requestCall = /(?:fetch|request|(?:^|\.)api)$/i.test(callee) && !/(?:^|\.)set[A-Z]\w*$/.test(callee);
       const localExport = callee === 'URL.createObjectURL' && relative.includes('/admin/');
-      const argumentText = expressionText(node.arguments[0]);
-      if (outOfScopeLiteral(argumentText)) return;
-      const endpoint = normalizedEndpoint(argumentText);
+      const endpoint = normalizedEndpoint(expressionText(node.arguments[0]));
       // Literal admin paths stay visible even through an unfamiliar wrapper.
       // Review distinguishes API adapters from navigation-only affordances.
       if (![verbCall, requestCall, localExport, endpoint].some(Boolean)) return;

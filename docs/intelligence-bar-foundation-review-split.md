@@ -95,12 +95,10 @@ conversation hooks from `481ad658f`, and the controlled staff documents from
 as unsupported/unverified, for 1,753 cumulative sites. Nothing gains coverage;
 this restores the drift gate on main without grandfathering any new action.
 
-Codex review of that integration tightened the census itself: React state
-setters that merely end in `Request` (`setLinkRequest`), literal `/tech/`
-router paths (the isolated tech portal), and a trailing interpolation glued to
-a segment (`/unread-count${scope}`, a query suffix) no longer produce rows or
-phantom `:param` routes. Six setter/tech rows left the denominator, fifteen
-rows re-identified to their base route, and the unread hook re-baselined on
-`481ad658f`, for 1,743 cumulative sites. Terminal and dispatch operations
-mounted outside `/admin/` stay in the denominator.
-
+Codex review of that integration tightened one matcher: React state setters
+that merely end in `Request` (`setLinkRequest`, `setNewLeadRequest`,
+`setRequest`) perform no request and no longer produce rows, for 1,747
+cumulative sites. Dynamic and glued-suffix endpoints stay recorded as
+unresolved / `:param` routes pending hand mapping; the scanner is per-file and
+cannot resolve a shared helper's callers or tell a query suffix from a path
+segment, so nothing else left the denominator.
