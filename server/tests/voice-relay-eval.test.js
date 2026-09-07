@@ -139,6 +139,9 @@ describe('voice relay eval — fixture lint', () => {
         { ...good, id: 'expects-outside', allowedTools: ['find_slots'] },
         { ...good, id: 'bad-when', fixtures: { toolResponses: { capture_lead: [{ when: 'yes', text: 'x' }] } } },
         { ...good, id: 'bad-fixture-tool', fixtures: { toolResponses: { not_a_tool: 'x' } } },
+        { ...good, id: 'bad-performed', expect: [exp('tools_performed_include', ['find_slots'])] },
+        { ...good, id: 'performed-outside', expect: [exp('tools_performed_include', ['request_booking'])] },
+        { ...good, id: 'cross-effect', fixtures: { toolResponses: { request_booking: [{ text: 'x', capture: true }, { text: 'y', reservice: true, booking: true }] } } },
       ],
     };
     const errors = replay.lintFixture(fixture);
@@ -157,6 +160,11 @@ describe('voice relay eval — fixture lint', () => {
     expect(joined).toMatch(/expects-outside: expect tools_called_include names "capture_lead", which allowedTools does not allow/);
     expect(joined).toMatch(/bad-when: toolResponses.capture_lead:/);
     expect(joined).toMatch(/bad-fixture-tool: toolResponses names unknown tool "not_a_tool"/);
+    expect(joined).toMatch(/bad-performed: .*"find_slots" is not a write tool/);
+    expect(joined).toMatch(/performed-outside: expect tools_performed_include names "request_booking", which allowedTools does not allow/);
+    expect(joined).toMatch(/cross-effect: toolResponses.request_booking: "capture" is the effect of capture_lead, not request_booking/);
+    expect(joined).toMatch(/cross-effect: toolResponses.request_booking: "reservice" is the effect of request_reservice, not request_booking/);
+    expect(joined).not.toMatch(/cross-effect: .*"booking" is the effect/);
     expect(replay.lintFixture({ schemaVersion: 'nope', scenarios: [] })).toEqual(expect.arrayContaining([expect.stringMatching(/schemaVersion/), 'fixture: no scenarios']));
   });
 
@@ -184,8 +192,7 @@ describe('voice relay eval — fixture lint', () => {
   });
 
   test.each([
-    'result', { text: 'result' }, { text: 'Refused.', ok: false }, { hang: true }, { transfer: true },
-    { booking: true }, { reservice: true }, { capture: true },
+    'result', { text: 'result' }, { text: 'Refused.', ok: false }, { hang: true }, { capture: true },
     { capture: { leadCreated: false } },
     { when: { slot_ref: 'S2' }, once: true, text: 'result' },
     { when: { service: ['pest_control', 'lawn_care'], home_sqft: 2000, known: false }, text: 'result' },
@@ -193,6 +200,15 @@ describe('voice relay eval — fixture lint', () => {
   ].map((response) => [response]))('accepts a supported response payload: %j', (response) => {
     const fixture = replay.loadFixture(FIXTURE_PATH);
     fixture.scenarios[0].fixtures.toolResponses.capture_lead = response;
+    expect(replay.lintFixture(fixture)).toEqual([]);
+  });
+
+  // Each effect flag is accepted only on the tool that performs it live.
+  test.each([
+    ['request_booking', { booking: true }], ['request_reservice', { reservice: true }], ['transfer_to_office', { transfer: true }],
+  ])('accepts %s carrying its own effect %j', (name, response) => {
+    const fixture = replay.loadFixture(FIXTURE_PATH);
+    fixture.scenarios[0].fixtures.toolResponses[name] = response;
     expect(replay.lintFixture(fixture)).toEqual([]);
   });
 
@@ -226,6 +242,25 @@ describe('voice relay eval — fixture lint', () => {
     const fixture = replay.loadFixture(FIXTURE_PATH);
     fixture.scenarios.find((s) => s.id === 'wrong-number').allowedToolInputs = allowedToolInputs;
     expect(replay.lintFixture(fixture).join('\n')).toContain('allowedToolInputs:');
+  });
+});
+
+describe('voice relay eval — end_session_called expectation shape', () => {
+  const replay = require('../services/eval/voice-relay-replay');
+  const lintWith = (value) => {
+    const fixture = replay.loadFixture(FIXTURE_PATH);
+    fixture.scenarios[0].expect = [exp('end_session_called', value)];
+    return replay.lintFixture(fixture).join('\n');
+  };
+
+  test.each([{}, [], { reasno: 'transfer' }, { reason: '' }, { reason: ' ' }, { reason: 7 }, { reason: 'transfer', extra: 1 }, 'transfer', null])(
+    'rejects a malformed end_session_called value instead of degrading to "ended for any reason": %j', (value) => {
+      expect(lintWith(value)).toMatch(/end_session_called\): value must be boolean or exactly \{ reason/);
+    },
+  );
+
+  test.each([true, false, { reason: 'transfer' }])('accepts the documented shapes: %j', (value) => {
+    expect(lintWith(value)).toBe('');
   });
 });
 
@@ -315,6 +350,24 @@ describe('voice relay eval — each expect key', () => {
     }
   });
 
+  test('tools_performed_include: only a write the fixture performed (a receipt) counts — a refusal answer is a call, not a performance', () => {
+    const refusedThenPlaced = record({ tools: [
+      { name: 'request_booking', input: { slot_ref: 'S1' }, text: 'That time is no longer open — nothing was booked.' },
+      { name: 'request_booking', input: { slot_ref: 'S3' }, text: 'Booking request placed.', receipt: true },
+    ] });
+    expect(runCheck(exp('tools_performed_include', ['request_booking']), refusedThenPlaced).status).toBe('pass');
+    const refusedOnly = record({ tools: [{ name: 'request_booking', input: { slot_ref: 'S1' }, text: 'That time is no longer open.' }] });
+    expect(runCheck(exp('tools_performed_include', ['request_booking']), refusedOnly)).toMatchObject({ status: 'fail', detail: 'never performed: request_booking' });
+    expect(runCheck(exp('tools_called_include', ['request_booking']), refusedOnly).status).toBe('pass');
+    expect(runCheck(exp('tools_performed_include', ['request_booking']), record()).status).toBe('fail');
+  });
+
+  test('slot-gone requires the replacement booking to be PERFORMED, not merely the first one refused', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'slot-gone');
+    expect(scenario.expect).toEqual(expect.arrayContaining([{ check: 'tools_performed_include', value: ['request_booking'], severity: 'critical' }]));
+  });
+
   test('spoken_never_matches / spoken_matches_any are case-insensitive regexes over what was sent', () => {
     const r = record({ agent: ['Nothing is booked yet.', 'A team member will call to confirm.'] });
     expect(runCheck(exp('spoken_never_matches', ['\\bLOCKED IN\\b']), r).status).toBe('pass');
@@ -334,7 +387,10 @@ describe('voice relay eval — each expect key', () => {
     expect(runCheck(exp('capture_lead_input_includes', { first_name: 'Priya' }), record()).status).toBe('fail');
     // A capture the fixture rejected recorded nothing, whatever fields it carried.
     const rejected = record({ tools: [{ name: 'capture_lead', input: { first_name: 'Priya' }, invalid: true, ok: false }] });
-    expect(runCheck(exp('capture_lead_input_includes', { first_name: 'Priya' }), rejected)).toMatchObject({ status: 'fail', detail: expect.stringContaining('rejected for its arguments') });
+    expect(runCheck(exp('capture_lead_input_includes', { first_name: 'Priya' }), rejected)).toMatchObject({ status: 'fail', detail: expect.stringContaining('rejected for its arguments or failed') });
+    // A capture the fixture answered `ok: false` performed no effect either — its fields are not on file.
+    const failed = record({ tools: [{ name: 'capture_lead', input: { first_name: 'Priya' }, ok: false }] });
+    expect(runCheck(exp('capture_lead_input_includes', { first_name: 'Priya' }), failed)).toMatchObject({ status: 'fail', detail: expect.stringContaining('never succeeded') });
   });
 
   test('end_session_called: boolean, and an optional reason', () => {
@@ -342,6 +398,7 @@ describe('voice relay eval — each expect key', () => {
     expect(runCheck(exp('end_session_called', true), ended).status).toBe('pass');
     expect(runCheck(exp('end_session_called', { reason: 'transfer' }), ended).status).toBe('pass');
     expect(runCheck(exp('end_session_called', { reason: 'agent_complete' }), ended).status).toBe('fail');
+    expect(runCheck(exp('end_session_called', { reason: 'transfer' }), record()).status).toBe('fail');
     expect(runCheck(exp('end_session_called', false), ended).status).toBe('fail');
     expect(runCheck(exp('end_session_called', true), record()).status).toBe('fail');
     expect(runCheck(exp('end_session_called', false), record()).status).toBe('pass');
@@ -1205,6 +1262,49 @@ describe('voice relay eval — the harness', () => {
     expect(first.interrupted).toBe(true);
     expect(result.transcript).toMatch(/Agent: Got it, Ben — \[interrupted\]\n\[caller interrupted the agent after: "Got it, Ben —"\]/);
     // The unheard clause is not graded: the never-matches check passes.
+    expect(result.checks[0].status).toBe('pass');
+  });
+
+  test.each([
+    ['a fabricated prefix', 'Sorry, we never said that'],
+    ['an empty prefix', '   '],
+    ['a later fragment of the utterance', 'best email for you?'],
+  ])('an interrupt whose "heard" is not a prefix of the cut utterance is a replay error and rewrites nothing: %s', async (label, heard) => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    replay.installHarness();
+    script.push(say('Got it, Ben — one two two zero Gulf Drive North in Bradenton Beach, and what is the best email for you?'), say('Thanks.'));
+    const result = await replay.runScenario(scenario({
+      id: 'harness-interrupt-mismatch', gates: { interrupt: true },
+      fixtures: { officeHours: 'unknown', toolResponses: {} },
+      turns: [{ caller: 'Ben Carter, 1220 Gulf Drive North.' }, { interrupt: { heard }, caller: 'Sorry, 1230 not 1220.' }],
+      expect: [{ check: 'spoken_never_matches', value: ['best email'], severity: 'major' }],
+    }));
+    expect(result.error).toMatchObject({ code: 'EVAL_INTERRUPT_MISMATCH' });
+    expect(result.status).toBe('error');
+    const first = result.events.find((e) => e.kind === 'agent');
+    expect(first.text).toMatch(/best email for you\?$/);
+    expect(first.interrupted).toBeUndefined();
+    expect(result.events.some((e) => e.kind === 'interrupt')).toBe(false);
+    expect(result.checks).toEqual([]);
+  });
+
+  test('an interrupt "heard" that IS a prefix (any spacing or case) is accepted and graded as what played', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    replay.installHarness();
+    script.push(say('Got it, Ben — one two two zero Gulf Drive North in Bradenton Beach, and what is the best email for you?'), say('Thanks.'));
+    const result = await replay.runScenario(scenario({
+      id: 'harness-interrupt-prefix', gates: { interrupt: true },
+      fixtures: { officeHours: 'unknown', toolResponses: {} },
+      turns: [{ caller: 'Ben Carter, 1220 Gulf Drive North.' }, { interrupt: { heard: 'got it,  BEN — one two' }, caller: 'Sorry, 1230 not 1220.' }],
+      expect: [{ check: 'spoken_never_matches', value: ['best email'], severity: 'major' }],
+    }));
+    expect(result.error).toBeUndefined();
+    const first = result.events.find((e) => e.kind === 'agent');
+    expect(first.interrupted).toBe(true);
+    expect(first.text).not.toMatch(/best email/);
+    expect(first.planned).toMatch(/best email/);
     expect(result.checks[0].status).toBe('pass');
   });
 

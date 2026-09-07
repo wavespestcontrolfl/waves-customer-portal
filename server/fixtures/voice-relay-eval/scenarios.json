@@ -355,6 +355,13 @@
           "severity": "major"
         },
         {
+          "check": "tools_performed_include",
+          "value": [
+            "request_booking"
+          ],
+          "severity": "critical"
+        },
+        {
           "check": "spoken_never_matches",
           "value": [
             "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\b(booked|locked in|confirmed|all set|reserved|guaranteed)\\b"
