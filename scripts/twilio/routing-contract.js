@@ -56,28 +56,38 @@ const APP_ROUTING = Object.freeze({
   trunkSid: '',
 });
 
-// The relay sandbox line (VOICE_RELAY_SANDBOX_NUMBER) is the one owned number
-// that deliberately routes elsewhere: POST /relay-sandbox on the same portal.
-const SANDBOX_VOICE_URL = `${PORTAL_ORIGIN}/api/webhooks/twilio/relay-sandbox`;
-
 // The SMS half of the contract. When a Messaging Service has
 // useInboundWebhookOnNumber=false, ITS inbound/fallback URL + method replace these
-// four fields for every number in its pool.
-const SMS_ROUTING_FIELDS = Object.freeze(['smsUrl', 'smsMethod', 'smsFallbackUrl', 'smsFallbackMethod']);
+// four fields for every number in its pool, so the service is checked against
+// exactly this subset.
+const SMS_ROUTING = Object.freeze({
+  smsUrl: APP_ROUTING.smsUrl,
+  smsMethod: APP_ROUTING.smsMethod,
+  smsFallbackUrl: APP_ROUTING.smsFallbackUrl,
+  smsFallbackMethod: APP_ROUTING.smsFallbackMethod,
+});
 
-// Names of the given contract fields whose value on `resource` differs from
-// APP_ROUTING — exact string comparison, so an http:// URL never passes for the
-// https:// contract. Defaults to every field (an IncomingPhoneNumber resource).
-function routingDrift(resource, fields = Object.keys(APP_ROUTING)) {
-  return fields.filter((field) => String(resource[field] == null ? '' : resource[field]) !== APP_ROUTING[field]);
+// The relay sandbox line (VOICE_RELAY_SANDBOX_NUMBER) is the one owned number
+// that deliberately routes elsewhere: POST /relay-sandbox on the same portal.
+const SANDBOX_ROUTING = Object.freeze({
+  voiceUrl: `${PORTAL_ORIGIN}/api/webhooks/twilio/relay-sandbox`,
+  voiceMethod: 'POST',
+});
+
+// Names of the contract's fields whose value on `resource` differs — exact
+// string comparison, so an http:// URL never passes for the https:// contract.
+// `resource` is an IncomingPhoneNumber (APP_ROUTING, SANDBOX_ROUTING) or a
+// Messaging Service's effective inbound fields (SMS_ROUTING).
+function routingDrift(resource, contract = APP_ROUTING) {
+  return Object.keys(contract).filter((field) => String(resource[field] == null ? '' : resource[field]) !== contract[field]);
 }
 
 module.exports = {
   FLOW_SID,
   APP_VOICE_URL,
   APP_ROUTING,
-  SMS_ROUTING_FIELDS,
-  SANDBOX_VOICE_URL,
+  SMS_ROUTING,
+  SANDBOX_ROUTING,
   studioVoiceUrl,
   expectedVoiceUrl,
   voiceUrlMatches,

@@ -39,7 +39,7 @@
 const path = require('path');
 const twilio = require('twilio');
 const REGISTRY = require(path.join(__dirname, '..', '..', 'server', 'config', 'twilio-numbers.js'));
-const { APP_ROUTING, SMS_ROUTING_FIELDS, SANDBOX_VOICE_URL, routingDrift } = require(path.join(__dirname, '..', '..', 'scripts', 'twilio', 'routing-contract.js'));
+const { APP_ROUTING, SMS_ROUTING, SANDBOX_ROUTING, routingDrift } = require(path.join(__dirname, '..', '..', 'scripts', 'twilio', 'routing-contract.js'));
 
 const TOLL_FREE = /^\+1(800|833|844|855|866|877|888)\d{7}$/;
 // Twilio's fixed Trust Hub policy SIDs. The A2P Messaging Profile bundle never
@@ -63,7 +63,7 @@ function auditRouting(numbers, sandbox, ownedNumbers) {
     const reg = REGISTRY.findByNumber(n.phoneNumber)
       || (n.phoneNumber === REGISTRY.mainLine.number ? { type: 'main_line', label: REGISTRY.mainLine.label } : null);
     const drift = routingDrift(n);
-    console.log(`${n.phoneNumber}  "${n.friendlyName}"  ${reg ? `${reg.type} / ${reg.label || reg.domain || ''}` : 'NOT IN REGISTRY'}${drift.length ? `  DRIFT ${drift.map(f => `${f}=${short(n[f])}`).join(' ')}` : ''}`);
+    console.log(`${n.phoneNumber}  "${n.friendlyName}"  ${reg ? [reg.type, reg.label, reg.domain].filter(Boolean).join(' / ') : 'NOT IN REGISTRY'}${drift.length ? `  DRIFT ${drift.map(f => `${f}=${short(n[f])}`).join(' ')}` : ''}`);
     if (!reg) defects.push(`${n.phoneNumber}  not in server/config/twilio-numbers.js — inbound SMS dropped, calls log as 'unknown'`);
     if (drift.length) defects.push(`${n.phoneNumber}  routing drift — ${drift.map(f => `${f}=${short(n[f])} (expected ${short(APP_ROUTING[f]) || 'empty'})`).join(', ')}`);
   }
@@ -76,8 +76,10 @@ function auditRouting(numbers, sandbox, ownedNumbers) {
     const parked = (REGISTRY.unassigned || []).some(u => last10(u.number) === last10(sandbox.phoneNumber));
     const live = !parked && !!REGISTRY.findByNumber(sandbox.phoneNumber);
     console.log(`\n=== RELAY SANDBOX LINE (VOICE_RELAY_SANDBOX_NUMBER, excluded from the fleet checks above) ===`);
-    console.log(`${sandbox.phoneNumber}  "${sandbox.friendlyName}"  registry=${parked ? 'parked (unassigned)' : live ? 'LIVE LINE' : 'absent'}  voice=${short(sandbox.voiceUrl)}${String(sandbox.voiceUrl || '') === SANDBOX_VOICE_URL ? '' : `  (expected ${short(SANDBOX_VOICE_URL)})`}`);
+    const misrouted = routingDrift(sandbox, SANDBOX_ROUTING);
+    console.log(`${sandbox.phoneNumber}  "${sandbox.friendlyName}"  registry=${parked ? 'parked (unassigned)' : live ? 'LIVE LINE' : 'absent'}  voice=${short(sandbox.voiceUrl)} [${sandbox.voiceMethod}]`);
     if (live) defects.push(`${sandbox.phoneNumber}  VOICE_RELAY_SANDBOX_NUMBER is a registered live line — the server refuses every sandbox call (403); park it under twilio-numbers.unassigned or pick another number`);
+    if (misrouted.length) defects.push(`${sandbox.phoneNumber}  VOICE_RELAY_SANDBOX_NUMBER routing — ${misrouted.map(f => `${f}=${short(sandbox[f])} (expected ${short(SANDBOX_ROUTING[f])})`).join(', ')}; sandbox calls never reach /relay-sandbox`);
   }
   return defects;
 }
@@ -99,8 +101,13 @@ async function auditTrustHub(client, fleet, numberBySid) {
   const livePerPolicy = new Map(); // policySid → { bundle, endpoints } — the approved bundle carrying the most numbers
   for (const b of bundles) {
     const endpoints = await listEndpoints(b);
-    console.log(`  ${b.kind} ${b.sid}  "${b.friendlyName}"  status=${b.status}  numbers=${endpoints.size}`);
-    const fleetWide = b.status === 'twilio-approved' && endpoints.size > 0
+    // `status` has no expired value; an approved bundle past validUntil is still
+    // reported approved, so the timestamp is checked on its own.
+    const validUntil = b.validUntil ? new Date(b.validUntil).toISOString().slice(0, 10) : null;
+    const expired = Boolean(validUntil) && validUntil < new Date().toISOString().slice(0, 10);
+    console.log(`  ${b.kind} ${b.sid}  "${b.friendlyName}"  status=${b.status}${expired ? ` EXPIRED ${validUntil}` : ''}  numbers=${endpoints.size}`);
+    if (expired && endpoints.size) defects.push(`${b.kind} ${b.sid}  "${b.friendlyName}" expired ${validUntil} while still carrying ${endpoints.size} number(s)`);
+    const fleetWide = b.status === 'twilio-approved' && !expired && endpoints.size > 0
       && b.policySid !== TOLLFREE_VERIFICATION_POLICY && b.policySid !== A2P_MESSAGING_PROFILE_POLICY;
     if (fleetWide && endpoints.size > (livePerPolicy.get(b.policySid)?.endpoints.size || 0)) livePerPolicy.set(b.policySid, { bundle: b, endpoints });
   }
@@ -142,7 +149,7 @@ async function auditMessaging(client, fleet, numberBySid) {
     // comparison as the number check, on the service's effective values.
     if (!s.useInboundWebhookOnNumber) {
       const effective = { smsUrl: s.inboundRequestUrl, smsMethod: s.inboundMethod, smsFallbackUrl: s.fallbackUrl, smsFallbackMethod: s.fallbackMethod };
-      const drift = routingDrift(effective, SMS_ROUTING_FIELDS);
+      const drift = routingDrift(effective, SMS_ROUTING);
       if (drift.length) defects.push(`service ${s.sid}  overrides inbound SMS for its ${senders.length} senders — ${drift.map(f => `${f}=${short(effective[f])} (expected ${short(APP_ROUTING[f]) || 'empty'})`).join(', ')}; set useInboundWebhookOnNumber=true or match the contract`);
     }
     // A service without a VERIFIED campaign registers nothing: its fleet numbers
