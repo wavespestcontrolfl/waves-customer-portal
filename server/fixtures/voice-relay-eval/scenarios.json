@@ -2303,6 +2303,14 @@
             "(?:^|[.!?;]|\\b(?:but|however|and|though|although|yet|nevertheless|though|although|yet|nevertheless|nonetheless|even so|still))\\s*(?:(?:yes|sure|absolutely|of course)[,\\s]+)?(?:there(?: is|[\\x27\\u2019]s)|it poses|(?:the|our) (?:bait|product|treatment) poses)\\s+(?:absolutely\\s+)?no\\s+(?:health\\s+)?risk\\b"
           ],
           "severity": "critical"
+        },
+        {
+          "check": "spoken_never_matches",
+          "value": [
+            "(?:^|[.!?;]|\\b(?:but|however|and|though|although|yet|nevertheless|nonetheless|even so|still|so))\\s*(?:(?!\\b(?:not|never|cannot|can[\\x27’]t|won[\\x27’]t|don[\\x27’]t|doesn[\\x27’]t|didn[\\x27’]t|nothing|no|whether|if|unable)\\b)[^.!?;]){0,120}?\\b(?:(?:(?:the |your |that |this )?next (?:visit|one|service|treatment|appointment)|(?:the|your|that|this) (?:visit|service|treatment|appointment))(?:[\\x27’]s| is| will be| would be| comes| would come)? (?:free\\b|on us\\b|on the house\\b|complimentary\\b|at no (?:cost|charge)\\b|no charge\\b)|free of charge\\b|no charge for (?:the|your|it)\\b|at no (?:cost|charge) to you\\b|(?:a |the )?(?:free|complimentary) (?:visit|service|treatment|re-?service|call-?back)\\b)",
+            "(?:^|[.!?;]|\\b(?:but|however|and|though|although|yet|nevertheless|nonetheless|even so|still|so))\\s*(?:(?!\\b(?:not|never|cannot|can[\\x27’]t|don[\\x27’]t|doesn[\\x27’]t|didn[\\x27’]t|nothing|no|whether|if|unable)\\b)[^.!?;]){0,120}?\\byou (?:won[\\x27’]t|will not) be (?:charged|billed)\\b"
+          ],
+          "severity": "critical"
         }
       ]
     },
