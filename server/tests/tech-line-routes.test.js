@@ -54,6 +54,7 @@ async function call(method, path, req) {
   return r;
 }
 const chains = {};
+const CLAIM_SQL = /INSERT INTO sms_send_claims/;
 function primeVisit({ visit = { id: VISIT, customer_id: 'c1', technician_id: 'tech-1' }, customer = { id: 'c1', first_name: 'Pat', last_name: 'Sample', phone: '(941) 555-0100' } } = {}) {
   db.mockImplementation((table) => {
     const chain = {};
@@ -65,14 +66,14 @@ function primeVisit({ visit = { id: VISIT, customer_id: 'c1', technician_id: 'te
     chains[table] = chain;
     return chain;
   });
-  db.raw = jest.fn((sql) => sql);
+  // The durable text claim answers through db.raw (a row = claim acquired).
+  db.raw = jest.fn((sql) => (CLAIM_SQL.test(String(sql)) ? Promise.resolve({ rows: [{ id: 1 }] }) : sql));
 }
 
 // The text and bridge interlocks run under a per-customer transaction
 // advisory lock; the text's durable claim insert answers through trx.raw
 // (a row = claim acquired) and its release goes through the same db mock.
-const CLAIM_SQL = /INSERT INTO sms_send_claims/;
-const trx = Object.assign(jest.fn((table) => db(table)), { raw: jest.fn(async () => ({ rows: [{ id: 1 }] })) });
+const trx = Object.assign(jest.fn((table) => db(table)), { raw: jest.fn(async () => ({})) });
 beforeEach(() => {
   jest.clearAllMocks();
   techLineContext.mockResolvedValue(CTX);
@@ -116,24 +117,27 @@ describe('POST /sms', () => {
 
   test('a live claim on (customer, body) refuses the text under the per-customer lock — a double submit from two PWAs never reaches Twilio (codex #4072 r10 + r11 P2)', async () => {
     primeVisit();
-    trx.raw.mockImplementationOnce(async () => ({})); // the lock
-    trx.raw.mockImplementationOnce(async () => ({ rows: [] })); // claim held by the other request
+    db.raw.mockImplementationOnce(async () => ({ rows: [] })); // claim held by the other request
     const r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way' } });
     expect(r.statusCode).toBe(409);
     expect(r.body.code).toBe('DUPLICATE_TEXT');
     expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['tech-text:c1']);
-    const [claimSql, claimBindings] = trx.raw.mock.calls[1];
-    expect(claimSql).toMatch(CLAIM_SQL);
+    const [claimSql, claimBindings] = db.raw.mock.calls.find((c) => CLAIM_SQL.test(String(c[0])));
     expect(claimSql).toContain("interval '1 minute'");
     expect(claimBindings[0]).toMatch(/^tech-line-text:c1:[0-9a-f]{64}$/);
     expect(reserveHumanReply).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
-    // Claim acquired → the send runs, inside the lock, and the claim is kept.
+    // Claim acquired — COMMITTED on its own (db.raw, not the lock's trx) so
+    // it survives an accepted send whatever the connection does afterwards
+    // (codex r13 P2) — then the send runs inside the lock; the claim is kept.
     primeVisit();
     const ok = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way' } });
     expect(ok.statusCode).toBe(200);
-    expect(trx.raw.mock.invocationCallOrder[3]).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
-    expect(trx).not.toHaveBeenCalledWith('sms_send_claims');
+    const claimCall = db.raw.mock.calls.findIndex((c) => CLAIM_SQL.test(String(c[0])));
+    expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(db.raw.mock.invocationCallOrder[claimCall]);
+    expect(db.raw.mock.invocationCallOrder[claimCall]).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+    // Kept: the only claims write after a delivered text is the daily prune, never a release by key.
+    expect(chains.sms_send_claims.where).not.toHaveBeenCalledWith({ claim_key: expect.any(String) });
   });
 
   test('a text that never left (gate-off sentinel) releases its claim so a real retry can send', async () => {
@@ -141,7 +145,7 @@ describe('POST /sms', () => {
     sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'gate-blocked' });
     const r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way' } });
     expect(r.statusCode).toBe(409);
-    expect(trx).toHaveBeenCalledWith('sms_send_claims');
+    expect(db).toHaveBeenCalledWith('sms_send_claims');
     expect(chains.sms_send_claims.where).toHaveBeenCalledWith({ claim_key: expect.stringMatching(/^tech-line-text:c1:/) });
     expect(chains.sms_send_claims.del).toHaveBeenCalled();
   });
@@ -186,6 +190,8 @@ describe('POST /sms', () => {
       isOperational: true, statusCode: 500, message: 'Tech line text failed',
     });
     expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ sent: false }));
+    // Nothing left → the claim is released so a real retry can send (codex r13 P2).
+    expect(chains.sms_send_claims.del).toHaveBeenCalled();
   });
 
   test('a throw AFTER Twilio accepted settles the thread as answered and reports Sent — never a retry invitation', async () => {
@@ -195,6 +201,9 @@ describe('POST /sms', () => {
     expect(r.statusCode).toBe(200);
     expect(r.body).toEqual({ success: true, from: LINE });
     expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ sent: true, reviewedBy: 'tech-1' }));
+    // The customer has the text: first response stamped, claim kept (codex r13 P2).
+    expect(stampFirstResponseByContact).toHaveBeenCalledWith({ phone: '+19415550100', performedBy: 'tech:tech-1' });
+    expect(chains.sms_send_claims.where).not.toHaveBeenCalledWith({ claim_key: expect.any(String) });
   });
 
   test('a throw after a SUPPRESSED accept (sentinel id) is still a failure — nothing left', async () => {

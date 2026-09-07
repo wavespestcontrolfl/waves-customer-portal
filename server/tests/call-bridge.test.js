@@ -12,7 +12,7 @@ jest.mock('../config', () => ({ twilio: { accountSid: 'AC-test', authToken: 'tok
 
 const db = require('../models/db');
 const { recordTouchpoint } = require('../services/conversations');
-const { placeBridgeCall, activeBridgeCall } = require('../services/call-bridge');
+const { placeBridgeCall, activeBridgeCall, backfillCallSid } = require('../services/call-bridge');
 
 function primeDb() {
   const inserted = [];
@@ -71,6 +71,28 @@ test('missing Twilio credentials fail before any row is written', async () => {
   await expect(fresh({ to: '+19415550100', bridgePhone: '+19415550101', from: '+19412975749', source: 'admin-click' }))
     .rejects.toMatchObject({ code: 'TWILIO_NOT_CONFIGURED' });
   expect(inserted).toHaveLength(0);
+});
+
+describe('backfillCallSid (codex #4072 r13 P2)', () => {
+  test('retries a transient failure and links the row', async () => {
+    const updates = [];
+    const chain = { where: jest.fn(() => chain), update: jest.fn(async (u) => { updates.push(u); if (updates.length < 3) throw new Error('connection reset'); return 1; }) };
+    db.mockImplementation(() => chain);
+    expect(await backfillCallSid('log-1', 'CA-1', [0, 0, 0, 0])).toBe(true);
+    expect(updates).toHaveLength(3);
+    expect(updates[2]).toMatchObject({ twilio_call_sid: 'CA-1' });
+  });
+
+  test('a row that still cannot be linked is closed as failed with the reason, never left initiated and sidless', async () => {
+    const updates = [];
+    const chain = { where: jest.fn(() => chain), update: jest.fn(async (u) => { updates.push(u); if (u.twilio_call_sid) throw new Error('connection reset'); return 1; }) };
+    db.mockImplementation(() => chain);
+    db.raw = jest.fn((sql) => sql);
+    expect(await backfillCallSid('log-1', 'CA-1', [0, 0])).toBe(false);
+    expect(updates).toHaveLength(3);
+    expect(updates[2]).toMatchObject({ status: 'failed' });
+    expect(String(updates[2].metadata)).toContain('sid_backfill_failed');
+  });
 });
 
 describe('activeBridgeCall', () => {

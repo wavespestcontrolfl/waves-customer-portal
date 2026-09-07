@@ -47,6 +47,24 @@ const DUPLICATE_TEXT_WINDOW = '1 minute';
 function sentBodyHash(body) {
   return crypto.createHash('sha256').update(normalizeGsmPunctuation(body), 'utf8').digest('hex');
 }
+// A text that never left must not stay claimed for the window, or the
+// tech's real retry silently 409s.
+function releaseTextClaim(claimKey) {
+  return db('sms_send_claims').where({ claim_key: claimKey }).del()
+    .catch((err) => logger.warn(`[tech-line] text claim release failed (${String(err?.code || err?.name || 'error')})`));
+}
+// A tech's real text is a first response to any open lead on this phone —
+// the same Speed-to-Lead stamp the admin composer makes after a real
+// provider send; no watcher stamps manual rows later (codex #4072 r8 P2).
+// Fail-soft: SLA bookkeeping never breaks a send that already left.
+async function stampTechFirstResponse({ to, technicianId }) {
+  try {
+    const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
+    await stampFirstResponseByContact({ phone: to, performedBy: `tech:${technicianId}` });
+  } catch (stampErr) {
+    logger.warn(`[tech-line] first-response stamp failed: ${stampErr.message}`);
+  }
+}
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function publicLine(ctx) {
@@ -141,6 +159,8 @@ async function textFromLine({ req, ctx, target, body }) {
     await settleHumanReply({ ...reply, sent: accepted, reviewedBy: req.technicianId }).catch(() => {});
     if (!accepted) throw err;
     logger.error(`[tech-line] text accepted but its audit write failed (${String(err.code || err.name || 'error')}) for visit ${target.visit.id}`);
+    // The customer has the text: it is a first response too (codex r13 P2).
+    await stampTechFirstResponse({ to: target.to, technicianId: req.technicianId });
     return { status: 200, json: { success: true, from: publicLine(ctx) } };
   }
   // A suppression / gate-off sentinel comes back sent:true with no real
@@ -159,16 +179,7 @@ async function textFromLine({ req, ctx, target, body }) {
       },
     };
   }
-  // A tech's real text is a first response to any open lead on this phone —
-  // the same Speed-to-Lead stamp the admin composer makes after a real
-  // provider send; no watcher stamps manual rows later (codex #4072 r8 P2).
-  // Fail-soft: SLA bookkeeping never breaks a send that already left.
-  try {
-    const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
-    await stampFirstResponseByContact({ phone: target.to, performedBy: `tech:${req.technicianId}` });
-  } catch (stampErr) {
-    logger.warn(`[tech-line] first-response stamp failed: ${stampErr.message}`);
-  }
+  await stampTechFirstResponse({ to: target.to, technicianId: req.technicianId });
   return { status: 200, json: { success: true, from: publicLine(ctx) } };
 }
 
@@ -189,14 +200,16 @@ router.post('/sms', async (req, res, next) => {
     // process gate the public estimate route uses: a fresh insert, or a
     // takeover of one older than the window (codex #4072 r10 + r11 P2).
     // The audit row is best-effort by design, so it is never the proof.
-    // The claim commits with this transaction — after the send — so the
-    // waiting request sees it; a send that never left releases it, a throw
-    // rolls it back, so a real retry can send. Same shape as the bridge
-    // interlock; the send's own writes commit as before.
+    // The claim is COMMITTED before the send — its own statement, not the
+    // lock's transaction: once Twilio has accepted the text the evidence
+    // must survive whatever happens to this connection afterwards (r13
+    // P2). A send that never left (a refusal, a throw before acceptance)
+    // releases it explicitly so a real retry can send. Same shape as the
+    // bridge interlock; the send's own writes commit as before.
     const claimKey = `tech-line-text:${target.customer.id}:${sentBodyHash(body)}`;
     const out = await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`tech-text:${target.customer.id}`]);
-      const claim = await trx.raw(
+      const claim = await db.raw(
         `INSERT INTO sms_send_claims (claim_key) VALUES (?)
          ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
          WHERE sms_send_claims.created_at < NOW() - interval '${DUPLICATE_TEXT_WINDOW}'
@@ -206,8 +219,14 @@ router.post('/sms', async (req, res, next) => {
       if (!(claim?.rows || []).length) {
         return { status: 409, json: { error: 'This text just went out to the customer', code: 'DUPLICATE_TEXT' } };
       }
-      const outcome = await textFromLine({ req, ctx, target, body });
-      if (outcome.status !== 200) await trx('sms_send_claims').where({ claim_key: claimKey }).del();
+      let outcome;
+      try {
+        outcome = await textFromLine({ req, ctx, target, body });
+      } catch (err) {
+        await releaseTextClaim(claimKey);
+        throw err;
+      }
+      if (outcome.status !== 200) await releaseTextClaim(claimKey);
       return outcome;
     });
     if (out.status === 200) {

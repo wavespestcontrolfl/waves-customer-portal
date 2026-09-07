@@ -71,13 +71,9 @@ async function placeBridgeCall({ to, bridgePhone, from, customer = null, source,
     throw err;
   }
 
-  // Backfill the Twilio CallSid now that we have it.
-  if (callLogId) {
-    await db('call_log').where({ id: callLogId }).update({
-      twilio_call_sid: call.sid,
-      updated_at: new Date(),
-    }).catch((err) => logger.warn(`[call-bridge] call_log sid backfill failed for ${callLogId}: ${err.message}`));
-  }
+  // Backfill the Twilio CallSid now that we have it — the ONLY link
+  // /call-status and the recording callbacks find the row by.
+  if (callLogId) await backfillCallSid(callLogId, call.sid);
   require('./conversations').recordTouchpoint({
     customerId: customer?.id || null,
     channel: 'voice',
@@ -115,4 +111,29 @@ async function activeBridgeCall({ source, customerId, withinMs = ACTIVE_BRIDGE_W
     .first('id', 'status', 'created_at');
 }
 
-module.exports = { placeBridgeCall, activeBridgeCall };
+// A sidless non-terminal row is invisible to every callback and would hold
+// activeBridgeCall's interlock for the whole window, so the backfill is
+// retried through a transient failure, and a row that still cannot be
+// linked is closed as failed — with the reason on it — rather than left
+// 'initiated' forever (codex #4072 r13 P2). Code-only logs: the message can
+// quote the statement's bindings.
+const SID_BACKFILL_DELAYS_MS = [0, 250, 1000, 3000];
+async function backfillCallSid(callLogId, sid, delaysMs = SID_BACKFILL_DELAYS_MS) {
+  let lastErr = null;
+  for (const delay of delaysMs) {
+    if (delay) await new Promise((resolve) => { setTimeout(resolve, delay); });
+    try {
+      await db('call_log').where({ id: callLogId }).update({ twilio_call_sid: sid, updated_at: new Date() });
+      return true;
+    } catch (err) { lastErr = err; }
+  }
+  logger.error(`[call-bridge] call_log sid backfill failed for ${callLogId} after ${delaysMs.length} attempts (${String(lastErr?.code || lastErr?.name || 'error')})`);
+  await db('call_log').where({ id: callLogId }).update({
+    status: 'failed',
+    metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{sid_backfill_failed}', 'true'::jsonb, true)"),
+    updated_at: new Date(),
+  }).catch((err) => logger.warn(`[call-bridge] unlinked-row close skipped for ${callLogId} (${String(err?.code || err?.name || 'error')})`));
+  return false;
+}
+
+module.exports = { placeBridgeCall, activeBridgeCall, backfillCallSid };
