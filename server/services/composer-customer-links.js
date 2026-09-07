@@ -1635,6 +1635,9 @@ async function buildPrepGuideLink(customerIds) {
   const sortKey = (v) => `${dateOnly(v.scheduled_date)} ${v.window_start ? String(v.window_start).padStart(8, '0') : '~'} ${v.id}`;
   let pick = null;
   for (const [pestType, config] of Object.entries(PREP_CONFIG)) {
+    // A standalone guide (sprinkler_timer) hangs on no visit and carries no
+    // service family — nothing for this scan to find (GH Codex #3953 r1 P1).
+    if (config.guide) continue;
     const visit = await nextUpcomingVisit(customerIds, config.serviceKeywords[0]);
     if (!visit) continue;
     if (!pick || sortKey(visit) < sortKey(pick.visit)) pick = { visit, config, pestType };

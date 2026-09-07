@@ -1169,6 +1169,11 @@ module.exports = {
   // shared with the composer's contract seam, which must never carry one
   // (the consent + opt-out footer live in this module's delivery).
   isMarketingCustomerGuide,
+  // The one derivation of a seasonal-guide SMS consent basis (owner ruling
+  // 08-25: seasonal_tips === true) — shared with the sprinkler timer guide's
+  // standalone text (prep-guide-sender.js), which runs under the same
+  // marketing_seasonal policy.
+  marketingSmsConsentBasisForContract,
   _internals: {
     deliveryOptionsForContract,
     emailPayload,
