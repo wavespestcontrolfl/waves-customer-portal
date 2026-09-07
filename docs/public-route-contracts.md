@@ -605,7 +605,9 @@ server can't validate exposure keys)).
 `/ingest/*` (first-party PostHog ingest proxy — no auth, no token; the
 browser SDK on the hub and on `/book` posts here instead of `*.posthog.com`
 so ad blockers stop dropping funnel events. **Gated behind
-GATE_POSTHOG_INGEST_PROXY** (generic 404 when off, no upstream call).
+GATE_POSTHOG_INGEST_PROXY** (generic 404 when off, no upstream call; read at
+REQUEST time via `gateEnvValue` — `1`/`true`/`on` — so a Railway unset is a
+live kill, no redeploy).
 Mounted in `server/index.js` ABOVE helmet, the CORS allowlist and the body
 parsers → `routes/posthog-ingest.js`. Invariants: the upstream origins are
 FIXED constants (`https://us.i.posthog.com`; `/static/*` →
@@ -616,7 +618,8 @@ never resolve off-host (SSRF, Codex r1 on #4027); GET/POST/OPTIONS only
 (405); a per-IP limiter (`POSTHOG_INGEST_RATE_MAX`/min, default 300; 429)
 sits AFTER the gate so gate-off probes stay an unobservable 404 and never
 spend budget; 2 MB raw body cap (413); 10 s upstream timeout (502).
-Inbound `cookie`, `authorization`, `referer`, hop-by-hop and client-IP
+Inbound `cookie`, `authorization`, `referer`, `content-encoding` (the raw
+body parser has already inflated the bytes), hop-by-hop and client-IP
 headers are stripped and `X-Forwarded-For` is set to `req.ip`
 (trust-proxy aware) so PostHog GeoIP survives; `origin` and `content-type`
 pass through so PostHog's own CORS reflection answers the browser (spoke

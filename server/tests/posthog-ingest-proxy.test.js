@@ -1,11 +1,13 @@
 /**
  * /ingest PostHog proxy — pins the contract that makes it safe to expose
  * unauthenticated on the portal origin:
- *  - dark (404) unless GATE_POSTHOG_INGEST_PROXY=true; 405 for non GET/POST/OPTIONS
+ *  - dark (404) unless GATE_POSTHOG_INGEST_PROXY is on, read at REQUEST time (an
+ *    env change after the router loaded flips it); 405 for non GET/POST/OPTIONS
  *  - upstream host is FIXED: /static/* → assets host, everything else → API host,
  *    query string preserved, ../ cannot escape the host
  *  - cookies / authorization / referer never reach PostHog; origin + content-type
- *    do; X-Forwarded-For carries the visitor IP; raw POST body forwarded byte-for-byte
+ *    do; X-Forwarded-For carries the visitor IP; raw POST body forwarded byte-for-byte;
+ *    a gzip-encoded body arrives inflated WITHOUT a content-encoding label
  *  - upstream status/body/CORS headers pass through; set-cookie and
  *    content-encoding do not; CORP is cross-origin (hub loads array.js from here)
  *  - oversize body → 413, upstream failure → 502; the failure log never
@@ -20,7 +22,7 @@ const express = require('express');
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const featureGates = require('../config/feature-gates');
+const zlib = require('zlib');
 const logger = require('../services/logger');
 const router = require('../routes/posthog-ingest');
 
@@ -67,19 +69,30 @@ beforeEach(() => {
     fetchCalls.push({ url: String(url), init });
     return fetchImpl(url, init);
   });
-  featureGates.gates.posthogIngestProxy = true;
+  process.env.GATE_POSTHOG_INGEST_PROXY = 'true';
 });
 
 afterEach(() => {
-  featureGates.gates.posthogIngestProxy = false;
+  delete process.env.GATE_POSTHOG_INGEST_PROXY;
 });
 
 describe('gate + method surface', () => {
   test('404 and no upstream call while the gate is off', async () => {
-    featureGates.gates.posthogIngestProxy = false;
+    delete process.env.GATE_POSTHOG_INGEST_PROXY;
     const res = await request({ path: '/ingest/e/' });
     expect(res.status).toBe(404);
     expect(fetchCalls).toHaveLength(0);
+  });
+
+  test('the gate is read per request: an env change after load flips the route without a reload', async () => {
+    expect((await request({ path: '/ingest/flags/' })).status).toBe(200);
+    delete process.env.GATE_POSTHOG_INGEST_PROXY;
+    expect((await request({ path: '/ingest/flags/' })).status).toBe(404);
+    process.env.GATE_POSTHOG_INGEST_PROXY = '1';
+    expect((await request({ path: '/ingest/flags/' })).status).toBe(200);
+    process.env.GATE_POSTHOG_INGEST_PROXY = 'false';
+    expect((await request({ path: '/ingest/flags/' })).status).toBe(404);
+    expect(fetchCalls).toHaveLength(2);
   });
 
   test('405 for methods posthog-js never uses', async () => {
@@ -158,6 +171,21 @@ describe('request boundary', () => {
     expect(init.redirect).toBe('manual');
   });
 
+  test('a gzip-encoded body is forwarded inflated, with no content-encoding label', async () => {
+    const plain = Buffer.from('{"api_key":"phc_abc","batch":[{"event":"$pageview"}]}');
+    const gz = zlib.gzipSync(plain);
+    await request({
+      method: 'POST',
+      path: '/ingest/batch/',
+      headers: { 'content-type': 'text/plain', 'content-encoding': 'gzip', 'content-length': String(gz.length) },
+      body: gz,
+    });
+    const { init } = fetchCalls[0];
+    expect(Buffer.from(init.body).equals(plain)).toBe(true);
+    expect(init.headers['content-encoding']).toBeUndefined();
+    expect(init.headers['content-type']).toBe('text/plain');
+  });
+
   test('GET carries no body', async () => {
     await request({ path: '/ingest/flags/?v=2' });
     expect(fetchCalls[0].init.body).toBeUndefined();
@@ -225,17 +253,15 @@ describe('response boundary', () => {
 });
 
 describe('per-IP limiter after the gate', () => {
-  // Two isolated router instances with a 2/min budget so the (n+1)th request
-  // is observable without 300 round trips. Each isolated require resolves its
-  // own feature-gates copy, which reads GATE_POSTHOG_INGEST_PROXY at load.
-  function isolatedRouter(gateOn) {
+  // Isolated router instances with a 2/min budget so the (n+1)th request is
+  // observable without 300 round trips. The gate itself is read from the live
+  // env per request, so each test sets it directly.
+  function isolatedRouter() {
     let r;
     jest.isolateModules(() => {
       process.env.POSTHOG_INGEST_RATE_MAX = '2';
-      process.env.GATE_POSTHOG_INGEST_PROXY = gateOn ? 'true' : '';
       r = require('../routes/posthog-ingest');
       delete process.env.POSTHOG_INGEST_RATE_MAX;
-      delete process.env.GATE_POSTHOG_INGEST_PROXY;
     });
     return r;
   }
@@ -259,7 +285,7 @@ describe('per-IP limiter after the gate', () => {
   });
 
   test('enabled: the (n+1)th request per IP in a minute is 429 and never reaches upstream; another IP is unaffected', async () => {
-    const { srv, base } = await listen(isolatedRouter(true));
+    const { srv, base } = await listen(isolatedRouter());
     try {
       const a = [];
       for (let i = 0; i < 3; i++) a.push(await get(base, '/ingest/flags/?v=2', '198.51.100.7'));
@@ -273,7 +299,8 @@ describe('per-IP limiter after the gate', () => {
   });
 
   test('gate off: probes stay 404 past the budget — the limiter sits after the gate', async () => {
-    const { srv, base } = await listen(isolatedRouter(false));
+    const { srv, base } = await listen(isolatedRouter());
+    delete process.env.GATE_POSTHOG_INGEST_PROXY;
     try {
       const probes = [];
       for (let i = 0; i < 4; i++) probes.push(await get(base, '/ingest/e/', '198.51.100.9'));

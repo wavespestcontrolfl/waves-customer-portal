@@ -1429,8 +1429,10 @@ const gates = {
   // events (10–25% by PostHog's figure). Inert until a caller points its SDK
   // host at it (hub PUBLIC_POSTHOG_HOST / portal VITE_POSTHOG_HOST). Kill:
   // unset → 404; revert the caller's host env too, or its SDK keeps posting
-  // into the 404. See server/routes/posthog-ingest.js.
-  posthogIngestProxy: process.env.GATE_POSTHOG_INGEST_PROXY === 'true',
+  // into the 404. This entry is for logGateStatus; the route reads
+  // gateEnvValue('GATE_POSTHOG_INGEST_PROXY') at REQUEST time (the techTips
+  // idiom), so a flip needs no redeploy. See server/routes/posthog-ingest.js.
+  posthogIngestProxy: gateEnvValue('GATE_POSTHOG_INGEST_PROXY'),
   // The surname rung of that matcher (click_name: the ONE in-window clicker
   // whose complete last name is the reviewer's; see
   // findConfidentClickMatch). Ships DARK on its own switch because its

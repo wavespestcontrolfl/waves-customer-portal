@@ -16,8 +16,10 @@
  *
  * Abuse posture:
  *  - GATE_POSTHOG_INGEST_PROXY off → 404, the dark-surface contract every other
- *    gated public route uses. Revoke = unset the gate AND revert the SDK host
- *    env on the caller (a live SDK pointed at a 404 host just drops events).
+ *    gated public route uses. Read at REQUEST time (gateEnvValue: 1/true/on),
+ *    so unsetting it on Railway kills the route in the running process.
+ *    Revoke = unset the gate AND revert the SDK host env on the caller (a
+ *    live SDK pointed at a 404 host just drops events).
  *  - GET / POST / OPTIONS only; 2 MB body cap; 10 s upstream timeout; a
  *    per-IP limiter (POSTHOG_INGEST_RATE_MAX/min, default 300) sits AFTER the
  *    gate so gate-off probes stay an unobservable 404 and never spend budget.
@@ -36,7 +38,7 @@
  */
 const express = require('express');
 const rateLimit = require('express-rate-limit');
-const featureGates = require('../config/feature-gates');
+const { gateEnvValue } = require('../config/feature-gates');
 const logger = require('../services/logger');
 
 const API_HOST = 'https://us.i.posthog.com';
@@ -50,9 +52,13 @@ const METHODS = new Set(['GET', 'POST', 'OPTIONS']);
 const RATE_MAX_PER_MIN = Math.max(1, parseInt(process.env.POSTHOG_INGEST_RATE_MAX, 10) || 300);
 
 // Hop-by-hop headers plus everything that must not cross the boundary.
+// content-encoding: express.raw() inflates a gzip/deflate request body before
+// we see it, so the bytes we forward are already decoded — forwarding the
+// original label would make PostHog try to decode them twice. (posthog-js's
+// own payload compression rides in `?compression=gzip-js`, not this header.)
 const DROP_REQUEST_HEADERS = new Set([
   'host', 'cookie', 'authorization', 'referer', 'connection', 'content-length',
-  'transfer-encoding', 'keep-alive', 'upgrade', 'te', 'trailer',
+  'content-encoding', 'transfer-encoding', 'keep-alive', 'upgrade', 'te', 'trailer',
   'proxy-authorization', 'proxy-connection', 'accept-encoding',
   'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip',
   'cf-connecting-ip', 'true-client-ip',
@@ -129,7 +135,9 @@ async function proxy(req, res) {
 const router = express.Router();
 
 router.use((req, res, next) => {
-  if (!featureGates.isEnabled('posthogIngestProxy')) return res.status(404).end();
+  // Call-time read (not the load-time gates snapshot): a Railway unset is a
+  // live kill, as documented.
+  if (!gateEnvValue('GATE_POSTHOG_INGEST_PROXY')) return res.status(404).end();
   if (!METHODS.has(req.method)) return res.status(405).set('Allow', 'GET, POST, OPTIONS').end();
   return next();
 });
