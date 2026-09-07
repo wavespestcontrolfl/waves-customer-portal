@@ -2491,7 +2491,6 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       if (!normalized) {
         channels.sms = { ok: false, error: `Invalid phone format: ${estimate.customer_phone}` };
       } else {
-        let smsDispatchStarted = false;
         try {
           const currentSmsBody = await smsTemplatesRouter.getTemplate('estimate_sent', { first_name: firstName, estimate_url: smsViewUrl }, {
             workflow: 'admin_estimate_send',
@@ -2506,7 +2505,6 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           if (await estimateInvalidatedJustBeforeHandoff(estimate.id)) {
             throw new Error('invalidated_before_delivery');
           }
-          smsDispatchStarted = true;
           const result = await sendCustomerMessage({
             to: normalized,
             body: smsBody,
@@ -2550,7 +2548,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             if (options.leadShapeRef) options.leadShapeRef.delivered = true;
           } else {
             const rejected = e.providerOutcome?.terminal === true || sendgrid.isDefiniteRejection({ status: e.providerOutcome?.providerHttpStatus || e.status });
-            channels.sms = { ok: false, uncertain: smsDispatchStarted && !rejected, error: e.message };
+            channels.sms = { ok: false, uncertain: !!e.providerOutcome && !rejected, error: e.message };
           }
         }
       }

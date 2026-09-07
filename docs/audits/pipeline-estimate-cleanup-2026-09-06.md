@@ -293,3 +293,9 @@ The fifth review of `3d96530ce` returned two P2s and no P0/P1. The scheduler now
 CI on that head passed six jobs and the PR preview, but the server suite had one assertion still expecting the former unqualified prospect status (1 failed, 41,279 passed). That dashboard-alert assertion now checks `leads.status`; it does not change runtime behavior. All 58 tests across the scheduler, dashboard alerts and attribution suites passed locally after these corrections.
 
 Deferred P2: `client/src/components/admin/customer360/activity.js:16` retains activity helpers that this PR's production code does not consume. The coordinated Customer360 checkout consumes the same module through `ActivityFeed.jsx:15` and onward, including filters, descriptions, grouping and date helpers. Retain the shared module pending that integration; removing/recreating it here would create avoidable divergence. This PR does not claim that the activity feed itself is implemented on this branch.
+
+### Sixth review: SMS dispatch evidence
+
+The sixth review found a P2 in uncertainty classification. The estimate sender now uses the existing messaging wrapper's `providerOutcome` evidence instead of assuming that entering the wrapper means dispatch began. Consent/suppression/read failures before dispatch produce definite failed receipts; nonterminal provider outcomes remain uncertain, terminal rejections remain definite, and provider acceptance still completes the successful receipt despite audit failure. The provider adapter normalizes dispatch failures, while the wrapper attaches that outcome to post-dispatch audit exceptions. No callback or provider interface was added.
+
+The reviewed-send regression covers pre-provider failure, ambiguous outcome and terminal rejection alongside the existing accepted-but-unaudited case. Validation is recorded in the PR body; no provider requests were made.

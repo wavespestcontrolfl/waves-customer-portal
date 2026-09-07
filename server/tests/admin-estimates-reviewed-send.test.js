@@ -300,6 +300,21 @@ describe('reviewed send attempt receipts', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test.each([
+    ['pre-provider consent read failed', undefined, false],
+    ['provider outcome unknown', { sent: false, terminal: false }, true],
+    ['provider definitely rejected', { sent: false, terminal: true }, false],
+  ])('SMS %s records the corresponding uncertainty', async (reason, providerOutcome, uncertain) => {
+    const manualAttempt = { key: 'synthetic-sms-failure', binding: 'synthetic-sms-binding' };
+    sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error(reason), { providerOutcome }));
+    const result = await router.sendEstimateNow(structuredClone(row), 'sms', { manualAttempt });
+    expect(result).toMatchObject({ sent: false, channels: { sms: { ok: false, uncertain } } });
+    const receipt = dataOf().manualSendAttempts[0];
+    if (uncertain) expect(receipt.result).toBeUndefined();
+    else expect(receipt.result).toMatchObject({ sent: false });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
   test('an SMS audit failure carrying real provider acceptance completes the successful receipt', async () => {
     const manualAttempt = { key: 'synthetic-accepted-sms', binding: 'synthetic-sms-binding' };
     sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('Synthetic audit write failed'), {
