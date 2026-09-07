@@ -34,7 +34,7 @@ test('retained coverage excludes prior-term visits using the selected Eastern ac
   const verify = vm.runInNewContext(`${source.slice(start, end)}; verifyAcceptedRecurringSchedule`, {
     etDateString,
     require: () => ({ acceptedScheduleFindings: classify, formatDateOnly: (value) => value || null,
-      readActiveFamilyHolds: async () => [] }),
+      readActiveFamilyHolds: async () => [], readStoppedRecurringRoots: async () => new Set() }),
     logger: { warn: jest.fn(), error: jest.fn() },
   });
   const result = await verify(database, { estimateId: estimate.id, customerId: estimate.customer_id });
@@ -74,7 +74,7 @@ test.each(['2040-01-10', '2040-01-11'])('acceptance honors active family holds u
     ? [] : [{ serviceFamily: 'pest', recordedVisits: 0, expectedVisits: 12 }]);
   const verify = vm.runInNewContext(`${source.slice(start, end)}; verifyAcceptedRecurringSchedule`, {
     etDateString: () => todayET,
-    require: () => ({ acceptedScheduleFindings: classify, readActiveFamilyHolds }),
+    require: () => ({ acceptedScheduleFindings: classify, readActiveFamilyHolds, readStoppedRecurringRoots: async () => new Set() }),
     logger: { warn: jest.fn(), error: jest.fn() },
   });
   const result = await verify(database, { estimateId: estimate.id, customerId: estimate.customer_id });
@@ -84,6 +84,55 @@ test.each(['2040-01-10', '2040-01-11'])('acceptance honors active family holds u
   expect(result.ok).toBe(held);
   expect(insert).toHaveBeenCalledTimes(held ? 0 : 1);
 });
+
+test.each(['let_lapse', 'cancel_series', 'extend_series'])(
+  'acceptance uses the latest resolved series decision (%s)', async (action) => {
+    const audit = require('../services/recurring-schedule-audit');
+    const estimate = { id: 'estimate-new', customer_id: 'customer-1', accepted_at: new Date('2040-01-01T16:00:00Z'),
+      accepted_service_mode: 'recurring', monthly_total: 100, annual_total: 1200,
+      estimate_data: { customerSelection: { frequency: 'monthly' }, result: { recurring: {
+        services: [{ service: 'pest_control', name: 'Pest Control', frequency: 'monthly', visitsPerYear: 12 }],
+      } } } };
+    const root = { id: 'root', customer_id: 'customer-1', source_estimate_id: 'estimate-old',
+      service_type: 'Monthly Pest Control Service', catalog_service_key: 'pest_general_monthly',
+      is_recurring: true, recurring_pattern: 'monthly', scheduled_date: '2039-12-01', status: 'completed' };
+    const upcoming = { ...root, id: 'child', recurring_parent_id: 'root', scheduled_date: '2040-02-01', status: 'pending' };
+    const decisions = [
+      { customer_id: 'customer-1', recurring_parent_id: 'root', resolved_action: 'let_lapse', resolved_at: '2039-12-01' },
+      { customer_id: 'customer-1', recurring_parent_id: 'root', resolved_action: action, resolved_at: '2039-12-02' },
+      { customer_id: 'customer-1', recurring_parent_id: 'root', resolved_action: 'extend_series', resolved_at: null },
+      { customer_id: 'customer-2', recurring_parent_id: 'root', resolved_action: 'extend_series', resolved_at: '2039-12-03' },
+    ];
+    const insert = jest.fn(async () => []);
+    const database = (table) => {
+      let rows = table === 'recurring_plan_alerts' ? decisions : table === 'scheduled_services as s' ? [root, upcoming]
+        : table === 'activity_log' ? [{ metadata: { estimateId: estimate.id, existingParentId: root.id } }] : [];
+      const query = {
+        where: () => query,
+        whereIn: (key, values) => { rows = rows.filter((row) => values.includes(row[key])); return query; },
+        whereNotNull: (key) => { rows = rows.filter((row) => row[key] != null); return query; },
+        orderBy: (key) => { rows = [...rows].sort((a, b) => b[key].localeCompare(a[key])); return query; },
+        leftJoin: () => query,
+        select: () => query,
+        first: async () => estimate,
+        insert,
+        then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
+      };
+      return query;
+    };
+    const classify = jest.fn(audit.acceptedScheduleFindings);
+    const verify = vm.runInNewContext(`${source.slice(start, end)}; verifyAcceptedRecurringSchedule`, {
+      etDateString: (value) => value ? etDateString(value) : '2040-01-01',
+      require: () => ({ ...audit, acceptedScheduleFindings: classify }),
+      logger: { warn: jest.fn(), error: jest.fn() },
+    });
+    const result = await verify(database, { estimateId: estimate.id, customerId: estimate.customer_id });
+    const stopped = action !== 'extend_series';
+    expect(result.ok).toBe(stopped);
+    expect(insert).toHaveBeenCalledTimes(stopped ? 0 : 1);
+    expect(classify.mock.calls[0][1].map((row) => row.id)).toEqual(stopped ? ['root', 'child'] : ['child']);
+    if (!stopped) expect(result.gaps[0].issues).toContain('missing_applications');
+  });
 
 test('an audit exception returns an explicit failure without aborting conversion', async () => {
   const checkStart = source.indexOf('    let recurringScheduleCheck =');

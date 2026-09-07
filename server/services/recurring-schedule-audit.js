@@ -309,6 +309,15 @@ function readActiveFamilyHolds(conn, customerIds, todayET) {
     .where('starts_on', '<=', todayET).where('resume_on', '>', todayET).select('customer_id', 'family_key');
 }
 
+async function readStoppedRecurringRoots(conn, customerIds) {
+  const decisions = await conn('recurring_plan_alerts').whereIn('customer_id', customerIds)
+    .whereNotNull('resolved_at').orderBy('resolved_at', 'desc')
+    .select('recurring_parent_id', 'resolved_action');
+  // Query is newest-first; Map's last value wins after reversing it.
+  const latestDecision = new Map(decisions.map((row) => [row.recurring_parent_id, row.resolved_action]).reverse());
+  return new Set([...latestDecision].filter(([, action]) => ['cancel_series', 'let_lapse'].includes(action)).map(([id]) => id));
+}
+
 async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn = db) {
   // Let the accept/conversion transaction settle before paging. A real Date
   // binds a timestamptz cutoff independently of Railway's UTC process zone.
@@ -346,12 +355,7 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
     .where('action', 'recurring_series_skipped').select('customer_id', 'metadata');
   const todayET = etDateString(now);
   const holds = await readActiveFamilyHolds(conn, customerIds, todayET);
-  const decisions = await conn('recurring_plan_alerts').whereIn('customer_id', customerIds)
-    .whereNotNull('resolved_at').orderBy('resolved_at', 'desc')
-    .select('recurring_parent_id', 'resolved_action');
-  // Query is newest-first; Map's last value wins after reversing it.
-  const latestDecision = new Map(decisions.map((row) => [row.recurring_parent_id, row.resolved_action]).reverse());
-  const stopped = new Set([...latestDecision].filter(([, action]) => ['cancel_series', 'let_lapse'].includes(action)).map(([id]) => id));
+  const stopped = await readStoppedRecurringRoots(conn, customerIds);
   // Index history once: each estimate only walks its explicitly linked roots.
   const customers = new Map(customerIds.map((id) => [id, { roots: new Map(), holds: new Set() }]));
   const estimatesById = new Map(estimates.map((estimate) => [estimate.id, {
@@ -406,5 +410,6 @@ module.exports = {
   normalizeLimit,
   acceptedScheduleFindings,
   readActiveFamilyHolds,
+  readStoppedRecurringRoots,
   findAcceptedRecurringScheduleGaps,
 };
