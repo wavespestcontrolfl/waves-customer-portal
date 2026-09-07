@@ -166,3 +166,11 @@ them. Linked and other-status duplicates count, while deleted leads do not.
 The final checks pass 148 unit/write-boundary tests and 13 real PostgreSQL tests.
 Generic action-object refusal hints (3947287736) remain deferred: recipient
 parsing must preserve earlier explicit targets across compound clauses.
+
+B2 message search rereads the resolved customer's saved phone before including
+unlinked historical messages. Foreign linked rows, stale supplied numbers and
+unavailable customers are excluded. The final parent-integrated checks pass
+20 isolated PostgreSQL tests and 143 targeting/reader/pinning/history unit tests;
+earlier unchanged provider/publisher checks remain recorded above.
+
+Customer-ID-only searches retain linked history after a phone-number change; only unlinked messages depend on the current saved phone. An explicit phone selector still narrows the results. The final seven adapter DB cases and 32 reader/pinning/history tests pass after this correction, and independent review closed it.
