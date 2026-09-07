@@ -3183,6 +3183,14 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     // a field the UI never renders (matches client isLawn = !isTypedFindings && lawn).
     const turfHeightApplicable = turfHeightFlagOn && reportServiceLine === 'lawn'
       && !isIncompleteVisit && !typedFindingsType;
+    // Packet snapshots omit image bytes, so a supplied gauge photo must not
+    // disappear when the capture flag or service applicability changes.
+    if (packetRecord && gaugePhoto && !turfHeightApplicable) {
+      return { status: 409, body: {
+        code: 'visit_gauge_photo_unavailable',
+        error: 'Lawn-length photo capture is unavailable. Refresh this service form before closing the visit.',
+      } };
+    }
 
     // Typed completions (e.g. palm_injection detects to the 'palm' line)
     // capture their structured findings instead of the Tree/Shrub closeout —

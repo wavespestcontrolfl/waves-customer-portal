@@ -804,6 +804,52 @@ postgres('visit completion packet records on PostgreSQL', () => {
     }
   });
 
+  test.each(['disabled flag', 'SQL failure'])('a gauge capture %s rolls back earlier photos and permits a complete retry', async (mode) => {
+    const config = require('../config');
+    const priorBucket = config.s3.bucket;
+    config.s3.bucket = 'fixture-photo-bucket';
+    const send = jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send').mockResolvedValue({});
+    const flags = require('../services/feature-flags').isUserFeatureEnabled;
+    let checks = 0;
+    flags.mockImplementation(async (_id, flag, _fallback, database) => {
+      if (flag !== 'turf-height-capture') return false;
+      checks += 1;
+      if (checks !== 2) return true;
+      if (mode === 'SQL failure') await database.raw('SELECT 1 / 0');
+      return false;
+    });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ service_type: 'WaveGuard Lawn Care' });
+    const input = submission();
+    for (const item of input.items) item.body.gaugePhoto = {
+      data: `data:image/png;base64,${Buffer.from('synthetic gauge photo').toString('base64')}`, name: 'fixture.png',
+    };
+    try {
+      expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 409, body: {
+        code: 'visit_gauge_photo_unavailable', serviceId: fixture.serviceIds[1],
+      } });
+      expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
+      expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      expect(await mockPg('turf_height_readings').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      const commands = send.mock.calls.map(([command]) => command);
+      expect(commands.map((command) => command.constructor.name)).toEqual(['PutObjectCommand', 'DeleteObjectCommand']);
+      expect(commands[1].input.Key).toBe(commands[0].input.Key);
+
+      flags.mockImplementation(async (_id, flag) => flag === 'turf-height-capture');
+      const retried = await saveVisitCompletionPacket(input);
+      expect(retried).toMatchObject({ status: 202, body: { replayed: false } });
+      expect(await mockPg('service_photos').whereIn('service_record_id', retried.body.items.map((item) => item.serviceRecordId)))
+        .toHaveLength(2);
+      expect((await saveVisitCompletionPacket(input)).body.replayed).toBe(true);
+      expect(send.mock.calls.map(([command]) => command.constructor.name))
+        .toEqual(['PutObjectCommand', 'DeleteObjectCommand', 'PutObjectCommand', 'PutObjectCommand']);
+    } finally {
+      send.mockRestore();
+      config.s3.bucket = priorBucket;
+      flags.mockImplementation(async () => false);
+    }
+  });
+
   test.each(['profile', 'Auto Pay', 'turf profile', 'Pest Pressure table', 'Pest Pressure config', 'customer snapshot'])
   ('a packet records every member after a recoverable %s read failure', async (helper) => {
     const matches = {
