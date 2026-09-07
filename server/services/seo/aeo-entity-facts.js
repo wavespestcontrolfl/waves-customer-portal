@@ -215,7 +215,8 @@ function asserted(compiled, answer) {
   for (const match of answer.matchAll(compiled.scanRe)) {
     // The captured value is the first defined group (a pattern may capture in
     // any one of its alternatives).
-    if (approvedValue(compiled, (match.slice(1).find(v => v !== undefined) || '').trim())) continue;
+    const captured = (match.slice(1).find(v => v !== undefined) || '').trim();
+    if (approvedValue(compiled, captured)) continue;
     const start = match.index;
     let end = start + match[0].length;
     // A pattern may stop mid-word ("fumigat"); the assertion is the whole word.
@@ -232,8 +233,10 @@ function asserted(compiled, answer) {
     // Facts and claims alike must be about Waves: "Orkin serves Manatee"
     // earns no footprint credit and "Orkin is a franchise" is no wrong claim.
     // The match itself is read too: "Orkin owns Waves" names Waves as the
-    // party the relation is about, whatever the previous sentence said.
-    if (aboutAnotherEntity(before, answer.slice(0, end))) continue;
+    // party the relation is about, whatever the previous sentence said. The
+    // captured value is the relation's object ("Owner: Rentokil"), never
+    // its subject, so it is blanked before the subject is read.
+    if (aboutAnotherEntity(before, answer.slice(0, start) + (captured ? match[0].replace(captured, ' ') : match[0]))) continue;
     // Passive attribution after the match: "fumigation is offered by Orkin".
     const agent = after.match(/^\s*(?:is|are|was|were|gets?|comes)?\s*\w*\s*(?:by|from|through)\s+([A-Z][\w'&-]+(?:\s+[A-Z][\w'&-]+){0,2})/);
     if (agent && lastIndexOfMatch(OTHER_ENTITY_RE, agent[1]) >= 0 && lastIndexOfMatch(WAVES_NAMED_RE, agent[1]) < 0) continue;

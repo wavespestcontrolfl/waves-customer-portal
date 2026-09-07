@@ -278,6 +278,17 @@ test('ownership: another capitalized name is a wrong founder; Adam is not', () =
   expect(score('E1', 'The business is owned by Waves Pest Control, LLC.').forbidden.wrong_founder).toBe(false);
 });
 
+test('ownership in copular and label-value form is a wrong owner unless it names Adam', () => {
+  expect(score('E1', 'The owner of Waves Pest Control is John Smith.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'John Smith is the founder and owner of Waves Pest Control.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'Owner: John Smith').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'Owner: Rentokil').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', '**Owner:** Adam Benetti')).toMatchObject({ expected: { founder: true }, forbidden: { wrong_founder: false } });
+  expect(score('E1', 'The owner of Waves Pest Control is Adam Benetti.').forbidden.wrong_founder).toBe(false);
+  expect(score('E1', 'The owner of Waves Pest Control is not John Smith.').forbidden.wrong_founder).toBe(false);
+  expect(score('E1', 'Otto Orkin is the founder of Orkin. Adam Benetti is the founder and owner of Waves.').forbidden.wrong_founder).toBe(false);
+});
+
 test('franchise: a negated mention is fine, an affirmative one is a wrong claim', () => {
   expect(score('E8', 'Waves is independently owned and not a franchise.')).toMatchObject({ expected: { independent: true }, forbidden: { franchise: false }, wrong: 0 });
   expect(score('E8', 'Waves Pest Control operates as a franchise of a national brand.')).toMatchObject({ forbidden: { franchise: true }, wrong: 1 });
