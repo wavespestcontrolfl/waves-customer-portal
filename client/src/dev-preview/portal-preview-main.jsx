@@ -279,6 +279,11 @@ const NOTIFICATION_PREFS = {
   billingReminderChannel: 'sms',
   paymentConfirmationChannel: 'sms',
 };
+const APP_NOTIFICATIONS = new URLSearchParams(window.location.search).get('appNotifications');
+if (APP_NOTIFICATIONS) Object.assign(NOTIFICATION_PREFS, {
+  appPreferencesAvailable: true, pushEnabled: APP_NOTIFICATIONS !== 'off',
+  serviceCompleteChannel: 'sms', weatherAlerts: true, channelEmailAvailable: true,
+});
 
 const PROPERTY_PREFERENCES = {
   neighborhoodGateCode: '', propertyGateCode: '', garageCode: '', lockboxCode: '',
@@ -399,7 +404,12 @@ Object.assign(api, {
 
   // notifications
   getNotificationPrefs: async () => NOTIFICATION_PREFS,
-  updateNotificationPrefs: async () => ({ success: true }),
+  updateNotificationPrefs: async (updates) => {
+    Object.assign(NOTIFICATION_PREFS, updates);
+    return { success: true, preferences: { ...NOTIFICATION_PREFS } };
+  },
+  getCustomerPushStatus: async () => ({ available: !!APP_NOTIFICATIONS, enabled: NOTIFICATION_PREFS.pushEnabled !== false,
+    registered: APP_NOTIFICATIONS !== 'missing', fresh: APP_NOTIFICATIONS === 'ready' }),
   updateAccountCreditPreference: async (on) => { CUSTOMER.autoApplyAccountCredit = !!on; return { autoApplyAccountCredit: !!on }; },
   getPropertyNotificationPrefs: async () => ({
     properties: [{

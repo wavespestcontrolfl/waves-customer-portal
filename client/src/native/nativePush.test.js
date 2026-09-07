@@ -10,7 +10,7 @@ const nativeMocks = vi.hoisted(() => {
     }),
     checkPermissions: vi.fn(async () => ({ receive: state.permission })),
     requestPermissions: vi.fn(async () => ({ receive: state.requestResult })),
-    register: vi.fn(async () => {}),
+    register: vi.fn(async () => { if (state.listeners.registration) await state.listeners.registration({ value: 'test-native-device' }); }),
   };
   return { state, PushNotifications };
 });
@@ -62,6 +62,7 @@ describe('nativePush permission and tap handling', () => {
 
   it('prompts only from the explicit request action and can report denial for recovery UI', async () => {
     nativeMocks.state.permission = 'prompt';
+    localStorage.setItem('waves_token', 'test-customer-session');
     await expect(requestNativePushPermission()).resolves.toBe('granted');
     expect(nativeMocks.PushNotifications.requestPermissions).toHaveBeenCalledTimes(1);
     expect(nativeMocks.PushNotifications.register).toHaveBeenCalledTimes(1);
@@ -72,6 +73,33 @@ describe('nativePush permission and tap handling', () => {
     expect(nativeMocks.PushNotifications.requestPermissions).toHaveBeenCalledTimes(1);
     expect(nativeMocks.PushNotifications.register).not.toHaveBeenCalled();
     await expect(nativePushPermissionState()).resolves.toBe('denied');
+  });
+
+  it('does not report ready when OS permission succeeds but server registration fails', async () => {
+    localStorage.setItem('waves_token', 'test-customer-session');
+    api.request.mockRejectedValueOnce(new Error('offline'));
+    await expect(requestNativePushPermission()).resolves.toBe('registration_unavailable');
+  });
+
+  it('does not report a signed-out registration as connected', async () => {
+    await expect(requestNativePushPermission()).resolves.toBe('registration_unavailable');
+  });
+
+  it('waits for the registration event and backend confirmation', async () => {
+    localStorage.setItem('waves_token', 'test-customer-session');
+    nativeMocks.PushNotifications.register.mockImplementationOnce(async () => {});
+    let completed = false;
+    const enrollment = requestNativePushPermission().then((result) => { completed = true; return result; });
+    await vi.waitFor(() => expect(nativeMocks.PushNotifications.register).toHaveBeenCalled());
+    expect(completed).toBe(false);
+    let accept;
+    api.request.mockImplementationOnce(() => new Promise((resolve) => { accept = resolve; }));
+    const registration = nativeMocks.state.listeners.registration({ value: 'confirmed-device' });
+    await vi.waitFor(() => expect(accept).toBeTypeOf('function'));
+    expect(completed).toBe(false);
+    accept({ success: true });
+    await registration;
+    await expect(enrollment).resolves.toBe('granted');
   });
 
   it('posts a pre-login device token through the refresh-aware customer API after login', async () => {

@@ -471,6 +471,7 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
         trackToken,
         {
           operatorInitiated: ['tech', 'admin'].includes(String(opts.actorType || '')),
+          notificationEventKey: svc.visit_id ? `visit:${svc.visit_id}:en-route` : `scheduled-service:${svc.id}:en-route`,
         },
       );
 

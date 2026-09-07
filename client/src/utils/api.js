@@ -520,12 +520,16 @@ export class ApiClient {
   }
 
   // ---- Notifications ----
+  getCustomerPushStatus() {
+    return this.request('/push/status');
+  }
+
   getNotificationPrefs() {
-    return this.request('/notifications/preferences');
+    return this.request('/notifications/preferences?appPreferences=1');
   }
 
   updateNotificationPrefs(prefs) {
-    return this.request('/notifications/preferences', {
+    return this.request('/notifications/preferences?appPreferences=1', {
       method: 'PUT',
       body: JSON.stringify(prefs),
     });

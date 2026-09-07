@@ -27,6 +27,9 @@ const { toE164 } = require('../../../utils/phone');
  * @returns {Promise<{ ok: boolean, code?: string, reason?: string }>}
  */
 async function checkSuppression(input, _policy, contactState) {
+  if (input.channel === 'push' && contactState?.suppressionLoaded !== true) {
+    return { ok: false, code: 'SUPPRESSION_LOOKUP_FAILED', reason: 'Suppression state unavailable for app delivery' };
+  }
   const suppression = contactState && contactState.suppression;
   if (!suppression) return { ok: true };
 

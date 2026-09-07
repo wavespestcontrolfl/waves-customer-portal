@@ -97,7 +97,7 @@ describe('customer notification native push dispatch', () => {
       category: 'service',
       notificationId: 'notification-1',
       tag: 'scheduled-service:service-1:en-route',
-    });
+    }, { notificationId: 'notification-1' });
     expect(result.push).toEqual({ queued: true });
     resolvePush({ subscriptions: 1, sent: 1, expired: 0, failed: 0, skipped: 0 });
   });

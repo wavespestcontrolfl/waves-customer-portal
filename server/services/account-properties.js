@@ -21,4 +21,20 @@ async function accountPropertyIds(req, knex = db) {
   return rows.map((r) => r.id);
 }
 
-module.exports = { accountPropertyIds };
+// Appointment delivery preferences belong to the account's primary profile.
+// Delivery decisions must request onError:'throw'; an unknown owner cannot
+// authorize a different profile's preference. Routes retain their legacy fallback.
+async function resolvePrimaryProfileId(req, knex = db, { onError = 'fallback' } = {}) {
+  const accountId = req.accountId || req.customer?.account_id || req.customerId;
+  if (!accountId) return req.customerId;
+  const primary = await knex('customers')
+    .where({ account_id: accountId, is_primary_profile: true })
+    .first('id')
+    .catch((err) => {
+      if (onError === 'throw') throw err;
+      return null;
+    });
+  return primary?.id || req.customerId;
+}
+
+module.exports = { accountPropertyIds, resolvePrimaryProfileId };

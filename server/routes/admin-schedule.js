@@ -12917,6 +12917,7 @@ router.put('/:id/status', async (req, res, next) => {
           await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, {
             icon: '\u{1F697}',
             preferenceKey: 'tech_en_route',
+            push: await require('../services/messaging/push-channel-routing').bellPushAllowed(svc.customer_id, 'tech_en_route'),
             dedupeKey: svc.visit_id ? `visit:${svc.visit_id}:en-route` : `scheduled-service:${svc.id}:en-route`,
             metadata: { scheduledServiceId: svc.id, ...(svc.visit_id ? { visitId: svc.visit_id } : {}) },
           });
@@ -13018,6 +13019,7 @@ router.put('/:id/status', async (req, res, next) => {
           icon: '\u{1F3E0}',
           link: '/?tab=documents',
           preferenceKey: 'service_completed',
+          push: await require('../services/messaging/push-channel-routing').bellPushAllowed(svc.customer_id, 'service_complete'),
           dedupeKey: `scheduled-service:${svc.id}:completed`,
           metadata: { scheduledServiceId: svc.id },
         });
