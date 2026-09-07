@@ -59,6 +59,12 @@ function trailClause(text, matchIsLabel) {
   return matchIsLabel ? clause.replace(/^\s*:/, ' ') : clause.split(':')[0];
 }
 
+// A negation AFTER the match denies it only as its own predicate ("fumigation
+// is not offered", "does not own"), within two words and before any comma. A
+// later contrastive exclusion ("…, not fumigation") or a negated modifier
+// ("at no additional cost") does not reach back to the match.
+const AFTER_NEGATION_RE = /^\s*(?:(?!(?:and|or|but)\b)[\w']+\s+){0,2}(?:not(?! only)|never|neither|nor|cannot)\b|^\s*(?:(?!(?:and|or|but)\b)[\w']+\s+){0,1}\w+n't\b/i;
+
 const LIST_MARKER_RE = /^[ \t]*(?:[-*+\u2022]|\d+[.)])[ \t]+/;
 
 // Engines answer in Markdown with typographic quotes. Scoring reads plain
@@ -109,21 +115,25 @@ function aboutAnotherEntity(before) {
   return OTHER_ENTITY_RE.test(before) && !WAVES_SUBJECT_RE.test(before);
 }
 
-function asserted(compiled, answer, { attributed = false } = {}) {
+function asserted(compiled, answer) {
   for (const match of answer.matchAll(compiled.scanRe)) {
     if (compiled.rejectValue !== undefined && match[1] === compiled.rejectValue) continue;
     const start = match.index;
-    const end = start + match[0].length;
+    let end = start + match[0].length;
+    // A pattern may stop mid-word ("fumigat"); the assertion is the whole word.
+    while (end < answer.length && /[\w-]/.test(answer[end])) end++;
     // Clause boundaries are found on the full text, never a fixed window: a
     // governed list can run well past 80 characters before its last item.
     const before = leadClause(answer.slice(0, start));
     const after = trailClause(answer.slice(end), before.trim() === '');
-    if (attributed && aboutAnotherEntity(before)) continue;
+    // Facts and claims alike must be about Waves: "Orkin serves Manatee"
+    // earns no footprint credit and "Orkin is a franchise" is no wrong claim.
+    if (aboutAnotherEntity(before)) continue;
     // A negation INSIDE the match ("bond is not optional") also denies it,
     // unless the pattern deliberately matched a negated phrase from its first
     // word ("not a franchise" as evidence of independence).
     const inner = NEGATION_RE.exec(match[0]);
-    if ((inner && inner.index > 0) || NEGATION_RE.test(before) || NEGATION_RE.test(after)) continue;
+    if ((inner && inner.index > 0) || NEGATION_RE.test(before) || AFTER_NEGATION_RE.test(after)) continue;
     return true;
   }
   return false;
@@ -159,7 +169,7 @@ function scoreEntityAnswer(query, text) {
   for (const key of question.expect) expected[key] = asserted(FACTS[key], answer);
   const forbidden = {};
   for (const key of new Set([...cohort.global_forbid, ...question.forbid])) {
-    forbidden[key] = asserted(CLAIMS[key], answer, { attributed: true });
+    forbidden[key] = asserted(CLAIMS[key], answer);
   }
   const right = Object.values(expected).filter(Boolean).length;
   return {

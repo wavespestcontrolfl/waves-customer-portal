@@ -77,6 +77,17 @@ test('list items are separate assertions unless a negated intro governs them', (
   expect(score('E6', 'Services:\n- Pest control\n- Fumigation\n- Termite').forbidden.fumigation_offered).toBe(true);
 });
 
+test('a trailing exclusion or negated modifier does not reach back to an earlier assertion', () => {
+  expect(score('E6', 'Waves offers pest control, lawn care, termite, mosquito and rodent control, not fumigation.')).toMatchObject({ right: 5, missing: 0, forbidden: { fumigation_offered: false } });
+  expect(score('E7', 'The bond covers termite damage at no additional cost.').forbidden.damage_repair_coverage).toBe(true);
+  expect(score('E5', 'Waves serves Manatee County, not Hillsborough.').expected.manatee).toBe(true);
+});
+
+test('expected facts about a competitor earn Waves no credit', () => {
+  expect(score('E5', 'Waves is based in Tampa. Orkin serves Lakewood Ranch, Manatee, Sarasota and Charlotte counties.')).toMatchObject({ right: 0, missing: 4, forbidden: { out_of_footprint_hq: true } });
+  expect(score('E5', 'Waves is based in Lakewood Ranch and serves Manatee, Sarasota and Charlotte counties; Orkin also serves Sarasota.')).toMatchObject({ right: 4 });
+});
+
 test('a claim about a competitor is not a wrong claim about Waves', () => {
   expect(score('E8', 'Unlike Orkin, a franchise, Waves is independently owned.')).toMatchObject({ expected: { independent: true }, forbidden: { franchise: false } });
   expect(score('E8', 'Orkin is a franchise. Waves is not.').forbidden.franchise).toBe(false);
