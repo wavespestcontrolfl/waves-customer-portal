@@ -105,6 +105,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     // movement's customer while its service_product is deleted in the same
     // statement, and that row's re-check fails the service_product FK.
     await mockPg('product_inventory_movements').where({ product_id: fixture.productId }).del();
+    await mockPg('turf_height_readings').where({ customer_id: fixture.customerId }).del();
     await mockPg('customers').where({ id: fixture.customerId }).del();
     await mockPg('technicians').where({ id: fixture.techId }).del();
     await mockPg('services').where({ id: fixture.catalogId }).del();
