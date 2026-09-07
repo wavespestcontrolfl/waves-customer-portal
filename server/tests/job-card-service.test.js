@@ -984,7 +984,8 @@ describe('PR review r5', () => {
       seen.push(table);
       const chain = {};
       for (const m of ['join', 'leftJoin', 'where', 'modify', 'orderBy', 'select', 'limit']) chain[m] = () => chain;
-      chain.catch = async () => [{ service_date: '2026-06-10', product_name: 'Bifen IT' }];
+      chain.then = (resolve, reject) => Promise.resolve([{ service_date: '2026-06-10', product_name: 'Bifen IT' }]).then(resolve, reject);
+      chain.catch = (fn) => chain.then(undefined, fn);
       return chain;
     };
     const note = await jobCard._test.rotationNote(dbh, { customerId: 'c1', scheduledDate: '2026-09-04' }, { name: 'Talstar P', moa_group: '3A' });
@@ -996,7 +997,8 @@ describe('PR review r5', () => {
     const dbh = () => {
       const chain = {};
       for (const m of ['join', 'leftJoin', 'where', 'modify', 'orderBy', 'select', 'limit']) chain[m] = () => chain;
-      chain.catch = async (fn) => fn(new Error('db down'));
+      chain.then = (resolve, reject) => Promise.reject(new Error('db down')).then(resolve, reject);
+      chain.catch = (fn) => chain.then(undefined, fn);
       return chain;
     };
     await expect(jobCard._test.rotationNote(dbh, { customerId: 'c1', scheduledDate: '2026-09-04' }, { name: 'Talstar P', moa_group: '3A' })).resolves.toBe('MOA 3A rotation check unavailable — verify before applying');
@@ -1108,7 +1110,8 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     const failing = (table) => {
       const chain = {};
       for (const m of ['join', 'where', 'select', 'orderBy']) chain[m] = () => chain;
-      chain.catch = (fn) => Promise.reject(new Error('relation missing')).catch(fn);
+      chain.then = (resolve, reject) => Promise.reject(new Error('relation missing')).then(resolve, reject);
+      chain.catch = (fn) => chain.then(undefined, fn);
       return chain;
     };
     expect(await jobCard._test.loadRigCalibrations(failing, null)).toBeNull();
