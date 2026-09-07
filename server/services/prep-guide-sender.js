@@ -34,7 +34,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
-const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { sendCustomerMessage, normalizeRecipient } = require('./messaging/send-customer-message');
 const { isRealProviderSend } = require('./sms-auto-send');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { resolveProjectEmailRecipient, ensureServicePrepToken } = require('./project-email');
@@ -249,6 +249,7 @@ const GUIDE_SMS_LINK_SIGNATURE = 'wavespestcontrol.com/sprinkler-timers/';
 // The pre-dispatch claim's body (openGuideSend) — settled into the delivered
 // marker or released; an unsettled one this old is reclaimed.
 const GUIDE_CLAIM_BODY = 'Prep send claimed via Communications — dispatching.';
+const GUIDE_EMAIL_DISPATCH_BODY = 'Prep email dispatch started — delivery unconfirmed; not resent.';
 const GUIDE_CLAIM_STALE_MS = 10 * 60 * 1000;
 
 const CHANNELS = Object.freeze(['email', 'sms', 'both']);
@@ -635,7 +636,12 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
             verdict = await db.transaction(async (trx) => {
               await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customer.id)]);
               const row = await trx('property_preferences').where({ customer_id: customer.id }).first('irrigation_home_changed_at');
-              return stampAt(row?.irrigation_home_changed_at) === stampAt(snapshot.moveStamp);
+              if (stampAt(row?.irrigation_home_changed_at) !== stampAt(snapshot.moveStamp)) return false;
+              // Record the handoff BEFORE the provider call. A crashed process
+              // cannot mistake an accepted-but-unlogged email for a free retry.
+              return (await trx('customer_interactions')
+                .where({ id: guide.claimId, customer_id: customer.id, body: GUIDE_CLAIM_BODY })
+                .update({ body: GUIDE_EMAIL_DISPATCH_BODY })) === 1;
             });
           } catch (err) {
             // The library treats a THROWING hook as "keep" — an unreadable
@@ -644,7 +650,7 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
             return false;
           }
           if (!verdict) {
-            logger.warn(`[prep-guide-sender] guide email withheld for customer ${customer.id}: address changed before dispatch`);
+            logger.warn(`[prep-guide-sender] guide email withheld for customer ${customer.id}: address or delivery claim changed before dispatch`);
             return false;
           }
           dispatched = true;
@@ -770,8 +776,10 @@ async function sendPrepSms({ customer, firstName, phone, templateKey, vars, vari
 // may be a service contact); the text goes to customer.phone — the primary's
 // line — so it greets the customer's own first name, never the contact's.
 // A chosen channel with nothing on file is an operator-facing refusal.
-function resolvePrepContacts(customer, channel) {
-  const recipient = resolveProjectEmailRecipient(customer);
+function resolvePrepContacts(customer, channel, config) {
+  const recipient = config.guide
+    ? { email: customer.email || '', name: customer.first_name || '' }
+    : resolveProjectEmailRecipient(customer);
   const firstWord = (v) => String(v || '').trim().split(/\s+/)[0] || 'there';
   const contacts = {
     recipient,
@@ -894,12 +902,17 @@ async function priorGuideDelivery(customer, config, pestType) {
   const email = emails.find((row) => row.status !== 'queued' || row.sent_at || row.provider_message_id);
   const settledMarker = marker?.body !== GUIDE_CLAIM_BODY ? marker : null;
   const prior = settledMarker || email || text;
-  if (prior) return { refusal: { reason: 'guide_already_sent', sentAt: prior.created_at || null } };
+  if (prior) return { refusal: { reason: 'guide_already_sent', sentAt: prior.created_at } };
   if (emails.some((row) => EmailTemplateLibrary.queuedRowInFlight(row))) {
     return { refusal: { reason: 'prep_send_busy' } };
   }
+  // Older claims lack the durable dispatch fence. Their stale queued row
+  // cannot prove that SendGrid did not accept the email.
+  if (emails.length && marker?.metadata?.guide_email_fenced !== true) {
+    return { refusal: { reason: 'guide_check_failed' } };
+  }
   if (marker) {
-    const ageMs = Date.now() - new Date(marker.created_at || NaN).getTime();
+    const ageMs = Date.now() - Date.parse(marker.created_at);
     if (!Number.isFinite(ageMs) || ageMs < GUIDE_CLAIM_STALE_MS) return { refusal: { reason: 'prep_send_busy' } };
     // Persist the intended recipient so a later phone edit cannot redirect
     // reconciliation. Legacy claims did not record a channel or recipient.
@@ -907,17 +920,17 @@ async function priorGuideDelivery(customer, config, pestType) {
     if (smsTo !== null) {
       const TwilioService = require('./twilio');
       const outcome = await TwilioService.findOutboundMessageSince({
-        to: smsTo || customer.phone,
+        to: normalizeRecipient(smsTo || customer.phone),
         sentAfter: marker.created_at,
         bodyFragment: GUIDE_SMS_LINK_SIGNATURE,
       });
-      if (outcome?.found) {
+      if (outcome.found) {
         await db('customer_interactions').where({ id: marker.id, customer_id: customer.id }).update({
           body: 'Prep text confirmed by provider reconciliation — not resent.',
         });
         return { refusal: { reason: 'guide_already_sent', sentAt: marker.created_at } };
       }
-      if (outcome?.found !== false || outcome.unavailable) return { refusal: { reason: 'guide_check_failed' } };
+      if (outcome.found !== false || outcome.unavailable) return { refusal: { reason: 'guide_check_failed' } };
     }
     await db('customer_interactions').where({ id: marker.id, customer_id: customer.id }).del();
   }
@@ -1000,7 +1013,7 @@ async function openGuideSend({ customer, config, pestType, contacts, result, act
       admin_user_id: actorId || null,
       subject: `${config.label} prep sent (manual)`,
       body: GUIDE_CLAIM_BODY,
-      metadata: { guide_sms_to: contacts.wantSms ? contacts.phone : null },
+      metadata: { guide_sms_to: contacts.wantSms ? normalizeRecipient(contacts.phone) : null, guide_email_fenced: true },
     }, ['id']);
     return { refusal: null, consentBasis, claimId: claimed?.id ?? claimed ?? null, skippedLeg };
   } catch (err) {
@@ -1024,9 +1037,11 @@ async function settleGuideClaim({ claimId, customer, config, contacts, result, p
       });
     } else if (result.emailUncertain) {
       await row.update({ body: 'Prep email dispatched via Communications — delivery uncertain (provider response lost); not resent.' });
-    } else if (!result.smsUncertain) {
-      // Provider failures include lost responses after acceptance. Keep
-      // those claims dispatching until reconciliation proves no text went.
+    } else if (result.smsUncertain) {
+      // Any email attempt definitely failed. Restore the pending text state
+      // so reconciliation can release it if Twilio proves no text went.
+      await row.update({ body: GUIDE_CLAIM_BODY });
+    } else {
       await row.del();
     }
   } catch (err) {
@@ -1070,7 +1085,7 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
   const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
   if (!customer) return { ok: false, reason: 'customer_not_found', pestType };
 
-  const contacts = resolvePrepContacts(customer, channel);
+  const contacts = resolvePrepContacts(customer, channel, config);
   const result = {
     ok: false,
     pestType,

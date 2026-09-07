@@ -5,7 +5,10 @@ jest.mock('../services/email-template-library', () => ({
   queuedRowInFlight: jest.requireActual('../services/email-template-library').queuedRowInFlight,
 }));
 jest.mock('../services/twilio', () => ({ findOutboundMessageSince: jest.fn() }));
-jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: jest.fn(),
+  normalizeRecipient: jest.requireActual('../services/messaging/send-customer-message').normalizeRecipient,
+}));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
 jest.mock('../services/sms-auto-send', () => ({ isRealProviderSend: jest.requireActual('../services/sms-auto-send').isRealProviderSend }));
 // The sprinkler timer guide's watering block reads the CURRENT restriction
@@ -1092,13 +1095,103 @@ describe('sprinkler timer guide', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('the standalone email uses the weekly plan primary recipient, not a service contact', async () => {
+    customerRow.service_contact_email = 'contact@example.com';
+    customerRow.service_contact_name = 'Service Contact';
+    const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
+    expect(result).toMatchObject({ ok: true, emailAddress: customerRow.email });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      to: customerRow.email, payload: expect.objectContaining({ first_name: customerRow.first_name }),
+    }));
+    customerRow.email = null;
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' }))
+      .toMatchObject({ ok: false, reason: 'no_email' });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('an accepted email whose process loses all post-provider writes stays fenced after the queue expires', async () => {
+    const baseDb = db.getMockImplementation();
+    let lostWrites = false;
+    db.mockImplementation((table) => {
+      const q = baseDb(table);
+      if (table === 'customer_interactions' && lostWrites) {
+        q.update = jest.fn(async () => { throw new Error('connection lost'); });
+        q.del = jest.fn(async () => { throw new Error('connection lost'); });
+      }
+      return q;
+    });
+    EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async ({ onQueued }) => {
+      expect(await onQueued()).toBe(true);
+      const beforeProvider = interactionUpdates.at(-1);
+      expect(beforeProvider.body).toMatch(/dispatch started/);
+      const old = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      interactionMarkerRow = { ...interactionsInsert.mock.calls.at(-1)[0], ...beforeProvider, id: 'crashed', created_at: old };
+      manualEmailRow = { status: 'queued', queued_at: old, created_at: old };
+      lostWrites = true;
+      throw new Error('provider response lost');
+    });
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' }))
+      .toMatchObject({ ok: false, emailUncertain: true });
+    lostWrites = false;
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' }))
+      .toMatchObject({ ok: false, reason: 'guide_already_sent' });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+    expect(interactionDeletes).toBe(0);
+  });
+
+  test.each([0, 'throws'])('email dispatch aborts when its durable fence cannot be written: %s', async (failure) => {
+    const baseDb = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const q = baseDb(table);
+      if (table === 'customer_interactions') q.update = jest.fn(async () => {
+        if (failure === 'throws') throw new Error('write unavailable');
+        return failure;
+      });
+      return q;
+    });
+    let providerCalled = false;
+    EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async ({ onQueued }) => {
+      // Mirrors the library: thrown callbacks permit dispatch; explicit false aborts.
+      let keep = true;
+      try { keep = (await onQueued()) !== false; } catch { /* library fail-open hook */ }
+      providerCalled = keep;
+      return { sent: keep };
+    });
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' }))
+      .toMatchObject({ ok: false, emailSent: false });
+    expect(providerCalled).toBe(false);
+  });
+
+  test.each(['(941) 555-0101', '941-555-0101', '1 941 555 0101'])('SMS claims and legacy reconciliation normalize %s like dispatch', async (rawPhone) => {
+    mockNotificationPrefsRow = { seasonal_tips: true };
+    customerRow.phone = rawPhone;
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, code: 'PROVIDER_FAILURE' });
+    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
+    expect(interactionsInsert.mock.calls.at(-1)[0].metadata.guide_sms_to).toBe('+19415550101');
+    // Already-persisted claims from the previous head stored free-form numbers.
+    interactionMarkerRow = {
+      ...interactionsInsert.mock.calls.at(-1)[0], id: 'legacy-phone',
+      metadata: { guide_sms_to: rawPhone },
+      created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    };
+    customerRow.phone = '+19415550102';
+    TwilioService.findOutboundMessageSince.mockResolvedValueOnce({ found: true });
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' }))
+      .toMatchObject({ ok: false, reason: 'guide_already_sent' });
+    expect(TwilioService.findOutboundMessageSince).toHaveBeenCalledWith(expect.objectContaining({ to: '+19415550101' }));
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
   test('an uncertain email (post-dispatch throw) writes a durable marker so the next click is refused, even though the ledger row reads failed', async () => {
     EmailTemplateLibrary.sendTemplate.mockImplementation(async ({ onQueued }) => { await onQueued?.(); throw new Error('response lost'); });
     const first = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
     expect(first).toMatchObject({ ok: false, emailSent: false, emailUncertain: true });
     // The pre-send claim is kept and marked uncertain — never released.
     expect(interactionDeletes).toBe(0);
-    expect(interactionUpdates).toEqual([{ body: expect.stringMatching(/delivery uncertain/) }]);
+    expect(interactionUpdates).toEqual([
+      { body: expect.stringMatching(/dispatch started/) },
+      { body: expect.stringMatching(/delivery uncertain/) },
+    ]);
     // A definite pre-dispatch failure releases the claim (a retry is fine).
     jest.clearAllMocks(); interactionUpdates = []; interactionDeletes = 0;
     EmailTemplateLibrary.sendTemplate.mockRejectedValue(new Error('template missing'));
@@ -1207,15 +1300,16 @@ describe('sprinkler timer guide', () => {
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
   });
 
-  test.each([false, true])('an abandoned queued email can retry (stale interaction claim: %s)', async (withClaim) => {
+  test.each([false, true])('an abandoned queued email retries only with a pre-dispatch fence (fenced: %s)', async (withClaim) => {
     const old = new Date(Date.now() - 60 * 60 * 1000).toISOString();
     manualEmailRow = { status: 'queued', queued_at: old, created_at: old };
     if (withClaim) interactionMarkerRow = {
       id: 'abandoned', body: 'Prep send claimed via Communications — dispatching.',
-      created_at: old, metadata: { guide_sms_to: null },
+      created_at: old, metadata: { guide_sms_to: null, guide_email_fenced: true },
     };
     const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'email' });
-    expect(result).toMatchObject({ ok: true, emailSent: true });
+    expect(result).toMatchObject(withClaim
+      ? { ok: true, emailSent: true } : { ok: false, reason: 'guide_check_failed' });
     expect(TwilioService.findOutboundMessageSince).not.toHaveBeenCalled();
   });
 
@@ -1261,7 +1355,7 @@ describe('sprinkler timer guide', () => {
     const result = await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
     expect(result).toMatchObject({ ok: false, smsSent: false, smsUncertain: true });
     expect(interactionDeletes).toBe(0);
-    expect(interactionUpdates).toEqual([]);
+    expect(interactionUpdates).toEqual([{ body: 'Prep send claimed via Communications — dispatching.' }]);
     interactionMarkerRow = {
       ...interactionsInsert.mock.calls.at(-1)[0], id: 'uncertain-sms',
       created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
@@ -1271,6 +1365,27 @@ describe('sprinkler timer guide', () => {
     expect(retry).toMatchObject({ ok: false, reason: 'guide_already_sent' });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(interactionDeletes).toBe(0);
+  });
+
+  test('a definite email rejection plus uncertain text restores the text reconciliation state', async () => {
+    mockNotificationPrefsRow = { seasonal_tips: true };
+    EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async ({ onQueued }) => {
+      expect(await onQueued()).toBe(true);
+      throw Object.assign(new Error('provider rejected'), { status: 400 });
+    });
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, code: 'PROVIDER_FAILURE' });
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'both' }))
+      .toMatchObject({ ok: false, emailUncertain: false, smsUncertain: true });
+    expect(interactionUpdates[0].body).toMatch(/email dispatch started/);
+    expect(interactionUpdates.at(-1).body).toBe('Prep send claimed via Communications — dispatching.');
+    expect(interactionDeletes).toBe(0);
+    interactionMarkerRow = {
+      ...interactionsInsert.mock.calls.at(-1)[0], ...interactionUpdates.at(-1), id: 'retryable-text',
+      created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+    };
+    expect(await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' }))
+      .toMatchObject({ ok: true, smsSent: true });
+    expect(TwilioService.findOutboundMessageSince).toHaveBeenCalled();
   });
 
   test('provider reconciliation failure preserves the stale claim; confirmed absence permits retry', async () => {
@@ -1289,7 +1404,7 @@ describe('sprinkler timer guide', () => {
     expect(result).toMatchObject({ ok: true, smsSent: true });
     expect(interactionDeletes).toBe(1);
     expect(interactionsInsert).toHaveBeenLastCalledWith(expect.objectContaining({
-      metadata: { guide_sms_to: customerRow.phone },
+      metadata: { guide_sms_to: customerRow.phone, guide_email_fenced: true },
     }), ['id']);
   });
 

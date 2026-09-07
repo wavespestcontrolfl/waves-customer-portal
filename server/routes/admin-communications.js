@@ -1170,7 +1170,7 @@ const PREP_TEXT_DOWN_COPY = {
 };
 // SendGrid MAY have accepted the email (post-dispatch throw): the page claim
 // is kept and "try again" would double-send the guide (GH Codex #3856 r8 P2).
-// The text leg is never uncertain (sendPrepSms).
+// Standalone guide texts also retain uncertain provider outcomes for reconciliation.
 const PREP_EMAIL_UNCERTAIN_COPY = "The prep email may or may not have gone out — check the customer's email log before sending it again.";
 
 function manualPrepMessage(result) {
@@ -1184,6 +1184,10 @@ function manualPrepMessage(result) {
   if (result.smsSent) parts.push(`texted to ${result.phone}`);
   const sent = `${result.label} prep ${parts.join(' and ')}.`;
   if (result.reason !== 'partial') return sent;
+  if (result.pestType === 'sprinkler_timer') {
+    const missing = result.failedChannel === 'sms' ? 'Text' : 'Email';
+    return `${sent} ${missing} delivery was not confirmed. Check delivery history; this one-time guide cannot be retried with Send prep guide.`;
+  }
   if (result.failedChannel === 'sms') {
     const why = PREP_TEXT_DOWN_COPY[result.smsLinkReason];
     return `${sent} ${why ? why(result) : 'The text did not go out — send it again as Text once the number is confirmed.'}`;
