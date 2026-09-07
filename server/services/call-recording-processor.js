@@ -6267,6 +6267,85 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
 }
 
 // ══════════════════════════════════════════════════════════════
+// ── Tech follow-up calls ──────────────────────────────────────────────────
+// A technician's own-line call from the visit brief (source tech-click,
+// routes/tech-line.js) is a field follow-up to a visit the bridge already
+// linked to its customer — not a lead call. None of the lead pipeline
+// applies to it: customer/lead upserts, the routing gate's triage cards,
+// auto-booking and the approved-but-unbooked audit, the new_lead drip and
+// newsletter enrollment, follow-up SMS, the "Inbound call" interaction, CSR
+// scoring. processRecording finalizes such a call at ONE seam (below the
+// extraction, above voicemail routing) instead of excluding the source
+// branch by branch (codex #4072 r1 / r4 / r6 / r7 / r8).
+function isTechFollowUpCall(call) {
+  return call?.source === 'tech-click';
+}
+
+// Commitments — what Waves promised and what the caller agreed to, as
+// evidence-linked rows (services/call-commitments.js). Runs after
+// finalization, fenced on this pass's GENERATION (the token is already
+// cleared by finalization — same fence the detached estimator lanes use).
+// Seeds from the V2 extraction plus one bounded model pass; a human-touched
+// row is never rewritten. Dark behind GATE_CALL_COMMITMENTS; never blocks
+// the call.
+async function recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration }) {
+  if (!transcription || extracted?.is_spam || !isEnabled('callCommitments')) return;
+  try {
+    const commitmentsStartedAt = Date.now();
+    const settled = await db('call_log').where({ id: call.id }).first('transcript_structured', 'processing_status');
+    if (settled && settled.processing_status !== 'spam') {
+      const commitmentSummary = await require('./call-commitments').recordCallCommitments({
+        conn: db,
+        call: { ...call, transcript_structured: settled.transcript_structured ?? call.transcript_structured },
+        transcript: transcription,
+        v2: v2Result?.status === 'valid' ? v2Result.extraction : null,
+        procGeneration,
+      });
+      logger.info(`[call-proc] commitments for ${maskSid(callSid)}: seeds=${commitmentSummary.seeds} model=${commitmentSummary.model} written=${commitmentSummary.written} dropped=${commitmentSummary.dropped} ms=${Date.now() - commitmentsStartedAt}${commitmentSummary.skipped ? ` skipped=${commitmentSummary.skipped}` : ''}${commitmentSummary.ownershipLost ? ' superseded_by_newer_pass' : ''}`);
+    }
+  } catch (err) {
+    logger.warn(`[call-proc] commitments step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
+  }
+}
+
+// Terminal write for a tech follow-up call: the transcript is already
+// stored; this lands the extraction, summary and sentiment the Calls tab
+// reads, marks the call processed and releases the claim in one
+// token-fenced statement, then records commitments. No lead, booking,
+// automation, SMS, interaction or CSR write ever runs for the call.
+async function finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result }) {
+  const written = await db('call_log')
+    .where({ id: call.id })
+    .where('processing_token', procToken)
+    .update({
+      ai_extraction: JSON.stringify(extracted),
+      call_summary: extracted.call_summary || null,
+      transcription_metadata: db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || jsonb_build_object('summary_source', 'model')"),
+      sentiment: extracted.sentiment || null,
+      processing_status: 'processed',
+      processing_token: null,
+      metadata: db.raw(
+        "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{processing_timings}', ?::jsonb, true)",
+        [JSON.stringify({
+          ...stageTimings,
+          total_ms: Date.now() - processingStartedAt.getTime(),
+          generation: procGeneration,
+          started_at: processingStartedAt.toISOString(),
+          finished_at: new Date().toISOString(),
+          tech_follow_up: true,
+        })],
+      ),
+      updated_at: new Date(),
+    });
+  if (!written) {
+    logger.warn(`[call-proc] Skipped tech follow-up terminal write for ${maskSid(callSid)} — ownership lost (peer reclaimed).`);
+    return { success: false, skipped: true, reason: 'terminal_write_ownership_lost', callSid };
+  }
+  await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
+  logger.info(`[call-proc] Completed tech follow-up processing for ${maskSid(callSid)}: customer=${call.customer_id || null}`);
+  return { success: true, callSid, customerId: call.customer_id || null, extracted, techFollowUp: true };
+}
+
 const CallRecordingProcessor = {
   // Re-used by the bounce audio-reverify lane (email-bounce-reverify.js) —
   // full pipeline incl. the letter-fidelity contact-dictation second pass,
@@ -7523,6 +7602,14 @@ const CallRecordingProcessor = {
         // like the enforce path's approved-booking re-assert (codex P2).
         if (!isOutboundCall(call)) extracted = applyRecurringIntentDefault(extracted, transcription, bookableServiceNames);
       }
+    }
+
+    // ── Tech follow-up short-circuit ── (see isTechFollowUpCall)
+    // Extraction is final here and no side effect has run yet: the call
+    // keeps its transcript, extraction, summary and commitments, and
+    // nothing of the lead pipeline below touches it.
+    if (isTechFollowUpCall(call)) {
+      return finalizeTechFollowUpCall({ call, callSid, procToken, procGeneration, processingStartedAt, stageTimings, transcription, extracted, v2Result });
     }
 
     // ── Voicemail routing ──
@@ -12389,12 +12476,8 @@ const CallRecordingProcessor = {
     // so a call those gates would have vetoed books live — containment the
     // removed review hold used to provide (Codex #3361 r4 P1). Shadow/legacy
     // routing keeps the pre-gate behavior: outbound bookings stay manual.
-    // A technician's own-line call from the visit brief (source tech-click,
-    // routes/tech-line.js) is a field follow-up, not a return call to a lead:
-    // a date it mentions never auto-books (codex #4072 r1 P1).
     const outboundAutoBooking = isOutboundCall(call) && isEnabled('callOutboundBooking')
-      && CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED
-      && call.source !== 'tech-click';
+      && CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED;
     // The v2 TCPA verdict is only computed in ENFORCE routing mode — but
     // outbound consent is never implied, and the removed review hold used to
     // be the backstop that kept a shadow/legacy-mode outbound booking from
@@ -14939,10 +15022,7 @@ const CallRecordingProcessor = {
     // preferred_date_time — or only a vague time — leaves every branch above
     // unentered, so appointmentResult stays undefined and requiring it
     // skipped exactly the held bookings the office has to finish by hand.
-    // A tech's own-line call (source tech-click) never books, so "no schedule
-    // row" is its normal outcome, not an unfinished booking: no "collect the
-    // email" card for a routine field follow-up (codex #4072 r7 P2).
-    if (customerId && !appointmentResult?.scheduleCreated && call.source !== 'tech-click') {
+    if (customerId && !appointmentResult?.scheduleCreated) {
       try {
         const unbookedCustomer = await db('customers').where({ id: customerId }).first();
         if (unbookedCustomer
@@ -14973,10 +15053,7 @@ const CallRecordingProcessor = {
       const bookedServiceId = appointmentResult?.scheduledServiceId || null;
       // Held bookings already opened their own reason-specific card above.
       const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed', 'reservice_property_uncovered']);
-      // A tech's own-line call (source tech-click) skips auto-booking BY
-      // DESIGN — the tech is standing at the visit the call belongs to; a
-      // reiterated time is not an approved-but-unbooked call (codex #4072 r6 P2).
-      if (!bookedServiceId && call.source !== 'tech-click' && !heldReasons.has(appointmentResult?.skippedReason)) {
+      if (!bookedServiceId && !heldReasons.has(appointmentResult?.skippedReason)) {
         const skipReason = appointmentResult?.skippedReason
           || appointmentResult?.scheduleError
           || appointmentResult?.error
@@ -15336,12 +15413,7 @@ const CallRecordingProcessor = {
     // staff segment; scoring it would persist a meaningless CSR score and
     // could file a bogus follow-up, codex r5 P1).
     const csrTranscript = recordedPartOfComposite(transcription) || transcription;
-    // A technician's own-line call from the visit brief (source tech-click)
-    // is an outbound field follow-up: no forward_acceptance leg, no inbound
-    // sales script — scoring it would book an 'Unknown' CSR score against
-    // the wrong rubric and could file a follow-up task (codex #4072 r4 P1).
-    const csrScorable = call.source !== 'tech-click';
-    if (csrScorable && csrTranscript && csrTranscript.length > 50 && csrTranscript !== TRANSCRIPTION_REJECTED_SENTINEL) {
+    if (csrTranscript && csrTranscript.length > 50 && csrTranscript !== TRANSCRIPTION_REJECTED_SENTINEL) {
       try {
         const callMeta = typeof call.metadata === 'string'
           ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()
@@ -16058,31 +16130,8 @@ const CallRecordingProcessor = {
     if (finalized > 0) {
       await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, appointmentResult, customerId, transcript: transcription });
 
-      // Commitments — what Waves promised and what the caller agreed to, as
-      // evidence-linked rows (services/call-commitments.js). Runs after
-      // finalization, fenced on this pass's GENERATION (the token is already cleared by
-      // finalization — same fence the detached estimator lanes use). Seeds
-      // from the V2 extraction plus one bounded model pass; a human-touched
-      // row is never rewritten. Dark behind GATE_CALL_COMMITMENTS; never
-      // blocks the call.
-      if (transcription && !extracted.is_spam && isEnabled('callCommitments')) {
-        try {
-          const commitmentsStartedAt = Date.now();
-          const settled = await db('call_log').where({ id: call.id }).first('transcript_structured', 'processing_status');
-          if (settled && settled.processing_status !== 'spam') {
-            const commitmentSummary = await require('./call-commitments').recordCallCommitments({
-              conn: db,
-              call: { ...call, transcript_structured: settled.transcript_structured ?? call.transcript_structured },
-              transcript: transcription,
-              v2: v2Result?.status === 'valid' ? v2Result.extraction : null,
-              procGeneration,
-            });
-            logger.info(`[call-proc] commitments for ${maskSid(callSid)}: seeds=${commitmentSummary.seeds} model=${commitmentSummary.model} written=${commitmentSummary.written} dropped=${commitmentSummary.dropped} ms=${Date.now() - commitmentsStartedAt}${commitmentSummary.skipped ? ` skipped=${commitmentSummary.skipped}` : ''}${commitmentSummary.ownershipLost ? ' superseded_by_newer_pass' : ''}`);
-          }
-        } catch (err) {
-          logger.warn(`[call-proc] commitments step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
-        }
-      }
+      // Commitments (recordCommitmentsStep): after finalization, generation-fenced, never blocking.
+      await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
     }
 
     // Reconcile-only draft-linkage pass, AFTER the fenced finalization
@@ -16806,6 +16855,9 @@ const LEAD_UNIT_MAX_LENGTH = 100;
 const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
 
 CallRecordingProcessor._test = {
+  isTechFollowUpCall,
+  finalizeTechFollowUpCall,
+  recordCommitmentsStep,
   recordedPartOfComposite,
   summarizeBatch,
   noteSharedPhoneSibling,

@@ -555,7 +555,7 @@ describe('codex r5 follow-ups', () => {
   test('the CSR coach is skipped when the recorded leg was rejected (P1)', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     expect(src).toContain('const csrTranscript = recordedPartOfComposite(transcription) || transcription;');
-    expect(src).toContain("if (csrScorable && csrTranscript && csrTranscript.length > 50 && csrTranscript !== TRANSCRIPTION_REJECTED_SENTINEL) {"); // the length gate reads the HUMAN leg (codex r6 P1)
+    expect(src).toContain("if (csrTranscript && csrTranscript.length > 50 && csrTranscript !== TRANSCRIPTION_REJECTED_SENTINEL) {"); // the length gate reads the HUMAN leg (codex r6 P1)
     expect(src).toContain('transcript: csrTranscript,');
   });
 });
