@@ -105,11 +105,15 @@ const LOOKUP_BUDGET_TEXT = 'No more account lookups are available on this call. 
 const TRANSFER_TEXT = 'Transferring the caller to the office now. Your part of the call is over — do not say anything else and do not call any more tools.';
 const TRANSFER_IN_PROGRESS_TEXT = 'The transfer is already in progress. Say nothing further.';
 const MISMATCH_TEXT = 'Nothing matches those arguments on this call — nothing was done. Check what the caller actually asked for and the values earlier results gave you.';
+const MATCHER_SCALAR = Joi.alternatives().try(Joi.string().pattern(/\S/), Joi.number(), Joi.boolean());
+const INPUT_MATCHER_SCHEMA = Joi.object().min(1).pattern(/\S/, Joi.alternatives().try(
+  MATCHER_SCALAR, Joi.array().min(1).items(MATCHER_SCALAR.required()),
+));
 const TOOL_RESPONSES_SCHEMA = Joi.array().min(1).items(Joi.alternatives().try(
   Joi.string().pattern(/\S/),
   Joi.object({
     text: Joi.string().pattern(/\S/),
-    when: Joi.object().min(1).unknown(true),
+    when: INPUT_MATCHER_SCHEMA,
     once: Joi.boolean(),
     ok: Joi.boolean(),
     hang: Joi.boolean(),
@@ -255,6 +259,10 @@ function lintScenario(s, knownTools) {
   // A tool an expectation wants called must be one the scenario allows —
   // otherwise the allowlist and the expectation contradict each other.
   const allowed = new Set(Array.isArray(s.allowedTools) ? s.allowedTools : []);
+  if (s.allowedToolInputs != null) {
+    const { error } = Joi.object().pattern(Joi.string().valid(...allowed), INPUT_MATCHER_SCHEMA).validate(s.allowedToolInputs, { convert: false });
+    if (error) problems.push(`allowedToolInputs: ${error.message}`);
+  }
   for (const e of expects) {
     if (e && e.check === 'tools_called_include' && Array.isArray(e.value)) {
       for (const name of e.value) if (!allowed.has(name)) problems.push(`expect tools_called_include names "${name}", which allowedTools does not allow`);
@@ -455,8 +463,8 @@ function applyToolSideEffects(response, { input, ctx, scenario }) {
   let receipt = false;
   if (response.capture) {
     if (typeof ctx.markCaptured === 'function') ctx.markCaptured(response.capture === true ? {} : response.capture);
-    if (input && input.call_summary && typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
-    receipt = true;
+    if (input.call_summary && typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
+    receipt = input.lead_quality !== 'spam'; // the live spam branch suppresses capture without writing a lead or callback
   }
   if (response.booking) { if (typeof ctx.markBookingRequested === 'function') ctx.markBookingRequested(null); receipt = true; }
   if (response.reservice) { if (typeof ctx.markReserviceFiled === 'function') ctx.markReserviceFiled(); receipt = true; }
@@ -650,6 +658,7 @@ function applyResumeFixture(convo, scenario, record) {
   const resume = scenario?.fixtures?.resume;
   if (!resume) return;
   const segmentsText = String(resume.segmentsText || '');
+  if (segmentsText) record.events.push({ kind: 'resume', text: segmentsText, turn: 0, index: record.events.length });
   convo._resumedHint = true;
   convo._resume = { predecessorsComplete: true, segmentsText, reconnects: Number(resume.reconnects) || 1, relayLeadId: null };
   convo._resumeReady = Promise.resolve();
@@ -713,6 +722,7 @@ function renderTranscript(events = []) {
     if (e.kind === 'caller') lines.push(`Caller: ${e.text}${e.ignored ? ' (not heard — the session was already ending)' : ''}`);
     else if (e.kind === 'agent') lines.push(`Agent: ${e.text}`);
     else if (e.kind === 'clock') lines.push(`[clock] ${e.text}`);
+    else if (e.kind === 'resume') lines.push(`[earlier call segment]\n${e.text}\n[end earlier call segment]`);
     else if (e.kind === 'interrupt') lines.push(`[caller interrupted the agent after: "${e.text}"]`);
     else if (e.kind === 'tool') lines.push(`[tool] ${e.name}(${clip(JSON.stringify(e.input || {}), 240)}) → ${clip(e.text, 600)}`);
   }
@@ -829,11 +839,11 @@ function runCheck(expectation, record) {
 // blocking miss, whatever the fixture happens to answer for it.
 function allowedToolsCheck(scenario, record) {
   const allowed = new Set(scenario.allowedTools || []);
-  const outside = [...new Set(record.toolCalls.filter((t) => !allowed.has(t.name)).map((t) => t.name))];
+  const outside = [...new Set(record.toolCalls.filter((t) => !allowed.has(t.name) || !inputMatches(t.input, scenario.allowedToolInputs?.[t.name] || {})).map((t) => t.name))];
   return {
     check: 'allowed_tools', severity: 'critical', adjudicated: true,
     status: outside.length ? 'fail' : 'pass',
-    detail: outside.length ? `called outside allowedTools: ${outside.join(', ')}` : `every call inside {${[...allowed].join(', ')}}`,
+    detail: outside.length ? `called outside allowedTools or allowedToolInputs: ${outside.join(', ')}` : `every call inside {${[...allowed].join(', ')}} with permitted inputs`,
   };
 }
 

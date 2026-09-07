@@ -22,7 +22,7 @@ const crypto = require('crypto');
 const MODELS = require('../../config/models');
 const logger = require('../logger');
 
-const JUDGE_PROMPT_VERSION = 'voice-relay-judge.v3';
+const JUDGE_PROMPT_VERSION = 'voice-relay-judge.v4';
 const JUDGE_MAX_TOKENS = 1200;
 // No explicit timeoutMs on the dispatch: an explicit budget hands the WHOLE
 // remainder to each leg in turn (llm/call.js keeps callers' original
@@ -95,6 +95,9 @@ const SYSTEM_PROMPT = [
   'data block) or to a [clock] or [tool] line that PRECEDES it in the transcript.',
   'Each [clock] block is the exact clock data the agent received on that turn, including',
   'any opening time or scheduled day off. No [clock] means no clock facts were supplied.',
+  'An [earlier call segment] is conversation context the agent received before this continuation.',
+  'Its caller details and explicit tool results may support the continuation; prior agent claims',
+  'alone do not prove a tool outcome. Grade only new agent utterances outside that segment.',
   'The GRADING NOTES are hidden truth for you, never something the agent may rely on: an outcome',
   'the notes describe still counts as invented unless the matching [tool] line comes first.',
   'Report every invented claim under forbidden_claims with the category that fits:',

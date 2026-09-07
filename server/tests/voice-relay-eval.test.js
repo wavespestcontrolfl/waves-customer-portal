@@ -120,6 +120,13 @@ describe('voice relay eval — fixture lint', () => {
     ['string flag', { text: 'result', transfer: 'true' }],
     ['null matcher', { when: null, text: 'result' }],
     ['empty matcher', { when: {}, text: 'result' }],
+    ['empty matcher value', { when: { city: '' }, text: 'result' }],
+    ['blank matcher value', { when: { city: '   ' }, text: 'result' }],
+    ['null matcher value', { when: { city: null }, text: 'result' }],
+    ['empty matcher array', { when: { city: [] }, text: 'result' }],
+    ['blank matcher array entry', { when: { city: ['Bradenton', ''] }, text: 'result' }],
+    ['nested matcher array', { when: { city: [['Bradenton']] }, text: 'result' }],
+    ['nested matcher object', { when: { city: { name: 'Bradenton' } }, text: 'result' }],
     ['string once', { once: 'true', text: 'result' }],
   ])('rejects a %s tool response before scenario execution', (_label, response) => {
     const fixture = replay.loadFixture(FIXTURE_PATH);
@@ -133,6 +140,7 @@ describe('voice relay eval — fixture lint', () => {
     { booking: true }, { reservice: true }, { capture: true },
     { capture: { leadCreated: false } },
     { when: { slot_ref: 'S2' }, once: true, text: 'result' },
+    { when: { service: ['pest_control', 'lawn_care'], home_sqft: 2000, known: false }, text: 'result' },
     ['first', { text: 'second' }],
   ].map((response) => [response]))('accepts a supported response payload: %j', (response) => {
     const fixture = replay.loadFixture(FIXTURE_PATH);
@@ -158,6 +166,18 @@ describe('voice relay eval — fixture lint', () => {
         }
       }
     }
+  });
+
+  test.each([
+    { missing_tool: { lead_quality: 'spam' } },
+    { capture_lead: { lead_quality: '' } },
+    { capture_lead: { lead_quality: [] } },
+    { capture_lead: {} },
+    [],
+  ])('input permissions must name an allowed tool and use valid matchers: %j', (allowedToolInputs) => {
+    const fixture = replay.loadFixture(FIXTURE_PATH);
+    fixture.scenarios.find((s) => s.id === 'wrong-number').allowedToolInputs = allowedToolInputs;
+    expect(replay.lintFixture(fixture).join('\n')).toContain('allowedToolInputs:');
   });
 });
 
@@ -353,7 +373,20 @@ describe('voice relay eval — argument-matched fixture answers', () => {
     const { loadFixture } = require('../services/eval/voice-relay-replay');
     const scenario = loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'pricing-gate-on');
     expect(pickToolResponse(scenario, 'get_pricing', 1, { service: 'lawn_care' }, {}).response.text).toMatch(/Cannot price that plan yet/);
-    expect(pickToolResponse(scenario, 'get_pricing', 2, { service: 'pest_control' }, {}).response.text).toMatch(/quarterly \$129/);
+    expect(pickToolResponse(scenario, 'get_pricing', 2, { service: 'pest_control', home_sqft: 2000 }, {}).response.text).toMatch(/quarterly \$129/);
+  });
+
+  test('every stock pricing success requires the fixture service and positive home size', () => {
+    const { loadFixture } = require('../services/eval/voice-relay-replay');
+    const scenarios = loadFixture(FIXTURE_PATH).scenarios.filter((s) => (JSON.stringify(s.fixtures.toolResponses.get_pricing) || '').includes('quarterly $129'));
+    expect(scenarios.length).toBeGreaterThan(1);
+    for (const s of scenarios) {
+      for (const input of [{}, { service: 'pest_control' }, { service: 'pest_control', home_sqft: 0 }, { service: 'pest_control', home_sqft: -2000 }]) {
+        const selected = pickToolResponse(s, 'get_pricing', 1, input, {});
+        expect(selected?.response?.text || '').not.toMatch(/\$\d/);
+      }
+      expect(pickToolResponse(s, 'get_pricing', 1, { service: 'pest_control', home_sqft: 2000 }, {}).response.text).toContain('$129 per application');
+    }
   });
 
   test('a missing location does not consume the slot-gone fixture sequence', () => {
@@ -797,6 +830,68 @@ describe('voice relay eval — the harness', () => {
     expect(valid.status).toBe('pass');
   });
 
+  test.each([undefined, 0, -2000])('schema-valid pricing with home_sqft=%s receives no price and fails the price scenario', async (home_sqft) => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'pricing-gate-on');
+    const input = home_sqft === undefined ? { service: 'pest_control' } : { service: 'pest_control', home_sqft };
+    script.push(toolUse('get_pricing', input), say('I need the home size before I can give a price.'));
+    const result = await replay.runScenario({ ...fixture, turns: [fixture.turns[0]] }, { judge: false });
+    expect(result.error).toBeUndefined();
+    expect(result.toolCalls[0]).toMatchObject({ name: 'get_pricing', ok: false, receipt: false });
+    expect(result.toolCalls[0].text).not.toMatch(/\$\d/);
+    expect(result.status).toBe('fail');
+    expect(result.checks).toContainEqual(expect.objectContaining({ check: 'spoken_matches_any', severity: 'critical', status: 'fail' }));
+    expect(require('../models/db')).not.toHaveBeenCalled();
+  });
+
+  test.each(['wrong-number', 'robocall'])('%s permits no capture or spam suppression, and critically rejects every other capture input', async (id) => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
+    const oneTurn = { ...fixture, turns: [fixture.turns[0]] };
+    script.push(say('This is Waves Pest Control. Goodbye.'));
+    const noCapture = await replay.runScenario(oneTurn, { judge: false });
+    expect(noCapture.status).toBe('pass');
+    for (const lead_quality of [undefined, 'cold', 'warm', 'hot']) {
+      const input = { call_summary: 'Synthetic wrong-number or recording call', ...(lead_quality ? { lead_quality } : {}) };
+      script.push(toolUse('capture_lead', input), say('This is Waves Pest Control. Goodbye.'));
+      const rejected = await replay.runScenario(oneTurn, { judge: false });
+      expect(rejected.error).toBeUndefined();
+      expect(rejected.status).toBe('fail');
+      expect(rejected.checks[0]).toMatchObject({ check: 'allowed_tools', severity: 'critical', status: 'fail' });
+      expect(rejected.toolCalls[0]).toMatchObject({ mismatch: true, ok: false, receipt: false });
+      expect(rejected.toolCalls[0].text).not.toContain('Marked as spam');
+    }
+    script.push(toolUse('capture_lead', { call_summary: 'Synthetic recording', lead_quality: 'spam' }), say('Goodbye.'));
+    const spam = await replay.runScenario(oneTurn, { judge: false });
+    expect(spam.status).toBe('pass');
+    expect(spam.toolCalls[0]).toMatchObject({ ok: true, receipt: false, text: expect.stringContaining('no lead created') });
+    // A later permitted spam call cannot erase a preceding unauthorized capture.
+    const mixed = record({ tools: [{ name: 'capture_lead', input: { lead_quality: 'cold' } }, { name: 'capture_lead', input: { lead_quality: 'spam' } }] });
+    expect(replay._internals.scenarioStatus({ checks: replay._internals.evaluateChecks(fixture, mixed) })).toBe('fail');
+    expect(require('../models/db')).not.toHaveBeenCalled();
+  });
+
+  test.each(['eta-recognised-redacted', 'third-party-neighbor'])('%s account overview withholds all upcoming appointment facts', async (id) => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
+    if (id === 'third-party-neighbor') script.push(toolUse('lookup_customer', { name: 'Marsh', street: '1450 Coral' }, 'lookup'));
+    script.push(toolUse('get_account_overview', id === 'third-party-neighbor' ? { customer_ref: 'C1' } : {}, 'overview'));
+    if (id === 'eta-recognised-redacted') script.push(toolUse('capture_lead', { call_summary: 'Synthetic request for office assistance' }, 'capture'));
+    script.push(say("I can't share schedule or contact details on this call. The account holder can check the portal or speak with the office."));
+    const result = await replay.runScenario({ ...fixture, turns: [fixture.turns[0]] }, { judge: false });
+    expect(result.error).toBeUndefined();
+    const overview = result.toolCalls.find((t) => t.name === 'get_account_overview');
+    expect(overview.text).toContain('Do NOT say whether one is scheduled');
+    expect(overview.text).not.toMatch(/none scheduled|Next appointment:|\d{4}-\d{2}-\d{2}|\$\d/);
+    expect(result.status).toBe('pass');
+    const checks = replay._internals.judgeChecks(fixture, { ok: true, judge_fallback: false, verdict: { pass: false, forbidden_claims: [], required_facts_missing: [], prohibited_facts_stated: ['No upcoming appointment is scheduled'], action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 5 } });
+    expect(replay._internals.scenarioStatus({ checks })).toBe('fail');
+    expect(require('../models/db')).not.toHaveBeenCalled();
+  });
+
   test.each([
     ['eta-third-party', 'lookup_customer', {}, { name: 'Alvarez', street: 'Bayshore' }, 'customer_ref: C1'],
     ['eta-third-party', 'lookup_customer', { name: 'Alvarez' }, { name: 'Alvarez', street: 'Bayshore' }, 'customer_ref: C1'],
@@ -987,6 +1082,36 @@ describe('voice relay eval — the harness', () => {
     expect(clock.text).toBe(suppliedClock);
     expect(clock.index).toBeLessThan(result.events.find((e) => e.kind === 'agent').index);
     expect(judgeFn).toHaveBeenCalledTimes(1);
+    expect(require('../models/db')).not.toHaveBeenCalled();
+  });
+
+  test('the judge sees the earlier call segment given to Sandy without grading it as new speech', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const segmentsText = 'Caller: My name is Rowan. I need quarterly pest control.\nAgent: Let me check.\n[tool] get_pricing → Quarterly pest control is $129 per application.\nAgent: Quarterly pest control is $129 per application.';
+    let suppliedResume;
+    script.push((params) => {
+      suppliedResume = params.messages.find((m) => typeof m.content === 'string' && m.content.startsWith('[Earlier in this call')).content;
+      return say('Yes, Rowan, we were discussing quarterly pest control at $129 per application.');
+    });
+    const judgeFn = jest.fn(async ({ transcript }) => {
+      expect(transcript).toContain(`[earlier call segment]\n${segmentsText}\n[end earlier call segment]`);
+      expect(transcript.indexOf('[earlier call segment]')).toBeLessThan(transcript.indexOf('Caller: The line dropped'));
+      return { ok: true, judge_fallback: false, verdict: { pass: true, forbidden_claims: [], required_facts_missing: [], prohibited_facts_stated: [], action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 5 } };
+    });
+    const result = await replay.runScenario(scenario({
+      gates: { context: false, recovery: true },
+      fixtures: { officeHours: 'unknown', resume: { reconnects: 1, segmentsText }, toolResponses: {} },
+      turns: [{ caller: 'The line dropped. Can we continue?' }], expect: [],
+    }), { judge: true, judgeFn });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe('pass');
+    expect(suppliedResume).toContain(segmentsText);
+    expect(result.events[0]).toMatchObject({ kind: 'resume', text: segmentsText, turn: 0 });
+    expect(result.spoken).not.toContain('Let me check.');
+    expect(result.toolCalls).toEqual([]);
+    expect(judgeFn).toHaveBeenCalledTimes(1);
+    expect(require('../services/eval/voice-relay-judge').buildJudgePrompt().system).toContain('Grade only new agent utterances outside that segment');
     expect(require('../models/db')).not.toHaveBeenCalled();
   });
 

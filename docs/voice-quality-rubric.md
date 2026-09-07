@@ -53,6 +53,15 @@ The harness records the exact clock block supplied to Sandy before each model tu
 passes it to the judge in transcript order. This preserves known opening times and
 distinguishes normal closure from a scheduled day off. Successful account and scheduling
 fixtures require matching lookup criteria and location inputs before returning refs.
+Stock pricing responses also require the fixture's positive home size. Redacted account
+overviews withhold appointment existence as well as dates and windows. The tool allowlist
+can constrain inputs with `allowedToolInputs`: wrong-number and robocall scenarios permit
+no capture or a spam capture, and any other classification is a critical failure. Spam
+suppression does not create a follow-up receipt.
+
+Resumed-call segments appear as earlier context in the judge transcript, matching the
+conversation supplied to Sandy. Prompt v4 uses that context to judge the continuation;
+the earlier segment is excluded from grading of new speech.
 
 ## Targets
 
@@ -117,8 +126,9 @@ read against it.
 
 This historical baseline predates critical grading of pinned-judge forbidden claims,
 the `invented_coverage` category in judge prompt v2, and prompt v3's exact clock context
-and semantic safety guidance. It also predates the receipt, third-party ETA and
-argument-conditioned fixture corrections;
+and semantic safety guidance, plus prompt v4's resumed-call context. It also predates
+the receipt, redacted appointment, pricing-input, spam-capture and argument-conditioned
+fixture corrections;
 its pass/fail totals do not verify the current grading contract.
 
 | Measure | Value |
