@@ -1556,9 +1556,10 @@ postgres('visit completion packet records on PostgreSQL', () => {
         expect(await database('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
       }
       const invoices = await database('invoices').where({ customer_id: fixture.customerId });
-      if (['not performed', 'unpriced'].includes(shape)) {
+      if (shape !== 'billable') {
         expect(invoices).toHaveLength(1);
         expect(Number(invoices[0].total)).toBe(120);
+        expect(invoices[0].scheduled_service_id).toBe(fixture.serviceIds[1]);
       } else expect(invoices).toHaveLength(0);
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
       expect(sendCustomerMessage).not.toHaveBeenCalled();
