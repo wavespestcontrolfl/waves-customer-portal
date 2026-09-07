@@ -65,6 +65,9 @@ const EXPECTED_PRODUCTS = Object.freeze({
 });
 
 const last10 = (v) => String(v == null ? '' : v).replace(/\D/g, '').slice(-10);
+// Capabilities Twilio reports as missing on a number — routing that matches the
+// contract is worthless on a line Twilio will not deliver calls or texts to.
+const missingCaps = (n, wanted) => wanted.filter(c => !(n.capabilities || {})[c]);
 const day = (d) => new Date(d).toISOString().slice(0, 10);
 // Display only: drops the https:// everyone shares; any other scheme stays visible.
 const short = (u) => (u ? String(u).replace(/^https:\/\//, '') : '(none)');
@@ -77,13 +80,11 @@ function auditRouting(numbers, sandbox, ownedNumbers) {
     const reg = REGISTRY.findByNumber(n.phoneNumber)
       || (n.phoneNumber === REGISTRY.mainLine.number ? { type: 'main_line', label: REGISTRY.mainLine.label } : null);
     const drift = routingDrift(n);
-    // Routing that matches the contract is worthless on a number Twilio will not
-    // deliver calls or texts to in the first place.
-    const missingCaps = ['voice', 'sms'].filter(c => !(n.capabilities || {})[c]);
-    console.log(`${n.phoneNumber}  "${n.friendlyName}"  ${reg ? [reg.type, reg.label, reg.domain].filter(Boolean).join(' / ') : 'NOT IN REGISTRY'}${drift.length ? `  DRIFT ${drift.map(f => `${f}=${short(n[f])}`).join(' ')}` : ''}${missingCaps.length ? `  NO ${missingCaps.join('/').toUpperCase()} CAPABILITY` : ''}`);
+    const caps = missingCaps(n, ['voice', 'sms']);
+    console.log(`${n.phoneNumber}  "${n.friendlyName}"  ${reg ? [reg.type, reg.label, reg.domain].filter(Boolean).join(' / ') : 'NOT IN REGISTRY'}${drift.length ? `  DRIFT ${drift.map(f => `${f}=${short(n[f])}`).join(' ')}` : ''}${caps.length ? `  NO ${caps.join('/').toUpperCase()} CAPABILITY` : ''}`);
     if (!reg) defects.push(`${n.phoneNumber}  not in server/config/twilio-numbers.js — inbound SMS dropped, calls log as 'unknown'`);
     if (drift.length) defects.push(`${n.phoneNumber}  routing drift — ${drift.map(f => `${f}=${short(n[f])} (expected ${short(APP_ROUTING[f]) || 'empty'})`).join(', ')}`);
-    if (missingCaps.length) defects.push(`${n.phoneNumber}  Twilio reports no ${missingCaps.join(' / ')} capability — the routing contract cannot apply`);
+    if (caps.length) defects.push(`${n.phoneNumber}  Twilio reports no ${caps.join(' / ')} capability — the routing contract cannot apply`);
   }
   // Ownership is checked against EVERY owned number — the sandbox line may
   // legitimately sit in the registry under `unassigned`.
@@ -98,6 +99,7 @@ function auditRouting(numbers, sandbox, ownedNumbers) {
     console.log(`${sandbox.phoneNumber}  "${sandbox.friendlyName}"  registry=${parked ? 'parked (unassigned)' : live ? 'LIVE LINE' : 'absent'}  voice=${short(sandbox.voiceUrl)} [${sandbox.voiceMethod}]`);
     if (live) defects.push(`${sandbox.phoneNumber}  VOICE_RELAY_SANDBOX_NUMBER is a registered live line — the server refuses every sandbox call (403); park it under twilio-numbers.unassigned or pick another number`);
     if (misrouted.length) defects.push(`${sandbox.phoneNumber}  VOICE_RELAY_SANDBOX_NUMBER routing — ${misrouted.map(f => `${f}=${short(sandbox[f])} (expected ${short(SANDBOX_ROUTING[f])})`).join(', ')}; sandbox calls never reach /relay-sandbox`);
+    if (missingCaps(sandbox, ['voice']).length) defects.push(`${sandbox.phoneNumber}  VOICE_RELAY_SANDBOX_NUMBER has no voice capability — Twilio will not deliver sandbox calls to it`);
   }
   return defects;
 }
