@@ -78,7 +78,10 @@ if (limitIdx > -1) {
   const startedAt = new Date();
   let q = db('customers as c')
     .whereNull('c.deleted_at')
-    .whereRaw("coalesce(c.address_line1, '') <> ''")
+    // Same trimmed predicate as the per-row re-check so the dry run lists
+    // exactly what execute would create (a whitespace-only line1 is not an
+    // address).
+    .whereRaw("btrim(coalesce(c.address_line1, '')) <> ''")
     .whereNotExists(db('customer_properties as p').select(1).whereRaw('p.customer_id = c.id'))
     .orderBy('c.created_at', 'asc')
     .select('c.id', 'c.pipeline_stage', 'c.created_at');
@@ -103,7 +106,10 @@ if (limitIdx > -1) {
   // baseline (relationship is guarded when the column exists —
   // schema-drift-safe like the migration).
   const cols = await db('customer_properties').columnInfo();
-  const fpCols = ['label', 'occupancy_type', 'address_key', 'active', 'is_primary', 'address_line1', 'address_line2', 'city', 'zip']
+  // customer_id is part of the fingerprint: a customer merge repoints a
+  // primary to the winner UNCHANGED, and that inherited row must survive
+  // the rollback too.
+  const fpCols = ['customer_id', 'label', 'occupancy_type', 'address_key', 'active', 'is_primary', 'address_line1', 'address_line2', 'city', 'state', 'zip']
     .concat(cols.relationship ? ['relationship'] : []);
   const fpExpr = `md5(concat_ws('|', ${fpCols.map((c) => `${c}::text`).join(', ')}))`;
 
