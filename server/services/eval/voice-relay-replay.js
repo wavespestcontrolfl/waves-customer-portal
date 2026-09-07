@@ -467,6 +467,23 @@ function pickToolResponse(scenario, name, n, input = {}, used = {}) {
   return { response: unconditioned[Math.min(Math.max(n, 1), unconditioned.length) - 1] };
 }
 
+// The live capture_lead accumulates the estimate fields across one call's
+// captures (relay-tools `priorEstimateFields`): a retry that supplies only the
+// missing piece completes the request. The fixture matcher sees that same
+// view — this call's non-empty fields, then the latest earlier answered
+// capture's, and so on back; a call the tool refused never accumulated.
+const ESTIMATE_FIELDS = Object.freeze(['first_name', 'last_name', 'email', 'address_line1']);
+function matcherInput(record, event, name, input) {
+  if (name !== 'capture_lead') return input;
+  const nz = (v) => v != null && String(v).trim() !== '';
+  const view = { ...input };
+  for (const prior of [...record.toolCalls].reverse()) {
+    if (prior === event || prior.name !== 'capture_lead' || prior.ok !== true) continue;
+    for (const field of ESTIMATE_FIELDS) if (!nz(view[field]) && nz(prior.input[field])) view[field] = prior.input[field];
+  }
+  return view;
+}
+
 /**
  * The ctx side effects the real write tools perform — capture latch, booking /
  * re-service / transfer marks. Never a write. Returns the answer text and
@@ -524,7 +541,7 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
   // enum, an invented ref — before any fixture answer, hanging or not.
   const invalid = validateToolInput(name, input, record);
   if (invalid) { event.invalid = true; return answer(invalid, false); }
-  const picked = pickToolResponse(scenario, name, record.toolUse[name], input, record.toolResponseUse);
+  const picked = pickToolResponse(scenario, name, record.toolUse[name], matcherInput(record, event, name, input), record.toolResponseUse);
   if (!picked) {
     event.unexpected = true;
     record.warnings.push(`tool ${name} called with no fixture response`);

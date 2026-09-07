@@ -1071,6 +1071,52 @@ describe('voice relay eval — the harness', () => {
     expect(runCheck(exp('commitment_requires_receipt', true), rec).status).toBe('fail');
   });
 
+  test('an estimate capture is queued only once the office can send it: fields accumulate across captures like the live tool, and an incomplete capture is no receipt for the promise', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const { runFixtureTool, runCheck } = replay._internals;
+    const s = replay.loadFixture(FIXTURE_PATH).scenarios.find((x) => x.id === 'pricing-gate-off');
+    const fresh = () => ({ ...record(), turn: 1, modelCalls: 1, toolUse: {}, toolResponseUse: {}, warnings: [] });
+    const call_summary = 'Wants a quarterly estimate';
+    const complete = { first_name: 'Priya', last_name: 'Raman', email: 'priya.raman@example.com', address_line1: '4418 Cortez Road West' };
+    const promise = (rec, turn) => rec.events.push({ kind: 'agent', text: 'We will send your written estimate as soon as possible.', turn, modelRound: rec.modelCalls, index: rec.events.length });
+
+    // Before the office has anything to send it to, the request is held open: no capture latch, no receipt.
+    const rec = fresh();
+    const ctx = { markCaptured: jest.fn(), noteCallSummary: jest.fn() };
+    expect(await runFixtureTool({ scenario: s, record: rec }, 'capture_lead', { call_summary, estimate_requested: true }, ctx)).toMatch(/NOT queued yet — still missing: first_name, last_name, email, address_line1/);
+    expect(rec.toolCalls.at(-1)).toMatchObject({ ok: true, invalid: false, receipt: false });
+    expect(ctx.markCaptured).not.toHaveBeenCalled();
+    promise(rec, 1);
+    expect(runCheck(exp('commitment_requires_receipt', true), rec)).toMatchObject({ status: 'fail', detail: expect.stringContaining('no write receipt before it') });
+    expect(runCheck(exp('tools_performed_include', ['capture_lead']), rec).status).toBe('fail');
+    // The retry supplies the name, then the rest — the fixture sees the accumulated fields, as the live tool does.
+    rec.turn = 2; rec.modelCalls = 2;
+    expect(await runFixtureTool({ scenario: s, record: rec }, 'capture_lead', { call_summary, estimate_requested: true, first_name: 'Priya', last_name: 'Raman' }, ctx)).toMatch(/NOT queued yet/);
+    expect(await runFixtureTool({ scenario: s, record: rec }, 'capture_lead', { call_summary, estimate_requested: true, email: complete.email, address_line1: complete.address_line1 }, ctx)).toMatch(/estimate request IS on the office queue/);
+    expect(rec.toolCalls.at(-1)).toMatchObject({ ok: true, receipt: true });
+    expect(ctx.markCaptured).toHaveBeenCalledTimes(1);
+    expect(runCheck(exp('tools_performed_include', ['capture_lead']), rec).status).toBe('pass');
+    expect(runCheck(exp('commitment_requires_receipt', true), rec).status).toBe('fail'); // the turn-1 promise preceded every receipt
+
+    // A single complete capture is queued outright; a complete capture for someone else is scenario-wrong and stays held.
+    const one = fresh();
+    expect(await runFixtureTool({ scenario: s, record: one }, 'capture_lead', { call_summary, estimate_requested: true, ...complete }, ctx)).toMatch(/IS on the office queue/);
+    expect(one.toolCalls.at(-1).receipt).toBe(true);
+    const wrong = fresh();
+    expect(await runFixtureTool({ scenario: s, record: wrong }, 'capture_lead', { call_summary, estimate_requested: true, first_name: 'Sam', last_name: 'Okafor', email: 'sam@example.com', address_line1: '77 Longboat Club Road' }, ctx)).toMatch(/NOT queued yet/);
+    expect(wrong.toolCalls.at(-1).receipt).toBe(false);
+    // Fields on a call the tool refused never accumulated (live: validation precedes the merge) — and the flag alone completes nothing.
+    const refused = fresh();
+    expect(await runFixtureTool({ scenario: s, record: refused }, 'capture_lead', { estimate_requested: true, ...complete }, ctx)).toMatch(/Missing required argument "call_summary"/);
+    expect(await runFixtureTool({ scenario: s, record: refused }, 'capture_lead', { call_summary, estimate_requested: true }, ctx)).toMatch(/NOT queued yet/);
+    expect(refused.toolCalls.at(-1).receipt).toBe(false);
+    // Both estimate scenarios require the performed capture, so a held-open request can never pass on its own.
+    for (const id of ['pricing-gate-off', 'spanish-pricing-gate-off']) {
+      expect(replay.loadFixture(FIXTURE_PATH).scenarios.find((x) => x.id === id).expect).toContainEqual({ check: 'tools_performed_include', value: ['capture_lead'], severity: 'major' });
+    }
+  });
+
   test('recovery fixtures accept complete generation-scoped refs without aliasing an old or malformed handle', async () => {
     mockSdk();
     const replay = require('../services/eval/voice-relay-replay');

@@ -701,10 +701,22 @@
       "fixtures": {
         "officeHours": "unknown",
         "toolResponses": {
-          "capture_lead": {
-            "text": "Lead saved successfully. Let the caller know a Waves team member will follow up to confirm details and scheduling — set WHEN from the latest CLOCK DATA (never \"shortly\" while the office is closed). The estimate request IS on the office queue. Office hours are unknown right now: tell the caller the written estimate will be sent as soon as possible — do not name a time.",
-            "capture": true
-          },
+          "capture_lead": [
+            {
+              "when": {
+                "estimate_requested": true,
+                "first_name": "Priya",
+                "last_name": "Raman",
+                "email": "example",
+                "address_line1": "Cortez"
+              },
+              "text": "Lead saved successfully. Let the caller know a Waves team member will follow up to confirm details and scheduling — set WHEN from the latest CLOCK DATA (never \"shortly\" while the office is closed). The estimate request IS on the office queue. Office hours are unknown right now: tell the caller the written estimate will be sent as soon as possible — do not name a time.",
+              "capture": true
+            },
+            {
+              "text": "IMPORTANT: the estimate request is NOT queued yet — still missing: first_name, last_name, email, address_line1 (whichever this call did not carry). Do NOT promise a written estimate yet; ask the caller for what is missing and call capture_lead again with estimate_requested: true. If the caller declines to give it, respect that: call capture_lead again WITHOUT estimate_requested (the estimate is dropped) and end the call normally."
+            }
+          ],
           "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
           "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead."
         }
@@ -767,6 +779,13 @@
           "value": {
             "estimate_requested": true
           },
+          "severity": "major"
+        },
+        {
+          "check": "tools_performed_include",
+          "value": [
+            "capture_lead"
+          ],
           "severity": "major"
         },
         {
@@ -1653,10 +1672,22 @@
       "fixtures": {
         "officeHours": "unknown",
         "toolResponses": {
-          "capture_lead": {
-            "text": "Lead saved successfully. Let the caller know a Waves team member will follow up to confirm details and scheduling — set WHEN from the latest CLOCK DATA (never \"shortly\" while the office is closed). The estimate request IS on the office queue. Office hours are unknown right now: tell the caller the written estimate will be sent as soon as possible — do not name a time.",
-            "capture": true
-          },
+          "capture_lead": [
+            {
+              "when": {
+                "estimate_requested": true,
+                "first_name": "Carmen",
+                "last_name": "Ortiz",
+                "email": "example",
+                "address_line1": "Riverside"
+              },
+              "text": "Lead saved successfully. Let the caller know a Waves team member will follow up to confirm details and scheduling — set WHEN from the latest CLOCK DATA (never \"shortly\" while the office is closed). The estimate request IS on the office queue. Office hours are unknown right now: tell the caller the written estimate will be sent as soon as possible — do not name a time.",
+              "capture": true
+            },
+            {
+              "text": "IMPORTANT: the estimate request is NOT queued yet — still missing: first_name, last_name, email, address_line1 (whichever this call did not carry). Do NOT promise a written estimate yet; ask the caller for what is missing and call capture_lead again with estimate_requested: true. If the caller declines to give it, respect that: call capture_lead again WITHOUT estimate_requested (the estimate is dropped) and end the call normally."
+            }
+          ],
           "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
           "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead."
         }
@@ -1712,6 +1743,13 @@
           "value": {
             "estimate_requested": true
           },
+          "severity": "major"
+        },
+        {
+          "check": "tools_performed_include",
+          "value": [
+            "capture_lead"
+          ],
           "severity": "major"
         },
         {
