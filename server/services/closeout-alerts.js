@@ -112,7 +112,10 @@ function issueInputFactKeys() {
 // (admin-dispatch.js) — a second card here would be a parallel alert path
 // with its own dismissal state (GH r3 P1). The invoice fact never emits
 // `failed`; awaiting_completion is transient; `unknown` = outage.
+// A reversed packet invoice has no legacy completion bell; retain its
+// existing invoice identity on this same office-alert rail.
 const ACTIONABLE_INVOICE_PENDING = (reason) => reason === 'frozen_required_mint_not_minted'
+  || reason === 'parked_manual_reversed_packet_invoice'
   || /^expected_.+_not_minted$/.test(reason || '');
 // Invoice-delivery pending reasons an operator owns: a paid invoice whose
 // receipt was never enqueued, and a payer-billed invoice never sent. The
@@ -322,7 +325,9 @@ function moneyCommsIssues(facts) {
   }
   const invoice = facts.invoice;
   if (invoice?.state === 'pending' && ACTIONABLE_INVOICE_PENDING(invoice.reason)) {
-    const summary = 'This visit owes an invoice that was never minted — create it before the customer is billed elsewhere.';
+    const summary = invoice.reason === 'parked_manual_reversed_packet_invoice'
+      ? 'The combined visit invoice was reversed — review the existing invoice with the office before collecting payment.'
+      : 'This visit owes an invoice that was never minted — create it before the customer is billed elsewhere.';
     // Reason-qualified identity (GH r1 P1): a dismissed expected-not-minted
     // card must not swallow a later parked-manual exception on the same
     // visit — same idiom as the contradiction issues.

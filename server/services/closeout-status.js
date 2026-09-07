@@ -315,8 +315,9 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
       .where({ 'i.scheduled_service_id': serviceId, 'i.service_record_id': recordId,
         'p.visit_id': visit.visit_id, 'invoice.customer_id': visit.customer_id })
       .whereRaw('invoice.visit_completion_packet_id = p.id')
-      .first('i.invoice_id'));
+      .first('i.invoice_id', 'invoice.status as packet_invoice_status'));
     packetInvoiceId = linked.value?.invoice_id || null;
+    inputs.packetInvoice = linked.value || null;
     inputs.packetInvoiceLookupFailed = Boolean(linked.error);
   }
 
@@ -814,6 +815,11 @@ function deriveCloseoutFacts(inputs) {
     // unread refunded sibling would otherwise read done when it must park.
     invoice = fact('unknown', 'invoice_lookup_failed', {
       failed: [inputs.liveInvoiceLookupFailed ? 'live' : null, inputs.terminalInvoiceLookupFailed ? 'refunded' : null].filter(Boolean),
+      expectation: expectation?.kind || null,
+    });
+  } else if (['void', 'canceled', 'cancelled'].includes(inputs.packetInvoice?.packet_invoice_status)) {
+    invoice = fact('pending', 'parked_manual_reversed_packet_invoice', {
+      invoiceId: inputs.packetInvoice.invoice_id, status: inputs.packetInvoice.packet_invoice_status,
       expectation: expectation?.kind || null,
     });
   } else if (reconciled.terminal) {
