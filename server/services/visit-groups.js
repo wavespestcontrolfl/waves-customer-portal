@@ -3169,6 +3169,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
 
 module.exports = {
   dateOnly,
+  rowStillAtVisitStop,
   toMinutes,
   // Pure key builder, exported for the reminder cron's visit-scoped email
   // idempotency key (the undelivered-SMS recovery rebuilds it from the
