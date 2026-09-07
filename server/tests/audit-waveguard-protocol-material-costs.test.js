@@ -82,9 +82,14 @@ test('missing calendar and missing static allowance remain explicit', () => {
   expect(empty.catalogSelectedAnnual).toBeNull();
   expect(empty.reconstructedStaticAnnualAllowance).toBeNull();
   expect(empty.issues).toContainEqual({ reason: 'missing_calendar' });
-  const missing = reportFor([{ ...visit, material_cost: null }]).rows[0];
-  expect(missing.reconstructedStaticAnnualAllowance).toBeNull();
-  expect(missing.budgetMinusStaticAllowance).toBeNull();
+  for (const field of ['material_cost', 'conditional_cost']) {
+    const missing = reportFor([{ ...visit, [field]: null }]).rows[0];
+    expect(missing.reconstructedStaticAnnualAllowance).toBeNull();
+    expect(missing.budgetMinusStaticAllowance).toBeNull();
+    expect(missing.catalogSelectedAnnual).toBeNull();
+    expect(missing.catalogCalculationComplete).toBe(false);
+    expect(missing.issues).toContainEqual({ reason: 'missing_static_allowance' });
+  }
 });
 
 test('the legacy visit comparison scales both sides to the requested lawn size and preserves unknowns', () => {

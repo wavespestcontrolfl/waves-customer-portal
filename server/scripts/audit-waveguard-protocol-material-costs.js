@@ -198,6 +198,7 @@ function buildCadenceReport(products, lawn = protocols.lawn) {
       const staticComplete = visits.length > 0 && visits.every((visit) => (
         money(visit.material_cost) != null && money(visit.conditional_cost) != null
       ));
+      if (!staticComplete) issues.push({ reason: 'missing_static_allowance' });
       const factor = visits.length ? applications / visits.length : 0;
       const selectedSubtotal = money(results.reduce((sum, result) => sum + result.inventoryMaterialCost, 0) * factor);
       const staticAllowance = staticComplete ? money(visits.reduce((sum, visit) => sum

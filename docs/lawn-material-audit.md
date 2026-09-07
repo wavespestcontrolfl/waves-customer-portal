@@ -36,7 +36,7 @@ this allowance normalization does not select or validate a treatment calendar.
 | `reconstructedStaticAnnualAllowance` | Protocol scheduled-material allowances scaled from 10,000 sqft, plus the conditional reserve already at the 4,500-sqft reference, normalized to the sold count. Missing allowances remain `null`. |
 | `catalogSelectedSubtotal` | Available catalog-derived costs under first-year, normal-weed-pressure selection. Retained even when evidence is incomplete. |
 | `catalogSelectedAnnual` | The selected subtotal only when no calculation issues remain; otherwise `null`. |
-| `issues` | Unmatched products, missing rates or positive costs, unresolved pricing, missing inventory prices, unverifiable units, or missing calendar flags. |
+| `issues` | Unmatched products, missing rates or positive costs, unresolved pricing, missing inventory prices, unverifiable units, missing static allowances, or missing calendar flags. |
 
 Premium-only eligibility and conditional selection use the existing plan engine.
 Unselected rescue work is excluded from the catalog subtotal, so it is not the
