@@ -256,6 +256,56 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
     expect(await guards[0]({ ...row })).toBeNull();
   });
 
+  test.each(['customer_id', 'link_source', 'location_id', 'reviewer_name', 'review_created_at', 'gbp_review_name'])(
+    'an approved review pin refuses changed %s even when draft grounding remains valid', async field => {
+      const row = liveReview({ customer_id: 'cust-1', link_source: 'click_auto', location_id: 'bradenton',
+        review_created_at: new Date('2020-01-01T12:00:00Z'), gbp_review_name: 'locations/fixture/reviews/fixture' });
+      state.rows.google_reviews = [row];
+      const tools = require('../services/intelligence-bar/review-tools');
+      const pin = await tools.loadReviewReplyPin(row.id);
+      expect(pin).toMatchObject({ review_id: row.id, customer_id: 'cust-1', attribution: 'click_auto' });
+      row[field] = field === 'review_created_at' ? new Date('2020-01-02T12:00:00Z') : 'changed-fixture';
+      const result = await tools.executeReviewTool('submit_review_reply', {
+        review_id: row.id, reply_text: 'Synthetic reply', grounding_token: 'unused-before-verification',
+        _ib_review_pin: pin._pin,
+      });
+      expect(result).toMatchObject({ preview_changed: true });
+      expect(row.review_reply).toBeNull();
+    },
+  );
+
+  test('the approved raw attribution pin composes with both publisher guard checks', async () => {
+    const row = liveReview({ customer_id: 'cust-1', link_source: 'click_auto' });
+    state.rows.google_reviews = [row];
+    const reply = 'Hi Pat,\n\nGlad the service went well. Thanks for having us out.\n\nThe 🌊 Waves Pest Control Bradenton Team';
+    let tools;
+    let guarded = 0;
+    jest.resetModules();
+    jest.isolateModules(() => {
+      jest.doMock('../services/review-reply/publisher', () => {
+        const actual = jest.requireActual('../services/review-reply/publisher');
+        return { ...actual, publishReviewReply: async ({ guard }) => {
+          expect(await guard({ ...row })).toBeNull();
+          guarded++;
+          // A click-auto relink does not affect the separate draft grounding token.
+          row.customer_id = 'cust-2';
+          const reason = await guard({ ...row });
+          guarded++;
+          if (reason) throw new actual.ReviewReplyError(actual.CODES.STALE, reason, { status: 409 });
+          throw new Error('Changed attribution must never reach the provider');
+        } };
+      });
+      tools = require('../services/intelligence-bar/review-tools');
+    });
+    const pin = await tools.loadReviewReplyPin(row.id);
+    const result = await tools.executeReviewTool('submit_review_reply', {
+      review_id: row.id, reply_text: reply, grounding_token: tokenFor(row, reply), _ib_review_pin: pin._pin,
+    });
+    expect(result).toMatchObject({ code: 'stale_claim' });
+    expect(guarded).toBe(2);
+    expect(row.review_reply).toBeNull();
+  });
+
   test('a model-proposed reply that fails the public-reply verifier is never posted', async () => {
     const row = liveReview();
     state.rows.google_reviews = [row];

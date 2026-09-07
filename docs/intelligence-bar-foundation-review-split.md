@@ -9,7 +9,7 @@ communications are outside the development/testing authorization.
 
 | Part | Branch | Scope |
 | --- | --- | --- |
-| A | `feat/ib-registry-coverage-foundation` | Typed catalog and explicit action policy over existing executors; source census and CI drift check. No runtime route or UI integration. |
+| A | `feat/ib-registry-coverage-foundation` / #4041 | Typed catalog and explicit action policy over existing executors; source census and CI drift check. No runtime route or UI integration. |
 | B | `feat/ib-target-context-foundation` | Fresh target resolution, parent scope and version checks, shared outcome classification, and identity-bound review publishing. |
 | C | `feat/ib-task-recovery-foundation` | Actor/session task ledger, confirmation receipts, safe resume and bounded sensitive-context retention. |
 | D | `feat/ib-platform-foundation` / #4019 | Route and UI integration, durable conversation continuation, desktop/mobile and real dev-database acceptance tests. |
@@ -50,3 +50,28 @@ those exceptions grants domain-action coverage.
 Part A local checks: catalog/coverage unit suites (9 tests) passed. The coverage
 and domain-rule gates must pass before push. It has no DB or UI change, so no
 migration or browser run is claimed for this split.
+
+Part B introduces the target-context reader for integration in D. Review IDs
+participate in the same parent/customer checks as other records; an unlinked
+review needs its native deep link or an explicit UUID, and cannot be substituted
+for a selected customer. Its approval pin includes raw customer attribution,
+location, content, and review identity separately from the public-copy grounding
+fingerprint. The existing publisher checks that pin inside its claim and after
+the Google read; its local-only path also rechecks under the review row lock.
+The route must call review read validation even with no customer target and
+carry the server-authored pin through confirmation; those calls belong to D.
+
+History now uses the same outcome classifier as receipts, including unknown,
+provider-accepted, partial, failed, blocked, and completed states. Copied shared
+email/provider changes preserve uncertain sends and acceptance IDs; copied
+customer/bulk-lead changes compare full-precision versions under existing locks.
+Part B uses controlled provider/unit fixtures; the integrated dev-DB/browser
+proof remains in D. No real communication or publication is authorized for QA.
+
+### Deferred P2s in B
+
+- `server/services/intelligence-bar/task-context.js:229`: the shared target
+  validator exceeds the structural complexity warning. Its ordered ownership,
+  bulk-cohort, and recipient checks remain together; moving them into one-use
+  helpers would only relocate the decisions. Further simplification must
+  preserve every independently tested authorization path.

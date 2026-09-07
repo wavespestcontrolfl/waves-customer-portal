@@ -288,8 +288,21 @@ async function sendMessage(to, subject, body, threadId = null, inReplyTo = null)
   const params = { userId: 'me', requestBody: { raw } };
   if (threadId) params.requestBody.threadId = threadId;
 
-  const res = await gmail.users.messages.send(params);
-  return res.data;
+  try {
+    const res = await gmail.users.messages.send(params, { retry: false });
+    return res.data;
+  } catch (err) {
+    // OAuth refresh can fail inside messages.send before any message POST.
+    // Its token endpoint must never be mistaken for an uncertain delivery.
+    const failedUrl = String(err.config?.url || err.response?.config?.url || '');
+    const messagePost = /\/gmail\/v1\/users\/[^/]+\/messages\/send(?:\?|$)/.test(failedUrl);
+    const status = Number(err.response?.status || err.status || err.code);
+    if (messagePost && !require('../../utils/provider-transport').isPreSendFailure(err)
+      && !(status >= 400 && status < 500 && status !== 408)) {
+      err.providerOutcome = { outcomeUnknown: true };
+    }
+    throw err;
+  }
 }
 
 async function modifyLabels(messageId, addLabels = [], removeLabels = []) {

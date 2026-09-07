@@ -82,16 +82,26 @@ test('full-text hit: actor-scoped, paired turn + receipts attached', async () =>
     [{ id: 'turn-2', thread_id: T1, seq: 2, role: 'assistant', created_at: '2026-08-30T01:00:00Z', title: 'acct-1042 reschedule', context: 'schedule', last_active_at: '2026-08-30T01:01:00Z', snippet: '…moved <b>acct-1042</b> to Thursday…' }],
     [{ thread_id: T1, seq: 1, role: 'user', content: 'move acct-1042 to thursday' }],
     [
-      // This exchange (assistant seq 2): confirmed + success → executed
+      // This exchange (assistant seq 2): confirmed + success → completed
       { id: 'pa-1', thread_id: T1, thread_turn_seq: 2, tool_name: 'reschedule_appointment', summary: 'Move → Thu', status: 'confirmed', result: JSON.stringify({ success: true }), created_at: '2026-08-30T01:00:30Z', consumed_at: '2026-08-30T01:02:00Z' },
       // Same exchange: confirmed but the run recorded an error → failed
       { id: 'pa-2', thread_id: T1, thread_turn_seq: 2, tool_name: 'send_sms', summary: 'Notify', status: 'confirmed', result: JSON.stringify({ error: 'Twilio 21610' }), created_at: '2026-08-30T01:00:31Z', consumed_at: '2026-08-30T01:02:01Z' },
       // Same exchange: still `pending` in the table but past its TTL → reported expired, never_ran
       { id: 'pa-3', thread_id: T1, thread_turn_seq: 2, tool_name: 'send_sms', summary: 'Notify again', status: 'pending', result: null, created_at: '2026-08-30T01:00:32Z', consumed_at: null, expires_at: '2026-08-30T01:10:32Z' },
-      // Same exchange: confirmed but the tool BLOCKED without an error key → failed (never executed)
+      // Same exchange: confirmed but the tool BLOCKED without an error key → blocked (never executed)
       { id: 'pa-4', thread_id: T1, thread_turn_seq: 2, tool_name: 'create_pending_estimate', summary: 'Draft', status: 'confirmed', result: JSON.stringify({ success: false, blocked: true, reason: 'duplicate' }), created_at: '2026-08-30T01:00:33Z', consumed_at: '2026-08-30T01:02:03Z' },
-      // Same exchange: confirmed, result recorded but empty object → unknown (not claimed executed)
+      // Same exchange: confirmed, malformed result → outcome_unknown
       { id: 'pa-5', thread_id: T1, thread_turn_seq: 2, tool_name: 'send_sms', summary: 'x', status: 'confirmed', result: 'not-json', created_at: '2026-08-30T01:00:34Z', consumed_at: '2026-08-30T01:02:04Z' },
+      ...[
+        ['empty', {}, 'outcome_unknown'],
+        ['unknown', { outcome_unknown: true }, 'outcome_unknown'],
+        ['unknown-error', { outcome_unknown: true, error: 'Synthetic timeout' }, 'outcome_unknown'],
+        ['accepted', { state: 'provider_accepted', providerMessageId: 'fixture-provider-id' }, 'provider_accepted'],
+        ['partial', { partial: true, warning: 'Synthetic downstream failure' }, 'partially_completed'],
+        ['missing', null, 'outcome_unknown'],
+      ].map(([id, result]) => ({ id, thread_id: T1, thread_turn_seq: 2, tool_name: 'send_sms',
+        summary: 'Synthetic lifecycle fixture', status: 'confirmed', result,
+        created_at: '2026-08-30T01:00:35Z', consumed_at: '2026-08-30T01:02:05Z' })),
       // A LATER exchange in the same thread (assistant seq 4) → must NOT be attributed
       { id: 'pa-9', thread_id: T1, thread_turn_seq: 4, tool_name: 'create_customer', summary: 'Unrelated', status: 'confirmed', result: JSON.stringify({ success: true }), created_at: '2026-08-30T01:10:00Z', consumed_at: '2026-08-30T01:10:05Z' },
     ],
@@ -104,8 +114,11 @@ test('full-text hit: actor-scoped, paired turn + receipts attached', async () =>
   expect(hit.thread_title).toBe('acct-1042 reschedule');
   expect(hit.paired_turn).toEqual({ role: 'user', content: 'move acct-1042 to thursday', truncated: false });
   expect(hit.receipts.map((x) => [x.id, x.status, x.outcome])).toEqual([
-    ['pa-1', 'confirmed', 'executed'], ['pa-2', 'confirmed', 'failed'], ['pa-3', 'expired', 'never_ran'],
-    ['pa-4', 'confirmed', 'failed'], ['pa-5', 'confirmed', 'unknown'],
+    ['pa-1', 'confirmed', 'completed'], ['pa-2', 'confirmed', 'failed'], ['pa-3', 'expired', 'never_ran'],
+    ['pa-4', 'confirmed', 'blocked'], ['pa-5', 'confirmed', 'outcome_unknown'],
+    ['empty', 'confirmed', 'outcome_unknown'], ['unknown', 'confirmed', 'outcome_unknown'],
+    ['unknown-error', 'confirmed', 'outcome_unknown'], ['accepted', 'confirmed', 'provider_accepted'],
+    ['partial', 'confirmed', 'partially_completed'], ['missing', 'confirmed', 'outcome_unknown'],
   ]);
   expect(hit.receipts.find((x) => x.id === 'pa-9')).toBeUndefined();
 
