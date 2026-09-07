@@ -367,7 +367,12 @@ router.post('/', async (req, res) => {
         // the shared checker (the edit save-probe's) about THIS hour and
         // reserve fits:false for a verified miss (pre-push P1). It scores
         // the whole route, so there is no single insertion leg to name.
+        // With no technician selected (visit set to Unassigned) the checker
+        // would fall back to the SAVED technician while the recommendations
+        // rank every technician — a verdict on a different pool than the
+        // chips. No technician, no verdict (pre-push P1).
         try {
+          if (!technicianId) throw Object.assign(new Error('no technician selected'), { silent: true });
           const fit = await checkArrivalPlacement({
             serviceId, date: from, technicianId: technicianId || undefined, excludeServiceIds,
             windowStart: pickedWindow.start, windowEnd: pickedWindow.end, durationMinutes: spanMin,
@@ -381,7 +386,7 @@ router.post('/', async (req, res) => {
             picked = { start: pickedStart, fits: false };
           }
         } catch (checkErr) {
-          logger.warn('[find-time] picked-hour arrival check failed (no verdict):', checkErr.message);
+          if (!checkErr.silent) logger.warn('[find-time] picked-hour arrival check failed (no verdict):', checkErr.message);
         }
       } else {
         const gap = rawSlots.find((s) => {

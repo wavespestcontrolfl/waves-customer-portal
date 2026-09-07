@@ -511,6 +511,12 @@ test('arrival-window mode scores the picked hour with the shared route checker: 
     checkArrivalPlacement.mockResolvedValue({ feasible: false, reason: 'arrival_window' });
     body = await (await post(req)).json();
     expect(body.picked).toEqual({ start: '09:00', fits: false });
+    // Unassigned (no technicianId): the checker would score the SAVED
+    // tech's route while the chips rank every tech — no verdict at all.
+    checkArrivalPlacement.mockClear();
+    body = await (await post({ ...req, technicianId: undefined })).json();
+    expect(body.picked).toBeUndefined();
+    expect(checkArrivalPlacement).not.toHaveBeenCalled();
   } finally {
     if (saved === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
     else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = saved;
