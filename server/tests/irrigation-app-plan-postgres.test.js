@@ -106,7 +106,7 @@ const SKIP = !process.env.DATABASE_URL;
     expect(require('../services/logger').warn).not.toHaveBeenCalled();
     expect(saved.claimed).toBe(true);
   }, 30000);
-  afterEach(async () => { jest.useRealTimers(); await mockTransaction?.rollback(); });
+  afterEach(async () => { jest.restoreAllMocks(); jest.useRealTimers(); await mockTransaction?.rollback(); });
   afterAll(async () => {
     delete process.env.GATE_IRRIGATION_APP_PLAN;
     delete process.env.GATE_IRRIGATION_WEEK_PLAN;
@@ -306,9 +306,12 @@ const SKIP = !process.env.DATABASE_URL;
 
   test('an email-disabled customer gets the published plan advisory once through the real bell and alert ledgers', async () => {
     // The final provider fence reads the live clock; freeze Date only while
-    // leaving PostgreSQL's sockets and timers real.
+    // leaving PostgreSQL's sockets and timers real. Lease durations use
+    // Date.now() and must stay aligned with PostgreSQL's real now().
+    const realDateNow = Date.now.bind(Date);
     jest.useFakeTimers({ doNotFake: ['hrtime', 'nextTick', 'performance', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
     jest.setSystemTime(now);
+    jest.spyOn(Date, 'now').mockImplementation(realDateNow);
     await resetDraft();
     process.env.GATE_PROPERTY_ALERTS = 'true';
     await mockTransaction('notification_prefs').insert({ customer_id: customerId, email_enabled: false, weather_alerts: true });
