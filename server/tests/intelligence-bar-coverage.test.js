@@ -55,3 +55,26 @@ test('verified coverage requires actual policy and evidence for the reviewed imp
   expect(checkCoverage([action], { actions: [record] }, { save: {} })).toEqual([]);
   expect(checkCoverage([action], { actions: [{ ...record, evidence: [] }] }, { save: {} })).toHaveLength(1);
 });
+
+
+test('baseline provenance cannot silently promote unsupported coverage to a reviewed status', () => {
+  const action = census[0], proof = new Set([`${action.id}:${action.fingerprint}`]);
+  for (const status of ['verified', 'reviewed_exception', 'invented']) {
+    const record = { ...action, baselineFingerprint: action.fingerprint, status };
+    expect(checkCoverage([action], { actions: [record] }, {}, proof)).toHaveLength(1);
+  }
+});
+
+
+test('stale or incomplete reviewed metadata cannot use an otherwise valid baseline', () => {
+  const action = census[0], proof = new Set([`${action.id}:${action.fingerprint}`]);
+  const base = { ...action, baselineFingerprint: action.fingerprint, reviewedFingerprint: action.fingerprint };
+  for (const extra of [
+    { status: 'verified', tools: ['missing'], evidence: ['fixture'] },
+    { status: 'verified', tools: ['save'], evidence: [] },
+    { status: 'verified', tools: ['save'], evidence: ['fixture'], reviewedFingerprint: 'stale' },
+    { status: 'reviewed_exception', exception: { reason: 'fixture' } },
+    { status: 'reviewed_exception', exception: { review: 'fixture' } },
+    { status: 'reviewed_exception', exception: { reason: 'fixture', review: 'fixture' }, reviewedFingerprint: 'stale' },
+  ]) expect(checkCoverage([action], { actions: [{ ...base, ...extra }] }, { save: {} }, proof)).toHaveLength(1);
+});

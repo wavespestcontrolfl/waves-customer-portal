@@ -25,7 +25,7 @@ beforeEach(() => {
   db.raw = text => ({ text });
 });
 
-const selectors = ['Send to', 'Email to', 'Text to', 'Message to', 'Notify to', 'Quote for', 'Schedule for', 'Reply to', 'Respond to', 'Send a message to', 'Send an SMS to', 'Send a reminder to', 'Update customer'];
+const selectors = ['Reschedule', 'Reschedule for', 'Move', 'Move for', 'Call', 'Remind', 'Cancel', 'Book', 'Archive', 'Delete', 'Merge', 'Pause', 'Reactivate', 'Restore', 'Refund', 'Charge', 'Invoice', 'Credit', 'Assign', 'Unassign', 'Send to', 'Email to', 'Text to', 'Message to', 'Notify to', 'Quote for', 'Schedule for', 'Reply to', 'Respond to', 'Send a message to', 'Send an SMS to', 'Send a reminder to', 'Update customer'];
 test.each(selectors)(
   'an unresolved person after "%s" cannot fall back to the viewed customer', async selector => {
     const task = await Context.resolve({ prompt: `${selector} Jhon using this customer`, pageData: { customer_id: A } });
@@ -151,3 +151,42 @@ test.each(['customer', 'raw_sms', 'vendor_email', 'unlinked_lead', 'unlinked_est
     }
   },
 );
+
+test.each([
+  ['property', 'customer_properties'], ['appointment', 'scheduled_services'], ['estimate', 'estimates'],
+  ['invoice', 'invoices'], ['review', 'google_reviews'], ['email', 'emails'], ['call', 'call_log'], ['lead', 'leads'],
+])('a selected %s cannot be replaced by a sibling belonging to the same customer', async (noun, table) => {
+  const id = '40000000-0000-4000-8000-000000000001', sibling = '40000000-0000-4000-8000-000000000002';
+  rows[table] = [{ id, customer_id: A }, { id: sibling, customer_id: A }];
+  for (const reference of ['this', 'that', 'selected']) {
+    const task = await Context.resolve({ prompt: `Update ${reference} ${noun}`, pageData: { [`${noun}_id`]: id } });
+    // Customer resolution is independent of the exact child-record binding.
+    task.targets = [{ customer_id: A }];
+    expect(await Context.validateRecordTarget({ [`${noun}_id`]: id }, task)).toBeNull();
+    expect((await Context.validateRecordTarget({ [`${noun}_id`]: sibling }, task)).code).toBe('target_clarification_required');
+  }
+});
+
+test('a record reference inside message content does not constrain an unrelated named target', async () => {
+  lookupRows = [rows.customers[0]];
+  const task = await Context.resolve({ prompt: 'Update Synthetic Person notes to this property needs a label', pageData: { property_id: PROPERTY } });
+  expect(task.requestedRecords).toEqual({});
+  expect(task.target.customer_id).toBe(A);
+});
+
+
+test('an explicit named customer supersedes the viewed account without inheriting its ID pin', async () => {
+  lookupRows = [rows.customers[0]];
+  const task = await Context.resolve({ prompt: 'Update Synthetic Person using this customer', pageData: { customer_id: B } });
+  expect(task.target.customer_id).toBe(A);
+  expect(task.requestedRecords).toEqual({});
+  expect(await Context.validateRecordTarget({ customer_id: A }, task)).toBeNull();
+});
+
+
+test('this customer resolves through a viewed property without requiring a redundant page customer ID', async () => {
+  const task = await Context.resolve({ prompt: 'Text this customer', pageData: { property_id: PROPERTY } });
+  expect(task.target.customer_id).toBe(B);
+  expect(task.requestedRecords).toEqual({});
+  expect(await Context.validateRecordTarget({ customer_id: B }, task)).toBeNull();
+});

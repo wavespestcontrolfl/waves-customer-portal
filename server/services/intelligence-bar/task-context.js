@@ -24,7 +24,9 @@ const normalizeName = value => String(value || '').toLowerCase().replace(/[’']
   .replace(/[^\p{L}\p{N}\s'-]/gu, ' ').replace(/\s+/g, ' ').trim();
 // Overlapping selectors matter: "update customer Jhon" must still inspect
 // "customer Jhon" after seeing "update customer".
-const PERSON_REFERENCE = /\b(?=((?:send|email|text|sms|message|reminder|contact|notify|quote|schedule|reply|respond)\s+(?:to|for)|for|customer|named|change|update|email|text|message|contact|quote|send|notify|schedule)\s+([\p{L}'-]+)\b)/gu;
+const PERSON_ACTIONS = 'reply|respond|send|email|text|sms|message|reminder|contact|notify|quote|schedule|reschedule|move|call|remind|cancel|book|archive|delete|merge|pause|reactivate|restore|refund|charge|invoice|credit|assign|unassign|change|update';
+const PERSON_SELECTOR_SOURCE = `(?:${PERSON_ACTIONS})(?:\\s+(?:to|for))?|for|customer|named`;
+const PERSON_REFERENCE = new RegExp(`\\b(?=((?:${PERSON_SELECTOR_SOURCE}))\\s+([\\p{L}'-]+)\\b)`, 'gu');
 const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'using', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
   'property', 'properties', 'appointment', 'appointments', 'estimate', 'invoice', 'details', 'inactive', 'active', 'reminder', 'reminders']);
@@ -34,7 +36,7 @@ function targetClause(prompt) {
   // Message bodies and replacement values are data, even when they contain
   // another customer's exact name. They never select the recipient/account.
   const referenced = String(prompt).replace(/^(\s*(?:please\s+)?(?:(?:reply|respond)\s+to|(?:draft|write|post|submit)\s+(?:(?:a|the)\s+)?(?:reply|response)\s+(?:to|for))\s+)that(?=\s+review\b)/i, '$1this');
-  const clause = referenced.split(/[:;\n“”"]|\b(?:that|saying|regarding|about)\b/i)[0];
+  const clause = referenced.split(/[:;\n“”"]|\b(?:notes?|message|instructions)\s+that\b|\b(?:that(?!\s+(?:customer|account|property|appointment|estimate|invoice|review|email|call|product|lead)\b)|saying|regarding|about)\b/i)[0];
   if (!/\b(?:change|update|set|rename|relabel|add|save)\b/i.test(clause)) return clause;
   return clause.split(/\b(?:name|address|email|phone|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+/i)[0];
 }
@@ -91,7 +93,7 @@ function namesTargetCustomer(clause, customer) {
   if (offset < 0) return false;
   const before = clause.slice(0, offset).trim();
   if (!before || before === 'please') return true;
-  return /\b(?:for|customer|named|change|update|(?:email|text|sms|message|reminder|contact|notify)(?: to)?|quote(?: for)?|schedule(?: for)?|send to|reply to|respond to)(?:\s+both)?$/.test(before)
+  return new RegExp(`\\b(?:${PERSON_SELECTOR_SOURCE})(?:\\s+both)?$`).test(before)
     || (/\bboth\b/.test(clause) && /\band$/.test(before));
 }
 
@@ -188,7 +190,9 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   const explicitReview = reviewClause.match(/\breview\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i)?.[1];
   const reviewReference = explicitReview || (!namesRequested(prompt)
     && /\b(?:this|that|current|selected|viewed|open)\s+review\b/i.test(reviewClause) ? page.ids.review_id : null);
-  return { page, candidates, ...selection, requestPhrase: normalizeName(prompt),
+  const requestedRecords = Object.fromEntries([...targetClause(prompt).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(property|appointment|estimate|invoice|review|email|call|product|lead)\b/gi)]
+    .map(match => { const kind = `${match[1].toLowerCase()}_id`; return [kind, page.ids[kind] || null]; }));
+  return { page, candidates, ...selection, requestedRecords, requestPhrase: normalizeName(prompt),
     reviewReference: reviewReference || null,
     bulkLeadRequest: !namesRequested(prompt) && /\b(?:all|bulk)\b.*\bleads\b/i.test(targetClause(prompt)),
     explicitEmails: [...recipient.matchAll(/^([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi)]
@@ -198,6 +202,7 @@ async function resolve({ prompt, pageData, selectedTarget }) {
 }
 
 function unlinkedRecordIsReferenced(record, context) {
+  if (Object.hasOwn(context.requestedRecords || {}, record.kind) && context.requestedRecords[record.kind] !== record.id) return false;
   if (record.customer_id) return true;
   const { targets = [], requestPhrase = '', explicitEmails = [] } = context;
   const ids = context.page?.ids || {};
