@@ -186,6 +186,67 @@ beforeEach(() => {
 });
 
 describe('reviewed send attempt receipts', () => {
+  test('a terminal pre-dispatch schedule failure replays failure instead of the queued receipt', async () => {
+    const { entry, body } = scheduledAttempt();
+    row.status = 'send_failed';
+    row.scheduled_at = null;
+    row.last_send_error = 'The reviewed estimate changed before its scheduled send.';
+    row.estimate_data = { manualSendAttempts: [entry] };
+    const response = await invoke('/:id/send', 'post', body);
+    expect(response.statusCode).toBe(422);
+    expect(response.body).toMatchObject({ code: 'SCHEDULED_SEND_FAILED', scheduled: false, sent: false,
+      replayed: true, error: row.last_send_error });
+    expect(mutations).toEqual([]);
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an active scheduled attempt still replays its queued receipt', async () => {
+    const { entry, body, scheduledAt } = scheduledAttempt();
+    row.status = 'scheduled';
+    row.scheduled_at = scheduledAt;
+    row.estimate_data = { manualSendAttempts: [entry] };
+    const response = await invoke('/:id/send', 'post', body);
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toEqual({ ...entry.scheduleResult, replayed: true });
+    expect(mutations).toEqual([]);
+  });
+
+  test.each([
+    ['sms', 'sms'], ['email', 'email'], ['both', 'sms'], ['both', 'email'],
+  ])('scheduling %s rejects an unavailable %s message for reviewed and legacy callers', async (sendMethod, missing) => {
+    row.status = 'draft';
+    if (missing === 'sms') require('../routes/admin-sms-templates').getTemplate.mockResolvedValueOnce(null);
+    else email.loadTemplateByKey.mockResolvedValueOnce(null);
+    const preview = await invoke('/:id/send-preview', 'get');
+    const { body } = scheduledAttempt();
+    for (const reviewed of [true, false]) {
+      if (missing === 'sms') require('../routes/admin-sms-templates').getTemplate.mockResolvedValueOnce(null);
+      else email.loadTemplateByKey.mockResolvedValueOnce(null);
+      const response = await invoke('/:id/send', 'post', { ...body, sendMethod,
+        ...(reviewed ? { messageVersion: preview.body.messageVersion } : {}) });
+      expect(response.statusCode).toBe(422);
+      expect(response.body.code).toBe('ESTIMATE_MESSAGE_UNAVAILABLE');
+      expect(response.body.error).toContain(missing);
+      expect(row.status).toBe('draft');
+    }
+    expect(mutations).toEqual([]);
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a missing unselected message does not block scheduling the available channel', async () => {
+    row.status = 'draft';
+    require('../routes/admin-sms-templates').getTemplate.mockResolvedValueOnce(null);
+    const { body } = scheduledAttempt();
+    const response = await invoke('/:id/send', 'post', body);
+    expect(response.statusCode).toBe(200);
+    expect(response.body.scheduled).toBe(true);
+    expect(row.status).toBe('scheduled');
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('an interrupted scheduled attempt replays uncertainty instead of its old queued receipt', async () => {
     const { entry, body } = scheduledAttempt({ startedAt: new Date().toISOString(), channels: { email: { ok: true } } });
     row.estimate_data = { manualSendAttempts: [entry] };

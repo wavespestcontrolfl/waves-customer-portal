@@ -1170,6 +1170,13 @@ router.post('/:id/send', async (req, res, next) => {
     const previousAttempt = (Array.isArray(attempts) ? attempts : []).find((entry) => entry.key === idempotencyKey);
     if (previousAttempt) {
       if (previousAttempt.binding !== attemptBinding) return res.status(409).json({ error: 'This send attempt belongs to a different reviewed request.' });
+      // The scheduler can stop a stale offer before the attempt starts.
+      // Its old queued receipt must not describe that terminal row as scheduled.
+      if (!previousAttempt.result && !previousAttempt.startedAt && previousAttempt.scheduleResult
+        && estimate.status === 'send_failed' && !estimate.scheduled_at) {
+        return res.status(422).json({ success: false, sent: false, scheduled: false, replayed: true,
+          code: 'SCHEDULED_SEND_FAILED', error: estimate.last_send_error || 'The scheduled estimate send failed. Review the estimate before scheduling a new attempt.' });
+      }
       const receipt = previousAttempt.result || (!previousAttempt.startedAt && previousAttempt.scheduleResult);
       if (receipt) return res.status(receipt.sent || receipt.scheduled ? 200 : 422).json({ ...receipt, replayed: true });
       return res.status(409).json({ error: 'The earlier send may have reached a provider. Check its channel outcome before starting a new send.', code: 'SEND_OUTCOME_UNCERTAIN', channels: previousAttempt.channels || {} });
@@ -1195,6 +1202,13 @@ router.post('/:id/send', async (req, res, next) => {
       }
       if (scheduledTime <= new Date()) {
         return res.status(400).json({ error: 'scheduledAt must be in the future' });
+      }
+      const scheduleMessages = reviewedMessages || (await buildEstimateSendPreview(estimate)).messages;
+      const requestedChannels = sendMethod === 'both' ? ['sms', 'email'] : [sendMethod];
+      const unavailableChannels = requestedChannels.filter((channel) => !scheduleMessages[channel]);
+      if (unavailableChannels.length) {
+        return res.status(422).json({ code: 'ESTIMATE_MESSAGE_UNAVAILABLE',
+          error: `Cannot schedule: the ${unavailableChannels.join(' and ')} message is unavailable. Restore the template or choose an available channel.` });
       }
       // Grouped schedule: every active sibling must clear the pricing-
       // authority gate NOW, not when the cron's group claim refuses it
