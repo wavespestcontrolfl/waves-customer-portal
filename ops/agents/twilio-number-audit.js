@@ -8,9 +8,11 @@
  *   1. the number is not in server/config/twilio-numbers.js — inbound texts to it
  *      are DROPPED by twilio-webhook.js ("unmanaged number") and calls log with
  *      location 'unknown';
- *   2. its voice / SMS / status-callback webhooks drift from the portal's — the
- *      2026-08-12 → 2026-09-07 incident: the Google Ads line pointed at a Sandy
- *      sandbox Function for four weeks while the campaign still spent;
+ *   2. its routing drifts from the contract in scripts/twilio/routing-contract.js
+ *      (voice / fallback / status-callback / SMS URLs and methods, plus the App
+ *      and trunk overrides) — the 2026-08-12 → 2026-09-07 incident: the Google
+ *      Ads line pointed at a Sandy sandbox Function for four weeks while the
+ *      campaign still spent;
  *   3. it is missing from a LIVE Trust Hub product (customer profile, SHAKEN/STIR,
  *      CNAM, Voice Integrity, Branded Calling) — the console's per-number
  *      "Not started" items;
@@ -18,10 +20,14 @@
  *      a toll-free number, has no approved toll-free verification — so the first
  *      outbound text from it fails.
  *
- * The canonical webhook config is the MODE across owned numbers per field (no
- * hard-coded host): one drifted line stands out, a fleet-wide host move does not.
- * A "live" Trust Hub product = twilio-approved with at least one assigned number;
- * duplicates / empty leftovers are reported, never treated as coverage.
+ * The relay sandbox line (VOICE_RELAY_SANDBOX_NUMBER) is the one owned number
+ * that is supposed to fail 1 and 2: it stays out of the registry (or parked under
+ * `unassigned`) and routes to /relay-sandbox. It is reported on its own and never
+ * counted against the fleet. A "live" Trust Hub product = twilio-approved with at
+ * least one assigned number; duplicate / empty leftovers are listed, never
+ * treated as coverage. scripts/twilio/audit-inbound-routing.js is the companion
+ * TRAFFIC audit (call legs + call_log over N days, Studio rollback contract);
+ * this one is the configuration audit and needs no database.
  *
  * Prints the full picture, then defects. Exits 1 when defects exist so a sweep can
  * gate on it. No customer data is read; nothing is written to Twilio.
@@ -33,11 +39,8 @@
 const path = require('path');
 const twilio = require('twilio');
 const REGISTRY = require(path.join(__dirname, '..', '..', 'server', 'config', 'twilio-numbers.js'));
+const { APP_ROUTING, SANDBOX_VOICE_URL, routingDrift } = require(path.join(__dirname, '..', '..', 'scripts', 'twilio', 'routing-contract.js'));
 
-// A TwiML App (voice/smsApplicationSid) or SIP trunk (trunkSid) OVERRIDES the
-// URLs, so they are part of the routing config — a number handed to a third-party
-// app keeps a canonical-looking voiceUrl and would otherwise pass.
-const WEBHOOK_FIELDS = ['voiceUrl', 'voiceMethod', 'voiceFallbackUrl', 'statusCallback', 'smsUrl', 'smsMethod', 'voiceApplicationSid', 'smsApplicationSid', 'trunkSid'];
 const TOLL_FREE = /^\+1(800|833|844|855|866|877|888)\d{7}$/;
 // Twilio's fixed Trust Hub policy SIDs. The A2P Messaging Profile bundle never
 // carries phone numbers by design (the brand registration hangs off it); a
@@ -46,137 +49,134 @@ const TOLL_FREE = /^\+1(800|833|844|855|866|877|888)\d{7}$/;
 const A2P_MESSAGING_PROFILE_POLICY = 'RNb0d4771c2c98518d916a3d4cd70a8f8b';
 const TOLLFREE_VERIFICATION_POLICY = 'RNa282dd7f3dbef8586501ca2e045e764c';
 
-function mode(values) {
-  const counts = new Map();
-  for (const v of values) counts.set(v, (counts.get(v) || 0) + 1);
-  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? '';
-}
+const last10 = (v) => String(v == null ? '' : v).replace(/\D/g, '').slice(-10);
+const short = (u) => (u ? String(u).replace(/^https?:\/\//, '') : '(none)');
 
-function short(u) { return u ? String(u).replace(/^https?:\/\//, '') : '(none)'; }
-
-async function main() {
-  const sid = process.env.TWILIO_ACCOUNT_SID;
-  const token = process.env.TWILIO_AUTH_TOKEN;
-  if (!sid || !token) {
-    console.error('TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not set — run via: railway run node ops/agents/twilio-number-audit.js');
-    process.exit(1);
-  }
-  const client = twilio(sid, token);
+// ── 1 + 2. Registry membership and routing, per owned number ─────────────
+function auditRouting(numbers, sandbox) {
   const defects = [];
-  const defect = (n, what) => defects.push(`${n}  ${what}`);
-
-  // ── 1. Owned numbers vs registry ─────────────────────────────
-  const numbers = (await client.incomingPhoneNumbers.list({ limit: 500 }))
-    .sort((a, b) => a.phoneNumber.localeCompare(b.phoneNumber));
-  const numberBySid = new Map(numbers.map(n => [n.sid, n.phoneNumber]));
-  const owned = new Set(numbers.map(n => n.phoneNumber));
-  const registered = new Set([...REGISTRY.allNumbers.map(n => n.number), REGISTRY.mainLine.number]);
-
-  console.log(`=== NUMBERS (${numbers.length} owned, ${registered.size} registered) ===`);
+  console.log(`=== NUMBERS (${numbers.length} owned) ===`);
   for (const n of numbers) {
     const reg = REGISTRY.findByNumber(n.phoneNumber)
       || (n.phoneNumber === REGISTRY.mainLine.number ? { type: 'main_line', label: REGISTRY.mainLine.label } : null);
-    console.log(`${n.phoneNumber}  "${n.friendlyName}"  ${reg ? `${reg.type} / ${reg.label || reg.domain || ''}` : 'NOT IN REGISTRY'}`);
-    if (!reg) defect(n.phoneNumber, `not in server/config/twilio-numbers.js — inbound SMS dropped, calls log as 'unknown'`);
+    const drift = routingDrift(n);
+    console.log(`${n.phoneNumber}  "${n.friendlyName}"  ${reg ? `${reg.type} / ${reg.label || reg.domain || ''}` : 'NOT IN REGISTRY'}${drift.length ? `  DRIFT ${drift.map(f => `${f}=${short(n[f])}`).join(' ')}` : ''}`);
+    if (!reg) defects.push(`${n.phoneNumber}  not in server/config/twilio-numbers.js — inbound SMS dropped, calls log as 'unknown'`);
+    if (drift.length) defects.push(`${n.phoneNumber}  routing drift — ${drift.map(f => `${f}=${short(n[f])} (expected ${short(APP_ROUTING[f]) || 'empty'})`).join(', ')}`);
   }
-  for (const r of registered) {
-    if (!owned.has(r)) defect(r, 'registered in twilio-numbers.js but NOT owned on this Twilio account');
+  const owned = new Set(numbers.map(n => n.phoneNumber));
+  for (const r of new Set([...REGISTRY.allNumbers.map(n => n.number), REGISTRY.mainLine.number])) {
+    if (!owned.has(r)) defects.push(`${r}  registered in twilio-numbers.js but NOT owned on this Twilio account`);
   }
+  if (sandbox) {
+    const parked = (REGISTRY.unassigned || []).some(u => last10(u.number) === last10(sandbox.phoneNumber));
+    const live = !parked && !!REGISTRY.findByNumber(sandbox.phoneNumber);
+    console.log(`\n=== RELAY SANDBOX LINE (VOICE_RELAY_SANDBOX_NUMBER, excluded from the fleet checks above) ===`);
+    console.log(`${sandbox.phoneNumber}  "${sandbox.friendlyName}"  registry=${parked ? 'parked (unassigned)' : live ? 'LIVE LINE' : 'absent'}  voice=${short(sandbox.voiceUrl)}${String(sandbox.voiceUrl || '') === SANDBOX_VOICE_URL ? '' : `  (expected ${short(SANDBOX_VOICE_URL)})`}`);
+    if (live) defects.push(`${sandbox.phoneNumber}  VOICE_RELAY_SANDBOX_NUMBER is a registered live line — the server refuses every sandbox call (403); park it under twilio-numbers.unassigned or pick another number`);
+  }
+  return defects;
+}
 
-  // ── 2. Webhook drift vs the fleet mode ───────────────────────
-  const canonical = {};
-  for (const f of WEBHOOK_FIELDS) canonical[f] = mode(numbers.map(n => String(n[f] || '')));
-  console.log('\n=== WEBHOOK CANONICAL (mode across owned numbers) ===');
-  for (const f of WEBHOOK_FIELDS) console.log(`  ${f}: ${short(canonical[f])}`);
-  for (const n of numbers) {
-    const drift = WEBHOOK_FIELDS.filter(f => String(n[f] || '') !== canonical[f]);
-    if (drift.length) {
-      console.log(`  DRIFT ${n.phoneNumber} "${n.friendlyName}": ${drift.map(f => `${f}=${short(n[f])}`).join('  ')}`);
-      defect(n.phoneNumber, `webhook drift — ${drift.map(f => `${f}=${short(n[f])}`).join(', ')}`);
-    }
-  }
-
-  // ── 3. Trust Hub coverage ────────────────────────────────────
-  const listEndpoints = async (kind, bu) => {
-    const list = kind === 'profile'
-      ? await client.trusthub.v1.customerProfiles(bu).customerProfilesChannelEndpointAssignment.list({ limit: 500 })
-      : await client.trusthub.v1.trustProducts(bu).trustProductsChannelEndpointAssignment.list({ limit: 500 });
+// ── 3. Trust Hub: every fleet number on every live product ───────────────
+async function auditTrustHub(client, fleet, numberBySid) {
+  const defects = [];
+  const listEndpoints = async (b) => {
+    const list = b.kind === 'profile'
+      ? await client.trusthub.v1.customerProfiles(b.sid).customerProfilesChannelEndpointAssignment.list({ limit: 500 })
+      : await client.trusthub.v1.trustProducts(b.sid).trustProductsChannelEndpointAssignment.list({ limit: 500 });
     return new Set(list.map(a => numberBySid.get(a.channelEndpointSid)).filter(Boolean));
   };
-  const profiles = await client.trusthub.v1.customerProfiles.list({ limit: 50 });
-  const products = await client.trusthub.v1.trustProducts.list({ limit: 50 });
   const bundles = [
-    ...profiles.map(p => ({ kind: 'profile', ...p })),
-    ...products.map(p => ({ kind: 'product', ...p })),
+    ...(await client.trusthub.v1.customerProfiles.list({ limit: 50 })).map(p => ({ kind: 'profile', ...p })),
+    ...(await client.trusthub.v1.trustProducts.list({ limit: 50 })).map(p => ({ kind: 'product', ...p })),
   ];
   console.log('\n=== TRUST HUB ===');
-  const livePerPolicy = new Map(); // policySid → { bundle, endpoints }
+  const livePerPolicy = new Map(); // policySid → { bundle, endpoints } — the approved bundle carrying the most numbers
   for (const b of bundles) {
-    const endpoints = await listEndpoints(b.kind, b.sid);
-    console.log(`  ${b.kind === 'profile' ? 'profile' : 'product'} ${b.sid}  "${b.friendlyName}"  status=${b.status}  numbers=${endpoints.size}`);
-    if (b.status !== 'twilio-approved' || endpoints.size === 0) continue;
-    if (b.policySid === TOLLFREE_VERIFICATION_POLICY) continue;
-    const cur = livePerPolicy.get(b.policySid);
-    if (!cur || endpoints.size > cur.endpoints.size) livePerPolicy.set(b.policySid, { bundle: b, endpoints });
+    const endpoints = await listEndpoints(b);
+    console.log(`  ${b.kind} ${b.sid}  "${b.friendlyName}"  status=${b.status}  numbers=${endpoints.size}`);
+    const fleetWide = b.status === 'twilio-approved' && endpoints.size > 0
+      && b.policySid !== TOLLFREE_VERIFICATION_POLICY && b.policySid !== A2P_MESSAGING_PROFILE_POLICY;
+    if (fleetWide && endpoints.size > (livePerPolicy.get(b.policySid)?.endpoints.size || 0)) livePerPolicy.set(b.policySid, { bundle: b, endpoints });
   }
   for (const { bundle, endpoints } of livePerPolicy.values()) {
-    const missing = numbers.map(n => n.phoneNumber).filter(p => !endpoints.has(p));
-    if (missing.length) {
-      console.log(`  MISSING from "${bundle.friendlyName}" (${bundle.sid}): ${missing.join(', ')}`);
-      for (const m of missing) defect(m, `not assigned to live ${bundle.kind} "${bundle.friendlyName}" (${bundle.sid})`);
-    }
+    const missing = fleet.filter(p => !endpoints.has(p));
+    if (missing.length) console.log(`  MISSING from "${bundle.friendlyName}" (${bundle.sid}): ${missing.join(', ')}`);
+    for (const m of missing) defects.push(`${m}  not assigned to live ${bundle.kind} "${bundle.friendlyName}" (${bundle.sid})`);
   }
   const leftovers = bundles.filter(b => b.status === 'twilio-approved'
-    && b.policySid !== A2P_MESSAGING_PROFILE_POLICY
-    && b.policySid !== TOLLFREE_VERIFICATION_POLICY
+    && b.policySid !== A2P_MESSAGING_PROFILE_POLICY && b.policySid !== TOLLFREE_VERIFICATION_POLICY
     && livePerPolicy.get(b.policySid)?.bundle.sid !== b.sid);
   if (leftovers.length) console.log(`  info: ${leftovers.length} approved bundle(s) carry no numbers (duplicates / leftovers, not coverage): ${leftovers.map(b => `${b.sid} "${b.friendlyName}"`).join(', ')}`);
+  return defects;
+}
 
-  // ── 4. Messaging: brand, campaign, senders, toll-free ────────
+// ── 4. Messaging: every fleet number can text ─────────────────────────────
+async function auditMessaging(client, fleet, numberBySid) {
+  const defects = [];
   console.log('\n=== MESSAGING ===');
   const brands = await client.messaging.v1.brandRegistrations.list({ limit: 20 });
-  for (const b of brands) {
-    console.log(`  brand ${b.sid}  status=${b.status}  identity=${b.identityStatus}  type=${b.brandType}`);
-    if (b.status !== 'APPROVED') defect('brand', `${b.sid} status=${b.status}`);
-  }
-  if (!brands.length) defect('brand', 'no A2P brand registration');
-  const services = await client.messaging.v1.services.list({ limit: 50 });
+  for (const b of brands) console.log(`  brand ${b.sid}  status=${b.status}  identity=${b.identityStatus}  type=${b.brandType}`);
+  // Historical failed / deleted registrations stay on the account; only the
+  // absence of an approved brand is a defect.
+  if (!brands.some(b => b.status === 'APPROVED')) defects.push('brand  no APPROVED A2P brand registration');
   const registeredSenders = new Set();
-  for (const s of services) {
+  for (const s of await client.messaging.v1.services.list({ limit: 50 })) {
+    const senders = (await client.messaging.v1.services(s.sid).phoneNumbers.list({ limit: 500 })).map(p => p.phoneNumber);
     const campaigns = await client.messaging.v1.services(s.sid).usAppToPerson.list({ limit: 20 });
-    const senders = await client.messaging.v1.services(s.sid).phoneNumbers.list({ limit: 500 });
+    const verified = campaigns.some(c => c.campaignStatus === 'VERIFIED');
     console.log(`  service ${s.sid}  "${s.friendlyName}"  senders=${senders.length}  campaigns=${campaigns.map(c => `${c.sid}:${c.campaignStatus}/${c.usAppToPersonUsecase}`).join(',') || 'none'}`);
-    for (const c of campaigns) if (c.campaignStatus !== 'VERIFIED') defect('campaign', `${c.sid} on ${s.sid} status=${c.campaignStatus}`);
-    if (campaigns.some(c => c.campaignStatus === 'VERIFIED')) senders.forEach(p => registeredSenders.add(p.phoneNumber));
+    if (verified) senders.forEach(p => registeredSenders.add(p));
+    // A draft / failed campaign only matters on a service that carries fleet numbers.
+    else if (senders.some(p => fleet.includes(p) && !TOLL_FREE.test(p))) defects.push(`campaign  service ${s.sid} carries fleet numbers but has no VERIFIED A2P campaign (${campaigns.map(c => c.campaignStatus).join(',') || 'none'})`);
   }
   const verifications = await client.messaging.v1.tollfreeVerifications.list({ limit: 20 });
   const approvedTollFree = new Set(verifications.filter(v => v.status === 'TWILIO_APPROVED').map(v => numberBySid.get(v.tollfreePhoneNumberSid)).filter(Boolean));
   for (const v of verifications) console.log(`  toll-free verification ${v.sid}  number=${numberBySid.get(v.tollfreePhoneNumberSid) || '(released)'}  status=${v.status}`);
-  for (const n of numbers) {
-    if (TOLL_FREE.test(n.phoneNumber)) {
-      if (!approvedTollFree.has(n.phoneNumber)) defect(n.phoneNumber, 'toll-free number without an approved toll-free verification');
-    } else if (!registeredSenders.has(n.phoneNumber)) {
-      defect(n.phoneNumber, 'not a sender on a messaging service with a VERIFIED A2P campaign — outbound SMS from it will fail');
+  for (const p of fleet) {
+    if (TOLL_FREE.test(p)) {
+      if (!approvedTollFree.has(p)) defects.push(`${p}  toll-free number without an approved toll-free verification`);
+    } else if (!registeredSenders.has(p)) {
+      defects.push(`${p}  not a sender on a messaging service with a VERIFIED A2P campaign — outbound SMS from it will fail`);
     }
   }
-
-  // ── 5. Other senders (RCS / WhatsApp) — informational ────────
-  const auth = 'Basic ' + Buffer.from(`${sid}:${token}`).toString('base64');
+  // Other channel senders — informational (an RCS agent left in DRAFT is what
+  // the console's "finish compliance for N numbers and senders" banner counts).
+  const auth = 'Basic ' + Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${process.env.TWILIO_AUTH_TOKEN}`).toString('base64');
   for (const channel of ['rcs', 'whatsapp']) {
     try {
       const r = await fetch(`https://messaging.twilio.com/v2/Channels/Senders?Channel=${channel}&PageSize=50`, { headers: { Authorization: auth } });
-      const j = await r.json();
-      const list = Array.isArray(j.senders) ? j.senders : [];
-      if (list.length) console.log(`  ${channel} senders: ${list.map(s => `${s.sender_id} ${s.status}`).join('; ')}`);
+      const list = (await r.json()).senders;
+      if (Array.isArray(list) && list.length) console.log(`  ${channel} senders: ${list.map(x => `${x.sender_id} ${x.status}`).join('; ')}`);
     } catch (e) {
       console.log(`  ${channel} senders: unavailable (${e.message})`);
     }
   }
+  return defects;
+}
 
-  // ── Verdict ──────────────────────────────────────────────────
+async function main() {
+  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) {
+    console.error('TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not set — run via: railway run node ops/agents/twilio-number-audit.js');
+    process.exit(1);
+  }
+  const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+  const owned = (await client.incomingPhoneNumbers.list({ limit: 500 })).sort((a, b) => a.phoneNumber.localeCompare(b.phoneNumber));
+  const numberBySid = new Map(owned.map(n => [n.sid, n.phoneNumber]));
+  const sandboxKey = last10(process.env.VOICE_RELAY_SANDBOX_NUMBER);
+  const sandbox = sandboxKey ? owned.find(n => last10(n.phoneNumber) === sandboxKey) : null;
+  const numbers = owned.filter(n => n !== sandbox);
+  const fleet = numbers.map(n => n.phoneNumber);
+
+  const defects = [
+    ...auditRouting(numbers, sandbox),
+    ...(await auditTrustHub(client, fleet, numberBySid)),
+    ...(await auditMessaging(client, fleet, numberBySid)),
+  ];
   console.log(`\n=== DEFECTS (${defects.length}) ===`);
   for (const d of defects) console.log(`  ${d}`);
-  if (!defects.length) console.log('  none — every owned number is registered, on the canonical webhooks, on every live Trust Hub product, and A2P/toll-free covered.');
+  if (!defects.length) console.log('  none — every owned number is registered, on the routing contract, on every live Trust Hub product, and A2P/toll-free covered.');
   process.exit(defects.length ? 1 : 0);
 }
 
