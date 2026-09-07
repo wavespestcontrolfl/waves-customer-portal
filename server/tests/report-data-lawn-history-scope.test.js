@@ -54,6 +54,20 @@ describeDb('report property history projections', () => {
     expect(after.lawnHistory.identity).not.toBe(before.lawnHistory.identity);
   });
 
+  test.each([false, true])('a reassigned visit cannot render the original property scores or photos (pinned=%s)', async (pinned) => {
+    const f = await fixture(knex);
+    const visit = await f.visit(-1);
+    const record = await f.record(visit);
+    const assessment = await f.assessment(visit, { service_record_id: record.id });
+    const [otherProperty] = await knex('customer_properties').insert({ customer_id: f.customerId }).returning('*');
+    await knex('scheduled_services').where({ id: visit.id }).update({ property_id: otherProperty.id });
+    const result = buildLawnAssessmentReportData({ ...record, service_line: 'lawn' }, 'lawn', knex, {
+      propertyHistoryEnabled: true, pinnedAssessmentId: pinned ? assessment.id : null,
+    });
+    if (pinned) await expect(result).rejects.toMatchObject({ code: 'pinned_assessment_unavailable' });
+    else await expect(result).resolves.toBeNull();
+  });
+
   test.each([true, false])('ancillary-only visit reassignment invalidates the PDF identity (current assessment=%s)', async (withAssessment) => {
     const f = await fixture(knex);
     const earlierVisit = await f.visit(-20);

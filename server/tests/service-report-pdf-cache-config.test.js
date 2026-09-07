@@ -106,11 +106,11 @@ describe('service report PDF Pest Pressure cache config', () => {
     mockActivePestPressureConfig = { key: 'current', showOnCustomerReport: true };
   });
 
-  test('a pinned delivery returns the same history identity sent to the PDF browser', async () => {
+  test.each(['fixture-assessment', 'none'])('the delivery PDF wrapper returns the browser history identity (pin=%s)', async (pin) => {
     const { resolveCanonicalLawnRender } = require('../services/service-report/report-data');
-    resolveCanonicalLawnRender.mockResolvedValueOnce({ pin: 'fixture-assessment', signature: '-la-fixture', lawnHistory: { identity: 'fixture-history', eligibleVisitIds: [] } });
-    const result = await renderAndStoreServiceReportPdf('service-1', {
-      token: 'token-1', knex: makeKnex(makeService()), pinnedLawnAssessmentId: 'fixture-assessment', propertyHistoryEnabled: true,
+    resolveCanonicalLawnRender.mockResolvedValueOnce({ pin, signature: '-la-fixture', lawnHistory: { identity: 'fixture-history', eligibleVisitIds: [] } });
+    const result = await getOrRenderServiceReportPdf('service-1', {
+      token: 'token-1', knex: makeKnex(makeService()), pinnedLawnAssessmentId: pin, propertyHistoryEnabled: true,
     });
     expect(result.pinnedLawnHistoryIdentity).toBe('fixture-history');
     expect(mockRenderServiceReportV1Pdf.mock.calls[0][1].pinnedLawnHistoryIdentity).toBe(result.pinnedLawnHistoryIdentity);

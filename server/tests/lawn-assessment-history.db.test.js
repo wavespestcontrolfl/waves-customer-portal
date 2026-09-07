@@ -85,6 +85,43 @@ describeDb('property lawn history through PostgreSQL', () => {
     expect(ambiguous.previous).toBeNull();
   });
 
+  test.each([false, true])('a property reassignment refuses the original assessment, including signed pins (pinned=%s)', async (pinned) => {
+    const f = await fixture(knex);
+    const visit = await f.visit();
+    const assessment = await f.assessment(visit);
+    const [otherProperty] = await knex('customer_properties').insert({ customer_id: f.customerId }).returning('*');
+    await knex('scheduled_services').where({ id: visit.id }).update({ property_id: otherProperty.id });
+    const resolved = await history.historyForAssessment(assessment, { knex, pinned });
+    expect(resolved.scope.propertyId).toBeNull();
+    expect(resolved.rows).toEqual([]);
+    expect(resolved.current).toBeNull();
+    expect(resolved.previous).toBeNull();
+    expect(resolved.baseline).toBeNull();
+    expect(resolved.progress.score).toBeNull();
+  });
+
+  test('an incompatible stamped address cannot use the unknown-property fallback', async () => {
+    const f = await fixture(knex);
+    const visit = await f.visit(-1, { property_id: null, service_address_line1: '999 Different Street' });
+    const assessment = await f.assessment(visit);
+    const resolved = await history.historyForAssessment(assessment, { knex });
+    expect(resolved.rows).toEqual([]);
+    expect(resolved.current).toBeNull();
+  });
+
+  test('a conflicting record-linked assessment cannot outrank the replacement property assessment', async () => {
+    const f = await fixture(knex);
+    const visit = await f.visit();
+    const record = await f.record(visit);
+    await f.assessment(visit, { service_record_id: record.id });
+    const [otherProperty] = await knex('customer_properties').insert({ customer_id: f.customerId }).returning('*');
+    const [movedVisit] = await knex('scheduled_services').where({ id: visit.id }).update({ property_id: otherProperty.id }).returning('*');
+    const replacement = await f.assessment(movedVisit);
+    const installed = await history.installedForVisit({ customerId: f.customerId, serviceId: visit.id, serviceRecordId: record.id }, knex);
+    expect(installed.id).toBe(replacement.id);
+    expect((await history.historyForAssessment(replacement, { knex })).current.id).toBe(replacement.id);
+  });
+
   test('later reset leaves old reports alone and changes the current history identity', async () => {
     const f = await fixture(knex);
     const first = await f.assessment(await f.visit(-20));

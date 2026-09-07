@@ -38,6 +38,7 @@ function resolveVisit(row) {
   const invalidLink = !!(
     (row.service_record_id && (!row.history_record_id || row.history_record_customer_id !== row.customer_id))
     || (visitId && (!row.history_visit_id || row.history_visit_customer_id !== row.customer_id))
+    || (row.property_id && row.history_visit_property_id && row.property_id !== row.history_visit_property_id)
   );
   const identity = visitId ? `visit:${visitId}` : row.service_record_id ? `record:${row.service_record_id}` : `assessment:${row.id}`;
   const date = row.history_visit_date || row.history_record_date || row.service_date;
@@ -240,9 +241,10 @@ async function historyForAssessment(row, { pinned = false, knex = db } = {}) {
   const visit = resolveVisit(joined);
   const reset = await applicableReset({ customerId: row.customer_id, propertyId: scope.propertyId, throughVisitDate: visit.visitDate }, knex);
   let rows = await propertyHistory({ customerId: row.customer_id, scope, throughVisitDate: visit.visitDate, reset, current: joined, pinned, rows: candidates }, knex);
-  // A legitimate visit-linked report may lack a provable property. Show its
-  // own assessment without inventing a cross-property baseline or delta.
-  if (!rows.some((candidate) => candidate.visit_identity === visit.identity)) rows = installedRows([joined]);
+  // An unstamped report may lack a provable property. Show only its own
+  // assessment; conflicting property/address evidence must never use this
+  // fallback, nor may it bypass a resolved property's reset window.
+  if (!scope.propertyId && !joined.property_id && !joined.history_visit_property_id && !joined.history_address_line1) rows = installedRows([joined]);
   const current = rows.find((candidate) => candidate.visit_identity === visit.identity) || null;
   const index = rows.indexOf(current);
   const eligibleIds = await eligibleVisitIds(scope, knex);

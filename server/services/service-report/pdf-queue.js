@@ -611,6 +611,7 @@ async function getOrRenderServiceReportPdf(recordId, {
     // Pinned renders are deliberately unstored (#3168) — surfaced so a caller
     // can tell "no key because storage failed" from "no key by design".
     pinned: !!rendered.pinned,
+    ...(propertyHistoryEnabled ? { pinnedLawnHistoryIdentity: rendered.pinnedLawnHistoryIdentity } : {}),
     // Likewise for a render that completed but was not cacheable (unfrozen
     // week, or a selection that moved during the render).
     uncached: !!rendered.uncached,
