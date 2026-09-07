@@ -8,7 +8,7 @@ const { COMMITMENT_KINDS, kindBelongsToParty, parseDueAt } = require('./call-com
 const { parseQuotedETDeadline } = require('../utils/datetime-et');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
 
-const VERSION = 'sms-operations-v7';
+const VERSION = 'sms-operations-v8';
 const FACT_FIELDS = Object.freeze([
   'contact_preference', 'irrigation_controller_location', 'irrigation_schedule_notes',
   'irrigation_issues', 'parking_notes', 'pet_details', 'access_notes', 'special_instructions',
@@ -73,7 +73,18 @@ function explicitContactPreference(quote) {
   return match ? match[1] || match[2] || match[3] : null;
 }
 
+// Questions in SMS frequently omit punctuation. Check every clause, not only
+// the start of the message, and normalize compatibility question marks.
+const INTERROGATIVE = /(?:^|[.!;:\n]\s*)(?:(?:and|but|also|however)[, ]+)?(?:are|is|am|was|were|do(?!\s+not\b)|does|did|can|could|would|should|will|won't|have|has|had|what|where|when|why|who|whose|which|how)\b/i;
+function isQuestionSource(source) {
+  const text = String(source || '').normalize('NFKC');
+  return /[?¿؟]/u.test(text) || INTERROGATIVE.test(text);
+}
+
 function matchesExplicitAccessCode({ quote, field, value }) {
+  // Missing-code descriptions are not credentials, even if the model
+  // proposes them verbatim. Preserve the empty field for the real code.
+  if (/\b(?:unknown|none|null|undefined|unsure|uncertain|unavailable|pending|missing|not|no|never|forgot(?:ten)?|forget|maybe|perhaps)\b|n['’]t|^n[ /]?a$/i.test(String(value || '').trim())) return false;
   const match = /^(?:(?:the|my|our) )?(neighborhood gate|community gate|property gate|lockbox|garage) code\s*(?:is\s+|:\s*)?([#*\dA-Za-z -]{1,100})[.!]?$/i.exec(String(quote || '').trim());
   if (!match) return false;
   const fields = { 'neighborhood gate': 'neighborhood_gate_code', 'community gate': 'neighborhood_gate_code',
@@ -154,7 +165,7 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
   // instead of maintaining an open-ended list of possible conjunctions.
   const completeSource = message.message_body.trim();
   const facts = message.direction !== 'inbound' ? [] : parsed.facts.filter((item) => {
-    if (!grounded(item) || item.quote.trim() !== completeSource || completeSource.includes('?')) return false;
+    if (!grounded(item) || item.quote.trim() !== completeSource || isQuestionSource(completeSource)) return false;
     if (item.field === 'contact_preference') return explicitContactPreference(item.quote) === item.value;
     if (item.field.endsWith('_code')) return matchesExplicitAccessCode(item);
     return item.value === item.quote && message.message_body.includes(item.value);

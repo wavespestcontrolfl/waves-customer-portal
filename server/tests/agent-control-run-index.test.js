@@ -301,6 +301,7 @@ describe('adapters project onto the canonical shape', () => {
     expect(mapped.map(([l]) => l).sort()).toEqual(['call_research', 'call_self_audit', 'shadow_judge',
       'sms-commitment-fulfillment', 'sms-operational-actions', 'voice_profile']);
     const smsIntake = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'sms-operational-actions.js'), 'utf8');
+    expect(scheduler).toContain("require('./sms-operational-actions')");
     expect(scheduler).toContain('await runSmsOperationalActions()');
     for (const [laneId, policy] of mapped) {
       const callsite = policy.workflow_id === 'sms-operational-actions' ? smsIntake : scheduler;
