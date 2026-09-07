@@ -48,6 +48,9 @@ const TOLL_FREE = /^\+1(800|833|844|855|866|877|888)\d{7}$/;
 // is a fleet-wide product, so neither counts toward — or against — coverage.
 const A2P_MESSAGING_PROFILE_POLICY = 'RNb0d4771c2c98518d916a3d4cd70a8f8b';
 const TOLLFREE_VERIFICATION_POLICY = 'RNa282dd7f3dbef8586501ca2e045e764c';
+// CNAM: Twilio only self-serves local numbers (toll-free CNAM goes through
+// Support), so a toll-free line is exempt from the CNAM coverage requirement.
+const CNAM_POLICY = 'RNf3db3cd1fe25fcfd3c3ded065c8fea53';
 
 const last10 = (v) => String(v == null ? '' : v).replace(/\D/g, '').slice(-10);
 const short = (u) => (u ? String(u).replace(/^https?:\/\//, '') : '(none)');
@@ -102,7 +105,8 @@ async function auditTrustHub(client, fleet, numberBySid) {
     if (fleetWide && endpoints.size > (livePerPolicy.get(b.policySid)?.endpoints.size || 0)) livePerPolicy.set(b.policySid, { bundle: b, endpoints });
   }
   for (const { bundle, endpoints } of livePerPolicy.values()) {
-    const missing = fleet.filter(p => !endpoints.has(p));
+    const required = bundle.policySid === CNAM_POLICY ? fleet.filter(p => !TOLL_FREE.test(p)) : fleet;
+    const missing = required.filter(p => !endpoints.has(p));
     if (missing.length) console.log(`  MISSING from "${bundle.friendlyName}" (${bundle.sid}): ${missing.join(', ')}`);
     for (const m of missing) defects.push(`${m}  not assigned to live ${bundle.kind} "${bundle.friendlyName}" (${bundle.sid})`);
   }
