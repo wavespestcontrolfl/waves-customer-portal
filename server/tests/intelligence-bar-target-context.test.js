@@ -67,7 +67,7 @@ test('malformed identifiers refuse before a query, and child relationships are c
   expect((await Context.validateRecordTarget({ customer_id: A, property_id: PROPERTY }, context())).code).toBe('target_relationship_mismatch');
 });
 
- test.each([
+test.each([
   'Reply to the review for Another Person',
   `Add a note: reply to review ${REVIEW}`,
   'Add a note: reply to this review',
@@ -80,3 +80,47 @@ test('malformed identifiers refuse before a query, and child relationships are c
   expect(task.reviewReference).toBeNull();
   expect((await Context.validateRecordTarget({ review_id: REVIEW }, task)).code).toBe('target_clarification_required');
 });
+
+test.each(['customer', 'raw_sms', 'vendor_email', 'unlinked_lead', 'unlinked_estimate', 'unlinked_review', 'bulk_leads'])(
+  'approval projection preserves %s authority without retaining resolution text', async kind => {
+    const recordId = '40000000-0000-4000-8000-000000000001';
+    const task = { ...context(null), requestPhrase: 'synthetic person', explicitEmails: ['fixture@example.invalid'],
+      explicitPhones: ['5550101234'], candidates: [{ label: 'Private synthetic candidate', address: 'Private address' }],
+      page: { ids: {}, records: { customer_id: { first_name: 'Private page name' } } } };
+    let toolName = 'update_customer', params = { customer_id: A, updates: { notes: 'Approved note' } };
+    if (kind === 'customer') task.targets = [{ customer_id: A, label: 'Private name', address: 'Private address' }];
+    if (kind === 'raw_sms') { toolName = 'send_sms'; params = { phone: '+15550101234', message: 'Approved message' }; }
+    if (kind === 'vendor_email') {
+      toolName = 'send_email_reply'; params = { email_id: recordId, body: 'Approved reply' };
+      rows.emails = [{ id: recordId, customer_id: A, from_address: 'fixture@example.invalid' }];
+    }
+    if (kind === 'unlinked_lead' || kind === 'bulk_leads') {
+      toolName = 'update_lead'; params = { lead_id: recordId, updates: { status: 'new' } };
+      rows.leads = [{ id: recordId, first_name: 'Synthetic', last_name: 'Person', customer_id: null }];
+    }
+    if (kind === 'unlinked_estimate') {
+      toolName = 'set_estimate_presentation'; params = { estimate_id: recordId, show_savings: true };
+      rows.estimates = [{ id: recordId, customer_name: 'Synthetic Person', customer_id: null }];
+    }
+    if (kind === 'unlinked_review') {
+      toolName = 'submit_review_reply'; params = { review_id: REVIEW, reply_text: 'Approved reply' };
+      rows.google_reviews[0].customer_id = null; task.reviewReference = REVIEW;
+    }
+    if (kind === 'bulk_leads') {
+      toolName = 'bulk_update_leads'; params = { lead_ids: [recordId], current_status: 'new', _expect_full_set: true };
+      task.bulkLeadRequest = true;
+      task.bulkLeadSelection = Context.bulkLeadSelection(toolName, [{ kind: 'lead_id', id: recordId }], params);
+      task.requestPhrase = 'all leads';
+    }
+    const proof = await Context.validateRecordTarget(params, task, { toolName, forApproval: true });
+    expect(proof.error).toBeUndefined();
+    expect(Object.keys(proof).sort()).toEqual(['actionBinding', 'recordsBinding', 'references', 'targets']);
+    expect(JSON.stringify(proof)).not.toMatch(/Private|Synthetic|synthetic|fixture@|5550101234/);
+    expect(await Context.validateRecordTarget({ ...params, _ib_task_context: proof }, proof, { toolName })).toBeNull();
+    expect((await Context.validateRecordTarget({ ...params, unexpected: 'changed' }, proof, { toolName })).code).toBe('target_changed');
+    if (kind === 'vendor_email') {
+      rows.emails[0].from_address = 'changed@example.invalid';
+      expect((await Context.validateRecordTarget(params, proof, { toolName })).code).toBe('target_changed');
+    }
+  },
+);

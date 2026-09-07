@@ -10,7 +10,7 @@ communications are outside the development/testing authorization.
 | Part | Branch | Scope |
 | --- | --- | --- |
 | A | `feat/ib-registry-coverage-foundation` / #4041 | Typed catalog and explicit action policy over existing executors; source census and CI drift check. No runtime route or UI integration. |
-| B | `feat/ib-target-context-foundation` | Fresh target resolution, parent scope and version checks, shared outcome classification, and identity-bound review publishing. |
+| B | `feat/ib-target-context-foundation` / #4044 | Fresh target resolution, parent scope and version checks, shared outcome classification, and identity-bound review publishing. |
 | C | `feat/ib-task-recovery-foundation` | Actor/session task ledger, confirmation receipts, safe resume and bounded sensitive-context retention. |
 | D | `feat/ib-platform-foundation` / #4019 | Route and UI integration, durable conversation continuation, desktop/mobile and real dev-database acceptance tests. |
 
@@ -57,6 +57,27 @@ unmapped, for 1,736 cumulative unsupported/unverified sites. The existing
 write-gate scanner now recognizes `action-registry.js` as a non-tool helper;
 catalog, coverage, and write-gate suites pass all 46 tests. These resolve the
 first CI run's exact failures (new upstream sites and the helper allowlist).
+
+Part C persists request identity, runner leases, action-step deduplication and
+actor/session-bound recovery through the existing confirmation store. It adds
+the `ib_tasks` migration and extends the existing daily Eastern retention tick;
+it does not add a worker/job system or authorize background writes. The platform
+gate defaults off. Route and conversation-cursor integration remain in D.
+
+Before storage, the same target validator replaces full resolution context with
+IDs, an exact-action fingerprint, and a fingerprint of the freshly authorized
+records. Confirmation compares both again. This preserves raw-number SMS,
+vendor replies, explicit unlinked records, and approved bulk cohorts without
+retaining their names, addresses, candidates or request text in receipt params.
+The existing sweep strips old private context only after approval expiry,
+including receipts whose task FK is already null; results and receipt IDs stay.
+
+Part C validation: 79 unit/contract/scheduler tests passed and six tests passed
+against the already-migrated isolated Postgres database. The latter cover
+request replay, competing resumes, predecessor gating, privacy-preserving
+confirmation hashes, non-resumable reads/attachments, and legacy retention.
+Their recorded provider outcomes are synthetic ledger fixtures; no provider or
+domain send ran. Full natural-language/route/UI proof is required in D.
 
 Part B introduces the target-context reader for integration in D. Review IDs
 participate in the same parent/customer checks as other records; an unlinked

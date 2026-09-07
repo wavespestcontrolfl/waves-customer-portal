@@ -226,7 +226,7 @@ function bulkLeadSelection(toolName, records, params) {
   });
 }
 
-async function validateRecordTarget(params, context = {}, { toolName } = {}) {
+async function validateRecordTarget(params, context = {}, { toolName, forApproval = false } = {}) {
   const references = { ...params };
   if (['get_closeout_status', 'get_stop_details'].includes(toolName) && params.service_id) references.appointment_id = params.service_id;
   if (params.estimate_identifier) references.estimate_id = params.estimate_identifier;
@@ -235,9 +235,25 @@ async function validateRecordTarget(params, context = {}, { toolName } = {}) {
   const { records } = resolved;
   const relationship = relationshipFailure(records, params, toolName);
   if (relationship) return relationship;
+  // Approval storage keeps exact IDs and fingerprints, never the prompt,
+  // candidates, addresses, or raw-contact lookup evidence. The same fresh
+  // validation below authorizes this one action before that proof is minted.
+  const { _ib_task_context, ...boundParams } = params;
+  const hash = require('./pending-actions').paramsHash;
+  const actionBinding = hash(toolName, boundParams);
+  const recordsBinding = hash('ib-target-records', records);
+  const accepted = forApproval ? {
+    targets: (context.targets || []).map(({ customer_id }) => ({ customer_id })),
+    references: records.map(({ kind, id }) => ({ kind, id })),
+    actionBinding, recordsBinding,
+  } : null;
+  if (context.actionBinding) {
+    return context.actionBinding === actionBinding && context.recordsBinding === recordsBinding ? accepted
+      : { error: 'The approved action or target records changed. Review a fresh proposal.', code: 'target_changed' };
+  }
   if (context.bulkLeadRequest && !context.targets?.length
     && context.bulkLeadSelection === bulkLeadSelection(toolName, records, params)) {
-    return null; // Server dry-run cohort, scoped only to this approved action.
+    return accepted; // Server dry-run cohort, scoped only to this approved action.
   }
   const permitted = new Set((context.targets || []).map(t => t.customer_id));
   if (toolName === 'send_email_reply' && !permitted.size) {
@@ -258,7 +274,7 @@ async function validateRecordTarget(params, context = {}, { toolName } = {}) {
     if (customer && !matchesCustomer) return { error: 'The message recipient does not match the target customer', code: 'target_relationship_mismatch' };
     if (!customer && (permitted.size || !context.explicitPhones?.includes(phone))) return { error: 'Select the customer or explicitly provide the recipient number', code: 'target_clarification_required' };
   }
-  return null;
+  return accepted;
 }
 
 // Resolve name/phone selectors to one of the task's known customers, then pass

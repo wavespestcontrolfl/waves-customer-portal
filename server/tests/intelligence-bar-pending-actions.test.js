@@ -8,6 +8,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const db = require('../models/db');
 const {
   paramsHash,
+  stepKey,
   stableStringify,
   createPendingAction,
   claimForConfirm,
@@ -55,6 +56,18 @@ describe('pending-actions service', () => {
     expect(paramsHash('create_customer', { first_name: 'Jefe' })).not.toBe(h);
   });
 
+  test('stored JSON preserves hashes for Date versions and omitted values', () => {
+    const input = { version: new Date('2020-01-02T03:04:05Z'), ignored: undefined, values: [undefined, null] };
+    expect(paramsHash('update_customer', input)).toBe(paramsHash('update_customer', JSON.parse(JSON.stringify(input))));
+  });
+
+  test('semantic steps dedupe name/ID aliases, defaults, and changing execution pins', () => {
+    const one = { customer_id: 'a', customer_name: 'Synthetic Person', phone: '+1 (555) 010-1234', message: 'Synthetic message', _require_phone_match: true };
+    const two = { customerId: 'a', phone: '15550101234', message: 'Synthetic message', message_type: 'manual', _ib_task_context: { version: 'later' } };
+    expect(stepKey('send_sms', one)).toBe(stepKey('send_sms', two));
+    expect(stepKey('send_sms', one)).not.toBe(stepKey('send_sms', { ...two, message: 'Different message' }));
+  });
+
   test('createPendingAction stores hash, actor, and a future expiry', async () => {
     const inserted = insertBuilder({ id: 'pa-1', tool_name: 'send_sms' });
     db.mockImplementation(() => inserted);
@@ -73,6 +86,21 @@ describe('pending-actions service', () => {
     expect(stored.requested_by).toBe('admin-1');
     expect(stored.status).toBe('pending');
     expect(new Date(stored.expires_at).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  test('storage replaces full raw-recipient context with exact-action authorization proof', async () => {
+    const inserted = insertBuilder({ id: 'pa-redacted', tool_name: 'send_sms' });
+    db.mockImplementation(() => inserted);
+    await createPendingAction({ toolName: 'send_sms', requestedBy: 'admin-1', params: {
+      phone: '+15550101234', message: 'Approved synthetic message',
+      _ib_task_context: { targets: [], explicitPhones: ['5550101234'], requestPhrase: 'Private full prompt',
+        candidates: [{ label: 'Private candidate', address: 'Private address' }], page: { records: { private: 'Private page data' } } },
+    } });
+    const stored = inserted.insert.mock.calls[0][0];
+    const params = JSON.parse(stored.params);
+    expect(JSON.stringify(params._ib_task_context)).not.toMatch(/Private|5550101234/);
+    expect(params._ib_task_context.actionBinding).toMatch(/^[a-f0-9]{64}$/);
+    expect(stored.params_hash).toBe(paramsHash('send_sms', params));
   });
 
   test('claim succeeds when the atomic update wins and the hash matches', async () => {
