@@ -74,6 +74,18 @@ describe('settleDeadRunningJobs', () => {
     expect(db.__state.updates).toHaveLength(1); // attempted, pinned, matched 0 rows
   });
 
+  test('a lock held at boot (outgoing instance) that is free on a later pass is settled then', async () => {
+    const t = new Date('2026-09-07T07:40:00Z');
+    rows.push({ job_name: 'voice-profile-distiller', last_started_at: t });
+    db.client.acquireConnection.mockImplementationOnce(async () => lockProbe({ 'voice-profile-distiller': false }));
+    expect(await settleDeadRunningJobs()).toEqual([]);
+    expect(db.__state.updates).toHaveLength(0);
+    // The outgoing instance was killed mid-body: its session lock is gone.
+    db.client.acquireConnection.mockImplementationOnce(async () => lockProbe({ 'voice-profile-distiller': true }));
+    expect(await settleDeadRunningJobs()).toEqual(['voice-profile-distiller']);
+    expect(db.__state.updates).toHaveLength(1);
+  });
+
   test('nothing running ⇒ no probes, no writes', async () => {
     expect(await settleDeadRunningJobs()).toEqual([]);
     expect(db.client.acquireConnection).not.toHaveBeenCalled();
