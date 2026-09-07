@@ -197,6 +197,7 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(estimateParams.get('customerName')).toBe('Avery Customer');
     expect(estimateParams.get('address')).toContain('Unit 4');
     fireEvent.click(screen.getByRole('button', { name: 'More customer actions' }));
+    expect(screen.getByRole('link', { name: 'Book appointment', exact: true })).toHaveAttribute('href', '/admin/schedule?customer=customer-a');
     expect(screen.getByRole('link', { name: 'Invoices', exact: true })).toHaveAttribute('href', '/admin/invoices?customer=customer-a');
     fireEvent.click(screen.getByRole('button', { name: 'Edit customer' }));
     expect(screen.getByRole('dialog', { name: 'Edit customer' })).toBeInTheDocument();
@@ -212,10 +213,16 @@ describe('Customer360ProfileV2 profile state', () => {
       : response({})));
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} initialTab="billing" embedded />);
     await screen.findByRole('heading', { name: 'Avery Customer' });
+    expect(screen.queryByRole('link', { name: 'Create estimate', exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByText('Balance could not be verified.')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('Why this status?'));
+    expect(screen.queryByRole('button', { name: 'View billing', exact: true })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Book appointment', exact: true })).not.toBeInTheDocument();
     expect(screen.queryByRole('tab', { name: 'Billing', exact: true })).not.toBeInTheDocument();
     expect(screen.getByRole('tabpanel', { name: 'Summary', exact: true })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /^(Manage invoices|All invoices)$/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'More customer actions' }));
+    expect(screen.queryByRole('link', { name: 'Book appointment', exact: true })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Invoices', exact: true })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Edit customer' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Prepay invoice' })).not.toBeInTheDocument();

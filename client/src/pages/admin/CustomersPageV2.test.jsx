@@ -53,6 +53,30 @@ function NavigateToCustomerButton() {
 }
 
 describe('CustomersPageV2 workflow state', () => {
+  it('opens the churn alert with the at-risk filter and preserves manual changes on profile return', async () => {
+    const requests = [];
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const parsed = new URL(String(url), 'http://fixture.invalid');
+      if (parsed.pathname !== '/api/admin/customers') return response({});
+      requests.push(parsed.searchParams);
+      return response(list);
+    }));
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace&healthRisk=at_risk']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    expect(requests.every((params) => params.get('healthRisk') === 'at_risk')).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: /^Filter/ }));
+    expect(screen.getByLabelText('Health / churn risk')).toHaveValue('at_risk');
+    fireEvent.change(screen.getByLabelText('Health / churn risk'), { target: { value: 'low' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    await waitFor(() => expect(requests.at(-1).get('healthRisk')).toBe('low'));
+    fireEvent.click(screen.getByRole('button', { name: 'Open Avery Customer customer profile' }));
+    fireEvent.click(screen.getByRole('button', { name: 'All customers', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: /^Filter/ }));
+    expect(screen.getByLabelText('Health / churn risk')).toHaveValue('low');
+    fireEvent.click(screen.getByRole('button', { name: 'Clear all' }));
+    await waitFor(() => expect(requests.at(-1).has('healthRisk')).toBe(false));
+  });
+
   it('shows recorded circular scores beside names and composes server filters with search and pagination', async () => {
     const requests = [];
     vi.stubGlobal('fetch', vi.fn((url) => {

@@ -5078,8 +5078,10 @@ function CustomerWorkspaceHeader({ c, isAdmin, unreadConversations, onEdit, onTa
     email: c[`serviceContact${suffix}Email`],
   })).filter((contact) => contact.phone || contact.email);
   const actions = [
-    { label: "Book appointment", href: `/admin/schedule?customer=${c.id}` },
-    ...(isAdmin ? [{ label: "Invoices", href: `/admin/invoices?customer=${c.id}` }] : []),
+    ...(isAdmin ? [
+      { label: "Book appointment", href: `/admin/schedule?customer=${c.id}` },
+      { label: "Invoices", href: `/admin/invoices?customer=${c.id}` },
+    ] : []),
     { label: "Activity & notes", onClick: () => onTab("comms") },
     ...(c.phone && isAdmin ? [{ label: "Send link", onClick: onSendLink }] : []),
     ...(isAdmin ? [{ label: "Edit customer", onClick: onEdit }] : []),
@@ -5093,7 +5095,7 @@ function CustomerWorkspaceHeader({ c, isAdmin, unreadConversations, onEdit, onTa
     </div>
     <div className="c360-workspace-actions">
       {c.phone && <Button className="c360-message-action" onClick={onMessage}><MessageSquare size={16} />Message{unreadConversations > 0 && <span className="c360-unread-count" aria-label={`${unreadConversations} unread conversations`}>{unreadConversations}</span>}</Button>}
-      <a className="u-focus-ring" href={customerEstimateHref({ ...c, address })}><FileText size={16} />Create estimate</a>
+      {isAdmin && <a className="u-focus-ring" href={customerEstimateHref({ ...c, address })}><FileText size={16} />Create estimate</a>}
       <div className="c360-more-action" ref={menuRef} onKeyDown={(event) => { if (event.key === "Escape" && menuOpen) { event.stopPropagation(); setMenuOpen(false); menuRef.current?.querySelector("button")?.focus(); } }}>
         <Button variant="ghost" className="c360-icon-button" aria-label="More customer actions" aria-expanded={menuOpen} aria-controls={menuId} onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); setMenuOpen((open) => !open); }}><MoreHorizontal size={20} /></Button>
         {menuOpen && <div id={menuId} className="c360-workspace-action-menu">{actions.map((action) => action.href ? <a key={action.label} className="u-focus-ring" href={action.href}>{action.label}</a> : <button key={action.label} type="button" className="u-focus-ring" onClick={() => { menuRef.current?.querySelector("button")?.focus(); setMenuOpen(false); action.onClick(); }}>{action.label}</button>)}</div>}
@@ -7041,7 +7043,7 @@ export default function Customer360ProfileV2({
           {/* OVERVIEW */}
           {activeTab === "overview" && (
             <div className="c360-overview-content">
-              {embedded && <Customer360Summary customer={c} upcoming={upcomingFuture} services={services} comms={comms} commsLoading={commsLoading} commsError={isAdmin ? commsErr : "Message history requires admin access"} balance={data.billingSummary} unread={unreadConversations} preferences={prefs} alerts={alerts} onMessage={openMessages} onTab={changeWorkspaceTab} onViewServices={viewServiceRecords} discounts={discounts} referral={referral} />}
+              {embedded && <Customer360Summary isAdmin={isAdmin} customer={c} upcoming={upcomingFuture} services={services} comms={comms} commsLoading={commsLoading} commsError={isAdmin ? commsErr : "Message history requires admin access"} balance={data.billingSummary} unread={unreadConversations} preferences={prefs} alerts={alerts} onMessage={openMessages} onTab={changeWorkspaceTab} onViewServices={viewServiceRecords} discounts={discounts} referral={referral} />}
 
               <CustomerRequestsPanel customerId={customerId} />
               {/* both customer-scoped zone endpoints are requireAdmin — a

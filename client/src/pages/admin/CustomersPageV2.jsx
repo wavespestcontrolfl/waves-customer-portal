@@ -1025,7 +1025,11 @@ export default function CustomersPageV2() {
   const [search, setSearch] = useState("");
   const [filterStage, setFilterStage] = useState("all");
   const [filterTier, setFilterTier] = useState("all");
-  const [healthFilters, setHealthFilters] = useState({});
+  const atRiskFromUrl = searchParams.get("healthRisk") === "at_risk";
+  const [healthFilters, setHealthFilters] = useState(() => atRiskFromUrl ? { healthRisk: "at_risk" } : {});
+  useEffect(() => {
+    setHealthFilters((current) => ({ ...current, healthRisk: atRiskFromUrl ? "at_risk" : "" }));
+  }, [atRiskFromUrl]);
   const [sortBy, setSortBy] = useState("lastName");
   const [sortDir, setSortDir] = useState("asc");
   const isNewCustomerRoute = location.pathname === "/admin/customers/new";
