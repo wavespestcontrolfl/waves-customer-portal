@@ -146,7 +146,10 @@ function checkCoverage(current, manifest, policy, baselineProof = new Set()) {
     const previous = stored.get(action.id);
     if (!previous) { errors.push(`New unmapped UI action: ${action.ui.file}:${action.ui.line}`); continue; }
     const implemented = previous.tools?.length && previous.tools.every(name => policy[name])
-      && previous.status === 'verified' && previous.evidence?.length;
+      && previous.status === 'verified' && Array.isArray(previous.evidence) && previous.evidence.length
+      && previous.evidence.every(value => typeof value === 'string' && value.trim())
+      && ['permission', 'approval', 'inputsAndEffects'].every(key => typeof previous[key] === 'string'
+        && previous[key].trim() && previous[key] !== 'requires_action_review');
     const exception = previous.status === 'reviewed_exception' && previous.exception?.review && previous.exception?.reason;
     if ((implemented || exception) && previous.reviewedFingerprint === action.fingerprint) continue;
     if (previous.status !== 'unmapped' || previous.baselineFingerprint !== action.fingerprint || !baselineProof.has(`${action.id}:${action.fingerprint}`)) {
