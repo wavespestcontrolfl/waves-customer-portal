@@ -12,6 +12,8 @@ const { getEffectiveDiscount, lineFlagsBlockPercentDiscount } = require('./prici
 const { isActivePlanCustomer } = require('./waveguard-existing-services');
 const { completionInvoiceAmount } = require('./billing-lane');
 const { applyDiscount } = require('./booking/visit-financial-stamps');
+const { splitTerminalCompletionInvoice } = require('./completion-invoice-candidate');
+const { recurringServiceKey } = require('./estimate-converter');
 
 const MONEY_FIELDS = [
   'estimated_price', 'primary_line_price', 'line_discount_id', 'line_discount_name',
@@ -31,7 +33,7 @@ const CUSTOMER_FIELDS = ['id', 'active', 'waveguard_tier', 'billing_mode', 'per_
 const LIVE_STATUSES = new Set(['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site']);
 
 function money(value) {
-  if (value == null || typeof value === 'boolean' || String(value).trim() === '') return null;
+  if (!['number', 'string'].includes(typeof value) || String(value).trim() === '') return null;
   const n = Number(value);
   return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null;
 }
@@ -107,7 +109,7 @@ function acceptedPricing(line) {
     discounts: acceptedDiscountRows(discount, base, savings),
     // A bare list figure cannot justify another percentage on a legacy net.
     provenUndiscounted: complete && savings === 0 && !line.parentRecurringDiscounted
-      && raw.manualFinalAnnual == null
+      && money(raw.manualFinalAnnual) === null
       && (raw.priceAfterDiscount != null || discount.effectiveDiscount === 0)
       && !(Number(discount.effectiveDiscount) > 0),
   };
@@ -144,15 +146,14 @@ function discountProposal({ entry, quote, line, service, estimate, tierRate, act
   // Do not overwrite a recorded price decision, combine an unknown stack,
   // or let a one-application add-on adjustment change the series template.
   if (entry.discountRecorded || (entry.id !== 'primary' && service.is_recurring && !service.recurring_parent_id)) return null;
-  const appointmentAdjusted = Boolean(service.discount_type || service.discount_id);
-  if (!appointmentAdjusted && quote.savings > 0 && sameMoney(entry.amount, quote.base)) {
+  if (quote.savings > 0 && sameMoney(entry.amount, quote.base)) {
     return { kind: 'accepted', name: 'Accepted estimate discounts', base: quote.base, amount: quote.amount,
       dollars: quote.savings, discounts: quote.discounts };
   }
   if (lineFlagsBlockPercentDiscount(line.sourceLine) || !activeMember || !quote.provenUndiscounted || !sameMoney(entry.amount, quote.amount)) return null;
   const tier = String(estimate.waveguard_tier || '').toLowerCase();
   if (tier !== tierRate.tier) return null;
-  const key = line.sourceLine.service || line.serviceKey;
+  const key = recurringServiceKey({ service: line.sourceLine.service || line.serviceKey });
   const benefit = getEffectiveDiscount(key, tierRate);
   if (!(benefit.effectiveDiscount > 0)) return null;
   const percent = benefit.effectiveDiscount * 100;
@@ -167,7 +168,10 @@ async function readEstimate(service, database) {
   let parent = null;
   if (!estimateId && service.recurring_parent_id) {
     parent = await database('scheduled_services').where({ id: service.recurring_parent_id }).first();
-    if (parent?.customer_id === service.customer_id && parent.service_id === service.service_id) {
+    const sameService = parent?.service_id && service.service_id
+      ? parent.service_id === service.service_id
+      : Boolean(parent?.service_key_snapshot && parent.service_key_snapshot === service.service_key_snapshot);
+    if (parent?.customer_id === service.customer_id && sameService) {
       const sameProperty = parent.property_id && service.property_id
         ? parent.property_id === service.property_id
         : samePropertyKey(scheduledPropertyKey(parent), scheduledPropertyKey(service));
@@ -253,7 +257,12 @@ async function loadCompletionPricing(serviceId, { database = db, role = 'technic
   if (!customer) throw reviewError('The job customer could not be verified.');
   const addons = await database('scheduled_service_addons').where({ scheduled_service_id: service.id }).orderBy('id');
   const source = await readEstimate(service, database);
-  const invoiceRows = await database('invoices').where({ scheduled_service_id: service.id }).whereNotIn('status', ['void', 'cancelled']).select('id', 'status', 'total').orderBy('id');
+  const attachedInvoices = await database('invoices').where({ scheduled_service_id: service.id })
+    .select('id', 'status', 'total').orderBy('id');
+  const invoiceRows = attachedInvoices.filter((row) => {
+    const { existing, terminal } = splitTerminalCompletionInvoice(row);
+    return existing || terminal; // Refunded still blocks; canceled/void rows do not.
+  });
   const { tierRate, rateRow, savedDiscount, activeMember, canStack, tierRulesAvailable } =
     await completionDiscountRules(database, customer, service, lockRules);
   const catalog = await database('services').select('id', 'service_key', 'name', 'short_name', 'category', 'billing_type', 'frequency', 'visits_per_year', 'default_duration_minutes');

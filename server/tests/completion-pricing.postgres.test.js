@@ -58,8 +58,8 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
     await pricing.commitCompletionPricingReview(trx, { ...plan, review: { witness: plan.view.witness, applyDiscounts: true } }, { role: 'admin' });
     expect(Number((await trx('scheduled_services').where({ id: jobId }).first()).estimated_price)).toBe(85);
   }));
-  test('tier comes from DB and stacks with a recorded stackable fixed adjustment', () => rollbackTest(async (trx) => {
-    const { jobId } = await fixture(trx, { net: 100 });
+  test.each([100, 85])('accepted net %p and tier proposals stack with a recorded fixed adjustment', (net) => rollbackTest(async (trx) => {
+    const { jobId } = await fixture(trx, { net });
     const discountId = randomUUID();
     await trx('discounts').insert({ id: discountId, discount_key: 'synthetic-courtesy', name: 'Courtesy', discount_type: 'fixed_amount', amount: 5, is_stackable: true });
     await trx('scheduled_services').where({ id: jobId }).update({ estimated_price: 95, discount_id: discountId, discount_name: 'Courtesy', discount_type: 'fixed_amount', discount_amount: 5, discount_dollars: 5 });
@@ -68,6 +68,63 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
     await pricing.commitCompletionPricingReview(trx, { ...plan, review: { witness: plan.view.witness, applyDiscounts: true } }, { role: 'admin', technicianId: 'synthetic' });
     const { lineItems } = await Invoice.buildLineItemsForScheduledService(jobId, { database: trx, fallbackAmount: 80 });
     expect(lineItems.reduce((sum, row) => sum + Number(row.amount), 0)).toBe(80);
+  }));
+  test.each([null, '', ' ', false])('empty annual override %p permits the proven tier benefit', (manualFinalAnnual) => rollbackTest(async (trx) => {
+    const { jobId, estimateId, soldLine } = await fixture(trx, { net: 100 });
+    await trx('estimates').where({ id: estimateId }).update({ estimate_data: {
+      result: { recurring: { services: [{ ...soldLine, manualFinalAnnual }] } },
+    } });
+    expect((await pricing.loadCompletionPricing(jobId, { database: trx, role: 'admin' })).view)
+      .toMatchObject({ canApply: true, proposedAmount: 85 });
+  }));
+  test.each(['void', 'canceled', 'cancelled', 'refunded', 'paid', 'open', 'processing'])('attached %s invoice follows canonical replacement eligibility', (status) => rollbackTest(async (trx) => {
+    const { jobId, customerId } = await fixture(trx);
+    await trx('invoices').insert({ customer_id: customerId, scheduled_service_id: jobId,
+      token: randomUUID(), invoice_number: `QA-${randomUUID().slice(0, 20)}`, status, total: 100 });
+    const replaceable = ['void', 'canceled', 'cancelled'].includes(status);
+    const plan = await pricing.loadCompletionPricing(jobId, { database: trx, role: 'admin' });
+    expect(plan.view.canApply).toBe(replaceable);
+    if (replaceable) {
+      await pricing.commitCompletionPricingReview(trx, { ...plan, review: { witness: plan.view.witness, applyDiscounts: true } }, { role: 'admin' });
+      const { lineItems } = await Invoice.buildLineItemsForScheduledService(jobId, { database: trx, fallbackAmount: 85 });
+      expect(lineItems.reduce((sum, row) => sum + Number(row.amount), 0)).toBe(85);
+    }
+  }));
+  test.each([['pest_general_quarterly', 'Pest Control', 'pest', true], ['lawn_care_recurring', 'Lawn Care', 'lawn', true],
+    ['rodent_bait_quarterly', 'Rodent Bait', 'rodent', true], ['commercial_lawn_care', 'Commercial Lawn Care', 'lawn', false]])(
+    'name-only accepted line uses catalog family %s for eligibility', (key, name, category, eligible) => rollbackTest(async (trx) => {
+      const { jobId, estimateId, serviceId, soldLine } = await fixture(trx, { net: 100 });
+      await trx('services').where({ id: serviceId }).update({ service_key: key, name, category });
+      await trx('scheduled_services').where({ id: jobId }).update({ service_key_snapshot: key, service_category_snapshot: category, service_type: name });
+      const { service: _service, ...nameOnly } = soldLine;
+      await trx('estimates').where({ id: estimateId }).update({ estimate_data: {
+        result: { recurring: { services: [{ ...nameOnly, name, perApplicationBilled: true }] } },
+      } });
+      const view = (await pricing.loadCompletionPricing(jobId, { database: trx, role: 'admin' })).view;
+      expect(view.lines[0].status).toBe('matched');
+      expect(view.canApply).toBe(eligible);
+      if (view.canApply) expect(view.proposedAmount).toBe(85);
+    }));
+  test.each([['pest_control_quarterly', 'lawn_care_recurring', false], ['pest_control_quarterly', 'pest_control_quarterly', true],
+    [null, null, false], [null, 'pest_control_quarterly', false]])(
+    'null service IDs require matching non-null parent/child keys %p/%p', (parentKey, childKey, linked) => rollbackTest(async (trx) => {
+      const { jobId, parentId, estimateId, soldLine } = await fixture(trx);
+      await trx('services').insert({ service_key: 'lawn_care_recurring', name: 'Lawn Care', category: 'lawn', frequency: 'quarterly', billing_type: 'recurring', visits_per_year: 4 });
+      await trx('estimates').where({ id: estimateId }).update({ estimate_data: { result: { recurring: { services: [soldLine,
+        { ...soldLine, service: 'lawn_care', name: 'Lawn Care' }] } } } });
+      await trx('scheduled_services').where({ id: parentId }).update({ service_id: null, service_key_snapshot: parentKey });
+      await trx('scheduled_services').where({ id: jobId }).update({ service_id: null, service_key_snapshot: childKey, source_estimate_id: null });
+      const view = (await pricing.loadCompletionPricing(jobId, { database: trx, role: 'admin' })).view;
+      expect(view.canApply).toBe(linked);
+      expect(view.estimate?.id || null).toBe(linked ? estimateId : null);
+    }));
+  test('an accepted discount cannot stack with an unapproved appointment adjustment', () => rollbackTest(async (trx) => {
+    const { jobId } = await fixture(trx);
+    const discountId = randomUUID();
+    await trx('discounts').insert({ id: discountId, discount_key: 'synthetic-nonstackable', name: 'Nonstackable', discount_type: 'fixed_amount', amount: 5, is_stackable: false });
+    await trx('scheduled_services').where({ id: jobId }).update({ estimated_price: 95, discount_id: discountId,
+      discount_name: 'Nonstackable', discount_type: 'fixed_amount', discount_amount: 5, discount_dollars: 5 });
+    expect((await pricing.loadCompletionPricing(jobId, { database: trx, role: 'admin' })).view.canApply).toBe(false);
   }));
   test.each(['customer', 'price', 'estimate'])('stale %s evidence refuses all writes', (change) => rollbackTest(async (trx) => {
     const ids = await fixture(trx, { net: 100 });
