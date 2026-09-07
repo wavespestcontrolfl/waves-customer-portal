@@ -247,7 +247,7 @@ async function prepareReadInput(params, context, { toolName, schema }) {
     }
     input.customer_id = customer.id;
     delete input.customer_name;
-    if (schema.properties.phone && customer.phone) input.phone = customer.phone;
+    if (params.phone && schema.properties.phone && customer.phone) input.phone = customer.phone;
     else delete input.phone;
   }
   const invalid = await validateRecordTarget(input, context, { toolName });

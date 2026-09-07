@@ -166,6 +166,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     ]);
     await db('sms_log').insert([
       { customer_id: customerA, direction: 'inbound', from_phone: a.phone, to_phone: '+15555550199', message_body: 'Correct task SMS evidence' },
+      { customer_id: customerA, direction: 'inbound', from_phone: '+15555550198', to_phone: '+15555550199', message_body: 'Correct former-phone SMS evidence' },
       { customer_id: null, direction: 'inbound', from_phone: a.phone, to_phone: '+15555550199', message_body: 'Correct unlinked SMS evidence' },
       { customer_id: customerB, direction: 'inbound', from_phone: a.phone, to_phone: '+15555550199', message_body: 'Foreign private shared-phone evidence' },
     ]);
@@ -187,6 +188,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       ['get_call_log', { customer_name: nameA }, 'Correct task call evidence'],
       ['get_conversation_thread', { customer_name: nameA }, 'Correct task SMS evidence'],
       ['search_messages', { phone: a.phone }, 'Correct unlinked SMS evidence'],
+      ['search_messages', { customer_name: nameA }, 'Correct former-phone SMS evidence'],
       ['match_existing_customer', { phone: a.phone }, customerA],
       ['get_partner_call_history', { phone: a.phone }, 'calls'],
     ];
