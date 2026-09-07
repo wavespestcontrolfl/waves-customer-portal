@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
+const { isTrackTokenLive } = require('./track-token-expiry');
 const { getPrimaryContact, getInvoiceEmailRecipients } = require('./customer-contact');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
@@ -694,10 +695,10 @@ async function sendMembershipStarted({
 const APP_STORE_URL = 'https://apps.apple.com/us/app/waves-pest-control/id6782775654';
 const PLAY_STORE_URL = 'https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal';
 
-async function sendAppIntro({ customerId, sourceId = null, trackToken = null } = {}) {
+async function sendAppIntro({ customerId, sourceId = null, trackToken = null, trackTokenExpiresAt = null } = {}) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
-  const trackUrl = /^[a-f0-9]{64}$/.test(String(trackToken || ''))
+  const trackUrl = /^[a-f0-9]{64}$/.test(String(trackToken || '')) && isTrackTokenLive(trackTokenExpiresAt)
     ? buildPortalUrl(`/track/${encodeURIComponent(trackToken)}`)
     : '';
   return sendTemplate({

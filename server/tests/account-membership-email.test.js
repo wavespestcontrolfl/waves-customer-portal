@@ -404,12 +404,13 @@ describe('account and membership email sender', () => {
 describe('app intro tracker destination', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  test.each([['a'.repeat(64), true], [null, false], ['bad/token', false]])('uses a valid tracker or login fallback (%s)', async (trackToken, valid) => {
+  test.each([['a'.repeat(64), null, true], ['a'.repeat(64), 3600000, true], ['a'.repeat(64), -1, false], ['a'.repeat(64), 'invalid', false], [null, null, false], ['bad/token', null, false]])('uses a live tracker or login fallback (%s, %s)', async (trackToken, expiry, valid) => {
     setDbQueues({
       customers: [chain({ first: customer() }), chain({ first: customer() })],
       customer_interactions: [chain()],
     });
-    await AccountMembershipEmail.sendAppIntro({ customerId: 'cust-1', sourceId: 'visit-1', trackToken });
+    const trackTokenExpiresAt = typeof expiry === 'number' ? new Date(Date.now() + expiry) : expiry;
+    await AccountMembershipEmail.sendAppIntro({ customerId: 'cust-1', sourceId: 'visit-1', trackToken, trackTokenExpiresAt });
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
       templateKey: 'app_intro', to: 'taylor@example.com', idempotencyKey: 'app_intro:cust-1',
       payload: expect.objectContaining({
