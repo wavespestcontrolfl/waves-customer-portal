@@ -76,3 +76,60 @@ links in the browser. No client update needed.
 - The client handler also refuses /admin, /tech, /api and any URL whose
   pathname starts with `//` (protocol-relative smuggling) — keep that guard;
   it backstops the association files.
+
+## Diagnosing an app that opens on home
+
+The web handler reports native link stages through the existing
+`POST /api/client-errors` receiver. In Sentry, filter
+`client_context:native-links` and `native_platform:ios` (or `android`).
+`link_source` distinguishes boot, the launch lookup, and a live `appUrlOpen`
+event. `link_route` is the current document's route family; `link_target` is
+the destination family. These labels never contain the link, estimate token,
+query string, customer information or a device identifier.
+
+| Outcome | Meaning |
+| --- | --- |
+| `started` / `listener-ready` | Native detection passed / the native listener registered. |
+| `plugin-error` / `listener-error` | The JS import failed / the native listener failed to register. An installed JS package does not prove the plugin was compiled into the binary. |
+| `empty` | The launch lookup returned no URL; this also happens on ordinary icon opens. |
+| `lookup-error` / `lookup-timeout` | The launch lookup rejected / remained unresolved for five seconds. A timeout does not cancel a later result. |
+| `received` / `rejected` | The handler received a permitted URL / refused the URL before consumption or navigation. |
+| `replay-skipped` | The launch URL matches the existing storage marker. `link_route:home` is worth checking during a link-open reproduction; it is not proof of a cold start. |
+| `superseded` | A live event was handled during startup, so the launch lookup did not overwrite it. |
+| `navigation-requested` / `navigation-failed` | Navigation was attempted / the navigation call failed synchronously. A request is not proof the destination rendered. |
+| `already-current` | The destination is already the current URL. |
+| `storage-unavailable` | The replay marker could not be read or written; navigation remains best-effort, and redirect-loop protection cannot be guaranteed. |
+
+Normal stages are informational; bridge, storage and navigation failures use
+error severity. Reports share the receiver's per-IP and global ceilings and
+are best-effort. Missing telemetry is not proof that the OS never delivered a
+URL. No stable per-device identifier is collected, so aggregate events are
+not a correlated per-customer navigation trace.
+
+Keep the existing launch marker until a replacement has device evidence. It
+prevents a short link from looping `assign -> 302 -> boot -> assign`. Explicit
+events bypass the marker. On iOS, an event-delivered URL stamps it before
+navigation so the next document does not replay that tap. Android's launch
+lookup retains the original launch URL, so its events preserve that original
+marker instead. A synchronous navigation failure restores the previous marker.
+Unit tests with cleared storage do not establish how WKWebView behaves across
+a native cold start.
+
+For device verification, use an owner-created test estimate and record the app
+version, iOS version and test time. Do not use a live customer's link.
+
+1. From Messages or Notes, open a fresh short link after force-quitting the
+   installed customer app. Confirm the estimate renders and stays stable.
+2. Force-quit again and open that same link. Then try a different short link.
+3. Repeat both links with the app in the background, including after viewing
+   an estimate or another server-rendered page. Also test a direct estimate
+   URL to separate redirect behavior from URL delivery.
+4. Inspect the native `AppDelegate` universal-link forwarding and Capacitor
+   App-plugin registration if the app opens but neither delivery path carries
+   the link. A correct AASA only establishes the association.
+5. Check the matching diagnostic time window and confirm there is no repeated
+   short-link request loop. Use Safari's device inspector to confirm the
+   destination loaded; `navigation-requested` alone does not establish that.
+
+The generated customer shell is `client/ios/` (see the bootstrap procedure
+above); the checked-in `ios/WavesPay` project is a different application.

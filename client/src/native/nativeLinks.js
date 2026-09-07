@@ -8,10 +8,9 @@
  * navigation — the SPA router, auth guards, and the /l/:code short-link 302s
  * all behave exactly as they do in a browser tab, just inside the app.
  *
- * Cold starts deliver the URL via App.getLaunchUrl() before listeners can bind,
- * so both paths are handled; the current-location guard makes them idempotent
- * when the OS fires both for one tap. On the web this module is an inert no-op
- * (mirrors nativePush.js).
+ * Cold starts can deliver the URL via App.getLaunchUrl() before listeners bind,
+ * so both paths are handled. An event delivered during startup takes priority
+ * over the launch lookup. On the web this module is an inert no-op.
  *
  * Safety rules (the OS should never hand us a violating URL, but the webview
  * must not be steerable if it does):
@@ -24,9 +23,21 @@
  *    (AASA excludes; Android intent-filter allowlists customer paths), and
  *    are refused here too as defense in depth.
  */
-import { isNativeApp } from './platform';
+import { isNativeApp, nativePlatform } from './platform';
+import { reportNativeLink } from '../lib/reportError';
 
 const STAFF_OR_API_PATH = /^\/(admin|tech|api)(\/|$)/;
+const LINK_ROUTES = new Map([['', 'home'], ['l', 'shortlink'], ['estimate', 'estimate']]);
+
+function traceLink(source, outcome, target) {
+  reportNativeLink({
+    platform: nativePlatform(),
+    source,
+    outcome,
+    route: LINK_ROUTES.get(window.location.pathname.split('/')[1]) || 'other',
+    target: target ? LINK_ROUTES.get(target.pathname.split('/')[1]) || 'other' : 'none',
+  });
+}
 
 export function sameOriginUrl(rawUrl, loc = window.location) {
   if (!rawUrl) return null;
@@ -69,9 +80,7 @@ export function customerAppUrl(rawUrl, loc = window.location) {
 export function navigateToCustomerUrl(rawUrl, loc = window.location) {
   const target = customerAppUrl(rawUrl, loc);
   if (!target) return false;
-  const dest = `${target.pathname}${target.search}${target.hash}`;
-  const current = `${loc.pathname || ''}${loc.search || ''}${loc.hash || ''}`;
-  if (dest === current) return false;
+  if (isCurrentUrl(target, loc)) return false;
   try {
     loc.assign(target.href);
     return true;
@@ -80,50 +89,108 @@ export function navigateToCustomerUrl(rawUrl, loc = window.location) {
   }
 }
 
-function navigateTo(rawUrl) {
-  navigateToCustomerUrl(rawUrl);
+function isCurrentUrl(target, loc = window.location) {
+  const dest = `${target.pathname}${target.search}${target.hash}`;
+  const current = `${loc.pathname || ''}${loc.search || ''}${loc.hash || ''}`;
+  return dest === current;
 }
 
-// App.getLaunchUrl() returns the SAME URL for the entire native app session,
-// and in remote-server mode every location.assign is a full document load that
-// re-runs this module. The dest === current guard above cannot catch a launch
-// URL that REDIRECTS — an /l/:code short link 302s to /estimate/:token, so the
-// webview is never "at" /l/:code and the replay loops the app forever
-// (2026-07-23 prod incident: a customer's estimate short link looped ~3
-// navigations/sec until they force-quit). Consume the launch URL ONCE per app
-// session: mark it in sessionStorage — which WebKit scopes to the browsing
-// session, so it survives in-session document reloads but resets on the next
-// cold start — BEFORE navigating, and skip the replay on later boots.
+// The native launch lookup can replay its URL across document reloads. A short
+// link redirects, so isCurrentUrl cannot prevent assign -> 302 -> boot loops.
+// Preserve the existing marker across reloads; do not assume a retained marker
+// proves this is the same native session. Explicit appUrlOpen events always
+// bypass it. Storage persistence on a real cold start needs device evidence.
 export const LAUNCH_URL_CONSUMED_KEY = 'waves-native-launch-url-consumed';
 
-function consumeLaunchUrl(url) {
-  try {
-    if (sessionStorage.getItem(LAUNCH_URL_CONSUMED_KEY) === url) return false;
-    sessionStorage.setItem(LAUNCH_URL_CONSUMED_KEY, url);
-  } catch {
-    // Storage unavailable: still honor the launch URL — a true cold start must
-    // navigate. The loop needs storage broken AND a redirecting link at once.
+function navigateTo(rawUrl, source) {
+  const target = customerAppUrl(rawUrl);
+  if (!target) {
+    traceLink(source, 'rejected');
+    return false;
   }
-  return true;
+  traceLink(source, 'received', target);
+
+  let previousUrl;
+  let markerWritten = false;
+  // iOS updates ApplicationDelegateProxy.lastURL on every event. Android's
+  // Bridge.intentUri remains the original launch URL: an event must not replace
+  // its marker, or the next document would navigate back to that old link.
+  if (source === 'launch' || nativePlatform() === 'ios') {
+    try {
+      previousUrl = sessionStorage.getItem(LAUNCH_URL_CONSUMED_KEY);
+      if (source === 'launch' && previousUrl === target.href) {
+        traceLink(source, 'replay-skipped', target);
+        return false;
+      }
+      sessionStorage.setItem(LAUNCH_URL_CONSUMED_KEY, target.href);
+      markerWritten = true;
+    } catch {
+      // Preserve the existing best-effort behavior, but make missing loop
+      // protection visible instead of silently assuming storage works.
+      traceLink(source, 'storage-unavailable', target);
+    }
+  }
+
+  if (isCurrentUrl(target)) {
+    traceLink(source, 'already-current', target);
+    return true;
+  }
+  // This records an attempt, not proof that the destination loaded. A later
+  // boot/replay event reports the new document's route family separately.
+  traceLink(source, 'navigation-requested', target);
+  if (navigateToCustomerUrl(target.href)) return true;
+
+  // A synchronous navigation failure must not burn a valid URL. Restore only
+  // our own marker, retaining protection for a previously consumed link.
+  if (markerWritten) {
+    try {
+      if (sessionStorage.getItem(LAUNCH_URL_CONSUMED_KEY) === target.href) {
+        if (previousUrl === null) sessionStorage.removeItem(LAUNCH_URL_CONSUMED_KEY);
+        else sessionStorage.setItem(LAUNCH_URL_CONSUMED_KEY, previousUrl);
+      }
+    } catch {
+      traceLink(source, 'storage-unavailable', target);
+    }
+  }
+  traceLink(source, 'navigation-failed', target);
+  return false;
 }
 
 export async function initNativeLinks() {
   if (!isNativeApp()) return;
+  traceLink('boot', 'started');
 
   let App;
   try {
     ({ App } = await import('@capacitor/app'));
   } catch {
-    // Old binary without the App plugin compiled in — universal links can't
-    // reach it anyway (no entitlement), so silently keep legacy behavior.
+    traceLink('boot', 'plugin-error');
     return;
   }
 
+  let handledEvent = false;
   try {
-    App.addListener('appUrlOpen', ({ url }) => navigateTo(url));
-    const launch = await App.getLaunchUrl();
-    if (launch?.url && consumeLaunchUrl(launch.url)) navigateTo(launch.url);
+    // Registration is asynchronous. Handle its rejection independently so a
+    // missing listener cannot prevent the cold-start lookup from running.
+    void App.addListener('appUrlOpen', (event) => {
+      handledEvent = navigateTo(event?.url, 'event') || handledEvent;
+    }).then(() => traceLink('boot', 'listener-ready'))
+      .catch(() => traceLink('boot', 'listener-error'));
   } catch {
-    // Never let link plumbing break app boot.
+    traceLink('boot', 'listener-error');
+  }
+
+  // A bridge call can hang without rejecting. Report that separately, without
+  // cancelling a delayed result or blocking an eventual appUrlOpen event.
+  const lookupTimer = setTimeout(() => traceLink('launch', 'lookup-timeout'), 5000);
+  try {
+    const launch = await App.getLaunchUrl();
+    if (handledEvent) traceLink('launch', 'superseded');
+    else if (launch?.url) navigateTo(launch.url, 'launch');
+    else traceLink('launch', 'empty');
+  } catch {
+    traceLink('launch', 'lookup-error');
+  } finally {
+    clearTimeout(lookupTimer);
   }
 }
