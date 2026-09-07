@@ -125,6 +125,30 @@ describe("Email draft and navigation preservation", () => {
     expect(screen.getByRole("textbox", { name: "Reply" })).toHaveValue("");
   });
 
+  it("keeps a pending guide send and its outcome when the email compose channel is hidden", async () => {
+    let complete;
+    loadResponses["link-library"] = () => response({ links: [] });
+    loadResponses.customers = () => response({ customers: [
+      { id: "fixture-guide-customer", first_name: "Guide", last_name: "Fixture", email: "recipient@example.invalid" },
+    ] });
+    loadResponses["send-prep"] = () => new Promise((resolve) => { complete = resolve; });
+    const view = mount(); await compose();
+    fireEvent.click(screen.getByRole("button", { name: "Quick Links", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: /^Lawn treatment/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Guide Fixture/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Send by email" }));
+    view.rerender(emailRoute(false));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    view.rerender(emailRoute());
+    fireEvent.click(screen.getByRole("button", { name: "Quick Links", exact: true }));
+    expect(screen.getByRole("button", { name: "Sending…" })).toBeDisabled();
+    await act(async () => complete(response({ success: true, message: "Fixture guide emailed." })));
+    expect(within(screen.getByRole("dialog", { name: "Quick Links" })).getByRole("status")).toHaveTextContent("Fixture guide emailed.");
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith("/send-prep"))).toHaveLength(1);
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Quick Links" })).getByRole("button", { name: "Close", exact: true }));
+    expect(screen.getByLabelText("Message *")).toHaveValue("Unsent compose text");
+  });
+
   it("preserves recipient, thread and HTML body fields for replies and new messages", async () => {
     mount();
     fireEvent.change(await open(a), { target: { value: "First line\nSecond line" } });

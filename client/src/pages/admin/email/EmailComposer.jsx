@@ -82,16 +82,19 @@ export default function EmailComposer({ active, editor, onSent }) {
     setToResults([]);
   };
 
-  if (!active || !showCompose) return null;
+  // Keep a guide send and its outcome mounted while the email channel is
+  // hidden. The compose focus trap and Quick Links sheet follow visibility.
+  const visible = active && showCompose;
   return createPortal(
     <div
       onClick={close}
+      hidden={!visible}
       style={{
         position: "fixed",
         inset: 0,
         background: "rgba(0,0,0,0.45)",
         zIndex: 1000,
-        display: "flex",
+        display: visible ? "flex" : "none",
         alignItems: "center",
         justifyContent: "center",
         padding: isMobile ? 0 : 16,
