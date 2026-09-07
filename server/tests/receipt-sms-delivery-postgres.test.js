@@ -38,7 +38,7 @@ jest.mock('../services/messaging/providers/twilio-sms', () => ({
 
 const { randomUUID } = require('node:crypto');
 const migration = require('../models/migrations/20260907000020_invoice_receipt_sms_delivery');
-const { buildReceiptLink } = require('../services/composer-customer-links');
+const { buildReceiptLink, immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
 const { loadPaymentForInvoice } = require('../services/receipt-payment');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { sendViaTwilio } = require('../services/messaging/providers/twilio-sms');
@@ -190,6 +190,26 @@ postgres('receipt SMS delivery evidence on PostgreSQL', () => {
       await mockPg('payments').insert(payment);
       await mockPg('payments').insert({ ...payment, id: randomUUID(), customer_id: randomUUID(), created_at: '2026-09-01T15:00:00Z' });
       expect((await loadPaymentForInvoice(row.id, customerId, { stripePaymentIntentId: row.stripe_payment_intent_id, stripeChargeId: row.stripe_charge_id, invoiceNumber: row.invoice_number })).id).toBe(payment.id);
+    }
+  });
+
+  test('a payment lookup failure rejects the latest-receipt request instead of selecting an older paid invoice', async () => {
+    await invoice({ receipt_sms_sent_at: sentAt });
+    await invoice({ status: 'refunded', paid_at: null, receipt_sms_sent_at: sentAt, created_at: '2026-07-01T15:00:00Z' });
+    // Fault only this transaction's isolated payment table. The real helper
+    // must propagate the SQL failure, never report a confirmed missing row.
+    await mockPg.schema.alterTable('payments', (table) => table.renameColumn('metadata', 'unavailable_metadata'));
+    await expect(buildReceiptLink([customerId], customerId)).rejects.toMatchObject({ code: '42703' });
+  });
+
+  test('raw receipt payment URLs are immediate-only according to the persisted invoice status', async () => {
+    const row = await invoice();
+    const url = `https://portal.wavespestcontrol.com/pay/${row.token}`;
+    for (const status of ['paid', 'processing', 'sent', 'refunded']) {
+      await mockPg('invoices').where({ id: row.id }).update({ status });
+      expect(await immediateOnlyLinkSendCheck(url)).toEqual(['paid', 'processing'].includes(status)
+        ? { present: true, label: 'Receipt' }
+        : { present: false });
     }
   });
 });

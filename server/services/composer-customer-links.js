@@ -648,6 +648,14 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
     applies: async () => true,
   },
   {
+    // The receipt SMS falls back to this URL if shortening fails. Invoice
+    // links also become receipt links when the payment page redirects.
+    label: 'Receipt',
+    fragment: /\/pay\//i,
+    token: (run, host) => canonicalPortalToken(run, host, RECEIPT_PAY_TARGET_RE, ANY_SCHEME),
+    applies: payLinkOpensReceipt,
+  },
+  {
     label: 'Contract signing',
     fragment: /\/contract\//i,
     token: (run, host) => canonicalPortalToken(run, host, /^\/contract\/([A-Za-z0-9_-]{16,})$/i, ANY_SCHEME),
@@ -701,7 +709,7 @@ async function shortCodeRows(runs, scheme = {}) {
     const code = canonicalPortalToken(run, hosts, /^\/l\/([A-Za-z0-9_-]+)$/i, scheme);
     if (!code) continue;
     const row = await db('short_codes').where({ code: code.toLowerCase() }).first('code', 'kind', 'target_url', 'expires_at');
-    const dest = row && shortRowDestination(row, hosts);
+    const dest = row && await shortRowDestination(row, hosts);
     // The seam refuses a plaintext run outright; the fence only needs presence.
     if (dest) rows.push({ code: row.code, expires_at: row.expires_at, plaintext: /^http:\/\//i.test(run), ...dest });
   }
@@ -714,7 +722,7 @@ async function shortCodeRows(runs, scheme = {}) {
 // protected kind the target does not confirm fails closed: present to the
 // fence, unverifiable (refused) at the send. The stored target is our own
 // redirect, judged under ANY_SCHEME like the fence.
-function shortRowDestination(row, hosts) {
+async function shortRowDestination(row, hosts) {
   const target = String(row.target_url || '');
   const appointment = canonicalPortalToken(target, hosts, APPOINTMENT_TOKEN_RE, ANY_SCHEME);
   if (appointment) return { kind: 'appointment', token: appointment };
@@ -722,18 +730,18 @@ function shortRowDestination(row, hosts) {
   if (report) return { kind: 'service_report', token: report };
   // A receipt short code pasted from message history is judged by its
   // target like the long form (pre-push Codex P1 on r9). The receipt SMS
-  // itself shortens /pay/<invoice token> (InvoiceService.receiptSmsFacts —
-  // a paid invoice's pay page renders its receipt), so a receipt-KIND code
-  // hands over its /pay target's token too; an untyped /pay code is a pay
-  // link, not a receipt, and stays out of the receipt seam (GH Codex #3893
-  // r10 P2).
+  // itself shortens /pay/<invoice token> (InvoiceService.receiptSmsFacts).
+  // Any code targeting a payment page that now redirects to a receipt
+  // needs the same checks, regardless of its original analytics kind.
   const receipt = canonicalPortalToken(target, hosts, RECEIPT_TOKEN_PATH_RE, ANY_SCHEME);
   if (receipt) return { kind: 'receipt', token: receipt };
   // payTarget: the pay page only redirects a paid / processing invoice to
   // its receipt — a refunded one stays on the payment page (PayPageV2), so
   // the seam refuses that form for a refunded row (r11 P2).
-  const payTarget = row.kind === 'receipt' && canonicalPortalToken(target, hosts, RECEIPT_PAY_TARGET_RE, ANY_SCHEME);
-  if (payTarget) return { kind: 'receipt', token: payTarget, payTarget: true };
+  const payTarget = canonicalPortalToken(target, hosts, RECEIPT_PAY_TARGET_RE, ANY_SCHEME);
+  if (payTarget && (row.kind === 'receipt' || await payLinkOpensReceipt(payTarget))) {
+    return { kind: 'receipt', token: payTarget, payTarget: true };
+  }
   if (['appointment', 'service_report', 'receipt'].includes(row.kind)) return { kind: row.kind, token: null };
   return null;
 }
@@ -758,9 +766,14 @@ const PROJECT_REPORT_RUN_RE = /\/report\/project\//i;
 // /receipt/<invoices.token> — the permanent receipt URL; receipt delivery
 // (invoice-email.js) also shortens it to /l/<code> of kind 'receipt'.
 const RECEIPT_TOKEN_PATH_RE = /^\/receipt\/([A-Za-z0-9_-]{16,})$/i;
-// /pay/<invoices.token> — the target receipt delivery shortens (kind
-// 'receipt' short codes only; see shortRowDestination).
+// /pay/<invoices.token> — receipt delivery's short-link target and raw fallback.
 const RECEIPT_PAY_TARGET_RE = /^\/pay\/([A-Za-z0-9_-]{16,})$/i;
+
+async function payLinkOpensReceipt(token) {
+  const invoice = await db('invoices').where({ token }).first('status');
+  // Mirrors PayPageV2's automatic receipt redirect, including pending ACH.
+  return ['paid', 'processing'].includes(invoice?.status);
+}
 
 // Appointment page links (GH Codex #3844 r2 P1): every /appointment route
 // 404s the moment GATE_APPOINTMENT_PAGE is off, and a queued message has no
@@ -1160,6 +1173,9 @@ async function checkAccountBoundLinks(ctx, projectReports) {
 // one live row on the number; an ambiguous number refuses, like the insert.
 async function checkReceiptLinks(ctx, shortRows, onRecipientAccount) {
   const vet = async (token, { payTarget = false } = {}) => {
+    if (!require('../config/feature-gates').isEnabled('composerReceiptLinks')) {
+      return refuseSend('Receipt Quick Links are switched off (GATE_COMPOSER_RECEIPT_LINKS) — remove the receipt link before sending.');
+    }
     const invoice = await db('invoices').where({ token }).first('id', 'customer_id', 'status', 'payer_id', 'receipt_sms_sent_at', 'stripe_payment_intent_id', 'stripe_charge_id', 'invoice_number');
     if (!invoice || !RECEIPT_INVOICE_STATUSES.includes(String(invoice.status || '')) || invoice.payer_id || !invoice.receipt_sms_sent_at) {
       return refuseSend('This receipt is not available to text — remove the link and insert a fresh one.');
@@ -1194,6 +1210,15 @@ async function checkReceiptLinks(ctx, shortRows, onRecipientAccount) {
     const token = canonicalPortalToken(run, ctx.hosts, RECEIPT_TOKEN_PATH_RE);
     if (!token) return refuseSend('A receipt link in this message is not on the Waves portal — remove it before sending.');
     const bad = await vet(token);
+    if (bad) return bad;
+  }
+  for (const run of linkRuns(ctx.runs, /\/pay\//i)) {
+    const token = canonicalPortalToken(run, ctx.hosts, RECEIPT_PAY_TARGET_RE, ANY_SCHEME);
+    if (!token || !await payLinkOpensReceipt(token)) continue;
+    if (!canonicalPortalToken(run, ctx.hosts, RECEIPT_PAY_TARGET_RE)) {
+      return refuseSend('A receipt payment link in this message uses http:// — remove it and insert a fresh one.');
+    }
+    const bad = await vet(token, { payTarget: true });
     if (bad) return bad;
   }
   // The shortened form receipt delivery texts (kind 'receipt', or any code

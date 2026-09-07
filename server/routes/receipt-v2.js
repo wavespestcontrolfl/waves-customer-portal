@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const InvoiceService = require('../services/invoice');
+const logger = require('../services/logger');
 const { noStore } = require('../middleware/no-store');
 
 // Receipt links are PERMANENT bearer URLs — the strongest case on the
@@ -39,6 +40,10 @@ router.get('/:token', async (req, res, next) => {
       stripePaymentIntentId: data.stripe_payment_intent_id,
       stripeChargeId: data.stripe_charge_id,
       invoiceNumber: data.invoice_number,
+    }).catch((err) => {
+      // Preserve the permanent viewer's existing invoice-only fallback.
+      logger.warn(`[receipt-v2] payment lookup failed: ${err.message}`);
+      return null;
     });
 
     const refundAmount = payment ? Number(payment.refund_amount || 0) : 0;
@@ -159,6 +164,10 @@ router.get('/:token/pdf', async (req, res, next) => {
       stripePaymentIntentId: data.stripe_payment_intent_id,
       stripeChargeId: data.stripe_charge_id,
       invoiceNumber: data.invoice_number,
+    }).catch((err) => {
+      // Paid PDFs retain their fallback; refunded PDFs still refuse below.
+      logger.warn(`[receipt-v2] payment lookup failed: ${err.message}`);
+      return null;
     });
     // A refunded receipt MUST show the refund — if the payment/refund row can't be
     // resolved (e.g. a legacy row with neither metadata.invoice_id nor a matching
