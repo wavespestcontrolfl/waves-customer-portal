@@ -935,7 +935,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       // Caller-supplied last-moment check (e.g. "is the SMS still unread?").
       // Fail open: a throwing check still pushes.
       if (enabledUserIds.length > 0 && typeof beforePush === 'function') {
-        const stillWanted = await Promise.resolve(beforePush()).catch(() => true);
+        const stillWanted = await Promise.resolve(beforePush({ dispatching: false })).catch(() => true);
         if (stillWanted === false) {
           stats.push = { sent: 0, skipped: 'superseded_before_push' };
           return stats;
@@ -1009,7 +1009,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
         // Second look right before the send: the badge fan-out above can take
         // up to ~1.5s and a thread opened in that window must not buzz (P2).
         if (typeof beforePush === 'function') {
-          const stillWanted = await Promise.resolve(beforePush()).catch(() => true);
+          const stillWanted = await Promise.resolve(beforePush({ dispatching: true })).catch(() => true);
           if (stillWanted === false) {
             stats.push = { sent: 0, skipped: 'superseded_before_push' };
             return stats;
