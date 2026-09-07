@@ -56,3 +56,15 @@ it('skips the range search without rangeFrom and never sends a half-typed picked
   expect(result.current.picked).toBeNull();
   expect(result.current.bestInRange).toBeNull();
 });
+
+it('enabled:false searches nothing — the edit form turns the hint off for a completed visit', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ slots: [] }) });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({
+    enabled: false, date: '2035-01-02', serviceId: 'fixture', technicianId: 'tech', pickedStart: '09:00', rangeFrom: '2035-01-01',
+  }));
+  // Past the hook's 300ms debounce: nothing may have been sent.
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  expect(fetch).not.toHaveBeenCalled();
+  expect(result.current).toMatchObject({ bestTimes: [], picked: null, bestInRange: null, checking: false });
+});

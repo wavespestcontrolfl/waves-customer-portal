@@ -124,11 +124,17 @@ async function guardHintSlots(slots, { today, sameDayFloorMin, step, spanMin, ex
 // reasons, not route reasons, so they get no verdict: a same-day hour
 // before its now+30 lead, an hour before its day open, or a window ending
 // after its day close (the arrival simulation runs later than the gap walk).
-// The edit picker allows all of these.
+// The edit picker allows all of these. An off-hour start (09:15 typed into
+// the edit form's free time input) is also never enumerated, and the save
+// validator refuses it outright (window-rules: appointment windows start on
+// the hour), so a verdict on it could endorse a window that cannot be saved
+// (Codex #4120 r4 P1). The window END may land off-hour and is never
+// rejected — only the start is checked.
 function pickedUnscorable({ from, today, pickedMin, pickedEndMin, useArrivalWindows }) {
   const nowEt = etParts();
   const dayEndMin = useArrivalWindows ? ADMIN_DAY_END_MINUTES : DAY_END_HOUR * 60;
-  return (from === today && pickedMin < nowEt.hour * 60 + nowEt.minute + 30)
+  return pickedMin % 60 !== 0
+    || (from === today && pickedMin < nowEt.hour * 60 + nowEt.minute + 30)
     || pickedMin < DAY_START_HOUR * 60
     || pickedEndMin > dayEndMin;
 }

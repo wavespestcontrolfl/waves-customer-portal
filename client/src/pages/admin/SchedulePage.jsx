@@ -1524,8 +1524,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     excludeServiceIds: [service.id],
   });
   // Advisory drive-detour suggestions for the same fixed day — picking a
-  // chip only fills the window fields (never saves).
+  // chip only fills the window fields (never saves). A completed visit's
+  // date/window edit is a record correction: there is no route to price,
+  // and the range chip would move the finished visit onto a live day
+  // (update-details allows the edit) — no hint at all (Codex #4120 r4 P2).
   const { bestTimes, picked, bestInRange } = useBestTimes({
+    enabled: !isCompletedVisit,
     arrivalWindows: true,
     date: form.scheduledDate,
     serviceId: service.id,

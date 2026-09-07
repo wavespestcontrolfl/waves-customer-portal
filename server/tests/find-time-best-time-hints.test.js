@@ -479,6 +479,20 @@ test('a picked hour outside the engine\'s day bounds is not scored (no picked ke
   expect(body.picked).toEqual({ start: '16:00', fits: false });
 });
 
+test('an off-hour picked start is not scored (no picked key): the save validator refuses :15/:30 starts, so no verdict may endorse one', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot()], evaluated: 1 });
+  // 09:15 sits inside the 09:00 gap's bounds — a gap match alone would call
+  // it a fit — but window-rules rejects every non-HH:00 start at save. The
+  // chips still answer, so the hint keeps its other lines while the
+  // operator is mid-edit.
+  const off = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '09:15' })).json();
+  expect(off.picked).toBeUndefined();
+  expect(off.slots).toHaveLength(1);
+  const onHour = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '09:00' })).json();
+  expect(onHour.picked).toMatchObject({ start: '09:00', fits: true });
+});
+
 test('a same-day picked hour before the engine\'s now+30 floor is not scored (no picked key), later hours are', async () => {
   process.env.GATE_BEST_TIME_HINTS = 'true';
   // ET now is pinned at 12:00 → the engine floors today at 12:30, so a
