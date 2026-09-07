@@ -52,6 +52,16 @@ test('viewed and selected targets retain the database text version without Date 
 });
 const context = (customerId = A) => ({ targets: customerId ? [{ customer_id: customerId }] : [], page: { ids: {} } });
 
+test.each(['reschedule_appointment', 'move_stops_to_day'])('%s cannot attach a customerless reservation to a customer task', async toolName => {
+  const hold = '40000000-0000-4000-8000-000000000001';
+  const owned = '40000000-0000-4000-8000-000000000002';
+  rows.scheduled_services = [{ id: hold, customer_id: null }, { id: owned, customer_id: A }];
+  const params = id => toolName === 'move_stops_to_day' ? { service_ids: [id] } : { appointment_id: id };
+  expect(await Context.validateRecordTarget(params(hold), context(), { toolName })).toMatchObject({ code: 'target_clarification_required' });
+  expect(await Context.validateRecordTarget(params(owned), context(), { toolName })).toBeNull();
+  expect(await Context.validateRecordTarget(params(hold), context(null), { toolName })).toBeNull();
+});
+
 test.each(['Synthetic Person', 'Another Person', 'Unresolved'])('SMS recipient name %s requires a canonical customer ID', async customer_name => {
   expect((await Context.validateRecordTarget({ customer_name }, context(), { toolName: 'send_sms' })).code).toBe('target_clarification_required');
   expect((await Context.validateRecordTarget({ customer_name, customerId: A }, context(), { toolName: 'send_sms' })).code).toBe('target_clarification_required');

@@ -156,6 +156,26 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     } finally { process.env.GATE_IB_PLATFORM = 'true'; }
   }, 30000);
 
+  test('a customer task cannot propose moving an unrelated customerless reservation hold', async () => {
+    const hold = crypto.randomUUID();
+    const date = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000));
+    const nextDate = require('../utils/datetime-et').etDateString(new Date(Date.now() + 8 * 86400000));
+    await db('scheduled_services').insert({ id: hold, customer_id: null, scheduled_date: date,
+      service_type: 'Synthetic reservation', status: 'pending', window_start: '12:00:00', window_end: '14:00:00' });
+    const before = await db('scheduled_services').where('id', hold).first();
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'move stops to day' }, 'discover'))
+      .mockResolvedValueOnce(tools('move_stops_to_day', { service_ids: [hold], new_date: nextDate }, 'move'))
+      .mockResolvedValueOnce(answer('The selected reservation does not belong to this customer.'));
+    const proposed = await api('/query', request(`Move ${nameA}'s appointments to ${nextDate}`));
+    expect(proposed.body.taskTarget.customer_id).toBe(customerA);
+    expect(proposed.body.pendingActions || []).toHaveLength(0);
+    const result = mockModel.mock.calls.at(-1)[0].messages.flatMap(message => Array.isArray(message.content) ? message.content : [])
+      .find(block => block.type === 'tool_result' && block.tool_use_id === 'move');
+    expect(JSON.parse(result.content)).toMatchObject({ code: 'target_clarification_required' });
+    expect(await db('ib_pending_actions').where({ task_id: proposed.body.taskId })).toHaveLength(0);
+    expect(await db('scheduled_services').where('id', hold).first()).toEqual(before);
+  }, 30000);
+
   test('visit, call, name, phone and Gmail selectors cannot substitute another customer', async () => {
     const visitB = crypto.randomUUID(), callA = crypto.randomUUID(), callB = crypto.randomUUID();
     const emailA = crypto.randomUUID(), emailB = crypto.randomUUID(), mixedA = crypto.randomUUID(), mixedB = crypto.randomUUID();

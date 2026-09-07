@@ -83,6 +83,20 @@ suite('IB target validation against isolated PostgreSQL', () => {
     expect((await Context.validateRecordTarget(params, task, { toolName: 'send_sms' })).code).toBe('target_relationship_mismatch');
   });
 
+  test('customer-scoped single and bulk appointment approvals exclude customerless slot holds', async () => {
+    const hold = randomUUID(), owned = randomUUID();
+    await mockDb('scheduled_services').insert([
+      { id: hold, customer_id: null, scheduled_date: require('../utils/datetime-et').etDateString(), service_type: 'Synthetic reservation', status: 'pending' },
+      { id: owned, customer_id: customerId, scheduled_date: require('../utils/datetime-et').etDateString(), service_type: 'Synthetic visit', status: 'pending' },
+    ]);
+    const task = await Context.resolve({ prompt: 'Update this customer', pageData: { customer_id: customerId } });
+    for (const params of [{ appointment_id: hold }, { service_ids: [owned, hold] }]) {
+      expect(await Context.validateRecordTarget(params, task, { forApproval: true })).toMatchObject({ code: 'target_clarification_required' });
+    }
+    expect(await Context.validateRecordTarget({ appointment_id: owned }, task)).toBeNull();
+    expect((await mockDb('scheduled_services').where('id', hold).first()).customer_id).toBeNull();
+  });
+
   test('a viewed call resolves its owner and cannot be swapped for a sibling call or body reference', async () => {
     const ids = [randomUUID(), randomUUID()];
     await mockDb('call_log').insert(ids.map(id => ({ id, customer_id: customerId, twilio_call_sid: `fixture-${id}`,
