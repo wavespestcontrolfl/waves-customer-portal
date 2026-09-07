@@ -1670,6 +1670,7 @@ export default function EmailTemplatesPanelV2() {
   const [fixtureName, setFixtureName] = useState("");
   const [payload, setPayload] = useState("{}");
   const [preview, setPreview] = useState(null);
+  const [audienceAppointmentId, setAudienceAppointmentId] = useState("");
   const [testEmail, setTestEmail] = useState("contact@wavespestcontrol.com");
   const [toast, setToast] = useState("");
   const [loading, setLoading] = useState(true);
@@ -1948,7 +1949,7 @@ export default function EmailTemplatesPanelV2() {
       if (canEdit) await persistDraft();
       const d = await adminFetch(`/admin/email-templates/versions/${selectedVersionId}/preview`, {
         method: "POST",
-        body: JSON.stringify({ payload: parsedPayload() }),
+        body: JSON.stringify({ payload: parsedPayload(), scheduledServiceId: audienceAppointmentId.trim() || undefined }),
       });
       setPreview(d);
       if (d.missingPayload?.length) {
@@ -2688,6 +2689,26 @@ export default function EmailTemplatesPanelV2() {
                   <Trash2 size={14} /> Delete
                 </Button>
               </div>
+              {["app_intro", "welcome.new_recurring"].includes(selectedKey) && (
+                <div className="space-y-2">
+                  <label htmlFor="email-audience-appointment" className="text-14 text-ink-secondary">Appointment ID for an audience check (optional)</label>
+                  <Input
+                    id="email-audience-appointment"
+                    value={audienceAppointmentId}
+                    onChange={(event) => { setAudienceAppointmentId(event.target.value); setPreview(null); }}
+                    placeholder="Paste an appointment UUID, then choose Preview"
+                  />
+                  {preview?.audiencePreview?.scheduledServiceId === audienceAppointmentId.trim() && preview.audiencePreview.templateKey === selectedKey && (
+                    <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-14 text-ink-secondary" role="status">
+                      {preview.audiencePreview.applies ? (
+                        <p>Audience eligible before: {preview.audiencePreview.before ? "Yes" : "No"}. After: {preview.audiencePreview.after ? "Yes" : "No"}.</p>
+                      ) : <p>This appointment’s audience is unchanged.</p>}
+                      <p>Email gate: {preview.audiencePreview.gateEnabled ? "Enabled" : "Off"}.</p>
+                      <p className="mt-2">{preview.audiencePreview.note}</p>
+                    </div>
+                  )}
+                </div>
+              )}
               <Textarea
                 rows={12}
                 value={payload}
