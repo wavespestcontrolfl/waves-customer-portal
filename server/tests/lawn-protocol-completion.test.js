@@ -290,13 +290,14 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
     expect(JSON.parse(completions[0].metadata)).toMatchObject({ attribution: 'protocol', treatedSqftSource: 'missing' });
   });
 
-  test('gate off: the WaveGuard writer still substitutes the planned area (unchanged while dark)', async () => {
-    const completions = [];
-    await recordLawnProtocolCompletion(fakeTrx(completions, [], []), {
+  test('gate off: the WaveGuard writer still substitutes the planned area and writes no skipped rows (unchanged while dark)', async () => {
+    const completions = []; const actuals = [];
+    await recordLawnProtocolCompletion(fakeTrx(completions, actuals, []), {
       service: oneTimeVisit, serviceRecord: { id: 'record-4' }, serviceProducts: [],
       plan: { protocol: { structured: { protocolKey: 'st_augustine', version: 1, window: { key: 'summer_insect', title: 'Summer', requiredTasks: [] } } }, mixCalculator: { lawnSqft: 5000, carrierGalPer1000: 1, items: [] } },
-      completionInput: {},
+      completionInput: { skippedProducts: [{ productId: 'prod-2', productName: 'Removed default (defaults gates on, ledger gate off)' }] },
     });
+    expect(actuals).toEqual([]);
     expect(completions[0]).toMatchObject({ treated_sqft: 5000, total_carrier_gal: 5 });
     expect(JSON.parse(completions[0].metadata)).toMatchObject({ attribution: 'protocol', treatedSqftSource: 'plan' });
   });

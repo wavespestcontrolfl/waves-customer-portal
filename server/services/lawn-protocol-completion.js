@@ -312,7 +312,10 @@ async function recordLawnProtocolCompletion(trx, {
   // a product retired while the form was open would otherwise fail the whole
   // closeout. Known = catalog row, an approved substitute on this plan, or a
   // protocol product; anything else keeps its name with product_id NULL.
-  const skippedProducts = normalizeSkippedProducts(completionInput.skippedProducts || completionInput.skipped_products);
+  // Skipped rows are part of the all-lawn ledger: with the gate off the
+  // legacy WaveGuard writer must stay byte-identical even though Complete
+  // Service (defaults gates on) now submits removed defaults.
+  const skippedProducts = allLawn ? normalizeSkippedProducts(completionInput.skippedProducts || completionInput.skipped_products) : [];
   const skippedIds = [...new Set(skippedProducts.map((row) => row.productId).filter(Boolean).map(String))];
   const catalogIds = skippedIds.length
     ? await trx('products_catalog').whereIn('id', skippedIds).select('id').then((rows) => rows.map((row) => String(row.id))).catch(() => [])
