@@ -341,7 +341,7 @@ async function enrollVisitCompletionReview(packetId, database = db) {
     serviceType: first.service_type, technicianId: visit.technician_id,
     completedAt: visit.completion_submitted_at, triggeredBy: 'auto',
     delayMinutes: require('./review-request').completionReviewDelay(first.structured_notes), legacyDelayMinutes: 120,
-  });
+  }).catch(() => ({ started: false, reason: 'error' }));
   if (result?.started === false && ['plan_resolution_failed', 'error'].includes(result.reason)) {
     // A paid webhook can reach a packet already closed while awaiting
     // payment. Put it back on the existing recovery worker's queue too.

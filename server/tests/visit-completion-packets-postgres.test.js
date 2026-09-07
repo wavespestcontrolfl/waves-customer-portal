@@ -247,11 +247,11 @@ postgres('visit completion packet records on PostgreSQL', () => {
       }
       return execute.call(this, connection, query);
     });
-    await expect(runVisitCompletionPacketEffects(saved.body.packetId)).rejects.toThrow('Synthetic record reload outage');
+    await expect(runVisitCompletionPacketMemberEffects(saved.body.packetId)).rejects.toThrow('Synthetic record reload outage');
     expect(interrupted).toBe(true);
     expect(await mockPg('service_completion_attempts').where({ service_id: fixture.serviceIds[0] }).first())
       .toMatchObject({ status: 'side_effects_pending' });
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
     expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(0);
   });
@@ -260,7 +260,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     process.env.PEST_RECAP = 'true';
     const enqueue = jest.spyOn(require('../services/service-report/recap-pipeline'), 'enqueueRecap').mockResolvedValue({ queued: true });
     const saved = await saveVisitCompletionPacket(submission());
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect((await mockPg('service_records').where({ customer_id: fixture.customerId })).every((record) => record.service_line === 'pest')).toBe(true);
     expect(enqueue).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
@@ -275,7 +275,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     for (const item of input.items) item.body.backfill = true;
     const saved = await saveVisitCompletionPacket(input);
     jest.spyOn(require('../routes/reports-public'), 'ensureReportToken').mockRejectedValue(new Error('Synthetic token outage'));
-    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
     expect(require('../services/customer-card').ensureCardForCompletion).not.toHaveBeenCalled();

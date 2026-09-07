@@ -5,6 +5,7 @@ jest.mock('../models/db', () => {
   for (const name of ['schema', 'fn']) Object.defineProperty(db, name, { get: () => mockPg[name] });
   return db;
 });
+jest.mock('../utils/scheduled-cron', () => ({ schedule: jest.fn(), scheduleTimeout: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
 jest.mock('../services/customer-card', () => ({ ensureCardForCompletion: jest.fn(async () => null) }));
@@ -86,10 +87,117 @@ postgres('visit summary recipient recovery', () => {
     fixture.token = await Summary.ensureVisitSummaryToken(fixture.packetId);
   });
   afterEach(async () => {
+    await mockPg('sms_log').where({ customer_id: fixture.customerId }).del();
     await mockPg('email_messages').where({ recipient_id: fixture.customerId }).del();
     await mockPg('dispatch_alerts').where({ tech_id: fixture.techId }).del();
     await mockPg('customers').where({ id: fixture.customerId }).del();
     await mockPg('technicians').where({ id: fixture.techId }).del();
+  });
+
+  async function heldSummary() {
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    const nextAllowedAt = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString();
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, retryable: true,
+      deferred: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt });
+    expect(await deliver()).toEqual({ state: 'delivery_pending' });
+    const queued = await mockPg('sms_log').where({ customer_id: fixture.customerId }).first();
+    expect(queued).toMatchObject({ status: 'scheduled', message_type: 'visit_summary', to_phone: '+12025550124' });
+    expect(new Date(queued.scheduled_for).toISOString()).toBe(nextAllowedAt);
+    return queued;
+  }
+
+  test('quiet hours queue once and scheduled finalization dedupes packet replay', async () => {
+    const queued = await heldSummary();
+    expect(await deliver()).toEqual({ state: 'delivery_pending' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(await mockPg('sms_log').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    const replay = require('../services/messaging/deferred-replay-registry');
+    expect(await replay.recheckDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ eligible: true });
+    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: true });
+    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: false });
+    expect(await replay.finalizeDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: true });
+    expect(await replay.finalizeDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: true });
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('the actual scheduled worker retries finalization without resending the summary', async () => {
+    const queued = await heldSummary();
+    const cron = require('../utils/scheduled-cron');
+    cron.schedule.mockClear();
+    const gates = require('../config/feature-gates');
+    const isEnabled = gates.isEnabled;
+    jest.spyOn(gates, 'logGateStatus').mockImplementation(() => {});
+    jest.spyOn(gates, 'isEnabled').mockImplementation((gate) => gate === 'cronJobs' || isEnabled(gate));
+    require('../services/scheduler').initScheduledJobs();
+    const tick = cron.schedule.mock.calls.find(([, callback]) => String(callback).includes('claimDueScheduledSms'))[1];
+    await mockPg('sms_log').where({ id: queued.id }).update({ scheduled_for: new Date(0) });
+    sendCustomerMessage.mockImplementation(async ({ preDispatchCheck }) => ({
+      sent: (await preDispatchCheck()).ok, providerMessageId: 'fixture-scheduled-provider-id',
+    }));
+    jest.spyOn(VisitGroups, 'finalizeVisitNotification').mockResolvedValueOnce({ ok: false });
+    await tick();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+    expect(sendCustomerMessage.mock.calls[1][0]).toMatchObject({
+      purpose: 'service_completion', to: '+12025550124', entryPoint: 'scheduled_sms_cron',
+    });
+    expect(await mockPg('sms_log').where({ id: queued.id }).first()).toMatchObject({
+      status: 'scheduled', metadata: { finalize_only: true, finalize_pending: true },
+    });
+    await mockPg('sms_log').where({ id: queued.id }).update({ scheduled_for: new Date(0) });
+    await tick();
+    expect(await mockPg('sms_log').where({ id: queued.id }).first()).toMatchObject({ status: 'sent' });
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+  });
+
+  test.each(['contact', 'consent', 'revocation'])('a queued summary suppresses after %s changes', async (change) => {
+    const queued = await heldSummary();
+    if (change === 'contact') await mockPg('customers').where({ id: fixture.customerId }).update({ service_contact_phone: '+12025550125' });
+    if (change === 'consent') await mockPg('customers').where({ id: fixture.customerId }).update({ service_contacts_consent_at: null });
+    if (change === 'revocation') await mockPg('service_visits').where({ id: fixture.visitId }).update({ summary_token_revoked_at: new Date() });
+    const replay = require('../services/messaging/deferred-replay-registry');
+    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: false });
+    expect(await replay.onTerminalDeferredReplay('visit_summary_deferred', queued.metadata)).toEqual({ ok: true });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
+      .toMatchObject({ status: 'suppressed' });
+  });
+
+  test('revocation between replay validation and the atomic dispatch claim still blocks sending', async () => {
+    const queued = await heldSummary();
+    const execute = mockPg.client._query;
+    let revoked = false;
+    jest.spyOn(mockPg.client, '_query').mockImplementation(async function revokeBeforeClaim(connection, query) {
+      if (!revoked && query.sql.startsWith('update "visit_effects"') && query.bindings.includes('unknown_delivery')) {
+        revoked = true;
+        await mockPg('service_visits').where({ id: fixture.visitId }).update({ summary_token_revoked_at: new Date() });
+      }
+      return execute.call(this, connection, query);
+    });
+    const replay = require('../services/messaging/deferred-replay-registry');
+    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: false });
+    expect(revoked).toBe(true);
+  });
+
+  test('an ambiguous scheduled provider handoff cannot resend and reaches office review', async () => {
+    const queued = await heldSummary();
+    const replay = require('../services/messaging/deferred-replay-registry');
+    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: true });
+    expect(await replay.recheckDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ eligible: false });
+    expect(await replay.onTerminalDeferredReplay('visit_summary_deferred', queued.metadata)).toEqual({ ok: true });
+    expect(await deliver()).toEqual({ state: 'delivery_review' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a proven provider-boundary quiet-hours hold can retry its pending scheduled handoff', async () => {
+    const queued = await heldSummary();
+    const replay = require('../services/messaging/deferred-replay-registry');
+    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: true });
+    const effect = await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first();
+    const heldMeta = { ...queued.metadata, quiet_hours_hold_at: new Date(new Date(effect.claimed_at).getTime() + 1).toISOString() };
+    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', heldMeta)).toMatchObject({ ok: true });
+    expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', heldMeta)).toMatchObject({ ok: false });
   });
 
   test('an interrupted first delivery resumes only the missing recipient and fully dedupes replay', async () => {
@@ -132,6 +240,17 @@ postgres('visit summary recipient recovery', () => {
     expect(await deliver()).toEqual({ state: 'delivered' });
     expect(sendOne).toHaveBeenCalledTimes(1);
     expect(sendOne.mock.calls[0][0].to).toBe(fixture.serviceEmail);
+  });
+
+  test.each(['failed', 'bounced', 'dropped'])('provider acceptance on an old %s email does not prove delivery or permit retry', async (status) => {
+    await priorEmail(fixture.serviceEmail, { status, provider_message_id: 'fixture-accepted-id',
+      sent_at: new Date(), error_message: ABORTED_BEFORE_DISPATCH });
+    await priorClaim('completion_email', { status: 'unknown_delivery', last_error: 'provider_outcome_unknown' });
+    expect(await deliver()).toEqual({ state: 'delivery_review' });
+    expect(sendOne).toHaveBeenCalledTimes(1);
+    expect(sendOne.mock.calls[0][0].to).toBe(fixture.primaryEmail);
+    expect(await deliver()).toEqual({ state: 'delivery_review' });
+    expect(sendOne).toHaveBeenCalledTimes(1);
   });
 
   test('an old owner cannot dispatch a later recipient after aggregate recovery', async () => {
@@ -221,6 +340,23 @@ postgres('visit summary recipient recovery', () => {
     expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'office_required' } });
     expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' })).toHaveLength(1);
     expect(sendOne).toHaveBeenCalledTimes(2);
+  });
+
+  test('a thrown legacy review enrollment reopens a done packet for recovery', async () => {
+    fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({
+      status: 'done', payload: JSON.stringify(fixture.payload),
+    });
+    await mockPg('service_records').whereIn('id', fixture.recordIds).update({
+      structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'auto_send', requestReview: true }),
+    });
+    jest.spyOn(require('../services/review-request'), 'enrollPostService')
+      .mockRejectedValueOnce(new Error('legacy database temporarily unavailable')).mockResolvedValue({ started: true });
+    expect(await require('../services/review-request').enrollForPaidInvoice({ visit_completion_packet_id: fixture.packetId }))
+      .toMatchObject({ retryable: true, reason: 'error' });
+    expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first())
+      .toMatchObject({ status: 'processing', error: 'review_enrollment_pending' });
+    expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
   });
 
   test('review enrollment retries through the saved packet and stays suppressed for partial outcomes', async () => {
