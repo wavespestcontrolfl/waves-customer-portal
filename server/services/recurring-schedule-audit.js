@@ -304,6 +304,11 @@ function hasAcceptedScheduleSpacingGap(rows, pattern, seeder) {
   });
 }
 
+function readActiveFamilyHolds(conn, customerIds, todayET) {
+  return conn('plan_holds').whereIn('customer_id', customerIds).where('status', 'active')
+    .where('starts_on', '<=', todayET).where('resume_on', '>', todayET).select('customer_id', 'family_key');
+}
+
 async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn = db) {
   // Let the accept/conversion transaction settle before paging. A real Date
   // binds a timestamptz cutoff independently of Railway's UTC process zone.
@@ -340,8 +345,7 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
   const retainedSeries = await conn('activity_log').whereIn('customer_id', customerIds)
     .where('action', 'recurring_series_skipped').select('customer_id', 'metadata');
   const todayET = etDateString(now);
-  const holds = await conn('plan_holds').whereIn('customer_id', customerIds).where('status', 'active')
-    .where('starts_on', '<=', todayET).where('resume_on', '>', todayET).select('customer_id', 'family_key');
+  const holds = await readActiveFamilyHolds(conn, customerIds, todayET);
   const decisions = await conn('recurring_plan_alerts').whereIn('customer_id', customerIds)
     .whereNotNull('resolved_at').orderBy('resolved_at', 'desc')
     .select('recurring_parent_id', 'resolved_action');
@@ -401,5 +405,6 @@ module.exports = {
   formatDateOnly,
   normalizeLimit,
   acceptedScheduleFindings,
+  readActiveFamilyHolds,
   findAcceptedRecurringScheduleGaps,
 };

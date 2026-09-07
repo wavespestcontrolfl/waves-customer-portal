@@ -33,13 +33,56 @@ test('retained coverage excludes prior-term visits using the selected Eastern ac
   };
   const verify = vm.runInNewContext(`${source.slice(start, end)}; verifyAcceptedRecurringSchedule`, {
     etDateString,
-    require: () => ({ acceptedScheduleFindings: classify, formatDateOnly: (value) => value || null }),
+    require: () => ({ acceptedScheduleFindings: classify, formatDateOnly: (value) => value || null,
+      readActiveFamilyHolds: async () => [] }),
     logger: { warn: jest.fn(), error: jest.fn() },
   });
   const result = await verify(database, { estimateId: estimate.id, customerId: estimate.customer_id });
   expect(classify.mock.calls[0][1].map((visit) => visit.id)).toEqual(['current', 'future']);
   expect(result.ok).toBe(false);
   expect(insert).toHaveBeenCalledWith(expect.objectContaining({ action: 'recurring_schedule_missing_followups' }));
+});
+
+test.each(['2040-01-10', '2040-01-11'])('acceptance honors active family holds until resume day (%s)', async (todayET) => {
+  const { readActiveFamilyHolds } = require('../services/recurring-schedule-audit');
+  const estimate = { id: 'estimate-new', customer_id: 'customer-1' };
+  const holdRows = [
+    { customer_id: 'customer-1', family_key: 'pest', status: 'active', starts_on: '2040-01-10', resume_on: '2040-01-11' },
+    { customer_id: 'customer-2', family_key: 'lawn', status: 'active', starts_on: '2040-01-01', resume_on: '2040-02-01' },
+    { customer_id: 'customer-1', family_key: 'lawn', status: 'cancelled', starts_on: '2040-01-01', resume_on: '2040-02-01' },
+    { customer_id: 'customer-1', family_key: 'mosquito', status: 'active', starts_on: '2040-02-01', resume_on: '2040-03-01' },
+  ];
+  const insert = jest.fn(async () => []);
+  const database = (table) => {
+    let rows = table === 'plan_holds' ? holdRows : [];
+    const query = {
+      whereIn: (key, values) => { rows = rows.filter((row) => values.includes(row[key])); return query; },
+      where: (key, op, value) => {
+        if (table === 'plan_holds') rows = rows.filter((row) => value === undefined
+          ? row[key] === op : op === '<=' ? row[key] <= value : row[key] > value);
+        return query;
+      },
+      leftJoin: () => query,
+      select: () => query,
+      first: async () => estimate,
+      insert,
+      then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
+    };
+    return query;
+  };
+  const classify = jest.fn((_estimate, _visits, _stopped, { heldFamilies }) => heldFamilies.has('pest')
+    ? [] : [{ serviceFamily: 'pest', recordedVisits: 0, expectedVisits: 12 }]);
+  const verify = vm.runInNewContext(`${source.slice(start, end)}; verifyAcceptedRecurringSchedule`, {
+    etDateString: () => todayET,
+    require: () => ({ acceptedScheduleFindings: classify, readActiveFamilyHolds }),
+    logger: { warn: jest.fn(), error: jest.fn() },
+  });
+  const result = await verify(database, { estimateId: estimate.id, customerId: estimate.customer_id });
+  const held = todayET === '2040-01-10';
+  expect([...classify.mock.calls[0][3].heldFamilies]).toEqual(held ? ['pest'] : []);
+  expect(classify.mock.calls[0][3].todayET).toBe(todayET);
+  expect(result.ok).toBe(held);
+  expect(insert).toHaveBeenCalledTimes(held ? 0 : 1);
 });
 
 test('an audit exception returns an explicit failure without aborting conversion', async () => {
@@ -63,8 +106,11 @@ test('an audit exception returns an explicit failure without aborting conversion
 const postgresTest = process.env.DATABASE_URL ? test : test.skip;
 postgresTest('a PostgreSQL audit statement error rolls back its savepoint and preserves acceptance writes', async () => {
   const url = new URL(process.env.DATABASE_URL);
-  if (!['localhost', '127.0.0.1'].includes(url.hostname)) {
-    throw new Error('This regression requires disposable local CI PostgreSQL');
+  const localCI = ['localhost', '127.0.0.1'].includes(url.hostname);
+  const ownedQA = process.env.WAVES_LOCAL_DEV === '1'
+    && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
+  if (!localCI && !ownedQA) {
+    throw new Error('Use disposable CI or this worktree\'s private QA database');
   }
   const db = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL });
   const checkStart = source.indexOf('    let recurringScheduleCheck =');

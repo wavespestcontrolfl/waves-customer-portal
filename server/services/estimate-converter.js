@@ -3847,7 +3847,9 @@ async function verifyAcceptedRecurringSchedule(database, { estimateId, customerI
       's.recurring_nth', 's.recurring_weekday', 's.skip_weekends', 's.weekend_shift', 's.date_exception',
       's.date_exception_cadence_date', 's.property_id',
       'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type');
-  const { acceptedScheduleFindings, formatDateOnly } = require('./recurring-schedule-audit');
+  const { acceptedScheduleFindings, formatDateOnly, readActiveFamilyHolds } = require('./recurring-schedule-audit');
+  const todayET = etDateString();
+  const holds = await readActiveFamilyHolds(database, [customerId], todayET);
   const reservedServiceIds = new Set(retained.map((metadata) => metadata.reservedServiceId).filter(Boolean));
   const acceptedDay = estimate.accepted_at ? etDateString(estimate.accepted_at) : null;
   const retainedRootSet = new Set(retainedParentIds);
@@ -3860,7 +3862,8 @@ async function verifyAcceptedRecurringSchedule(database, { estimateId, customerI
     return !isRetained || !acceptedDay || formatDateOnly(row.scheduled_date) >= acceptedDay;
   });
   const gaps = acceptedScheduleFindings({ ...estimate, property_id: null }, auditRows, new Set(), {
-    heldFamilies: new Set(),
+    todayET,
+    heldFamilies: new Set(holds.map((hold) => hold.family_key)),
   }).map((finding) => ({
     ...finding,
     estimateId,
