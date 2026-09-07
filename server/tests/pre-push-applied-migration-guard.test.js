@@ -397,4 +397,43 @@ describe('pre-push applied-migration guard', () => {
     expect(r.stderr).toMatch(/\[migration-guard\] BLOCKED/);
     expect(r.stderr).toContain('R100\t' + MIG_OLD.split(path.sep).join('/') + '\t' + MIG_NEW.split(path.sep).join('/'));
   });
+
+  // The exception needs a FRESH origin/main: when the refresh fails, a
+  // stale local copy must not vouch for a push that reverts the
+  // destination's migration to content main has since repaired away
+  // (pre-push hook P1 on this change) — the stale tip check would miss
+  // it too. The push targets the remote by path while origin's URL is
+  // pointed at a dead path, so only the hook's main refresh fails.
+  test('with a failed origin/main refresh, reverting the destination\'s migration to the stale local content is still BLOCKED', () => {
+    const MIG_F = path.join(MIGRATIONS, '20260101000016_repaired_after_stale.js');
+    const migRel = MIG_F.split(path.sep).join('/');
+    git(other, ['checkout', '-q', 'main']);
+    git(other, ['pull', '-q', '--ff-only', 'origin', 'main']);
+    writeAndCommit(other, { [MIG_F]: migBody('repaired_after_stale') }, 'main migration before its repair');
+    git(other, ['push', '-q', 'origin', 'HEAD:main']);
+    git(work, ['fetch', '-q', 'origin']);
+    git(work, ['checkout', '-q', '-b', 'stale-revert', 'origin/main']);
+    expect(pushResult(work, {}, 'HEAD:refs/heads/stale-revert').ok).toBe(true);
+    // main repairs MIG_F and the branch's tip is advanced to it from the
+    // other clone; this clone's origin/main stays at the pre-repair blob.
+    const repaired = "exports.up = async () => { /* repaired on main while this clone was offline */ };\nexports.down = async () => {};\n";
+    writeAndCommit(other, { [MIG_F]: repaired }, 'repair on main');
+    git(other, ['push', '-q', 'origin', 'HEAD:main', 'HEAD:refs/heads/stale-revert']);
+    writeAndCommit(work, { 'server/index.js': "module.exports = 'stale revert';\n" }, 'work on the stale local branch');
+    expect(git(work, ['show', 'HEAD:' + migRel])).toBe(git(work, ['show', 'origin/main:' + migRel]));
+    let r;
+    git(work, ['remote', 'set-url', 'origin', path.join(root, 'no-such-remote.git')]);
+    try {
+      git(work, ['push', remote, '+HEAD:refs/heads/stale-revert']);
+      r = { ok: true, stderr: '' };
+    } catch (e) {
+      r = { ok: false, stderr: String(e.stderr || '') };
+    } finally {
+      git(work, ['remote', 'set-url', 'origin', remote]);
+    }
+    expect(r.stderr).toMatch(/could not fetch main from origin/);
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toMatch(/\[migration-guard\] BLOCKED/);
+    expect(r.stderr).toContain('M\t' + migRel);
+  });
 });
