@@ -162,11 +162,30 @@ function buildJudgePrompt(spec = {}, transcript = '', { language = 'en', toolsAv
 /**
  * The prompt-template fingerprint every verdict carries: the version, the
  * system prompt, the output schema (its descriptions are grading
- * instructions too) and the static user-turn template — everything that
- * shapes a verdict except the scenario's own content.
+ * instructions too) and the user-turn template rendered through EVERY
+ * conditional branch — both languages, transfer required or not, each office
+ * state, with and without an account block, with and without tools — so a
+ * grading-instruction change on any branch moves the fingerprint. The
+ * scenario's own content never enters it.
  */
 function judgePromptSha() {
-  return sha256([JUDGE_PROMPT_VERSION, SYSTEM_PROMPT, JSON.stringify(JUDGE_SCHEMA), JSON.stringify(OFFICE_FACT), buildJudgePrompt({}, '').text].join('\n'));
+  const probeSpec = {
+    fixture_facts: ['F'], required_facts: ['R'], prohibited_facts: ['P'], required_action: 'A', acceptable_actions: ['B'],
+    ideal_move: 'I', response_range: { min: 1, max: 2 }, max_words_per_agent_turn: 40,
+  };
+  const renderings = [];
+  for (const language of ['en', 'es']) {
+    for (const transferRequired of [false, true]) {
+      for (const officeHours of [null, 'open', 'closed', 'unknown']) {
+        for (const callerBlock of [null, 'BLOCK']) {
+          for (const toolsAvailable of [[], ['T']]) {
+            renderings.push(buildJudgePrompt({ ...probeSpec, transfer_required: transferRequired }, 'X', { language, toolsAvailable, officeHours, callerBlock }).text);
+          }
+        }
+      }
+    }
+  }
+  return sha256([JUDGE_PROMPT_VERSION, SYSTEM_PROMPT, JSON.stringify(JUDGE_SCHEMA), JSON.stringify(OFFICE_FACT), ...renderings].join('\n'));
 }
 
 const toBool = (v) => v === true || v === 'true' || v === 1;

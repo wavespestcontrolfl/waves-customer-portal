@@ -176,6 +176,9 @@ describe('voice relay eval — each expect key', () => {
     expect(runCheck(exp('capture_lead_input_includes', { lead_quality: ['hot', 'warm'] }), r).status).toBe('pass');
     expect(runCheck(exp('capture_lead_input_includes', { lead_quality: 'hot' }), r)).toMatchObject({ status: 'fail', detail: expect.stringContaining('lead_quality') });
     expect(runCheck(exp('capture_lead_input_includes', { first_name: 'Priya' }), record()).status).toBe('fail');
+    // A capture the fixture rejected recorded nothing, whatever fields it carried.
+    const rejected = record({ tools: [{ name: 'capture_lead', input: { first_name: 'Priya' }, invalid: true, ok: false }] });
+    expect(runCheck(exp('capture_lead_input_includes', { first_name: 'Priya' }), rejected)).toMatchObject({ status: 'fail', detail: expect.stringContaining('rejected for its arguments') });
   });
 
   test('end_session_called: boolean, and an optional reason', () => {
@@ -197,11 +200,6 @@ describe('voice relay eval — each expect key', () => {
     expect(runCheck(exp('no_model_text_before_tool', ['find_slots']), clean)).toMatchObject({ status: 'fail', detail: expect.stringContaining('Let me check.') });
     const dirty = record({ order: [{ kind: 'agent', text: "You're all set!", turn: 1 }, { kind: 'tool', name: 'request_booking', turn: 1 }] });
     expect(runCheck(exp('no_model_text_before_tool', true), dirty).status).toBe('fail');
-  });
-
-  test('preamble_category is skipped until the deterministic preamble table ships', () => {
-    const r = record({ order: [{ kind: 'agent', text: 'Let me look that up.' }, { kind: 'tool', name: 'get_account_overview' }] });
-    expect(runCheck(exp('preamble_category', { tool: 'get_account_overview', category: 'lookup' }), r)).toMatchObject({ status: 'skip', detail: expect.stringContaining('PR 5') });
   });
 
   test('commitment_requires_receipt: every promise needs a performed write BEFORE it — never a refusal, never a later write, EN and ES', () => {
@@ -305,9 +303,16 @@ describe('voice relay eval — the judge', () => {
     // version, the system prompt, the schema and the user-turn template.
     const sha = judge.judgePromptSha();
     expect(sha).toMatch(/^[0-9a-f]{64}$/);
+    // Every conditional branch is rendered into it: the Spanish text, the
+    // transfer rule, each office state, the block / no-block wording, the
+    // tools line — a change to any of them moves the fingerprint.
+    const render = (opts) => judge.buildJudgePrompt({ fixture_facts: ['F'], required_facts: ['R'], prohibited_facts: ['P'], required_action: 'A', acceptable_actions: ['B'], ideal_move: 'I', response_range: { min: 1, max: 2 }, max_words_per_agent_turn: 40, ...opts.spec }, 'X', opts).text;
+    const parts = [judge.JUDGE_PROMPT_VERSION, judge._internals.SYSTEM_PROMPT, JSON.stringify(judge.JUDGE_SCHEMA), JSON.stringify(judge._internals.OFFICE_FACT)];
+    for (const language of ['en', 'es']) for (const transfer_required of [false, true]) for (const officeHours of [null, 'open', 'closed', 'unknown']) for (const callerBlock of [null, 'BLOCK']) for (const toolsAvailable of [[], ['T']]) parts.push(render({ language, toolsAvailable, officeHours, callerBlock, spec: { transfer_required } }));
     const crypto = require('crypto');
-    const expected = crypto.createHash('sha256').update([judge.JUDGE_PROMPT_VERSION, judge._internals.SYSTEM_PROMPT, JSON.stringify(judge.JUDGE_SCHEMA), JSON.stringify(judge._internals.OFFICE_FACT), judge.buildJudgePrompt({}, '').text].join('\n')).digest('hex');
-    expect(sha).toBe(expected);
+    expect(sha).toBe(crypto.createHash('sha256').update(parts.join('\n')).digest('hex'));
+    expect(parts.filter((x) => /Spanish/.test(x)).length).toBeGreaterThan(0);
+    expect(parts.filter((x) => /transfer_required: true/.test(x)).length).toBeGreaterThan(0);
   });
 
   test('judgeTranscript dispatches the voiceJudge policy on its lane and stamps model, provider, fallback and prompt sha', async () => {

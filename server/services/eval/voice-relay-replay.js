@@ -88,7 +88,7 @@ const SEVERITY_WEIGHT = Object.freeze({ critical: 3, major: 2, quality: 1 });
 const CHECKS = Object.freeze([
   'tools_called_include', 'tools_never_called', 'tools_called_subset_of',
   'spoken_never_matches', 'spoken_matches_any', 'capture_lead_input_includes',
-  'end_session_called', 'no_model_text_before_tool', 'preamble_category',
+  'end_session_called', 'no_model_text_before_tool',
   'commitment_requires_receipt',
 ]);
 // The tools whose PERFORMED write is a receipt for a spoken promise, and the
@@ -175,7 +175,6 @@ const CHECK_VALUE_RULES = Object.freeze({
   capture_lead_input_includes: () => (v) => (!v || typeof v !== 'object' || Array.isArray(v) || !Object.keys(v).length ? 'value must be an object of capture_lead fields' : null),
   end_session_called: () => (v) => (typeof v === 'boolean' || (v && typeof v === 'object') ? null : 'value must be boolean or { reason }'),
   no_model_text_before_tool: (knownTools) => (v) => (v === true || (Array.isArray(v) && v.length && v.every((n) => WRITE_TOOLS.includes(n) || knownTools.has(n))) ? null : 'value must be true or a tool list'),
-  preamble_category: () => (v) => (v && typeof v.tool === 'string' && typeof v.category === 'string' ? null : 'value must be { tool, category }'),
   commitment_requires_receipt: () => (v) => (v === true ? null : 'value must be true'),
 });
 
@@ -674,8 +673,10 @@ const CHECK_RUNNERS = Object.freeze({
     return hit ? ['pass', `/${hit.source}/i matched: "${clip(hit.text, 160)}"`] : ['fail', `none of ${value.map((v) => `/${v}/i`).join(', ')} was spoken`];
   },
   capture_lead_input_includes(value, record) {
-    const captures = record.toolCalls.filter((t) => t.name === 'capture_lead');
-    if (!captures.length) return ['fail', 'capture_lead was never called'];
+    // Only a capture the fixture ACCEPTED counts — a rejected call (missing
+    // call_summary, bad enum) recorded nothing, whatever fields it carried.
+    const captures = record.toolCalls.filter((t) => t.name === 'capture_lead' && !t.invalid && !t.unexpected);
+    if (!captures.length) return ['fail', record.toolCalls.some((t) => t.name === 'capture_lead') ? 'capture_lead was never validly called (every call was rejected for its arguments)' : 'capture_lead was never called'];
     const best = captures.map((c) => inputIncludes(c.input, value)).reduce((a, b) => (b.length < a.length ? b : a));
     return best.length ? ['fail', `no capture_lead input satisfied: ${best.join('; ')}`] : ['pass', 'capture_lead input includes every expected field'];
   },
@@ -693,16 +694,6 @@ const CHECK_RUNNERS = Object.freeze({
       if (before) return ['fail', `"${clip(before.text, 120)}" was spoken before ${call.name} ran`];
     }
     return ['pass', 'no model text preceded a write'];
-  },
-  preamble_category(value, record, { utterances }) {
-    const table = require('../voice-agent/relay-language').SAFE_PREAMBLES;
-    if (!table) return ['skip', 'deterministic preambles are not shipped yet (PR 5)'];
-    const call = record.toolCalls.find((t) => t.name === value.tool);
-    if (!call) return ['fail', `${value.tool} was never called`];
-    const before = [...utterances].reverse().find((u) => u.turn === call.turn && u.index < call.index);
-    if (!before) return ['fail', `nothing was spoken before ${value.tool}`];
-    const allowed = (table[record.language] || table.en || {})[value.category] || [];
-    return allowed.includes(before.text) ? ['pass', `preamble "${clip(before.text, 80)}" is a ${value.category} preamble`] : ['fail', `"${clip(before.text, 120)}" is not a ${value.category} preamble`];
   },
   // Every spoken promise needs a receipt that PRECEDES it: a write the
   // fixture actually performed (capture / booking / re-service / transfer),
