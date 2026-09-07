@@ -1446,8 +1446,13 @@ const ReviewService = {
    */
   async enrollForPaidInvoice(invoice, { source = "invoice_paid" } = {}) {
     try {
-      if (invoice?.visit_completion_packet_id) {
-        return await require('./visit-completion-packets').enrollVisitCompletionReview(invoice.visit_completion_packet_id);
+      // Webhooks pass a narrow projection. Resolve omitted ownership before
+      // considering the representative service record's review preferences.
+      const packetId = invoice?.id && invoice.visit_completion_packet_id === undefined
+        ? (await db('invoices').where({ id: invoice.id }).first('visit_completion_packet_id'))?.visit_completion_packet_id
+        : invoice?.visit_completion_packet_id;
+      if (packetId) {
+        return await require('./visit-completion-packets').enrollVisitCompletionReview(packetId);
       }
       if (!invoice?.customer_id || !invoice?.service_record_id) {
         return { enrolled: false, reason: "not_completion_invoice" };

@@ -131,7 +131,7 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
     } else if (err.wavesCardDecline) {
       // A closeout retry never starts a fresh automatic attempt after a decline.
       reason = 'payment_failed';
-    } else if (err.code === 'VISIT_PAYMENT_REVIEW_REQUIRED') {
+    } else if (['VISIT_PAYMENT_REVIEW_REQUIRED', 'INVOICE_COLLECTION_STOPPED'].includes(err.code)) {
       reason = 'office_required';
       await database('service_visits').where({ id: visit.id }).update({ billing_hold: true, updated_at: database.fn.now() });
     } else {

@@ -2070,7 +2070,9 @@ const StripeService = {
             .forUpdate()
             .first('status');
           if (seq && String(seq.status || '').toLowerCase() === 'stopped') {
-            throw new Error('Collection is stopped for this invoice. Review before charging.');
+            throw Object.assign(new Error('Collection is stopped for this invoice. Review before charging.'), {
+              code: 'INVOICE_COLLECTION_STOPPED',
+            });
           }
         }
         // Auto Pay SERIALIZED with the charge (Codex #3153 r13 P1): the

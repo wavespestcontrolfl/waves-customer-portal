@@ -227,10 +227,13 @@ async function probe(label, unavailable, fn) {
 // Loader — every DB read for one service, each individually fallible.
 // ---------------------------------------------------------------------------
 function visitSummaryDeliveryFact(effects) {
+  if (effects.some((effect) => effect.status === 'unknown_delivery')) return fact('unknown', 'visit_summary_delivery_unknown');
+  if (effects.length !== 2 || effects.some((effect) => !['sent', 'suppressed'].includes(effect.status))) {
+    return fact('pending', 'visit_summary_delivery_pending');
+  }
   const delivered = effects.find((effect) => effect.status === 'sent');
   if (delivered) return fact('done', 'visit_summary_delivered', { channel: delivered.effect_type,
     sentAt: isoOrNull(delivered.sent_at), source: 'visit_effects' });
-  if (effects.some((effect) => effect.status === 'unknown_delivery')) return fact('unknown', 'visit_summary_delivery_unknown');
   if (effects.length === 2 && effects.every((effect) => effect.status === 'suppressed')) {
     return fact('not_required', 'visit_summary_suppressed', { ruleSource: 'visit_effects' });
   }

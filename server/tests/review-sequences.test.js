@@ -3,6 +3,7 @@ const mockSendCustomerMessage = jest.fn(async () => ({ sent: true, auditLogId: '
 const mockEmailSendTemplate = jest.fn(async () => ({ sent: true, message: { id: 'em-1' } }));
 
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/visit-completion-packets', () => ({ enrollVisitCompletionReview: jest.fn() }));
 // Mutable gate flags for the 2026-07-30 revamp tests (post-service auto-enroll
 // + direct Google link). Both default OFF = pre-rollout behavior.
 const mockGates = { reviewSequences: false, reviewDirectLink: false };
@@ -2238,6 +2239,19 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     const scheduled = result.scheduledFor.getTime();
     expect(scheduled).toBeGreaterThanOrEqual(before + 29 * 60000);
     expect(scheduled).toBeLessThanOrEqual(before + 31 * 60000);
+  });
+
+  test('paid webhook projections resolve packet ownership before the representative record review policy', async () => {
+    const mock = makeMock({ invoices: [{ id: 'packet-invoice', visit_completion_packet_id: 'saved-packet' }] });
+    db.mockImplementation(mock);
+    const enroll = require('../services/visit-completion-packets').enrollVisitCompletionReview;
+    enroll.mockResolvedValue({ enrolled: false, reason: 'member_review_suppressed' });
+    const individual = jest.spyOn(ReviewService, 'enrollPostService');
+    const result = await ReviewService.enrollForPaidInvoice({ id: 'packet-invoice', customer_id: 'customer-1', service_record_id: 'representative-record' });
+    expect(enroll).toHaveBeenCalledWith('saved-packet');
+    expect(individual).not.toHaveBeenCalled();
+    expect(result).toEqual({ enrolled: false, reason: 'member_review_suppressed' });
+    individual.mockRestore();
   });
 
   test('enrollForPaidInvoice parses a naive ET reviewScheduledFor as Eastern wall-clock', async () => {

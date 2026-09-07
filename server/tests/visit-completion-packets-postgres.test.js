@@ -288,7 +288,10 @@ postgres('visit completion packet records on PostgreSQL', () => {
   });
 
 
-  test('a declined shared charge is not attempted again by a closeout retry', async () => {
+  test.each([
+    [{ wavesCardDecline: true }, 'payment_failed'],
+    [{ code: 'INVOICE_COLLECTION_STOPPED' }, 'office_required'],
+  ])('a terminal shared charge refusal %j is not attempted again by a closeout retry', async (refusal, expectedState) => {
     const methodId = randomUUID();
     await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,
       processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_fixture_decline',
@@ -296,17 +299,17 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await mockPg('customers').where({ id: fixture.customerId }).update({
       autopay_enabled: true, autopay_payment_method_id: methodId,
     });
-    chargeInvoiceWithSavedCard.mockRejectedValue(Object.assign(new Error('Synthetic decline'), { wavesCardDecline: true }));
+    chargeInvoiceWithSavedCard.mockRejectedValue(Object.assign(new Error('Synthetic collection refusal'), refusal));
     const saved = await saveVisitCompletionPacket(submission());
     expect(await runVisitCompletionPacketEffects(saved.body.packetId))
-      .toMatchObject({ status: 200, body: { payment: { state: 'payment_failed' } } });
+      .toMatchObject({ status: 200, body: { payment: { state: expectedState } } });
     expect(await runVisitCompletionPacketEffects(saved.body.packetId))
-      .toMatchObject({ status: 200, body: { payment: { state: 'payment_failed' } } });
+      .toMatchObject({ status: 200, body: { payment: { state: expectedState } } });
     expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(require('../services/review-request').enrollPostService).not.toHaveBeenCalled();
     expect(await mockPg('invoices').where({ visit_completion_packet_id: saved.body.packetId }).first())
-      .toMatchObject({ status: 'scheduled' });
+      .toMatchObject({ status: expectedState === 'office_required' ? 'draft' : 'scheduled' });
   });
 
   test('an ambiguous charge waits for the existing invoice settlement and repairs the visit ledger', async () => {

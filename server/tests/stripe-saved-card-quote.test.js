@@ -453,7 +453,7 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
 
     const StripeService = require('../services/stripe');
     await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { refuseWhenDunningStopped: true }))
-      .rejects.toThrow('Collection is stopped for this invoice');
+      .rejects.toMatchObject({ code: 'INVOICE_COLLECTION_STOPPED', message: expect.stringContaining('Collection is stopped for this invoice') });
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
