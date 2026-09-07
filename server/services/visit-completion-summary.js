@@ -180,7 +180,8 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
       await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', 'unknown_delivery', new Date(), claim.token);
       return;
     }
-    const outcome = result.sent ? 'sent' : result.retryable ? 'retry' : 'suppressed';
+    const retryable = result.retryable || result.code === 'CONSENT_LOOKUP_FAILED';
+    const outcome = result.sent ? 'sent' : retryable ? 'retry' : 'suppressed';
     await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', outcome, new Date(), claim.token);
   } catch {
     await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', dispatched ? 'unknown_delivery' : 'retry', new Date(), claim.token);
@@ -265,7 +266,7 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   const visibleMembers = await database('visit_completion_packet_items').where({ packet_id: packet.id })
     .whereIn('service_record_id', (summary?.services || []).map((service) => service.id)).pluck('scheduled_service_id');
   const context = { visit, member, customer, prefs, database, visible: Boolean(summary), summaryUrl: token ? portalUrl(`/visit/${token}`) : null,
-    requested: payload.items.some((item) => visibleMembers.includes(item.serviceId) && item.body.sendCompletionSms !== false) };
+    requested: payload.items.some((item) => visibleMembers.includes(item.serviceId) && item.body.sendCompletionSms === true) };
   await sendSummarySms(context);
   await sendSummaryEmail(context);
   const effects = await database('visit_effects').where({ visit_id: visit.id })

@@ -3831,7 +3831,7 @@ function initScheduledJobs() {
               status: 'scheduled',
               scheduled_for: retryAt,
               updated_at: completedAt,
-              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?)", [completedAt, smsResult.code || null]),
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?::text)", [completedAt, smsResult.code || null]),
             });
             logger.warn(`[scheduled-sms] Retryable failure on ${msg.id} (${smsResult.code}); retry at ${retryAt.toISOString()} (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
           } else {

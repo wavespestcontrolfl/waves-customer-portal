@@ -323,7 +323,7 @@ async function enrollVisitCompletionReview(packetId, database = db) {
   const packet = await database('visit_completion_packets').where({ id: packetId }).first();
   if (!packet) return { enrolled: false, reason: 'packet_missing' };
   const payload = typeof packet.payload === 'string' ? JSON.parse(packet.payload) : packet.payload;
-  const requested = payload.items.every(({ body }) => body.requestReview === true
+  const requested = payload.items.every(({ body }) => body.requestReview !== false
     && (!body.reviewSuppression || body.reviewSuppression === 'invoice_created'));
   const visit = await database('service_visits').where({ id: packet.visit_id }).first();
   if (!requested || visit.billing_hold) return { enrolled: false, reason: 'visit_review_suppressed' };

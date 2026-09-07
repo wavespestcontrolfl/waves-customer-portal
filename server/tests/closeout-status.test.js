@@ -504,6 +504,7 @@ describe('closeout-status: invoice + invoice delivery', () => {
 
 describe('closeout-status: grouped summary evidence', () => {
   test.each([
+    [[], 'pending'],
     [['sent', 'suppressed'], 'done'],
     [['sent', 'sent'], 'done'],
     [['sent', 'failed'], 'pending'],

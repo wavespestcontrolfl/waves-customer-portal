@@ -346,6 +346,7 @@ async function sendCustomerMessage(input) {
         blocked: true,
         code: blocked.code,
         reason: blocked.reason,
+        ...(verdict?.retryable === true ? { retryable: true } : {}),
         auditLogId: audit.id,
         segmentCount: segmentMeta.segmentCount,
         encoding: segmentMeta.encoding,
