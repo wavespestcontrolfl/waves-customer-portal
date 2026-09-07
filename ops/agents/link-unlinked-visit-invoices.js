@@ -72,7 +72,7 @@ if (!CONNECTION) { console.error('DATABASE_PUBLIC_URL (or DATABASE_URL) is requi
 const knex = require(path.join(ROOT, 'node_modules', 'knex'))({ client: 'pg', connection: CONNECTION, pool: { min: 0, max: 2 } });
 const InvoiceService = require(path.join(ROOT, 'server', 'services', 'invoice'));
 const { serviceKeyFor } = require(path.join(ROOT, 'server', 'services', 'recurring-appointment-seeder'));
-const { acquireScheduledMintLockChain, assertScheduledInvoiceNotPacketOwned } = require(path.join(ROOT, 'server', 'services', 'scheduled-invoice-mint'));
+const { acquireScheduledInvoiceMintLock, acquireScheduledMintLockChain, assertScheduledInvoiceNotPacketOwned } = require(path.join(ROOT, 'server', 'services', 'scheduled-invoice-mint'));
 const { etDateString } = require(path.join(ROOT, 'server', 'utils', 'datetime-et'));
 
 const DEAD_VISIT_STATUSES = ['cancelled', 'rescheduled', 'skipped', 'no_show'];
@@ -247,6 +247,17 @@ function readPlan(file) {
     const catalogNames = await catalog(knex);
     let written = 0;
     await knex.transaction(async (trx) => {
+      // Every reviewed visit's mint advisory lock FIRST, in one deterministic
+      // order, before any customer / visit row lock is held (pre-push r6
+      // P1): with visits A and B of one customer in the plan, evaluating A
+      // holds the customer FOR UPDATE through commit, a live mint for B
+      // takes B's advisory lock and waits on that customer, and evaluating
+      // B would then wait on B's advisory lock — a deadlock that aborts the
+      // repair or live billing. Advisory xact locks are re-entrant, so the
+      // per-pair chain below re-acquires without waiting.
+      for (const visitId of [...new Set(reviewed.map((p) => String(p.visitId)))].sort()) {
+        await acquireScheduledInvoiceMintLock(trx, visitId);
+      }
       for (const p of reviewed) {
         const again = await evaluate(trx, p.invoiceId, catalogNames, { lock: true });
         const same = again.pairing && String(again.pairing.visitId) === String(p.visitId)
