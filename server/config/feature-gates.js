@@ -720,6 +720,8 @@ const gates = {
   // also requires GATE_SMS_OPERATIONAL_ACTIONS_SINCE (an offset ISO instant)
   // so enabling this lane never applies the historical training corpus.
   smsOperationalActions: gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS'),
+  // Separate activation for commitment capture, follow-up bells and staff closure.
+  smsCommitmentFollowup: gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP'),
 
   // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
   // human-authored SMS replies + consent-gated call transcripts into

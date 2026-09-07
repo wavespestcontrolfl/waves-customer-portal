@@ -1,7 +1,7 @@
 'use strict';
 
-// Private-profile capture for the SMS agent. Reuses extraction receipts,
-// the audited profile writer, cron lock and existing exception bell.
+// The action half of the SMS agent. Reuses the extraction receipt store,
+// commitment ledger, private profile writer, cron lock and admin bell.
 // No customer communications, scheduling writes, account merges or money movement.
 const db = require('../models/db');
 const logger = require('./logger');
@@ -15,19 +15,32 @@ const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = requi
 const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode } = require('./sms-operational-extractor');
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment } = require('./sms-commitment-fulfillment');
 
 const enabled = () => gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS');
+const smsCommitmentsEnabled = () => enabled() && gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP');
 const SOURCE_COLUMNS = ['id', 'customer_id', 'direction', 'message_body', 'message_type', 'created_at', 'from_phone', 'to_phone', 'status'];
+const HUMAN_TYPES = ['manual', 'ai_approved', 'ai_revised'];
 const EXCLUDED_TYPES = ['opt_out', 'opt_in', 'sms_reaction', 'help_request'];
 const tail = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-function eligibleMessage(message = {}) {
+// A sentence can request the same kind of work for two properties or two
+// recipients/deliverables. Keep that scope in identity. Source-row locking
+// and operational_analysis prevent a reworded retry from committing a
+// second extraction of the same SMS.
+const keyOf = (item) => `${item.party}:${item.kind}:${hashExtractionSource(
+  JSON.stringify([item.quote, item.property_id, item.description]),
+).slice(0, 20)}`;
+
+function eligibleMessage(message = {}, { captured = false } = {}) {
+  const statuses = captured ? ['sent', 'delivered', 'failed', 'undelivered'] : ['sent', 'delivered'];
   const ourNumber = message.direction === 'inbound' ? message.to_phone : message.from_phone;
   return !!message.customer_id && !!message.message_body
     && !isInternalTestCustomerId(message.customer_id)
     && tail(ourNumber) !== tail(numbers.tollFree.number)
     && !!numbers.findByNumber(ourNumber)
     && !EXCLUDED_TYPES.includes(message.message_type)
-    && message.direction === 'inbound';
+    && (message.direction === 'inbound'
+      || (smsCommitmentsEnabled() && HUMAN_TYPES.includes(message.message_type) && statuses.includes(message.status)));
 }
 
 // Temporal qualifiers anywhere in the current SMS require staff review, even
@@ -92,7 +105,7 @@ async function loadMessageContext(conn, message) {
       .select('id', 'is_primary', 'address_line1', 'address_line2', 'city', 'zip'),
     conn('property_preferences').where({ customer_id: message.customer_id }).first(),
   ]);
-  return { message, history: history.reverse(), properties, preferences: preferences || {} };
+  return { message, history: history.reverse(), properties, preferences: preferences || {}, captureCommitments: smsCommitmentsEnabled() };
 }
 
 async function recordMessageOperations(conn, message, extracted, matchedContext) {
@@ -104,7 +117,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     const customer = await trx('customers').where({ id: message.customer_id }).whereNull('deleted_at').forUpdate().first();
     if (!customer) return { skipped: 'customer_unavailable' };
     const live = await trx('sms_log').where({ id: message.id }).forUpdate().first();
-    if (!enabled()) return { skipped: 'gate_off' };
+    if (!enabled() || matchedContext.captureCommitments !== smsCommitmentsEnabled()) return { skipped: 'gate_changed' };
     if (!eligibleMessage(live) || live.customer_id !== message.customer_id || live.message_body !== message.message_body) return { skipped: 'source_changed' };
     if (live.operational_analysis?.version === VERSION) return { skipped: 'already_processed' };
     const properties = await trx('customer_properties').where({ customer_id: customer.id, active: true }).select('id');
@@ -116,22 +129,36 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     const facts = await applyFacts(trx, message, extracted.facts, {
       properties, current: current || {}, expectedCurrent: matchedContext.preferences, senderIsPrimary, messageBody: message.message_body,
     });
-    const analysis = { version: VERSION, processed_at: new Date().toISOString(), facts, dropped: extracted.dropped };
+    const obligations = matchedContext.captureCommitments ? extracted.obligations : [];
+    const dropped = extracted.dropped;
+    for (const item of obligations) {
+      const propertyValid = properties.some((p) => p.id === item.property_id);
+      await trx('call_commitments').insert({
+        sms_log_id: message.id, commitment_key: keyOf(item), party: item.party, kind: item.kind,
+        description: item.description, channel: 'sms', due_at: item.due_at,
+        due_basis: item.due_at ? 'stated' : null, source: 'ai', extractor_version: VERSION,
+        evidence: JSON.stringify([{ quote: item.quote, sms_log_id: message.id, matched: true,
+          speaker: message.direction === 'inbound' ? 'caller' : 'agent' }]),
+        sms_context: { basis: item.basis, due_text: item.due_text, property_id: propertyValid ? item.property_id : null,
+          property_ambiguous: !propertyValid, customer_id: customer.id, source_at: message.created_at },
+      }).onConflict(['sms_log_id', 'commitment_key']).ignore();
+    }
+    const analysis = { version: VERSION, processed_at: new Date().toISOString(), facts, dropped };
     await trx('sms_log').where({ id: message.id }).update({ operational_analysis: analysis });
     await recordExtractionAttempt({ trx, source_type: 'message', source_id: message.id, extractor_version: VERSION,
-      source_hash: hashExtractionSource(message.message_body), status: 'ok', proposal_count: facts.length });
+      source_hash: hashExtractionSource(message.message_body), status: 'ok', proposal_count: facts.length + obligations.length });
     const exceptions = facts.filter((f) => !['applied', 'unchanged'].includes(f.outcome));
-    if (exceptions.length + extracted.dropped) {
+    if (exceptions.length + dropped) {
       const notif = await NotificationService.notifyAdmin('alert', 'SMS instructions need review',
-        'Part of this message needs an evidence, property, or existing-value check. Open the customer profile to review the source conversation.',
+        'Part of this message needs an evidence, property, timing, or existing-value check. Open the customer profile to review the source conversation.',
         { trx, bell: true, dedupeKey: `sms-property-instructions:${message.id}`,
-          link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+          link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}&tab=comms`,
           metadata: { triggerKey: 'sms_operational_exception', customerId: customer.id, sms_log_id: message.id,
-            fields: exceptions.map((f) => f.field), unverified_count: extracted.dropped,
+            fields: exceptions.map((f) => f.field), unverified_count: dropped,
             reasons: [...new Set(exceptions.map((f) => f.outcome))] } });
       if (!notif?.id) throw new Error('sms_operations_bell_not_persisted');
     }
-    return { applied: facts.filter((f) => f.outcome === 'applied').length };
+    return { recorded: obligations.length, applied: facts.filter((f) => f.outcome === 'applied').length };
   });
 }
 
@@ -176,7 +203,7 @@ async function runSmsOperationalActions({ now = new Date(), conn = db, extract =
           const notification = await NotificationService.notifyAdmin('alert', 'An SMS needs a manual review',
             'The SMS agent could not finish processing this conversation after its retries. Open the customer profile to check the requested work.',
             { trx, bell: true, dedupeKey: `sms-operations-failed:${message.id}`,
-              link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}`,
+              link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
               metadata: { triggerKey: 'sms_operational_exception', customerId: message.customer_id, sms_log_id: message.id } });
           if (!notification?.id) throw new Error('sms_operations_bell_not_persisted');
         });
@@ -187,4 +214,143 @@ async function runSmsOperationalActions({ now = new Date(), conn = db, extract =
   });
 }
 
-module.exports = { eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions };
+const KIND_LABELS = {
+  send_estimate: 'An estimate requested or promised by SMS needs follow-up',
+  callback: 'An SMS callback request or promise needs follow-up',
+  send_report: 'A requested report needs follow-up',
+  send_paperwork: 'Requested paperwork needs follow-up',
+  technician_follow_up: 'A technician follow-up needs attention',
+  schedule_visit: 'An SMS scheduling request needs attention',
+  send_appointment_confirmation: 'A promised appointment confirmation needs attention',
+  other: 'An SMS request needs follow-up',
+};
+
+// Only the customer profile opts into SMS rows. Call queues and workers
+// continue using their call-scoped reader and implicit deadline rules.
+async function listSmsCommitments(conn, { customerId, limit = 20, offset = 0, now = new Date() }) {
+  const rows = await conn('call_commitments as cc')
+    .join('sms_log as s', 's.id', 'cc.sms_log_id')
+    .join('customers as c', 'c.id', 's.customer_id')
+    .where({ 's.customer_id': customerId, 'cc.status': 'open' }).whereNull('c.deleted_at')
+    .orderByRaw('cc.due_at ASC NULLS LAST, s.created_at ASC, cc.id ASC')
+    .limit(Math.max(1, Math.min(201, Number(limit) || 20)))
+    .offset(Math.max(0, Number(offset) || 0))
+    .select('cc.id', 'cc.party', 'cc.kind', 'cc.description', 'cc.status', 'cc.due_at',
+      'cc.sms_log_id', 's.created_at as sms_started_at', 's.customer_id');
+  return rows.map((row) => ({ ...row, overdue: !!row.due_at && new Date(row.due_at) <= now }));
+}
+
+async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, reviewedBy }) {
+  if (!['fulfill', 'dismiss'].includes(action)) throw Object.assign(new Error('SMS follow-up supports Mark done or Dismiss'), { status: 400 });
+  if (note !== undefined && typeof note !== 'string') throw Object.assign(new Error('note must be text'), { status: 400 });
+  return conn.transaction(async (trx) => {
+    const initial = await trx('call_commitments').where({ id }).first('sms_log_id');
+    if (!initial?.sms_log_id) throw Object.assign(new Error('SMS follow-up not found'), { status: 404 });
+    // Match intake/watcher lock order. The requested profile must still own
+    // the source after a merge or relink while its controls were open.
+    const customer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first('id');
+    if (!customer) throw Object.assign(new Error('Customer unavailable'), { status: 409 });
+    const source = await trx('sms_log').where({ id: initial.sms_log_id }).forUpdate().first();
+    if (source?.customer_id !== customerId) throw Object.assign(new Error('SMS follow-up moved; reload this profile'), { status: 409 });
+    const current = await trx('call_commitments').where({ id }).forUpdate().first();
+    if (current?.sms_log_id !== source.id || current.status !== 'open') {
+      throw Object.assign(new Error('SMS follow-up changed; reload this profile'), { status: 409 });
+    }
+    if (!smsCommitmentsEnabled()) throw Object.assign(new Error('SMS follow-up is disabled'), { status: 409 });
+    const { applyHumanUpdate } = require('./call-commitments');
+    const updated = await applyHumanUpdate(trx, id, { action, note, reviewedBy });
+    // Staff tokens resolve to technicians rows, including the admin role.
+    await recordAuditEvent({ trx, critical: true, actor_type: 'technician', actor_id: reviewedBy,
+      action: `sms.commitment.${action}`, resource_type: 'call_commitment', resource_id: id,
+      metadata: { sms_log_id: source.id, customer_id: customerId } });
+    await trx('notifications').where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [`sms-commitment:${id}`]).update({ read_at: trx.fn.now() });
+    return updated;
+  });
+}
+
+async function refreshSmsCommitments({ now = new Date(), conn = db, verify = verifySmsFulfillment } = {}) {
+  if (!smsCommitmentsEnabled()) return { skipped: 'gate_off' };
+  if (!gateEnvTimestamp('GATE_SMS_OPERATIONAL_ACTIONS_SINCE')) return { skipped: 'activation_time_required' };
+  let afterId = null;
+  const cursorKey = 'sms_operations.fulfillment_cursor';
+  const cursor = await conn('system_settings').where({ key: cursorKey }).first('value');
+  if (/^[a-f0-9-]{36}$/i.test(cursor?.value || '')) afterId = cursor.value;
+  let scanned = 0;
+  let fulfilled = 0;
+  let unverified = 0;
+  // One bounded page per tick, with a durable cursor. An old open item
+  // cannot monopolize the first page and strand later customers forever.
+  const rows = await conn('call_commitments as cc').join('sms_log as s', 's.id', 'cc.sms_log_id')
+    .join('customers as c', 'c.id', 's.customer_id').whereNull('c.deleted_at')
+    .where({ 'cc.status': 'open', 'cc.party': 'waves' }).whereNull('cc.human_state')
+    .whereNotNull('cc.due_at').where('cc.due_at', '<=', now)
+    .modify((q) => { if (afterId) q.where('cc.id', '>', afterId); })
+    .orderBy('cc.id').limit(25).select('cc.*');
+  for (const row of rows) {
+    if (!smsCommitmentsEnabled()) return { scanned, fulfilled, unverified, skipped: 'gate_off' };
+    scanned += 1;
+    const message = await conn('sms_log').where({ id: row.sms_log_id }).first(...SOURCE_COLUMNS);
+    // A later delivery failure cannot erase already-recorded staff work.
+    // Intake still refuses failed sources; captured promises stay actionable.
+    if (!message || !eligibleMessage(message, { captured: true })) continue;
+    // The SMS foreign key follows merges and merge undo. Embedded context
+    // is only a snapshot; never let its former owner strand the obligation.
+    const current = { ...row, sms_context: { ...row.sms_context, customer_id: message.customer_id } };
+    const evidence = await loadSmsFulfillmentEvidence(conn, current, message, now);
+    const verdict = await verify(current, evidence, { now });
+    if (verdict.verdict === 'uncertain') unverified += 1;
+    await conn.transaction(async (trx) => {
+      // Match merge and intake: customer, source, then commitment. A relink
+      // while verification runs must retry against the current owner.
+      const customer = await trx('customers').where({ id: message.customer_id }).whereNull('deleted_at').forUpdate().first();
+      if (!customer) return;
+      const source = await trx('sms_log').where({ id: message.id }).forUpdate().first();
+      if (!source || !eligibleMessage(source, { captured: true }) || source.customer_id !== message.customer_id || source.message_body !== message.message_body) return;
+      const live = await trx('call_commitments').where({ id: row.id }).forUpdate().first();
+      if (!smsCommitmentsEnabled() || live?.status !== 'open' || live.human_state != null) return;
+      const latest = { ...live, sms_context: { ...live.sms_context, customer_id: source.customer_id } };
+      if (verdict.verdict === 'fulfilled' && !await revalidateSmsFulfillment(trx, latest, source, verdict, now)) return;
+      const dedupeKey = `sms-commitment:${row.id}`;
+      if (live.sms_context.customer_id !== source.customer_id) {
+        // Rolling dedupe only refreshes recent rows. Older bells must also
+        // follow a merge or undo instead of opening the retired account.
+        await trx('notifications').where({ recipient_type: 'admin' })
+          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).update({
+            link: `/admin/customers?customerId=${encodeURIComponent(source.customer_id)}&tab=comms`,
+            metadata: trx.raw("jsonb_set(metadata, '{customerId}', to_jsonb(?::text), true)", [source.customer_id]),
+          });
+      }
+      await trx('call_commitments').where({ id: row.id }).update({
+        sms_context: { ...current.sms_context, fulfillment_check: verdict },
+      });
+      if (verdict.verdict === 'fulfilled') {
+        await trx('call_commitments').where({ id: row.id }).update({
+          status: 'fulfilled', fulfillment: verdict, fulfilled_at: now, updated_at: now,
+        });
+        await trx('notifications').where({ recipient_type: 'admin' })
+          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).update({ read_at: now });
+        fulfilled += 1;
+        return;
+      }
+      const when = new Date(message.created_at).toLocaleString('en-US', {
+        timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+      });
+      const body = verdict.verdict === 'uncertain'
+        ? `The ${when} ET SMS needs a completion check. Some follow-up evidence is unavailable or ambiguous; the agent cannot determine whether the work was completed. Open the customer profile to verify.`
+        : `Requested or promised in the ${when} ET conversation. The available follow-up records do not establish completion. Open the customer profile to take the next step.`;
+      const notification = await NotificationService.notifyAdmin('alert', KIND_LABELS[row.kind] || KIND_LABELS.other, body,
+        { trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true,
+          link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,
+          metadata: { triggerKey: 'sms_operational_followup', customerId: message.customer_id,
+            sms_log_id: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.verdict } });
+      if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
+    });
+  }
+  const nextCursor = rows.length === 25 ? rows[rows.length - 1].id : null;
+  await conn('system_settings').insert({ key: cursorKey, value: nextCursor, category: 'sms_operations' })
+    .onConflict('key').merge({ value: nextCursor, updated_at: now });
+  return { scanned, fulfilled, unverified };
+}
+
+module.exports = { smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate };

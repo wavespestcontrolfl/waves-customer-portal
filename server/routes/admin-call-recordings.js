@@ -254,6 +254,23 @@ function rotatingRefreshWindow(ids) {
   return [...ids.slice(start), ...ids.slice(0, start)].slice(0, REFRESH_CALLS_PER_READ);
 }
 
+// Customer-profile SMS follow-up uses its own source-scoped read. The Owed
+// queue's call joins and implicit deadlines remain unchanged.
+router.get('/commitments/sms', async (req, res, next) => {
+  try {
+    const { customer_id: customerId, limit, offset } = req.query;
+    if (!UUID_RE.test(String(customerId || ''))) return res.status(400).json({ error: 'customer_id must be a UUID' });
+    if (offset !== undefined && !/^\d{1,9}$/.test(String(offset))) return res.status(400).json({ error: 'offset must be a non-negative integer' });
+    const { listSmsCommitments, smsCommitmentsEnabled } = require('../services/sms-operational-actions');
+    const pageLimit = Math.max(1, Math.min(200, Number(limit) || 20));
+    const pageOffset = Number(offset) || 0;
+    const rows = await listSmsCommitments(db, { customerId, limit: pageLimit + 1, offset: pageOffset });
+    const hasMore = rows.length > pageLimit;
+    res.json({ commitments: rows.slice(0, pageLimit), enabled: smsCommitmentsEnabled(),
+      has_more: hasMore, next_offset: hasMore ? pageOffset + pageLimit : null });
+  } catch (err) { next(err); }
+});
+
 router.get('/commitments/open', async (req, res, next) => {
   try {
     const { party, customer_id: customerId, lead_id: leadId, limit, offset, hints } = req.query;
@@ -334,9 +351,24 @@ router.post('/calls/:id/commitments', requireCommitmentsEnabled, async (req, res
 // PATCH /commitments/:id — confirm / dismiss / fulfill / reopen / edit. A
 // human verdict is recorded on the row and survives every reprocess.
 // Staff-wide: settling a promise is the office's daily work.
-router.patch('/commitments/:id', requireCommitmentsEnabled, async (req, res, next) => {
+router.patch('/commitments/:id', async (req, res, next) => {
   try {
     if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Commitment id must be a UUID' });
+    const { smsCommitmentsEnabled, applySmsCommitmentUpdate } = require('../services/sms-operational-actions');
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('callCommitments') && !smsCommitmentsEnabled()) {
+      return res.status(409).json({ error: 'Commitments are disabled', code: 'COMMITMENTS_DISABLED' });
+    }
+    const existing = await db('call_commitments').where({ id: req.params.id }).first('call_log_id', 'sms_log_id');
+    if (!existing) return res.status(404).json({ error: 'Commitment not found' });
+    if (existing.sms_log_id) {
+      if (!UUID_RE.test(String(req.body?.customer_id || ''))) return res.status(400).json({ error: 'customer_id must be a UUID' });
+      const row = await applySmsCommitmentUpdate(db, req.params.id, {
+        customerId: req.body.customer_id, action: req.body.action, note: req.body.note, reviewedBy: req.technicianId || null,
+      });
+      return res.json({ commitment: row });
+    }
+    if (!isEnabled('callCommitments')) return res.status(409).json({ error: 'Call commitments are disabled', code: 'COMMITMENTS_DISABLED' });
     const { applyHumanUpdate } = require('../services/call-commitments');
     const row = await applyHumanUpdate(db, req.params.id, {
       action: req.body?.action,

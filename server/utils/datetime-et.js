@@ -82,6 +82,52 @@ function addETDays(date, days) {
   return new Date(Date.UTC(et.year, et.month - 1, et.day + days, 12, 0, 0));
 }
 
+// Resolve only explicit, unambiguous quoted day + clock expressions. This
+// does not assign business defaults to "tomorrow morning" or bare times.
+// Unknown wording, past yearless dates and DST gaps/folds require review.
+function parseQuotedETDeadline(text, reference) {
+  if (!text || !(reference instanceof Date) || Number.isNaN(reference.getTime())) return null;
+  const explicitClock = text.trim().replace(/\b(noon|midnight)\b/gi,
+    (clock) => ({ noon: '12:00pm', midnight: '12:00am' }[clock.toLowerCase()]));
+  const match = /^(?:(?:by|on|before)\s+)?(.+?)\s+(?:(?:at|by)\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?(?:\s+(?:ET|Eastern(?: time)?))?[.!]?$/i.exec(explicitClock);
+  if (!match) return null;
+  const [, dayText, hourText, minuteText, meridiem] = match;
+  const rawHour = Number(hourText);
+  const minute = Number(minuteText || 0);
+  if (minute > 59 || (meridiem ? rawHour < 1 || rawHour > 12 : rawHour > 23 || !minuteText || hourText.length !== 2)) return null;
+  const hour = meridiem ? rawHour % 12 + (meridiem.toLowerCase().startsWith('p') ? 12 : 0) : rawHour;
+  const base = etParts(reference);
+  const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const months = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+  const formats = [
+    [/^(today|tomorrow)$/i, (m) => etParts(addETDays(reference, m[1].toLowerCase() === 'tomorrow' ? 1 : 0))],
+    [/^(sunday|monday|tuesday|wednesday|thursday|friday|saturday)$/i,
+      (m) => etParts(addETDays(reference, (weekdays.indexOf(m[1].toLowerCase()) - base.dayOfWeek + 7) % 7))],
+    [/^(\d{4})-(\d{2})-(\d{2})$/, (m) => ({ year: Number(m[1]), month: Number(m[2]), day: Number(m[3]) })],
+    [/^(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?$/,
+      (m) => ({ year: Number(m[3] || base.year), month: Number(m[1]), day: Number(m[2]) })],
+    [/^([a-z]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?$/i,
+      (m) => ({ year: Number(m[3] || base.year), day: Number(m[2]),
+        month: months.findIndex((name) => [name, name.slice(0, 3)].includes(m[1].toLowerCase())) + 1 })],
+  ];
+  const date = formats.map(([pattern, resolve]) => {
+    const found = pattern.exec(dayText);
+    return found ? resolve(found) : null;
+  }).find(Boolean);
+  if (!date) return null;
+  const pad = (n) => String(n).padStart(2, '0');
+  const due = parseETDateTime(`${date.year}-${pad(date.month)}-${pad(date.day)}T${pad(hour)}:${pad(minute)}`);
+  if (Number.isNaN(due.getTime()) || due < reference) return null;
+  const expected = [date.year, date.month, date.day, hour, minute].join(':');
+  const wallClocks = [-3600000, 0, 3600000].map((offset) => {
+    const p = etParts(new Date(due.getTime() + offset));
+    return [p.year, p.month, p.day, p.hour, p.minute].join(':');
+  });
+  // Reject rolled calendar values and nonexistent or repeated ET clocks.
+  if (wallClocks[1] !== expected || wallClocks.filter((wall) => wall === expected).length !== 1) return null;
+  return due;
+}
+
 // Returns the instant N ET-calendar-days away from `date` at the SAME ET wall-clock
 // time (hour:minute:second.ms) — across a DST seam the elapsed time is 23 or 25 hours,
 // never a fixed 24×N. Use for "N days after this event" deadlines; addETDays anchors
@@ -300,7 +346,7 @@ function lastCompletedWeekEndingET(now = new Date()) {
 
 module.exports = {
   lastCompletedWeekEndingET,
-  TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
+  TZ, parseETDateTime, parseQuotedETDeadline, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
   etParts, etDateString, addETDays, addETDaysAtWallClock, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
   etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validCalendarDate, validScheduleDate,
   sameDayWindowElapsed, windowDurationMinutes, deriveWindowEnd,

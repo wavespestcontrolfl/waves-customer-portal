@@ -294,19 +294,18 @@ describe('adapters project onto the canonical shape', () => {
     expect(running).toMatchObject({ lifecycle: 'running', finishedAt: null, durationMs: null, workflowId: 'nightly_sweep', title: 'nightly sweep' });
     expect(jobHealth.fromRow({ job_name: 'j', last_status: 'failed', consecutive_failures: 3, last_error: 'ENOTFOUND', last_started_at: ago(5e3), last_finished_at: ago(4e3) })).toMatchObject({ lifecycle: 'terminal', result: 'errored', failureClass: 'infrastructure', subtitle: '3 consecutive failures', detail: 'ENOTFOUND', attempts: 1, maxAttempts: null });
     const { LANE_RUNTIME, policyFor } = require('../services/agent-control/lane-policies');
-    // every lane that names its cron: the job exists in the scheduler under that name, and the job reads with the lane's policy
+    // Each mapped workflow must have its real lock callsite and read with
+    // the lane policy. SMS intake delegates its lock to the service.
     const scheduler = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
     const mapped = Object.entries(LANE_RUNTIME).filter(([, p]) => p.workflow_id);
-    expect(mapped.map(([l]) => l).sort()).toEqual(['call_research', 'call_self_audit', 'shadow_judge', 'sms-operational-actions', 'voice_profile']);
+    expect(mapped.map(([l]) => l).sort()).toEqual(['call_research', 'call_self_audit', 'shadow_judge',
+      'sms-commitment-fulfillment', 'sms-operational-actions', 'voice_profile']);
+    const smsIntake = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'sms-operational-actions.js'), 'utf8');
+    expect(scheduler).toContain("require('./sms-operational-actions')");
+    expect(scheduler).toContain('await runSmsOperationalActions()');
     for (const [laneId, policy] of mapped) {
-      const workflowSource = laneId === 'sms-operational-actions'
-        ? require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'sms-operational-actions.js'), 'utf8')
-        : scheduler;
-      expect(workflowSource).toContain(`runExclusive('${policy.workflow_id}'`);
-      if (laneId === 'sms-operational-actions') {
-        expect(scheduler).toContain("require('./sms-operational-actions')");
-        expect(scheduler).toContain('runSmsOperationalActions(');
-      }
+      const callsite = policy.workflow_id === 'sms-operational-actions' ? smsIntake : scheduler;
+      expect(callsite).toContain(`runExclusive('${policy.workflow_id}'`);
       expect(jobHealth.laneForJob(policy.workflow_id)).toBe(laneId);
     }
     const miner = jobHealth.fromRow({ job_name: 'call-research-miner', last_status: 'running', last_started_at: ago(7 * 60e3) });
