@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { adminFetch } from '../../lib/adminFetch';
 import { box, row, inputStyle, buttonStyle, primaryStyle, Field, request } from './common';
 
-export default function DocumentEditor({ initial, people, onSaved, onClose }) {
+export default function DocumentEditor({ initial, onSaved, onClose }) {
   const [draft, setDraft] = useState(initial);
   const [citations, setCitations] = useState(JSON.stringify(initial.source.metadata.citations, null, 2));
   const [fields, setFields] = useState(JSON.stringify(initial.source.metadata.fields, null, 2));
@@ -44,9 +44,10 @@ export default function DocumentEditor({ initial, people, onSaved, onClose }) {
       </>}
       <Field label="Title"><input required style={inputStyle} value={draft.source.title} onChange={e => changeSource({ title: e.target.value })} /></Field>
       <div style={row}>
-        <Field label="Document owner"><select style={inputStyle} value={draft.source.metadata.owner_id || ''} onChange={e => changeMetadata({ owner_id: e.target.value || null })}><option value="">Choose owner before issuing</option>{people.map(person => <option key={person.id} value={person.id}>{person.name}</option>)}</select></Field>
+        <Field label="Document owner role"><input style={inputStyle} maxLength={120} value={draft.source.metadata.owner_role || ''} placeholder="Office Manager" onChange={e => changeMetadata({ owner_role: e.target.value || null })} /></Field>
         <Field label="Next review"><input type="date" style={inputStyle} value={draft.source.metadata.review_on?.slice(0, 10) || ''} onChange={e => changeMetadata({ review_on: e.target.value || null })} /></Field>
       </div>
+      <p>Use a job title for ownership. Keep current staff and backup assignments in the coverage register. Signatures and case assignments identify the person who acted.</p>
       <Field label="Document source"><textarea required rows={22} style={{ ...inputStyle, fontFamily: 'monospace', resize: 'vertical' }} value={draft.source.body} onChange={e => changeSource({ body: e.target.value })} /></Field>
       <p>Start each clause with <code>## Title {'{#stable-anchor}'}</code>. Use paragraphs, bullet lists, emphasis and HTTPS links. Keep anchor IDs when wording changes. Shared terms use bindings such as <code>{'{{policy.pto_accrual}}'}</code>.</p>
       <details><summary style={{ cursor: 'pointer', padding: '12px 0' }}>Clause citations</summary>

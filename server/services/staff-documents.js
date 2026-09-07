@@ -45,9 +45,7 @@ async function issueVersion(trx, document, version, policy, at, actor) {
   const source = sourceOf(version);
   const rendered = renderSource(source, policy?.values);
   checkRelease(source, rendered, at);
-  await activeOwner(trx, source.metadata.owner_id);
-  const owner = await trx('technicians').where({ id: source.metadata.owner_id }).first('name');
-  const snapshot = { ...rendered, owner_name: owner.name, kind: document.staff_kind,
+  const snapshot = { ...rendered, kind: document.staff_kind,
     version_number: version.version_number, effective_at: new Date(at).toISOString(),
     policy_values: rendered.used_variables.length ? policy.values : null,
     acknowledgment_statement: document.staff_kind === 'policy' ? ACKNOWLEDGMENT : null };
@@ -149,7 +147,7 @@ async function list(actor, { at = new Date(), search = '', asOf = false } = {}) 
     if (!version) continue;
     if (search && !`${version.title} ${version.content_snapshot?.body || version.body}`.toLowerCase().includes(search.toLowerCase())) continue;
     result.push({ ...document, version_id: version.id, title: version.title, version_number: version.version_number,
-      effective_at: version.effective_at, review_on: version.staff_metadata.review_on, owner_id: version.staff_metadata.owner_id,
+      effective_at: version.effective_at, review_on: version.staff_metadata.review_on, owner_role: version.staff_metadata.owner_role,
       issued: !!version.published_at });
   }
   return result;
@@ -164,11 +162,6 @@ async function detail(id, actor, versionId = null, at = new Date()) {
   if (!version) reject('Version not found', 404);
   const policy = await policyAt(db, version.effective_at || new Date());
   const rendered = version.content_snapshot || renderSource(sourceOf(version), policy?.values);
-  if (!rendered.owner_name && rendered.metadata.owner_id) {
-    const owner = await db('technicians').where({ id: rendered.metadata.owner_id }).first('name');
-    rendered.owner_name = owner?.name || 'Unassigned';
-  }
-  rendered.owner_name ||= 'Unassigned';
   const acknowledgments = await db('staff_document_acknowledgments').where({ version_id: version.id }).modify(q => { if (!isAdmin(actor)) q.where('technician_id', actor.id); });
   const records = await db('staff_document_records').where({ version_id: version.id }).modify(q => { if (!isAdmin(actor)) q.where(b => b.where('created_by', actor.id).orWhere('owner_id', actor.id)); }).orderBy('created_at', 'desc');
   return { document, version, rendered, versions: versions.map(v => ({ id: v.id, number: v.version_number, effective_at: v.effective_at, hash: v.content_hash, issued: !!v.published_at })), acknowledgments, records };

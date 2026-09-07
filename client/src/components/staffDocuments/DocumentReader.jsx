@@ -37,7 +37,7 @@ export default function DocumentReader({ detail, people, selfId, manage, onVersi
   return <article style={box}>
     <div style={{ ...row, justifyContent: 'space-between' }}><span style={{ textTransform: 'capitalize', color: D.muted }}>{document.staff_kind} · {version.content_hash ? 'Issued' : 'Draft — not issued'}</span><button disabled={busy} style={buttonStyle} onClick={() => act(() => download())}>Export PDF</button></div>
     <h1 style={{ fontSize: 26, lineHeight: 1.2, fontFamily: 'inherit', fontWeight: 700 }}>{rendered.title}</h1>
-    <p>Owner: {rendered.owner_name} · Next review: {reviewLabel(rendered.metadata.review_on)}</p>
+    <p>Owner role: {rendered.metadata.owner_role || 'Unassigned'} · Next review: {reviewLabel(rendered.metadata.review_on)}</p>
     <p>Effective: {dateLabel(version.effective_at)} (Eastern)</p>
     <Field label="Version history"><select style={inputStyle} value={version.id} onChange={e => onVersion(e.target.value)}>{versions.map(item => <option key={item.id} value={item.id}>v{item.number} · {item.issued ? dateLabel(item.effective_at) : 'Draft'}</option>)}</select></Field>
     {version.content_hash && <details><summary style={{ cursor: 'pointer', padding: '10px 0' }}>Version identity</summary><p style={{ overflowWrap: 'anywhere', fontSize: 14 }}>SHA-256: {version.content_hash}</p><p>Version ID: {version.id}</p></details>}

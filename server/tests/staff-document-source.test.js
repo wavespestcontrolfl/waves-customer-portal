@@ -5,7 +5,7 @@ const starters = require('../services/staff-document-starters');
 
 const day = offset => new Date(Date.now() + offset * 86400000).toISOString().slice(0, 10);
 const source = (body = '## PTO {#pto-accrual}\nAccrual: {{policy.pto_accrual}}.') => ({ title: 'QA policy', body,
-  metadata: { owner_id: '00000000-0000-4000-8000-000000000001', review_on: day(30), citations: [], fields: [] } });
+  metadata: { owner_role: 'Office Manager', review_on: day(30), citations: [], fields: [] } });
 const values = { pay_frequency: 'weekly', pay_schedule: 'QA schedule', pto_accrual: [{ after_years: 0, hours_per_year: 40 }], paid_holidays: [], unpaid_holidays: [], equipment_deduction_terms: 'QA terms' };
 
 test('all starters are valid, have stable anchors and remain blocked by explicit owner decisions', () => {

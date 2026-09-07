@@ -5,9 +5,15 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const { parseETDateTime, etParts, etDateString } = require('../utils/datetime-et');
 const { validate, reject } = require('../services/staff-document-source');
 const documents = require('../services/staff-documents');
+const { gateEnvValue } = require('../config/feature-gates');
 const router = express.Router();
 router.use(adminAuthenticate, requireTechOrAdmin);
 router.use((req, res, next) => { res.set('Cache-Control', 'private, no-store'); next(); });
+router.get('/availability', (req, res) => res.json({ available: gateEnvValue('GATE_CONTROLLED_STAFF_DOCUMENTS') }));
+router.use((req, res, next) => {
+  if (!gateEnvValue('GATE_CONTROLLED_STAFF_DOCUMENTS')) return res.status(404).json({ error: 'Document not found' });
+  next();
+});
 
 const uuid = Joi.string().uuid();
 const actor = req => ({ id: req.technicianId, role: req.techRole });

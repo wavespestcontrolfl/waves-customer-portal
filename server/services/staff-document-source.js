@@ -15,7 +15,7 @@ const sourceSchema = Joi.object({
   title: Joi.string().trim().max(180).required(),
   body: Joi.string().max(80000).required(),
   metadata: Joi.object({
-    owner_id: Joi.string().uuid().allow(null).required(),
+    owner_role: Joi.string().trim().max(120).allow(null).required(),
     review_on: date.allow(null).required(),
     citations: Joi.array().max(60).items(Joi.object({
       anchor: anchor.required(), label: Joi.string().max(240).required(),
@@ -117,7 +117,7 @@ function renderSource(source, policyValues) {
 }
 
 function checkRelease(source, rendered, effectiveAt) {
-  if (!source.metadata.owner_id || !source.metadata.review_on) reject('Choose a document owner and next-review date before issuing.');
+  if (!source.metadata.owner_role || !source.metadata.review_on) reject('Choose a document owner role and next-review date before issuing.');
   if (rendered.unresolved.length) reject(`Resolve before issuing: ${rendered.unresolved.join('; ')}`);
   const start = new Date(effectiveAt).getTime();
   const review = parseETDateTime(`${source.metadata.review_on}T23:59:59`).getTime();

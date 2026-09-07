@@ -25,7 +25,7 @@ role guard. Authoring, policy-value changes and issuance additionally require ad
   Admins can assign records; technicians can create and update their own records.
   Completed records can be exported with their field values and version identity.
 
-Every issued snapshot contains the owner name/ID, next-review date, bound
+Every issued snapshot contains the accountable owner role, next-review date, bound
 citations, resolved wording, form schema, effective timestamp and shared values.
 Database triggers prevent modification/deletion of issued versions, policy-value
 revisions, acknowledgments and completed records. Open records cannot be deleted.
@@ -56,7 +56,7 @@ Bindings are restricted to `{{policy.pay_frequency}}`, `{{policy.pay_schedule}}`
 No owner-approved pay/benefit values are seeded. Unresolved bindings and explicit
 `[DECISION: ...]` markers prevent issuance.
 
-Every issued document requires an active staff owner and a next-review date within
+Every issued document requires an owner role and a next-review date within
 one year. A citation is stored alongside its clause anchor, label, HTTPS source,
 verification date and review date. Citation review is due within 90 days of
 verification, and the document review cannot be later. An overdue review remains
@@ -89,3 +89,23 @@ form workflow; this feature does not generate a substitute inspection certificat
    Stale edits cannot overwrite another staff member's open record.
 5. Desktop and 390-pixel layouts support clause links, authoring, signing,
    checklist completion and PDF exports without horizontal overflow.
+
+## Role continuity and rollout
+
+Document ownership and procedural instructions use job titles. The Office Manager
+coordinates customer and billing follow-up and retains complaint ownership through
+day three; the Operations Lead owns field exceptions; the Certified Operator in
+Charge reviews technical decisions. The Owner retains decisions beyond delegated
+authority. An Acting Owner assignment records temporary scope, ceilings and expiry;
+it does not confer technical qualifications. One staff member can hold several roles.
+A separate accessible coverage roster maps these roles to current primary and
+alternate staff IDs and contacts. Its location and actual delegations remain owner
+decisions before issuance. No access rights derive from the document's role label.
+Approvals, signatures and record ownership still identify the actual person who acted.
+
+`GATE_CONTROLLED_STAFF_DOCUMENTS=true` enables the library. It defaults off. The
+authenticated availability endpoint reads no document data; every document API
+rechecks the gate before DB work. Staff retains its uploaded-files UI while dark,
+and Tech hides the Documents entry. Unsetting the gate revokes feature access,
+including writes, while preserving all versions and evidence. This release neither
+enables the production gate nor issues any employee policy.

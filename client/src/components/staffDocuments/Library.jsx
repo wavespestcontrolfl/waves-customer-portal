@@ -5,7 +5,7 @@ import DocumentReader from './DocumentReader';
 import PolicyValuesEditor from './PolicyValuesEditor';
 import { box, row, D, inputStyle, buttonStyle, primaryStyle, Field, request, reviewLabel } from './common';
 
-const emptyDraft = () => ({ key: '', kind: 'procedure', access: 'staff', source: { title: '', body: '## Purpose {#purpose}\nWrite the procedure here.', metadata: { owner_id: null, review_on: null, citations: [], fields: [] } } });
+const emptyDraft = () => ({ key: '', kind: 'procedure', access: 'staff', source: { title: '', body: '## Purpose {#purpose}\nWrite the procedure here.', metadata: { owner_role: null, review_on: null, citations: [], fields: [] } } });
 
 export default function StaffDocumentLibrary({ manage = false }) {
   const [params, setParams] = useSearchParams();
@@ -68,7 +68,7 @@ export default function StaffDocumentLibrary({ manage = false }) {
       {message && <p role="status">{message}</p>}{error && <p role="alert">{error}</p>}
       {canManage && <Field label="Start from a reviewed draft"><select style={{ ...inputStyle, marginTop: 8 }} value="" onChange={e => { const starter = starters.find(item => item.key === e.target.value); if (starter) { setEditing(structuredClone(starter)); setPolicyEditor(false); } }}><option value="">Choose a draft…</option>{starters.map(starter => <option key={starter.key} value={starter.key}>{starter.source.title}</option>)}</select></Field>}
     </section>
-    {editing ? <DocumentEditor key={`${editing.id || editing.key}-${editing.base_version_id || 'new'}`} initial={editing} people={profile?.people || []} onClose={() => setEditing(null)} onSaved={(id, version) => { select(id, version); saved('Draft revision saved.'); }} /> : policyEditor ? <PolicyValuesEditor onClose={() => setPolicyEditor(false)} onSaved={text => { setPolicyEditor(false); saved(text); }} /> : <>
+    {editing ? <DocumentEditor key={`${editing.id || editing.key}-${editing.base_version_id || 'new'}`} initial={editing} onClose={() => setEditing(null)} onSaved={(id, version) => { select(id, version); saved('Draft revision saved.'); }} /> : policyEditor ? <PolicyValuesEditor onClose={() => setPolicyEditor(false)} onSaved={text => { setPolicyEditor(false); saved(text); }} /> : <>
       {selected ? <>
         <button style={{ ...buttonStyle, justifySelf: 'start' }} onClick={() => select(null)}>← All controlled documents</button>
         {!detail || !profile ? <p>Loading document…</p> : <DocumentReader key={detail.version.id} detail={detail} people={profile.people} selfId={profile.self_id} manage={canManage} onVersion={id => select(selected, id)} onEdit={editCurrent} onSaved={saved} />}
@@ -80,7 +80,7 @@ export default function StaffDocumentLibrary({ manage = false }) {
         </div>
         {!items ? <p>Loading documents…</p> : <div style={{ display: 'grid', gap: 12 }}>
           {!items.filter(item => kind === 'all' || item.staff_kind === kind).length && <p style={box}>{canManage ? 'No matching documents. Start a reviewed draft or create a document above.' : 'No issued documents are available for this view.'}</p>}
-          {items.filter(item => kind === 'all' || item.staff_kind === kind).map(item => <button key={item.id} style={{ ...box, cursor: 'pointer', textAlign: 'left', width: '100%', color: D.text, fontSize: 14 }} onClick={() => select(item.id, item.version_id)}><div style={{ ...row, justifyContent: 'space-between' }}><strong style={{ fontSize: 18 }}>{item.title}</strong><span style={{ textTransform: 'capitalize' }}>{item.staff_kind} · v{item.version_number} · {item.issued ? 'Issued' : 'Draft'}</span></div><div style={{ marginTop: 8 }}>Owner: {profile?.people.find(person => person.id === item.owner_id)?.name || 'See document'} · Review: {reviewLabel(item.review_on)}</div></button>)}
+          {items.filter(item => kind === 'all' || item.staff_kind === kind).map(item => <button key={item.id} style={{ ...box, cursor: 'pointer', textAlign: 'left', width: '100%', color: D.text, fontSize: 14 }} onClick={() => select(item.id, item.version_id)}><div style={{ ...row, justifyContent: 'space-between' }}><strong style={{ fontSize: 18 }}>{item.title}</strong><span style={{ textTransform: 'capitalize' }}>{item.staff_kind} · v{item.version_number} · {item.issued ? 'Issued' : 'Draft'}</span></div><div style={{ marginTop: 8 }}>Owner role: {item.owner_role || 'Unassigned'} · Review: {reviewLabel(item.review_on)}</div></button>)}
         </div>}
       </>}
     </>}

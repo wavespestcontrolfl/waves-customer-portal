@@ -3,6 +3,7 @@ import useIsMobile from "../../hooks/useIsMobile";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 import StaffDocumentLibrary from "../../components/staffDocuments/Library";
+import useStaffDocumentsAvailable from "../../hooks/useStaffDocumentsAvailable";
 import {
   BarChart3,
   CheckCircle2,
@@ -174,6 +175,7 @@ const STAFF_LEAF_BY_KEY = Object.fromEntries(
 );
 
 export default function TimeTrackingPage() {
+  const controlledDocumentsAvailable = useStaffDocumentsAvailable();
   const [searchParams, setSearchParams] = useSearchParams();
   const tab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
   const setTab = (value) => {
@@ -263,13 +265,13 @@ export default function TimeTrackingPage() {
       {tab === "entries" && <EntriesTab showToast={showToast} />}
       {tab === "analytics" && <AnalyticsTab />}
       {tab === "team" && <TeamTab showToast={showToast} />}
-      {tab === "documents" && <>
+      {tab === "documents" && (controlledDocumentsAvailable ? <>
         <StaffDocumentLibrary manage />
         <details style={{ marginTop: 24 }}>
           <summary style={{ fontSize: 16, fontWeight: 700, padding: "16px 0", cursor: "pointer" }}>Uploaded files and historical attachments</summary>
           <DocumentsTab showToast={showToast} />
         </details>
-      </>}
+      </> : <DocumentsTab showToast={showToast} />)}
       <div
         style={{
           position: "fixed",

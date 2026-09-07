@@ -1,7 +1,4 @@
 const { randomUUID } = require('node:crypto');
-const db = require('../models/db');
-const documents = require('../services/staff-documents');
-const { hash } = require('../services/staff-document-source');
 jest.setTimeout(30000);
 
 // Explicit, worktree-owned Railway QA DB only. Ordinary Jest runs skip this suite.
@@ -11,6 +8,11 @@ if (enabled) {
   const expected = `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
   if (process.env.WAVES_LOCAL_DEV !== '1' || process.env.RAILWAY_DEPLOYMENT_ID || new URL(process.env.DATABASE_URL).pathname !== expected) throw new Error('Staff-document integration tests require this worktree’s private QA database.');
 }
+const schema = `qa_staff_roles_${randomUUID().replaceAll('-', '')}`;
+const db = enabled ? require('knex')({ ...require('../knexfile').development, searchPath: [schema] }) : require('../models/db');
+if (enabled) jest.doMock('../models/db', () => db);
+const documents = require('../services/staff-documents');
+const { hash } = require('../services/staff-document-source');
 
 describeDb('controlled staff documents on PostgreSQL', () => {
   const admin = { id: randomUUID(), role: 'admin' };
@@ -20,7 +22,7 @@ describeDb('controlled staff documents on PostgreSQL', () => {
   const at = seconds => new Date(Date.now() + seconds * 1000);
   const reviewOn = () => at(30 * 86400).toISOString().slice(0, 10);
   const source = (body = '## PTO {#pto-accrual}\n{{policy.pto_accrual}}') => ({ title: `QA ${run}`, body,
-    metadata: { owner_id: admin.id, review_on: reviewOn(), citations: [], fields: [] } });
+    metadata: { owner_role: 'Office Manager', review_on: reviewOn(), citations: [], fields: [] } });
   let policy;
   let handbook;
   let offer;
@@ -32,6 +34,16 @@ describeDb('controlled staff documents on PostgreSQL', () => {
   const values = hours => ({ pay_frequency: 'weekly', pay_schedule: 'QA fixture only', pto_accrual: [{ after_years: 0, hours_per_year: hours }], paid_holidays: [], unpaid_holidays: [], equipment_deduction_terms: 'QA fixture only; no deductions authorized.' });
 
   beforeAll(async () => {
+    const setup = require('knex')(require('../knexfile').development);
+    try {
+      await setup.raw('CREATE SCHEMA ??', [schema]);
+      // Empty structural copies only: no account data or prior issued fixtures.
+      for (const table of ['technicians', 'company_documents', 'customer_contracts', 'audit_log']) {
+        await setup.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
+      }
+      await require('../models/migrations/20260601000009_document_template_library').up(db);
+      await require('../models/migrations/20260907000010_controlled_staff_documents').up(db);
+    } finally { await setup.destroy(); }
     await db('technicians').insert([admin, tech, other].map((actor, index) => ({ id: actor.id, name: `QA Document ${index}`, email: `qa-doc-${run}-${index}@example.invalid`, role: actor.role, employment_status: 'active', active: true })));
     const previous = await db('policy_values').orderBy('revision', 'desc').first();
     if (previous && new Date(previous.effective_at) >= at(-15)) throw new Error('Wait 15 seconds before re-running this preserved-history fixture.');
@@ -73,6 +85,9 @@ describeDb('controlled staff documents on PostgreSQL', () => {
     await documents.publish(offer.document.id, offer.version.id, at(-13), admin);
     expect(first.content_hash).toBe(hash(first.content_snapshot));
     expect(first.content_snapshot.body).toContain('40 hours');
+    expect(first.content_snapshot.metadata.owner_role).toBe('Office Manager');
+    expect(first.content_snapshot).not.toHaveProperty('owner_name');
+    expect(first.approved_by).toBe(admin.id);
     previousHash = first.content_hash;
     await expect(db('document_template_versions').where({ id: first.id }).update({ body: 'tampered' })).rejects.toThrow(/immutable/);
     await expect(db('document_template_versions').where({ id: first.id }).del()).rejects.toThrow(/immutable/);
