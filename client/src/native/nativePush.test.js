@@ -9,7 +9,7 @@ const nativeMocks = vi.hoisted(() => {
       return { remove: vi.fn() };
     }),
     checkPermissions: vi.fn(async () => ({ receive: state.permission })),
-    requestPermissions: vi.fn(async () => ({ receive: state.requestResult })),
+    requestPermissions: vi.fn(async () => ({ receive: state.permission === 'prompt' ? state.requestResult : state.permission })),
     register: vi.fn(async () => { if (state.listeners.registration) await state.listeners.registration({ value: 'test-native-device' }); }),
   };
   return { state, PushNotifications };
@@ -69,17 +69,18 @@ describe('nativePush permission and tap handling', () => {
     expect(navigateToCustomerUrl).toHaveBeenCalledWith('https://evil.example/phish');
   });
 
-  it('prompts only from the explicit request action and can report denial for recovery UI', async () => {
+  it('requests the OS permission directly and respects a saved denial', async () => {
     nativeMocks.state.permission = 'prompt';
     localStorage.setItem('waves_token', 'test-customer-session');
     await expect(requestNativePushPermission()).resolves.toBe('granted');
     expect(nativeMocks.PushNotifications.requestPermissions).toHaveBeenCalledTimes(1);
     expect(nativeMocks.PushNotifications.register).toHaveBeenCalledTimes(1);
+    expect(nativeMocks.PushNotifications.checkPermissions).not.toHaveBeenCalled();
 
     nativeMocks.PushNotifications.register.mockClear();
     nativeMocks.state.permission = 'denied';
     await expect(requestNativePushPermission()).resolves.toBe('denied');
-    expect(nativeMocks.PushNotifications.requestPermissions).toHaveBeenCalledTimes(1);
+    expect(nativeMocks.PushNotifications.requestPermissions).toHaveBeenCalledTimes(2);
     expect(nativeMocks.PushNotifications.register).not.toHaveBeenCalled();
     await expect(nativePushPermissionState()).resolves.toBe('denied');
   });
@@ -94,10 +95,10 @@ describe('nativePush permission and tap handling', () => {
     await expect(requestNativePushPermission()).resolves.toBe('registration_unavailable');
   });
 
-  it.each(['checkPermissions', 'requestPermissions'])('bounds a stalled %s and prevents a late result from continuing enrollment', async (method) => {
+  it('bounds a stalled permission popup and prevents a late result from continuing enrollment', async () => {
     vi.useFakeTimers();
     let complete;
-    nativeMocks.PushNotifications[method].mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    nativeMocks.PushNotifications.requestPermissions.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
     let result;
     requestNativePushPermission().then((value) => { result = value; });
 
@@ -105,10 +106,9 @@ describe('nativePush permission and tap handling', () => {
     expect(result).toBe('permission_unavailable');
     expect(reportError).toHaveBeenCalledWith(expect.objectContaining({ name: 'TimeoutError' }));
 
-    complete({ receive: method === 'checkPermissions' ? 'prompt' : 'granted' });
+    complete({ receive: 'granted' });
     await vi.advanceTimersByTimeAsync(0);
     expect(nativeMocks.PushNotifications.register).not.toHaveBeenCalled();
-    if (method === 'checkPermissions') expect(nativeMocks.PushNotifications.requestPermissions).not.toHaveBeenCalled();
     await expect(requestNativePushPermission()).resolves.toBe('registration_unavailable');
   });
 
@@ -272,7 +272,7 @@ it('revokes permission on native foreground even when the settings page is close
   expect(api.request).toHaveBeenLastCalledWith('/push/native-unsubscribe', expect.objectContaining({ method: 'POST' }));
 });
 
-it('bounds initial listener setup before any permission request', async () => {
+it('shows the permission popup before listener setup and bounds a stalled bind', async () => {
   vi.useFakeTimers();
   vi.resetModules();
   const freshNativePush = await import('./nativePush');
@@ -287,6 +287,6 @@ it('bounds initial listener setup before any permission request', async () => {
   complete({ remove: vi.fn() });
   await vi.advanceTimersByTimeAsync(0);
   expect(nativeMocks.PushNotifications.checkPermissions).not.toHaveBeenCalled();
-  expect(nativeMocks.PushNotifications.requestPermissions).not.toHaveBeenCalled();
+  expect(nativeMocks.PushNotifications.requestPermissions).toHaveBeenCalledTimes(1);
   expect(nativeMocks.PushNotifications.register).not.toHaveBeenCalled();
 });

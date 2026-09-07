@@ -163,9 +163,9 @@ export async function nativePushPermissionState() {
 }
 
 /**
- * Ask for native push from an explicit customer gesture (the notification
- * drawer's Enable button). A denied permission is reported to the caller so
- * it can direct the customer to device Settings instead of leaving a dead UI.
+ * Ask for native push once the authenticated customer app is unlocked, or
+ * from the notification drawer's retry button. The OS owns the permission
+ * popup and remembers an existing Allow/Don't Allow choice.
  */
 export async function requestNativePushPermission() {
   if (!isNativeApp()) return 'unavailable';
@@ -190,19 +190,18 @@ export async function requestNativePushPermission() {
   void (async () => {
     const PushNotifications = await pushPlugin();
     if (settled) return;
-    await bindPushListeners(PushNotifications);
-    if (settled) return;
     failureState = 'permission_unavailable';
-    let state = permissionValue(await PushNotifications.checkPermissions());
+    // requestPermissions already returns the saved OS choice when one exists.
+    // Do not put a separate permission probe in front of the system popup.
+    const state = permissionValue(await PushNotifications.requestPermissions());
     if (settled) return;
-    if (state === 'prompt' || state === 'prompt-with-rationale') {
-      state = permissionValue(await PushNotifications.requestPermissions());
-      if (settled) return;
-    }
     if (state !== 'granted') {
       finish(state);
       return;
     }
+    failureState = 'setup_unavailable';
+    await bindPushListeners(PushNotifications);
+    if (settled) return;
     failureState = 'registration_unavailable';
     registrationWaiters.add(finish);
     // This task is detached: the event/deadline completes the action even if
@@ -239,10 +238,9 @@ export async function initNativePush() {
     const PushNotifications = await pushPlugin();
     await bindPushListeners(PushNotifications);
 
-    // Startup may silently recover an already-granted registration, but it
-    // must never surprise a newly installed customer with an OS prompt before
-    // the app has explained the value. Prompting happens only from
-    // requestNativePushPermission(), called by the bell's Enable action.
+    // Bootstrap can run before authentication or Face ID unlock. Only recover
+    // granted registrations here; the mounted customer bell requests the OS
+    // permission popup automatically after sign-in and unlock.
     const state = permissionValue(await PushNotifications.checkPermissions());
     if (state === 'granted') {
       await PushNotifications.register();
