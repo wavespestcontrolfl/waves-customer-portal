@@ -12,6 +12,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 const SKIP = !process.env.DATABASE_URL;
+const newerMigration = require('../models/migrations/20260907000018_iron_newer_supplier_cost');
 const quoteMigration = require('../models/migrations/20260907000019_approved_iron_supplier_cost');
 const linkMigration = require('../models/migrations/20260907000022_iron_supplier_quote_link');
 const dimensionsMigration = require('../models/migrations/20260907000021_lawn_cost_inventory_dimensions');
@@ -55,6 +56,7 @@ jest.setTimeout(60000);
 
   const product = () => mockPg('products_catalog').where({ id: productId }).first();
   const apply = () => mockPg.transaction(async (trx) => {
+    await newerMigration.up(trx);
     await quoteMigration.up(trx);
     await linkMigration.up(trx);
   });
@@ -84,6 +86,7 @@ jest.setTimeout(60000);
     })));
   }
   const migrationNames = [
+    '20260907000018_iron_newer_supplier_cost.js',
     '20260907000019_approved_iron_supplier_cost.js',
     '20260907000021_lawn_cost_inventory_dimensions.js',
     '20260907000022_iron_supplier_quote_link.js',
@@ -122,6 +125,7 @@ jest.setTimeout(60000);
     const firstCounts = await counts();
     await apply();
     await quoteMigration.down(mockPg);
+    await newerMigration.down(mockPg);
     await linkMigration.down(mockPg);
     expect(await counts()).toEqual(firstCounts);
     expect(await product()).toEqual(after);
@@ -151,14 +155,67 @@ jest.setTimeout(60000);
     expect(await mockPg('products_catalog').where({ id: keeper.id }).first()).toMatchObject({ best_price: '36.15', cost_per_unit: '0.1130' });
   });
 
-  test('preserves a newer manual supplier observation and catalog edits', async () => {
-    await existingQuote({ price_type: 'manual', price: 39, last_checked_at: '2026-09-07T10:00:00Z' });
-    const before = await product();
-    const quotes = await mockPg('vendor_pricing');
+  test('preserves a newer manual observation while reconciling its stale catalog cost', async () => {
+    await otherProducts();
+    const before = await existingQuote({ price_type: 'manual', price: 39, price_amount: 39,
+      last_checked_at: '2026-09-07T10:00:00Z', vendor_sku: '084043', vendor_product_url: LISTING_URL });
+    await expect(mockPg.transaction(async (trx) => {
+      await quoteMigration.up(trx);
+      await dimensionsMigration.up(trx);
+    })).rejects.toThrow(`Cost basis needs review: ${LEGACY}`);
     await apply();
+    await dimensionsMigration.up(mockPg);
+    await canonicalMigration.up(mockPg);
+    expect(await mockPg('vendor_pricing').where({ id: before.id }).first()).toEqual({ ...before, is_best_price: true });
+    expect(await product()).toMatchObject({ best_price: '39.00', cost_per_unit: '0.1219', cost_unit: 'fl_oz', inventory_unit: 'fl_oz' });
+    expect(await mockPg('price_history')).toHaveLength(0);
+    expect(await mockPg('price_snapshots')).toHaveLength(0);
+    const after = await product();
+    const afterCounts = await counts();
+    await apply();
+    await newerMigration.down(mockPg);
+    expect(await product()).toEqual(after);
+    expect(await counts()).toEqual(afterCounts);
+  });
+
+  test('reconciles a newer quote after both dimension migrations were already recorded', async () => {
+    await otherProducts();
+    await mockPg('products_catalog').where({ id: productId }).update({ cost_per_unit: 0.1 });
+    await migrate(migrationNames.filter(name => name.includes('000021') || name.includes('000100')));
+    const before = await existingQuote({ price_type: 'manual', price: 39, price_amount: 39,
+      last_checked_at: '2026-09-07T10:00:00Z', vendor_sku: '084043', vendor_product_url: LISTING_URL });
+    await mockPg('products_catalog').where({ id: productId }).update({ cost_per_unit: 0.25 });
+    const [, ran] = await migrate(migrationNames);
+    expect(ran).toEqual(migrationNames.filter(name => !name.includes('000021') && !name.includes('000100')));
+    expect(await product()).toMatchObject({ best_price: '39.00', cost_per_unit: '0.1219', cost_unit: 'fl_oz', inventory_unit: 'fl_oz' });
+    expect(await mockPg('vendor_pricing').where({ id: before.id }).first()).toEqual({ ...before, is_best_price: true });
+    expect(await mockPg('price_snapshots')).toHaveLength(0);
+    expect((await migrate(migrationNames))[1]).toEqual([]);
+  });
+
+  test('a newer quote cannot reinterpret unknown stock quantities', async () => {
+    const quote = await existingQuote({ price_type: 'manual', price: 39, price_amount: 39,
+      last_checked_at: '2026-09-07T10:00:00Z' });
+    await mockPg('products_catalog').where({ id: productId }).update({ inventory_on_hand: 2 });
+    const before = await product();
+    const beforeCounts = await counts();
+    await expect(apply()).rejects.toThrow('Iron stock basis needs review');
     expect(await product()).toEqual(before);
-    expect(await mockPg('vendor_pricing')).toEqual(quotes);
-    expect(await mockPg('audit_log')).toHaveLength(0);
+    expect(await mockPg('vendor_pricing').where({ id: quote.id }).first()).toEqual(quote);
+    expect(await counts()).toEqual(beforeCounts);
+  });
+
+  test('a newer-cost audit failure rolls back catalog cost and winner flags', async () => {
+    const quote = await existingQuote({ price_type: 'manual', price: 39, price_amount: 39,
+      last_checked_at: '2026-09-07T10:00:00Z' });
+    await mockPg.raw("CREATE FUNCTION iron_newer_audit_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture newer audit failure'; END; $$");
+    await mockPg.raw("CREATE TRIGGER iron_newer_audit_failure BEFORE INSERT ON audit_log FOR EACH ROW WHEN (NEW.action = 'migration.20260907000018.iron_newer_supplier_cost') EXECUTE FUNCTION iron_newer_audit_failure()");
+    const before = await product();
+    const beforeCounts = await counts();
+    await expect(apply()).rejects.toThrow('fixture newer audit failure');
+    expect(await product()).toEqual(before);
+    expect(await mockPg('vendor_pricing').where({ id: quote.id }).first()).toEqual(quote);
+    expect(await counts()).toEqual(beforeCounts);
   });
 
   test('honors a cheaper eligible vendor and reconciles cost to the actual winner', async () => {
@@ -240,7 +297,7 @@ jest.setTimeout(60000);
 
   test.each(['none', 'dimensions', 'first_quote'])('Knex runs remaining repairs with recorded history=%s', async (history) => {
     await otherProducts();
-    const recorded = history === 'none' ? [] : migrationNames.filter(name => !name.includes('000022')
+    const recorded = history === 'none' ? [] : migrationNames.filter(name => !name.includes('000018') && !name.includes('000022')
       && (history === 'first_quote' || !name.includes('000019')));
     if (recorded.length) {
       await mockPg('products_catalog').where({ id: productId }).update({ cost_per_unit: 0.1 });

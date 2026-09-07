@@ -41,6 +41,14 @@ SiteOne quotes and retired predecessors are preserved. A critical audit event
 records prior and resulting price/unit evidence in the same transaction; a
 repeat run and the documented no-op rollback preserve that history.
 
+Migration `20260907000018_iron_newer_supplier_cost.js` handles the newer-quote
+branch before the published quote migration returns. It validates the same
+package and stock evidence, preserves the newer supplier observation and
+reconciles the catalog cost through the existing winner calculation. This
+works both before the pending dimension check and after that check is already
+recorded. A dedicated critical audit makes the reconciliation atomic and
+idempotent. The published quote migration remains unchanged.
+
 The forward source correction
 `20260907000022_iron_supplier_quote_link.js` fixes the initial quote writer
 clearing the supplier URL. It preserves the published migration, appends a
@@ -62,17 +70,19 @@ no application records were copied. All regression fixtures use temporary
 schemas inside transactions and roll back, including audit events and Knex
 tracking tables. No production database was accessed.
 
-- 24 PostgreSQL regressions passed: stale/missing/volume costs, active and
+- 27 PostgreSQL regressions passed: stale/missing/volume costs, active and
   null-active rows, active keeper with retired predecessor, unchanged stock and
   rates, newer manual quotes, a cheaper supplier, contradictory evidence,
   ambiguous identity, failed audit insertion and idempotency.
 - The original cost-check stop was reproduced, then both dimension migrations
   completed after applying the repair.
-- The actual Knex migration runner verified both execution orders: earlier
+- The actual Knex migration runner verified the recorded-history states: earlier
   migrations pending, dimension migrations already recorded, and the first
   published quote migration already recorded. Source-link preservation, newer
-  quote protection and a failed source-correction audit are covered too. A second run
-  performed no work.
+  quote protection and a failed source-correction audit are covered too. A second
+  run performed no work. Newer-quote reconciliation also runs after both dimension
+  migrations are recorded; unknown stock and a failed reconciliation audit roll
+  back without changing the supplier quote.
 - 64 existing inventory-costing, canonical-dimension and migration-state
   regressions passed. Scoped lint and whitespace checks passed.
 
