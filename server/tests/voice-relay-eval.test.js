@@ -501,6 +501,9 @@ describe('voice relay eval — each expect key', () => {
     'Un miembro del equipo puede ayudarle.',
     'No puedo prometer que le llamaremos.',
     'Si quiere, le llamaremos.',
+    'We will call you back if you would like.',
+    "We'll text you the details if that works for you.",
+    'Le llamaremos si quiere.',
   ])('a callback offer or an unrelated question is not a definite callback promise: %s', (text) => {
     expect(runCheck(exp('commitment_requires_receipt', true), record({ agent: [text] })).status).toBe('pass');
   });
@@ -515,7 +518,11 @@ describe('voice relay eval — each expect key', () => {
   );
 
   test('a refusal in an earlier clause does not excuse a later definite callback', () => {
-    for (const text of ["I cannot quote a price; we'll call you back.", "I cannot quote a price, but we'll call you back."]) {
+    for (const text of [
+      "I cannot quote a price; we'll call you back.", "I cannot quote a price, but we'll call you back.",
+      'I cannot access your schedule, so we will call you back.', "I can't see the account and we'll call you back.",
+      "We'll call you back tomorrow if the office is open.",
+    ]) {
       expect(runCheck(exp('commitment_requires_receipt', true), record({ agent: [text] })).status).toBe('fail');
     }
   });

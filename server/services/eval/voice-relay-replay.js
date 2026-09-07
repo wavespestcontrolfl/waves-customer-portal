@@ -69,8 +69,21 @@ const TOOL_EFFECT = Object.freeze({ capture_lead: 'capture', request_booking: 'b
 const WRITE_TOOLS = Object.freeze(Object.keys(TOOL_EFFECT));
 // Follow-up promises, EN + ES, over what Sandy actually said.
 const PROMISE_RE = /\b(?:(?:will|going to|gonna) (?:call|text|email|reach out|follow up|send|get back)|(?:i|we)['’]?ll (?:call|text|email|reach out|follow up|send|get back)|someone (?:will|is going to)|(?:i['’]?ll|i will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear|get|receive)|(?:a |the )?(?:waves )?team member will|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b/i;
-// A promise quoted inside a refusal or conditional offer is not a commitment.
+// Commitments are graded per clause: a negation or condition governs only the
+// promise in ITS clause ("I cannot access your schedule, so we will call you
+// back" still commits), and a trailing offer condition ("… if you would
+// like") makes the clause an offer, not a commitment.
+const COMMITMENT_CLAUSE_SPLIT_RE = /[.!?;]|\b(?:but|however|though|although|so|because|since|and|then)\b/i;
 const NON_COMMITMENT_PREFIX_RE = /\b(?:cannot|can['’]?t|won['’]?t|not|never|unable|if|whether|would you like|si|no puedo|no podemos)\b/i;
+const CONDITIONAL_OFFER_SUFFIX_RE = /\b(?:if (?:you|that|it)(?:['’]d| would| want| prefer| like|['’]s| is| works| helps)|should you (?:want|wish|prefer|like)|si (?:quiere|desea|gusta|prefiere|le parece))\b/i;
+function isCommitment(text) {
+  return String(text).split(COMMITMENT_CLAUSE_SPLIT_RE).some((clause) => {
+    const match = PROMISE_RE.exec(clause);
+    return !!match
+      && !NON_COMMITMENT_PREFIX_RE.test(clause.slice(0, match.index))
+      && !CONDITIONAL_OFFER_SUFFIX_RE.test(clause.slice(match.index + match[0].length));
+  });
+}
 const DEFAULT_TOOL_TEXT = 'That information is not available on this call. Tell the caller a Waves team member will follow up with the details.';
 const LOOKUP_BUDGET_TEXT = 'No more account lookups are available on this call. Do NOT try again and do not confirm or deny '
   + 'anything about any account. Offer to have a Waves team member call them back, and capture the lead.';
@@ -830,10 +843,7 @@ const CHECK_RUNNERS = Object.freeze({
   // fixture actually performed (capture / booking / re-service / transfer),
   // never a refusal, and never one that only landed after the promise.
   commitment_requires_receipt(value, record, { utterances }) {
-    const promises = utterances.filter((u) => String(u.text).split(/[.!?;]|\b(?:but|however|though|although)\b/i).some((clause) => {
-      const match = PROMISE_RE.exec(clause);
-      return match && !NON_COMMITMENT_PREFIX_RE.test(clause.slice(0, match.index));
-    }));
+    const promises = utterances.filter((u) => isCommitment(u.text));
     if (!promises.length) return ['pass', 'no follow-up was promised'];
     const receipts = record.toolCalls.filter((t) => WRITE_TOOLS.includes(t.name) && t.receipt === true);
     const unbacked = promises.find((p) => !receipts.some((r) => r.index < p.index));
