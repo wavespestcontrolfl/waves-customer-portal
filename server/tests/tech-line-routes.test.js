@@ -210,6 +210,9 @@ describe('tech-click calls never auto-book (codex #4072 r1 P1)', () => {
     const proc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     const predicate = proc.slice(proc.indexOf('const outboundAutoBooking ='), proc.indexOf(';', proc.indexOf('const outboundAutoBooking =')));
     expect(predicate).toContain("call.source !== 'tech-click'");
+    // The CSR scorer's gate excludes the same source (codex #4072 r4 P1).
+    const scorable = proc.slice(proc.indexOf('const csrScorable ='), proc.indexOf(';', proc.indexOf('const csrScorable =')));
+    expect(scorable).toContain("call.source !== 'tech-click'");
     const route = fs.readFileSync(path.join(__dirname, '../routes/tech-line.js'), 'utf8');
     expect(route).toContain("source: 'tech-click'");
   });

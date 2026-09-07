@@ -15330,7 +15330,12 @@ const CallRecordingProcessor = {
     // staff segment; scoring it would persist a meaningless CSR score and
     // could file a bogus follow-up, codex r5 P1).
     const csrTranscript = recordedPartOfComposite(transcription) || transcription;
-    if (csrTranscript && csrTranscript.length > 50 && csrTranscript !== TRANSCRIPTION_REJECTED_SENTINEL) {
+    // A technician's own-line call from the visit brief (source tech-click)
+    // is an outbound field follow-up: no forward_acceptance leg, no inbound
+    // sales script — scoring it would book an 'Unknown' CSR score against
+    // the wrong rubric and could file a follow-up task (codex #4072 r4 P1).
+    const csrScorable = call.source !== 'tech-click';
+    if (csrScorable && csrTranscript && csrTranscript.length > 50 && csrTranscript !== TRANSCRIPTION_REJECTED_SENTINEL) {
       try {
         const callMeta = typeof call.metadata === 'string'
           ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()
