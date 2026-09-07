@@ -25,7 +25,7 @@
 
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { anthropicText } = require('./llm/call');
+const { anthropicText, geminiText } = require('./llm/call');
 // Shared egress sanitizers: reduce names to allowlisted labels and scrub free text
 // BEFORE the narrative LLM sees them, so no raw/injected finding text can echo into
 // the published customer_summary (the output is scrubbed again at the public route).
@@ -466,9 +466,8 @@ async function runPerception(context = {}) {
       return { ok: false, reason: `gemini_${resp.status}` };
     }
     const data = await resp.json();
-    // Join ALL text parts — a thinking model can return a thought part before the answer
-    // part, so parts[0] alone would miss the JSON.
-    const text = (data?.candidates?.[0]?.content?.parts || []).map((part) => part && part.text).filter(Boolean).join('');
+    // The shared parser joins every answer part and skips thought parts.
+    const text = geminiText(data);
     const parsed = parseLooseJson(text);
     const observations = Array.isArray(parsed?.observations)
       ? parsed.observations.filter((obs) => obs && typeof obs === 'object')

@@ -178,13 +178,16 @@ describe("AgentModelsTab", () => {
     expect(within(card).queryByText(/Backup/)).toBeNull();
   });
 
-  it("a skipped backup leg (same model as primary, never called) is hidden from the chain and the retry becomes the backup", async () => {
-    adminFetch.mockImplementation(async (path) => {
+  it("on a guarded ladder a backup that equals the primary is hidden (never called) and the retry becomes the backup — until a draft splits them", async () => {
+    adminFetch.mockImplementation(async (path, init) => {
+      if (path.startsWith("/admin/agents/models/search")) return { newest: [], results: [], unavailable: [] };
+      if (path === "/admin/agents/models/probe") return { ok: true, provider: JSON.parse(init.body).provider, id: JSON.parse(init.body).id };
       if (path === "/admin/agents/models") {
         const data = makeData();
         const lane = data.lanes[0];
-        lane.fallback = { ...lane.fallback, skipped: true };
-        lane.retry = { ...lane.fallback, model: "m3", skipped: false };
+        lane.skipsEqualLeg = true;
+        lane.retry = { ...lane.fallback, model: "m3", unpinnedModel: "m3" };
+        lane.fallback = { ...lane.fallback, model: "m1", unpinnedModel: "m1", skipped: true }; // same as primary m1
         return data;
       }
       throw new Error(path);
@@ -194,7 +197,15 @@ describe("AgentModelsTab", () => {
     expect(within(card).getByText(/Backup/)).toBeInTheDocument();
     expect(within(card).getByText("GPT-5.6 Terra")).toBeInTheDocument();
     expect(within(card).queryByText(/then/)).toBeNull();
-    expect(within(card).queryByText(/No backup/)).toBeNull();
+    // Drafting the primary onto Opus 5 splits it from the backup: the Opus 4.8
+    // rung runs again, so the chain shows it, then Terra.
+    fireEvent.click(within(card).getByRole("button", { name: /Change/ }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getAllByRole("button", { name: "Use" })[0]);
+    // The dialog also carries the lane name, so re-find the lane card itself.
+    const cardNow = () => screen.getAllByText("SMS intent").map((e) => e.closest(".p-4")).find((c) => c && /Runs on/.test(c.textContent));
+    await waitFor(() => expect(within(cardNow()).getByText(/then/)).toBeInTheDocument());
+    expect(within(cardNow()).getByText("Claude Opus 4.8")).toBeInTheDocument();
   });
 
   it("a failed load offers Retry, and a failed refresh keeps the lanes on screen", async () => {

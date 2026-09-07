@@ -794,6 +794,7 @@ function getSwitchboard() {
       lock: lane.lock || null,
       fanout: !!lane.fanout,
       inbound: !!lane.inbound,
+      skipsEqualLeg: !!lane.skipsEqualLeg,
       note: lane.note || null,
     };
   });

@@ -56,15 +56,20 @@ export default function LaneModelCard({ lane, catalog, draft, effectiveLeg, envF
   const primaryDraft = primaryEnv && draft[primaryEnv];
   const primaryNow = effectiveLeg(l.primary);
   const changed = [l.primary, l.fallback, l.retry, ...(l.also || [])].filter(Boolean).some((leg) => effectiveLeg(leg) !== leg.model);
-  // A `skipped` leg resolves to the same model as the one before it and is not
-  // called at runtime. It stays pickable (its selector still moves the lane) but
-  // the chain sentence shows only what runs.
-  const skippedNote = (leg, which) => (leg?.skipped ? `${which} (skipped — same model)` : which);
-  const backupLeg = l.fallback?.skipped ? l.retry : l.fallback;
-  const retryLeg = l.fallback?.skipped || l.retry?.skipped ? null : l.retry;
+  // On a `skipsEqualLeg` lane a leg that resolves to the same model as the one
+  // before it is never called. Derived from the DRAFTED models (not the server's
+  // `skipped` snapshot) so the preview shows the chain that runs after restart:
+  // splitting the retry model re-arms the rung, drafting a primary onto its
+  // backup skips it. The leg stays pickable — its selector still moves the lane.
+  const eqLeg = (a, b) => !!(l.skipsEqualLeg && a && b && effectiveLeg(a) === effectiveLeg(b));
+  const fallbackSkipped = eqLeg(l.primary, l.fallback);
+  const retrySkipped = !fallbackSkipped && eqLeg(l.fallback, l.retry);
+  const skippedNote = (skipped, which) => (skipped ? `${which} (skipped — same model)` : which);
+  const backupLeg = fallbackSkipped ? l.retry : l.fallback;
+  const retryLeg = fallbackSkipped || retrySkipped ? null : l.retry;
   const extraLegs = [
-    { leg: l.fallback, which: skippedNote(l.fallback, l.fanout ? "parallel arm" : "backup") },
-    { leg: l.retry, which: skippedNote(l.retry, "retry") },
+    { leg: l.fallback, which: skippedNote(fallbackSkipped, l.fanout ? "parallel arm" : "backup") },
+    { leg: l.retry, which: skippedNote(retrySkipped, "retry") },
     ...(l.also || []).map((a) => ({ leg: a, which: "parallel arm" })),
   ].filter((x) => x.leg);
 
