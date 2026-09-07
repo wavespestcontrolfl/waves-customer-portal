@@ -31,10 +31,12 @@ describe('recordLawnProtocolCompletion checklist semantics', () => {
   // Fake trx: lookups resolve to nothing (protocol/window rows are optional)
   // and the completion upsert records its row so checklist fields can be
   // asserted. Table name keeps its "as" alias, hence startsWith.
-  function fakeTrx(insertedCompletions) {
+  function fakeTrx(insertedCompletions, insertedActuals = [], deletes = []) {
     return (table) => ({
-      where: () => ({
+      columnInfo: () => Promise.resolve({ property_id: {} }),
+      where: (criteria) => ({
         first: () => Promise.resolve(null),
+        del: () => { deletes.push({ table, criteria }); return Promise.resolve(0); },
       }),
       leftJoin: () => ({
         where: () => ({
@@ -52,6 +54,7 @@ describe('recordLawnProtocolCompletion checklist semantics', () => {
             }),
           };
         }
+        if (String(table).startsWith('lawn_protocol_product_actuals')) insertedActuals.push(row);
         return Promise.resolve([row]);
       },
     });
@@ -84,7 +87,8 @@ describe('recordLawnProtocolCompletion checklist semantics', () => {
     const completions = [];
     const actuals = [];
     const trx = (table) => ({
-      where: () => ({ first: () => Promise.resolve(null) }),
+      columnInfo: () => Promise.resolve({}),
+      where: () => ({ first: () => Promise.resolve(null), del: () => Promise.resolve(0) }),
       leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([]) }) }),
       insert: (row) => {
         if (String(table).startsWith('lawn_protocol_service_completions')) {
@@ -167,5 +171,96 @@ describe('recordLawnProtocolCompletion checklist semantics', () => {
       { key: 'irrigation_audit', label: 'irrigation audit' },
     ]);
     expect(JSON.parse(row.metadata).checklistCollected).toBe(true);
+  });
+});
+
+describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
+  const { lawnActualsLedgerEnabled } = require('../services/lawn-protocol-completion');
+  afterEach(() => { delete process.env.GATE_LAWN_ACTUALS_LEDGER; });
+
+  function fakeTrx(completions, actuals, deletes) {
+    return (table) => ({
+      columnInfo: () => Promise.resolve({ property_id: {} }),
+      where: (criteria) => ({
+        first: () => Promise.resolve(null),
+        del: () => { deletes.push({ table, criteria }); return Promise.resolve(0); },
+      }),
+      leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([]) }) }),
+      insert: (row) => {
+        if (String(table).startsWith('lawn_protocol_service_completions')) {
+          completions.push(row);
+          return { onConflict: () => ({ merge: () => ({ returning: () => Promise.resolve([{ id: 'completion-9', ...row }]) }) }) };
+        }
+        actuals.push(row);
+        return Promise.resolve([row]);
+      },
+    });
+  }
+  const oneTimeVisit = { id: 'svc-2', customer_id: 'cust-2', property_id: 'prop-2' };
+  const appliedProduct = {
+    id: 'sp-1', product_id: 'prod-1', product_name: 'Fixture iron', application_rate: 3, rate_unit: 'fl oz',
+    total_amount: 7.5, amount_unit: 'fl oz', application_method: 'spot_spray', area_value: '2500', area_unit: 'sqft',
+    application_area: 'Front yard, Side yards', zone_ids: ['zone-a'],
+  };
+
+  test('gate off: a visit without a structured protocol window leaves no row (legacy WaveGuard-only writer)', async () => {
+    expect(lawnActualsLedgerEnabled()).toBe(false);
+    const completions = [];
+    const result = await recordLawnProtocolCompletion(fakeTrx(completions, [], []), {
+      service: oneTimeVisit, serviceRecord: { id: 'record-2' }, plan: null, serviceProducts: [appliedProduct], completionInput: { treatedSqft: 2500 },
+    });
+    expect(result).toBeNull();
+    expect(completions).toEqual([]);
+  });
+
+  test('gate on: a one-time lawn visit records actuals with no invented protocol, the frozen property, and each product\'s own area', async () => {
+    process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+    const completions = []; const actuals = []; const deletes = [];
+    const result = await recordLawnProtocolCompletion(fakeTrx(completions, actuals, deletes), {
+      service: oneTimeVisit, serviceRecord: { id: 'record-2' }, plan: null, serviceProducts: [appliedProduct],
+      completionInput: { treatedSqft: 2500, incompleteVisit: true, skippedProducts: [{ productId: 'prod-2', productName: 'Fixture pre-emergent' }] },
+    });
+    expect(result.id).toBe('completion-9');
+    const row = completions[0];
+    expect(row).toMatchObject({
+      service_record_id: 'record-2', scheduled_service_id: 'svc-2', customer_id: 'cust-2', property_id: 'prop-2',
+      lawn_protocol_id: null, protocol_key: null, protocol_version: null, window_key: null, window_title: null,
+      treated_sqft: 2500, recheck_due_date: null,
+    });
+    expect(JSON.parse(row.expected_response)).toEqual({});
+    expect(JSON.parse(row.watch_items)).toEqual([]);
+    expect(JSON.parse(row.metadata)).toMatchObject({ attribution: 'none', treatedSqftSource: 'visit', incompleteVisit: true });
+    // Idempotent: the completion's earlier actual rows are cleared in the same trx before re-insert.
+    expect(deletes).toEqual([{ table: 'lawn_protocol_product_actuals', criteria: { lawn_protocol_service_completion_id: 'completion-9' } }]);
+    expect(actuals).toHaveLength(2);
+    expect(actuals[0]).toMatchObject({ service_product_id: 'sp-1', status: 'applied', protocol_product_id: null, actual_amount: 7.5 });
+    expect(JSON.parse(actuals[0].metadata)).toMatchObject({
+      applicationMethod: 'spot_spray', areaValue: 2500, areaUnit: 'sqft', applicationArea: 'Front yard, Side yards', zoneIds: ['zone-a'],
+    });
+    expect(actuals[1]).toMatchObject({ status: 'skipped', product_id: 'prod-2', product_name: 'Fixture pre-emergent', skip_reason: 'Not applied' });
+    expect(JSON.parse(actuals[1].metadata)).toEqual({ source: 'tech_closeout', reasonSupplied: false });
+  });
+
+  test('gate on: a missing visit area stays NULL instead of the planned turf area, and a plan-attributed visit keeps its protocol', async () => {
+    process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+    const completions = [];
+    await recordLawnProtocolCompletion(fakeTrx(completions, [], []), {
+      service: oneTimeVisit, serviceRecord: { id: 'record-3' }, serviceProducts: [],
+      plan: { protocol: { structured: { protocolKey: 'st_augustine', version: 1, window: { key: 'summer_insect', title: 'Summer insect pressure', requiredTasks: [] } } }, mixCalculator: { lawnSqft: 5000, carrierGalPer1000: 1, items: [] } },
+      completionInput: { treatedSqft: null },
+    });
+    expect(completions[0]).toMatchObject({ protocol_key: 'st_augustine', window_key: 'summer_insect', treated_sqft: null, total_carrier_gal: null });
+    expect(JSON.parse(completions[0].metadata)).toMatchObject({ attribution: 'protocol', treatedSqftSource: 'missing' });
+  });
+
+  test('gate off: the WaveGuard writer still substitutes the planned area (unchanged while dark)', async () => {
+    const completions = [];
+    await recordLawnProtocolCompletion(fakeTrx(completions, [], []), {
+      service: oneTimeVisit, serviceRecord: { id: 'record-4' }, serviceProducts: [],
+      plan: { protocol: { structured: { protocolKey: 'st_augustine', version: 1, window: { key: 'summer_insect', title: 'Summer', requiredTasks: [] } } }, mixCalculator: { lawnSqft: 5000, carrierGalPer1000: 1, items: [] } },
+      completionInput: {},
+    });
+    expect(completions[0]).toMatchObject({ treated_sqft: 5000, total_carrier_gal: 5 });
+    expect(JSON.parse(completions[0].metadata)).toMatchObject({ attribution: 'protocol', treatedSqftSource: 'plan' });
   });
 });

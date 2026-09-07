@@ -18,7 +18,7 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
 const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft } = require('../services/nutrient-ledger');
 const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
-const { lawnCompletionDefaultsEnabled } = require('../services/lawn-completion-defaults');
+const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies } = require('../services/lawn-completion-defaults');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
@@ -53,6 +53,7 @@ const {
 } = require('../services/service-photos');
 const {
   recordLawnProtocolCompletion,
+  lawnActualsLedgerEnabled,
   normalizeCompletionForStructuredNotes,
 } = require('../services/lawn-protocol-completion');
 const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
@@ -2367,6 +2368,17 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     if (lawnCompletionAreaError) {
       return { status: 400, body: { error: 'treatedSqft must be a positive whole number, or null to clear the visit area.', code: 'lawn_completion_area_invalid' } };
     }
+    // Plan defaults the technician removed, recorded as skipped on the lawn
+    // actuals ledger. No reason is required (owner ruling: no skip-reason
+    // checklist); an optional typed reason is kept verbatim.
+    const { value: lawnSkippedProducts, error: lawnSkippedProductsError } = Joi.array().max(50).items(Joi.object({
+      productId: Joi.alternatives(Joi.string().max(80), Joi.number().integer().positive()).required(),
+      productName: Joi.string().trim().max(180).required(),
+      reason: Joi.string().trim().max(500).allow(null, ''),
+    })).allow(null).validate(lawnDefaultsEnabled ? lawnProtocolCompletion?.skippedProducts : undefined);
+    if (lawnSkippedProductsError) {
+      return { status: 400, body: { error: 'skippedProducts must list removed plan defaults as { productId, productName, reason? }.', code: 'lawn_skipped_products_invalid' } };
+    }
     if (offerInspectionCredit !== true && offerInspectionCredit !== false) {
       return ({ status: 400, body: { error: 'offerInspectionCredit must be a boolean' } });
     }
@@ -4100,14 +4112,29 @@ async function completeScheduledService(completionInput, packetRecord = null) {
       treeShrubCloseoutWarnings = typedCompliance.warnings || [];
     }
 
-    if (claim.action === 'proceed' && !isIncompleteVisit && isWaveGuardLawnCompletion(svc)) {
-      const plan = await buildPlanForService(svc.id, {
-        db,
-        equipmentSystemId: waveguardEquipmentSystemId || null,
-        calibrationId: waveguardCalibrationId || null,
-        lawnSqft: lawnCompletionArea,
-      });
-      waveguardPlan = plan;
+    // GATE_LAWN_ACTUALS_LEDGER: every lawn visit gets the appointment plan
+    // built so its ledger row can carry any protocol attribution the visit
+    // has. The WaveGuard advisories below stay tier-scoped; a plan outage on
+    // a non-WaveGuard visit records actuals without attribution rather than
+    // failing the closeout.
+    const lawnLedgerVisit = lawnActualsLedgerEnabled() && detectServiceLine(svc?.service_type) === 'lawn';
+    const waveguardCloseout = !isIncompleteVisit && isWaveGuardLawnCompletion(svc);
+    if (claim.action === 'proceed' && (waveguardCloseout || lawnLedgerVisit)) {
+      try {
+        waveguardPlan = await buildPlanForService(svc.id, {
+          db,
+          equipmentSystemId: waveguardEquipmentSystemId || null,
+          calibrationId: waveguardCalibrationId || null,
+          lawnSqft: lawnCompletionArea,
+        });
+      } catch (planErr) {
+        if (waveguardCloseout) throw planErr;
+        logger.warn('lawn actuals ledger: appointment plan unavailable, recording actuals without attribution', { serviceId: svc.id, error: planErr?.message });
+        waveguardPlan = null;
+      }
+    }
+    if (claim.action === 'proceed' && waveguardCloseout) {
+      const plan = waveguardPlan;
       const calibrationBlocks = calibrationLockoutBlocks(plan);
       // Calibration is advisory at completion, not a hard gate (mirrors
       // CompletionPanel's calibrationAdvisory): the tech acknowledges the warning
@@ -6071,14 +6098,25 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           await ComplianceService.createComplianceRecords(record.id, { trx });
         }
 
-        if (!isIncompleteVisit && isWaveGuardLawnCompletion(svc) && waveguardPlan?.protocol?.structured) {
+        // Ledger row: legacy = completed WaveGuard visits with a structured
+        // plan; under GATE_LAWN_ACTUALS_LEDGER = every completed lawn visit,
+        // plus an incomplete one that applied product (what was put down is
+        // real regardless of the visit outcome).
+        const ledgerVisit = lawnLedgerVisit
+          ? (!isIncompleteVisit || insertedServiceProducts.length > 0)
+          : (!isIncompleteVisit && isWaveGuardLawnCompletion(svc) && waveguardPlan?.protocol?.structured);
+        if (ledgerVisit) {
           const protocolCompletion = await recordLawnProtocolCompletion(trx, {
             service: svc,
             serviceRecord: record,
-            plan: waveguardPlan,
+            // A track-resolved protocol on a visit with no program is not the
+            // visit's protocol — record the actuals without attribution.
+            plan: lawnLedgerVisit && waveguardPlan && !lawnPlanProgramApplies(waveguardPlan) ? null : waveguardPlan,
             serviceProducts: insertedServiceProducts,
             completionInput: {
               ...(lawnProtocolCompletion || {}),
+              skippedProducts: lawnSkippedProducts || [],
+              incompleteVisit: isIncompleteVisit,
               inventoryDeductions,
             },
             equipmentSystemId: waveguardEquipmentSystemId,

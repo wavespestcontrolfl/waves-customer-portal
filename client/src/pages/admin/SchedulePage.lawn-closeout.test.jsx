@@ -193,7 +193,7 @@ it('updates untouched products and areas while keeping a manually entered amount
     .toEqual([{ completionDefaults: true, lawnSqft: 4000 }]);
 });
 
-it('keeps removed defaults out of the plan after refresh', async () => {
+it('keeps removed defaults out of the plan after refresh and submits them as skipped products', async () => {
   enableDefaults();
   mount();
   await waitFor(() => expect(totals()).toHaveLength(2));
@@ -201,6 +201,12 @@ it('keeps removed defaults out of the plan after refresh', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Refresh plan' }));
   await waitFor(() => expect(screen.queryByText('Updating plan suggestions…')).toBeNull());
   expect(totals().map(input => input.value)).toEqual(['10']);
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].lawnProtocolCompletion).toEqual({
+    treatedSqft: 5000,
+    skippedProducts: [{ productId: products[0].id, productName: products[0].name }],
+  });
 });
 
 it('preserves a per-product treated-area override when the visit area changes', async () => {

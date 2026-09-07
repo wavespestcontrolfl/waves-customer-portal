@@ -242,4 +242,54 @@ describeDb('appointment completion defaults through PostgreSQL', () => {
     }
     expect(Number((await knex('customer_turf_profiles').where({ id: profile.id }).first()).lawn_sqft)).toBe(4000);
   });
+
+  describe('GATE_LAWN_ACTUALS_LEDGER', () => {
+    afterEach(() => { delete process.env.GATE_LAWN_ACTUALS_LEDGER; });
+
+    test('a one-time lawn visit records the frozen property and unattributed per-product actuals, idempotently', async () => {
+      process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+      const f = await fixture(knex);
+      const visit = await f.visit(0, { scheduled_date: '2026-09-07', service_type: 'Lawn one-time fertilization' });
+      const record = await f.record(visit);
+      let plan = null;
+      try { plan = await buildPlanForService(visit.id, { db: knex }); } catch { plan = null; }
+      const { lawnPlanProgramApplies } = require('../services/lawn-completion-defaults');
+      expect(plan === null || lawnPlanProgramApplies(plan)).toBe(false);
+      const [product] = await knex('products_catalog').insert({ name: 'Fixture one-time iron', category: 'micronutrient', rate_unit: 'fl oz', active: true }).returning('*');
+      const [applied] = await knex('service_products').insert({
+        service_record_id: record.id, product_id: product.id, product_name: product.name, application_rate: 3, rate_unit: 'fl oz',
+        total_amount: 4.5, amount_unit: 'fl oz', application_method: 'spot_spray', application_area: 'Front yard', area_value: 1500, area_unit: 'sqft',
+      }).returning('*');
+      const args = {
+        service: visit, serviceRecord: record, plan: null, serviceProducts: [applied],
+        completionInput: { treatedSqft: null, incompleteVisit: true, skippedProducts: [{ productId: product.id, productName: 'Fixture removed default' }] },
+      };
+      const completion = await recordLawnProtocolCompletion(knex, args);
+      expect(completion).toMatchObject({ property_id: visit.property_id, customer_id: f.customerId, protocol_key: null, window_key: null, treated_sqft: null, total_carrier_gal: null });
+      expect(completion.metadata).toMatchObject({ attribution: 'none', treatedSqftSource: 'missing', incompleteVisit: true });
+      const actuals = () => knex('lawn_protocol_product_actuals').where({ lawn_protocol_service_completion_id: completion.id }).orderBy('status');
+      const first = await actuals();
+      expect(first.map(row => row.status)).toEqual(['applied', 'skipped']);
+      expect(first[0]).toMatchObject({ service_product_id: applied.id, protocol_product_id: null });
+      expect(first[0].metadata).toMatchObject({ areaValue: 1500, areaUnit: 'sqft', applicationArea: 'Front yard', applicationMethod: 'spot_spray' });
+      expect(first[1].metadata).toEqual({ source: 'tech_closeout', reasonSupplied: false });
+      // A retry re-runs the same writer: one completion row, the same two actual rows.
+      const again = await recordLawnProtocolCompletion(knex, args);
+      expect(again.id).toBe(completion.id);
+      expect((await actuals()).length).toBe(2);
+      expect(await knex('lawn_protocol_service_completions').where({ service_record_id: record.id }).count('id as count').first()).toMatchObject({ count: '1' });
+    });
+
+    test('gate off leaves a one-time lawn visit unrecorded while a member visit records attribution plus the property', async () => {
+      const f = await fixture(knex);
+      const oneTime = await f.visit(0, { scheduled_date: '2026-09-07' });
+      expect(await recordLawnProtocolCompletion(knex, { service: oneTime, serviceRecord: await f.record(oneTime), plan: null, serviceProducts: [], completionInput: {} })).toBeNull();
+      process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+      const { f: member, visit } = await plannedVisit();
+      const plan = await buildPlanForService(visit.id, { db: knex, completionDefaultsEnabled: true, lawnSqft: 2500 });
+      const completion = await recordLawnProtocolCompletion(knex, { service: visit, serviceRecord: await member.record(visit), plan, completionInput: { treatedSqft: 2500 } });
+      expect(completion).toMatchObject({ property_id: visit.property_id, protocol_key: 'fixture_lawn', window_key: 'fixture_6', treated_sqft: 2500 });
+      expect(completion.metadata).toMatchObject({ attribution: 'protocol', treatedSqftSource: 'visit' });
+    });
+  });
 });

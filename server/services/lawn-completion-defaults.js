@@ -132,11 +132,19 @@ function completionItem(item, protocolProduct, amountsAllowed) {
   };
 }
 
+// A lawn plan attributes the visit only when a program actually applies: a
+// WaveGuard tier or an explicit appointment assignment. The planner can still
+// resolve an active protocol by grass track for anyone; that resolution must
+// not become a one-time or commercial visit's protocol.
+function lawnPlanProgramApplies(plan) {
+  return ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(plan?.propertyGate?.serviceTier)
+    || !!plan?.appointmentAssignment?.windowKey;
+}
+
 function buildLawnCompletionDefaults(plan, context) {
   const protocol = plan.protocol.structured;
   const assigned = plan.appointmentAssignment;
-  const programApplies = ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(plan.propertyGate.serviceTier)
-    || !!assigned.windowKey;
+  const programApplies = lawnPlanProgramApplies(plan);
   const protocolMatches = matchesLawnCompletionProtocol(protocol, assigned, plan.propertyGate.trackKey);
   const eligible = context.isLawn && context.propertyMatchesProfile && programApplies && protocolMatches;
   const amountsAllowed = eligible && plan.propertyGate.blocks.length === 0;
@@ -163,4 +171,4 @@ function buildLawnCompletionDefaults(plan, context) {
   };
 }
 
-module.exports = { lawnCompletionDefaultsEnabled, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches };
+module.exports = { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches };

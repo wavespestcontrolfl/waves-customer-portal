@@ -14850,6 +14850,12 @@ export function CompletionPanel({
           ? [typedRecommendations.trim()]
           : []),
       ];
+      const lawnSkippedDefaults = lawnDefaultsEnabled
+        ? lawnRemovedDefaultIds.flatMap((id) => {
+            const item = lawnCompletionDefaults.items.find((row) => String(row.product.id) === String(id));
+            return item ? [{ productId: item.product.id, productName: item.product.name }] : [];
+          })
+        : [];
       const body = {
         ...(reviewedPricing ? { pricingReview: reviewedPricing.review } : {}),
         idempotencyKey: completionIdempotencyKeyRef.current,
@@ -14893,8 +14899,13 @@ export function CompletionPanel({
         // The existing completion field carries the visit area into the server
         // planner, protocol record and nutrient ledger. Product-specific actuals
         // remain on each product row; no saved turf profile is changed.
+        // Plan defaults the tech removed ride along as skipped products for
+        // the lawn actuals ledger — id + name only, no reason demanded.
         lawnProtocolCompletion: lawnDefaultsEnabled
-          ? { treatedSqft: lawnVisitArea === "" ? null : Number(lawnVisitArea) } : null,
+          ? {
+              treatedSqft: lawnVisitArea === "" ? null : Number(lawnVisitArea),
+              ...(lawnSkippedDefaults.length ? { skippedProducts: lawnSkippedDefaults } : {}),
+            } : null,
         treeShrubCompletion: treeShrubCloseoutRequired
           ? {
               ...treeShrubCloseout,

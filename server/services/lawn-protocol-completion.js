@@ -1,4 +1,13 @@
 const { addETDays, etDateString } = require('../utils/datetime-et');
+const { gateEnvValue } = require('../config/feature-gates');
+
+// GATE_LAWN_ACTUALS_LEDGER (dark): the ledger records EVERY lawn visit —
+// member, one-time, commercial, and incomplete visits that applied product —
+// with protocol attribution left absent when the visit has none. Read at call
+// time so unsetting the var is a live kill. Off = the WaveGuard-only writer.
+function lawnActualsLedgerEnabled() {
+  return gateEnvValue('GATE_LAWN_ACTUALS_LEDGER');
+}
 
 function parseJson(value, fallback) {
   if (value == null) return fallback;
@@ -102,6 +111,9 @@ function normalizeSkippedProducts(input = []) {
       productName: row.productName || row.product_name || row.name || 'Skipped protocol product',
       role: row.role || null,
       reason: row.reason || row.skipReason || row.skip_reason || 'Not applied',
+      // Whether the technician typed a reason or the default stands in;
+      // the closeout never demands a reason for a removed default.
+      reasonSupplied: !!(row.reason || row.skipReason || row.skip_reason),
     }))
     .filter((row) => row.productName);
 }
@@ -117,14 +129,22 @@ async function recordLawnProtocolCompletion(trx, {
   calibrationCleared = false,
   serviceDate = new Date(),
 } = {}) {
-  const structured = plan?.protocol?.structured;
-  const window = structured?.window;
-  if (!serviceRecord?.id || !structured || !window) return null;
+  const allLawn = lawnActualsLedgerEnabled();
+  const structured = plan?.protocol?.structured || null;
+  const window = structured?.window || null;
+  if (!serviceRecord?.id) return null;
+  // Without the gate, a visit with no structured protocol window leaves no
+  // row (legacy WaveGuard-only behaviour). With it, the visit is recorded
+  // with attribution "none" rather than an invented residential plan.
+  if (!allLawn && (!structured || !window)) return null;
+  const attributed = !!(structured && window);
 
-  const protocolRow = await trx('lawn_protocols')
-    .where({ protocol_key: structured.protocolKey, version: structured.version })
-    .first('id')
-    .catch(() => null);
+  const protocolRow = attributed
+    ? await trx('lawn_protocols')
+      .where({ protocol_key: structured.protocolKey, version: structured.version })
+      .first('id')
+      .catch(() => null)
+    : null;
   const windowRow = protocolRow?.id
     ? await trx('lawn_protocol_windows')
       .where({ lawn_protocol_id: protocolRow.id, window_key: window.key })
@@ -139,7 +159,7 @@ async function recordLawnProtocolCompletion(trx, {
       .catch(() => [])
     : [];
 
-  const requiredTasks = window.requiredTasks || [];
+  const requiredTasks = window?.requiredTasks || [];
   // The completion screen no longer submits a protocol checklist (read-only
   // protocol redesign). When none was provided, record an explicitly empty
   // checklist with no missing tasks — normalizeChecklist would otherwise
@@ -148,14 +168,22 @@ async function recordLawnProtocolCompletion(trx, {
   const checklistProvided = Boolean(completionInput?.checklist || completionInput?.tasks);
   const checklist = checklistProvided ? normalizeChecklist(completionInput, requiredTasks) : [];
   const missingTasks = checklistProvided ? missingRequiredTasks(checklist, requiredTasks) : [];
-  const treatedSqft = Number(completionInput.treatedSqft || completionInput.treated_sqft || plan?.mixCalculator?.lawnSqft || 0) || null;
+  // The visit-level treated area is the technician's actual. Under the
+  // all-lawn ledger an explicitly missing area stays NULL — the planned turf
+  // area is never substituted for it (scope 2026-09-06). Legacy keeps the
+  // plan fallback so the WaveGuard-only rows are unchanged while dark.
+  const enteredSqft = Number(completionInput.treatedSqft || completionInput.treated_sqft || 0) || null;
+  const treatedSqft = enteredSqft || (allLawn ? null : (Number(plan?.mixCalculator?.lawnSqft || 0) || null));
+  const treatedSqftSource = enteredSqft ? 'visit' : (treatedSqft ? 'plan' : 'missing');
   const carrier = Number(completionInput.carrierGalPer1000 || completionInput.carrier_gal_per_1000 || plan?.mixCalculator?.carrierGalPer1000 || 0) || null;
   const totalCarrier = Number(completionInput.totalCarrierGal || completionInput.total_carrier_gal || 0)
     || (treatedSqft && carrier ? Number(((treatedSqft / 1000) * carrier).toFixed(3)) : null);
-  const expectedResponse = summarizeExpectedResponse(window, completionInput);
+  // No protocol window → no protocol-derived response window or watch items;
+  // the columns stay at their empty defaults instead of a generic promise.
+  const expectedResponse = attributed ? summarizeExpectedResponse(window, completionInput) : {};
   const watchItems = Array.isArray(completionInput.watchItems)
     ? completionInput.watchItems
-    : (window.requiredTasks || []).map((task) => String(task).replace(/_/g, ' '));
+    : (window?.requiredTasks || []).map((task) => String(task).replace(/_/g, ' '));
   const substitutions = (plan?.mixCalculator?.items || [])
     .map((item) => item?.substitution)
     .filter(Boolean);
@@ -165,17 +193,22 @@ async function recordLawnProtocolCompletion(trx, {
       .map((sub) => [String(sub.substituteProductId), sub]),
   );
 
+  // property_id ships in migration 20260907000110; a completion on a
+  // checkout that has not run it yet must not fail the whole closeout.
+  const completionCols = await trx('lawn_protocol_service_completions').columnInfo().catch(() => ({}));
+  const propertyId = service?.property_id || null;
   const [completion] = await trx('lawn_protocol_service_completions')
     .insert({
       service_record_id: serviceRecord.id,
       scheduled_service_id: service?.id || serviceRecord.scheduled_service_id || null,
       customer_id: service?.customer_id || serviceRecord.customer_id || null,
+      ...(completionCols.property_id ? { property_id: propertyId } : {}),
       lawn_protocol_id: protocolRow?.id || null,
       lawn_protocol_window_id: windowRow?.id || null,
-      protocol_key: structured.protocolKey,
-      protocol_version: structured.version,
-      window_key: window.key,
-      window_title: window.title,
+      protocol_key: structured?.protocolKey || null,
+      protocol_version: structured?.version || null,
+      window_key: window?.key || null,
+      window_title: window?.title || null,
       // calibrationCleared means the tech completed without field-verified
       // equipment (calibration advisory bypass) — record "none" rather than
       // falling back to the stale assigned system carried on the plan.
@@ -189,15 +222,21 @@ async function recordLawnProtocolCompletion(trx, {
       missing_required_tasks: JSON.stringify(missingTasks),
       expected_response: JSON.stringify(expectedResponse),
       watch_items: JSON.stringify(watchItems),
-      recheck_due_date: defaultRecheckDueDate(window, completionInput, serviceDate),
+      recheck_due_date: defaultRecheckDueDate(window || {}, completionInput, serviceDate),
       metadata: JSON.stringify({
         source: 'dispatch_completion',
+        // 'protocol' = a structured window attributed the visit; 'none' = the
+        // visit was recorded without a lawn plan (one-time / commercial / no
+        // assignment). Never a guessed residential protocol.
+        attribution: attributed ? 'protocol' : 'none',
+        treatedSqftSource,
+        incompleteVisit: completionInput.incompleteVisit === true,
         // Distinguishes "no checklist collected" (read-only protocol flow)
         // from "checklist collected with nothing missing" for audits.
         checklistCollected: checklistProvided,
-        customerNoteTemplates: window.customerNoteTemplates || [],
-        serviceReportContext: window.serviceReportContext || {},
-        assessmentBridge: window.assessmentBridge || {},
+        customerNoteTemplates: window?.customerNoteTemplates || [],
+        serviceReportContext: window?.serviceReportContext || {},
+        assessmentBridge: window?.assessmentBridge || {},
         substitutions,
         inventoryDeductions: Array.isArray(completionInput.inventoryDeductions)
           ? completionInput.inventoryDeductions
@@ -207,6 +246,12 @@ async function recordLawnProtocolCompletion(trx, {
     .onConflict('service_record_id')
     .merge()
     .returning('*');
+
+  // The completion row upserts on service_record_id; its actual rows must be
+  // just as idempotent, or a durable-completion resume / retry doubles every
+  // applied and skipped product. Same trx as the completion, so a failure
+  // after the delete rolls the old rows back with it.
+  await trx('lawn_protocol_product_actuals').where({ lawn_protocol_service_completion_id: completion.id }).del();
 
   for (const serviceProduct of serviceProducts || []) {
     const substitution = serviceProduct.product_id
@@ -240,7 +285,9 @@ async function recordLawnProtocolCompletion(trx, {
       product_id: serviceProduct.product_id || protocolProduct?.product_id || null,
       product_name: serviceProduct.product_name || protocolProduct?.catalog_product_name || protocolProduct?.product_name || 'Applied product',
       role: protocolProduct?.role || null,
-      status: substitution ? 'substituted_applied' : (protocolProduct ? 'applied' : 'off_protocol_applied'),
+      // off_protocol means the visit HAD a protocol and this product was not
+      // on it; a visit with no protocol at all records a plain application.
+      status: substitution ? 'substituted_applied' : (protocolProduct || !attributed ? 'applied' : 'off_protocol_applied'),
       planned_rate_per_1000: protocolProduct?.rate_per_1000 || null,
       planned_rate_unit: protocolProduct?.rate_unit || null,
       actual_rate_per_1000: actualRatePer1000,
@@ -252,6 +299,13 @@ async function recordLawnProtocolCompletion(trx, {
         substitution: substitution || null,
         recordedRate: serviceProduct.application_rate || null,
         recordedRateUnit: serviceProduct.rate_unit || null,
+        // The product's OWN treated area and zones (spot treatment across
+        // three zones must not read as a whole-lawn broadcast). Copied from
+        // the service_products row so the ledger stands alone.
+        areaValue: serviceProduct.area_value == null ? null : Number(serviceProduct.area_value),
+        areaUnit: serviceProduct.area_unit || null,
+        applicationArea: serviceProduct.application_area || null,
+        zoneIds: Array.isArray(serviceProduct.zone_ids) ? serviceProduct.zone_ids : [],
       }),
     });
   }
@@ -270,7 +324,7 @@ async function recordLawnProtocolCompletion(trx, {
       planned_rate_per_1000: protocolProduct?.rate_per_1000 || null,
       planned_rate_unit: protocolProduct?.rate_unit || null,
       skip_reason: skipped.reason,
-      metadata: JSON.stringify({ source: 'tech_closeout' }),
+      metadata: JSON.stringify({ source: 'tech_closeout', reasonSupplied: skipped.reasonSupplied }),
     });
   }
 
@@ -291,6 +345,7 @@ function normalizeCompletionForStructuredNotes(completion) {
 }
 
 module.exports = {
+  lawnActualsLedgerEnabled,
   recordLawnProtocolCompletion,
   normalizeChecklist,
   missingRequiredTasks,
