@@ -60,7 +60,7 @@ it("keeps the profile recipient and thread line, sends once, and clears only on 
   expect(requests("/admin/communications/sms")).toHaveLength(1);
   expect(bodyOf("/admin/communications/sms")).toMatchObject({ to: customer.phone, customerId: customer.id, fromNumber: line, body: "Hello" });
   expect(field).toHaveValue("Hello");
-  await act(async () => { accept({ sent: true, providerMessageId: "SM_test_accepted" }); });
+  await act(async () => { accept({ sent: true, providerMessageId: "SMaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }); });
   expect(field).toHaveValue("");
   expect(onSent).toHaveBeenCalledOnce();
   expect(requests("/admin/drafts/unrelated")).toHaveLength(0);
@@ -106,7 +106,7 @@ it("rewrites against only the selected phone and business line and accepts dicta
 it("uploads signed attachment metadata, blocks scheduling MMS, and supports an immediate MMS", async () => {
   const attachment = { url: "https://example.invalid/qa.png", key: "qa/image", fileName: "qa.png", size: 4, mimeType: "image/png", attachmentToken: "synthetic-signed-token" };
   responses["/admin/communications/attach"] = { attachments: [attachment] };
-  responses["/admin/communications/sms"] = { sent: true, providerMessageId: "SM_test_mms" };
+  responses["/admin/communications/sms"] = { sent: true, providerMessageId: "MMbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" };
   const { container, onSent } = setup();
   fireEvent.change(container.querySelector('input[type="file"]'), { target: { files: [new File(["test"], "qa.png", { type: "image/png" })] } });
   await screen.findByRole("button", { name: "Remove qa.png" });

@@ -80,7 +80,7 @@ describe('Customer360ProfileV2 profile state', () => {
         return response(detail);
       }
       if (path.endsWith('/comms')) return response({ error: 'Admin access required' }, 403);
-      if (path.endsWith('/communications/sms')) return response({ sent: true, providerMessageId: 'SM_qa_accepted' });
+      if (path.endsWith('/communications/sms')) return response({ sent: true, providerMessageId: 'SMaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' });
       return response({});
     }));
     const { container } = render(<MemoryRouter><Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded /></MemoryRouter>);
