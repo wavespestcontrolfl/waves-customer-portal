@@ -88,6 +88,12 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
   const invoice = await database('invoices').where({ visit_completion_packet_id: packet.id }).first();
   if (visit.billing_hold) return { state: 'office_required', invoiceId: invoice?.id || null };
   if (!invoice) return { state: 'no_charge', invoiceId: null };
+  if (['void', 'refunded'].includes(invoice.status)) {
+    await database('service_visits').where({ id: visit.id }).update({
+      billing_hold: true, updated_at: database.fn.now(),
+    });
+    return { state: 'office_required', invoiceId: invoice.id };
+  }
   if (!isInvoiceCollectibleStatus(invoice.status)) {
     if (['paid', 'prepaid'].includes(invoice.status)) {
       await VisitGroups.finalizeVisitNotification(visit.id, 'visit_payment', 'sent');

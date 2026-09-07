@@ -312,6 +312,22 @@ postgres('visit completion packet records on PostgreSQL', () => {
       .toMatchObject({ payment_intent_id: 'pi_fixture_late' });
   });
 
+  test.each(['void', 'refunded'])('recovery parks a shared invoice reversed to %s before effects resume', async (status) => {
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).update({ status });
+    await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).update({ updated_at: new Date(0) });
+    await require('../services/visit-completion-packets').resumePendingVisitCompletions({ limit: 1 });
+    expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first())
+      .toMatchObject({ status: 'done', error: JSON.stringify({ payment: 'office_required', delivery: 'delivered' }) });
+    expect(await mockPg('service_visits').where({ id: fixture.visitId }).first())
+      .toMatchObject({ billing_hold: true, close_reason: 'office_review' });
+    await runVisitCompletionPacketEffects(saved.body.packetId);
+    expect(await mockPg('dispatch_alerts').where({ job_id: fixture.serviceIds[0], type: 'visit_closeout_review' })).toHaveLength(1);
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(require('../services/review-request').enrollPostService).not.toHaveBeenCalled();
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
   test('the existing recovery worker retries a blocked pre-provider summary without repeating billing', async () => {
     const send = sendCustomerMessage.getMockImplementation();
     sendCustomerMessage.mockImplementationOnce(async () => ({ blocked: true, retryable: true }));
