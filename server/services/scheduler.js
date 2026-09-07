@@ -4167,8 +4167,15 @@ function initScheduledJobs() {
           // the attempts ran out; parked as send_failed with no due time it
           // is inert, as the sibling release leaves a held row (pre-push
           // codex P1 on #3750; codex r18 P2 on #3804).
-          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING'].includes(e.code));
-          await markScheduledEstimateSendFailure(est, e.message, { retry: !deterministicRefusal, now });
+          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING', 'ESTIMATE_REVIEW_STALE', 'SEND_OUTCOME_UNCERTAIN'].includes(e.code));
+          // A reviewed attempt cannot be retimed: its receipt and pinned
+          // offer belong to the original schedule. Even a bookkeeping throw
+          // can follow provider acceptance, so stop for explicit staff review.
+          let sendData = est.estimate_data;
+          try { if (typeof sendData === 'string') sendData = JSON.parse(sendData); } catch { sendData = null; }
+          const scheduledAt = est.scheduled_at ? new Date(est.scheduled_at).toISOString() : null;
+          const reviewedSchedule = scheduledAt && (sendData?.manualSendAttempts || []).some((entry) => entry.scheduleReview?.scheduledAt === scheduledAt);
+          await markScheduledEstimateSendFailure(est, e.message, { retry: !deterministicRefusal && !reviewedSchedule, now });
         }
       }
       logger.info(`Scheduled estimates processed: ${scheduled.length}`);
