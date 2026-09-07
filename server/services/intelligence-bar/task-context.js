@@ -223,7 +223,7 @@ async function resolve({ prompt, pageData, selectedTarget }) {
       .map(match => match[1].replace(/\D/g, '').slice(-10)) };
 }
 
-function unlinkedRecordIsReferenced(record, context) {
+async function unlinkedRecordIsReferenced(record, context) {
   if (Object.hasOwn(context.requestedRecords || {}, record.kind) && context.requestedRecords[record.kind] !== record.id) return false;
   if (record.customer_id) return true;
   const { targets = [], requestPhrase = '', explicitEmails = [] } = context;
@@ -234,7 +234,20 @@ function unlinkedRecordIsReferenced(record, context) {
   const noun = record.kind.replace(/_id$/, '');
   if (ids[record.kind] === record.id && new RegExp(`\\b(?:this|that|current|selected|viewed|open)\\s+${noun}\\b`).test(requestPhrase)) return true;
   if (record.kind === 'email_id') return explicitEmails.includes(normalizeEmail(record.from_address));
-  return namesTargetCustomer(requestPhrase, record);
+  if (!namesTargetCustomer(requestPhrase, record)) return false;
+  const table = record.kind === 'lead_id' ? 'leads' : 'estimates';
+  const nameSql = record.kind === 'lead_id' ? "concat_ws(' ', first_name, last_name)" : 'customer_name';
+  const fullName = record.customer_name || [record.first_name, record.last_name].filter(Boolean).join(' ');
+  // Both expressions are selected from this fixed whitelist. Request data and
+  // regex patterns remain bound values. Count linked and unlinked duplicates
+  // across statuses; the supplied record ID must never break a name tie.
+  const matches = db(table).whereRaw(
+    `btrim(regexp_replace(regexp_replace(regexp_replace(replace(lower(coalesce(${nameSql}, '')), ?, ?), ?, '', 'g'), ?, ' ', 'g'), ?, ' ', 'g')) = ?`,
+    ["’", "'", "'s(?![abcdefghijklmnopqrstuvwxyz0123456789_])", "[^[:alnum:][:space:]'-]", '[[:space:]]+', normalizeName(fullName)],
+  );
+  if (table === 'leads') matches.whereNull('deleted_at');
+  const candidates = await matches.select('id').limit(2);
+  return candidates.length === 1 && candidates[0].id === record.id;
 }
 
 function relationshipFailure(records, params, toolName) {
@@ -294,7 +307,7 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
     }
   }
   const missingTarget = customerIds(records).some(id => !permitted.has(id));
-  const unlinkedTarget = records.some(r => !unlinkedRecordIsReferenced(r, context));
+  const unlinkedTarget = (await Promise.all(records.map(r => unlinkedRecordIsReferenced(r, context)))).some(allowed => !allowed);
   if (missingTarget || unlinkedTarget) return {
     error: 'Choose the target for this action; the current request has not established it',
     code: 'target_clarification_required', candidates: context.candidates || [],

@@ -108,8 +108,8 @@ suite('IB target resolution against isolated PostgreSQL', () => {
     await mockDb('customers').insert({ id: foreignId, first_name: 'Synthetic', last_name: 'Foreigncalls',
       phone: '+1555' + (Date.now()+3).toString().slice(-7) });
     await mockDb('call_log').insert([
-      { id: ownCall, customer_id: customerId, call_sid: `fixture-${ownCall}`, direction: 'inbound', from_phone: '+15550101234', to_phone: '+15550104321', transcription: 'Owned synthetic call' },
-      { id: foreignCall, customer_id: foreignId, call_sid: `fixture-${foreignCall}`, direction: 'inbound', from_phone: '+15550105678', to_phone: '+15550104321', transcription: 'Foreign synthetic call' },
+      { id: ownCall, customer_id: customerId, twilio_call_sid: `fixture-${ownCall}`, direction: 'inbound', from_phone: '+15550101234', to_phone: '+15550104321', transcription: 'Owned synthetic call' },
+      { id: foreignCall, customer_id: foreignId, twilio_call_sid: `fixture-${foreignCall}`, direction: 'inbound', from_phone: '+15550105678', to_phone: '+15550104321', transcription: 'Foreign synthetic call' },
     ]);
     const comms = require('../services/intelligence-bar/comms-tools');
     const schema = comms.COMMS_TOOLS.find(tool => tool.name === 'get_call_log').input_schema;
@@ -131,6 +131,33 @@ suite('IB target resolution against isolated PostgreSQL', () => {
       expect(task.target.customer_id).toBe(recipientId);
       expect((await Context.validateRecordTarget({ customer_id: customerId }, task)).code).toBe('target_clarification_required');
     }
+  });
+
+  test('selector-free message search includes current unlinked history without crossing linked accounts', async () => {
+    const foreignId = randomUUID();
+    const ownPhone = (await mockDb('customers').where('id', customerId).first('phone')).phone;
+    await mockDb('customers').insert({ id: foreignId, first_name: 'Synthetic', last_name: 'Foreignmessages', phone: '+15550108888' });
+    const ids = Array.from({ length: 4 }, () => randomUUID());
+    await mockDb('sms_log').insert([
+      { id: ids[0], customer_id: customerId, from_phone: ownPhone },
+      { id: ids[1], customer_id: null, from_phone: ownPhone },
+      { id: ids[2], customer_id: foreignId, from_phone: ownPhone },
+      { id: ids[3], customer_id: null, from_phone: '+15550109999' },
+    ].map(row => ({ ...row, to_phone: '+15550101111', direction: 'inbound', message_body: 'Synthetic search fixture', message_type: 'manual' })));
+    const comms = require('../services/intelligence-bar/comms-tools');
+    const schema = comms.COMMS_TOOLS.find(tool => tool.name === 'search_messages').input_schema;
+    const task = await Context.resolve({ prompt: "Show this customer's messages", pageData: { customer_id: customerId } });
+    const prepared = await Context.prepareReadInput({ search: 'Synthetic search fixture' }, task, { toolName: 'search_messages', schema });
+    expect(prepared.input.customer_id).toBe(customerId);
+    const result = await comms.executeCommsTool('search_messages', prepared.input);
+    expect(result.messages.map(message => message.id).sort()).toEqual(ids.slice(0, 2).sort());
+    expect((await comms.executeCommsTool('search_messages', { customer_id: customerId, phone: '+15550109999' })).code).toBe('target_relationship_mismatch');
+    await mockDb('customers').where('id', customerId).update({ phone: '+15550109999' });
+    expect((await comms.executeCommsTool('search_messages', prepared.input)).messages.map(message => message.id).sort()).toEqual([ids[0], ids[3]].sort());
+    expect((await comms.executeCommsTool('search_messages', { ...prepared.input, phone: '+15550109999' })).messages.map(message => message.id)).toEqual([ids[3]]);
+    expect((await comms.executeCommsTool('search_messages', { customer_id: customerId, phone: ownPhone })).code).toBe('target_relationship_mismatch');
+    await mockDb('customers').where('id', customerId).update({ deleted_at: mockDb.fn.now() });
+    expect((await comms.executeCommsTool('search_messages', prepared.input)).code).toBe('record_unavailable');
   });
 
 });
