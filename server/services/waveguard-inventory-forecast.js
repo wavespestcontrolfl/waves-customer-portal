@@ -93,14 +93,16 @@ async function buildWaveGuardInventoryForecast({ days = 14, limit = 150, knex = 
     try {
       const plan = await buildPlanForService(service.id, { db: knex });
       const customerName = `${service.first_name || ''} ${service.last_name || ''}`.trim() || 'Customer';
-      // Under the lawn completion gates an archived assignment whose recipe no
-      // longer reproduces plans NO products (waveguard-plan-engine withholds
-      // rather than borrowing a later recipe). Counting that as zero demand
-      // would read as "nothing needed" and under-order — report it the way a
-      // failed plan is reported.
-      const archivedRecipeBlock = (plan?.propertyGate?.blocks || []).find((block) => block.code === 'lawn_archived_recipe_unavailable');
-      if (archivedRecipeBlock) {
-        errors.push({ serviceId: service.id, scheduledDate: service.scheduled_date, customerName, message: archivedRecipeBlock.message });
+      // Under the lawn completion gates the planner withholds EVERY product
+      // when the assigned protocol version/window cannot be resolved
+      // (lawn_protocol_unresolved) or an archived assignment's recipe no
+      // longer reproduces (lawn_archived_recipe_unavailable) — it never
+      // borrows a later recipe. Counting either as zero demand would read as
+      // "nothing needed" and under-order — report it the way a failed plan is.
+      const withheldBlock = (plan?.propertyGate?.blocks || [])
+        .find((block) => ['lawn_archived_recipe_unavailable', 'lawn_protocol_unresolved'].includes(block.code));
+      if (withheldBlock) {
+        errors.push({ serviceId: service.id, scheduledDate: service.scheduled_date, customerName, message: withheldBlock.message });
         continue;
       }
       for (const item of plan?.mixCalculator?.items || []) {
