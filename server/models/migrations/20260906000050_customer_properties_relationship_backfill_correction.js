@@ -32,47 +32,63 @@ exports.up = async function up(knex) {
   const original = await knex('knex_migrations').where({ name: ORIGINAL_MIGRATION }).first('migration_time');
   const backfilledAt = original?.migration_time ? new Date(original.migration_time) : null;
 
+  const hasContactRole = await knex.schema.hasColumn('customers', 'contact_role');
+  const occupancyDerived = (qb) => qb.where(function occupancyDerivedValue() {
+    this.where({ relationship: 'own_home', occupancy_type: 'owner_occupied' })
+      .orWhere({ relationship: 'rental_owned', occupancy_type: 'rental_investment' });
+  });
+  const untouchedSinceBackfill = (qb) => (backfilledAt
+    ? qb.where(function untouched() {
+      this.whereNull('updated_at').orWhere('updated_at', '<=', backfilledAt);
+    })
+    : qb);
+  const inferredPredicate = (qb) => untouchedSinceBackfill(occupancyDerived(qb));
+
   await knex.transaction(async (trx) => {
-    // Snapshot BOTH sets before any write, locked, so `down` can restore each
-    // row's real prior value and a concurrent property PATCH cannot land
-    // between the SELECT and the UPDATE and be recorded with a stale prior.
-    const inferred = trx('customer_properties')
-      .where(function occupancyDerived() {
-        this.where({ relationship: 'own_home', occupancy_type: 'owner_occupied' })
-          .orWhere({ relationship: 'rental_owned', occupancy_type: 'rental_investment' });
-      });
-    if (backfilledAt) {
-      inferred.where(function untouchedSinceBackfill() {
-        this.whereNull('updated_at').orWhere('updated_at', '<=', backfilledAt);
-      });
-    }
-    const inferredRows = await inferred.select('id', 'relationship').forUpdate();
+    // Lock order = the admin address save's (customers first, then their
+    // customer_properties rows — admin-customers.js locks the customer row,
+    // customer-properties.js then updates the primary): every customer whose
+    // rows this migration may touch is locked BEFORE any property row, so an
+    // overlapping save waits instead of deadlocking (Codex r10 P1). The
+    // locked customers rows also pin contact_role for the rest of the
+    // transaction, which is what makes the manager set below safe to derive
+    // from them without a joined `FOR UPDATE OF c`.
+    const customers = trx('customers')
+      .select('id', ...(hasContactRole ? ['contact_role'] : []))
+      .whereIn('id', inferredPredicate(trx('customer_properties').select('customer_id')));
+    if (hasContactRole) customers.orWhere('contact_role', 'property_manager');
+    const lockedCustomers = await customers.forUpdate();
+    const managerCustomerIds = hasContactRole
+      ? lockedCustomers.filter((c) => c.contact_role === 'property_manager').map((c) => c.id)
+      : [];
+
+    // Snapshot BOTH property sets before any write, locked, so `down` can
+    // restore each row's real prior value and a concurrent property PATCH
+    // cannot land between the SELECT and the UPDATE and be recorded with a
+    // stale prior.
+    const inferredRows = await inferredPredicate(trx('customer_properties'))
+      .select('id', 'customer_id', 'relationship')
+      .forUpdate();
     const inferredIds = inferredRows.map((r) => r.id);
 
     // Manager-profile rows: those not already managed_for_client are
     // snapshotted with their prior value; an inferred row on a manager profile
     // goes straight to managed_for_client, its prior value recorded once above.
-    // The joined customers rows are locked too (FOR UPDATE OF cp, c) so a
-    // contact_role change cannot commit between this selection and the
-    // id-based UPDATE below.
+    // A profile that becomes a manager after the customer lock above is
+    // outside a point-in-time backfill by design; the office sets it on the
+    // panel.
     let managerRows = [];
     let managerIds = [];
     let inferredOnManager = [];
-    if (await trx.schema.hasColumn('customers', 'contact_role')) {
-      const managers = trx('customer_properties as cp')
-        .join('customers as c', 'c.id', 'cp.customer_id')
-        .where('c.contact_role', 'property_manager')
-        .whereRaw("cp.relationship IS DISTINCT FROM 'managed_for_client'");
-      if (inferredIds.length) managers.whereNotIn('cp.id', inferredIds);
-      managerRows = await managers.select('cp.id', 'cp.relationship').forUpdate('cp', 'c');
-      inferredOnManager = inferredIds.length
-        ? (await trx('customer_properties as cp')
-          .join('customers as c', 'c.id', 'cp.customer_id')
-          .where('c.contact_role', 'property_manager')
-          .whereIn('cp.id', inferredIds)
-          .select('cp.id')
-          .forUpdate('c')).map((r) => r.id)
-        : [];
+    if (managerCustomerIds.length) {
+      const managers = trx('customer_properties')
+        .whereIn('customer_id', managerCustomerIds)
+        .whereRaw("relationship IS DISTINCT FROM 'managed_for_client'");
+      if (inferredIds.length) managers.whereNotIn('id', inferredIds);
+      managerRows = await managers.select('id', 'relationship').forUpdate();
+      inferredOnManager = inferredRows
+        .filter((r) => managerCustomerIds.includes(r.customer_id))
+        .map((r) => r.id);
       managerIds = managerRows.map((r) => r.id).concat(inferredOnManager);
     }
 
@@ -104,7 +120,7 @@ exports.up = async function up(knex) {
           corrected_at: correctedAt.toISOString(),
           cleared_count: cleared,
           managed_for_client_set_count: managed,
-          prior_values: inferredRows.concat(managerRows),
+          prior_values: inferredRows.map(({ id, relationship }) => ({ id, relationship })).concat(managerRows),
         },
       });
     }
