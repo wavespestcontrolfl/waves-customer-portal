@@ -469,7 +469,8 @@ function composeRelaySegment(call) {
   if (!text) return null;
   return {
     text: `[AI segment]\n${text}`,
-    metadata: tmeta && typeof tmeta === 'object' ? tmeta : { provider: TRANSCRIPTION_PROVIDER },
+    metadata: { ...(tmeta && typeof tmeta === 'object' ? tmeta : { provider: TRANSCRIPTION_PROVIDER }),
+      ...require('./relay-segments').summarizeSegments(meta) },
   };
 }
 

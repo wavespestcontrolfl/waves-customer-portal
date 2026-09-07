@@ -56,6 +56,7 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     await admin.schema.createSchema(schema);
     mockPg = knex({ client: 'pg', connection: { connectionString: connection, application_name: schema }, searchPath: [schema], pool: { min: 0, max: 4 } });
     await mockPg.schema.createTable('call_log', (t) => { t.text('id').primary(); t.text('twilio_call_sid').unique(); t.text('customer_id'); t.text('from_phone'); t.jsonb('metadata'); t.timestamp('voicemail_callback_alerted_at'); t.integer('duration_seconds'); t.text('call_summary'); t.text('call_outcome'); t.text('answered_by'); t.text('status'); t.timestamp('created_at', { useTz: true }); t.timestamp('updated_at', { useTz: true }); });
+    await mockPg.schema.alterTable('call_log', (t) => { t.text('transcription_provider'); t.jsonb('transcription_metadata'); });
     await mockPg.schema.createTable('notifications', (t) => {
       t.increments('id');
       for (const field of ['recipient_type', 'recipient_id', 'category', 'title', 'body', 'icon', 'link']) t.text(field);
@@ -347,6 +348,7 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
       { started_at: '2026-01-01T12:00:00Z', ended_at: '2026-01-01T12:01:00Z', text: 'Caller: need pest service' },
       { started_at: '2026-01-01T12:01:00Z', ended_at: '2026-01-01T12:01:20Z', text: 'Caller: please continue' },
     ] };
+    await mockPg('call_log').where('id', 'call-1').update({ metadata: meta });
     await RelayConversation.prototype._refreshCallSummary.call({ callSid }, meta);
     expect((await mockPg('call_log').first()).duration_seconds).toBe(80);
     if (summary) expect((await mockPg('call_log').first()).call_summary).toBe(summary);
@@ -354,8 +356,9 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     await RelayConversation.prototype._refreshCallSummary.call({ callSid }, meta);
     expect((await mockPg('call_log').first()).duration_seconds).toBe(100);
     // Silent segments and missing segment start use the call's creation time.
-    await mockPg('call_log').where('id', 'call-1').update({ duration_seconds: 0 });
-    await RelayConversation.prototype._refreshCallSummary.call({ callSid }, { relay_segments: [{ ended_at: '2026-01-01T12:02:00Z' }] });
+    const silent = { relay_segments: [{ ended_at: '2026-01-01T12:02:00Z' }] };
+    await mockPg('call_log').where('id', 'call-1').update({ duration_seconds: 0, metadata: silent });
+    await RelayConversation.prototype._refreshCallSummary.call({ callSid }, silent);
     expect((await mockPg('call_log').first()).duration_seconds).toBe(120);
   });
 
