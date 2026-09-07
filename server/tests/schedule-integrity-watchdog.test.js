@@ -327,6 +327,19 @@ describe('runInner alerting', () => {
 });
 
 describe('accepted-plan schedule detection', () => {
+  test('morning lawn-email alerts retain priority over a large acceptance backlog', async () => {
+    findAcceptedRecurringScheduleGaps.mockResolvedValueOnce(Array.from({ length: MAX_ALERTS_PER_RUN + 5 }, (_, i) => ({
+      estimateId: `e-${i}`, customerId: `c-${i}`, serviceFamily: 'pest_control', pattern: 'monthly',
+      expectedVisits: 12, recordedVisits: 0, issues: ['missing_schedule'], evidenceKey: 'missing', appointmentIds: [],
+    })));
+    findLawnEmailAudienceGaps.mockResolvedValueOnce([{ customerId: 'lawn-1', fixable: ['no_coordinates'] }]);
+    makeDbMock();
+    expect(await runInner({ now: NOW })).toMatchObject({ alerted: MAX_ALERTS_PER_RUN });
+    const keys = NotificationService.notifyAdmin.mock.calls.map((call) => call[3].metadata.dedupeKey);
+    expect(keys[0]).toBe('lawn-email-gap:lawn-1:no_coordinates');
+    expect(keys.filter((key) => key.startsWith('accepted-schedule:'))).toHaveLength(MAX_ALERTS_PER_RUN - 1);
+  });
+
   test('acceptance findings use the existing admin bell and evidence dedupe', async () => {
     const gap = { estimateId: 'e-1', customerId: 'c-1', serviceFamily: 'pest_control', pattern: 'monthly',
       expectedVisits: 12, recordedVisits: 1, issues: ['missing_recurrence'], evidenceKey: 'evidence-1', appointmentIds: ['s-1'] };
