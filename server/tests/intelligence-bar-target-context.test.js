@@ -54,6 +54,29 @@ test('viewed and selected targets retain the database text version without Date 
   expect(viewed.target.version).toBe('2026-09-01 12:00:00.123456+00');
   expect(selected.target.version).toBe(viewed.target.version);
 });
+
+test('an unmatched current name refuses a stale operator selection', async () => {
+  const result = await Context.resolve({ prompt: 'Update Synthetiic Person', pageData: { customer_id: A }, selectedTarget: { customer_id: A } });
+  expect(result).toMatchObject({ code: 'context_mismatch' });
+  lookupRows = [rows.customers[0]];
+  const matching = await Context.resolve({ prompt: 'Update Synthetic Person', pageData: { customer_id: B }, selectedTarget: { customer_id: A } });
+  expect(matching.target.customer_id).toBe(A);
+});
+
+test.each(['both', 'these customers', 'all of these'])('a partially resolved %s set never authorizes its matching subset', async set => {
+  lookupRows = [rows.customers[0]];
+  const prompt = `Update ${set} Synthetic Person and Missing Customer`;
+  const result = await Context.resolve({ prompt, pageData: { customer_id: A } });
+  expect(result).toMatchObject({ targets: [], ambiguous: true });
+  expect(await Context.resolve({ prompt, pageData: {}, selectedTarget: { customer_id: A } })).toMatchObject({ code: 'context_mismatch' });
+});
+
+test('both requested fields are not mistaken for a customer set', async () => {
+  lookupRows = [rows.customers[0]];
+  const task = await Context.resolve({ prompt: 'Update both the phone and email for Synthetic Person', pageData: {} });
+  expect(task.target.customer_id).toBe(A);
+  expect(task.ambiguous).toBe(false);
+});
 const context = (customerId = A) => ({ targets: customerId ? [{ customer_id: customerId }] : [], page: { ids: {} } });
 
 test('explicit child identifiers constrain same-customer choices and exclude message content', async () => {
