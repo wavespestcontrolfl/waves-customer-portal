@@ -32,13 +32,18 @@ const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'h
   'property', 'properties', 'appointment', 'appointments', 'estimate', 'invoice', 'details', 'inactive', 'active', 'reminder', 'reminders']);
 const NON_PERSON_NAMES = new Set(['this', 'that', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using']);
 const PAGE_REFERENCE_RE = /\b(?:(?:this|that|current|selected|viewed|open)\s+(?:customer|account|property|appointment|estimate|invoice|review|email|call|lead)|his|her|their)\b/i;
+const CUSTOMER_LOOKUP_LIMIT = 10;
 
 function targetClause(prompt, retainRecordConstraints = false) {
   // Message bodies and replacement values are data, even when they contain
   // another customer's exact name. They never select a recipient/account.
-  let clause = String(prompt).split(/[:;\n“”"]|\b(?:notes?|message|instructions|comments)\s+(?:that|mentioning|referencing)\b|\b(?:saying|regarding|about)\b/i)[0];
-  if (/\b(?:change|update|set|rename|relabel|add|save)\b/i.test(clause)) {
-    clause = clause.split(/\b(?:name|address|email|phone|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+/i)[0];
+  let clause = String(prompt).split(/[:;\n“”"]|\bwith\s+(?:(?:the|a|this|following)\s+)*(?:text|body|message|content|notes?|instructions|comments)\b|\b(?:notes?|message|instructions|comments)\s+(?:that|mentioning|referencing|containing|with|reading)\b|\b(?:saying|regarding|about)\b/i)[0];
+  for (const replacement of clause.matchAll(/\b(?:name|address|email|phone|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+/gi)) {
+    const action = [...clause.slice(0, replacement.index).matchAll(new RegExp(`\\b(?:${PERSON_ACTIONS}|change|set|rename|relabel|add|save|draft|write|post|submit)\\b`, 'gi'))].at(-1)?.[0];
+    if (/^(?:change|update|set|rename|relabel|add|save)$/i.test(action || '')) {
+      clause = clause.slice(0, replacement.index);
+      break;
+    }
   }
   // A deictic child-record constraint may only narrow already established
   // authority. Retain it in compound requests even when recipient parsing
@@ -115,15 +120,18 @@ async function namedCustomers(prompt) {
   // never the first fuzzy result or a name mentioned by an old assistant turn.
   const singleNames = explicitSingleNames(prompt).filter(name => words.some((word, i) => word === name
     && (!words[i + 1] || AFTER_SINGLE_NAME.has(words[i + 1]))));
-  if (!phrases.length && !singleNames.length) return [];
+  if (!phrases.length && !singleNames.length) return { matches: [], complete: true };
   const columns = ['id', 'first_name', 'last_name', 'address_line1', 'city', 'updated_at', db.raw('updated_at::text AS version')];
   const matches = phrases.length ? await db('customers').whereNull('deleted_at')
-    .whereIn(normalizedStoredName("concat_ws(' ', first_name, last_name)"), phrases).limit(10).select(columns) : [];
+    .whereIn(normalizedStoredName("concat_ws(' ', first_name, last_name)"), phrases).limit(CUSTOMER_LOOKUP_LIMIT).select(columns) : [];
   const fullNames = matches.filter(customer => namesTargetCustomer(normalized, customer));
-  if (fullNames.length || !singleNames.length) return fullNames;
-  return db('customers').whereNull('deleted_at').where(function () {
+  if (fullNames.length || !singleNames.length || matches.length === CUSTOMER_LOOKUP_LIMIT) {
+    return { matches: fullNames, complete: matches.length < CUSTOMER_LOOKUP_LIMIT };
+  }
+  const singles = await db('customers').whereNull('deleted_at').where(function () {
     this.whereIn(normalizedStoredName('first_name'), singleNames).orWhereIn(normalizedStoredName('last_name'), singleNames);
-  }).limit(10).select(columns);
+  }).limit(CUSTOMER_LOOKUP_LIMIT).select(columns);
+  return { matches: singles, complete: singles.length < CUSTOMER_LOOKUP_LIMIT };
 }
 
 // Callers supply only the fixed customer/lead/estimate column expressions below.
@@ -208,7 +216,8 @@ async function loadPage(pageData, prompt) {
   return page;
 }
 
-function candidateSelection(candidates, prompt, viewedCustomer) {
+function candidateSelection(candidates, prompt, viewedCustomer, complete) {
+  if (!complete) return { target: null, targets: [], ambiguous: true };
   const labels = candidates.map(c => normalizeName(c.label));
   const namedSet = candidates.length > 1 && new Set(labels).size === candidates.length
     && /\b(?:both|these customers|all of these)\b/i.test(prompt)
@@ -222,13 +231,14 @@ function candidateSelection(candidates, prompt, viewedCustomer) {
 }
 
 async function resolve({ prompt, pageData, selectedTarget }) {
-  const [viewed, named] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt)]);
+  const [viewed, namedResult] = await Promise.all([loadPage(pageData, prompt), namedCustomers(prompt)]);
+  const named = namedResult.matches;
   // A stale page hint cannot block an unrelated task or an explicitly named
   // customer. A request relying on the unavailable viewed record still stops.
   if (viewed.error && PAGE_REFERENCE_RE.test(targetClause(prompt)) && !named.length && !selectedTarget?.customer_id) return viewed;
   const page = viewed.error ? { ids: {}, records: {} } : viewed;
   const candidates = named.map(c => customerTarget(c, 'current_request_lookup'));
-  let selection = candidateSelection(candidates, prompt, page.customer);
+  let selection = candidateSelection(candidates, prompt, page.customer, namedResult.complete);
   if (selectedTarget?.customer_id) {
     const selected = await customerById(selectedTarget.customer_id);
     if (!selected || (named.length && !named.some(c => c.id === selected.id))) {
@@ -250,10 +260,11 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   // Keep all deliberately named records for compound requests; body text never
   // enters this clause and page hints cannot replace the explicit selection.
   const explicitRecords = {};
-  // A content-introducing noun ends explicit ID authority regardless of the
-  // conjunction or wording that follows it. Deictic constraints above may
-  // still narrow existing customer authority; they never widen this ID set.
-  const explicitRecordClause = targetClause(prompt, true).split(/\b(?:notes?|messages?|instructions|comments)\b/i)[0];
+  // A content noun ends its own action clause. An independently requested
+  // operation after "and/then <action>" retains its explicit target IDs.
+  const explicitRecordClause = targetClause(prompt, true)
+    .split(new RegExp(`\\b(?:and|then)\\s+(?=(?:${PERSON_ACTIONS}|revise|change|set|rename|relabel|add|save|assign|draft|write|post|submit)\\b)`, 'i'))
+    .map(clause => clause.split(/\b(?:notes?|messages?|instructions|comments)\b/i)[0]).join(' and ');
   for (const match of explicitRecordClause.matchAll(/\b(property|appointment|estimate|invoice|review|email|call|product|lead)\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/gi)) {
     (explicitRecords[`${match[1].toLowerCase()}_id`] ||= []).push(match[2].toLowerCase());
   }
@@ -281,8 +292,7 @@ async function unlinkedRecordIsReferenced(record, context) {
   if (record.customer_id) return true;
   const ids = context.page?.ids || {};
   if (record.kind === 'review_id') return targets.length === 0 && context.reviewReference === record.id;
-  if (record.kind === 'call_id') return targets.length === 0 && [context.requestedRecords?.call_id].flat().includes(record.id);
-  if (record.kind === 'appointment_id') return targets.length === 0;
+  if (['call_id', 'appointment_id'].includes(record.kind)) return targets.length === 0 && [context.requestedRecords?.[record.kind]].flat().includes(record.id);
   if (!['lead_id', 'email_id', 'estimate_id'].includes(record.kind)) return true;
   const noun = record.kind.replace(/_id$/, '');
   if (ids[record.kind] === record.id && new RegExp(`\\b(?:this|that|current|selected|viewed|open)\\s+${noun}\\b`).test(requestPhrase)) return true;
@@ -319,8 +329,9 @@ function bulkLeadSelection(toolName, records, params) {
 }
 
 async function validateRecordTarget(params, context = {}, { toolName, forApproval = false } = {}) {
-  if (['send_sms', 'trigger_review_request', 'reply_via_sms'].includes(toolName) && params.customer_name && !params.customer_id) {
-    return { error: 'Resolve the message recipient to a customer identifier before proposing this action', code: 'target_clarification_required' };
+  const policy = require('./action-policy.json')[toolName];
+  if (policy && policy.kind !== 'read' && [['customer_name', 'customer_id'], ['lead_name', 'lead_id']].some(([name, id]) => params[name] && !params[id])) {
+    return { error: 'Resolve the named target to its canonical record identifier before proposing this action', code: 'target_clarification_required' };
   }
   const references = { ...params };
   if (['get_closeout_status', 'get_stop_details'].includes(toolName) && params.service_id) references.appointment_id = params.service_id;
@@ -379,8 +390,9 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   const input = { ...params };
   if (schema.properties?.customer_id && (params.customer_name || params.phone)) {
     const permitted = new Set(context.targets.map(target => target.customer_id));
-    const matches = params.customer_name ? await namedCustomers(`for ${params.customer_name}`)
-      : await db('customers').whereNull('deleted_at')
+    const named = params.customer_name ? await namedCustomers(`for ${params.customer_name}`) : null;
+    if (named?.complete === false) return { error: 'The customer name lookup is incomplete. Select the task customer by identifier.', code: 'target_clarification_required' };
+    const matches = named ? named.matches : await db('customers').whereNull('deleted_at')
         .whereRaw("RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = ?", [String(params.phone).replace(/\D/g, '').slice(-10)])
         .select(CUSTOMER_FIELDS);
     const selected = matches.filter(customer => permitted.has(customer.id));

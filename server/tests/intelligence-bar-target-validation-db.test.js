@@ -95,6 +95,55 @@ suite('IB target validation against isolated PostgreSQL', () => {
     }
   });
 
+  test('a customerless appointment requires a current-request selection and rejects siblings', async () => {
+    const ids = [randomUUID(), randomUUID()];
+    await mockDb('scheduled_services').insert(ids.map(id => ({ id, customer_id: null, scheduled_date: '2099-01-01', service_type: 'Synthetic reservation' })));
+    const params = id => ({ service_ids: [id] });
+    const options = { toolName: 'move_stops_to_day' };
+    const unrelated = await Context.resolve({ prompt: 'Look up inventory', pageData: { appointment_id: ids[0] } });
+    expect(await Context.validateRecordTarget(params(ids[0]), unrelated, options)).toMatchObject({ code: 'target_clarification_required' });
+    const body = await Context.resolve({ prompt: `Send a message to +15550101234 with the text check inventory and move appointment ${ids[0]}`, pageData: {} });
+    expect(body.requestedRecords).toEqual({});
+    expect(await Context.validateRecordTarget(params(ids[0]), body, options)).toMatchObject({ code: 'target_clarification_required' });
+    for (const prompt of ['Move this appointment', `Move appointment ${ids[0]}`]) {
+      const task = await Context.resolve({ prompt, pageData: { appointment_id: ids[0] } });
+      expect(await Context.validateRecordTarget(params(ids[0]), task, options)).toBeNull();
+      expect(await Context.validateRecordTarget(params(ids[1]), task, options)).toMatchObject({ code: 'target_clarification_required' });
+    }
+  });
+
+  test('lead writes require canonical IDs and reject names unrelated to the current task', async () => {
+    const ids = [randomUUID(), randomUUID()];
+    await mockDb('leads').insert(ids.map((id, index) => ({ id, first_name: 'Synthetic', last_name: `Leadfixture${index}` })));
+    const task = await Context.resolve({ prompt: 'Update this lead', pageData: { lead_id: ids[0] } });
+    const options = { toolName: 'update_lead_status' };
+    expect(await Context.validateRecordTarget({ lead_name: 'Synthetic Leadfixture1' }, task, options)).toMatchObject({ code: 'target_clarification_required' });
+    expect(await Context.validateRecordTarget({ lead_id: ids[1] }, task, options)).toMatchObject({ code: 'target_clarification_required' });
+    expect(await Context.validateRecordTarget({ lead_id: ids[0] }, task, options)).toBeNull();
+  });
+
+  test('eleven explicit customer names cannot silently become ten approved targets', async () => {
+    const customers = Array.from({ length: 11 }, (_, i) => ({ id: randomUUID(), first_name: 'Synthetic', last_name: `Cohortfixture${i}`,
+      phone: `+15550000${String(i).padStart(3, '0')}` }));
+    await mockDb('customers').insert(customers);
+    const task = await Context.resolve({ prompt: `Update both ${customers.map(c => `${c.first_name} ${c.last_name}`).join(' and ')}`, pageData: {} });
+    expect(task.candidates).toHaveLength(10);
+    expect(task.targets).toEqual([]);
+    expect(task.ambiguous).toBe(true);
+    expect(await Context.validateRecordTarget({ customer_ids: task.candidates.map(c => c.customer_id) }, task)).toMatchObject({ code: 'target_clarification_required' });
+    const incidental = await Context.resolve({ prompt: `Update both ${customers.map(c => `${c.first_name} ${c.last_name}`).join(' and ')} after checking with Synthetic Targetfixture`, pageData: {} });
+    expect(incidental.targets).toEqual([]);
+    expect(incidental.ambiguous).toBe(true);
+  });
+
+  test('a later compound estimate step preserves its own exact ID despite a message noun', async () => {
+    const ids = [randomUUID(), randomUUID()];
+    await mockDb('estimates').insert(ids.map(id => ({ id, customer_id: customerId })));
+    const task = await Context.resolve({ prompt: `Send a message to Synthetic Targetfixture and revise estimate ${ids[0]}`, pageData: { estimate_id: ids[1] } });
+    expect(await Context.validateRecordTarget({ estimate_id: ids[0] }, task)).toBeNull();
+    expect(await Context.validateRecordTarget({ estimate_id: ids[1] }, task)).toMatchObject({ code: 'target_clarification_required' });
+  });
+
   test('child-only validation rechecks a deleted parent customer', async () => {
     const id = randomUUID();
     await mockDb('customer_properties').insert({ id, customer_id: customerId, address_line1: '100 Test Street' });

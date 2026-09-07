@@ -243,3 +243,13 @@ record a hash-bound step-key version so a legitimate distinct successor is
 still possible. The final checks pass 155 unit cases and 33 isolated PostgreSQL
 cases, including pending, accepted and unknown legacy replay. Independent
 review found no actionable issue; no provider or domain send ran.
+
+The next B1 correction generalizes canonical name-selector guards to all
+classified writes, including lead status, and requires explicit current-request
+evidence for customerless appointments. A capped name query preserves its raw
+completeness evidence before filtering incidental matches; incomplete cohorts
+cannot become approved subsets. Independent compound actions retain their
+explicit estimate IDs, while message-body commands grant no record authority.
+Validation passes 179 unit/catalog/write-boundary tests and 23 isolated
+PostgreSQL tests. Independent review closed both additional edge cases before
+the fifth remote review. No provider, customer message or production write ran.
