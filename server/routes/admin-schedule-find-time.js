@@ -242,13 +242,14 @@ router.post('/', async (req, res) => {
       dateFrom: from,
       dateTo: clampedTo,
       technicianId: technicianId || undefined,
-      // Hint mode takes the engine's whole bounded list and slices to the
-      // requested count below: the occupancy guard can veto entire gaps (a
-      // 3× over-fetch on a topN:1 range search starved the hint when its
+      // Hint mode takes the engine's ENTIRE candidate list and slices to
+      // the requested count below: the occupancy guard can veto whole gaps
+      // (a 3× over-fetch on a topN:1 range search starved the hint when its
       // three gaps were all occupied and a fourth was free — pre-push P1),
-      // and a picked hour can sit in the worst gap of the day. topN only
-      // changes the engine's final slice, never its work.
-      topN: hint ? 100 : requestedTopN,
+      // and a picked hour can sit in the worst gap of the day — or, on a
+      // busy multi-tech range, past any fixed cap (Codex #4120 r1). topN
+      // only changes the engine's final slice, never its work.
+      topN: hint ? Number.POSITIVE_INFINITY : requestedTopN,
       // undefined = the engine's own defaults ([] / exact-minute starts).
       excludeServiceIds,
       // Existing-visit staff hints share their route check with the edit

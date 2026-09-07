@@ -135,9 +135,10 @@ test('hint with the gate on runs a single-day search with the new params passed 
   expect(opts.dateTo).toBe('2026-09-01');
   expect(opts.excludeServiceIds).toEqual(['svc-1']);
   expect(opts.slotStepMinutes).toBe(60);
-  // Hint mode takes the engine's whole bounded list (the occupancy guard
-  // can veto entire gaps); the response is sliced back to topN.
-  expect(opts.topN).toBe(100);
+  // Hint mode takes the engine's ENTIRE list (the occupancy guard can veto
+  // whole gaps, and no fixed cap is safe on a busy multi-tech range); the
+  // response is sliced back to topN.
+  expect(opts.topN).toBe(Number.POSITIVE_INFINITY);
 });
 
 test('garbage excludeServiceIds / slotStepMinutes 400 before the engine runs', async () => {
@@ -354,7 +355,7 @@ test('pickedStart inside a gap answers that gap\'s drive-in leg, origin and deto
   });
   // The picked hour can sit in the worst gap of the day, so the engine's
   // whole list is requested (the chips row is still sliced to topN).
-  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(100);
+  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(Number.POSITIVE_INFINITY);
   expect(body.slots).toHaveLength(2);
 });
 
@@ -403,7 +404,7 @@ test('garbage pickedStart 400s before the engine runs; no pickedStart means no p
   expect(findAvailableSlots).not.toHaveBeenCalled();
   const body = await (await post({ ...BASE, hint: true })).json();
   expect(body.picked).toBeUndefined();
-  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(100);
+  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(Number.POSITIVE_INFINITY);
 });
 
 test('a topN:1 range hint survives three fully occupied gaps and answers the fourth (pre-push P1)', async () => {
@@ -424,7 +425,7 @@ test('a topN:1 range hint survives three fully occupied gaps and answers the fou
     ? { ...emptyOccupancy(), rows: [9, 11, 13].map((h) => occupiedRow({ id: `u-${h}`, startMin: h * 60, endMin: (h + 1) * 60 })) }
     : emptyOccupancy()));
   const body = await (await post({ ...BASE, dateTo: '2026-09-04', hint: true, slotStepMinutes: 60, topN: 1 })).json();
-  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(100);
+  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(Number.POSITIVE_INFINITY);
   expect(body.slots.map((s) => [s.date, s.start_time])).toEqual([['2026-09-02', '10:00']]);
 });
 
@@ -447,7 +448,7 @@ test('sameDayFloorMin is applied while choosing: a topN:1 range answer walks tod
   const late = await (await post({ ...BASE, dateFrom: '2026-08-31', dateTo: '2026-09-03', hint: true, slotStepMinutes: 60, topN: 1, sameDayFloorMin: 16 * 60 })).json();
   expect(late.slots.map((s) => [s.date, s.start_time])).toEqual([['2026-09-01', '09:00']]);
   // Other days are never floored; garbage 400s.
-  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(100);
+  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(Number.POSITIVE_INFINITY);
   expect((await post({ ...BASE, hint: true, sameDayFloorMin: '2pm' })).status).toBe(400);
 });
 
