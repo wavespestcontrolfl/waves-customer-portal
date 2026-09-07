@@ -37,18 +37,19 @@ async function begin({ actorId, sessionId, requestKey, request, pageContext }) {
   };
   const [created] = await db('ib_tasks').insert(row).onConflict(['actor_id', 'session_id', 'request_key']).ignore().returning('*');
   const task = created || await db('ib_tasks').where({ actor_id: String(actorId), session_id: sessionId, request_key: requestKey }).first();
-  if (!task || task.request_hash !== hash) return { error: 'This request key belongs to different request details', code: 'request_changed' };
+  if (!task || task.request_hash !== hash
+    || stableStringify(task.page_context || {}) !== stableStringify(pageContext || {})) return { error: 'This request key belongs to different request details', code: 'request_changed' };
   return { task, created: !!created };
 }
 
 async function checkpoint(id, actorId, { messages, target, state = 'running', response, runnerToken }) {
+  if (!UUID_RE.test(runnerToken || '')) throw new Error('A valid task runner token is required');
   if (!STATES.has(state)) throw new Error('Invalid IB task state');
   const updates = { state, updated_at: db.fn.now(), lease_expires_at: leaseExpiry() };
   if (messages) updates.checkpoint = JSON.stringify(withoutImages(messages));
   if (target !== undefined) updates.target = JSON.stringify(target);
   if (response) updates.response = JSON.stringify(response);
-  const query = db('ib_tasks').where({ id, actor_id: String(actorId) });
-  if (runnerToken) query.where('runner_token', runnerToken);
+  const query = db('ib_tasks').where({ id, actor_id: String(actorId), runner_token: runnerToken });
   if (!(await query.update(updates))) throw new Error('Task execution was superseded');
 }
 

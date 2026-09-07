@@ -16,16 +16,17 @@ beforeEach(() => {
     customers: [{ id: A, first_name: 'Synthetic', last_name: 'Person', version: '2026-09-01 12:00:00.123456+00' }, { id: B }],
   };
   db.mockReset().mockImplementation(table => {
-    let id;
+    let id, ids;
     const q = { where: (key, value) => { id = typeof key === 'object' ? key.id : value; return q; },
       first: async () => rows[table]?.find(row => row.id === id),
-      whereNull: () => q, whereIn: () => q, limit: () => q, select: async () => lookupRows };
+      whereNull: () => q, whereIn: (key, values) => { if (key === 'id') ids = values; return q; }, limit: () => q,
+      select: async () => ids ? (rows[table] || []).filter(row => ids.includes(row.id)) : lookupRows };
     return q;
   });
   db.raw = text => ({ text });
 });
 
-const selectors = ['Send to', 'Email to', 'Text to', 'Message to', 'Notify to', 'Quote for', 'Schedule for', 'Reply to', 'Respond to', 'Send a message to', 'Send an SMS to', 'Send a reminder to', 'Update customer'];
+const selectors = ['Reschedule', 'Reschedule for', 'Move', 'Move for', 'Call', 'Remind', 'Cancel', 'Book', 'Archive', 'Delete', 'Merge', 'Pause', 'Reactivate', 'Restore', 'Refund', 'Charge', 'Invoice', 'Credit', 'Send to', 'Email to', 'Text to', 'Message to', 'Notify to', 'Quote for', 'Schedule for', 'Reply to', 'Respond to', 'Send a message to', 'Send an SMS to', 'Send a reminder to', 'Update customer'];
 test.each(selectors)(
   'an unresolved person after "%s" cannot fall back to the viewed customer', async selector => {
     const task = await Context.resolve({ prompt: `${selector} Jhon using this customer`, pageData: { customer_id: A } });
@@ -81,8 +82,9 @@ test.each(['this', 'that', 'selected'])('a deliberate %s review request uses the
   expect(await Context.validateRecordTarget({ review_id: REVIEW }, task)).toBeNull();
 });
 
-test.each(['missing', 'stats', 'removed'])('unavailable review (%s) cannot be drafted or posted', async kind => {
+test.each(['missing', 'stats', 'removed', 'dismissed'])('unavailable review (%s) cannot be drafted or posted', async kind => {
   if (kind === 'missing') rows.google_reviews = [];
+  if (kind === 'dismissed') rows.google_reviews[0].dismissed = true;
   if (kind === 'stats') rows.google_reviews[0].reviewer_name = '_stats';
   if (kind === 'removed') rows.google_reviews[0].missing_since = new Date().toISOString();
   expect((await Context.validateRecordTarget({ review_id: REVIEW }, context())).code).toBe('record_unavailable');
@@ -151,3 +153,96 @@ test.each(['customer', 'raw_sms', 'vendor_email', 'unlinked_lead', 'unlinked_est
     }
   },
 );
+
+test.each([
+  ['property', 'customer_properties'], ['appointment', 'scheduled_services'], ['estimate', 'estimates'],
+  ['invoice', 'invoices'], ['review', 'google_reviews'], ['email', 'emails'], ['call', 'call_log'], ['lead', 'leads'],
+])('a selected %s cannot be replaced by a sibling belonging to the same customer', async (noun, table) => {
+  const id = '40000000-0000-4000-8000-000000000001', sibling = '40000000-0000-4000-8000-000000000002';
+  rows[table] = [{ id, customer_id: A }, { id: sibling, customer_id: A }];
+  for (const reference of ['this', 'that', 'selected']) {
+    const task = await Context.resolve({ prompt: `Update ${reference} ${noun}`, pageData: { [`${noun}_id`]: id } });
+    // Customer resolution is independent of the exact child-record binding.
+    task.targets = [{ customer_id: A }];
+    expect(await Context.validateRecordTarget({ [`${noun}_id`]: id }, task)).toBeNull();
+    expect((await Context.validateRecordTarget({ [`${noun}_id`]: sibling }, task)).code).toBe('target_clarification_required');
+  }
+});
+
+test('a record reference inside message content does not constrain an unrelated named target', async () => {
+  lookupRows = [rows.customers[0]];
+  const task = await Context.resolve({ prompt: 'Update Synthetic Person notes to this property needs a label', pageData: { property_id: PROPERTY } });
+  expect(task.requestedRecords).toEqual({});
+  expect(task.target.customer_id).toBe(A);
+});
+
+
+test('an explicit named customer supersedes the viewed account without inheriting its ID pin', async () => {
+  lookupRows = [rows.customers[0]];
+  const task = await Context.resolve({ prompt: 'Update Synthetic Person using this customer', pageData: { customer_id: B } });
+  expect(task.target.customer_id).toBe(A);
+  expect(task.requestedRecords).toEqual({});
+  expect(await Context.validateRecordTarget({ customer_id: A }, task)).toBeNull();
+});
+
+
+test('this customer resolves through a viewed property without requiring a redundant page customer ID', async () => {
+  const task = await Context.resolve({ prompt: 'Text this customer', pageData: { property_id: PROPERTY } });
+  expect(task.target.customer_id).toBe(B);
+  expect(task.requestedRecords).toEqual({});
+  expect(await Context.validateRecordTarget({ customer_id: B }, task)).toBeNull();
+});
+
+
+test.each(['Text this customer', 'Email this customer', 'Send this customer a text', 'Update this customer and text them', 'Remind this customer', 'Notify this customer', 'Tell this customer'])(
+  'a customer name in the body after "%s that" cannot choose the target', async prefix => {
+    lookupRows = [rows.customers[0]]; // A real matching alternate name is available to the lookup.
+    const task = await Context.resolve({ prompt: `${prefix} that customer Synthetic Person canceled`, pageData: { customer_id: B } });
+    expect(task.target.customer_id).toBe(B);
+    expect((await Context.validateRecordTarget({ customer_id: A }, task)).code).toBe('target_clarification_required');
+  });
+
+test('a technician name in assignment is not an explicit customer selector', async () => {
+  lookupRows = [rows.customers[0]];
+  const appointment = '40000000-0000-4000-8000-000000000004';
+  rows.scheduled_services = [{ id: appointment, customer_id: B }];
+  const task = await Context.resolve({ prompt: 'Assign Synthetic Person to this appointment', pageData: { appointment_id: appointment } });
+  expect(task.target.customer_id).toBe(B);
+  expect(await Context.validateRecordTarget({ appointment_id: appointment }, task)).toBeNull();
+});
+
+
+test('a compound communication request retains a narrowing appointment constraint after that', async () => {
+  const viewed = '40000000-0000-4000-8000-000000000005', sibling = '40000000-0000-4000-8000-000000000006';
+  rows.scheduled_services = [{ id: viewed, customer_id: B }, { id: sibling, customer_id: B }];
+  const task = await Context.resolve({ prompt: 'Text this customer and reschedule that appointment', pageData: { appointment_id: viewed } });
+  expect(await Context.validateRecordTarget({ appointment_id: viewed }, task)).toBeNull();
+  expect((await Context.validateRecordTarget({ appointment_id: sibling }, task)).code).toBe('target_clarification_required');
+});
+
+
+test('selector-free customer reads inherit one resolved task target and never choose from a cohort', async () => {
+  const args = { toolName: 'get_call_log', schema: { properties: { customer_id: { type: 'string' } } } };
+  expect(await Context.prepareReadInput({ days_back: 7 }, context(), args)).toEqual({ input: { days_back: 7, customer_id: A } });
+  expect(await Context.prepareReadInput({ days_back: 7 }, context(null), args)).toEqual({ input: { days_back: 7 } });
+  const multiple = { ...context(), targets: [{ customer_id: A }, { customer_id: B }] };
+  expect((await Context.prepareReadInput({}, multiple, args)).code).toBe('target_clarification_required');
+  expect(await Context.prepareReadInput({ customer_id: B }, multiple, args)).toEqual({ input: { customer_id: B } });
+  expect((await Context.prepareReadInput({ customer_id: B }, context(), args)).code).toBe('target_clarification_required');
+  rows.customers[0].deleted_at = new Date();
+  expect((await Context.prepareReadInput({}, context(), args)).code).toBe('record_unavailable');
+});
+
+test('bulk references use one query per table while preserving absent-record rejection', async () => {
+  const leads = Array.from({ length: 500 }, (_, index) => ({ id: `50000000-0000-4000-8000-${String(index).padStart(12, '0')}`, customer_id: A }));
+  rows.leads = leads.slice().reverse();
+  expect(await Context.validateRecordTarget({ lead_ids: leads.map(row => row.id), customer_id: A }, context())).toBeNull();
+  expect(db.mock.calls.filter(([table]) => table === 'leads')).toHaveLength(1);
+  expect(db.mock.calls.filter(([table]) => table === 'customers')).toHaveLength(1);
+  const params = { lead_ids: leads.map(row => row.id), customer_id: A };
+  const proof = await Context.validateRecordTarget(params, context(), { toolName: 'bulk_update_leads', forApproval: true });
+  rows.leads.reverse();
+  expect(await Context.validateRecordTarget(params, proof, { toolName: 'bulk_update_leads' })).toBeNull();
+  rows.leads.pop();
+  expect((await Context.validateRecordTarget({ lead_ids: leads.map(row => row.id) }, context())).code).toBe('record_unavailable');
+});

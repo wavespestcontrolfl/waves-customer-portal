@@ -216,6 +216,22 @@ async function getInboxSummary({ days = 1 }) {
   }
 }
 
+function scopeEmailCandidates(query, customerIds) {
+  if (!customerIds.length) return query;
+  // A name in a sender/subject is only a search filter. Linked task rows
+  // and unlinked replies in exclusively owned threads establish scope.
+  const ownedThreads = db('emails').whereIn('customer_id', customerIds).whereNotNull('gmail_thread_id').select('gmail_thread_id');
+  const foreignThreads = db('emails').whereNotNull('customer_id').whereNotIn('customer_id', customerIds)
+    .whereNotNull('gmail_thread_id').select('gmail_thread_id');
+  return query.where(function () {
+    this.whereIn('customer_id', customerIds).orWhere(function () {
+      this.whereNull('customer_id').whereIn('gmail_thread_id', ownedThreads);
+    });
+  }).where(function () {
+    this.whereNull('gmail_thread_id').orWhereNotIn('gmail_thread_id', foreignThreads);
+  });
+}
+
 async function searchEmails({ search, from, category, days_back = 30, has_attachment, is_unread, limit = 20 }, customerIds = []) {
   try {
     const since = new Date();
@@ -226,20 +242,7 @@ async function searchEmails({ search, from, category, days_back = 30, has_attach
       .orderBy('received_at', 'desc')
       .limit(Math.min(limit, 50));
 
-    if (customerIds.length) {
-      // A name in a sender/subject is only a search filter. Linked task rows
-      // and unlinked replies in exclusively owned threads establish scope.
-      const ownedThreads = db('emails').whereIn('customer_id', customerIds).whereNotNull('gmail_thread_id').select('gmail_thread_id');
-      const foreignThreads = db('emails').whereNotNull('customer_id').whereNotIn('customer_id', customerIds)
-        .whereNotNull('gmail_thread_id').select('gmail_thread_id');
-      query = query.where(function () {
-        this.whereIn('customer_id', customerIds).orWhere(function () {
-          this.whereNull('customer_id').whereIn('gmail_thread_id', ownedThreads);
-        });
-      }).where(function () {
-        this.whereNull('gmail_thread_id').orWhereNotIn('gmail_thread_id', foreignThreads);
-      });
-    }
+    query = scopeEmailCandidates(query, customerIds);
 
     if (search) {
       query = query.where(function () {
@@ -287,7 +290,7 @@ async function getEmailThread({ thread_id, from_name, from_email, subject_search
 
     // Find thread by sender or subject
     if (!threadId) {
-      let finder = db('emails').orderBy('received_at', 'desc');
+      let finder = scopeEmailCandidates(db('emails'), customerIds).orderBy('received_at', 'desc');
       if (from_name) finder = finder.whereILike('from_name', `%${from_name}%`);
       if (from_email) finder = finder.whereILike('from_address', `%${from_email}%`);
       if (subject_search) finder = finder.whereILike('subject', `%${subject_search}%`);
@@ -332,7 +335,7 @@ async function draftEmailReply(emailId, threadId, fromName, instructions, custom
     } else if (threadId) {
       email = await db('emails').where('gmail_thread_id', threadId).orderBy('received_at', 'desc').first();
     } else if (fromName) {
-      email = await db('emails').whereILike('from_name', `%${fromName}%`).orderBy('received_at', 'desc').first();
+      email = await scopeEmailCandidates(db('emails'), customerIds).whereILike('from_name', `%${fromName}%`).orderBy('received_at', 'desc').first();
     }
     if (!email) return { error: 'Email not found' };
 

@@ -89,3 +89,72 @@ test('restricted owner actions remain in their existing workflow and do not beco
     id: 'request_instant_payout', availability: 'requires_existing_owner_workflow', approval: 'confirmed_endpoint',
   }));
 });
+
+
+test('dedicated estimate cabinet excludes every unrelated write and admin discovery', async () => {
+  const scope = { role: 'admin', context: 'agent_estimate' };
+  const names = require('../services/intelligence-bar/agent-estimate-policy');
+  for (const context of [undefined, 'estimates', 'agent_estimate']) {
+    expect(registry.initialTools('agent_estimate', { role: 'admin', context }).map(t => t.name).sort()).toEqual([...names].sort());
+  }
+  expect(registry.discover({ query: 'create estimate inventory' }, scope).result.code).toBe('permission_denied');
+  for (const action of registry.actions.values()) {
+    if (names.has(action.id)) continue;
+    expect(registry.allowed(action, scope)).toBe(false);
+    expect(await registry.execute(action.id, {}, { ...scope, actionContext: { confirmed: true } }))
+      .toMatchObject({ code: 'permission_denied' });
+  }
+});
+
+test('technician execution cannot fall through to the unscoped admin executor', async () => {
+  const action = registry.actions.get('get_my_route'), original = action.executor;
+  action.executor = jest.fn(async (_name, _input, context) => ({ techId: context.techId || null }));
+  const scope = { role: 'technician', context: 'tech' };
+  try {
+    for (const techContext of [undefined, {}, { techId: '' }, { techId: ' ' }, { techName: 'Synthetic' }]) {
+      expect(await registry.execute(action.id, {}, { ...scope, techContext })).toMatchObject({ code: 'permission_denied' });
+    }
+    expect(action.executor).not.toHaveBeenCalled();
+    const techId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    expect(await registry.execute(action.id, {}, { ...scope, techContext: { techId } })).toEqual({ techId });
+    expect(await registry.execute(action.id, {}, { role: 'admin', context: 'tech' })).toEqual({ techId: null });
+  } finally { action.executor = original; }
+});
+
+test('sender blocking declares its Gmail filter side effect', () => {
+  expect(registry.actions.get('block_sender')).toMatchObject({ kind: 'external_action', approval: 'ui_confirm' });
+});
+
+
+test('initial and discovered model tools exclude local contract metadata', () => {
+  const scope = { role: 'admin', context: 'schedule' };
+  for (const action of registry.actions.values()) {
+    expect(Object.keys(action.definition).filter(key => key.startsWith('_'))).toEqual([]);
+  }
+  const initial = registry.initialTools('schedule', scope);
+  expect(initial.some(tool => tool.name === 'switch_appointment_property')).toBe(true);
+  const discovered = registry.discover({ query: 'switch appointment property', domain: 'schedule' }, scope).definitions;
+  expect(discovered.some(tool => tool.name === 'switch_appointment_property')).toBe(true);
+  for (const tool of [...initial, ...discovered]) {
+    expect(Object.keys(tool).filter(key => key.startsWith('_'))).toEqual([]);
+  }
+  const original = require('../services/intelligence-bar/schedule-tools').SCHEDULE_TOOLS
+    .find(tool => tool.name === 'switch_appointment_property');
+  expect(original._sideEffects).toBe(true);
+});
+
+test('registry cannot directly execute owner-endpoint actions even with confirmation', async () => {
+  for (const action of registry.actions.values()) {
+    if (action.approval !== 'confirmed_endpoint') continue;
+    const original = action.executor;
+    action.executor = jest.fn();
+    try {
+      for (const confirmed of [false, true]) {
+        expect(await registry.execute(action.id, {}, { role: 'admin', context: action.domain,
+          actionContext: { confirmed, requestedBy: 'synthetic-owner' } }))
+          .toMatchObject({ code: 'requires_existing_owner_workflow' });
+      }
+      expect(action.executor).not.toHaveBeenCalled();
+    } finally { action.executor = original; }
+  }
+});

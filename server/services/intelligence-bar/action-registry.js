@@ -8,6 +8,8 @@ const addFormats = require('ajv-formats');
 const policy = require('./action-policy.json');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
+const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
+const apiToolDefinition = require('./tool-definition');
 
 const MODULES = [
   ['tools', 'TOOLS', 'executeTool'],
@@ -72,7 +74,7 @@ for (const [moduleName, exportName, executeName] of MODULES) {
     // Existing domain schemas retain their nested semantics and validators.
     const schema = { ...tool.input_schema, additionalProperties: false };
     actions.set(tool.name, {
-      id: tool.name, ...p, schema, definition: tool,
+      id: tool.name, ...p, schema, definition: apiToolDefinition(tool),
       validate: ajv.compile(schema), executor: mod[executeName],
       retry: p.kind === 'read' ? 'read_only' : 'reconcile_before_retry',
       verification: 'domain_result',
@@ -97,6 +99,7 @@ const validateDiscovery = ajv.compile(DISCOVERY_TOOL.input_schema);
 
 function allowed(action, { role, context } = {}) {
   if (!action) return false;
+  if (context === 'agent_estimate' && !AGENT_ESTIMATE_TOOL_NAMES.has(action.id)) return false;
   if (role !== 'admin') return role === 'technician' && action.role === 'technician_or_admin';
   if (context === 'tech') return action.role === 'technician_or_admin';
   if (action.id === 'search_ib_history' && !threadsEnabled()) return false;
@@ -109,7 +112,7 @@ function allowed(action, { role, context } = {}) {
 function validateInput(name, input, scope) {
   const action = actions.get(name);
   if (name !== DISCOVERY_TOOL.name && !action) return { error: 'Capability is not implemented or has no reviewed action policy', code: 'capability_unimplemented' };
-  if (name === DISCOVERY_TOOL.name ? scope?.role !== 'admin' : !allowed(action, scope)) {
+  if (name === DISCOVERY_TOOL.name ? (scope?.role !== 'admin' || ['tech', 'agent_estimate'].includes(scope?.context)) : !allowed(action, scope)) {
     return { error: 'Your current role or feature access does not permit this capability', code: 'permission_denied' };
   }
   const validate = name === DISCOVERY_TOOL.name ? validateDiscovery : action.validate;
@@ -146,15 +149,21 @@ function discover(input, scope) {
 function initialTools(context, scope) {
   const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
   const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_products', 'query_leads']);
-  const discovery = scope.role === 'admin' && context !== 'tech' ? [DISCOVERY_TOOL] : [];
+  const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context) ? [DISCOVERY_TOOL] : [];
   return [...discovery, ...[...actions.values()]
-    .filter(a => allowed(a, scope) && a.approval !== 'confirmed_endpoint' && (common.has(a.id) || a.domain === domain))
+    .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint' && (context === 'agent_estimate' || common.has(a.id) || a.domain === domain))
     .map(a => a.definition)];
 }
 
 function execute(name, input, { role, context, techContext, actionContext = {} } = {}) {
   const action = actions.get(name);
   if (!allowed(action, { role, context })) return Promise.resolve({ error: 'Capability is unavailable to this actor', code: 'permission_denied' });
+  if (role === 'technician' && (typeof techContext?.techId !== 'string' || !techContext.techId.trim())) {
+    return Promise.resolve({ error: 'A verified technician identity is required', code: 'permission_denied' });
+  }
+  if (action.approval === 'confirmed_endpoint') {
+    return Promise.resolve({ error: 'Use the existing owner approval workflow for this action', code: 'requires_existing_owner_workflow' });
+  }
   if (action.kind !== 'read' && actionContext.confirmed !== true && !WRITE_TWO_STEP_TOOL_NAMES.has(name)) {
     return Promise.resolve({ error: 'Explicit approval is required', code: 'approval_required' });
   }
