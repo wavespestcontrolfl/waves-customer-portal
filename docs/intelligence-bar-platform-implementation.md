@@ -144,7 +144,7 @@ exceptions; 1,739 sites still unsupported/unverified in the matrix. Historical
 transport calls remain recorded after their frontend sites changed. Registration of existing tools
 has deliberately not been relabeled as verified application parity.
 The dependent property branch adds two UI sites and verifies four property
-operations: 1,717 retained sites, ten transport exceptions, and 1,703 unverified.
+operations: 1,748 retained sites, seven transport exceptions, and 1,737 unverified.
 
 ## Verification evidence
 

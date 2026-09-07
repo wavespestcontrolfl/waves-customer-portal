@@ -156,6 +156,17 @@ two further approval-effect regressions passed. The ten property Postgres cases
 passed across the full run and focused fixture/assertion reruns. Desktop/mobile
 Chrome exercised the relationship disclosure, persisted relationship, IB creation
 and relabel, portal occupancy/primary changes, touch opening and scoped refresh.
-The census retains 1,741 sites: four verified property operations, five current
-IB transport exceptions and 1,732 unsupported/unverified sites. No historical
+The current census retains 1,748 sites: four verified property operations, seven
+IB transport exceptions and 1,737 unsupported/unverified sites. No historical
 site was removed from the denominator.
+
+Final foundation integration passes all ten property PostgreSQL scenarios in
+one run (72.60 seconds), 142 server unit/contract tests and 61 client tests.
+The production build and coverage/domain/portal-brand checks pass. Desktop
+1440 and mobile 390 Chrome verify relationship disclosure, creation, primary
+eligibility/selection, relabeling, focus and saved-state refresh. Screenshots
+were inspected with vision. The harness's auxiliary payer/request/unread/thread
+routes remain unavailable; there are no IB or property failures, JavaScript
+exceptions or horizontal overflow. The model is scripted and physical iOS
+keyboard/notch behavior remains unverified. Final GitHub Codex review is
+pending its shared usage-limit reset; this remains a development-only draft.
