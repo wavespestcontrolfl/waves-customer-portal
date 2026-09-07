@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useId, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useId, useRef, useState } from 'react';
 import { cn } from './cn';
 
 const TabsCtx = createContext(null);
@@ -8,13 +8,22 @@ export function Tabs({ value, onValueChange, children, className }) {
   // Panels register themselves (mounted or not) so a Tab only claims
   // aria-controls when a matching TabPanel exists — some call sites use
   // Tabs as a bare filter strip with no panels.
-  const [panels, setPanels] = useState(() => new Set());
-  const registerPanel = (v) => {
-    setPanels((prev) => (prev.has(v) ? prev : new Set(prev).add(v)));
-    return () => setPanels((prev) => { if (!prev.has(v)) return prev; const next = new Set(prev); next.delete(v); return next; });
-  };
+  // The set lives in a ref and registerPanel is stable, so a panel's mount
+  // effect runs once; a version bump re-renders consumers only when the
+  // set actually changes (an unstable callback here looped the effect).
+  const panelsRef = useRef(new Set());
+  const [, bump] = useState(0);
+  const registerPanel = useCallback((v) => {
+    if (!panelsRef.current.has(v)) {
+      panelsRef.current.add(v);
+      bump((n) => n + 1);
+    }
+    return () => {
+      if (panelsRef.current.delete(v)) bump((n) => n + 1);
+    };
+  }, []);
   return (
-    <TabsCtx.Provider value={{ value, onValueChange, base, panels, registerPanel }}>
+    <TabsCtx.Provider value={{ value, onValueChange, base, panels: panelsRef.current, registerPanel }}>
       <div className={className}>{children}</div>
     </TabsCtx.Provider>
   );
