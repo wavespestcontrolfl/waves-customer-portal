@@ -4,6 +4,8 @@ import useIsMobile from "../../../hooks/useIsMobile";
 import useModalFocus from "../../../hooks/useModalFocus";
 import { adminFetch } from "./emailApi";
 import { D } from "./emailStyles";
+import EmailQuickLinks from "../../../components/admin/EmailQuickLinks";
+import { appendStaticLinkClause } from "../../../lib/composerLinks";
 
 export default function EmailComposer({ active, editor, onSent }) {
   const {
@@ -372,6 +374,11 @@ export default function EmailComposer({ active, editor, onSent }) {
         >
           {recoveryNotice}
         </p>
+        <EmailQuickLinks active={active && showCompose} recipient={composeForm.to}
+          disabled={composeSending}
+          onInsert={(link) => setComposeForm((form) => ({
+            ...form, body: appendStaticLinkClause(form.body, link),
+          }))} />
         <div
           style={{
             display: "flex",

@@ -64,6 +64,67 @@ async function open(message) {
 }
 
 describe("Email draft and navigation preservation", () => {
+  it("inserts public Quick Links once and keeps the email draft after closing the picker", async () => {
+    loadResponses["link-library"] = () => response({ links: [
+      { key: "quote", name: "Request a quote", category: "booking", url: "https://www.wavespestcontrol.com/quote/" },
+    ] });
+    mount();
+    await compose();
+    for (let i = 0; i < 2; i++) {
+      fireEvent.click(screen.getByRole("button", { name: "Quick Links", exact: true }));
+      const picker = await screen.findByRole("dialog", { name: "Quick Links" });
+      expect(picker).toHaveStyle({ zIndex: 1100 });
+      expect(within(picker).queryByRole("button", { name: /Card request|Pay balance|Contract signing/ })).not.toBeInTheDocument();
+      fireEvent.click(await within(picker).findByRole("button", { name: /^Request a quote/ }));
+    }
+    expect(screen.getByLabelText("Message *")).toHaveValue("Unsent compose text\n\nRequest a quote: https://www.wavespestcontrol.com/quote/");
+    expect(screen.getByLabelText("To *")).toHaveValue("recipient@example.invalid");
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith("/link-library"))).toHaveLength(1);
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith("/send"))).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Quick Links", exact: true }));
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Quick Links" })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "New email" })).toBeInTheDocument();
+  });
+
+  it("sends a guide separately from email with an explicit customer and keeps the unsent message", async () => {
+    loadResponses["link-library"] = () => response({ links: [] });
+    loadResponses.customers = () => response({ customers: [
+      { id: "fixture-guide-customer", first_name: "Guide", last_name: "Fixture", email: "recipient@example.invalid", phone: "9415550111" },
+    ] });
+    loadResponses["send-prep"] = () => response({ success: true, message: "Fixture guide emailed." });
+    mount(); await compose();
+    fireEvent.click(screen.getByRole("button", { name: "Quick Links", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: /^Lawn treatment/ }));
+    expect(screen.getByRole("textbox", { name: "Search customer" })).toHaveValue("recipient@example.invalid");
+    expect(screen.getByRole("radio", { name: "Email only" })).toBeChecked();
+    fireEvent.click(await screen.findByRole("button", { name: /Guide Fixture/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Send by email" }));
+    await screen.findByText("Fixture guide emailed.");
+    const guideSends = fetch.mock.calls.filter(([url]) => url.endsWith("/send-prep"));
+    expect(guideSends).toHaveLength(1);
+    expect(JSON.parse(guideSends[0][1].body)).toEqual({ customerId: "fixture-guide-customer", pestType: "lawn", channel: "email" });
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Quick Links" })).getByRole("button", { name: "Close", exact: true }));
+    expect(screen.getByLabelText("Message *")).toHaveValue("Unsent compose text");
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith("/email/send"))).toHaveLength(0);
+  });
+
+  it("adds Quick Links to the selected reply and hides the picker when the channel is inactive", async () => {
+    loadResponses["link-library"] = () => response({ links: [] });
+    const view = mount();
+    fireEvent.change(await open(a), { target: { value: "Reply for A" } });
+    fireEvent.click(screen.getByRole("button", { name: "Quick Links", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: /^Portal login/ }));
+    expect(screen.getByRole("textbox", { name: "Reply" })).toHaveValue("Reply for A\n\nManage your account and appointments here: https://portal.wavespestcontrol.com/login");
+    fireEvent.click(screen.getByRole("button", { name: "Quick Links", exact: true }));
+    view.rerender(emailRoute(false));
+    expect(screen.queryByRole("dialog", { name: "Quick Links" })).not.toBeInTheDocument();
+    view.rerender(emailRoute());
+    expect(screen.queryByRole("dialog", { name: "Quick Links" })).not.toBeInTheDocument();
+    await open(b);
+    expect(screen.getByRole("textbox", { name: "Reply" })).toHaveValue("");
+  });
+
   it("preserves recipient, thread and HTML body fields for replies and new messages", async () => {
     mount();
     fireEvent.change(await open(a), { target: { value: "First line\nSecond line" } });

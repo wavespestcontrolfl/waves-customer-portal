@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Sheet, SheetHeader, SheetBody } from '../ui/Sheet';
 import { cn } from '../ui/cn';
+import PrepGuideForm, { PREP_GUIDE_LINKS } from './PrepGuideForm';
 
-// The SMS composer's Quick Links picker: one searchable sheet over every link
-// an operator can text a customer — the per-customer minted links (reschedule,
+// The composers' Quick Links picker: one searchable sheet over links and prep
+// guides. The SMS composer supplies its per-customer minted links (reschedule,
 // re-service, review request, pay balance, latest estimate, referral, Auto
 // Pay setup), the per-office Google review links, and the whole link library
 // (sitemap-synced website pages + hand-managed rows). Presentation only: the
@@ -21,6 +22,7 @@ export const LINK_CHANNELS = [
 
 export const LINK_GROUP_ORDER = [
   ['customer', 'For this customer'],
+  ['guides', 'Prep guides'],
   ['reviews', 'Reviews'],
   ['booking', 'Booking & quotes'],
   ['app', 'Waves app'],
@@ -87,17 +89,22 @@ export default function InsertLinkSheet({
   busyKey = null,
   onPick,
   groupCaptions = {},
+  recipientSearch = "",
+  prepChannel = "both",
+  layer = 120,
 }) {
   const [query, setQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("all");
   // The `channels` row whose Text / Email / Both chooser is open.
   const [channelRowKey, setChannelRowKey] = useState(null);
+  const [prepGuide, setPrepGuide] = useState(null);
+  const [prepSending, setPrepSending] = useState(false);
   const searchRef = useRef(null);
 
   // Fresh search each open — a stale filter from the last insert is never
   // what the operator wants for the next one.
   useEffect(() => {
-    if (open) {
+    if (open && !prepGuide) {
       setQuery("");
       setActiveCategory("all");
       setChannelRowKey(null);
@@ -108,24 +115,41 @@ export default function InsertLinkSheet({
   }, [open]);
 
   const groups = useMemo(
-    () => buildLinkGroups(links, query, activeCategory),
+    () => buildLinkGroups([...(links || []), ...PREP_GUIDE_LINKS], query, activeCategory),
     [links, query, activeCategory],
   );
   const hasQuery = Boolean(query.trim());
+  const close = () => {
+    if (prepSending) return;
+    setPrepGuide(null);
+    onClose();
+  };
 
   return (
-    <Sheet open={open} onClose={onClose} width="sm" ariaLabel="Quick Links">
+    <Sheet open={open} onClose={close} width="sm" ariaLabel="Quick Links" layer={layer} keepMounted={!!prepGuide}>
       <SheetHeader>
         <span className="text-14 font-medium text-zinc-900">Quick Links</span>
         <button
           type="button"
-          onClick={onClose}
+          onClick={close}
+          disabled={prepSending}
           aria-label="Close"
-          className="w-8 h-8 rounded-full bg-zinc-100 text-zinc-600 hover:bg-zinc-200 u-focus-ring text-13"
+          className="w-8 h-8 rounded-full border-0 bg-zinc-100 text-zinc-600 hover:bg-zinc-200 u-focus-ring text-14"
         >
           ✕
         </button>
       </SheetHeader>
+      {prepGuide ? (
+        <SheetBody>
+          <button type="button" disabled={prepSending}
+            onClick={() => { setPrepGuide(null); searchRef.current?.focus(); }}
+            className="border-0 bg-transparent p-0 text-14 text-zinc-600 underline mb-4 u-focus-ring disabled:opacity-50">
+            Back to Quick Links
+          </button>
+          <PrepGuideForm active={open} guide={prepGuide} initialSearch={recipientSearch}
+            initialChannel={prepChannel} onSendingChange={setPrepSending} />
+        </SheetBody>
+      ) : <>
       <div className="px-5 pt-3 pb-2 border-b border-hairline border-zinc-200 shrink-0">
         <div className="relative">
           <svg
@@ -146,7 +170,7 @@ export default function InsertLinkSheet({
             aria-label="Search links"
             className={cn(
               "w-full h-11 bg-white border-hairline border-zinc-300 rounded-sm",
-              "text-16 md:text-13 text-zinc-900 pl-9 pr-3",
+              "text-16 md:text-14 text-zinc-900 pl-9 pr-3",
               "focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900",
             )}
           />
@@ -159,7 +183,7 @@ export default function InsertLinkSheet({
               aria-pressed={activeCategory === key}
               onClick={() => setActiveCategory(key)}
               className={cn(
-                "shrink-0 text-12 font-medium rounded-full px-3 py-1.5 border-hairline u-focus-ring",
+                "shrink-0 text-14 font-medium rounded-full px-3 py-1.5 border-solid border-hairline u-focus-ring",
                 activeCategory === key
                   ? "bg-zinc-900 border-zinc-900 text-white"
                   : "bg-white border-zinc-300 text-ink-secondary hover:bg-zinc-50",
@@ -177,11 +201,11 @@ export default function InsertLinkSheet({
             inserts down with it. The library's own state renders below. */}
         {groups.map(({ key, label, rows }) => (
             <div key={key}>
-              <div className="px-5 pt-3.5 pb-1 text-11 uppercase tracking-label font-medium text-ink-tertiary">
+              <div className="px-5 pt-3.5 pb-1 text-14 uppercase tracking-label font-medium text-ink-tertiary">
                 {label}
               </div>
               {!hasQuery && groupCaptions[key] && (
-                <div className="px-5 pb-1 text-11 text-ink-disabled leading-snug">
+                <div className="px-5 pb-1 text-14 text-ink-disabled leading-snug">
                   {groupCaptions[key]}
                 </div>
               )}
@@ -192,14 +216,16 @@ export default function InsertLinkSheet({
                   <div key={link.key}>
                   <button
                     type="button"
-                    onClick={() => (link.channels
+                    onClick={() => (link.pestType
+                      ? setPrepGuide(link)
+                      : link.channels
                       ? setChannelRowKey(chooserOpen ? null : link.key)
                       : onPick(link))}
                     disabled={busyKey != null}
                     title={link.title || link.name}
                     aria-expanded={link.channels ? chooserOpen : undefined}
                     className={cn(
-                      "w-full flex items-center gap-3 text-left px-5 py-2.5 u-focus-ring",
+                      "w-full flex items-center gap-3 text-left px-5 py-2.5 border-0 bg-transparent u-focus-ring",
                       "hover:bg-zinc-50 disabled:opacity-60",
                       chooserOpen && "bg-zinc-50",
                     )}
@@ -208,17 +234,17 @@ export default function InsertLinkSheet({
                       {ICONS[link.category === "customer" ? "customer" : link.category === "reviews" ? "reviews" : "link"]}
                     </span>
                     <span className="flex-1 min-w-0">
-                      <span className="block text-13 font-medium text-zinc-900 truncate">{link.name}</span>
-                      <span className="block text-11 text-ink-tertiary truncate">
-                        {displayUrl(link.url) || "Personal link — looked up on insert"}
+                      <span className="block text-14 font-medium text-zinc-900 truncate">{link.name}</span>
+                      <span className="block text-14 text-ink-tertiary truncate">
+                        {link.description || displayUrl(link.url) || "Personal link — looked up on insert"}
                       </span>
                     </span>
                     {busy ? (
-                      <span className="shrink-0 text-11 uppercase tracking-label font-bold text-ink-secondary bg-zinc-100 rounded-xs px-1.5 py-0.5">
+                      <span className="shrink-0 text-14 uppercase tracking-label font-medium text-ink-secondary bg-zinc-100 rounded-xs px-1.5 py-0.5">
                         Adding…
                       </span>
                     ) : link.dynamic ? (
-                      <span className="shrink-0 text-11 uppercase tracking-label font-bold text-waves-blue-dark bg-waves-blue-light rounded-xs px-1.5 py-0.5">
+                      <span className="shrink-0 text-14 uppercase tracking-label font-medium text-zinc-700 bg-zinc-100 rounded-xs px-1.5 py-0.5">
                         This customer
                       </span>
                     ) : null}
@@ -236,8 +262,8 @@ export default function InsertLinkSheet({
                             "hover:bg-zinc-100 disabled:opacity-60",
                           )}
                         >
-                          <span className="text-13 font-medium text-zinc-900 w-11 shrink-0">{label}</span>
-                          <span className="text-12 text-ink-secondary">{hint}</span>
+                          <span className="text-14 font-medium text-zinc-900 w-11 shrink-0">{label}</span>
+                          <span className="text-14 text-ink-secondary">{hint}</span>
                         </button>
                       ))}
                     </div>
@@ -248,10 +274,10 @@ export default function InsertLinkSheet({
             </div>
           ))}
         {loading && (
-          <div className="px-5 py-4 text-13 text-ink-secondary">Loading the link library…</div>
+          <div className="px-5 py-4 text-14 text-ink-secondary">Loading the link library…</div>
         )}
         {!loading && error && (
-          <div className="px-5 py-4 text-13">
+          <div className="px-5 py-4 text-14">
             <span className="text-alert-fg">{error}</span>{" "}
             {onRetry && (
               <button type="button" onClick={onRetry} className="underline text-zinc-900 u-focus-ring">
@@ -261,13 +287,14 @@ export default function InsertLinkSheet({
           </div>
         )}
         {!loading && !error && !groups.length && (
-          <div className="px-5 py-6 text-13 text-ink-secondary leading-relaxed">
+          <div className="px-5 py-6 text-14 text-ink-secondary leading-relaxed">
             No links match &ldquo;{query.trim()}&rdquo;.
             <br />
             Add it under Settings &rsaquo; Link Library and it shows up here.
           </div>
         )}
       </SheetBody>
+      </>}
     </Sheet>
   );
 }
