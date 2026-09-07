@@ -214,6 +214,15 @@ test('every gap names its two legs and the anchor the van leaves from (picked-ho
   db.mockImplementation((table) => (table === 'technicians' ? chain([{ id: 't1', name: 'A' }]) : chain([stop])));
   const { slots } = await findAvailableSlots({ ...BASE, slotStepMinutes: 60, topN: 10 });
   const byStart = Object.fromEntries(slots.map((s) => [s.start_time, s]));
+  // A coordless anchor scores as zero drive so its gaps stay offered, but
+  // the leg is unknown, not free — reported as null, never "0 min".
+  const coordless = { ...stop, svc_lat: null, svc_lng: null };
+  db.mockImplementation((table) => (table === 'technicians' ? chain([{ id: 't1', name: 'A' }]) : chain([coordless])));
+  const { slots: around } = await findAvailableSlots({ ...BASE, slotStepMinutes: 60, topN: 10 });
+  const afterCoordless = around.find((s) => s.insertion.after_stop_id === 's1');
+  expect(afterCoordless.drive_in_minutes).toBeNull();
+  expect(afterCoordless.drive_out_minutes).toBe(1); // to home base, which has coords
+  expect(around.find((s) => s.insertion.after_stop_id == null).drive_out_minutes).toBeNull();
   // Mocked geometry: every leg is 0.5 mi → 1 legacy minute.
   const first = byStart['09:00'];
   expect(first.drive_in_minutes).toBe(1);

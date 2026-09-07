@@ -30,6 +30,10 @@ const DEFAULT_SERVICE_MIN = 60;
 // route-optimizer's model, so this module and auto-dispatch score on the
 // same scale (a local copy lived here until the travel-gap lane).
 
+function hasCoords(stop) {
+  return stop != null && stop.lat != null && stop.lng != null;
+}
+
 function timeToMinutes(hhmm) {
   if (!hhmm) return null;
   const [h, m] = hhmm.split(':').map(Number);
@@ -327,9 +331,13 @@ async function findAvailableSlots(opts) {
           total_drive_minutes: detourDrive,
           // The two legs the detour is made of, so a picker can say what the
           // van actually drives INTO this stop (from the previous anchor)
-          // separately from what the insertion adds to the route.
-          drive_in_minutes: driveIn,
-          drive_out_minutes: driveOut,
+          // separately from what the insertion adds to the route. A
+          // coordless anchor scores as zero drive above (so its gaps stay
+          // offered), but that zero is a sentinel, not a trip — report the
+          // leg as unknown (null) so a hint omits it rather than claiming
+          // "0 min drive" (Codex #4120 r2 P2).
+          drive_in_minutes: hasCoords(prev) ? driveIn : null,
+          drive_out_minutes: hasCoords(next) ? driveOut : null,
           score,
           // Last start this gap can hold (its end still clears the drive to
           // the next anchor). Availability surfaces that only offer clean
