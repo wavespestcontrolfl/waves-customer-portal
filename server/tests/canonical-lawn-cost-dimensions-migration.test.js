@@ -2,6 +2,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/inventory-unit-review', () => ({ applyInventoryUnitFix: jest.fn() }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn() }));
 const migration = require('../models/migrations/20260907000100_canonical_lawn_cost_dimensions');
+const earlierMigration = require('../models/migrations/20260907000021_lawn_cost_inventory_dimensions');
 const { applyInventoryUnitFix } = require('../services/inventory-unit-review');
 const { recordAuditEvent } = require('../services/audit-log');
 
@@ -26,6 +27,7 @@ function fixture({ canonical = true } = {}) {
     expect(table).toBe('products_catalog');
     let matches = rows;
     const query = {
+      where: (fields) => { matches = matches.filter(row => Object.entries(fields).every(([key, value]) => row[key] === value)); return query; },
       whereIn: (field, values) => { matches = matches.filter(row => values.includes(row[field])); return query; },
       whereRaw: (sql) => { expect(sql).toBe('active IS NOT FALSE'); matches = matches.filter(row => row.active !== false); return query; },
       forUpdate: async () => matches,
@@ -80,4 +82,35 @@ test('refuses unknown stock basis', async () => {
   rows[0].inventory_on_hand = 1;
   await expect(migration.up(db)).rejects.toThrow('Stock basis missing');
   expect(applyInventoryUnitFix).not.toHaveBeenCalled();
+});
+
+
+test.each([true, false])('the complete unit migration sequence handles canonical=%s', async (canonical) => {
+  const { db, rows } = fixture({ canonical });
+  for (const row of rows) {
+    row.cost_unit = 'oz';
+    row.cost_per_unit = Number((row.best_price / row.unit_size_oz).toFixed(4));
+    if (row.active === false) Object.assign(row, { cost_per_unit: 99, inventory_on_hand: 17 });
+  }
+  const inactiveBefore = rows.filter(row => row.active === false).map(row => ({ ...row }));
+  await earlierMigration.up(db);
+  await migration.up(db);
+  expect(rows.filter(row => row.active === false)).toEqual(inactiveBefore);
+  expect(rows.filter(row => row.active !== false).every(row => row.inventory_unit)).toBe(true);
+  expect(applyInventoryUnitFix).toHaveBeenCalledTimes(6);
+  await earlierMigration.up(db);
+  await migration.up(db);
+  expect(applyInventoryUnitFix).toHaveBeenCalledTimes(6);
+  expect(recordAuditEvent).toHaveBeenCalledTimes(6);
+});
+
+test.each([true, null])('earlier migration still rejects stale liquid costs for active=%s', async (active) => {
+  const { db, rows } = fixture({ canonical: false });
+  for (const row of rows) {
+    row.cost_unit = 'oz';
+    row.cost_per_unit = Number((row.best_price / row.unit_size_oz).toFixed(4));
+  }
+  Object.assign(rows.find(row => row.name === 'LESCO 12-0-0 Chelated Iron Plus'),
+    { active, cost_per_unit: 99 });
+  await expect(earlierMigration.up(db)).rejects.toThrow('Cost basis needs review');
 });
