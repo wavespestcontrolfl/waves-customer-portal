@@ -101,6 +101,30 @@ describe('VisitBriefPanel — own tech line', () => {
     vi.useRealTimers();
   });
 
+  it('a refresh answering { line: null } mid-send keeps the compose mounted and never shows the personal links until the send settles', async () => {
+    let resolveSend;
+    const request = vi.fn(() => new Promise((resolve) => { resolveSend = resolve; }));
+    const { rerender } = render(<VisitBriefPanel stop={stop} detail={detail} techLine={LINE} request={request} />);
+    fireEvent.click(screen.getByRole('button', { name: /Text/ }));
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'hi' } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Send' })); });
+    // The gate flips off / the line is cleared while the text is in flight.
+    rerender(<VisitBriefPanel stop={stop} detail={detail} techLine={{ line: null }} request={request} />);
+    expect(screen.getByTestId('line-text-compose')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Text/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Call/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Text/ })).toBeDisabled();
+    // A failed lookup mid-send is held off the same way.
+    rerender(<VisitBriefPanel stop={stop} detail={detail} techLine={{ unknown: true }} request={request} />);
+    expect(screen.getByTestId('line-text-compose')).toBeInTheDocument();
+    await act(async () => { resolveSend({ success: true }); });
+    // Settled: the newest answer applies — no line → personal links.
+    rerender(<VisitBriefPanel stop={stop} detail={detail} techLine={{ line: null }} request={request} />);
+    expect(screen.queryByTestId('line-text-compose')).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Text/ })).toHaveAttribute('href', expect.stringMatching(/^sms:/));
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   it('a declined confirm never calls the server', () => {
     const request = vi.fn();
     vi.spyOn(window, 'confirm').mockReturnValue(false);

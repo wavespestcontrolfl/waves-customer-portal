@@ -578,8 +578,8 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   // render — a tech who holds a line must never reach the customer from
   // their handset on a lookup error (codex #4072 r5 P2). The home page
   // re-reads the line on every schedule refresh.
-  const lineUnknown = Boolean(techLine?.unknown);
-  const line = techLine?.line && request ? techLine : null;
+  const liveLineUnknown = Boolean(techLine?.unknown);
+  const liveLine = techLine?.line && request ? techLine : null;
   const [composeOpen, setComposeOpen] = useState(false);
   const [textBusy, setTextBusy] = useState(false);
   const [callState, setCallState] = useState({ busy: false, note: '', error: '' });
@@ -588,6 +588,18 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   // The parent accordion must not unmount a panel with a text or a bridge
   // in flight (a fresh panel would let the same action go out twice).
   const busy = textBusy || callState.busy;
+  // …and the panel itself keeps the line mode the action started in while
+  // it is in flight: a schedule refresh answering { line: null } (gate off,
+  // assignment cleared) or a failed lookup mid-send must not unmount the
+  // composer or swap the disabled own-line actions for enabled personal
+  // tel:/sms: links — the request can still succeed and a bridge stays
+  // locked (codex #4072 r12 P2). The latch clears when the action settles;
+  // the newest answer applies from then on. Busy only ever starts from a
+  // line action, so the held value is the line it started with.
+  const heldLine = useRef(null);
+  if (busy) { if (!heldLine.current) heldLine.current = liveLine; } else heldLine.current = null;
+  const line = busy ? heldLine.current : liveLine;
+  const lineUnknown = busy ? false : liveLineUnknown;
   useEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
   async function callFromLine() {
     if (callState.busy) return;
