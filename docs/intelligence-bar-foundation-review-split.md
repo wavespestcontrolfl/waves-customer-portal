@@ -82,3 +82,13 @@ proof remains in D. No real communication or publication is authorized for QA.
   bulk-cohort, and recipient checks remain together; moving them into one-use
   helpers would only relocate the decisions. Further simplification must
   preserve every independently tested authorization path.
+
+Part A review remediation validates arguments again inside registry execution.
+Trusted confirmation and private version pins use the server action context;
+model-supplied approval or private fields fail schema validation. Discovery is
+not offered on the technician surface. The coverage gate now proves baseline
+IDs and fingerprints against source at a commit already merged on main and
+retains dynamic admin verb-wrapper calls. All 1,736 recorded sites remain
+unsupported/unverified. Backend registrations remain a manual inventory in
+this split; automated backend drift enforcement is deferred to the final
+capability reconciliation, so this gate currently enforces frontend sites only.

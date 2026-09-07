@@ -146,7 +146,8 @@ function discover(input, scope) {
 function initialTools(context, scope) {
   const domain = { estimates: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
   const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_products', 'query_leads']);
-  return [DISCOVERY_TOOL, ...[...actions.values()]
+  const discovery = scope.role === 'admin' && context !== 'tech' ? [DISCOVERY_TOOL] : [];
+  return [...discovery, ...[...actions.values()]
     .filter(a => allowed(a, scope) && a.approval !== 'confirmed_endpoint' && (common.has(a.id) || a.domain === domain))
     .map(a => a.definition)];
 }
@@ -157,7 +158,15 @@ function execute(name, input, { role, context, techContext, actionContext = {} }
   if (action.kind !== 'read' && actionContext.confirmed !== true && !WRITE_TWO_STEP_TOOL_NAMES.has(name)) {
     return Promise.resolve({ error: 'Explicit approval is required', code: 'approval_required' });
   }
-  return action.executor(name, input, action.module === 'tech-tools.js' ? (techContext || {}) : actionContext);
+  const invalid = validateInput(name, input, { role, context });
+  if (invalid) return Promise.resolve(invalid);
+  // Server pins travel separately from schema-validated model arguments.
+  // No input.confirmed/confirm or model-supplied hidden field can approve a
+  // two-step executor. Confirm is derived solely from authenticated routing.
+  const pins = Object.fromEntries(Object.entries(actionContext.executionPins || {}).filter(([key]) => key.startsWith('_')));
+  const executionInput = { ...input, ...pins,
+    ...(WRITE_TWO_STEP_TOOL_NAMES.has(name) ? { confirmed: actionContext.confirmed === true } : {}) };
+  return action.executor(name, executionInput, action.module === 'tech-tools.js' ? (techContext || {}) : actionContext);
 }
 
 module.exports = { actions, policyErrors, DISCOVERY_TOOL, initialTools, discover, validateInput, allowed, execute };

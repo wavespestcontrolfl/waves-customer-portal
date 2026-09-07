@@ -31,6 +31,25 @@ test('technicians cannot discover admin tools or forge a tool scope', async () =
   expect(registry.discover({ query: 'customer inventory' }, scope).result.code).toBe('permission_denied');
   expect(registry.validateInput('update_customer', { customer_id: 'fixture' }, scope).code).toBe('permission_denied');
   expect(await registry.execute('send_sms', {}, scope)).toMatchObject({ code: 'permission_denied' });
+  expect(registry.initialTools('tech', { role: 'technician', context: 'tech' }).some(t => t.name === 'discover_capabilities')).toBe(false);
+  expect(registry.initialTools('tech', { role: 'admin', context: 'tech' }).some(t => t.name === 'discover_capabilities')).toBe(false);
+});
+
+test('execute validates raw model arguments before a two-step executor can see approval fields', async () => {
+  const action = registry.actions.get('create_customer');
+  const original = action.executor;
+  action.executor = jest.fn(async (_name, input) => ({ confirmed: input.confirmed }));
+  const scope = { role: 'admin', context: 'customers' };
+  const input = { first_name: 'Synthetic', last_name: 'Person', phone: '+15550101234' };
+  try {
+    expect(await registry.execute('create_customer', { ...input, confirmed: true }, scope)).toMatchObject({ code: 'invalid_input' });
+    expect(await registry.execute('create_customer', { ...input, _approved: true }, scope)).toMatchObject({ code: 'invalid_input' });
+    expect(action.executor).not.toHaveBeenCalled();
+    expect(await registry.execute('create_customer', input, scope)).toEqual({ confirmed: false });
+    expect(await registry.execute('create_customer', input, { ...scope, actionContext: { confirmed: true,
+      executionPins: { _ib_customer_version: 'server-version', confirmed: false } } })).toEqual({ confirmed: true });
+    expect(action.executor.mock.calls.at(-1)[1]).toMatchObject({ _ib_customer_version: 'server-version', confirmed: true });
+  } finally { action.executor = original; }
 });
 
 test('unknown classification, coerced quantities, and injected approval/actor fields fail closed', () => {
