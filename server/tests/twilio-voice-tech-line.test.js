@@ -17,7 +17,7 @@ const twilio = require('twilio');
 const VoiceResponse = twilio.twiml.VoiceResponse;
 const db = require('../models/db');
 const voiceRouter = require('../routes/twilio-voice-webhook');
-const { appendStaffRingDial } = voiceRouter._test;
+const { appendStaffRingDial, techLineUnacceptedLegSid } = voiceRouter._test;
 
 function handlerFor(path) {
   const layer = voiceRouter.stack.find((l) => l.route && l.route.path === path);
@@ -67,7 +67,7 @@ describe('appendStaffRingDial action URL', () => {
 });
 
 describe('/call-complete?stage=tech_line', () => {
-  test('nobody accepted the tech leg → rings the office list, stamps nothing', async () => {
+  test('nobody accepted the tech leg → rings the office list; only the unaccepted-leg SID is stamped, no outcome', async () => {
     const { update } = primeDb();
     const res = mockRes();
     await handlerFor('/call-complete')({
@@ -80,7 +80,11 @@ describe('/call-complete?stage=tech_line', () => {
     expect(res.body).toContain('action="/api/webhooks/twilio/call-complete"');
     expect(res.body).not.toContain('stage=');
     expect(res.body).not.toContain('<Record');
-    expect(update).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledTimes(1);
+    const stamp = update.mock.calls[0][0];
+    expect(Object.keys(stamp).sort()).toEqual(['metadata', 'updated_at']);
+    expect(stamp.metadata.sql).toContain("'{tech_line_unaccepted_leg}'");
+    expect(stamp.metadata.bindings).toEqual(['"CA-1-tech"']);
   });
 
   test('carrier voicemail answered the cell but nobody pressed 1 → still the office list', async () => {
@@ -92,7 +96,9 @@ describe('/call-complete?stage=tech_line', () => {
     }, res);
     expect(res.body).toContain('<Dial');
     expect(res.body).toContain('action="/api/webhooks/twilio/call-complete?lang=es"');
-    expect(update).not.toHaveBeenCalled();
+    // the stamp only — no status / answered_by / call_outcome
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(Object.keys(update.mock.calls[0][0]).sort()).toEqual(['metadata', 'updated_at']);
   });
 
   test('the tech pressed 1 → an ordinary answered call (no second ring)', async () => {
@@ -118,5 +124,51 @@ describe('/call-complete?stage=tech_line', () => {
     }, res);
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ answered_by: 'voicemail', call_outcome: 'voicemail' }));
     expect(res.body).toContain('<Record');
+  });
+});
+
+describe('/recording-status — the unaccepted tech-leg clip is never the row\'s recording', () => {
+  test('techLineUnacceptedLegSid reads the stamp from jsonb or a legacy string', () => {
+    expect(techLineUnacceptedLegSid({ tech_line_unaccepted_leg: 'CA-x' })).toBe('CA-x');
+    expect(techLineUnacceptedLegSid(JSON.stringify({ tech_line_unaccepted_leg: 'CA-y' }))).toBe('CA-y');
+    expect(techLineUnacceptedLegSid({})).toBeNull();
+    expect(techLineUnacceptedLegSid(null)).toBeNull();
+    expect(techLineUnacceptedLegSid('{bad json')).toBeNull();
+  });
+
+  test('a recording delivered for the stamped leg is kept as evidence under superseded_recordings and not attached or scheduled', async () => {
+    const update = jest.fn().mockResolvedValue(1);
+    const row = { id: 'row-1', twilio_call_sid: 'CA-1', recording_sid: null, recording_url: null, processing_status: null, transcription_metadata: null, metadata: { tech_line_unaccepted_leg: 'CA-1-tech' } };
+    const chain = { update, first: jest.fn().mockResolvedValue(row) };
+    chain.where = jest.fn(() => chain);
+    db.mockImplementation(() => chain);
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    const res = { sendStatus: jest.fn() };
+    await handlerFor('/recording-status')({
+      body: { CallSid: 'CA-1-tech', ParentCallSid: 'CA-1', RecordingSid: 'RE-tech', RecordingUrl: 'https://api.twilio.com/rec/RE-tech', RecordingDuration: '9', RecordingStatus: 'completed' },
+    }, res);
+    expect(res.sendStatus).toHaveBeenCalledWith(200);
+    expect(update).toHaveBeenCalledTimes(1);
+    const write = update.mock.calls[0][0];
+    expect(Object.keys(write).sort()).toEqual(['metadata', 'updated_at']);
+    expect(write.metadata.sql).toContain("'{superseded_recordings}'");
+    expect(JSON.parse(write.metadata.bindings[0])[0]).toMatchObject({ recording_sid: 'RE-tech', recording_duration_seconds: 9, reason: 'tech_line_unaccepted_leg' });
+    // never the row's recording
+    expect(write).not.toHaveProperty('recording_sid');
+  });
+
+  test('a redelivery of that clip writes nothing', async () => {
+    const update = jest.fn().mockResolvedValue(1);
+    const row = { id: 'row-1', twilio_call_sid: 'CA-1', recording_sid: null, recording_url: null, processing_status: null, transcription_metadata: null,
+      metadata: { tech_line_unaccepted_leg: 'CA-1-tech', superseded_recordings: [{ recording_sid: 'RE-tech', reason: 'tech_line_unaccepted_leg' }] } };
+    const chain = { update, first: jest.fn().mockResolvedValue(row) };
+    chain.where = jest.fn(() => chain);
+    db.mockImplementation(() => chain);
+    const res = { sendStatus: jest.fn() };
+    await handlerFor('/recording-status')({
+      body: { CallSid: 'CA-1-tech', ParentCallSid: 'CA-1', RecordingSid: 'RE-tech', RecordingUrl: 'https://api.twilio.com/rec/RE-tech', RecordingDuration: '9', RecordingStatus: 'completed' },
+    }, res);
+    expect(res.sendStatus).toHaveBeenCalledWith(200);
+    expect(update).not.toHaveBeenCalled();
   });
 });

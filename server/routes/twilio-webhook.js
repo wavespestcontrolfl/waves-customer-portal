@@ -679,6 +679,13 @@ router.post('/sms', async (req, res) => {
             await TwilioService.sendSMS(process.env.ADAM_PHONE, `📩 New SMS\nFrom: ${senderName}\n"${(Body || '').slice(0, 120)}"`, { messageType: 'internal_alert' });
           } catch (e) { logger.error(`SMS notification failed: ${e.message}`); }
         }
+        // A loud tapback on a tech line reaches the holder too (same card as a
+        // text — codex #4053 r2 P2); quiet ones stay silent everywhere.
+        if (numberConfig.type === 'tech_line') {
+          await require('../services/tech-line').notifyTechLineText({
+            lineNumber: To, from: From, body: Body, customer, mediaCount: inboundMedia.length,
+          }).catch((e) => logger.warn(`[tech-line] reaction notify failed: ${e.message}`));
+        }
       }
       return res.type('text/xml').send('<Response></Response>');
     }

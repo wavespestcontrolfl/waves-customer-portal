@@ -267,6 +267,13 @@ function listedRecordingReason(metadata, sid) {
   } catch { return null; }
 }
 
+function techLineUnacceptedLegSid(metadata) {
+  try {
+    const m = typeof metadata === 'string' ? JSON.parse(metadata) : (metadata || {});
+    return typeof m.tech_line_unaccepted_leg === 'string' ? m.tech_line_unaccepted_leg : null;
+  } catch { return null; }
+}
+
 function decideRecordingAttach(row, incoming) {
   const currentSid = row?.recording_sid || null;
   const currentUrl = String(row?.recording_url || '').trim();
@@ -1574,6 +1581,16 @@ router.post('/call-complete', async (req, res) => {
       const officeNumbers = getFallbackForwardNumbers();
       if (officeNumbers.length) {
         logger.info(`[call-complete] tech line leg ${status} for ${maskSid(CallSid)} — ringing the office list`);
+        // Remember the leg that ended without a press-1: <Dial record> may
+        // still deliver ITS recording (carrier voicemail answered the screen)
+        // and /recording-status must not let that clip become the row's
+        // recording ahead of the office conversation (codex #4053 r2 P1).
+        // Best-effort: Twilio fires this action before the recording callback,
+        // so the stamp is in place when that clip arrives.
+        await db('call_log').where('twilio_call_sid', CallSid).update({
+          metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{tech_line_unaccepted_leg}', ?::jsonb, true)", [JSON.stringify(DialCallSid || null)]),
+          updated_at: new Date(),
+        }).catch((err) => logger.warn(`[call-complete] tech line leg stamp failed for ${maskSid(CallSid)}: ${err.message}`));
         const twiml = new VoiceResponse();
         appendStaffRingDial(twiml, officeNumbers, 30, { language: req.query.lang === 'es' ? 'es' : null });
         return res.type('text/xml').send(twiml.toString());
@@ -2405,6 +2422,28 @@ router.post('/recording-status', async (req, res) => {
       }
       if (!targetRow) {
         targetRow = await db('call_log').where('twilio_call_sid', CallSid).first(...ATTACH_COLUMNS);
+      }
+      // Tech line (GATE_TECH_LINES): the holder's leg ended without a press-1
+      // (/call-complete?stage=tech_line stamped its SID), so this recording is
+      // the screen prompt / the holder's carrier voicemail — not a
+      // conversation. The office leg that follows may run past the early
+      // processing timer, and attaching this clip would let it get
+      // processed first and PARK the real recording (codex #4053 r2 P1).
+      // Kept as evidence under superseded_recordings (a redelivery dedupes
+      // there), never attached, never scheduled.
+      if (targetRow && ParentCallSid && techLineUnacceptedLegSid(targetRow.metadata) === CallSid) {
+        if (!listedRecordingReason(targetRow.metadata, RecordingSid)) {
+          await db('call_log').where({ id: targetRow.id }).update({
+            metadata: db.raw(
+              "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{superseded_recordings}',"
+              + " COALESCE(metadata -> 'superseded_recordings', '[]'::jsonb) || ?::jsonb, true)",
+              [JSON.stringify([{ recording_sid: RecordingSid, recording_url: recordingData.recording_url, recording_duration_seconds: recordingData.recording_duration_seconds, superseded_at: new Date().toISOString(), reason: 'tech_line_unaccepted_leg' }])],
+            ),
+            updated_at: new Date(),
+          });
+        }
+        logger.info(`[recording-status] recording ${maskSid(RecordingSid)} is the unaccepted tech-line leg of ${maskSid(targetRow.twilio_call_sid)} — kept as evidence, not attached`);
+        return res.sendStatus(200);
       }
       let updated = 0;
       let matchedSid = null;
@@ -3313,6 +3352,7 @@ router._test = {
   rememberForwardAccept,
   resolveCsrName,
   resolveInboundDialCompletion,
+  techLineUnacceptedLegSid,
   sanitizeVoiceProviderError,
   shouldAlertInboundDialFailure,
   wasForwardAccepted,
