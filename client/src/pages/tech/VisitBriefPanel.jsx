@@ -17,8 +17,15 @@
 // math stays in MobileCheckoutSheet; this panel displays, checkout
 // charges.
 //
+// One exception to read-only: when the tech holds their own Twilio line
+// (GET /api/tech/line → techLine prop), Call and Text go through the line
+// instead of the personal phone — POST /api/tech/line/call (press-1 bridge
+// to the tech's cell, then the customer) and POST /api/tech/line/sms (an
+// inline compose). Without a line the tel:/sms: links stay as they were.
+//
 // Tech portal style rule (CLAUDE.md): inline styles + dark palette,
 // Montserrat headings per-element. No Tailwind, no components/ui.
+import { useState } from 'react';
 import { stopPropertyAlerts } from './routeStops';
 import {
   fmtMoney,
@@ -507,9 +514,68 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
   );
 }
 
-export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead }) {
+// "Text from my line": a compose box under the action row. The server
+// texts the VISIT's customer (never a number the client picks) from the
+// tech's line; the office sees the thread in /admin/communications.
+const LINE_TEXT_MAX = 600;
+function LineTextCompose({ line, onSend, onClose }) {
+  const [body, setBody] = useState('');
+  const [state, setState] = useState({ busy: false, error: '', sent: false });
+  async function send() {
+    const text = body.trim();
+    if (!text || state.busy) return;
+    setState({ busy: true, error: '', sent: false });
+    try {
+      await onSend(text);
+      setState({ busy: false, error: '', sent: true });
+      setBody('');
+    } catch (err) {
+      setState({ busy: false, error: String(err?.message || err).slice(0, 160), sent: false });
+    }
+  }
+  return (
+    <div data-testid="line-text-compose" style={{ marginTop: 8, padding: 10, borderRadius: 8, border: `1px solid ${DARK.border}`, background: DARK.bg }}>
+      <div style={{ ...factMutedStyle, margin: '0 0 6px' }}>Text from your line {line.formatted}</div>
+      <textarea
+        value={body}
+        onChange={(e) => setBody(e.target.value.slice(0, LINE_TEXT_MAX))}
+        placeholder="On my way — about 15 minutes out."
+        rows={3}
+        aria-label="Message"
+        style={{ width: '100%', boxSizing: 'border-box', padding: 8, borderRadius: 6, border: `1px solid ${DARK.border}`, background: DARK.card, color: DARK.text, fontSize: 15, resize: 'vertical' }}
+      />
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
+        <button type="button" onClick={send} disabled={state.busy || !body.trim()} style={{ padding: '8px 14px', borderRadius: 8, border: 'none', background: DARK.teal, color: '#0b1220', fontSize: 14, fontWeight: 700, cursor: 'pointer', opacity: state.busy || !body.trim() ? 0.6 : 1 }}>
+          {state.busy ? 'Sending…' : 'Send'}
+        </button>
+        <button type="button" onClick={onClose} style={{ padding: '8px 12px', borderRadius: 8, border: `1px solid ${DARK.border}`, background: 'transparent', color: DARK.muted, fontSize: 14, cursor: 'pointer' }}>Close</button>
+        <span style={{ ...factMutedStyle, margin: 0, marginLeft: 'auto' }}>{body.length}/{LINE_TEXT_MAX}</span>
+      </div>
+      {state.sent && <p role="status" style={{ ...factMutedStyle, color: '#10b981', marginTop: 6 }}>Sent.</p>}
+      {state.error && <p role="alert" style={{ ...factMutedStyle, color: DARK.red, marginTop: 6 }}>{state.error}</p>}
+    </div>
+  );
+}
+
+export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead, techLine = null, request = null }) {
   const service = stop.primary;
   const phone = service.customerPhone || service.customer_phone || null;
+  // Own-line mode: Call bridges through the line, Text composes from it.
+  const line = techLine?.line && request ? techLine : null;
+  const [composeOpen, setComposeOpen] = useState(false);
+  const [callState, setCallState] = useState({ busy: false, note: '', error: '' });
+  async function callFromLine() {
+    if (callState.busy) return;
+    const name = service.customer_name || service.customerName || 'the customer';
+    if (!window.confirm(`Ring your phone, then connect you to ${name} from ${line.line.formatted}?`)) return;
+    setCallState({ busy: true, note: '', error: '' });
+    try {
+      await request('/tech/line/call', { method: 'POST', body: JSON.stringify({ scheduledServiceId: service.id }) });
+      setCallState({ busy: false, note: 'Ringing your phone — press 1 to connect.', error: '' });
+    } catch (err) {
+      setCallState({ busy: false, note: '', error: String(err?.message || err).slice(0, 160) });
+    }
+  }
   const address = service.address || null;
   const alerts = stopPropertyAlerts(stop);
   const grouped = stop.services.length > 1;
@@ -556,8 +622,12 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
     <div data-testid="visit-brief-panel" style={{ borderTop: `1px solid ${DARK.border}`, marginTop: 10, paddingTop: 10 }}>
       {(tel || sms || address) && (
         <div style={{ display: 'flex', gap: 8 }}>
-          {tel && <LinkBtn href={tel} icon="📞" label="Call" />}
-          {sms && <LinkBtn href={sms} icon="💬" label="Text" />}
+          {tel && (line
+            ? (line.canCall && <LinkBtn icon="📞" label={callState.busy ? 'Calling…' : 'Call'} onClick={callFromLine} />)
+            : <LinkBtn href={tel} icon="📞" label="Call" />)}
+          {sms && (line
+            ? <LinkBtn icon="💬" label="Text" onClick={() => setComposeOpen((o) => !o)} />
+            : <LinkBtn href={sms} icon="💬" label="Text" />)}
           {address && (
             <LinkBtn
               icon="🗺️"
@@ -566,6 +636,15 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
             />
           )}
         </div>
+      )}
+      {line && callState.note && <p role="status" style={{ ...factMutedStyle, marginTop: 6 }}>{callState.note}</p>}
+      {line && callState.error && <p role="alert" style={{ ...factMutedStyle, color: DARK.red, marginTop: 6 }}>{callState.error}</p>}
+      {line && composeOpen && (
+        <LineTextCompose
+          line={line.line}
+          onSend={(body) => request('/tech/line/sms', { method: 'POST', body: JSON.stringify({ scheduledServiceId: service.id, body }) })}
+          onClose={() => setComposeOpen(false)}
+        />
       )}
       {address && <p style={{ ...factMutedStyle, marginTop: 8 }}>{address}</p>}
 

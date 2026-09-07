@@ -137,9 +137,16 @@ to it is lost.
    it assigned but inert — an inactive holder never rings). Reassign it to
    the next hire from the same picker.
 
-Not yet: replying or calling *from* the line out of the tech portal, and
-automated visit texts from it (owner ruling — those stay on the location
-lines).
+6. **From the tech portal**: once the line is assigned, the visit brief's
+   *Call* rings the tech's own phone first (press 1) and then the customer
+   with the line as caller ID; *Text* opens a compose that sends from the
+   line. Both reach only the customer of a visit on the tech's route, and
+   every send passes the normal customer-messaging guards (consent,
+   suppression, quiet hours). *Call* needs the tech's cell on their staff
+   row (`Phone`) — an office line there is refused.
+
+Not yet: automated visit texts from the line (owner ruling — those stay on
+the location lines).
 
 ## What the account can do
 

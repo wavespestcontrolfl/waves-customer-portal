@@ -212,6 +212,17 @@ const QUICK_ACTIONS = [
 export default function TechHomePage() {
   const navigate = useNavigate();
   const [schedule, setSchedule] = useState([]);
+  // The tech's own Twilio line, if they hold one (GET /api/tech/line):
+  // the brief panel's Call/Text then go through the line. Null = personal
+  // phone links as before; a failed read is the same as no line.
+  const [techLine, setTechLine] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    techRequest('/tech/line')
+      .then((d) => { if (alive) setTechLine(d?.line ? d : null); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
   const [loading, setLoading] = useState(true);
   const [scheduleError, setScheduleError] = useState('');
   const [showCreateProject, setShowCreateProject] = useState(false);
@@ -825,6 +836,7 @@ export default function TechHomePage() {
                 })}
                 onZone={(s) => setZoneTarget(s)}
                 onLead={(s) => setLeadTarget(s)}
+                techLine={techLine}
               />
             ))}
           </div>
@@ -1228,7 +1240,7 @@ function TimecardSignoffCard({ techName }) {
 // name, status·window, service label + short address, exception chips
 // (access alerts / collect-needed). Tap anywhere expands the Visit Brief
 // — the per-service action buttons (the old ServiceRow's) live inside it.
-function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, onProject, onZone, onLead }) {
+function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, onProject, onZone, onLead, techLine }) {
   const service = stop.primary;
   const status = service.status || 'pending';
   // A grouped transition that only partially fanned out leaves live
@@ -1321,6 +1333,8 @@ function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, on
           onProject={onProject}
           onZone={onZone}
           onLead={onLead}
+          techLine={techLine}
+          request={techRequest}
         />
       )}
     </div>

@@ -8,6 +8,8 @@
  *   - ringTargetForLine(number)  → that technician's cell (E.164) — the voice
  *                                  webhook rings it BEFORE the office list
  *   - lineForTechnician(id)      → the registry entry the customer card carries
+ *   - techLineContext(id)        → { line, cell } for the tech portal's own
+ *                                  call/text from the line (routes/tech-line.js)
  *   - notifyTechLineText(...)    → tech-home card + one-line push for an
  *                                  inbound text on the line
  *
@@ -64,12 +66,40 @@ async function technicianForLine(number, connection = db) {
   }
 }
 
+// A technician's own phone as an E.164 dial target, or null. A Waves-owned
+// number is never one: technicians.phone can hold an office line (the
+// owner's row does), and dialing our own Twilio number from inside /voice or
+// the bridge would open a second inbound call into the same webhook.
+function usableCell(tech) {
+  const cell = tech ? toE164(tech.phone) : null;
+  if (!cell || !isLikelyE164(cell)) return null;
+  if (TWILIO_NUMBERS.isOwnedNumber(cell)) {
+    logger.warn(`[tech-line] technician ${tech.id} has a Waves line as their phone — not a dial target`);
+    return null;
+  }
+  return cell;
+}
+
 // The cell to ring for a call on the line; null when nobody assignable holds
 // it or the holder has no usable cell (the office list then rings alone).
 async function ringTargetForLine(number) {
-  const tech = await technicianForLine(number);
-  const cell = tech ? toE164(tech.phone) : null;
-  return cell && isLikelyE164(cell) ? cell : null;
+  return usableCell(await technicianForLine(number));
+}
+
+// The tech portal's view of its own line: { line, cell } when the caller
+// holds a line (gate on, assignable), else null. `cell` may be null (no
+// usable phone on the row) — texting from the line still works, the
+// press-1 bridge does not.
+async function techLineContext(technicianId) {
+  const line = await lineForTechnician(technicianId);
+  if (!line) return null;
+  try {
+    const tech = await db('technicians').where({ id: technicianId }).first('id', 'name', 'phone');
+    return { line, cell: usableCell(tech), technicianName: tech?.name || null };
+  } catch (err) {
+    logger.warn(`[tech-line] context lookup failed for technician ${technicianId} (${errorTag(err)})`);
+    return null;
+  }
 }
 
 // Registry entry for the line a technician holds, or null (gate off, no line,
@@ -139,6 +169,7 @@ module.exports = {
   technicianForLine,
   ringTargetForLine,
   lineForTechnician,
+  techLineContext,
   notifyTechLineText,
   _test: { displayPhone },
 };
