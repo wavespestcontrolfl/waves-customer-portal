@@ -9,7 +9,7 @@ const { parseQuotedETDeadline } = require('../utils/datetime-et');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
 
 // The shared proposal rule_version column is varchar(16).
-const VERSION = 'sms-ops-v13';
+const VERSION = 'sms-ops-v14';
 const FACT_FIELDS = Object.freeze([
   'contact_preference', 'irrigation_controller_location', 'irrigation_schedule_notes',
   'irrigation_issues', 'parking_notes', 'pet_details', 'access_notes', 'special_instructions',
@@ -150,6 +150,9 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
   if (!validate(parsed)) throw new Error('sms_operations_invalid_schema');
   if (stringifySmsEvidence(parsed) !== JSON.stringify(parsed)) throw new Error('sms_operations_sensitive_output');
   const body = normalize(message.message_body);
+  // An opening reminder idiom is affirmative; keep every later qualifier
+  // visible so "don't forget to NOT call" still requires human review.
+  const instruction = body.replace(/^(?:please\s+)?(?:don['’]t|do not)\s+forget\s+to\b/i, '');
   const propertyIds = new Set(properties.map((p) => p.id));
   const grounded = (item) => body.includes(normalize(item.quote))
     && (!item.property_id || propertyIds.has(item.property_id));
@@ -158,7 +161,7 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
     if (item.basis === 'promise' && isQuestionSource(message.message_body)) return false;
     // Mixed/negated instructions need a human reading of scope; a keyword
     // in an affirmative substring cannot authorize the opposite action.
-    if (/\b(?:not|never|no|cannot|unable|instead|unless|rather|but|if|when|after|once|until|provided|assuming|only)\b|n['’]t/i.test(body)) return false;
+    if (/\b(?:not|never|no|cannot|unable|instead|unless|rather|but|if|when|after|once|until|provided|assuming|only)\b|n['’]t/i.test(instruction)) return false;
     if (!normalize(item.quote).includes(normalize(item.description))) return false;
     if (item.kind !== 'other' && !KIND_EVIDENCE[item.kind]?.test(item.description)) return false;
     if (message.direction === 'outbound') return item.party === 'waves' && item.basis === 'promise';

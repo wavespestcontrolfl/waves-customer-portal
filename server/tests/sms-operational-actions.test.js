@@ -366,7 +366,21 @@ describe('SMS operational evidence and ownership', () => {
     },
   );
 
+  test.each(["Don't forget to", 'Don’t forget to', 'Please do not forget to'])(
+    'captures affirmative reminders: %s', (opening) => {
+      const body = `${opening} call me tomorrow at 9am`;
+      const result = groundExtraction(extracted([obligation(body, {
+        kind: 'callback', description: 'call me', due_text: 'tomorrow at 9am',
+      })]), { message: source(body), properties });
+      expect(result.obligations).toHaveLength(1);
+      expect(result.obligations[0]).toMatchObject({ due_at: '2040-03-11T13:00:00.000Z', timing_unverified: false });
+      expect(result.dropped).toBe(0);
+    },
+  );
+
   test.each(["Please don't call me tomorrow at 9am", 'Do not call me tomorrow at 9am',
+    "Don't forget to not call me", "Don't forget to call me only after I confirm",
+    "I didn't say don't forget to call me",
     'Never call me', 'Please text instead of call me', 'Call me, but only after I confirm'])(
     'negated or conditional scope needs review: %s', (body) => {
       const result = groundExtraction(extracted([obligation(body, { kind: 'callback', description: 'call me' })]), {
