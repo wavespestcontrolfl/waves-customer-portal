@@ -217,9 +217,11 @@ async function recordLawnProtocolCompletion(trx, {
       window_title: window?.title || null,
       // calibrationCleared means the tech completed without field-verified
       // equipment (calibration advisory bypass) — record "none" rather than
-      // falling back to the stale assigned system carried on the plan.
-      equipment_system_id: equipmentSystemId || (calibrationCleared ? null : plan?.mixCalculator?.equipmentSystemId) || null,
-      calibration_id: calibrationId || (calibrationCleared ? null : plan?.equipmentCalibration?.selected?.id) || null,
+      // falling back to the stale assigned system carried on the plan. An
+      // inferred rig (the engine's pick, not the visit's) is mix math only:
+      // it is never recorded as equipment used (Codex #4124 r2 P1).
+      equipment_system_id: equipmentSystemId || (calibrationCleared || plan?.equipmentCalibration?.inferred ? null : plan?.mixCalculator?.equipmentSystemId) || null,
+      calibration_id: calibrationId || (calibrationCleared || plan?.equipmentCalibration?.inferred ? null : plan?.equipmentCalibration?.selected?.id) || null,
       treated_sqft: treatedSqft,
       carrier_gal_per_1000: carrier,
       total_carrier_gal: totalCarrier,

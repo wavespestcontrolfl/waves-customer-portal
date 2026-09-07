@@ -57,9 +57,14 @@ async function loadLawnCompletionContext(service, knex) {
 function completionMethod(item, protocolProduct) {
   if (item.scope?.includes('SPOT') || protocolProduct?.applicationMode === 'spot') return 'spot_treatment';
   if (item.product?.applicationMethod) return item.product.applicationMethod;
-  // Weighed WDG/WP concentrates are still sprayed. The catalog formulation,
-  // never the quantity unit, distinguishes spreader granules from tank mixes.
-  return /^(granular|granules|g)$/i.test(String(item.product?.formulation || '').trim()) ? 'granular_broadcast' : 'broadcast_spray';
+  // Weighed WDG/WG/WSG/WP concentrates are still sprayed. The catalog
+  // formulation, never the quantity unit, distinguishes spreader granules
+  // ('Granule (G)', 'Granular pre-emergent on fertilizer', 'Granular bait')
+  // from tank mixes ('Water-dispersible granule (WDG)').
+  const formulation = String(item.product?.formulation || '').trim();
+  const dispersible = /water[- ]?(dispersible|soluble)|\b(WDG|WG|WSG|WP|SP|DF)\b/i.test(formulation);
+  const granular = /granul|\(G\)|^G$/i.test(formulation);
+  return granular && !dispersible ? 'granular_broadcast' : 'broadcast_spray';
 }
 
 function matchesLawnCompletionProtocol(protocol, assigned, trackKey) {

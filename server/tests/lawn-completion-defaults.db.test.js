@@ -208,6 +208,7 @@ describeDb('appointment completion defaults through PostgreSQL', () => {
       service: visit, serviceRecord: record, plan, completionInput: { treatedSqft: lawnSqft },
     });
     expect(plan.propertyGate.lawnSqft).toBe(lawnSqft);
+    expect(plan.propertyGate.profileLawnSqft).toBe(4000);
     expect(completion.treated_sqft).toBe(lawnSqft);
     expect(completion.total_carrier_gal === null ? null : Number(completion.total_carrier_gal)).toBe(lawnSqft === null ? null : 2.5);
     const profile = await knex('customer_turf_profiles').where({ customer_id: f.customerId }).first();

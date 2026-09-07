@@ -100,6 +100,20 @@ test('forecast converts quantities, orders risks and preserves partial plan fail
   expect(db.transaction).not.toHaveBeenCalled();
 });
 
+test.each([
+  ['lawn_archived_recipe_unavailable', 'The assigned archived recipe cannot be reproduced with the current products and rates. Review the assigned protocol and enter the actual work.'],
+  ['lawn_protocol_unresolved', 'The appointment has no matching lawn protocol; suggested amounts are unavailable.'],
+])('forecast reports an appointment the planner withheld (%s) instead of counting zero demand', async (code, message) => {
+  visits = readQuery([{ id: 'visit-withheld', scheduled_date: '2030-01-10', first_name: 'Ada', last_name: 'Lovelace' }]);
+  buildPlanForService.mockResolvedValue({
+    mixCalculator: { items: [] },
+    propertyGate: { blocks: [{ code, severity: 'block', message }] },
+  });
+  const result = await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
+  expect(result.errors).toEqual([{ serviceId: 'visit-withheld', scheduledDate: '2030-01-10', customerName: 'Ada Lovelace', message }]);
+  expect(result).toMatchObject({ serviceCount: 1, productCount: 0, products: [] });
+});
+
 test('forecast HTTP handler returns computed demand and forwards query bounds', async () => {
   const { body, next } = await get('/waveguard-forecast', { days: '2', limit: '20' });
   expect(next).not.toHaveBeenCalled();
