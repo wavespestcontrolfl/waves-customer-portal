@@ -182,7 +182,9 @@ async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) 
     estimate: 'estimates', visit: 'scheduled_services' };
   const table = tables[verdict.record_type];
   if (!table || !verdict.record_id || !verdict.evidence_hash) return false;
-  const locked = await trx(table).where({ id: verdict.record_id }).forUpdate().first('id');
+  // Customer/source locks are already held. Estimate writers lock estimate
+  // first, so never wait here and reverse that order; retry busy witnesses.
+  const locked = await trx(table).where({ id: verdict.record_id }).forUpdate().skipLocked().first('id');
   if (!locked) return false;
   const evidence = await loadSmsFulfillmentEvidence(trx, commitment, message, now);
   if (fulfillmentFingerprint(commitment, evidence).evidenceHash !== verdict.evidence_hash) return false;

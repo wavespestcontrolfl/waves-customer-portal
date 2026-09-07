@@ -15,7 +15,7 @@ const { randomUUID } = require('node:crypto');
 const { recordMessageOperations, loadMessageContext, runSmsOperationalActions, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate } = require('../services/sms-operational-actions');
 const numbers = require('../config/twilio-numbers');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { loadSmsFulfillmentEvidence, admissibleWitness, verifySmsFulfillment } = require('../services/sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, admissibleWitness, verifySmsFulfillment, revalidateSmsFulfillment } = require('../services/sms-commitment-fulfillment');
 const NotificationService = require('../services/notification-service');
 const { etDateString } = require('../utils/datetime-et');
 const migration = require('../models/migrations/20260906000001_sms_operational_actions');
@@ -624,6 +624,37 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await refreshSmsCommitments({ conn: mockPg, now, verify })).toMatchObject({ fulfilled: 0 });
     expect((await mockPg('call_commitments').first()).status).toBe('open');
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+  });
+
+  test('a busy estimate witness skips without waiting under the customer lock and can close later', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    result.facts = [];
+    result.obligations[0].due_at = after.toISOString();
+    await recordMessageOperations(mockPg, message, result, context);
+    const commitment = await mockPg('call_commitments').first();
+    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id,
+      property_id: context.properties[0].id, status: 'sent', service_interest: 'Lawn',
+      estimate_data: { deliveryState: { lastDeliveredAt: after.toISOString() } } }).returning('id');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled',
+      record_ref: `estimate:${estimate.id}`, quote: 'Lawn' } });
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const verdict = await verifySmsFulfillment(commitment, evidence, { now });
+    expect(verdict.verdict).toBe('fulfilled');
+    const estimateWriter = await mockPg.transaction();
+    try {
+      await estimateWriter('estimates').where({ id: estimate.id }).forUpdate().first();
+      await mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '500ms'");
+        await trx('customers').where({ id: message.customer_id }).forUpdate().first();
+        expect(await revalidateSmsFulfillment(trx, commitment, message, verdict, now)).toBe(false);
+      });
+    } finally {
+      await estimateWriter.rollback();
+    }
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ fulfilled: 1 });
+    expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
   });
 
   test.each(['failed', 'undelivered'])('outbound %s during extraction cannot create a promise', async (status) => {
