@@ -14,7 +14,7 @@
  *   P0 FAQ_BLOCKED_SERVICE      — an FAQ section on a service whose FAQs are
  *                                 policy-blocked (bed bug, cockroach, rodent, …)
  *   P0 DISALLOWED_EXTERNAL_LINK — a link/URL pointing off the hub/spoke fleet
- *                                 (spam/injection guard — drafts link internally)
+ *                                 (spam/injection guard — unapproved sources block)
  *   P0/P1 affiliate family      — <AffiliateLink product="…"> components
  *                                 (owner monetization pilot) resolve only
  *                                 owner-approved registry products, on
@@ -832,13 +832,12 @@ const AS_OF_DATE_RE = /\bas of\b[^.\n]{0,40}?\b(?:19|20)\d{2}\b/i;
 // competitor-fact sources, and editorially-approved external domains. Our own
 // hub and spoke domains are deliberately absent.
 function citationOnlyHosts({ operatorCitations = false } = {}) {
-  const hosts = new Set();
+  const hosts = new Set(TRUSTED_CITATION_HOSTS.map(normalizeHost));
   for (const d of String(process.env.CONTENT_ALLOWED_LINK_DOMAINS || '').split(',')) {
     const h = normalizeHost(d);
     if (h) hosts.add(h);
   }
   if (operatorCitations) {
-    for (const h of OPERATOR_CITATION_HOSTS) hosts.add(normalizeHost(h));
     for (const h of curatedCompetitorSourceHosts()) hosts.add(h);
   }
   return hosts;
@@ -1042,8 +1041,8 @@ function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices
     // Scoped to the amount's OWN SENTENCE, not the surrounding window: a
     // competitor named in a neighbouring sentence must never launder our
     // price ("Orkin is expensive. Quarterly pest control is $129.").
-    // OPERATOR-PROVENANCE ONLY (same boundary as the .gov/.edu citation
-    // allowance): mined drafts compose from untrusted SERP/PAA text, and an
+    // OPERATOR-PROVENANCE ONLY: mined drafts compose from untrusted
+    // SERP/PAA text, and an
     // injected "other companies charge $X" attribution must not publish an
     // arbitrary price — the exemption exists for operator-directed
     // competitor-intercept briefs, so only they get it.
@@ -1558,28 +1557,20 @@ function brandTokenFinding(text, domains, { allowHubAnchor = false } = {}) {
 }
 
 // ── outbound-link gate ──────────────────────────────────────────────
-// Generated drafts link INTERNALLY only: the writer prompts mandate "never
-// invent URLs" / internal targets, and the audited live corpus is 100%
-// relative links. Any absolute URL pointing off the hub/spoke fleet is
-// therefore either a hallucinated citation or an injected spam/malicious
-// backlink (untrusted SERP/PAA text reaches the writer prompt), so it fails
-// CLOSED as a P0. If a citation domain is ever editorially approved, extend
-// the allowlist via CONTENT_ALLOWED_LINK_DOMAINS (comma-separated hostnames)
-// without a deploy.
+// Government domains and the curated citation sources below are trusted in
+// every draft. Other external sources require an exact brief URL or editorial
+// approval through CONTENT_ALLOWED_LINK_DOMAINS. Executable markup and raw
+// affiliate URLs remain independently blocked before host approval.
 const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
 
 function normalizeHost(host) {
   return String(host || '').trim().toLowerCase().replace(/\.$/, '').replace(/^www\./, '');
 }
 
-// Curated citation hosts for OPERATOR-directed sourcing. Intercept-brief
-// `source_notes` direct the writer to LOCATE sources of exactly these kinds
-// ("UF/IFAS for agronomic claims", regulators, consumer-protection outlets,
-// "Orkin published terms/plan pages") — their hosts can't be known per-URL at
-// gate time, so this curated set (plus the curated competitors' own sites,
-// below) is what "located source" may resolve to. Operator-provenance only:
-// mined drafts never get these.
-const OPERATOR_CITATION_HOSTS = [
+// Established educational, regulatory and consumer-reference sources. This
+// baseline applies to both mined and operator-directed content; competitor
+// websites still require operator provenance or an exact brief source URL.
+const TRUSTED_CITATION_HOSTS = [
   'ufl.edu', 'epa.gov', 'cdc.gov', 'fdacs.gov', 'myfloridalicense.com',
   'consumeraffairs.com', 'bbb.org', 'archive.org', 'web.archive.org',
 ];
@@ -2941,37 +2932,19 @@ function containsAffiliateMaterial(text) {
   return false;
 }
 
-function allowedLinkHosts({ operatorCitations = false, requiredSourceUrls = [] } = {}) {
-  const hosts = new Set();
-  for (const d of HUB_DOMAINS) hosts.add(normalizeHost(d));
-  for (const d of SPOKE_SITE_KEYS) hosts.add(normalizeHost(d));
-  for (const d of String(process.env.CONTENT_ALLOWED_LINK_DOMAINS || '').split(',')) {
-    const h = normalizeHost(d);
-    if (h) hosts.add(h);
-  }
-  // NOTE: brief-named sources are NOT host-allowlisted — see
-  // allowedExactSourceUrls. Allowing the HOST would let a named citation
-  // domain also serve "<script src=…/evil.js>", which is the executable-MDX
-  // hole the TLD rule had (Codex).
-
-  if (operatorCitations) {
-    for (const h of OPERATOR_CITATION_HOSTS) hosts.add(normalizeHost(h));
-    for (const h of curatedCompetitorSourceHosts()) hosts.add(h);
-  }
-  // NO broad .gov/.edu TLD allowance (owner ruling 2026-08-01, third).
-  // A host-wide rule has to be defended at every position a URL can appear —
-  // src=, script bodies, form action, a ping, MDX expressions, Markdown
-  // images and their reference/collapsed/shortcut forms — and each one was a
-  // separate bypass into executable .mdx. The brief NAMES its sources, and
-  // those flow in above as requiredSourceUrls, so a statute or extension
-  // citation the operator asked for is allowed wherever it appears while an
-  // unnamed host never is. Position stops mattering.
-  return hosts;
+function allowedLinkHosts({ operatorCitations = false } = {}) {
+  return new Set([
+    ...HUB_DOMAINS,
+    ...SPOKE_SITE_KEYS,
+    ...citationOnlyHosts({ operatorCitations }),
+  ].map(normalizeHost));
 }
 
 
 function hostAllowed(host, allowed) {
   if (!host) return false;
+  // Match the actual hostname suffix, never a substring such as .gov.example.com.
+  if (host.endsWith('.gov')) return true;
   if (allowed.has(host)) return true;
   for (const a of allowed) {
     if (a && host.endsWith(`.${a}`)) return true;
@@ -3318,14 +3291,11 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
       return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains a tel: link to "${t[1].trim() || '(empty)'}", which is not a Waves phone number — tap-to-call links may only dial the business's own lines.`);
     }
   }
-  const allowed = allowedLinkHosts({ operatorCitations, requiredSourceUrls });
+  const allowed = allowedLinkHosts({ operatorCitations });
   const exactUrls = allowedExactSourceUrls(requiredSourceUrls);
-  // The broad .gov/.edu allowance is for CITATIONS — passive hyperlink
-  // destinations. It must not extend to ACTIVE resource positions: posts are
-  // published as executable .mdx, so a "<script src=…edu/payload.js>" would
-  // turn control of any delegated subdomain into live third-party code on the
-  // customer site (Codex). Those spans lose the TLD leniency and fall back to
-  // the explicit host allowlist.
+  // Host trust never bypasses the executable-markup checks above or the
+  // affiliate check below. A URL in an MDX expression still needs an exact
+  // brief source even when its domain is a trusted citation source.
   const urlRe = new RegExp(ABSOLUTE_URL_RE.source, 'gi');
   let m;
   while ((m = urlRe.exec(body)) !== null) {
@@ -6434,11 +6404,11 @@ function literalPhoneInTitleFinding(frontmatter) {
  * operatorFaqException: narrow opt-in skip of the FAQ-blocked-service P0 for
  *   operator-authored intercept briefs whose manifest mandates an FAQ (see
  *   the inline note at the call below). Default false — full enforcement.
- * requiredSourceUrls: operator-brief must-link citation URLs — their hosts are
- *   allowed for this draft (the brief BINDS the writer to link them in-body).
+ * requiredSourceUrls: exact operator-brief must-link citation URLs, on top of
+ *   government domains, trusted citation hosts and editorially approved hosts.
  * operatorCitations: operator brief carries source_notes directives (writer
- *   locates the sources itself) — additionally allow the curated citation +
- *   competitor-source hosts. Both default off: mined drafts stay internal-only.
+ *   locates the sources itself) — additionally allow curated competitor-source
+ *   hosts. Default false; trusted government/reference sources need no flag.
  * allowedInternalLinks: brief-mandated internal link targets
  *   (internal_links_to_add, curated operator hub_link) — allowed for this
  *   draft on top of the static ALLOWED_INTERNAL_LINKS set.
@@ -6692,5 +6662,5 @@ module.exports = {
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   GEO_COMPOUND_EXEMPT_RE,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding },
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding },
 };
