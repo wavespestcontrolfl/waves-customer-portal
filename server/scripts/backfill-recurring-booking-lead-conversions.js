@@ -76,7 +76,12 @@ async function run() {
   // preview: every tier, the enforceOriginating guard, and the ambiguity/first-
   // close checks all run and the returned leadIds are exactly what --commit
   // would convert, with zero writes. Commit uses the real attribution service.
-  const previewAttribution = { markConverted: async () => {} };
+  // The stub reports success: every customer-link candidate converts under a
+  // claim, and a falsy result reads as the claim LOST — a no-op that returned
+  // nothing made the preview say it would convert zero (codex #3834 r17 P2).
+  // A repeat's booked funnel row is stamped INSIDE markConverted, so the stub
+  // keeps the preview write-free there too (r18 P1).
+  const previewAttribution = { markConverted: async () => true };
 
   let converted = 0;
   let skipped = 0;

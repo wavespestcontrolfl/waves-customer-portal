@@ -277,12 +277,51 @@ function costLineFromUsage(row, areaSqFt = 0) {
   };
 }
 
+// Count-based packs: how many units a quantity holds when it carries no
+// measurable size — "10 stations", "20 count", "12 ct", "1 trap", a bare
+// "25" — and WHAT is counted. Returns { count, unit } or null; measured packs
+// ("2.5 gal", "4 x 30g tubes") and unreadable text return null so callers
+// fall back to the raw-price path. The unit is the singular noun ('station',
+// 'trap', 'tablet', 'case', …) or 'each' for a generic count. Codex #3974 r1:
+// nouns are kept because "1 case" and "12 count" are NOT interchangeable —
+// the case-to-item conversion is unknown, and scaling across them would
+// persist one-twelfth of a case price as the catalog figure.
+const COUNT_GENERIC = /^(?:count|ct|pcs?|pieces?|each|ea|units?)$/;
+const COUNT_CONTAINER = /^(?:cases?|packs?|boxes|box|bags?|pails?|kits?)$/;
+const COUNT_ITEM = /^(?:stations?|traps?|tubes?|blocks?|blox|briquets?|briquettes?|dunks?|tablets?|signs?|stakes?|cards?|stickers?|placements?|refills?|sachets?)$/;
+const singularCount = (w) => ({ boxes: 'box', blox: 'block', briquettes: 'briquet' }[w] || w.replace(/s$/, ''));
+function parsePackCount(quantity) {
+  const raw = String(quantity || '').toLowerCase().trim();
+  const m = raw.match(/^(\d+)\s*(?:x\s*)?([a-z]*)\.?$/);
+  if (!m) return null;
+  const count = Number(m[1]);
+  if (!Number.isInteger(count) || count <= 0) return null;
+  const word = m[2];
+  if (!word || COUNT_GENERIC.test(word)) return { count, unit: 'each' };
+  if (COUNT_CONTAINER.test(word) || COUNT_ITEM.test(word)) return { count, unit: singularCount(word) };
+  return null;
+}
+
+// Two count units scale against each other only when the conversion is
+// known: the same noun always; a generic count ('each') against an ITEM noun
+// (a "20 count" catalog against "20 dunks"); never a container noun (case,
+// pack, box, bag, pail, kit) against anything but itself.
+function countUnitsCompatible(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const container = (u) => COUNT_CONTAINER.test(u) || COUNT_CONTAINER.test(`${u}s`);
+  if (container(a) || container(b)) return false;
+  return a === 'each' || b === 'each';
+}
+
 module.exports = {
   calcLandedCost,
   convertToOz,
+  countUnitsCompatible,
   costLineFromUsage,
   normalizeQuantityToOz,
   normalizeUnit,
+  parsePackCount,
   parsePackSize,
   unitPriceBreakdown,
   usageAmountForArea,

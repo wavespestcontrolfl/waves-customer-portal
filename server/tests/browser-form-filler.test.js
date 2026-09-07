@@ -7,8 +7,9 @@ const { fillCitationForm, _internals } = require('../services/seo/browser-form-f
 // clickOptsLog: records [selector, options] for clicks that pass options.
 // submitReq: {method,url,nav} — a synthetic request fired THROUGH the real route guard
 // when the submit is clicked, so submitDispatched/submitAborted get exercised offline.
-function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel = null, failClickSel = null, ctxOpts = null, wsLog = null, clickOptsLog = null, submitReq = null, submitReqs = null, formAction = null } = {}) {
+function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel = null, failClickSel = null, ctxOpts = null, wsLog = null, clickOptsLog = null, submitReq = null, submitReqs = null, formAction = null, fillRequest = false, delayedSubmit = false, requestLog = [] } = {}) {
   let routeHandler = null;
+  let clicked = false;
   // Fire one OR a SEQUENCE of synthetic requests through the real route guard (submitReqs
   // models e.g. an on-host form POST followed by an off-host confirmation redirect).
   const fireSubmitReq = async () => {
@@ -21,18 +22,18 @@ function fakeBrowser(actionsLog, { landedUrl = 'https://x.com/add', failFillSel 
         isNavigationRequest: () => !!sr.nav,
         frame: () => ({ parentFrame: () => null }),
       };
-      await routeHandler({ request: () => req, abort: async () => {}, continue: async () => {} });
+      await routeHandler({ request: () => req, abort: async () => { requestLog.push('aborted'); }, continue: async () => { requestLog.push('continued'); } });
     }
   };
   const page = {
-    goto: async () => {}, waitForTimeout: async () => {}, waitForLoadState: async () => {},
+    goto: async () => {}, waitForTimeout: async () => { if (delayedSubmit && clicked) await fireSubmitReq(); }, waitForLoadState: async () => {},
     url: () => landedUrl,
     $eval: async () => (formAction || ''), // the form's resolved action (or '' → guard uses the fallback heuristic)
     screenshot: async () => Buffer.from('png'),
-    fill: async (sel, val) => { if (sel === failFillSel) throw new Error('selector not found'); actionsLog.push(['fill', sel, val]); },
+    fill: async (sel, val) => { if (sel === failFillSel) throw new Error('selector not found'); actionsLog.push(['fill', sel, val]); if (fillRequest) await fireSubmitReq(); },
     selectOption: async (sel, val) => actionsLog.push(['select', sel, val]),
     check: async (sel) => actionsLog.push(['check', sel]),
-    click: async (sel, opts) => { if (sel === failClickSel) throw new Error('element not actionable'); if (clickOptsLog && opts) clickOptsLog.push([sel, opts]); actionsLog.push(['click', sel]); await fireSubmitReq(); },
+    click: async (sel, opts) => { if (sel === failClickSel) throw new Error('element not actionable'); if (clickOptsLog && opts) clickOptsLog.push([sel, opts]); if (opts?.trial) return; actionsLog.push(['click', sel]); clicked = true; if (!delayedSubmit) await fireSubmitReq(); },
   };
   const ctx = { newPage: async () => page, route: async (_p, handler) => { routeHandler = handler; } };
   if (wsLog) ctx.routeWebSocket = async (pattern) => { wsLog.push(pattern); };
@@ -46,7 +47,7 @@ function fakeAnthropic(planObj, verifyObj) {
 const nap = { business_name: 'Waves Pest Control', website: 'https://wavespestcontrol.com', email: 'contact@wavespestcontrol.com', phone: '(941) 318-7612', address: { street: 'x', city: 'Bradenton', state: 'FL', zip: '34211' }, category: 'Pest Control', description: 'desc' };
 // Default injected deps: a stub DNS resolver returns a public IP so we never hit the
 // network, plus whatever launchBrowser/anthropic the test supplies.
-const deps = (over = {}) => ({ resolveHostIps: async () => ['203.0.113.10'], ...over });
+const deps = (over = {}) => ({ resolveHostIps: async () => ['203.0.113.10'], beforeSubmit: async () => true, ...over });
 
 describe('fillCitationForm', () => {
   test('blocked (account/captcha/payment) → fail-closed, no actions executed', async () => {
@@ -300,19 +301,22 @@ describe('fillCitationForm', () => {
       launchBrowser: async () => fakeBrowser([], { clickOptsLog }),
       anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] }, { success: true }),
     }));
-    const submitClick = clickOptsLog.find((c) => c[0] === '#go');
+    const submitClick = clickOptsLog.find((c) => c[0] === '#go' && !c[1].trial);
     expect(submitClick).toBeDefined();
     expect(submitClick[1]).toMatchObject({ noWaitAfter: true });
   });
 
   test('P1: a non-actionable submit button (click throws pre-dispatch) → submit_failed (retryable, nothing sent)', async () => {
     const log = [];
+    const beforeSubmit = jest.fn(async () => true);
     const r = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+      beforeSubmit,
       launchBrowser: async () => fakeBrowser(log, { failClickSel: '#go' }),
       anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#n', value: 'W' }, { action: 'submit', selector: '#go' }] }, { success: true }),
     }));
     expect(r.outcome).toBe('failed');
     expect(r.errorCode).toBe('submit_failed');
+    expect(beforeSubmit).not.toHaveBeenCalled();
     expect(log).toContainEqual(['fill', '#n', 'W']); // fields filled, but submit never dispatched
   });
 
@@ -565,4 +569,32 @@ describe('resolvePublicIps (DNS pin source, fail-closed)', () => {
   test('empty host → []', async () => {
     expect(await resolvePublicIps('')).toEqual([]);
   });
+});
+
+
+test.each([undefined, async () => false])('missing or refused submit authority never clicks or mutates', async beforeSubmit => {
+  const log=[];
+  const r=await fillCitationForm({submitUrl:'https://x.com/add',nap,expectedHost:'x.com'},deps({beforeSubmit,
+    launchBrowser:async()=>fakeBrowser(log),
+    anthropic:fakeAnthropic({form_present:true,blocked:null,actions:[{action:'fill',selector:'#name',value:'Waves'},{action:'submit',selector:'#go'}]})}));
+  expect(r.errorCode).toBe('not_authorized');
+  expect(log).toEqual([['fill','#name','Waves']]);
+});
+test('a page-script POST during filling is aborted before submit authority is granted',async()=>{
+  const requestLog=[];
+  await fillCitationForm({submitUrl:'https://x.com/add',nap,expectedHost:'x.com'},deps({beforeSubmit:async()=>false,
+    launchBrowser:async()=>fakeBrowser([],{fillRequest:true,requestLog,submitReq:{method:'POST',url:'https://x.com/autosave'}}),
+    anthropic:fakeAnthropic({form_present:true,blocked:null,actions:[{action:'fill',selector:'#name',value:'Waves'},{action:'submit',selector:'#go'}]})}));
+  expect(requestLog).toEqual(['aborted']);
+});
+
+test('a delayed JavaScript submit POST remains authorized after DOM load is already complete', async () => {
+  const requestLog = [], actions = [];
+  const result = await fillCitationForm({ submitUrl: 'https://x.com/add', nap, expectedHost: 'x.com' }, deps({
+    launchBrowser: async () => fakeBrowser(actions, { delayedSubmit: true, requestLog, submitReq: { method: 'POST', url: 'https://x.com/submit' } }),
+    anthropic: fakeAnthropic({ form_present: true, blocked: null, actions: [{ action: 'fill', selector: '#name', value: 'Waves' }, { action: 'submit', selector: '#go' }] }, { success: false }),
+  }));
+  expect(requestLog).toEqual(['continued']);
+  expect(actions.filter(a => a[0] === 'click')).toHaveLength(1);
+  expect(result).toMatchObject({ outcome: 'placed', pending: true });
 });

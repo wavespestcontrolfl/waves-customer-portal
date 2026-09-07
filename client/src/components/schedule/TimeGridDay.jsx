@@ -19,6 +19,7 @@ import {
 import { BookOpen, Leaf, ShieldCheck } from 'lucide-react';
 import { Badge, cn } from '../ui';
 import RescheduleConfirmModal from './RescheduleConfirmModal';
+import DispatchReadinessStrip from './DispatchReadinessStrip';
 import {
   SERIES_ACK_REQUIRED,
   apiErrorMessage,
@@ -432,14 +433,14 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
             e.stopPropagation();
             onViewAudit(service);
           }}
-          className="absolute top-0.5 right-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring"
+          className="absolute z-[1] top-0.5 right-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring"
           title="View completion audit"
           aria-label="View completion audit"
         >
           <ShieldCheck size={12} strokeWidth={1.75} />
         </button>
       )}
-      {hasProtocolAction && (
+      {hasProtocolAction && !(service.readiness && effectiveHeight < SLOT_HEIGHT * 2) && (
         <button
           type="button"
           onPointerDown={(e) => e.stopPropagation()}
@@ -448,7 +449,7 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
             onProtocol(service);
           }}
           className={cn(
-            'absolute top-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
+            'absolute z-[1] top-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
             hasAuditAction ? 'right-6' : 'right-0.5'
           )}
           title="Protocol"
@@ -466,7 +467,7 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
             onTreatmentPlan(service);
           }}
           className={cn(
-            'absolute top-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
+            'absolute z-[1] top-0.5 h-5 w-5 inline-flex items-center justify-center rounded-xs bg-white/90 text-zinc-800 border-hairline border-zinc-300 u-focus-ring',
             hasAuditAction && hasProtocolAction ? 'right-11' : hasAuditAction || hasProtocolAction ? 'right-6' : 'right-0.5'
           )}
           title="Treatment plan"
@@ -521,6 +522,17 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
       )}
       {service.address && effectiveHeight > SLOT_HEIGHT * 2 && (
         <div className="opacity-70 truncate">{service.address}</div>
+      )}
+      {service.readiness && onProtocol && (
+        <DispatchReadinessStrip
+          readiness={service.readiness}
+          onOpen={() => onProtocol(service)}
+          compact
+          iconOnly={effectiveHeight < SLOT_HEIGHT * 2}
+          className={cn('absolute z-[1]', effectiveHeight >= SLOT_HEIGHT * 2
+            ? 'left-1 right-1 bottom-1.5'
+            : cn('top-0.5', hasAuditAction ? 'right-6' : 'right-0.5'))}
+        />
       )}
       {onResize && (
         <div
@@ -772,6 +784,7 @@ function AllDayStrip({ services, onEdit, onProtocol, onTreatmentPlan, onViewAudi
             {svc.customerName || 'Unassigned'} · {serviceDisplayName(svc)}
           </button>
           {owesCompletion?.(svc) && <CloseoutOwedChip onClick={() => onEdit?.(svc)} />}
+          <DispatchReadinessStrip readiness={svc.readiness} onOpen={onProtocol ? () => onProtocol(svc) : null} compact />
           {isLawnService(svc) && onTreatmentPlan && (
             <button
               type="button"
@@ -865,6 +878,7 @@ function RailItem({ service, onEdit, onProtocol, onTreatmentPlan, onViewAudit, o
         {service.customerName || 'Unassigned'}
       </button>
       {owesCompletion?.(service) && <div className="mt-0.5"><CloseoutOwedChip /></div>}
+      <DispatchReadinessStrip readiness={service.readiness} onOpen={onProtocol ? () => onProtocol(service) : null} compact className="my-1" />
       {serviceDisplayName(service) && (
         <div className="truncate opacity-90">{serviceDisplayName(service)}</div>
       )}

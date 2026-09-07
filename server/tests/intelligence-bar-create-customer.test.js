@@ -43,6 +43,10 @@ function makeTrx(calls) {
       }),
       onConflict: jest.fn(() => q),
       ignore: jest.fn(async () => undefined),
+      // createDefaultCustomerRows reads the customer row back to decide whether
+      // it is a secondary profile (rental texts default off, 2026-09-06).
+      where: jest.fn(() => q),
+      first: jest.fn(async () => (table === 'customers' ? { is_primary_profile: true, account_id: account.id } : undefined)),
     };
     return q;
   });

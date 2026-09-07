@@ -693,8 +693,11 @@ async function getAttributionQueue(options = {}) {
 // unaccent extension exists, so `translate()` carries the table; one
 // expression for both spelling directions — a reviewer typed without accents
 // against a record stored with them, and the reverse (GH codex r4 P1, r5 P2,
-// r8 P2).
+// r8 P2). Every dash form (U+2010–2015, U+2212) folds to "-" the way
+// normalizeName folds it, so a typographic hyphen typed or stored still
+// equates "Smith‑Jones" with "Smith-Jones" (GH codex r9 P2).
 const FOLD = [
+  ['-', '\u2010\u2011\u2012\u2013\u2014\u2015\u2212'],
   ['a', 'áàâäãåāąǎạảấầẩẫậắằẳẵặ'], ['c', 'çćčĉċ'], ['d', 'ď'], ['e', 'éèêëēęěėĕẹẻẽếềểễệ'], ['g', 'ğĝġģ'],
   ['i', 'íìîïīįǐĩỉị'], ['l', 'ĺļľ'], ['n', 'ñńňņ'], ['o', 'óòôöõōőǒơọỏốồổỗộớờởỡợ'], ['r', 'řŕŗ'],
   ['s', 'śšşŝș'], ['t', 'ťţț'], ['u', 'úùûüūůűųǔũưụủứừửữự'], ['w', 'ŵ'], ['y', 'ýÿŷỳỵỷỹ'], ['z', 'źžż'],

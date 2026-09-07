@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
-import { CUSTOMER_SURFACE } from '../theme-customer';
-import BrandFooter from '../components/BrandFooter';
+import { DOC_COLUMN_MAX, DOC_EYEBROW } from '../theme-doc';
+import { estimateCard, estimateInnerBox, ESTIMATE_CARD_BORDER } from '../components/estimate/cardStyles';
 import { useGlassSurface } from '../glass/glass-engine';
 import GuaranteeStrip from '../components/estimate/GuaranteeStrip';
 import QuestionsEscapeHatch from '../components/estimate/QuestionsEscapeHatch';
@@ -14,30 +14,24 @@ const WAVES_PHONE_TEL = '+19412975749';
 
 // Warm-brand tokens — mirror the public estimate view (customer surface, not admin).
 const BG = '#FAF8F3';
-const BORDER = '#E7E2D7';
+// Estimate grammar (owner 2026-09-03: the estimate is the template for every
+// customer-facing React page) — cards, inner boxes, eyebrow and body grey come
+// from the estimate's own tokens; only the page wash stays local.
+const BORDER = ESTIMATE_CARD_BORDER;
 // Canonical glass ink (owner ruling 2026-07-05) — this page is glass-only
 // (useGlassSurface mounts unconditionally), so the old marketing navy
 // the old marketing navy has no remaining render path here.
 const TEXT = '#04395E';
 const BODY = '#3F4A65';
-const MUTED = CUSTOMER_SURFACE.muted;
-const CARD = COLORS.white;
-const TAN = '#F2EEE0';
 
 // Two-decimal money (owner 2026-07-11: every price shows cents).
 const fmtCents = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-const STATUS_DOT = {
-  Healthy: COLORS.green,
-  'Keep an eye on it': COLORS.orange,
-  'Needs attention': COLORS.red,
-  Reviewed: COLORS.grayMid,
-};
 const SEVERITY_DOT = { mild: COLORS.green, moderate: COLORS.orange, severe: COLORS.red };
 
 function Page({ children }) {
   return (
-    <div className="lawn-report-page" style={{ minHeight: '100vh', background: BG, fontFamily: FONTS.body, color: BODY, display: 'flex', flexDirection: 'column' }}>
+    <div className="lawn-report-page" style={{ flex: 1, background: BG, fontFamily: FONTS.body, color: BODY, display: 'flex', flexDirection: 'column' }}>
       {/* ---------- liquid glass ----------
           useGlassSurface sets html[data-glass-theme]; every rule below is
           scoped under it so the non-glass page stays pixel-identical. Card
@@ -65,9 +59,7 @@ function Page({ children }) {
       {/* Page-local header removed — the WavesShell top bar (App.jsx route
           wrap, owner 2026-07-06) provides the standard chrome. */}
       {/* div, not <main> — WavesShell supplies the main landmark. */}
-      <div style={{ flex: 1, width: '100%', maxWidth: 792, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</div>
-      {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
-      <BrandFooter variant="light" appBadges={false} />
+      <div style={{ flex: 1, width: '100%', maxWidth: DOC_COLUMN_MAX, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</div>
     </div>
   );
 }
@@ -77,34 +69,24 @@ function SectionCard({ children, style, ...rest }) {
   // Rest props forward so callers can set role/aria attributes (the NotFound
   // card's role="alert" was silently dropped before — codex P2 #2824 r3).
   return (
-    <section {...rest} data-glass="card" style={{ background: CARD, border: `1px solid ${BORDER}`, borderRadius: 12, padding: 20, marginBottom: 16, ...style }}>
+    <section {...rest} data-glass="card" style={estimateCard(style)}>
       {children}
     </section>
   );
 }
 
 function SectionTitle({ children }) {
-  return <h2 style={{ fontFamily: FONTS.serif, fontSize: 22, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 12px' }}>{children}</h2>;
-}
-
-function StatusPill({ label }) {
-  const color = STATUS_DOT[label] || COLORS.grayMid;
-  return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 12px', borderRadius: 999, background: COLORS.white, border: `1px solid ${BORDER}`, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: TEXT }}>
-      <span style={{ width: 10, height: 10, borderRadius: 999, background: color, flex: 'none' }} />
-      {label}
-    </span>
-  );
+  return <h2 style={{ fontFamily: FONTS.serif, fontSize: 24, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 12px' }}>{children}</h2>;
 }
 
 function NotFoundCard() {
   return (
     <SectionCard role="alert" style={{ textAlign: 'center', marginTop: 40 }}>
       <SectionTitle>This lawn report isn&apos;t available</SectionTitle>
-      <p style={{ margin: '0 0 16px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
+      <p style={{ margin: '0 0 16px', color: BODY, fontSize: 16, lineHeight: 1.55 }}>
         The link may have expired or is no longer active. Give us a call and we&apos;ll take a fresh look at your lawn.
       </p>
-      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, textDecoration: 'none' }}>
+      <a data-glass-accent="" href={`tel:${WAVES_PHONE_TEL}`} style={{ display: 'inline-block', padding: '12px 18px', borderRadius: 10, background: COLORS.glassNavy, color: COLORS.white, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>
         Call {WAVES_PHONE_DISPLAY}
       </a>
     </SectionCard>
@@ -155,11 +137,12 @@ function QuoteRequestForm({ token, firstName }) {
     }
   };
 
-  const inputStyle = { minHeight: 46, padding: '0 12px', border: `1px solid ${BORDER}`, borderRadius: 10, fontSize: 15, fontFamily: FONTS.body, color: TEXT, background: COLORS.white, width: '100%', boxSizing: 'border-box' };
+  // 16px input text = no iOS focus zoom (same as the estimate's inputs).
+  const inputStyle = { minHeight: 48, padding: '0 12px', border: `1px solid ${BORDER}`, borderRadius: 10, fontSize: 16, fontFamily: FONTS.body, color: TEXT, background: COLORS.white, width: '100%', boxSizing: 'border-box' };
 
   if (status === 'success') {
     return (
-      <div role="status" style={{ background: COLORS.greenLight, border: `1px solid ${COLORS.green}`, borderRadius: 10, padding: '16px 18px', color: '#166534', fontSize: 15, lineHeight: 1.5 }}>
+      <div role="status" style={{ background: COLORS.greenLight, border: `1px solid ${COLORS.green}`, borderRadius: 10, padding: '16px 18px', color: '#166534', fontSize: 16, lineHeight: 1.5 }}>
         Thanks{form.name ? `, ${form.name.split(' ')[0]}` : ''}! We&apos;ll reach out shortly with your free lawn plan.
       </div>
     );
@@ -171,7 +154,7 @@ function QuoteRequestForm({ token, firstName }) {
       <input value={form.phone} onChange={update('phone')} disabled={busy} placeholder="Phone" aria-label="Phone" type="tel" autoComplete="tel" className="waves-focus-ring" style={inputStyle} />
       <input value={form.email} onChange={update('email')} disabled={busy} placeholder="Email" aria-label="Email" type="email" autoComplete="email" className="waves-focus-ring" style={inputStyle} />
       <input value={form.best_time} onChange={update('best_time')} disabled={busy} placeholder="Best time to reach you (optional)" aria-label="Best time to reach you (optional)" className="waves-focus-ring" style={inputStyle} />
-      <button data-glass-accent="" type="submit" disabled={busy} style={{ minHeight: 50, border: 'none', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontSize: 16, fontWeight: 800, cursor: busy ? 'not-allowed' : 'pointer', opacity: status === 'loading' ? 0.7 : 1 }}>
+      <button data-glass-accent="" type="submit" disabled={busy} style={{ minHeight: 48, border: 'none', borderRadius: 10, background: COLORS.yellow, color: TEXT, fontFamily: FONTS.heading, fontSize: 16, fontWeight: 700, cursor: busy ? 'not-allowed' : 'pointer', opacity: status === 'loading' ? 0.7 : 1 }}>
         {status === 'loading' ? 'Sending…' : 'Get my free lawn plan'}
       </button>
       {error ? (
@@ -215,7 +198,7 @@ export default function LawnReportViewPage() {
   // Liquid-glass theme — now unconditional. This page has no pdf/static
   // render modes — the route only ever serves the live customer view.
   const glassActive = true;
-  useGlassSurface(glassActive, 'full');
+  useGlassSurface(glassActive);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -259,15 +242,18 @@ export default function LawnReportViewPage() {
   return (
     <Page>
       {/* Hero */}
-      <SectionCard style={{ background: TAN }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap', marginBottom: 10 }}>
-          <h1 style={{ fontFamily: FONTS.serif, fontSize: 26, fontWeight: 500, lineHeight: 1.18, color: TEXT, margin: 0 }}>
-            Here&apos;s what we saw at {placeLabel}
-          </h1>
-          <StatusPill label={report.overall_status || 'Reviewed'} />
-        </div>
+      <SectionCard>
+        {/* Eyebrow → h1 → intro (owner 2026-09-04: no status chips on customer pages). */}
+        <div data-gt="eyebrow" style={DOC_EYEBROW}>Your lawn report</div>
+        <h1 style={{ fontFamily: FONTS.serif, fontSize: 26, fontWeight: 500, lineHeight: 1.18, color: TEXT, margin: '0 0 10px' }}>
+          Here&apos;s what we saw at {placeLabel}
+        </h1>
+        {/* The server's overall assessment stays, as text (no chip). */}
+        <p style={{ margin: '0 0 8px', color: TEXT, fontSize: 15, fontWeight: 600, lineHeight: 1.5 }}>
+          Overall: {report.overall_status || 'Reviewed'}
+        </p>
         {report.summary ? (
-          <p style={{ margin: 0, color: BODY, fontSize: 15, lineHeight: 1.6 }}>{report.summary}</p>
+          <p style={{ margin: 0, color: BODY, fontSize: 16, lineHeight: 1.6 }}>{report.summary}</p>
         ) : null}
       </SectionCard>
 
@@ -277,9 +263,9 @@ export default function LawnReportViewPage() {
           <SectionTitle>What we found</SectionTitle>
           <div style={{ display: 'grid', gap: 10 }}>
             {findings.map((f, i) => (
-              <div key={`${f.name}-${i}`} style={{ border: `1px solid ${BORDER}`, borderLeft: `4px solid ${SEVERITY_DOT[f.severity] || COLORS.teal}`, borderRadius: 10, background: COLORS.white, padding: '12px 14px' }}>
-                <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT, marginBottom: f.customer_note ? 4 : 0 }}>{f.name}</div>
-                {f.customer_note ? <div style={{ fontSize: 14, color: BODY, lineHeight: 1.5 }}>{f.customer_note}</div> : null}
+              <div key={`${f.name}-${i}`} style={estimateInnerBox({ borderLeft: `4px solid ${SEVERITY_DOT[f.severity] || COLORS.teal}`, padding: '12px 14px' })}>
+                <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, color: TEXT, marginBottom: f.customer_note ? 4 : 0 }}>{f.name}</div>
+                {f.customer_note ? <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5 }}>{f.customer_note}</div> : null}
               </div>
             ))}
           </div>
@@ -291,20 +277,20 @@ export default function LawnReportViewPage() {
         <SectionCard>
           <SectionTitle>Your plan &amp; what to expect</SectionTitle>
           {report.watering?.customer_sequence ? (
-            <p style={{ margin: '0 0 10px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>{report.watering.customer_sequence}</p>
+            <p style={{ margin: '0 0 10px', color: BODY, fontSize: 16, lineHeight: 1.55 }}>{report.watering.customer_sequence}</p>
           ) : null}
           {report.watering?.restriction_summary ? (
-            <p style={{ margin: '0 0 10px', color: MUTED, fontSize: 14, lineHeight: 1.5 }}>{report.watering.restriction_summary}</p>
+            <p style={{ margin: '0 0 10px', color: BODY, fontSize: 14, lineHeight: 1.5 }}>{report.watering.restriction_summary}</p>
           ) : null}
           {expectationItems.length ? (
-            <ul style={{ margin: '6px 0 0', padding: '0 0 0 18px', color: BODY, fontSize: 14, lineHeight: 1.6 }}>
+            <ul style={{ margin: '6px 0 0', padding: '0 0 0 18px', color: BODY, fontSize: 16, lineHeight: 1.6 }}>
               {expectationItems.map(([key, val]) => <li key={key}>{val}</li>)}
             </ul>
           ) : null}
           {watchItems.length ? (
             <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${BORDER}` }}>
-              <div data-gt="eyebrow" style={{ fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, marginBottom: 6 }}>What we&apos;ll keep an eye on</div>
-              <ul style={{ margin: 0, padding: '0 0 0 18px', color: BODY, fontSize: 14, lineHeight: 1.6 }}>
+              <div data-gt="eyebrow" style={{ ...DOC_EYEBROW, marginBottom: 6 }}>What we&apos;ll keep an eye on</div>
+              <ul style={{ margin: 0, padding: '0 0 0 18px', color: BODY, fontSize: 16, lineHeight: 1.6 }}>
                 {watchItems.map((w, i) => <li key={i}>{w}</li>)}
               </ul>
             </div>
@@ -313,9 +299,9 @@ export default function LawnReportViewPage() {
       ) : null}
 
       {report.seasonal_context ? (
-        <SectionCard style={{ background: COLORS.sand, border: `1px solid ${BORDER}` }}>
-          <div data-gt="eyebrow" style={{ fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700, marginBottom: 6 }}>Right now in Southwest Florida</div>
-          <p style={{ margin: 0, color: BODY, fontSize: 14, lineHeight: 1.55 }}>{report.seasonal_context}</p>
+        <SectionCard>
+          <div data-gt="eyebrow" style={{ ...DOC_EYEBROW, marginBottom: 6 }}>Right now in Southwest Florida</div>
+          <p style={{ margin: 0, color: BODY, fontSize: 16, lineHeight: 1.55 }}>{report.seasonal_context}</p>
         </SectionCard>
       ) : null}
 
@@ -326,24 +312,24 @@ export default function LawnReportViewPage() {
           <SectionTitle>{report.pricing.service_label || 'Your lawn program'}</SectionTitle>
           <div style={{ display: 'grid', gap: 10 }}>
             {report.pricing.tiers.map((tier, i) => (
-              <div key={`${tier.label}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', border: `1px solid ${tier.recommended ? COLORS.glassNavy : BORDER}`, borderRadius: 10, background: COLORS.white, padding: '12px 14px' }}>
+              <div key={`${tier.label}-${i}`} style={estimateInnerBox({ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap', padding: '12px 14px', ...(tier.recommended ? { border: `1px solid ${COLORS.glassNavy}` } : {}) })}>
                 <div>
-                  <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT }}>
+                  <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 16, color: TEXT }}>
                     {tier.label}{tier.recommended ? ' · Most popular' : ''}
                   </div>
                   {/* Engine labels usually already read "N Applications" — only add
                       the cadence line when the label doesn't state it. */}
-                  {tier.visits && !/application/i.test(tier.label || '') ? <div style={{ fontSize: 14, color: MUTED }}>{tier.visits} applications per year</div> : null}
+                  {tier.visits && !/application/i.test(tier.label || '') ? <div style={{ fontSize: 14, color: BODY }}>{tier.visits} applications per year</div> : null}
                 </div>
                 <div style={{ textAlign: 'right' }}>
                   {/* Per-application pricing (owner 2026-07-11): annual ÷
                       visits when derivable, /mo only as the no-visit-count
                       fallback, never a /yr total, always two decimals. */}
                   {tier.monthly != null ? (
-                    <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 18, color: TEXT }}>
+                    <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 18, color: TEXT }}>
                       {tierPerApplication(tier) != null
-                        ? <>${fmtCents(tierPerApplication(tier))}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}> / application</span></>
-                        : <span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>Priced per application</span>}
+                        ? <>${fmtCents(tierPerApplication(tier))}<span style={{ fontSize: 14, fontWeight: 600, color: BODY }}> / application</span></>
+                        : <span style={{ fontSize: 14, fontWeight: 600, color: BODY }}>Priced per application</span>}
                     </div>
                   ) : null}
                 </div>
@@ -351,15 +337,15 @@ export default function LawnReportViewPage() {
             ))}
           </div>
           {report.pricing.basis_note ? (
-            <p style={{ margin: '12px 0 0', color: MUTED, fontSize: 14, lineHeight: 1.5 }}>{report.pricing.basis_note}</p>
+            <p style={{ margin: '12px 0 0', color: BODY, fontSize: 14, lineHeight: 1.5 }}>{report.pricing.basis_note}</p>
           ) : null}
         </SectionCard>
       ) : null}
 
       {/* CTA */}
-      <SectionCard style={{ background: TAN }}>
+      <SectionCard>
         <SectionTitle>Want us to take care of it?</SectionTitle>
-        <p style={{ margin: '0 0 14px', color: BODY, fontSize: 15, lineHeight: 1.55 }}>
+        <p style={{ margin: '0 0 14px', color: BODY, fontSize: 16, lineHeight: 1.55 }}>
           Tell us how to reach you and we&apos;ll put together a free, no-pressure plan to get {placeLabel} where you want it.
         </p>
         <QuoteRequestForm token={token} firstName={report.first_name} />

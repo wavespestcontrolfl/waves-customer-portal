@@ -10,7 +10,7 @@
 const { settleRetiredPlacements } = require('../services/seo/link-registry');
 
 function makeDb(seed) {
-  const tables = { seo_link_prospects: [], seo_link_acquisition_paths: [], ...seed };
+  const tables = { seo_link_attempts: [], seo_link_prospects: [], seo_link_acquisition_paths: [], ...seed };
   const builder = (table) => {
     const preds = [];
     const get = (row, col) => row[col];
@@ -23,6 +23,7 @@ function makeDb(seed) {
       whereNotNull(col) { preds.push((row) => get(row, col) != null); return q; },
       select() { return q; },
       forUpdate() { return q; },
+      skipLocked() { return q; },
       orderBy() { return q; },
       async first() { return rows()[0] ? { ...rows()[0] } : undefined; },
       async update(patch) { const hit = rows(); for (const r of hit) Object.assign(r, patch); return hit.length; },
@@ -129,3 +130,16 @@ test('a supersession CYCLE is never a silent no-op — settlement throws so the 
   expect(far).toMatchObject({ path_id: 'c-11', target_url: 'https://example.com/v11' });
 });
 
+
+
+test.each(['release', 'investigator', 'rerank'])('an ambiguous submission is pinned during %s settlement', async mode => {
+  const row = { id: 'held', path_id: 'old', claimed_at: null, outreach_status: 'none', link_type: 'directory', leased_path_revision: 1 };
+  const next = { id: 'next', link_type: 'directory', confidence: 0.9, revision: 1 };
+  const db = makeDb({ seo_link_prospects: [row], seo_link_acquisition_paths: [{ id: 'old', superseded_by: 'next' }, next], seo_link_attempts: [{ prospect_id: row.id, action: 'submit', outcome: 'submit_ambiguous' }] });
+  const opts = mode === 'release' ? { prospectIds: [row.id] } : mode === 'investigator' ? { pathIds: ['old'], successor: next } : { prospectIds: [row.id], successor: next };
+  expect(await settleRetiredPlacements(db, opts)).toBe(0);
+  expect(row.path_id).toBe('old');
+  db._tables.seo_link_attempts[0].outcome = 'slot_released';
+  expect(await settleRetiredPlacements(db, opts)).toBe(1);
+  expect(row.path_id).toBe('next');
+});

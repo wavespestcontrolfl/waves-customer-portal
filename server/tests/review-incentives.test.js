@@ -848,6 +848,9 @@ describe('review incentives', () => {
   // The surname clause: the folded column (lowercase, apostrophe-free,
   // de-accented via translate()) IN the normalized whole-word suffixes.
   const FOLDED_IN = /^translate\(regexp_replace\(LOWER\(last_name\), '\[''’‘ʼ\]', '', 'g'\), '[^']+', '[^']+'\) IN \(\?, \?\)$/;
+  // The translate() table folds every dash form to "-" and every accented
+  // Latin letter to its base, position for position (GH codex r9 P2).
+  const foldTable = (sql) => { const m = sql.match(/translate\(.*?, '([^']+)', '([^']+)'\)/); return { from: [...m[1]], to: [...m[2]] }; };
 
   test('candidate search binds the COMPLETE surname list against the folded column — either side may carry the accents (GH codex r1 P1/P2, r8 P2)', async () => {
     const conn = createDbMock({
@@ -938,6 +941,10 @@ describe('review incentives', () => {
     conn.mock.results.length = 0;
     await ReviewIncentives.searchAttributionCandidates({ reviewId: 'google-1', conn });
     expect(surnameClauses()).toEqual([[expect.stringMatching(FOLDED_IN), ['pepe munoz-perez', 'munoz-perez']]]);
+    const table = foldTable(surnameClauses()[0][0]);
+    expect(table.from.length).toBe(table.to.length);
+    for (const dash of ['\u2010', '\u2011', '\u2013', '\u2014', '\u2212']) expect(table.to[table.from.indexOf(dash)]).toBe('-');
+    expect(table.to[table.from.indexOf('ñ')]).toBe('n');
   });
 
   test('candidate search and manual attribution reject removed reviews', async () => {

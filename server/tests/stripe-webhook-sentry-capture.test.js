@@ -67,8 +67,30 @@ jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed:
 jest.mock('../services/stripe', () => ({
   retrievePaymentIntent: jest.fn(async (piId) => ({ id: piId, metadata: {} })),
 }));
+jest.mock('../services/appointment-card-request', () => ({
+  completeSecureCardCaptureFromWebhook: jest.fn(),
+}));
 
 const express = require('express');
+jest.mock('../services/recurring-card-on-file', () => ({
+  isRecurringCardOnFileEnabled: jest.fn(() => true),
+  completeRecurringCardEnrollment: jest.fn(),
+}));
+jest.mock('../routes/estimate-public', () => ({
+  isCommercialAutoAcceptEstimate: jest.fn(() => false),
+  findLinkedUpcomingAppointment: jest.fn(async () => ({ id: 'appt_test' })),
+}));
+jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => null) }));
+jest.mock('../services/payment-method-consents', () => ({
+  hasEnrollmentScopedConsent: jest.fn(async () => true),
+  linkPaymentMethodId: jest.fn(async () => {}),
+}));
+jest.mock('../services/autopay-enrollment', () => ({ enrollConsentedMethod: jest.fn() }));
+const Payer = require('../services/payer');
+const ConsentService = require('../services/payment-method-consents');
+const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+const RecurringCards = require('../services/recurring-card-on-file');
+const AppointmentCardRequests = require('../services/appointment-card-request');
 const Sentry = require('@sentry/node');
 const db = require('../models/db');
 const router = require('../routes/stripe-webhook');
@@ -215,6 +237,208 @@ test('PII-bearing handler error never reaches the Sentry capture payload — not
   // message — that is where the real failure text lives.
   expect(update).toHaveBeenCalledWith({ error: boom.message });
 });
+
+test('setup_intent.succeeded expected-retry capture adds safe purpose/branch/reason dimensions', async () => {
+  const update = jest.fn().mockResolvedValue(1);
+  const builder = ledgerBuilder({ update });
+  db.mockImplementation((table) => {
+    if (table === 'stripe_webhook_events') return builder;
+    throw new Error(`Unexpected db table: ${table}`);
+  });
+  AppointmentCardRequests.completeSecureCardCaptureFromWebhook.mockResolvedValueOnce({ code: 'completion_in_progress' });
+  mockConstructEvent.mockReturnValue({
+    id: 'evt_setup_retry',
+    type: 'setup_intent.succeeded',
+    created: 1754500000,
+    data: {
+      object: {
+        id: 'seti_retry_1',
+        metadata: { purpose: 'appointment_card_request' },
+      },
+    },
+  });
+
+  const res = await postWebhook();
+  expect(res.status).toBe(500);
+
+  expect(Sentry.captureException).toHaveBeenCalledTimes(1);
+  const [capturedErr, context] = Sentry.captureException.mock.calls[0];
+  expect(capturedErr.message).toBe('stripe-webhook handler failure (setup_intent.succeeded)');
+  expect(context).toEqual({
+    tags: {
+      area: 'stripe-webhook',
+      setupIntentPurpose: 'appointment_card_request',
+      handlerBranch: 'appointment_card_request',
+      retryClass: 'expected_retry',
+    },
+    extra: {
+      eventType: 'setup_intent.succeeded',
+      eventId: 'evt_setup_retry',
+      errorName: 'Error',
+      errorCode: 'completion_in_progress',
+      setupIntentPurpose: 'appointment_card_request',
+      handlerBranch: 'appointment_card_request',
+      retryClass: 'expected_retry',
+      reasonCode: 'completion_in_progress',
+    },
+    fingerprint: [
+      'stripe-webhook-handler',
+      'setup_intent.succeeded',
+      'Error',
+      'appointment_card_request',
+      'expected_retry',
+      'completion_in_progress',
+    ],
+  });
+
+  expect(update).toHaveBeenCalledWith({ error: 'appointment card capture seti_retry_1 completion_in_progress — retry' });
+});
+
+test.each(['enrollment_transient', 'payer_lookup_failed'])('recurring %s keeps raw one-word exception private while Stripe still retries', async (reasonCode) => {
+  const privateReason = 'PrivateCustomerWord';
+  const update = jest.fn().mockResolvedValue(1);
+  const ledger = ledgerBuilder({ update });
+  db.schema = { hasTable: jest.fn(async () => false) };
+  db.mockImplementation((table) => {
+    if (table === 'stripe_webhook_events') return ledger;
+    const row = table === 'estimates'
+      ? { id: 'estimate_test', customer_id: 'customer_test', status: 'accepted' }
+      : { billing_mode: 'per_application' };
+    return { where: jest.fn().mockReturnThis(), first: jest.fn(async () => row) };
+  });
+  if (reasonCode === 'payer_lookup_failed') {
+    Payer.resolveForInvoice.mockRejectedValueOnce(new Error(privateReason));
+  } else {
+    RecurringCards.completeRecurringCardEnrollment.mockResolvedValueOnce({
+      enrolled: false, transient: true, reason: privateReason,
+    });
+  }
+  mockConstructEvent.mockReturnValue({
+    id: 'evt_enrollment_transient', type: 'setup_intent.succeeded',
+    data: { object: {
+      id: 'seti_enrollment', payment_method: 'pm_test',
+      metadata: { purpose: 'estimate_recurring_card', estimate_id: 'estimate_test' },
+    } },
+  });
+
+  expect((await postWebhook()).status).toBe(500);
+  expect(RecurringCards.completeRecurringCardEnrollment).toHaveBeenCalledTimes(reasonCode === 'payer_lookup_failed' ? 0 : 1);
+  expect(Payer.resolveForInvoice).toHaveBeenCalledWith({
+    customerId: 'customer_test', scheduledServiceId: 'appt_test', throwOnError: true,
+  });
+  expect(Sentry.captureException).toHaveBeenCalledTimes(1);
+  const [capturedErr, context] = Sentry.captureException.mock.calls[0];
+  expect(context.extra.reasonCode).toBe(reasonCode);
+  expect(context.extra.errorCode).toBe(reasonCode);
+  expect(context.fingerprint).toEqual([
+    'stripe-webhook-handler', 'setup_intent.succeeded', 'Error',
+    'estimate_recurring_card', 'expected_retry', reasonCode,
+  ]);
+  expect(JSON.stringify([capturedErr.message, capturedErr.stack, context])).not.toContain(privateReason);
+  expect(update).toHaveBeenCalledWith({
+    error: reasonCode === 'payer_lookup_failed'
+      ? privateReason
+      : `recurring-cof webhook enrollment transient failure (${privateReason}) — retry`,
+  });
+  expect(update).not.toHaveBeenCalledWith(expect.objectContaining({ processed: true }));
+});
+
+test.each([
+  ['payer lookup', 'expected_retry', 'payer_lookup_failed'],
+  ['consent persistence', 'unexpected_failure', 'ECONNRESET'],
+])('portal %s failure preserves retry behavior and its diagnostic classification', async (failureStage, retryClass, reasonCode) => {
+  const boom = new Error('private downstream detail');
+  boom.code = 'ECONNRESET';
+  const update = jest.fn().mockResolvedValue(1);
+  const ledger = ledgerBuilder({ update });
+  db.mockImplementation((table) => {
+    if (table === 'stripe_webhook_events') return ledger;
+    if (table === 'payment_methods') {
+      return { where: jest.fn().mockReturnThis(), first: jest.fn(async () => ({
+        id: 'method_test', customer_id: 'customer_test', method_type: 'card',
+      })) };
+    }
+    throw new Error(`Unexpected db table: ${table}`);
+  });
+  if (failureStage === 'payer lookup') Payer.resolveForInvoice.mockRejectedValueOnce(boom);
+  else ConsentService.linkPaymentMethodId.mockRejectedValueOnce(boom);
+  mockConstructEvent.mockReturnValue({
+    id: 'evt_portal_retry', type: 'setup_intent.succeeded',
+    data: { object: {
+      id: 'seti_portal_retry', payment_method: 'pm_test',
+      metadata: { purpose: 'portal_add_method', waves_customer_id: 'customer_test' },
+    } },
+  });
+
+  expect((await postWebhook()).status).toBe(500);
+  expect(enrollConsentedMethod).not.toHaveBeenCalled();
+  expect(Payer.resolveForInvoice).toHaveBeenCalledTimes(failureStage === 'payer lookup' ? 1 : 0);
+  expect(Sentry.captureException).toHaveBeenCalledTimes(1);
+  const [capturedErr, context] = Sentry.captureException.mock.calls[0];
+  expect(context.extra).toMatchObject({ handlerBranch: 'portal_add_method', retryClass, reasonCode });
+  expect(context.fingerprint).toEqual([
+    'stripe-webhook-handler', 'setup_intent.succeeded', 'Error', 'portal_add_method', retryClass, reasonCode,
+  ]);
+  expect(JSON.stringify([capturedErr.message, capturedErr.stack, context])).not.toContain(boom.message);
+  expect(update).toHaveBeenCalledWith({ error: boom.message });
+  expect(update).not.toHaveBeenCalledWith(expect.objectContaining({ processed: true }));
+});
+
+test('unexpected setup capture failures stay distinct from expected retries', async () => {
+  const boom = new Error('private provider failure detail');
+  boom.code = 'ECONNRESET';
+  const update = jest.fn().mockResolvedValue(1);
+  db.mockReturnValue(ledgerBuilder({ update }));
+  AppointmentCardRequests.completeSecureCardCaptureFromWebhook.mockRejectedValueOnce(boom);
+  mockConstructEvent.mockReturnValue({
+    id: 'evt_setup_unexpected',
+    type: 'setup_intent.succeeded',
+    data: { object: { id: 'seti_unexpected', metadata: { purpose: 'appointment_card_request' } } },
+  });
+
+  expect((await postWebhook()).status).toBe(500);
+  const [capturedErr, context] = Sentry.captureException.mock.calls[0];
+  expect(context.tags).toMatchObject({
+    setupIntentPurpose: 'appointment_card_request',
+    handlerBranch: 'appointment_card_request',
+    retryClass: 'unexpected_failure',
+  });
+  expect(context.fingerprint).toEqual([
+    'stripe-webhook-handler', 'setup_intent.succeeded', 'Error',
+    'appointment_card_request', 'unexpected_failure', 'ECONNRESET',
+  ]);
+  expect(JSON.stringify([capturedErr.message, capturedErr.stack, context])).not.toContain(boom.message);
+  expect(update).toHaveBeenCalledWith({ error: boom.message });
+});
+
+test.each([undefined, 'private_metadata_token', 'private metadata with spaces'])(
+  'unrecognized setup purpose %p and unsafe error dimensions never reach Sentry', async (purpose) => {
+    const boom = new Error('private handler detail');
+    boom.code = 'private error code';
+    boom.handlerBranch = 'private_branch_token';
+    boom.retryClass = 'private_retry_token';
+    const update = jest.fn().mockRejectedValueOnce(boom).mockResolvedValue(1);
+    db.mockReturnValue(ledgerBuilder({ update }));
+    mockConstructEvent.mockReturnValue({
+      id: 'evt_setup_unknown',
+      type: 'setup_intent.succeeded',
+      data: { object: { id: 'seti_unknown', metadata: { purpose } } },
+    });
+
+    expect((await postWebhook()).status).toBe(500);
+    const [capturedErr, context] = Sentry.captureException.mock.calls[0];
+    expect(context.tags).toEqual({
+      area: 'stripe-webhook', setupIntentPurpose: 'unknown',
+      handlerBranch: 'unknown', retryClass: 'unexpected_failure',
+    });
+    expect(context.fingerprint).toEqual([
+      'stripe-webhook-handler', 'setup_intent.succeeded', 'Error', 'unknown', 'unexpected_failure',
+    ]);
+    expect(context.extra.reasonCode).toBeUndefined();
+    expect(JSON.stringify([capturedErr.message, capturedErr.stack, context])).not.toContain('private');
+    expect(update).toHaveBeenCalledWith({ error: boom.message });
+  },
+);
 
 test('signature-verification failure returns 400 and does NOT capture to Sentry', async () => {
   db.mockImplementation((table) => {

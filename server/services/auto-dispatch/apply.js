@@ -21,6 +21,13 @@ const { etDateString } = require('../../utils/datetime-et');
 const { violatesPreferredTime, _internals: { isSaturday } } = require('./candidate-slots');
 const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('./eligibility');
 
+// Location belongs to the scored placement as much as its date and time do.
+// Reuse this field set in the preflight read and the atomic rebooker predicate.
+const LOCATION_FIELDS = [
+  'property_id', 'service_address_line1', 'service_address_line2',
+  'service_address_city', 'service_address_state', 'service_address_zip', 'lat', 'lng',
+];
+
 const norm = (t) => (t ? String(t).slice(0, 5) : null);
 
 /**
@@ -43,7 +50,7 @@ async function revalidatePlacement(service) {
   const fresh = await db('scheduled_services')
     .where({ id: service.id })
     .first('scheduled_date', 'window_start', 'window_end', 'technician_id', 'status',
-      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id');
+      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', 'recurring_dispatch_due_date', 'customer_confirmed', ...LOCATION_FIELDS);
   if (!fresh) {
     return { ok: false, fresh: null, code: 'STALE_PLACEMENT', reason: 'Service no longer exists' };
   }
@@ -56,11 +63,17 @@ async function revalidatePlacement(service) {
   if (!['pending', 'confirmed'].includes(String(fresh.status))) {
     return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: `Visit status changed to '${fresh.status}' after scoring` };
   }
-  const changed = toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
+  if (fresh.recurring_dispatch_due_date && fresh.customer_confirmed === true) {
+    return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Customer confirmed this recurring occurrence after scoring' };
+  }
+  const changed = toDateStr(fresh.recurring_dispatch_due_date) !== toDateStr(service.recurring_dispatch_due_date)
+    || toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
     || norm(fresh.window_start) !== norm(service.window_start)
     || norm(fresh.window_end) !== norm(service.window_end)
     || String(fresh.technician_id || '') !== String(service.technician_id || '');
-  if (changed) {
+  const locationChanged = LOCATION_FIELDS.some((field) =>
+    String(fresh[field] ?? '') !== String(service[field] ?? ''));
+  if (changed || locationChanged) {
     return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Placement changed since it was scored' };
   }
   return { ok: true, fresh, code: null, reason: null };
@@ -129,6 +142,56 @@ async function emitAutoDispatchChanged(service, best, runId, config) {
  *     the rebooker checks time/technician occupancy, so a different-time
  *     duplicate of the series would otherwise commit
  */
+/**
+ * Apply-time capability fence, run INSIDE the move transaction for every row
+ * that lands on `technicianId` (the tapped row via options.moveGuard, grouped
+ * members via options.memberGuard). The run's capability map is a start-of-run
+ * snapshot; the Team tab can turn a category Off mid-run, and Off is a HARD
+ * constraint — so the last fence reads the committed rows, never the snapshot,
+ * and regardless of whether the technician changed.
+ * Resolves, or throws `refuse(rowId, why)` for the first deactivated row.
+ */
+async function assertCapabilitiesActive(trx, technicianId, rows, refuse) {
+  if (!technicianId) return;
+  const categories = [...new Set(rows.map((r) => classifyServiceCategory(r.service_type)).filter(Boolean))];
+  if (!categories.length) return;
+  // Serialize with the Team tab's editor, which writes capabilities under
+  // FOR UPDATE on the technician row: a share lock here holds until this move
+  // commits, so an Off cannot land between the read below and the commit (the
+  // same technician-row lock assertAssignableTechnician takes).
+  await trx('technicians').where({ id: technicianId }).forShare().first('id');
+  const caps = await trx('technician_capabilities')
+    .where({ technician_id: technicianId }).whereIn('service_category', categories)
+    .select('service_category', 'active');
+  const deactivated = new Set(caps.filter((c) => c.active === false).map((c) => c.service_category));
+  const hit = rows.find((r) => deactivated.has(classifyServiceCategory(r.service_type)));
+  if (hit) throw refuse(hit.id, `cannot be assigned to a technician deactivated for ${classifyServiceCategory(hit.service_type)}`);
+}
+
+// Per-row fence run on the transaction that commits each row's placement:
+// the rebooker calls it for the row it moves (standalone, or each grouped
+// member — the unit mover forwards it), and the unit mover calls it again in
+// the transaction that assigns each member to the destination technician (the
+// member guard ran under the planning lock, released by then). The row checked
+// is the one the caller hands over; the tech checked is the DESTINATION — the
+// placement's technician (the unit mover strips technicianId from member
+// moves, so the rebooker's "kept" tech is the OLD one there and would both
+// block a valid move away from an Off category and miss the destination).
+function makeMoveGuard({ service, best }) {
+  const refuse = (rowId, why) => Object.assign(
+    new Error(`Cannot auto-move this stop: service ${rowId} ${why}`),
+    { statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', isOperational: true },
+  );
+  return async ({ trx, technicianId, service: movingRow }) => {
+    const row = movingRow || service;
+    if (row.recurring_dispatch_due_date && row.customer_confirmed === true) {
+      throw refuse(row.id, 'was confirmed by the customer');
+    }
+    const receiving = best.technician_id || technicianId || row.technician_id || null;
+    await assertCapabilitiesActive(trx, receiving, [row], refuse);
+  };
+}
+
 function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
   const refuse = (memberId, why) => Object.assign(
     new Error(`Cannot auto-move this stop: grouped service ${memberId} ${why}`),
@@ -150,6 +213,7 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       .leftJoin('customers as c', 'ss.customer_id', 'c.id')
       .whereIn('ss.id', siblings.map((m) => m.id))
       .select('ss.*', 'c.active as customer_active', 'c.deleted_at as customer_deleted_at',
+        'c.address_line1 as customer_address_line1', 'c.city as customer_city', 'c.zip as customer_zip',
         'c.latitude as customer_latitude', 'c.longitude as customer_longitude');
     const memberIds = (members || []).map((m) => m.id);
     const today = etDateString(new Date());
@@ -160,6 +224,10 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       ...(config.routeTiersEnabled === true ? { routeTiers: { enabled: true, today } } : {}),
     };
     for (const r of rows) {
+      if (r.recurring_dispatch_due_date) {
+        const drift = routeTiers.daysBetween(toDateStr(r.recurring_dispatch_due_date), best.date);
+        if (drift == null || Math.abs(drift) > 3) throw refuse(r.id, 'would leave its recurring due date ±3 days');
+      }
       if (r.customer_deleted_at) throw refuse(r.id, 'belongs to an archived customer');
       const elig = isEligibleForAutoDispatch(r, eligCtx);
       if (!elig.eligible) throw refuse(r.id, `is not auto-dispatchable (${elig.reason_code}: ${elig.reason_description})`);
@@ -196,26 +264,19 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       if (!r.recurring_parent_id && r.is_recurring !== true) continue;
       const parentId = r.recurring_parent_id || r.id;
       // Mirrors candidate-slots' sibling-date exclusion: every non-cancelled,
-      // non-request row of the series except the members moving together.
+      // non-request row (including reschedule holds for due placement),
+      // except the members moving together.
       const clash = await trx('scheduled_services')
         .where(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
         .whereNotIn('id', memberIds)
-        .whereNotIn('status', ['cancelled', 'rescheduled'])
+        .whereNotIn('status', r.recurring_dispatch_due_date ? ['cancelled'] : ['cancelled', 'rescheduled'])
         .where('scheduled_date', best.date)
         .first('id');
       if (clash) throw refuse(r.id, `already has another visit of its series on ${best.date}`);
     }
-    if (techChanged && best.technician_id) {
-      const categories = [...new Set(rows.map((r) => classifyServiceCategory(r.service_type)).filter(Boolean))];
-      if (categories.length) {
-        const caps = await trx('technician_capabilities')
-          .where({ technician_id: best.technician_id }).whereIn('service_category', categories)
-          .select('service_category', 'active');
-        const deactivated = new Set(caps.filter((c) => c.active === false).map((c) => c.service_category));
-        const hit = rows.find((r) => deactivated.has(classifyServiceCategory(r.service_type)));
-        if (hit) throw refuse(hit.id, `cannot be assigned to a technician deactivated for ${classifyServiceCategory(hit.service_type)}`);
-      }
-    }
+    // Every sibling against the receiving tech, committed rows, tech changed
+    // or not (see assertCapabilitiesActive).
+    await assertCapabilitiesActive(trx, best.technician_id || service.technician_id || null, rows, refuse);
   };
 }
 
@@ -232,6 +293,9 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
   // Every grouped member re-passes the apply-time hard guards under the
   // unit mover's stop lock, or the grouped move is refused (codex r13 P1).
   options.memberGuard = makeMemberGuard({ service, best, config, techChanged });
+  // The tapped row itself re-passes the capability fence inside the rebooker's
+  // move transaction (a standalone visit has no member guard).
+  options.moveGuard = makeMoveGuard({ service, best });
 
   // Stale-recommendation guard: the row was loaded + scored earlier this run.
   // reschedule() reloads it but only guards status — if staff locked/excluded it
@@ -242,6 +306,12 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     throw Object.assign(new Error(check.reason), { code: check.code });
   }
   const fresh = check.fresh;
+  if (fresh.recurring_dispatch_due_date) {
+    const drift = routeTiers.daysBetween(toDateStr(fresh.recurring_dispatch_due_date), best.date);
+    if (drift == null || Math.abs(drift) > 3) {
+      throw Object.assign(new Error('Placement is outside the recurring due date ±3 days'), { code: 'RECURRING_DUE_DATE_LIMIT' });
+    }
+  }
 
   // Re-assert the operator opt-out flags + original date INSIDE the rebooker's
   // move transaction so a lock/reschedule landing between the read above and the
@@ -257,6 +327,9 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     window_start: fresh.window_start,
     window_end: fresh.window_end,
     technician_id: fresh.technician_id,
+    recurring_dispatch_due_date: fresh.recurring_dispatch_due_date ?? null,
+    ...(fresh.recurring_dispatch_due_date ? { customer_confirmed: fresh.customer_confirmed ?? null } : {}),
+    ...Object.fromEntries(LOCATION_FIELDS.map((field) => [field, fresh[field] ?? null])),
   };
 
   // Canonical move — transactional, overlap-checked, silent. ALWAYS a
@@ -450,4 +523,4 @@ async function unitMoveSize(service, best = null) {
   }
 }
 
-module.exports = { applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement, unitMoveSize, makeMemberGuard };
+module.exports = { applyAutoDispatchMove, emitAutoDispatchChanged, revalidatePlacement, unitMoveSize, makeMemberGuard, makeMoveGuard, assertCapabilitiesActive };

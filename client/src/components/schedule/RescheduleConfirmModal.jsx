@@ -101,6 +101,9 @@ export default function RescheduleConfirmModal({
   // covers this first occurrence (copy stays singular by design).
   const [toStart, toEnd] = String(toWindow || '').split('-');
   const { conflicts } = useSlotConflicts({
+    serviceId,
+    technicianId,
+    durationMinutes,
     date: /^\d{4}-\d{2}-\d{2}$/.test(String(toDate || '')) ? toDate : null,
     windowStart: toStart || null,
     windowEnd: toEnd || null,
@@ -113,6 +116,7 @@ export default function RescheduleConfirmModal({
   // re-drop to take a suggestion). If the drop IS a best time, its chip
   // shows as selected.
   const { bestTimes } = useBestTimes({
+    arrivalWindows: true,
     date: /^\d{4}-\d{2}-\d{2}$/.test(String(toDate || '')) ? toDate : null,
     serviceId: serviceId != null ? serviceId : undefined,
     customerId,

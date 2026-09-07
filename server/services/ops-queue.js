@@ -380,7 +380,7 @@ async function laneFollowUps() {
 
 async function laneAdminAlerts() {
   // Open, plus snoozed alerts whose snooze has elapsed — they are due again.
-  const due = (b) => b.where(function whereDue() {
+  const due = (b) => b.whereNot('type', 'lawn_protocol_readiness').where(function whereDue() {
     this.where('status', 'open')
       .orWhere(function whereSnoozeElapsed() {
         this.where('status', 'snoozed').where('snoozed_until', '<=', new Date());

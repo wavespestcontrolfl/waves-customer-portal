@@ -27,8 +27,10 @@ async function sendTechNotification(technicianId, { type, message, payload }) {
       message,
       payload: payload ? JSON.stringify(payload) : null,
     });
+    return true;
   } catch (err) {
     logger.error(`[geofence-handler] sendTechNotification failed: ${err.message}`);
+    return false;
   }
 }
 

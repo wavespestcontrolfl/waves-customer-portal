@@ -198,6 +198,57 @@ async function resolveSmsLogCustomerFallbacks(rows) {
   return resolved;
 }
 
+// Composer-carried prep links: the provider call AND the tagger's replay
+// marker (markPrepGuidesSent) run under the manual sender's own
+// per-customer `prep-send:<customer>` lock, so a manual send for the same
+// customer never interleaves with this dispatch's claim → send → stamp
+// (GH Codex #3856 r22 P0; the sender no longer re-keys reservations at all,
+// r23 P0). The links are re-validated INSIDE the lock right before dispatch
+// (`recheck`): the pre-lock bearer check can have verified a manual send's
+// provisional page that failed and was released before the lock was ours
+// (pre-push Codex P1 on 7f82e7564); a refusal is a not-sent result. A held lease is an operator-facing "try again",
+// never a wait — reported as a not-sent result so the route's own no-send
+// exit releases every claim taken before dispatch. A throw the provider
+// accepted (err.providerOutcome.sent === true) still writes the marker
+// before propagating; a lost marker never fails a text that already left.
+async function dispatchPrepLinkSend(preps, dispatch, actorId, recheck) {
+  const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
+  // The bookkeeping uses the entries the in-lock recheck resolved — the
+  // guide each page renders NOW — never the pre-lock ones (pre-push Codex
+  // P1 on e8b68e9cc).
+  let live = preps;
+  const mark = async (label) => {
+    try {
+      await require('../services/composer-customer-links').markPrepGuidesSent(live, actorId);
+    } catch (stampErr) {
+      logger.warn(`[communications] prep sent marker failed ${label}: ${stampErr.message}`);
+    }
+  };
+  const customerIds = [...new Set(preps.map((p) => p.customerId))];
+  const locked = async (i) => {
+    if (i < customerIds.length) {
+      return runExclusive(`prep-send:${customerIds[i]}`, () => locked(i + 1), { recordHealth: false, waitForSlot: false });
+    }
+    const fresh = await recheck();
+    if (!fresh.ok) return { sent: false, blocked: false, reason: fresh.error };
+    if (fresh.preps) live = fresh.preps;
+    let result;
+    try {
+      result = await dispatch();
+    } catch (err) {
+      if (err?.providerOutcome?.sent === true) await mark('after a throw');
+      throw err;
+    }
+    if (result?.sent && require('../services/sms-auto-send').isRealProviderSend(result)) await mark('(text already sent)');
+    return result;
+  };
+  const outcome = await locked(0);
+  if (wasLockSkipped(outcome)) {
+    return { sent: false, blocked: false, reason: 'A prep guide is being sent to this customer right now — try again in a moment.' };
+  }
+  return outcome;
+}
+
 // POST /api/admin/communications/sms — send an SMS from admin
 router.post('/sms', async (req, res, next) => {
   let claimedDecisionId = null;
@@ -205,10 +256,20 @@ router.post('/sms', async (req, res, next) => {
   let parkedThreadIds = [];
   let claimedReviewRequestId = null;
   let claimedReviewClaimToken = null;
+  let reviewEmailOutcome = null;
+  // Quick Links "Both": once the text has really sent, the same ask goes out
+  // by email too (ReviewService.sendInlineEmailCopy). Hoisted: the catch
+  // below emails after an accepted-but-thrown send.
+  let reviewRequestEmail = false;
   // Composer-carried card request links: the visit-level send claim won
   // before dispatch (claimCardRequestSends) — released on every no-send
   // exit, marked after a real provider send.
   let cardClaim = null;
+  // Composer-carried project report links: the project send flow's own
+  // delivery claim, taken before dispatch (claimProjectReportSends) and
+  // handed back on every exit once the provider has answered — the text is
+  // a re-share, never a delivery.
+  let projectClaim = null;
   // Verified composer statement links — a real send is their first delivery.
   let statementLinkIds = null;
   // Verified composer prep links — a real send writes the tagger's dedupe marker.
@@ -237,6 +298,16 @@ router.post('/sms', async (req, res, next) => {
       logger.warn(`[communications] card request claim release failed (the service's stale-claim lease recovers it): ${releaseErr.message}`);
     }
   };
+  const releaseProjectClaim = async () => {
+    if (!projectClaim) return;
+    const claim = projectClaim;
+    projectClaim = null;
+    try {
+      await require('../services/composer-customer-links').releaseProjectReportSends(claim);
+    } catch (releaseErr) {
+      logger.warn(`[communications] project report claim release failed (the send flow's stale-claim takeover recovers it): ${releaseErr.message}`);
+    }
+  };
   // AMBIGUOUS provider outcome (GH Codex #3851 r4 P1 — the card funnel's own
   // rule): a provider-phase retryable/deferred result (Twilio timeout, 5xx,
   // 429) is NOT a definitive no-send — the provider may already hold the
@@ -252,6 +323,15 @@ router.post('/sms', async (req, res, next) => {
       const ids = contractActivations.map((a) => a.id).join(', ');
       contractActivations = null;
       logger.error(`[communications] send outcome RETRYABLE-ambiguous (${code}) — prepared contract links stay activated (${ids})`);
+    }
+    // The project delivery claim stays too (GH Codex #3893 r12 P1): the
+    // provider may still hold the text, and restoring the row's state would
+    // let a resend start inside that window. The send flow's own stale-claim
+    // takeover (ten minutes) recovers the row, as after a crashed send.
+    if (projectClaim) {
+      const claim = projectClaim;
+      projectClaim = null;
+      logger.error(`[communications] send outcome RETRYABLE-ambiguous (${code}) — keeping the project report delivery claim for projects ${claim.projects.map((p) => p.id).join(', ')}`);
     }
     if (cardClaim) {
       const claim = cardClaim;
@@ -285,13 +365,14 @@ router.post('/sms', async (req, res, next) => {
       mediaAttachments,
       agentDecisionId,
       agentDraft,
-      // Composer Insert Link: a pending inline review_requests row whose link
+      // Composer Quick Links: a pending inline review_requests row whose link
       // rides in this body — marked delivered after a real send (below).
       reviewRequestId,
       // Composer Insert Link: the contract a freshly inserted (unwritten)
       // signing link belongs to — activated before the provider call.
       contractId,
     } = req.body;
+    reviewRequestEmail = req.body.reviewRequestEmail === true;
     const cleanBody = typeof body === 'string' ? body.trim() : '';
     const cleanMediaUrls = Array.isArray(mediaUrls) ? mediaUrls.filter((u) => typeof u === 'string' && u.trim()) : [];
     const media = mediaFromOutboundAttachments(mediaAttachments, cleanMediaUrls);
@@ -477,6 +558,7 @@ router.post('/sms', async (req, res, next) => {
     const abortUnsent = async (status, error) => {
       await clearManualReservation();
       await releaseCardClaim();
+      await releaseProjectClaim();
       await restoreContractLinks();
       await reopenScheduledSuggestions({
         decisionIds: [claimedDecisionId, ...parkedThreadIds],
@@ -512,7 +594,7 @@ router.post('/sms', async (req, res, next) => {
     // mid-send, or a text already out) refuses here; every later exit
     // restores/releases or records/marks them.
     try {
-      const { bearerLinkSendCheck, claimCardRequestSends } = require('../services/composer-customer-links');
+      const { bearerLinkSendCheck, claimCardRequestSends, claimProjectReportSends } = require('../services/composer-customer-links');
       const bearerCheck = await bearerLinkSendCheck(cleanBody, normalizePhoneLast10(to), {
         trustedCustomerId: trustedCustomerId || null,
         // The seam binds by the last ten digits; a non-US E.164 destination
@@ -538,6 +620,14 @@ router.post('/sms', async (req, res, next) => {
         const claim = await claimCardRequestSends(bearerCheck.cards);
         if (!claim.ok) return abortUnsent(409, claim.error);
         cardClaim = claim.claim;
+      }
+      // The project send flow's delivery claim, held through the provider
+      // handoff (GH Codex #3893 r11 P1): a resend that starts now 409s on
+      // its own claim instead of texting the same report twice.
+      if (bearerCheck.projectReports) {
+        const claim = await claimProjectReportSends(bearerCheck.projectReports);
+        if (!claim.ok) return abortUnsent(409, claim.error);
+        projectClaim = claim.claim;
       }
     } catch (bearerErr) {
       logger.warn(`[communications] bearer link pre-send check failed — aborting send: ${bearerErr.message}`);
@@ -598,7 +688,10 @@ router.post('/sms', async (req, res, next) => {
             if (!consent.allowed) return { consent };
             const gate = await ReviewService.checkUnscheduledAskGates(rr.customer_id);
             if (!gate.allowed) return { gate };
-            return { claimed: await ReviewService.claimInlineForSend(rr.id) };
+            // Both stamps the owed email leg on the claim itself, so the
+            // Quick Links retry path has persisted evidence this ask asked
+            // for an email (GH Codex #3856 r8 P1).
+            return { claimed: await ReviewService.claimInlineForSend(rr.id, { emailRequested: reviewRequestEmail === true }) };
           },
           { recordHealth: false },
         );
@@ -659,7 +752,7 @@ router.post('/sms', async (req, res, next) => {
     // blocked — and the claim released — where the funnel accepts it (GH
     // Codex #3844 r5 P1). The composer inserts the BASE template copy.
     const cardVisitIds = cardClaim ? cardClaim.cards.map((c) => c.scheduledServiceId) : [];
-    const result = await sendCustomerMessage({
+    const dispatch = () => sendCustomerMessage({
       to,
       body: cleanBody,
       channel: 'sms',
@@ -699,6 +792,13 @@ router.post('/sms', async (req, res, next) => {
         humanAuthored: !bodyIsUnchangedAgentDraft,
       },
     });
+    const result = prepLinkSends
+      ? await dispatchPrepLinkSend(prepLinkSends, dispatch, req.technicianId || null, () => require('../services/composer-customer-links')
+        .recheckPrepLinks(cleanBody, normalizePhoneLast10(to), {
+          trustedCustomerId: trustedCustomerId || null,
+          usDestination: /^\+1\d{10}$/.test(String(normalizePhone(to) || '')),
+        }))
+      : await dispatch();
     // The reservation has done its job — the real provider row now exists (on
     // success) or no send happened (on failure). Clear it so it can't linger as
     // a stuck 'sending' row blocking auto-sends to the thread.
@@ -711,6 +811,9 @@ router.post('/sms', async (req, res, next) => {
         await releaseCardClaim();
         await restoreContractLinks();
       }
+      // Definitive no-send: the project delivery claim is handed back (an
+      // ambiguous outcome kept it above — this is a no-op then).
+      await releaseProjectClaim();
       if (claimedReviewRequestId) {
         await require('../services/review-request').releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
       }
@@ -766,16 +869,6 @@ router.post('/sms', async (req, res, next) => {
         logger.warn(`[communications] statement sent stamp failed (text already sent): ${stampErr.message}`);
       }
     }
-    // Composer-carried prep links: a REAL send is a delivered prep text —
-    // the tagger's replay-guard marker, as the manual sender writes it.
-    if (prepLinkSends && result?.sent) {
-      try {
-        const { isRealProviderSend } = require('../services/sms-auto-send');
-        if (isRealProviderSend(result)) await require('../services/composer-customer-links').markPrepGuidesSent(prepLinkSends, req.technicianId || null);
-      } catch (stampErr) {
-        logger.warn(`[communications] prep sent marker failed (text already sent): ${stampErr.message}`);
-      }
-    }
     // Composer-carried contract signing links: a REAL provider send is the
     // delivery — record it on the contract's timeline (the row was
     // activated before the call); a suppressed send hands the prepared link
@@ -815,26 +908,22 @@ router.post('/sms', async (req, res, next) => {
         logger.warn(`[communications] card request claim finalize failed (text already sent): ${markErr.message}`);
       }
     }
+    // The text left — the project delivery claim has covered its window; the
+    // row's delivery state is restored (the text is a re-share, not a delivery).
+    await releaseProjectClaim();
     if (claimedReviewRequestId) {
       try {
-        const { isRealProviderSend } = require('../services/sms-auto-send');
-        const ReviewService = require('../services/review-request');
-        if (isRealProviderSend(result)) {
-          // Retried once: a lost stamp after a REAL send is the one state
-          // that can double-text the ask, so it gets a second attempt here
-          // and, failing that, the stale-claim reconcile in
-          // claimInlineForSend repairs it from the outbound log.
-          try {
-            await ReviewService.markInlineDelivered(claimedReviewRequestId, claimedReviewClaimToken);
-          } catch (firstErr) {
-            logger.warn(`[communications] inline review mark-delivered failed, retrying once (requestId=${claimedReviewRequestId}): ${firstErr.message}`);
-            await ReviewService.markInlineDelivered(claimedReviewRequestId, claimedReviewClaimToken);
-          }
-        } else {
-          await ReviewService.releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
-        }
+        reviewEmailOutcome = await settleInlineReviewAfterSend({
+          result, requestId: claimedReviewRequestId, claimToken: claimedReviewClaimToken, emailRequested: reviewRequestEmail === true,
+        });
       } catch (markErr) {
         logger.warn(`[communications] inline review mark-delivered failed (requestId=${claimedReviewRequestId}): ${markErr.message}`);
+        // Both: the text left but its delivery stamp (or the email copy)
+        // threw — say the email leg did not go out rather than reporting a
+        // bare "Message sent." (GH Codex #3856 r3 P2).
+        if (reviewRequestEmail === true && !reviewEmailOutcome) {
+          reviewEmailOutcome = { sent: false, reason: 'email_not_attempted' };
+        }
       }
     }
 
@@ -948,7 +1037,7 @@ router.post('/sms', async (req, res, next) => {
       }
     }
 
-    res.json(result);
+    res.json(reviewEmailOutcome ? { ...result, reviewEmail: reviewEmailOutcome } : result);
   } catch (err) {
     // Release the in-flight reservation so a throw mid-send can't strand a
     // 'sending' row that blocks auto-sends to the thread.
@@ -961,12 +1050,9 @@ router.post('/sms', async (req, res, next) => {
     // it can never go out twice.
     if (claimedReviewRequestId) {
       try {
-        const ReviewService = require('../services/review-request');
-        if (err?.providerOutcome?.sent === true) {
-          await ReviewService.markInlineDelivered(claimedReviewRequestId, claimedReviewClaimToken);
-        } else {
-          await ReviewService.releaseInlineClaim(claimedReviewRequestId, claimedReviewClaimToken);
-        }
+        await settleInlineReviewAfterThrow({
+          err, requestId: claimedReviewRequestId, claimToken: claimedReviewClaimToken, emailRequested: reviewRequestEmail === true,
+        });
       } catch (claimErr) {
         logger.warn(`[communications] inline review claim cleanup failed (requestId=${claimedReviewRequestId}): ${claimErr.message}`);
       }
@@ -980,6 +1066,9 @@ router.post('/sms', async (req, res, next) => {
       && (err.providerOutcome.retryable || err.providerOutcome.deferred)) {
       await holdBearerStateAmbiguous({ code: err.providerOutcome.providerErrorCode || 'PROVIDER_FAILURE' });
     }
+    // The project delivery claim is handed back on a throw too — accepted,
+    // or definitively not sent; an ambiguous outcome kept it above.
+    await releaseProjectClaim();
     // Same convention for the card request claim: accepted → mark, else release.
     if (cardClaim) {
       if (err?.providerOutcome?.sent === true) {
@@ -1001,13 +1090,6 @@ router.post('/sms', async (req, res, next) => {
         await require('../services/composer-customer-links').markStatementsSent(statementLinkIds);
       } catch (stampErr) {
         logger.warn(`[communications] statement sent stamp failed after a throw: ${stampErr.message}`);
-      }
-    }
-    if (prepLinkSends && err?.providerOutcome?.sent === true) {
-      try {
-        await require('../services/composer-customer-links').markPrepGuidesSent(prepLinkSends, req.technicianId || null);
-      } catch (stampErr) {
-        logger.warn(`[communications] prep sent marker failed after a throw: ${stampErr.message}`);
       }
     }
     // And for the activated contract links: accepted → record, else hand back.
@@ -1048,41 +1130,79 @@ router.post('/sms', async (req, res, next) => {
 
 // POST /api/admin/communications/send-prep — manual prep-guide send for a
 // customer picked by name ("Send prep guide" button). Smart channel: emails
-// the formatted prep guide (plus the companion text) when the customer has an
-// email on file, otherwise sends the self-contained prep text. All PREP_CONFIG
-// pests are allowed — flea, bed bug, and cockroach templates all exist.
-const { isSupportedPestType } = require('../services/prep-guide-sender');
+// the prep guide on the operator-chosen channel (email / sms / both — owner
+// ruling 2026-09-03). All PREP_CONFIG pests are allowed — every prep.* guide.
+const { isSupportedPestType, isSupportedChannel } = require('../services/prep-guide-sender');
+
+// Operator copy for a prep send that delivered nothing, by reason.
+const PREP_REFUSAL_COPY = {
+  customer_not_found: () => 'That customer could not be found.',
+  no_email: () => 'This customer has no email on file — choose Text instead.',
+  no_phone: () => 'This customer has no phone number on file — choose Email instead.',
+  no_upcoming_visit: () => 'This guide can only be texted as a link, and the customer has no upcoming visit of that type to attach it to — email it, or book the visit first.',
+  // One prep page per visit: the row's page already renders another guide,
+  // and re-keying it would flip every link already delivered.
+  prep_page_taken: (r) => `This guide can only be texted as a link, and the customer's next visit already carries the ${r.takenBy || 'other'} prep page — email this guide instead.`,
+  prep_link_failed: () => "Couldn't build the guide page link for this visit — try again.",
+  prep_guide_inactive: (r) => `The ${r.label || 'prep'} guide has no active version in Email Templates — activate it before texting a prep link.`,
+  prep_page_expired: () => 'The prep page link for this visit has expired — email this guide instead.',
+  prep_send_pending: (r) => `The ${r.label || 'prep'} guide for this visit is already queued to send automatically — it will go out on its own.`,
+  prep_send_busy: () => 'Another prep send for this customer is in progress — try again in a moment.',
+  unsupported_pest_type: () => 'That prep type is not available yet.',
+  unsupported_channel: () => 'Choose Email, Text, or Both.',
+};
+// Both delivered the email but not the text: why the text did not go, by the
+// link's own reason (an unplanned text); anything else = the number.
+const PREP_TEXT_DOWN_COPY = {
+  no_upcoming_visit: () => 'The text was not sent — this guide can only be texted as a link, and the customer has no upcoming visit of that type to attach it to.',
+  prep_page_taken: (r) => `The text was not sent — the customer's next visit already carries the ${r.takenBy || 'other'} prep page.`,
+  prep_link_failed: () => 'The text was not sent — the guide page link could not be built; try Text again later.',
+  prep_guide_inactive: (r) => `The text was not sent — the ${r.label || 'prep'} guide has no active version in Email Templates.`,
+  prep_page_expired: () => 'The text was not sent — the prep page link for this visit has expired.',
+};
+// SendGrid MAY have accepted the email (post-dispatch throw): the page claim
+// is kept and "try again" would double-send the guide (GH Codex #3856 r8 P2).
+// The text leg is never uncertain (sendPrepSms).
+const PREP_EMAIL_UNCERTAIN_COPY = "The prep email may or may not have gone out — check the customer's email log before sending it again.";
 
 function manualPrepMessage(result) {
   if (!result.ok) {
-    switch (result.reason) {
-      case 'customer_not_found': return 'That customer could not be found.';
-      case 'no_email_or_phone': return 'This customer has no email or phone number on file, so there was nothing to send.';
-      case 'unsupported_pest_type': return 'That prep type is not available yet.';
-      default: return "Couldn't send the prep — check the customer's contact info and try again.";
-    }
+    if (result.emailUncertain) return PREP_EMAIL_UNCERTAIN_COPY;
+    const copy = PREP_REFUSAL_COPY[result.reason];
+    return copy ? copy(result) : "Couldn't send the prep — check the customer's contact info and try again.";
   }
   const parts = [];
   if (result.emailSent) parts.push(`emailed to ${result.emailAddress}`);
   if (result.smsSent) parts.push(`texted to ${result.phone}`);
-  return `${result.label} prep ${parts.join(' and ')}.`;
+  const sent = `${result.label} prep ${parts.join(' and ')}.`;
+  if (result.reason !== 'partial') return sent;
+  if (result.failedChannel === 'sms') {
+    const why = PREP_TEXT_DOWN_COPY[result.smsLinkReason];
+    return `${sent} ${why ? why(result) : 'The text did not go out — send it again as Text once the number is confirmed.'}`;
+  }
+  return result.emailUncertain
+    ? `${sent} The email may or may not have gone out — check the customer's email log before sending it again.`
+    : `${sent} The email did not go out — send it again as Email once the address is confirmed.`;
 }
 
 router.post('/send-prep', async (req, res, next) => {
   try {
-    const { customerId, pestType = 'flea' } = req.body || {};
+    const { customerId, pestType = 'flea', channel = 'both' } = req.body || {};
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
     if (!isSupportedPestType(pestType)) {
       return res.status(400).json({ error: `Unsupported prep type: ${pestType}` });
     }
+    if (!isSupportedChannel(channel)) {
+      return res.status(400).json({ error: 'channel must be one of email, sms, both' });
+    }
     const { sendPrepToCustomer } = require('../services/prep-guide-sender');
-    const result = await sendPrepToCustomer({ customerId, pestType, actorId: req.technicianId || null });
+    const result = await sendPrepToCustomer({ customerId, pestType, channel, actorId: req.technicianId || null });
     const message = manualPrepMessage(result);
     if (!result.ok) {
       const status = result.reason === 'customer_not_found' ? 404 : 400;
       return res.status(status).json({ error: message, result });
     }
-    res.json({ success: true, message, result });
+    res.json({ success: true, partial: result.reason === 'partial', message, result });
   } catch (err) { next(err); }
 });
 
@@ -1924,10 +2044,149 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
   }
 });
 
+// Quick Links review channel 'email' (owner ruling 2026-09-03): a SEND, not
+// a link build — the gate-wrapped engine path emails the ask now and nothing
+// is inserted into the text. strictChannel: the operator chose Email — never
+// fall back to a text. Answers { status, body } for the route to send.
+// The email went to the resolved email contact (a service contact when one
+// is on file) — the toast names THAT person, not the phone's owner. A
+// nicety: undefined when the row can't be read (the email already went).
+async function emailContactFirstName(customerId) {
+  try {
+    const { getServiceContact, firstNameFrom, SERVICE_CONTACT_COLUMNS } = require('../services/customer-contact');
+    const row = await db('customers').where({ id: customerId }).first('first_name', 'last_name', 'email', 'phone', ...SERVICE_CONTACT_COLUMNS);
+    return row ? (firstNameFrom(getServiceContact(row).name) || undefined) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Email-leg refusals by reason — transient ones (prefs read, provider
+// throw) are retryable and must not read as a missing address or an opt-out.
+const EMAIL_LEG_REASONS = {
+  prefs_unavailable: 'Notification preferences could not be read — try again',
+  email_send_failed: 'The review email could not be sent — try again',
+  opted_out: 'Review emails are turned off in this customer\'s notification preferences',
+  email_off: 'Review emails are turned off in this customer\'s notification preferences',
+  no_contact: 'No review email for this customer — no email on file',
+  no_email: 'No review email for this customer — no email on file',
+  email_blocked: 'The review email could not be sent — the address is suppressed',
+  // Post-dispatch throw: the provider MAY hold it — never "try again".
+  email_uncertain: "The review email may or may not have gone out — check the customer's email log before sending it again",
+  already_reviewed: 'This customer is already marked as having left a review',
+  no_customer: 'That customer could not be found',
+  // The email WENT but the row could not be stamped (twice): the ask is
+  // invisible to the cooldown, so the operator must not click again.
+  email_sent_unrecorded: 'The review email was sent, but it could not be recorded — do not send it again',
+  email_uncertain_unrecorded: "The review email may or may not have gone out and could not be recorded — do not send it again; check the customer's email log",
+  // The address was rejected AND the retry marker could not be restored:
+  // this ask cannot be retried from here, and the text's cooldown refuses a
+  // fresh one — never "try again".
+  email_retry_lost: 'The review email was not accepted, and this ask can no longer be retried from here — send a fresh review request after the cooldown',
+};
+
+// The inline review ask once the composer's send has RETURNED: a real send
+// stamps the row delivered (retried once — a lost stamp after a real send is
+// the one state that can double-text the ask; failing that, the stale-claim
+// reconcile in claimInlineForSend repairs it from the outbound log) and, for
+// Both, emails the SAME row — only after the text really went. A suppressed
+// (sentinel) send releases the claim and withholds the email leg, or the
+// composer would report "Message sent." for a Both ask that delivered
+// nothing (GH Codex #3856 r1 P1). Returns the Both email outcome, null when
+// no email was requested.
+async function settleInlineReviewAfterSend({ result, requestId, claimToken, emailRequested }) {
+  const { isRealProviderSend } = require('../services/sms-auto-send');
+  const ReviewService = require('../services/review-request');
+  if (!isRealProviderSend(result)) {
+    await ReviewService.releaseInlineClaim(requestId, claimToken);
+    return emailRequested ? { sent: false, reason: 'text_not_sent' } : null;
+  }
+  try {
+    await ReviewService.markInlineDelivered(requestId, claimToken);
+  } catch (firstErr) {
+    logger.warn(`[communications] inline review mark-delivered failed, retrying once (requestId=${requestId}): ${firstErr.message}`);
+    await ReviewService.markInlineDelivered(requestId, claimToken);
+  }
+  return emailRequested ? ReviewService.sendInlineEmailCopy(requestId) : null;
+}
+
+// The inline review ask once the composer's send has THROWN: a throw after
+// provider acceptance (err.providerOutcome.sent === true, the scheduler's
+// convention) means the ask DID text — stamp it delivered so it can never
+// go out twice and, for Both, email the same row now as the happy path
+// would have (the row is delivered, so no retry can reclaim it; GH Codex
+// #3856 r5 P2), the outcome riding the error message the composer shows.
+// Anything else releases the claim so an immediate retry isn't blocked for
+// the 10-minute stale window.
+async function settleInlineReviewAfterThrow({ err, requestId, claimToken, emailRequested }) {
+  const ReviewService = require('../services/review-request');
+  if (err?.providerOutcome?.sent !== true) {
+    await ReviewService.releaseInlineClaim(requestId, claimToken);
+    return;
+  }
+  await ReviewService.markInlineDelivered(requestId, claimToken);
+  if (!emailRequested) return;
+  const emailOutcome = await ReviewService.sendInlineEmailCopy(requestId);
+  err.message = `${err.message} The text was accepted; ${emailOutcome?.sent
+    ? 'the review email was sent too.'
+    : `the review email was not sent (${emailOutcome?.reason || 'unknown'}).`}`;
+}
+
+async function emailReviewAskNow(primaryId) {
+  const ReviewService = require('../services/review-request');
+  // A Both ask whose text went out but whose email leg failed: the text
+  // already started the cooldown, so a fresh ask would be refused — re-send
+  // the SAME row's email copy instead (idempotent per row; GH Codex #3856 r7 P2).
+  // Fail CLOSED on a lookup error: an unreadable owed-leg state is not
+  // "absent" — falling through would refuse a plain Both row on cooldown or
+  // mint a second ask beside a stranded one (GH Codex #3856 r11 P2).
+  let awaiting;
+  try {
+    awaiting = await ReviewService.findInlineAwaitingEmail(primaryId);
+  } catch (err) {
+    logger.warn(`[communications] owed review-email lookup failed (customerId=${primaryId}): ${err.message}`);
+    return { status: 409, body: { error: "Could not check this customer's pending review email — try again", outcome: 'error', reason: 'owed_lookup_failed' } };
+  }
+  if (awaiting?.id) {
+    const copy = await ReviewService.sendInlineEmailCopy(awaiting.id);
+    if (copy?.sent) {
+      const firstName = await emailContactFirstName(primaryId);
+      return { status: 200, body: { kind: 'review_request', channel: 'email', sent: true, requestId: awaiting.id, firstName, retriedInline: true } };
+    }
+    const error = EMAIL_LEG_REASONS[copy?.reason] || 'Review request email could not be sent';
+    return { status: 409, body: { error, outcome: 'blocked', reason: copy?.reason || null } };
+  }
+  const ask = await ReviewService.sendGatedAsk({ customerId: primaryId, channel: 'email', triggeredBy: 'admin', strictChannel: true });
+  if (ask.outcome === 'sent') {
+    const firstName = await emailContactFirstName(primaryId);
+    return { status: 200, body: { kind: 'review_request', channel: 'email', sent: true, requestId: ask.requestId, firstName } };
+  }
+  const outcomeReasons = {
+    already_reviewed: 'This customer is already marked as having left a review',
+    no_customer: 'That customer could not be found',
+    archived: 'That customer is archived',
+    concurrent: 'A review request to this customer is already being sent — try again in a moment',
+    blocked: 'No review email for this customer — no email on file, or review emails are turned off in their notification preferences',
+    deferred: 'A review request to this customer is already queued and will send automatically.',
+  };
+  const { REVIEW_GATE_REASONS } = require('../services/composer-customer-links');
+  const error = REVIEW_GATE_REASONS[ask.outcome]
+    || (ask.outcome === 'blocked' && EMAIL_LEG_REASONS[ask.reason])
+    || outcomeReasons[ask.outcome]
+    || 'Review request email could not be sent';
+  return { status: ask.outcome === 'no_customer' ? 404 : 409, body: { error, outcome: ask.outcome } };
+}
+
+const REVIEW_LINK_CHANNELS = ['sms', 'email', 'both'];
+// The channels on which the review ask is a SEND from /customer-link (the
+// owner must be unambiguous — resolveLinkOwner's emailSend).
+const EMAIL_SEND_CHANNELS = ['email', 'both'];
+
 // POST /api/admin/communications/customer-link  { phone, customerId?, kind }
 // The Insert Link sheet's other per-customer links — kind ∈ review_request |
 // pay_balance | estimate | referral | autopay_setup | appointment |
-// card_request | prep_guide | service_report | contract | statement. Same
+// card_request | prep_guide | service_report | contract | statement |
+// project_report. Same
 // fail-closed recipient contract as
 // /reschedule-link (requireAdmin, POST body, full last-10 phone, customerId
 // cross-checked then expanded to the account, cross-account 409). Builders
@@ -1939,7 +2198,10 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
 // deliver it; an abandoned draft never auto-texts, and a withdrawn draft
 // just forgets the row client-side (the pending row is SHARED across
 // composers via createInline reuse, so canceling it would break a sibling
-// operator's valid send — the next insert reuses it instead).
+// operator's valid send — the next insert reuses it instead). channel
+// 'email' sends the ask now instead (emailReviewAskNow); 'sms' and 'both'
+// mint the inline row as before — for 'both' the composer's send carries
+// reviewRequestEmail so the email goes out with the text.
 // The statement kind of /customer-link. A payer statement covers the
 // bill-to's whole book and goes to the PAYER's AP phone — which is normally
 // no customer's phone at all, so the builder resolves the payer from the
@@ -2059,6 +2321,8 @@ function composerLinkBuilders() {
     // Handled by statementLinkInsert before any customer resolution (the
     // key here only admits the kind).
     statement: null,
+    // A project report is the account's, like a service report.
+    project_report: (ids) => builders.buildProjectReportLink(ids),
   };
 }
 
@@ -2080,15 +2344,19 @@ const STRICT_OWNER_KINDS = ['autopay_setup', 'card_request', 'contract', 'prep_g
 // typed-in number sends as an unverified conversational lead, whose consent
 // read can miss the customer's notification_prefs entirely when the number
 // is formatted differently on file (GH Codex #3844 r4 P1).
-const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report'];
+const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report', 'project_report'];
 
 // The row a /customer-link kind targets: the operator-selected row first,
 // else the account row whose phone matches the number, else the first
 // sibling (sorted — the account expansion has no ORDER BY of its own).
 // Returns { primaryId } or { status, error }.
-async function resolveLinkOwner(kind, customerIds, customerId, last10) {
+// emailSend: the kind is not a text link but an email SEND to the resolved
+// row's own contact (a Quick Links review ask by Email / Both) — strict
+// like a prep page, whatever the kind: a number two siblings share must
+// never pick the row whose inbox receives it (GH Codex #3856 r21 P1).
+async function resolveLinkOwner(kind, customerIds, customerId, last10, { emailSend = false } = {}) {
   const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
-  const strictOwner = STRICT_OWNER_KINDS.includes(kind);
+  const strictOwner = STRICT_OWNER_KINDS.includes(kind) || emailSend;
   if (selectedId && !strictOwner) return { primaryId: selectedId };
   const phoneRows = await db('customers')
     .whereNull('deleted_at')
@@ -2113,46 +2381,59 @@ async function resolveLinkOwner(kind, customerIds, customerId, last10) {
 // the composer refuses to schedule or draft those kinds; /schedule-sms +
 // drafts re-fence. standalone: the line is a complete greeted message,
 // inserted as-is.
-const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'expiresAt', 'immediateOnly', 'standalone'];
+const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'projectReport', 'expiresAt', 'immediateOnly', 'standalone'];
 
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {
-    const kind = String(req.body?.kind || '');
+    const body = req.body || {};
+    const kind = String(body.kind || '');
     const builderByKind = composerLinkBuilders();
     if (!(kind in builderByKind)) {
       return res.status(400).json({ error: `kind must be one of ${Object.keys(builderByKind).join(', ')}` });
     }
 
-    const last10 = fullPhoneLast10(req.body?.phone);
+    const last10 = fullPhoneLast10(body.phone);
     if (!last10) {
       return res.status(400).json({ error: 'Enter a full 10-digit phone number first' });
     }
+    // Quick Links review channel (owner ruling 2026-09-03): sms | email | both.
+    const channel = kind === 'review_request' ? String(body.channel || 'sms') : undefined;
+    if (channel && !REVIEW_LINK_CHANNELS.includes(channel)) {
+      return res.status(400).json({ error: 'channel must be one of sms, email, both' });
+    }
     if (kind === 'statement') {
-      const { status, body } = await statementLinkInsert(require('../services/composer-customer-links'), last10, req.body?.customerId);
-      return res.status(status).json(body);
+      const answer = await statementLinkInsert(require('../services/composer-customer-links'), last10, body.customerId);
+      return res.status(answer.status).json(answer.body);
     }
 
-    const customerId = req.body?.customerId;
+    const { customerId } = body;
     const recipient = await resolveComposerRecipient(customerId, last10);
     if (recipient.error) return res.status(recipient.status).json({ error: recipient.error });
     const { customerIds } = recipient;
 
     const recipientFirstName = await firstNameForPhone(last10, customerIds);
-    const owner = await resolveLinkOwner(kind, customerIds, customerId, last10);
+    const owner = await resolveLinkOwner(kind, customerIds, customerId, last10, { emailSend: EMAIL_SEND_CHANNELS.includes(channel) });
     if (owner.error) return res.status(owner.status).json({ error: owner.error });
     const { primaryId } = owner;
 
-    const result = await builderByKind[kind](customerIds, primaryId);
+    // Email: a SEND, not a link build — nothing is inserted into the text.
+    if (channel === 'email') {
+      const answer = await emailReviewAskNow(primaryId);
+      return res.status(answer.status).json(answer.body);
+    }
+
+    const result = (await builderByKind[kind](customerIds, primaryId)) || {};
     // Auto Pay auto-secure: a consented saved card was enrolled instead of a
     // link being minted — a successful outcome with nothing to insert.
-    if (result?.autoSecured) {
+    if (result.autoSecured) {
       return res.json({ kind, url: null, line: '', autoSecured: true, firstName: recipientFirstName });
     }
-    if (!result?.url) {
-      return res.status(404).json({ error: result?.reason || 'Nothing to link for this customer' });
+    if (!result.url) {
+      return res.status(404).json({ error: result.reason || 'Nothing to link for this customer' });
     }
     res.json({
       kind,
+      channel,
       url: stripSmsLinkScheme(result.url),
       line: stripSmsLinkScheme(result.line),
       firstName: recipientFirstName,
@@ -2456,6 +2737,79 @@ router.post('/rewrite-sms', async (req, res) => {
 // The /5min scheduled-sms cron in server/services/scheduler.js picks up rows
 // where status='scheduled' AND scheduled_for <= now() and dispatches them
 // through sendCustomerMessage (same path as the immediate /sms route).
+// A tokenized review page link (/rate/:token or its /api/rate/:token/go
+// short form), scheme-less or not — what buildReviewRequestLink inserts.
+const REVIEW_LINK_RE = /\/(?:api\/)?rate\/[A-Za-z0-9_-]{6,}/i;
+// Branded /l/:code short links — what buildReviewUrl normally hands out
+// (shortenOrPassthrough); resolved through short_codes.kind below.
+// {5,}: legacy five-character codes still resolve (short-url.js).
+// Case-insensitive like REVIEW_LINK_RE: Express routing is case-insensitive
+// and the public resolver lowercases the code, so /L/AbCdE resolves too
+// (GH Codex #3856 r15 P1).
+const SHORT_LINK_RE = /\/l\/([A-Za-z0-9_-]{5,})/gi;
+const REVIEW_LINK_SCHEDULE_ERROR = 'Review request links can only go on an immediate send — send now, or remove the review link before scheduling';
+
+// Links a scheduled text may NOT carry — every one is an immediate-send-only
+// bearer or ask, re-checked only on the /sms path (the scheduler dispatches
+// straight into sendCustomerMessage). The composer refuses client-side;
+// this is the authoritative fence. Returns { status, error } or null.
+async function scheduledSmsLinkRefusal(cleanBody, to) {
+  // An Auto Pay setup link is a 30-day bearer credential with no
+  // schedule-time re-check.
+  const { autopayLinkSendCheck, immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
+  const autopayCheck = await autopayLinkSendCheck(cleanBody, normalizePhoneLast10(to));
+  if (autopayCheck.present) {
+    return { status: 400, error: 'Auto Pay setup links expire — send them now, or remove the link before scheduling' };
+  }
+  // Same fence for the other per-row bearers the composer inserts
+  // (contract signing, card request, statement pay, expiring prep pages)
+  // (GH Codex #3844 r1 P1).
+  const immediateOnly = await immediateOnlyLinkSendCheck(cleanBody);
+  if (immediateOnly.present) {
+    return { status: 400, error: `${immediateOnly.label} links are re-checked at delivery — send them now, or remove the link before scheduling` };
+  }
+  // A review ask rides the immediate /sms send only — that path claims and
+  // marks the inline row and emails the Both copy; a scheduled row would
+  // deliver it untracked (invisible to the cap and cooldown) and never
+  // email (GH Codex #3856 r4 P1).
+  if (REVIEW_LINK_RE.test(cleanBody)) return { status: 400, error: REVIEW_LINK_SCHEDULE_ERROR };
+  // A pasted branded short link hides the /rate/ path — ask short_codes
+  // what it points at (GH Codex #3856 r5 P1). Fail closed on a lookup miss.
+  // Lowercased like the public resolver (public-shortlinks.js): short_codes.code
+  // is case-sensitive, and a pasted /l/AbCdE still resolves for the customer
+  // (GH Codex #3856 r12 P1).
+  const shortCodes = [...cleanBody.matchAll(SHORT_LINK_RE)].map((m) => m[1].toLowerCase());
+  if (!shortCodes.length) return null;
+  let reviewCodes;
+  try {
+    reviewCodes = await db('short_codes').whereIn('code', shortCodes).where({ kind: 'review' }).select('code');
+  } catch (lookupErr) {
+    logger.warn(`[communications] short-link kind lookup failed — refusing to schedule: ${lookupErr.message}`);
+    return { status: 503, error: 'Could not verify the links in this message — try again in a moment.' };
+  }
+  return reviewCodes.length ? { status: 400, error: REVIEW_LINK_SCHEDULE_ERROR } : null;
+}
+
+// The customer a scheduled text is linked to: the selected one, whose phone
+// must match `to`; else a digit-normalized, deleted-filtered, ambiguity-aware
+// lookup (a raw exact-string phone match misses formatting variants and can
+// link the scheduled SMS to a soft-deleted or arbitrary duplicate customer).
+// Returns { customerId } or { status, error }.
+async function trustedCustomerForScheduledSms(customerId, to) {
+  if (!customerId) {
+    const fallback = await findSingleCustomerForPhone(to).catch(() => null);
+    return { customerId: fallback ? fallback.id : null };
+  }
+  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');
+  if (!customer) return { status: 404, error: 'customerId not found' };
+  const normalizedTo = normalizePhone(to);
+  const normalizedCustomerPhone = normalizePhone(customer.phone);
+  if (!normalizedTo || !normalizedCustomerPhone || normalizedTo !== normalizedCustomerPhone) {
+    return { status: 400, error: 'to must match the selected customer phone' };
+  }
+  return { customerId: customer.id };
+}
+
 router.post('/schedule-sms', async (req, res, next) => {
   try {
     const { to, body, scheduledFor, customerId, fromNumber, from, messageType, agentDecisionId, agentDraft } = req.body || {};
@@ -2466,27 +2820,8 @@ router.post('/schedule-sms', async (req, res, next) => {
     if (messageType && BLOCKED_SCHEDULED_PURPOSES.has(purposeForScheduledMessageType(messageType))) {
       return res.status(400).json({ error: 'marketing/retention sends are not allowed on this endpoint' });
     }
-    // An Auto Pay setup link is a 30-day bearer credential with no
-    // schedule-time re-check — immediate sends only (the composer refuses
-    // client-side; this is the authoritative fence).
-    {
-      const { autopayLinkSendCheck } = require('../services/composer-customer-links');
-      const autopayCheck = await autopayLinkSendCheck(cleanBody, normalizePhoneLast10(to));
-      if (autopayCheck.present) {
-        return res.status(400).json({ error: 'Auto Pay setup links expire — send them now, or remove the link before scheduling' });
-      }
-      // Same fence for the other per-row bearers the composer inserts
-      // (contract signing, card request, statement pay, expiring prep
-      // pages): only the immediate /sms path re-checks them at delivery —
-      // the scheduler dispatches straight into sendCustomerMessage (GH
-      // Codex #3844 r1 P1). The client refusal is transient state; this is
-      // the authoritative one.
-      const { immediateOnlyLinkSendCheck } = require('../services/composer-customer-links');
-      const immediateOnly = await immediateOnlyLinkSendCheck(cleanBody);
-      if (immediateOnly.present) {
-        return res.status(400).json({ error: `${immediateOnly.label} links are re-checked at delivery — send them now, or remove the link before scheduling` });
-      }
-    }
+    const linkRefusal = await scheduledSmsLinkRefusal(cleanBody, to);
+    if (linkRefusal) return res.status(linkRefusal.status).json({ error: linkRefusal.error });
 
     // ET wall-clock parse — datetime-local strings without offset are
     // interpreted in ET, ISO strings pass through unchanged.
@@ -2499,23 +2834,9 @@ router.post('/schedule-sms', async (req, res, next) => {
       return res.status(400).json({ error: 'fromNumber must be a Waves Twilio number' });
     }
 
-    let trustedCustomerId = null;
-    if (customerId) {
-      const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');
-      if (!customer) return res.status(404).json({ error: 'customerId not found' });
-      const normalizedTo = normalizePhone(to);
-      const normalizedCustomerPhone = normalizePhone(customer.phone);
-      if (!normalizedTo || !normalizedCustomerPhone || normalizedTo !== normalizedCustomerPhone) {
-        return res.status(400).json({ error: 'to must match the selected customer phone' });
-      }
-      trustedCustomerId = customer.id;
-    } else {
-      // Digit-normalized, deleted-filtered, ambiguity-aware lookup — a raw
-      // exact-string phone match misses formatting variants and can link the
-      // scheduled SMS to a soft-deleted or arbitrary duplicate customer.
-      const fallback = await findSingleCustomerForPhone(to).catch(() => null);
-      if (fallback) trustedCustomerId = fallback.id;
-    }
+    const trusted = await trustedCustomerForScheduledSms(customerId, to);
+    if (trusted.error) return res.status(trusted.status).json({ error: trusted.error });
+    const trustedCustomerId = trusted.customerId;
 
     // An Agent Review draft can be scheduled instead of sent now. Carry the
     // verified decision id on the scheduled row so the 5-min dispatch cron

@@ -15,6 +15,9 @@ jest.mock('../services/customer-contact', () => ({
   getServiceContactSmsRecipient: jest.fn(),
   firstNameFrom: jest.requireActual('../services/customer-contact').firstNameFrom,
 }));
+jest.mock('../services/email-template-library', () => ({
+  sendTemplate: jest.fn(),
+}));
 jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn((url) => Promise.resolve(url)),
   existingShortUrlFor: jest.fn().mockResolvedValue(null),
@@ -42,8 +45,11 @@ function chain(overrides = {}) {
   return {
     where: jest.fn(function () { return this; }),
     whereIn: jest.fn(function () { return this; }),
+    whereNotIn: jest.fn(function () { return this; }),
     whereNull: jest.fn(function () { return this; }),
     whereNotNull: jest.fn(function () { return this; }),
+    whereRaw: jest.fn(function () { return this; }),
+    orderByRaw: jest.fn(function () { return this; }),
     whereNotExists: jest.fn(function () { return this; }),
     whereExists: jest.fn(function () { return this; }),
     leftJoin: jest.fn(function () { return this; }),
@@ -581,7 +587,11 @@ describe('review request follow-up flow', () => {
     expect(await ReviewService.claimInlineForSend('rr-inline')).toBeInstanceOf(Date);
     expect(updateQuery.where).toHaveBeenCalledWith({ id: 'rr-inline', triggered_by: 'auto_inline', status: 'pending' });
     expect(updateQuery.whereNull).toHaveBeenCalledWith('sms_sent_at');
-    expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sending' }));
+    // A Text-only claim clears the owed email leg; a Both claim stamps it
+    // (the Quick Links retry path's evidence the ask asked for an email).
+    expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sending', email_leg_owed_at: null }));
+    expect(await ReviewService.claimInlineForSend('rr-inline', { emailRequested: true })).toBeInstanceOf(Date);
+    expect(updateQuery.update).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'sending', email_leg_owed_at: expect.any(Date) }));
 
     // A colleague's fresh (non-stale) claim already holds the row — the
     // conditional UPDATE matches nothing, the stale lookup finds nothing,
@@ -691,6 +701,400 @@ describe('review request follow-up flow', () => {
 
     prefsQuery.first.mockRejectedValueOnce(new Error('db down'));
     expect(await ReviewService.reviewSmsAllowedNow('cust-1')).toEqual({ allowed: false, reason: 'prefs_unavailable' });
+  });
+
+  // Quick Links "Both": the emailed copy of an inline ask (owner ruling 2026-09-03).
+  describe('findInlineAwaitingEmail', () => {
+    test('finds the latest texted Both row whose email leg is still owed, inside the cooldown window', async () => {
+      const q = chain({ first: jest.fn().mockResolvedValue({ id: 'rr-texted', status: 'sent', sms_sent_at: new Date() }) });
+      db.mockImplementation((table) => {
+        if (table === 'review_requests') return q;
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+
+      expect(await ReviewService.findInlineAwaitingEmail('cust-1')).toEqual({ id: 'rr-texted' });
+      expect(q.where).toHaveBeenCalledWith({ customer_id: 'cust-1', triggered_by: 'auto_inline' });
+      // Texted rows in ANY later lifecycle status (opened / rated …) plus
+      // stranded 'sending' claims (r16 P2) — no status list.
+      expect(q.where).toHaveBeenCalledWith(expect.any(Function));
+      // …but never a row the customer already answered / that was stopped (r17 P2).
+      expect(q.whereNotIn).toHaveBeenCalledWith('status', ['completed', 'stopped', 'suppressed', 'failed', 'rated']);
+      expect(q.whereNull).toHaveBeenCalledWith('submitted_at');
+      expect(q.whereNull).toHaveBeenCalledWith('rated_at');
+      expect(q.whereNull).toHaveBeenCalledWith('redirected_at');
+      // …nor a non-promoter draft score (score set, category not promoter) — r19 P2.
+      const draftPredicate = q.where.mock.calls.map(([a]) => a).filter((a) => typeof a === 'function').pop();
+      const qb = { whereNull: jest.fn(() => qb), orWhere: jest.fn(() => qb), whereNotNull: jest.fn(() => qb) };
+      draftPredicate(qb);
+      expect(qb.whereNull).toHaveBeenCalledWith('score');
+      expect(qb.orWhere).toHaveBeenCalledWith({ category: 'promoter' });
+      expect(q.whereNull).toHaveBeenCalledWith('sent_at');
+      // Only asks that requested an email leg (and still owe it) match —
+      // never a Text-only or completion-SMS ask (GH Codex #3856 r8 P1).
+      expect(q.whereNotNull).toHaveBeenCalledWith('email_leg_owed_at');
+      expect(q.where).toHaveBeenCalledWith('email_leg_owed_at', '>=', expect.any(Date));
+      expect(q.orderBy).toHaveBeenCalledWith('email_leg_owed_at', 'desc');
+      expect(q.update).not.toHaveBeenCalled();
+      expect(await ReviewService.findInlineAwaitingEmail(null)).toBeNull();
+    });
+
+    test('a stranded claim (text left, delivered stamp lost) is repaired from evidence and offered; no evidence = not this row (r10 P2)', async () => {
+      const stranded = { id: 'rr-stranded', status: 'sending', token: 'tok-64chars', customer_id: 'cust-1', claimed_at: new Date(), sms_sent_at: null };
+      const rrQuery = chain({ first: jest.fn().mockResolvedValue(stranded) });
+      const smsLogQuery = chain({ whereNotIn: jest.fn(function () { return this; }) });
+      smsLogQuery.first.mockResolvedValueOnce({ id: 'sms-1' }); // the ask already left
+      db.mockImplementation((table) => {
+        if (table === 'review_requests') return rrQuery;
+        if (table === 'sms_log') return smsLogQuery;
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+      expect(await ReviewService.findInlineAwaitingEmail('cust-1')).toEqual({ id: 'rr-stranded' });
+      expect(rrQuery.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent', sms_sent_at: expect.any(Date) }));
+
+      // No local row and the provider positively has nothing → not this row.
+      rrQuery.update.mockClear();
+      smsLogQuery.first.mockResolvedValue(undefined);
+      const customersQuery = chain({ first: jest.fn().mockResolvedValue({ phone: '+19415550123' }) });
+      db.mockImplementation((table) => {
+        if (table === 'review_requests') return rrQuery;
+        if (table === 'sms_log') return smsLogQuery;
+        if (table === 'customers') return customersQuery;
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+      require('../services/twilio').findOutboundMessageSince.mockResolvedValueOnce({ found: false });
+      expect(await ReviewService.findInlineAwaitingEmail('cust-1')).toBeNull();
+      expect(rrQuery.update).not.toHaveBeenCalled();
+
+      // Provider unreachable = unknown: throws so the route fails closed (r14 P2).
+      require('../services/twilio').findOutboundMessageSince.mockResolvedValueOnce({ unavailable: true });
+      await expect(ReviewService.findInlineAwaitingEmail('cust-1')).rejects.toThrow(/evidence unavailable/);
+      expect(rrQuery.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('sendInlineEmailCopy', () => {
+    const EmailLib = require('../services/email-template-library');
+    let rrUpdate;
+    const CLAIM_STAMP = expect.objectContaining({ email_leg_owed_at: null, channel: 'both', sent_at: expect.anything() });
+    const wire = ({ prefs, prefsThrow = false, email = 'megan@example.com', customerRow = {}, requestRow = {}, technicianName = null } = {}) => {
+      rrUpdate = jest.fn().mockResolvedValue(1);
+      // The claim's sent_at is COALESCE(sent_at, now) — a raw binding.
+      db.raw = (sql, bindings) => ({ sql, bindings });
+      getServiceContact.mockReturnValue({ email, name: 'Megan Example' });
+      db.mockImplementation((table) => {
+        if (table === 'review_requests') {
+          const q = chain({
+            first: jest.fn().mockResolvedValue({ id: 'rr-1', customer_id: 'cust-1', token: 'tok-1', status: 'sent', ...requestRow }),
+            update: rrUpdate,
+          });
+          // A real promise: the pre-dispatch owed clear is awaited directly,
+          // the sent stamp goes through .catch().
+          q.update = jest.fn((patch) => rrUpdate(patch));
+          return q;
+        }
+        if (table === 'customers') {
+          return chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Megan', city: 'Bradenton', ...customerRow }) });
+        }
+        if (table === 'technicians') {
+          // the by-id name lookup for a row that carries technician_id but no tech_name
+          return { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(technicianName ? { name: technicianName } : undefined) };
+        }
+        if (table === 'notification_prefs') {
+          if (prefsThrow) return chain({ first: jest.fn().mockRejectedValue(new Error('db down')) });
+          return chain({ first: jest.fn().mockResolvedValue(prefs) });
+        }
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+    };
+
+    test('the email names the technician createInline persisted on the row; else the row\'s technician_id; else a neutral label — never a hardcoded person (r30 P2, Field Team Phase 0)', async () => {
+      wire({ prefs: { review_request: true, email_enabled: true }, requestRow: { tech_name: 'Alex' } });
+      EmailLib.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-1' }); return { sent: true }; });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
+      expect(EmailLib.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ payload: expect.objectContaining({ tech_name: 'Alex' }) }));
+
+      // tech_name missing but the row points at a technician → their first name
+      EmailLib.sendTemplate.mockClear();
+      wire({ prefs: { review_request: true, email_enabled: true }, requestRow: { tech_name: null, technician_id: 'tech-9' }, technicianName: 'Jordan Reyes' });
+      EmailLib.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-2' }); return { sent: true }; });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
+      expect(EmailLib.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ payload: expect.objectContaining({ tech_name: 'Jordan' }) }));
+
+      // nothing on the row → neutral copy, and no technician lookup is attempted
+      EmailLib.sendTemplate.mockClear();
+      wire({ prefs: { review_request: true, email_enabled: true }, requestRow: { tech_name: null, technician_id: null } });
+      EmailLib.sendTemplate.mockImplementation(async (opts) => { await opts.onQueued({ id: 'em-3' }); return { sent: true }; });
+      const callsBefore = db.mock.calls.length;
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
+      expect(EmailLib.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({ payload: expect.objectContaining({ tech_name: 'Your technician' }) }));
+      expect(db.mock.calls.slice(callsBefore).map((c) => c[0])).not.toContain('technicians');
+    });
+
+    test('emails the SAME ask (same token) and stamps sent_at once — status untouched', async () => {
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      EmailLib.sendTemplate.mockImplementation(async (opts) => {
+        expect(await opts.onQueued({ id: 'em-1' })).toBe(true);
+        return { sent: true };
+      });
+
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: true });
+      // The owed leg is cleared durably BEFORE dispatch (r9 P2) — and the
+      // row texted AND emailed is recorded as channel 'both' + sent_at in
+      // that same write, so the outreach analytics count the email leg and
+      // the follow-up / cooldown clock can never be left on the text's date
+      // by a lost post-send stamp (r22 P2).
+      expect(rrUpdate).toHaveBeenNthCalledWith(1, CLAIM_STAMP);
+      const claimPatch = rrUpdate.mock.calls[0][0];
+      expect(claimPatch.sent_at).toEqual({ sql: 'COALESCE(sent_at, ?)', bindings: [expect.any(Date)] });
+      // The dispatch claim itself carries the terminal + customer predicates.
+      const rrQ = db.mock.results.map((r) => r.value).find((v) => v && v.whereExists && v.whereExists.mock.calls.length);
+      expect(rrQ.whereNotIn).toHaveBeenCalledWith('status', ['completed', 'stopped', 'suppressed', 'failed', 'rated']);
+      expect(rrQ.whereNull).toHaveBeenCalledWith('submitted_at');
+      expect(rrQ.whereExists).toHaveBeenCalledWith(expect.any(Function));
+      // …and re-checks consent as of the write, the last fence before the
+      // provider (r23 P1): a prefs row for the customer with review_request
+      // and email_enabled not false — the recipient read's predicate.
+      const consent = rrQ.whereExists.mock.calls.map(([fn]) => fn).find((fn) => fn.name === 'emailConsent');
+      const sub = { select: jest.fn(() => sub), from: jest.fn(() => sub), whereRaw: jest.fn(() => sub) };
+      consent.call(sub);
+      expect(sub.from).toHaveBeenCalledWith('notification_prefs');
+      expect(sub.whereRaw.mock.calls.map(([sql]) => sql)).toEqual([
+        'notification_prefs.customer_id = review_requests.customer_id',
+        'COALESCE(notification_prefs.review_request, true) = true',
+        'COALESCE(notification_prefs.email_enabled, true) = true',
+      ]);
+      // The dispatch claim excludes a non-promoter draft score too (r19 P2).
+      const claimDraft = rrQ.where.mock.calls.map(([a]) => a).filter((a) => typeof a === 'function').pop();
+      const qb2 = { whereNull: jest.fn(() => qb2), orWhere: jest.fn(() => qb2) };
+      claimDraft(qb2);
+      expect(qb2.whereNull).toHaveBeenCalledWith('score');
+      expect(qb2.orWhere).toHaveBeenCalledWith({ category: 'promoter' });
+      const call = EmailLib.sendTemplate.mock.calls[0][0];
+      expect(call).toMatchObject({
+        templateKey: 'review_request_email',
+        to: 'megan@example.com',
+        recipientId: 'cust-1',
+        // Per attempt (r10 P2): a blocked attempt must not dedupe a corrected address.
+        idempotencyKey: expect.stringMatching(/^review_touch:rr-1:email:[0-9a-z]+$/),
+        suppressProviderErrorLog: true,
+      });
+      expect(call.payload.first_name).toBe('Megan');
+      expect(call.payload.review_url).toContain('tok-1');
+      // No second write: nothing after the provider call is left to lose.
+      expect(rrUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    test('a failed pre-dispatch owed clear aborts the provider call — retryable, leg still owed (r9 P2)', async () => {
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      rrUpdate.mockRejectedValueOnce(new Error('db down'));
+      EmailLib.sendTemplate.mockImplementation(async (opts) => {
+        const keep = await opts.onQueued({ id: 'em-1' });
+        if (keep === false) return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+        throw new Error('must not dispatch');
+      });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_send_failed' });
+      expect(rrUpdate).toHaveBeenCalledTimes(1);
+
+      // A sibling attempt already cleared the owed leg (conditional update hit
+      // no row): this attempt aborts before the provider — never two emails.
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      rrUpdate.mockResolvedValueOnce(0);
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_send_failed' });
+      expect(rrUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    test('a lost post-send write cannot strand a Both row on its text date: sent_at + channel are the pre-dispatch claim itself (r22 P2)', async () => {
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      // The only write fails on its first try → the dispatch is aborted, the
+      // leg stays owed; there is no separate stamp left to lose after a send.
+      rrUpdate.mockRejectedValueOnce(new Error('db down'));
+      EmailLib.sendTemplate.mockImplementation(async (opts) => {
+        const keep = await opts.onQueued({ id: 'em-1' });
+        if (keep === false) return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+        return { sent: true };
+      });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_send_failed' });
+      expect(rrUpdate).toHaveBeenCalledTimes(1);
+      expect(rrUpdate).toHaveBeenCalledWith(CLAIM_STAMP);
+    });
+
+    test('refuses when review or email notifications are off, or prefs cannot be read (fail closed)', async () => {
+      wire({ prefs: { review_request: false, email_enabled: true } });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_off' });
+      wire({ prefs: { review_request: true, email_enabled: false } });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_off' });
+      wire({ prefsThrow: true });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'prefs_unavailable' });
+      wire({ prefs: { review_request: true, email_enabled: true }, email: '' });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'no_email' });
+      // No prefs row = no recorded email consent (same as sendOutreachTouch's canEmail).
+      wire({ prefs: null });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_off' });
+      expect(EmailLib.sendTemplate).not.toHaveBeenCalled();
+    });
+
+    test('a blocked send reports the library reason and never throws', async () => {
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      EmailLib.sendTemplate.mockResolvedValue({ sent: false, reason: 'suppressed' });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'suppressed' });
+      // A throw BEFORE dispatch (onQueued never fired) reached no one: a
+      // plain, retryable failure — the owed leg stays.
+      EmailLib.sendTemplate.mockRejectedValue(new Error('boom'));
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_send_failed' });
+      expect(rrUpdate).not.toHaveBeenCalled();
+    });
+
+    test('a throw AFTER dispatch is uncertain: the owed leg is cleared so no retry re-sends it (r8 P2)', async () => {
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      EmailLib.sendTemplate.mockImplementation(async (opts) => {
+        await opts.onQueued({ id: 'em-1' });
+        throw new Error('post-dispatch bookkeeping failed');
+      });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_uncertain' });
+      // Cleared once, before dispatch — no second write after the throw. The
+      // provider may hold the email, so the claim's sent_at (the cooldown
+      // and follow-up anchor) stays: conservative.
+      expect(rrUpdate).toHaveBeenCalledTimes(1);
+      expect(rrUpdate).toHaveBeenCalledWith(CLAIM_STAMP);
+    });
+
+    test('_sendOutreachEmail (one-off): a post-dispatch throw is uncertain — counted as the ask, never "try again" (r9 P2)', async () => {
+      const rrUpdateOneOff = jest.fn().mockResolvedValue(1);
+      db.mockImplementation((table) => {
+        if (table === 'review_requests') return chain({ update: rrUpdateOneOff });
+        throw new Error(`Unexpected table query: ${table}`);
+      });
+      const args = { request: { id: 'rr-7' }, customer: { id: 'cust-1', first_name: 'Megan' }, contact: { email: 'megan@example.com', name: 'Megan' }, reviewUrl: 'https://x/rate/t', techName: 'Adam', manageRetryVia: null };
+
+      EmailLib.sendTemplate.mockImplementationOnce(async (opts) => {
+        await opts.onQueued({ id: 'em-7' });
+        throw new Error('post-dispatch bookkeeping failed');
+      });
+      expect(await ReviewService._sendOutreachEmail(args)).toEqual({ ok: false, terminal: true, channel: 'email', requestId: 'rr-7', reason: 'email_uncertain' });
+      expect(rrUpdateOneOff).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent', sent_at: expect.any(Date) }));
+
+      // A REAL send whose sent stamp is lost twice must not read as "sent":
+      // the row would be invisible to the gates (r12 P2). Once lost = fine.
+      rrUpdateOneOff.mockClear();
+      rrUpdateOneOff.mockRejectedValueOnce(new Error('db down')).mockRejectedValueOnce(new Error('db down'));
+      EmailLib.sendTemplate.mockResolvedValueOnce({ sent: true });
+      expect(await ReviewService._sendOutreachEmail(args)).toEqual({ ok: false, terminal: true, channel: 'email', requestId: 'rr-7', reason: 'email_sent_unrecorded' });
+      rrUpdateOneOff.mockClear();
+      rrUpdateOneOff.mockRejectedValueOnce(new Error('db blip'));
+      EmailLib.sendTemplate.mockResolvedValueOnce({ sent: true });
+      expect(await ReviewService._sendOutreachEmail(args)).toEqual({ ok: true, sent: true, channel: 'email', requestId: 'rr-7' });
+      // A sequence step keeps its retry contract even when the stamp is lost.
+      rrUpdateOneOff.mockRejectedValueOnce(new Error('db down')).mockRejectedValueOnce(new Error('db down'));
+      EmailLib.sendTemplate.mockResolvedValueOnce({ sent: true });
+      expect(await ReviewService._sendOutreachEmail({ ...args, manageRetryVia: 'sequence' })).toMatchObject({ ok: true, sent: true });
+
+      // Lost twice: no cooldown guard in the DB → the distinct reason tells
+      // the operator not to send again (r13 P2).
+      rrUpdateOneOff.mockClear();
+      rrUpdateOneOff.mockRejectedValueOnce(new Error('db down')).mockRejectedValueOnce(new Error('db down'));
+      EmailLib.sendTemplate.mockImplementationOnce(async (opts) => { await opts.onQueued({ id: 'em-10' }); throw new Error('post-dispatch'); });
+      expect(await ReviewService._sendOutreachEmail(args)).toMatchObject({ terminal: true, reason: 'email_uncertain_unrecorded' });
+
+      // The cooldown stamp is the duplicate guard: retried once (r11 P2).
+      rrUpdateOneOff.mockClear();
+      rrUpdateOneOff.mockRejectedValueOnce(new Error('db blip'));
+      EmailLib.sendTemplate.mockImplementationOnce(async (opts) => { await opts.onQueued({ id: 'em-9' }); throw new Error('post-dispatch'); });
+      expect(await ReviewService._sendOutreachEmail(args)).toMatchObject({ reason: 'email_uncertain' });
+      expect(rrUpdateOneOff).toHaveBeenCalledTimes(2);
+
+      // A definite 4xx after dispatch: failed, no cooldown stamp (r16 P2).
+      rrUpdateOneOff.mockClear();
+      EmailLib.sendTemplate.mockImplementationOnce(async (opts) => {
+        await opts.onQueued({ id: 'em-7b' });
+        const err = new Error('SendGrid 400');
+        err.status = 400;
+        throw err;
+      });
+      expect(await ReviewService._sendOutreachEmail(args)).toEqual({ ok: false, terminal: true, channel: 'email', requestId: 'rr-7', reason: 'email_send_failed' });
+      expect(rrUpdateOneOff).toHaveBeenCalledWith({ status: 'failed' });
+      expect(rrUpdateOneOff).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'sent' }));
+
+      // Pre-dispatch (no onQueued): nothing reached SendGrid — the plain failure.
+      rrUpdateOneOff.mockClear();
+      EmailLib.sendTemplate.mockRejectedValueOnce(new Error('template missing'));
+      expect(await ReviewService._sendOutreachEmail(args)).toEqual({ ok: false, terminal: true, channel: 'email', requestId: 'rr-7', reason: 'email_send_failed' });
+      expect(rrUpdateOneOff).toHaveBeenCalledWith({ status: 'failed' });
+
+      // A sequence step keeps its retry contract (step-stable idempotency key).
+      EmailLib.sendTemplate.mockImplementationOnce(async (opts) => {
+        await opts.onQueued({ id: 'em-8' });
+        throw new Error('post-dispatch bookkeeping failed');
+      });
+      expect(await ReviewService._sendOutreachEmail({ ...args, manageRetryVia: 'sequence' })).toEqual({ ok: false, retryable: true, channel: 'email', requestId: 'rr-7' });
+    });
+
+    test('a definite SendGrid 4xx after dispatch is a plain failure: the owed leg is handed back (r16 P2)', async () => {
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      EmailLib.sendTemplate.mockImplementation(async (opts) => {
+        await opts.onQueued({ id: 'em-1' });
+        const err = new Error('SendGrid 400: bad address');
+        err.status = 400;
+        throw err;
+      });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_send_failed' });
+      // Cleared pre-dispatch, restored on the definite rejection — with the
+      // claim's analytics stamp reverted: no email went out, so the row is
+      // texted-only again (the mock row carries no channel → 'sms').
+      expect(rrUpdate).toHaveBeenNthCalledWith(1, CLAIM_STAMP);
+      expect(rrUpdate).toHaveBeenNthCalledWith(2, { email_leg_owed_at: expect.any(Date), channel: 'sms', sent_at: null });
+      // Restore lost twice → this row cannot be retried from here (r17 P2).
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      rrUpdate.mockResolvedValueOnce(1).mockRejectedValueOnce(new Error('db down')).mockRejectedValueOnce(new Error('db down'));
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_retry_lost' });
+      // A 408 (timeout-style — the provider may have processed the POST)
+      // stays uncertain like a 5xx; only conclusive 4xx codes are definite.
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      EmailLib.sendTemplate.mockImplementation(async (opts) => {
+        await opts.onQueued({ id: 'em-1' });
+        const err = new Error('SendGrid 408');
+        err.status = 408;
+        throw err;
+      });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_uncertain' });
+      // A 5xx stays uncertain.
+      wire({ prefs: { review_request: true, email_enabled: true } });
+      EmailLib.sendTemplate.mockImplementation(async (opts) => {
+        await opts.onQueued({ id: 'em-1' });
+        const err = new Error('SendGrid 503');
+        err.status = 503;
+        throw err;
+      });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'email_uncertain' });
+      expect(rrUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    test('re-checks the live customer: already reviewed or removed refuses before any send (r8 P2)', async () => {
+      wire({ prefs: { review_request: true, email_enabled: true }, customerRow: { has_left_google_review: true } });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'already_reviewed' });
+      wire({ prefs: { review_request: true, email_enabled: true }, customerRow: { deleted_at: new Date() } });
+      expect(await ReviewService.sendInlineEmailCopy('rr-1')).toEqual({ sent: false, reason: 'no_customer' });
+      expect(EmailLib.sendTemplate).not.toHaveBeenCalled();
+    });
+  });
+
+  test('sendOutreachTouch strictChannel: an unavailable chosen channel refuses instead of swapping', async () => {
+    const insert = jest.fn();
+    getServiceContact.mockReturnValue({ email: '', name: 'Megan' });
+    getServiceContactSmsRecipient.mockReturnValue({ phone: '+19415550101', name: 'Megan' });
+    db.mockImplementation((table) => {
+      if (table === 'notification_prefs') {
+        return chain({ first: jest.fn().mockResolvedValue({ review_request: true, sms_enabled: true, email_enabled: true }) });
+      }
+      if (table === 'review_requests') return { ...chain({ first: jest.fn().mockResolvedValue(null) }), insert };
+      return chain({ first: jest.fn().mockResolvedValue(null) });
+    });
+    const customer = { id: 'cust-1', first_name: 'Megan', city: 'Bradenton' };
+
+    // Email chosen, no email on file: strict = refused, no text goes out.
+    const strict = await ReviewService.sendOutreachTouch({ customer, channel: 'email', strictChannel: true });
+    expect(strict).toMatchObject({ ok: false, reason: 'no_contact', terminal: true });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
   });
 
   test('composer mint refuses an email-only review preference', async () => {

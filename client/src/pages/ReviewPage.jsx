@@ -9,7 +9,7 @@ import { useGlassSurface } from '../glass/glass-engine';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 export default function ReviewPage() {
   const { token } = useParams();
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -110,7 +110,7 @@ export default function ReviewPage() {
           color: COLORS.white, letterSpacing: '0.04em', lineHeight: 1, margin: 0,
           textShadow: '0 2px 8px rgba(0,0,0,0.2)',
         }}>WAVES</h1>
-        <div style={{ position: 'relative', zIndex: 1, fontSize: 10, color: 'rgba(255,255,255,0.6)', letterSpacing: 2, textTransform: 'uppercase', marginTop: 2 }}>Pest Control</div>
+        <div style={{ position: 'relative', zIndex: 1, fontSize: 14, color: 'rgba(255,255,255,0.6)', letterSpacing: 2, textTransform: 'uppercase', marginTop: 2 }}>Pest Control</div>
       </div>
 
       <div style={{ maxWidth: 440, margin: '0 auto', padding: '0 20px 60px' }}>
@@ -125,7 +125,7 @@ export default function ReviewPage() {
             border: `3px solid ${COLORS.white}`, boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
           }}>
             {!techPhoto && (
-              <span style={{ color: COLORS.white, fontSize: 28, fontFamily: FONTS.heading, fontWeight: 800 }}>
+              <span style={{ color: COLORS.white, fontSize: 28, fontFamily: FONTS.heading, fontWeight: 700 }}>
                 {(techName || 'W').charAt(0)}
               </span>
             )}
@@ -182,7 +182,7 @@ export default function ReviewPage() {
               })}
             </div>
 
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: COLORS.textCaption, marginTop: 10, maxWidth: 320, margin: '10px auto 0' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, color: COLORS.textCaption, marginTop: 10, maxWidth: 320, margin: '10px auto 0' }}>
               <span>Not great</span><span>Amazing!</span>
             </div>
           </div>

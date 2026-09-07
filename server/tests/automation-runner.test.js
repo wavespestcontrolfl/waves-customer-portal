@@ -8,6 +8,12 @@ jest.mock('../services/logger', () => ({
   warn: jest.fn(),
   error: jest.fn(),
 }));
+// The per-customer prep-send lock a customer-linked step runs under:
+// pass-through by default; a test flips it to "lease held elsewhere".
+jest.mock('../utils/cron-lock', () => ({
+  runExclusive: jest.fn(async (_name, fn) => fn()),
+  wasLockSkipped: jest.requireActual('../utils/cron-lock').wasLockSkipped,
+}));
 
 const {
   renderAutomationStepContent,
@@ -250,21 +256,22 @@ describe('automation runner prep sequence delivery stamp', () => {
     db.fn = { now: jest.fn(() => 'NOW()') };
   });
 
-  function queuesForSend({ templateKey, stampChain }) {
+  const ENROLLMENT = (templateKey) => ({
+    id: 'enrollment-1',
+    status: 'active',
+    template_key: templateKey,
+    customer_id: 'cust-1',
+    current_step: 0,
+    email: 'megan@example.com',
+    first_name: 'Megan',
+    last_name: 'Example',
+  });
+
+  function queuesForSend({ templateKey, stampChain, lockedRow }) {
     const queues = {
       automation_enrollments: [
-        chain({
-          first: {
-            id: 'enrollment-1',
-            status: 'active',
-            template_key: templateKey,
-            customer_id: 'cust-1',
-            current_step: 0,
-            email: 'megan@example.com',
-            first_name: 'Megan',
-            last_name: 'Example',
-          },
-        }),
+        chain({ first: ENROLLMENT(templateKey) }), // the pre-lock read
+        chain({ first: lockedRow === undefined ? ENROLLMENT(templateKey) : lockedRow }), // the re-read under the lock
         chain({}),
       ],
       automation_templates: [
@@ -303,6 +310,58 @@ describe('automation runner prep sequence delivery stamp', () => {
     expect(result.sent).toBe(true);
     expect(stampChain.where).toHaveBeenCalledWith({ customer_id: 'cust-1', prep_template_key: 'prep.flea' });
     expect(stampChain.update).toHaveBeenCalledWith({ prep_sent_at: 'NOW()' });
+  });
+
+  test('a customer-linked step runs under the customer\'s prep-send lock and re-reads the row inside it; a held lease skips this tick (pre-push Codex P1 on 2256101b7)', async () => {
+    const { runExclusive } = require('../utils/cron-lock');
+    setDbQueues(queuesForSend({ templateKey: 'flea', stampChain: chain({}) }));
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-1' });
+    expect((await sendStep('enrollment-1')).sent).toBe(true);
+    expect(runExclusive).toHaveBeenCalledWith('prep-send:cust-1', expect.any(Function), { recordHealth: false, waitForSlot: false });
+    // Both reads happened: the second is the one the send trusts.
+    expect(db).toHaveBeenCalledWith('automation_enrollments');
+    expect(db.mock.calls.filter(([t]) => t === 'automation_enrollments').length).toBeGreaterThanOrEqual(2);
+
+    // Lease held (a manual / composer prep delivery is settling this
+    // customer): nothing is sent, the row stays due for the next tick.
+    runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
+    sendgrid.sendOne.mockClear();
+    setDbQueues(queuesForSend({ templateKey: 'flea' }));
+    expect(await sendStep('enrollment-1')).toEqual({ sent: false, skipped: true, reason: 'lease_held' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+
+    // The re-read finds the row already settled — advanced onto its
+    // follow-up step with next_send_at days out: the follow-up is NOT sent
+    // now (the tick picked the row when step 0 was due), and nothing is
+    // written.
+    sendgrid.sendOne.mockClear();
+    const settled = { ...ENROLLMENT('flea'), current_step: 1, next_send_at: new Date(Date.now() + 72 * 3600 * 1000) };
+    const q = queuesForSend({ templateKey: 'flea', lockedRow: settled });
+    q.automation_steps = [chain({ result: [
+      { id: 'step-1', step_order: 0, enabled: true, subject: 'Prep', html_body: '<p>a</p>', text_body: 'a', from_email: 'automations@wavespestcontrol.com' },
+      { id: 'step-2', step_order: 1, delay_hours: 72, enabled: true, subject: 'Follow-up', html_body: '<p>b</p>', text_body: 'b', from_email: 'automations@wavespestcontrol.com' },
+    ] })];
+    const [, , enrollmentWrite] = q.automation_enrollments;
+    const [sendInsert] = q.automation_step_sends;
+    setDbQueues(q);
+    expect(await sendStep('enrollment-1')).toEqual({ sent: false, skipped: true, reason: 'not_due' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(enrollmentWrite.update).not.toHaveBeenCalled();
+    expect(sendInsert.insert).not.toHaveBeenCalled();
+
+    // A test send keeps ignoring the schedule.
+    setDbQueues(queuesForSend({ templateKey: 'flea', lockedRow: { ...ENROLLMENT('flea'), next_send_at: new Date(Date.now() + 72 * 3600 * 1000) } }));
+    sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-t' });
+    expect((await sendStep('enrollment-1', { testRecipient: 'qa@wavespestcontrol.com' })).sent).toBe(true);
+  });
+
+  test('a failed send marks the enrolment failed only on the step this attempt was for', async () => {
+    setDbQueues(queuesForSend({ templateKey: 'cold_lead' }));
+    sendgrid.sendOne.mockRejectedValue(new Error('provider down'));
+    const out = await sendStep('enrollment-1');
+    expect(out.sent).toBe(false);
+    const failWrite = db.mock.results.map((r) => r.value).find((v) => v && v.update && v.update.mock.calls.some(([p]) => p && p.status === 'failed' && p.next_send_at === null));
+    expect(failWrite.where).toHaveBeenCalledWith({ id: 'enrollment-1', current_step: 0 });
   });
 
   test('non-prep sequences never touch the visit rows', async () => {
@@ -434,5 +493,40 @@ describe('automation runner scheduler tick', () => {
     // off in the Automations tab immediately holds its in-flight enrollments.
     expect(dueChain.join).toHaveBeenCalledWith('automation_templates as t', 't.key', 'e.template_key');
     expect(dueChain.where).toHaveBeenCalledWith('t.enabled', true);
+  });
+});
+
+describe('advanceEnrollment', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  test('loads the enabled steps when the caller has none, schedules the next step from its delay, and fences the write on the step it saw', async () => {
+    const { advanceEnrollment } = require('../services/automation-runner');
+    const update = chain();
+    setDbQueues({
+      automation_steps: [chain({ result: [
+        { id: 'step-1', step_order: 0, delay_hours: 0, enabled: true },
+        { id: 'step-2', step_order: 1, delay_hours: 72, enabled: true },
+      ] })],
+      automation_enrollments: [update],
+    });
+    const before = Date.now();
+    const out = await advanceEnrollment({ id: 'enr-1', template_key: 'flea', current_step: 0 });
+    expect(out).toMatchObject({ sent: true, done: false });
+    // A concurrent settler of the same step (the tick vs a manual /
+    // composer prep delivery) cannot advance it twice.
+    expect(update.where).toHaveBeenCalledWith({ id: 'enr-1', current_step: 0 });
+    const patch = update.update.mock.calls[0][0];
+    expect(patch.current_step).toBe(1);
+    expect(patch.next_send_at.getTime()).toBeGreaterThanOrEqual(before + 72 * 3600 * 1000);
+  });
+
+  test('completes the enrolment when no enabled step remains', async () => {
+    const { advanceEnrollment } = require('../services/automation-runner');
+    const update = chain();
+    setDbQueues({ automation_enrollments: [update] });
+    const out = await advanceEnrollment({ id: 'enr-1', template_key: 'flea', current_step: 0 }, [{ id: 'step-1', step_order: 0 }]);
+    expect(out).toMatchObject({ sent: true, done: true });
+    expect(update.where).toHaveBeenCalledWith({ id: 'enr-1', current_step: 0 });
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'completed', next_send_at: null, current_step: 1 }));
   });
 });

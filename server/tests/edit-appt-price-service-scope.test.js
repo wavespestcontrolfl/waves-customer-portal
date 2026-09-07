@@ -227,6 +227,17 @@ describe('stampRecurringTemplateOverrides', () => {
     return { conn, updates };
   }
 
+  it('preserves future address defaults when a price edit clears price provenance', async () => {
+    const address = { property_id: 'property-next', service_address_city: 'Test City', zone: null };
+    const { conn, updates } = stampScenario({ existing: {
+      appointment_address: address, anchored_split_per_visit: 25,
+    } });
+    await stampRecurringTemplateOverrides(conn, 'p1', { estimated_price: 30 }, COLS);
+    expect(JSON.parse(updates[0].recurring_template_overrides)).toEqual({
+      appointment_address: address, estimated_price: 30,
+    });
+  });
+
   it('merges new fields over existing overrides, allowlisted only', async () => {
     const { conn, updates } = stampScenario({ existing: { service_type: 'Pest Control Service' } });
     const stamped = await stampRecurringTemplateOverrides(conn, 'p1', {
@@ -500,8 +511,8 @@ describe('source-pattern guards — wiring that unit tests cannot drive', () => 
   });
 
   it('every extension writer overlays the template overrides over the parent row', () => {
-    // auto-extend, visit-count top-up, and the alert extend/convert loops all
-    // reassign their parent through the overlay before copying fields.
+    // Auto-extend, visit-count top-up, and alert actions all overlay their
+    // parent before copying fields into new appointments.
     const overlays = src.match(/parent = overlayRecurringTemplateOverrides\(parent, cols\);/g) || [];
     expect(overlays.length).toBeGreaterThanOrEqual(3);
   });

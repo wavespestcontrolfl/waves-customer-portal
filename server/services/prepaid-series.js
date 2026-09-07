@@ -24,12 +24,22 @@ function resolveSeriesParentId(service) {
 
 // Fetch every row in the recurring family (parent + children) ordered by
 // scheduled_date so the UI can show "visit 2 of 4" deterministically.
-async function fetchSeriesRows(db, parentId) {
-  return db('scheduled_services')
+// `lock: true` (inside a transaction) takes FOR UPDATE on the rows the stamp
+// will UPDATE — the non-terminal family only, filtered in SQL — so the
+// eligibility read and the stamps see one row state (stampSeriesPrepaid).
+// Terminal rows are deliberately NOT locked: the series cancel locks its
+// cancellable children first and touches the (possibly completed) parent
+// last for the recurring_ongoing clear; locking the whole family here in
+// date order would take that parent first and deadlock against it
+// (Codex #3878 r3 P2). Both paths now lock live rows in scheduled_date
+// order and nothing else.
+async function fetchSeriesRows(db, parentId, { lock = false } = {}) {
+  const q = db('scheduled_services')
     .where(function () {
       this.where('recurring_parent_id', parentId).orWhere('id', parentId);
     })
     .orderBy(['scheduled_date', 'window_start', 'id']);
+  return lock ? q.whereNotIn('status', [...TERMINAL_STATUSES]).forUpdate() : q;
 }
 
 // Round to cents so per-visit stamps reconcile to the series total without
@@ -68,20 +78,29 @@ async function stampSeriesPrepaid(db, {
     throw err;
   }
   const parentId = resolveSeriesParentId(anchor);
-  const family = await fetchSeriesRows(db, parentId);
-  const eligible = family.filter((row) => !TERMINAL_STATUSES.has(String(row.status || '').toLowerCase()));
-  if (!eligible.length) {
-    const err = new Error('No eligible visits in this series to mark prepaid');
-    err.status = 400;
-    throw err;
-  }
-  const slices = splitTotalAcrossVisits(Number(totalAmount), eligible.length);
   const now = new Date();
   const updatedRows = [];
+  let eligible = [];
+  let slices = [];
   const run = useExistingTransaction
     ? async (handler) => handler(db)
     : async (handler) => db.transaction(handler);
   await run(async (trx) => {
+    // Eligibility is decided INSIDE the transaction on locked rows: a
+    // series cancel (admin-dispatch, FOR UPDATE on the same rows) that
+    // commits first is seen here as terminal and never stamped; one that
+    // is still open blocks on these locks and then reads the stamps
+    // before it transitions (Codex #3878 r1 P1 / hook r2). A pre-read
+    // family filtered before the transaction let a stamp land on a visit
+    // cancelled in between — money allocated to a visit that never runs.
+    const family = await fetchSeriesRows(trx, parentId, { lock: true });
+    eligible = family.filter((row) => !TERMINAL_STATUSES.has(String(row.status || '').toLowerCase()));
+    if (!eligible.length) {
+      const err = new Error('No eligible visits in this series to mark prepaid');
+      err.status = 400;
+      throw err;
+    }
+    slices = splitTotalAcrossVisits(Number(totalAmount), eligible.length);
     for (let i = 0; i < eligible.length; i++) {
       const row = eligible[i];
       const amt = slices[i];

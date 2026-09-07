@@ -46,12 +46,15 @@ jest.mock('../services/content-astro/author-service', () => ({
 }));
 jest.mock('../services/content/image-generator', () => ({
   generate: jest.fn(),
+  planFor: jest.fn(() => ({ style: 'photo', setting: 'inside a residential garage', timeOfDay: 'late afternoon', vantage: 'eye level' })), retryStyleFor: jest.fn(() => 'illustration'), IMAGE_CHAIN_BUDGET_MS: 360000,
 }));
 jest.mock('../services/content/fact-check-gate', () => ({
   evaluate: jest.fn().mockResolvedValue({ pass: true, findings: [], checked: false }),
 }));
 jest.mock('../services/content/hero-alt-vision', () => ({
   describeHeroForAlt: jest.fn().mockResolvedValue(null),
+  // The text/logo screen: clean by default (fail-open shape).
+  screenGeneratedImage: jest.fn().mockResolvedValue({ ok: true, checked: true, readableText: [], logos: [], reasons: [] }),
 }));
 
 const db = require('../models/db');
@@ -1256,11 +1259,14 @@ describe('publishOrUpdatePage autonomous hero pipeline', () => {
 
     await AstroPublisher.publishOrUpdatePage(heroDraft(), { action_type: 'new_supporting_blog' });
 
-    // The vision pass sees the exact bytes we commit, plus the post context.
+    // The vision pass sees the exact bytes we commit, plus the post context,
+    // and runs inside what is left of the hero's slot deadline (Codex r9 P2 on #3964).
     expect(heroAltVision.describeHeroForAlt).toHaveBeenCalledWith(expect.objectContaining({
       buffer: gh.putBinary.mock.calls[0][0].buffer,
       title: 'Dollar Spot in Venice',
+      timeoutMs: expect.any(Number),
     }));
+    expect(heroAltVision.describeHeroForAlt.mock.calls[0][0].timeoutMs).toBeGreaterThan(0);
     const parsed = fmModule.parse(gh.putFile.mock.calls[0][0].content);
     expect(parsed.data.hero_image.alt).toBe('Brown patch rings spreading across a St. Augustine lawn');
   });
@@ -1592,7 +1598,15 @@ describe('Astro publisher hero image republish', () => {
     const queries = [read, update];
     db.mockImplementation(() => queries.shift() || chain());
 
+    const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
+    screenGeneratedImage.mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ORKIN'], logos: ['Orkin logo'], reasons: ['logo or brand mark: Orkin logo'] });
     await AstroPublisher.publishAstro('post-1');
+
+    // An admin-generated data: URL hero is screened again at publish time
+    // and the PR body carries the verdict in bold (Codex r5 P2 on #3964).
+    expect(screenGeneratedImage).toHaveBeenCalledWith(expect.objectContaining({ mimeType: 'image/png', buffer: expect.any(Buffer) }));
+    const prBody = gh.createPr.mock.calls.at(-1)[0].body;
+    expect(prBody).toContain('- hero: admin pre-generated (unplanned) — **screen flagged after retry: logo or brand mark: Orkin logo**');
 
     // The republish carries the fresh hero bytes in the single publish
     // commit — the tree write replaces the existing path unconditionally,
@@ -3791,8 +3805,111 @@ describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () =
     const without = AstroPublisher._internals.buildRefreshPrBody({ ...base, oldBody: 'a b', newBody: 'a b c' });
     expect(without).not.toContain('Backfilled schema-required fields');
   });
+
+  test('every PR body that commits generated images carries the "### Images" provenance, and a flagged screen is bold (Codex hook on the image lane)', () => {
+    const { buildPrBody, buildDraftPrBody, buildRefreshPrBody, buildMetadataPrBody } = AstroPublisher._internals;
+    const flagged = { model: 'gpt-image-2', plan: { style: 'cartoon', setting: 'inside a residential garage, tools on the wall', timeOfDay: 'dusk' }, screen: { checked: true, ok: false, reasons: ['logo or brand mark: Orkin'] } };
+    const clean = { model: 'gemini-image-pro', plan: { style: 'photo', setting: 'a pool cage', timeOfDay: 'noon' }, screen: { checked: true, ok: true, reasons: [] } };
+    const images = { hero: flagged, body: [clean] };
+    const admin = buildPrBody({ post: { category: 'lawn-care' }, slug: 'x', branch: 'b', content: 'a b', images });
+    const draft = buildDraftPrBody({ frontmatter: {}, slug: 'x', branch: 'b', content: 'a b', brief: {}, images });
+    const refresh = buildRefreshPrBody({ ...base, oldBody: 'a b', newBody: 'a b c', images: { hero: null, body: [flagged] } });
+    for (const body of [admin, draft, refresh]) {
+      expect(body).toContain('### Images');
+      expect(body).toContain('**screen flagged after retry: logo or brand mark: Orkin**');
+      expect(body).toContain('gpt-image-2 (cartoon, inside a residential garage, dusk)');
+    }
+    expect(admin).toContain('- body-1: gemini-image-pro (photo, a pool cage, noon) — screen clean');
+    // The label is the committed file name, not the list position: a draft that already carried body-1 gets its generated asset as body-2 (Codex r13 P2 on #3964).
+    const shifted = buildPrBody({ post: {}, slug: 'x', branch: 'b', content: 'a b', images: { hero: null, body: [{ ...clean, src: '/images/blog/x/body-2.webp' }] } });
+    expect(shifted).toContain('- body-2: gemini-image-pro');
+    expect(shifted).not.toContain('- body-1:');
+    // No images → no section; the metadata lane never commits images and takes no `images` at all.
+    expect(buildPrBody({ post: {}, slug: 'x', branch: 'b', content: 'a' })).not.toContain('### Images');
+    expect(buildRefreshPrBody({ ...base, oldBody: 'a', newBody: 'a b', images: { hero: null, body: [] } })).not.toContain('### Images');
+    expect(() => buildMetadataPrBody(base)).not.toThrow();
+    expect(buildMetadataPrBody(base)).not.toContain('### Images');
+  });
 });
 
+
+describe('generatePlannedImage — one deadline per slot, safer candidate when both screens fail (Codex r6 P2 on #3964)', () => {
+  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const args = { title: 'T', keyword: 'K', mode: 'blog-hero', slug: 'x/y', index: 0 };
+
+  test('the screen retry reuses the first call\'s deadline and, when both fail, the candidate without a logo ships with its warning', async () => {
+    const imageGenerator = require('../services/content/image-generator');
+    const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
+    imageGenerator.generate.mockReset().mockResolvedValue({ dataUrl: PNG, mimeType: 'image/png', model: 'gpt-image-2', attempts: [], alt: 'a' });
+    screenGeneratedImage
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ZONE 5'], logos: [], reasons: ['readable text: ZONE 5'], violations: 1 })
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ZONE 5'], logos: ['Orkin'], reasons: ['logo or brand mark: Orkin', 'readable text: ZONE 5'], violations: 2 });
+    const before = Date.now();
+    const out = await AstroPublisher.generatePlannedImage(args);
+    expect(imageGenerator.generate).toHaveBeenCalledTimes(2);
+    const [first, second] = imageGenerator.generate.mock.calls.map((c) => c[0].deadlineAt);
+    expect(first).toBe(second);
+    expect(first).toBeGreaterThanOrEqual(before + 360000);
+    // The screen is bounded by what is left of the same deadline (Codex r7 P2).
+    for (const call of screenGeneratedImage.mock.calls) {
+      expect(call[0].timeoutMs).toBeGreaterThan(0);
+      expect(call[0].timeoutMs).toBeLessThanOrEqual(360000);
+    }
+    expect(out.screen.logos).toEqual([]);
+    expect(out.screen.reasons).toEqual(['readable text: ZONE 5']);
+    // The slot deadline rides on the result so the caller's alt pass shares it (Codex r9 P2).
+    expect(out.deadlineAt).toBe(first);
+  });
+
+  test('with no logos on either side, the candidate with fewer screen violations ships (Codex r7 P2)', async () => {
+    const imageGenerator = require('../services/content/image-generator');
+    const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
+    imageGenerator.generate.mockReset().mockResolvedValue({ dataUrl: PNG, mimeType: 'image/png', model: 'gpt-image-2', attempts: [], alt: 'a' });
+    screenGeneratedImage
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ZONE 5', 'SET TIME', 'RUN'], logos: [], reasons: ['readable text: ZONE 5, SET TIME, RUN'], violations: 3 })
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['ON'], logos: [], reasons: ['readable text: ON'], violations: 1 });
+    const out = await AstroPublisher.generatePlannedImage(args);
+    expect(out.screen.readableText).toEqual(['ON']);
+  });
+
+  test('an infographic that rendered its caption plus one stray label beats a retry that dropped the caption — allowed text is not a defect (Codex r11 P2)', async () => {
+    const imageGenerator = require('../services/content/image-generator');
+    const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
+    imageGenerator.generate.mockReset().mockResolvedValue({ dataUrl: PNG, mimeType: 'image/png', model: 'gpt-image-2', attempts: [], alt: 'a' });
+    screenGeneratedImage
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['How to Stop Ants', 'ZONE 5'], logos: [], reasons: ['readable text: ZONE 5'], violations: 1 })
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: [], logos: [], reasons: ['missing caption: "How to Stop Ants"'], violations: 1 })
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: ['How to Stop Ants', 'ZONE 5'], logos: [], reasons: ['readable text: ZONE 5'], violations: 1 })
+      .mockResolvedValueOnce({ ok: false, checked: true, readableText: [], logos: [], reasons: ['missing caption: "How to Stop Ants"', 'readable text: ORKIN'], violations: 2 });
+    // Equal violations → the first candidate (stable sort), never the captionless one by string count.
+    let out = await AstroPublisher.generatePlannedImage({ ...args, captions: ['How to Stop Ants'] });
+    expect(out.screen.readableText).toEqual(['How to Stop Ants', 'ZONE 5']);
+    // More violations on the retry → the first candidate again.
+    out = await AstroPublisher.generatePlannedImage({ ...args, captions: ['How to Stop Ants'] });
+    expect(out.screen.readableText).toEqual(['How to Stop Ants', 'ZONE 5']);
+  });
+
+  test('a caller-supplied deadline is honoured by both generate calls (near-duplicate re-framing shares the slot budget — Codex r8 P2)', async () => {
+    const imageGenerator = require('../services/content/image-generator');
+    const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
+    imageGenerator.generate.mockReset().mockResolvedValue({ dataUrl: PNG, mimeType: 'image/png', model: 'gpt-image-2', attempts: [], alt: 'a' });
+    screenGeneratedImage.mockResolvedValueOnce({ ok: true, checked: true, readableText: [], logos: [], reasons: [] });
+    const deadlineAt = Date.now() + 1234;
+    await AstroPublisher.generatePlannedImage({ ...args, deadlineAt, avoidDepicting: ['irrigation repair scenes'] });
+    expect(imageGenerator.generate.mock.calls[0][0].deadlineAt).toBe(deadlineAt);
+    expect(screenGeneratedImage.mock.calls.at(-1)[0]).toMatchObject({ avoidDepicting: ['irrigation repair scenes'] });
+  });
+
+  test('a clean first image returns without a retry', async () => {
+    const imageGenerator = require('../services/content/image-generator');
+    const { screenGeneratedImage } = require('../services/content/hero-alt-vision');
+    imageGenerator.generate.mockReset().mockResolvedValue({ dataUrl: PNG, mimeType: 'image/png', model: 'gemini-image-pro', attempts: [], alt: 'a' });
+    screenGeneratedImage.mockResolvedValueOnce({ ok: true, checked: true, readableText: [], logos: [], reasons: [] });
+    const out = await AstroPublisher.generatePlannedImage(args);
+    expect(imageGenerator.generate).toHaveBeenCalledTimes(1);
+    expect(out).toMatchObject({ model: 'gemini-image-pro', screen: { ok: true } });
+  });
+});
 
 describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)', () => {
   const fmModule = require('../services/content-astro/frontmatter');
@@ -4897,6 +5014,8 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(isTransientImageError(err([{ provider: 'gpt-image-2', result: { fatal: true, status: 400 } }, { provider: 'gemini', result: { fatal: true, status: 429 } }]))).toBe(true);
     expect(isTransientImageError(err([{ provider: 'gemini', result: { fatal: true, status: 503 } }]))).toBe(true);
     expect(isTransientImageError(err([{ provider: 'gemini', result: { fatal: true, status: 400 } }, { provider: 'gpt-image-2', result: { fatal: true, status: 'no_b64_in_response' } }]))).toBe(false);
+    // A chain skipped for a spent slot budget (the near-duplicate re-framing after a slow first leg) is transient, not a park (Codex r10 P2 on #3964).
+    expect(isTransientImageError(err([{ provider: 'gpt-image-2', result: { skipped: true, retryable: true, reason: 'chain budget exhausted (360000 ms)' } }]))).toBe(true);
   });
 
   test('publishAstro republish with a COMMITTED hero (absolute hub URL): the hero enters the duplicate check from its relative src (hook P1)', async () => {

@@ -20,6 +20,7 @@ jest.mock('../services/auto-dispatch/audit', () => ({
   startRun: jest.fn(async () => 'run1'),
   logDecision: jest.fn(async () => {}),
   completeRun: jest.fn(async () => {}),
+  flagUnplacedVisits: jest.fn(async () => 0),
 }));
 
 const db = require('../models/db');
@@ -33,7 +34,7 @@ const { runAutoDispatch } = require('../services/auto-dispatch');
 function buildChain(result) {
   const chain = {};
   const methods = ['leftJoin', 'where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull',
-    'orWhere', 'orWhereNull', 'orWhereNotNull', 'select', 'orderBy', 'limit', 'first', 'returning', 'count'];
+    'orWhere', 'orWhereNull', 'orWhereNotNull', 'select', 'orderBy', 'orderByRaw', 'limit', 'first', 'returning', 'count'];
   methods.forEach((m) => { chain[m] = (...args) => { args.forEach((a) => { if (typeof a === 'function') a.call(chain); }); return chain; }; });
   chain.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
   return chain;
@@ -101,6 +102,7 @@ test('apply requested without the server gate is downgraded to a dry-run recomme
     const res = await runAutoDispatch({ mode: 'apply' });
     expect(res).toMatchObject({ changed: 0, recommended: 1 });
     expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+    expect(audit.flagUnplacedVisits).toHaveBeenCalledTimes(1);
   } finally {
     process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
   }
@@ -114,6 +116,7 @@ test('apply mode honors the per-run change cap and counts cap-held moves as reco
     const res = await runAutoDispatch({ mode: 'apply', maxChangesPerRun: 0 });
     expect(res).toMatchObject({ changed: 0, recommended: 1 });
     expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+    expect(audit.flagUnplacedVisits).toHaveBeenCalledTimes(1);
     expect(lastDecision('recommended').reason_code).toBe('MAX_CHANGES_REACHED');
   } finally {
     process.env.AUTO_DISPATCH_ALLOW_APPLY = prev;
@@ -337,4 +340,64 @@ test('idempotency: an already-moved visit needs a much larger gain to move again
   const moved = await runAutoDispatch({ mode: 'dry_run' });
   expect(moved.recommended).toBe(0);
   expect(lastDecision('no_change').reason_code).toBe('NO_SCORE_IMPROVEMENT');
+});
+
+
+test('an untimed due date is placed even when it offers no route improvement', async () => {
+  servicesResult = [svc({ window_start: null, window_end: null, recurring_dispatch_due_date: '2026-08-04' })];
+  candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT_GOOD, candidates: [CAND_SMALL] });
+  const res = await runAutoDispatch({ mode: 'dry_run', minScoreImprovement: 100 });
+  expect(res).toMatchObject({ recommended: 1, changed: 0 });
+  expect(audit.flagUnplacedVisits).toHaveBeenCalledTimes(1);
+});
+
+test('unplaced due dates get the run budget ahead of ordinary route improvements', async () => {
+  const previous = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+  process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+  try {
+    servicesResult = [svc({ id: 'ordinary' }), svc({ id: 'due', window_start: null, window_end: null, recurring_dispatch_due_date: '2026-08-04' })];
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (row) => row.id === 'due'
+      ? { current: CURRENT_GOOD, candidates: [CAND_SMALL] }
+      : { current: CURRENT, candidates: [CAND_BIG] });
+    await runAutoDispatch({ mode: 'apply', maxChangesPerRun: 1 });
+    expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
+    expect(apply.applyAutoDispatchMove.mock.calls[0][0].id).toBe('due');
+    expect(audit.flagUnplacedVisits).toHaveBeenCalledTimes(1);
+  } finally {
+    if (previous === undefined) delete process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    else process.env.AUTO_DISPATCH_ALLOW_APPLY = previous;
+  }
+});
+
+test('never heals a moved secondary property with primary-customer coordinates', async () => {
+  servicesResult = [svc({ service_address_line1: '200 Example Avenue', customer_address_line1: '100 Example Street' })];
+  eligibility.isEligibleForAutoDispatch.mockReturnValue({ eligible: false, reason_code: 'MISSING_GEO' });
+  const res = await runAutoDispatch({ mode: 'dry_run' });
+  expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
+  expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
+  expect(res).toMatchObject({ skipped: 1, evaluated: 0, geocode_attempts: 0 });
+});
+
+
+test.each([
+  ['2026-08-01', 'earlier-due'],
+  ['2026-08-04', 'higher-score'],
+])('capped due placement honors deadline %s before route score', async (earlierDue, expectedId) => {
+  const previous = process.env.AUTO_DISPATCH_ALLOW_APPLY;
+  process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+  try {
+    servicesResult = [
+      svc({ id: 'higher-score', window_start: null, window_end: null, recurring_dispatch_due_date: '2026-08-04' }),
+      svc({ id: 'earlier-due', window_start: null, window_end: null, recurring_dispatch_due_date: new Date(`${earlierDue}T00:00:00Z`) }),
+    ];
+    candidateSlots.findValidCandidateSlots.mockImplementation(async (row) => row.id === 'earlier-due'
+      ? { current: CURRENT_GOOD, candidates: [CAND_SMALL] }
+      : { current: CURRENT, candidates: [CAND_BIG] });
+    await runAutoDispatch({ mode: 'apply', maxChangesPerRun: 1 });
+    expect(apply.applyAutoDispatchMove).toHaveBeenCalledTimes(1);
+    expect(apply.applyAutoDispatchMove.mock.calls[0][0].id).toBe(expectedId);
+  } finally {
+    if (previous === undefined) delete process.env.AUTO_DISPATCH_ALLOW_APPLY;
+    else process.env.AUTO_DISPATCH_ALLOW_APPLY = previous;
+  }
 });

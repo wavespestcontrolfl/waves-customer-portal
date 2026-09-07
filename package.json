@@ -1,7 +1,7 @@
 {
   "name": "waves-customer-portal",
   "version": "1.0.0",
-  "description": "Customer portal for Waves Pest Control — Twilio SMS + Stripe Payments",
+  "description": "Customer portal for Waves Pest Control \u2014 Twilio SMS + Stripe Payments",
   "private": true,
   "workspaces": [
     "server",
@@ -10,8 +10,7 @@
     "video"
   ],
   "scripts": {
-    "predev": "npm run db:migrate",
-    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev": "node scripts/dev/run.js app",
     "dev:server": "cd server && npm run dev",
     "dev:client": "cd client && npm run dev",
     "prebuild": "npm run verify:blog-schema && npm run verify:affiliate-registry && npm run check:portal-brand && npm run check:domain-rules",
@@ -20,9 +19,9 @@
     "check:domain-rules": "node scripts/check-domain-rules.js",
     "prestart": "npm run verify:blog-schema && npm run verify:affiliate-registry",
     "start": "node server/index.js",
-    "db:migrate": "cd server && npx knex migrate:latest",
-    "db:rollback": "cd server && npx knex migrate:rollback",
-    "db:seed": "cd server && npx knex seed:run",
+    "db:migrate": "npx knex migrate:latest --knexfile server/knexfile.js",
+    "db:rollback": "npx knex migrate:rollback --knexfile server/knexfile.js",
+    "db:seed": "npx knex seed:run --knexfile server/knexfile.js",
     "test": "cd server && npm test",
     "test:contracts": "node server/contract-tests/index.js",
     "test:contracts:list": "node server/contract-tests/index.js --list",
@@ -55,7 +54,22 @@
     "audit:estimate-previews": "node scripts/audit-estimate-previews.js",
     "prepare": "git config core.hooksPath scripts/hooks 2>/dev/null || true",
     "hooks:install": "git config core.hooksPath scripts/hooks",
-    "lint:staged": "lint-staged"
+    "lint:staged": "lint-staged",
+    "dev:doctor": "node scripts/dev/doctor.js",
+    "dev:debug": "node scripts/dev/run.js debug",
+    "dev:managed-client": "node scripts/dev/run.js client",
+    "dev:migrate": "node scripts/dev/run.js migrate",
+    "worktree:create": "node scripts/dev/worktree.js create",
+    "worktree:setup": "node scripts/dev/worktree.js setup",
+    "worktree:status": "node scripts/dev/worktree.js status",
+    "worktree:stop": "node scripts/dev/worktree.js stop",
+    "test:dev-workflow": "node --test scripts/dev/tests/*.test.js",
+    "qa:previews": "node scripts/qa/previews.js",
+    "test:qa-workflow": "node --test scripts/qa/tests/*.test.js",
+    "qa:e2e": "node scripts/qa/e2e.js",
+    "qa:seed": "node scripts/qa/e2e.js --seed",
+    "qa:cleanup": "node scripts/qa/e2e.js --cleanup",
+    "qa:database": "node scripts/qa/database.js"
   },
   "lint-staged": {
     "*.{js,jsx,cjs,mjs}": "eslint --fix --cache --cache-location node_modules/.cache/eslint --no-warn-ignored"

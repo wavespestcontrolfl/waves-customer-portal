@@ -53,7 +53,7 @@ const PLACED_STATUSES = Object.freeze(['placed', 'live', 'indexed']);
 // on a submit-first path — the sender narrows it) is the owner's send from here, without any park (a contacted row
 // is never parked: its lifecycle is the conversation's)
 const CONTACTED = 'contacted';
-const CARD_STATUSES = Object.freeze([PARKED, CHECKOUT, CONTACTED, ...PLACED_STATUSES]);
+const CARD_STATUSES = Object.freeze([PARKABLE, PARKED, CHECKOUT, CONTACTED, 'negotiating', ...PLACED_STATUSES]);
 const isFollowUp = (row) => row.dimension === 'communication' && row.instance_kind === 'followup';
 const isOwner = (level) => typeof level === 'string' && level.startsWith('OWNER_');
 const noop = () => {};
@@ -83,11 +83,15 @@ function actionFor(row) {
 // listing and the locked click apply the same test: parked from prospect ⇒ every row; at the publisher's checkout ⇒
 // the deferred payment; placed / live / indexed ⇒ its payment instance (a renewal, or the initial fee of a paid outreach
 // placement the reconciliation promoted before the fee settled — plan §6.4). null = decided here.
-function whyNotHere(placement, row) {
+function whyNotHere(placement, row, path, execution) {
+  const { submitStepOwed } = require('./link-prospect-outreach');
   if (placement.status === PARKED) return placement.parked_from_status === PARKABLE ? null : `parked from ${placement.parked_from_status} — not the queue's to decide`;
   if (placement.status === CHECKOUT) return row.dimension === 'payment' ? null : 'the placement is at the publisher\'s checkout — only its payment is decided here';
+  // A sent initial pitch unlocks its deferred acquisition decision without parking the conversation.
+  if (['contacted', 'negotiating'].includes(placement.status) && placement.outreach_status === 'sent'
+    && row.dimension === 'execution' && row.instance_kind === '-') return null;
   if (placement.status === CONTACTED) return isFollowUp(row) ? null : 'the placement is contacted — only its follow-up is decided here';
-  if (PLACED_STATUSES.includes(placement.status)) return row.dimension === 'payment' || isFollowUp(row) ? null : `the placement is ${placement.status} — only its payment or follow-up is decided here`;
+  if (PLACED_STATUSES.includes(placement.status)) return row.dimension === 'payment' || isFollowUp(row) || (row.dimension === 'communication' && P.submitFirst(path || {}) && !submitStepOwed(path, execution)) ? null : `the placement is ${placement.status} — only its payment or follow-up is decided here`;
   return `the placement is ${placement.status} — not awaiting your decision`;
 }
 
@@ -220,18 +224,34 @@ const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v))
 // ---------------------------------------------------------------------------
 async function listOwnerQueue(db) {
   const { policy } = await P.loadPolicy(db);
-  const candidates = await db('seo_link_prospects').whereIn('status', [...CARD_STATUSES]).whereNotNull('domain_id')
-    .select('id', 'domain_id', 'path_id', 'target_page', 'location_key', 'link_type', 'payment_group_id', 'status', 'parked_from_status', 'outreach_status', 'outreach_to_email', 'outreach_subject', 'outreach_body', 'follow_up_status', 'follow_up_subject', 'follow_up_body', 'follow_up_skipped_reason', 'claimed_at', 'updated_at'); // follow_up_skipped_reason: followUpReview reads the owner-routing markers from it — the card must judge the SAME inputs as the bridge
+  const uncertain = await db('seo_link_attempts').where({ action: 'submit', outcome: 'submit_ambiguous' }).select('id', 'prospect_id', 'evidence_url', 'updated_at');
+  const candidates = await db('seo_link_prospects').where((q) => q.whereIn('status', [...CARD_STATUSES])
+    .orWhere((held) => held.whereIn('id', uncertain.map((a) => a.prospect_id)))).whereNotNull('domain_id')
+    .select('id', 'domain_id', 'path_id', 'target_page', 'live_url', 'location_key', 'link_type', 'payment_group_id', 'status', 'parked_from_status', 'outreach_status', 'outreach_draft_attempts', 'outreach_to_email', 'outreach_subject', 'outreach_body', 'follow_up_status', 'follow_up_subject', 'follow_up_body', 'follow_up_skipped_reason', 'claimed_at', 'updated_at', 'quality_signals'); // follow_up_skipped_reason: followUpReview reads the owner-routing markers from it — the card must judge the SAME inputs as the bridge
+  const uncertainById = new Map(await Promise.all(uncertain.map(async (a) => [a.prospect_id, { ...a, evidence_url: await require('./signup-evidence').getEvidenceUrl(a.evidence_url, { expiresIn: 900 }) }])));
   const liveRows = candidates.length ? await db(AUTH).whereIn('prospect_id', candidates.map((p) => p.id)).whereNull('ended_at') : [];
-  // a parked prospect is a card outright; a checkout / placed placement only while an OPEN owner-level row it decides
-  // here exists — otherwise every placed link would be a card with nothing to click
-  const parked = candidates.filter((p) => (p.status === PARKED ? p.parked_from_status === PARKABLE
-    : liveRows.some((r) => r.prospect_id === p.id && !r.satisfied_at && isOwner(r.level) && whyNotHere(p, r) === null)));
-  if (!parked.length) return { cards: [] };
-  const domains = await db('seo_link_domains').whereIn('id', [...new Set(parked.map((p) => p.domain_id))]).whereIn('agent_state', [...BRIDGE_STATES])
+  const executionById = new Map(liveRows.filter((r) => r.dimension === 'execution' && r.instance_kind === '-').map((r) => [r.prospect_id, r]));
+  const domains = await db('seo_link_domains').whereIn('id', [...new Set(candidates.map((p) => p.domain_id))])
     .select('id', 'domain', 'agent_state', 'score', 'score_reasons', 'spam_score', 'domain_rating', 'organic_traffic', 'referring_domains', 'competitors_linked', 'best_path_id', 'source', 'discovery_priority');
   const domainById = new Map(domains.map((d) => [d.id, d]));
-  const cardsFor = parked.filter((p) => domainById.has(p.domain_id));
+  const pathIds = [...new Set([...domains.map((d) => d.best_path_id), ...candidates.map((p) => p.path_id)].filter(Boolean))];
+  const paths = pathIds.length ? await db('seo_link_acquisition_paths').whereIn('id', pathIds) : [];
+  const pathById = new Map(paths.map((p) => [p.id, p]));
+  // a parked prospect is a card outright; a checkout / placed placement only while an OPEN owner-level row it decides
+  // here exists — otherwise every placed link would be a card with nothing to click
+  const { SENDABLE_STATUSES, lateSend, submitStepOwed } = require('./link-prospect-outreach');
+  const exhaustedDraft = (p) => p.path_id && domainById.get(p.domain_id)?.best_path_id === p.path_id
+    && (SENDABLE_STATUSES.includes(p.status) || (lateSend(p, pathById.get(p.path_id)) && !submitStepOwed(pathById.get(p.path_id), executionById.get(p.id))))
+    && Number(p.outreach_draft_attempts) >= require('./link-prospect-worker').MAX_ATTEMPTS
+    && !['drafted', 'sending', 'sent', 'send_error'].includes(p.outreach_status);
+  const parked = candidates.filter((p) => (p.quality_signals?.outreach_match_ambiguous || exhaustedDraft(p) || uncertainById.has(p.id) || (p.status === PARKED ? p.parked_from_status === PARKABLE
+    : liveRows.some((r) => r.prospect_id === p.id && !r.satisfied_at && isOwner(r.level) && whyNotHere(p, r, pathById.get(p.path_id), executionById.get(p.id)) === null))));
+  if (!parked.length) return { cards: [] };
+  const matchIds = [...new Set(parked.map((p) => p.quality_signals?.outreach_match_ambiguous).filter(Boolean))];
+  const matchRows = matchIds.length ? await db('seo_backlinks').whereIn('id', matchIds).where({ status: 'active' }).select('id', 'source_url') : [];
+  const matchById = new Map(matchRows.map((b) => [b.id, b]));
+  const eligibleDomains = new Set(domains.filter((d) => BRIDGE_STATES.includes(d.agent_state)).map((d) => d.id));
+  const cardsFor = parked.filter((p) => domainById.has(p.domain_id) && (eligibleDomains.has(p.domain_id) || uncertainById.has(p.id)));
   if (!cardsFor.length) return { cards: [] };
   // the selection's hold, per domain: EVERY placement of the domain (not only the cards) against its best path
   const allPlacements = await db('seo_link_prospects').whereIn('domain_id', domains.map((d) => d.id)).select('id', 'domain_id', 'location_key', 'payment_group_id');
@@ -239,11 +259,10 @@ async function listOwnerQueue(db) {
   // a card's path is the placement's OWN (`path_id`) — never the domain's best path standing in for a deleted one
   // (ON DELETE SET NULL): a substituted path would show the replacement's price or terms as the card's, and the click
   // refuses it anyway; the card reads as awaiting the bridge's rotation instead
-  const pathIds = [...new Set([...domains.map((d) => d.best_path_id), ...cardsFor.map((p) => p.path_id)].filter(Boolean))];
-  const paths = pathIds.length ? await db('seo_link_acquisition_paths').whereIn('id', pathIds) : [];
-  const pathById = new Map(paths.map((p) => [p.id, p]));
   const heldDomain = new Set(domains.filter((d) => heldFor(d, pathById.get(d.best_path_id), allPlacements.filter((p) => p.domain_id === d.id), paid)).map((d) => d.id));
-  const cardIds = new Set(cardsFor.map((p) => p.id));
+  // the cards whose approve / draft / match / decide controls apply: a card status on a bridge-eligible domain — a
+  // held-submission card outside that set carries only its verdict controls
+  const cardIds = new Set(cardsFor.filter((p) => eligibleDomains.has(p.domain_id) && CARD_STATUSES.includes(p.status)).map((p) => p.id));
   const rows = await loadApprovals(db, liveRows.filter((r) => cardIds.has(r.prospect_id)));
   const waivers = await db('seo_link_floor_waivers').whereIn('domain_id', domains.map((d) => d.id)).whereNull('invalidated_at').orderBy('approved_at', 'desc')
     .select('id', 'domain_id', 'path_id', 'overridden_floors', 'decision_inputs_hash', 'note', 'approved_by', 'approved_at');
@@ -269,7 +288,7 @@ async function listOwnerQueue(db) {
     // a LEASED card cannot be the primary: its click is the lease 409 and every unleased sibling would defer to it
     if (p.claimed_at || !path || path.id !== d.best_path_id) return false;
     const ctx = { path, domain: d, policy, score: d.score, draftClean: M.draftReview(p).clean };
-    return rows.some((r) => r.prospect_id === p.id && r.dimension === 'payment' && r.path_id === path.id && whyNotApprovable(r, path) === null && whyNotHere(p, r) === null && !stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null, heldDomain.has(d.id)).reason);
+    return rows.some((r) => r.prospect_id === p.id && r.dimension === 'payment' && r.path_id === path.id && whyNotApprovable(r, path) === null && whyNotHere(p, r, path, executionById.get(p.id)) === null && !stalenessOf(r, ctx, activeWaiverFor.get(`${d.id}|${path.id}`) || null, heldDomain.has(d.id)).reason);
   };
   const groupPrimary = new Map();
   const byId = [...cardsFor].sort((a, b) => String(a.id).localeCompare(String(b.id)));
@@ -281,7 +300,6 @@ async function listOwnerQueue(db) {
   const coveredByGroup = new Map();
   for (const [groupId, primaryId] of groupPrimary) {
     const p = cardsFor.find((x) => x.id === primaryId);
-    const d = domainById.get(p.domain_id);
     const path = pathById.get(p.path_id) || null;
     const lead = path ? rows.find((r) => r.prospect_id === p.id && r.dimension === 'payment' && !r.satisfied_at) : null;
     const attachable = (s) => s.payment_group_id === groupId && s.path_id === path.id && !s.claimed_at
@@ -332,7 +350,7 @@ async function listOwnerQueue(db) {
       // against nothing here — the click's explicit row-path check refuses it, so the card never offers it
       let whyNot = !onBestPath ? 'placement is not on the domain\'s current best path — the nightly bridge rotates it'
         : r.path_id !== path.id ? 'the step was decided on a prior path — the nightly bridge rotates it'
-          : (whyNotApprovable(r, path) || whyNotHere(p, r) || (p.claimed_at ? 'leased to a worker — refresh after it reports' : null));
+          : (whyNotApprovable(r, path) || whyNotHere(p, r, path, executionById.get(p.id)) || (p.claimed_at ? 'leased to a worker — refresh after it reports' : null));
       // a follow-up closed above (or by the sender) for a customer recipient says so, not "no draft"
       if (!whyNot && isFollowUp(r) && p.follow_up_status === 'skipped' && p.follow_up_skipped_reason === 'customer_recipient') whyNot = 'the recipient is a customer contact — the follow-up is closed (the thread\'s recipient cannot change)';
       // a send needs a draft to send (the bridge parks the row only once one exists; a re-draft in flight clears it)
@@ -358,7 +376,10 @@ async function listOwnerQueue(db) {
       };
     });
     return {
-      placement: { id: p.id, target_page: p.target_page, location_key: p.location_key, link_type: p.link_type, status: p.status, outreach_status: p.outreach_status, follow_up_status: p.follow_up_status, claimed_at: p.claimed_at, updated_at: p.updated_at, payment_group_id: p.payment_group_id },
+      submission_ambiguity: uncertainById.get(p.id) || null,
+      outreach_draft_exhausted: cardIds.has(p.id) && exhaustedDraft(p),
+      backlink_match: cardIds.has(p.id) ? matchById.get(p.quality_signals?.outreach_match_ambiguous) || null : null,
+      placement: { id: p.id, target_page: p.target_page, live_url: p.live_url, location_key: p.location_key, link_type: p.link_type, status: p.status, outreach_status: p.outreach_status, follow_up_status: p.follow_up_status, claimed_at: p.claimed_at, updated_at: p.updated_at, payment_group_id: p.payment_group_id },
       domain: { id: d.id, domain: d.domain, agent_state: d.agent_state, score: d.score, score_reasons: d.score_reasons, spam_score: d.spam_score, domain_rating: d.domain_rating, organic_traffic: d.organic_traffic, referring_domains: d.referring_domains, competitors_linked: d.competitors_linked, source: d.source, discovery_priority: d.discovery_priority },
       path: path ? {
         id: path.id, on_best_path: onBestPath, acquisition_type: path.acquisition_type, link_type: path.link_type, submission_url: path.submission_url,
@@ -377,7 +398,7 @@ async function listOwnerQueue(db) {
       } : null,
       // Reject / Watch apply while the domain is still the owner's to decide; once a sibling is approved or in flight
       // (lane-owned) those buttons would only ever 409 — the card says so instead
-      decidable: !R.LANE_OWNED_STATES.includes(d.agent_state),
+      decidable: cardIds.has(p.id) && !R.LANE_OWNED_STATES.includes(d.agent_state),
       // shown only while the bridge would still honour it: the same floors-hash test approveRow / activeWaiver apply
       waiver: path && activeWaiverFor.has(`${d.id}|${path.id}`) ? waiverFor.get(`${d.id}|${path.id}`) : null,
       d30_confidence: null, // step 7 (D30 loop) — no evidence yet
@@ -409,7 +430,8 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
     // the card must still BE a card under the lock: another tab's Reject / Watch, a worker claim or a Judge move
     // since the page loaded means this approval would authorize something the owner no longer sees
     const placementNow = await trx('seo_link_prospects').where({ id: placement.id }).forUpdate().first();
-    const notHere = !placementNow ? 'gone' : placementNow.claimed_at ? `leased at ${placementNow.status}` : whyNotHere(placementNow, row);
+    const path = await trx('seo_link_acquisition_paths').where({ id: domain.best_path_id }).first();
+    const notHere = !placementNow ? 'gone' : placementNow.claimed_at ? `leased at ${placementNow.status}` : whyNotHere(placementNow, row, path);
     if (notHere) refuse(409, `the placement is no longer awaiting your decision (${notHere}) — refresh the queue`);
     if (!BRIDGE_STATES.includes(domain.agent_state)) refuse(409, `the domain is ${domain.agent_state.replace(/_/g, ' ')} — it left the queue; refresh`);
     Object.assign(placement, placementNow);
@@ -421,7 +443,6 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
     // the row AND the placement itself must sit on the domain's best path — a placement whose path was deleted (path_id
     // SET NULL) is nobody's to approve until the bridge rotates it, whatever its rows still name
     if (!domain.best_path_id || row.path_id !== domain.best_path_id || placementNow.path_id !== domain.best_path_id) refuse(409, 'the placement is no longer on the domain\'s best path — the nightly bridge rotates it; refresh the queue');
-    const path = await trx('seo_link_acquisition_paths').where({ id: domain.best_path_id }).first();
     if (!path || path.superseded_by || path.baseline === true) refuse(409, 'the path was superseded since the card — refresh the queue');
     const whyNotPath = whyNotApprovable(row, path);
     if (whyNotPath) refuse(409, `not approvable: ${whyNotPath}`);
@@ -474,7 +495,7 @@ async function approveRow(db, { authorityId, actor, approvedAmountCents = null, 
       // approval the next bridge pass would invalidate for the whole group) — the hash carries no path identity, so a stale-path or in-flight row with an equal hash must never inherit
       // the owner's spending authority) — locked, like the clicked placement
       const siblings = (await trx('seo_link_prospects').where({ domain_id: domain.id, payment_group_id: placement.payment_group_id, path_id: path.id }).whereIn('status', [...CARD_STATUSES]).whereNull('claimed_at').forUpdate().select('id', 'status', 'parked_from_status'))
-        .filter((s) => s.id !== placement.id && whyNotHere(s, row) === null).map((s) => s.id);
+        .filter((s) => s.id !== placement.id && whyNotHere(s, row, path) === null).map((s) => s.id);
       if (siblings.length) {
         const candidates = await loadApprovals(trx, await trx(AUTH).whereIn('prospect_id', siblings).where({ path_id: path.id, path_revision: pathRevision, dimension: 'payment', instance_key: row.instance_key, level: row.level, decision_inputs_hash: hash }).whereNull('ended_at').whereNull('satisfied_at'));
         for (const c of candidates) if (!c.approved) attached.push(c.id);
@@ -609,12 +630,17 @@ async function acquireAnyway(db, { domainId, actor, note = null, now = new Date(
   // failure reports an unavailable summary — never a failed click that invites a retry (which would only write an
   // audited replacement waiver).
   try {
-    const mine = await db('seo_link_prospects').where({ domain_id: result.domainId }).select('id', 'status', 'parked_from_status', 'claimed_at');
+    const mine = await db('seo_link_prospects').where({ domain_id: result.domainId }).select('id', 'status', 'parked_from_status', 'claimed_at', 'path_id', 'outreach_status');
+    const pathIds = [...new Set(mine.map((p) => p.path_id).filter(Boolean))];
+    const paths = pathIds.length ? await db('seo_link_acquisition_paths').whereIn('id', pathIds) : [];
+    const pathById = new Map(paths.map((p) => [p.id, p]));
     const byId = new Map(mine.map((p) => [p.id, p]));
-    const open = mine.length ? await loadApprovals(db, await db(AUTH).whereIn('prospect_id', mine.map((p) => p.id)).whereNull('ended_at').whereNull('satisfied_at')) : [];
+    const active = mine.length ? await db(AUTH).whereIn('prospect_id', mine.map((p) => p.id)).whereNull('ended_at') : [];
+    const executionById = new Map(active.filter((r) => r.dimension === 'execution' && r.instance_kind === '-').map((r) => [r.prospect_id, r]));
+    const open = await loadApprovals(db, active.filter((r) => !r.satisfied_at));
     // only what is a CARD now — a deferred outreach step (no draft yet, no checkout yet) stays open without a card and
     // must not be reported as awaiting in the queue
-    const awaiting = open.filter((r) => isOwner(r.level) && !r.approved && byId.has(r.prospect_id) && !byId.get(r.prospect_id).claimed_at && whyNotHere(byId.get(r.prospect_id), r) === null).length;
+    const awaiting = open.filter((r) => isOwner(r.level) && !r.approved && byId.has(r.prospect_id) && !byId.get(r.prospect_id).claimed_at && whyNotHere(byId.get(r.prospect_id), r, pathById.get(byId.get(r.prospect_id).path_id), executionById.get(r.prospect_id)) === null).length;
     const state = (await db('seo_link_domains').where({ id: result.domainId }).first('agent_state'))?.agent_state || null;
     return { ...result, bridge: ran, awaiting, agent_state: state, summary_unavailable: false };
   } catch (err) {
@@ -646,9 +672,11 @@ async function sendRow(db, { authorityId, actor, reviewedLookupHash = null, draf
   if (!row) refuse(404, 'authority row not found');
   if (row.dimension !== 'communication' || !['-', 'followup'].includes(row.instance_kind)) refuse(409, 'only the initial send and the follow-up are sent from the queue');
   if (row.ended_at || row.satisfied_at) refuse(409, 'the send instance is no longer open — refresh the queue');
-  const placement = await db('seo_link_prospects').where({ id: row.prospect_id }).first('id', 'status', 'parked_from_status', 'claimed_at');
+  const placement = await db('seo_link_prospects').where({ id: row.prospect_id }).first('id', 'status', 'parked_from_status', 'claimed_at', 'path_id');
   if (!placement) refuse(404, 'placement not found');
-  const notHere = placement.claimed_at ? `leased at ${placement.status}` : whyNotHere(placement, row);
+  const path = placement.path_id ? await db('seo_link_acquisition_paths').where({ id: placement.path_id }).first() : null;
+  const execution = await db(AUTH).where({ prospect_id: placement.id, dimension: 'execution', instance_kind: '-' }).whereNull('ended_at').first('path_id', 'satisfied_at');
+  const notHere = placement.claimed_at ? `leased at ${placement.status}` : whyNotHere(placement, row, path, execution);
   if (notHere) refuse(409, `the placement is no longer awaiting your decision (${notHere}) — refresh the queue`);
   const sendOutreach = send || require('./link-prospect-outreach').sendOutreach;
   const r = await sendOutreach({ prospectId: placement.id, approvedBy: actor, mode: 'owner', reviewedLookupHash, draftHash, followUp: isFollowUp(row) });

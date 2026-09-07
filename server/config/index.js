@@ -1,5 +1,4 @@
-const path = require('path');
-require('dotenv').config({ path: path.join(__dirname, '..', '..', '.env') });
+require('./load-env')();
 
 module.exports = {
   port: process.env.PORT || 3001,

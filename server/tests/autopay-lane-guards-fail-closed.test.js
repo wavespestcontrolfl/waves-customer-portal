@@ -67,7 +67,9 @@ jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(() => P
 jest.mock('../services/payment-lifecycle-email', () => ({ sendChargeSuccess: jest.fn(), sendChargeFailed: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({}));
 jest.mock('../services/billing-helpers', () => ({ isBillingDayMatch: jest.fn(() => true) }));
-jest.mock('../services/payment-router', () => ({ getServiceForCustomer: jest.fn() }));
+jest.mock('../services/stripe', () => ({
+  charge: jest.fn(), chargeOneTime: jest.fn(), chargeMonthly: jest.fn(),
+}));
 jest.mock('../services/twilio', () => ({ sendSms: jest.fn() }));
 jest.mock('../services/annual-prepay-renewals', () => ({
   activatePaidPendingTerms: jest.fn(() => Promise.resolve()),
@@ -78,7 +80,7 @@ jest.mock('../services/annual-prepay-renewals', () => ({
 const { MONTHLY_LANE_SQL } = require('../services/billing-lane');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { logAutopay } = require('../services/autopay-log');
-const PaymentRouter = require('../services/payment-router');
+const StripeService = require('../services/stripe');
 
 beforeEach(() => {
   mockCustomers = [];
@@ -86,6 +88,9 @@ beforeEach(() => {
   mockCalls.whereRaw.length = 0;
   mockCalls.select.length = 0;
   jest.clearAllMocks();
+  StripeService.charge.mockReset();
+  StripeService.chargeOneTime.mockReset();
+  StripeService.chargeMonthly.mockReset();
 });
 
 describe('sendPreChargeReminders — lane filter is unconditional', () => {
@@ -185,7 +190,9 @@ describe('processMonthlyBilling — billing_mode is always selected', () => {
 
     const result = await BillingCron.processMonthlyBilling();
 
-    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(StripeService.charge).not.toHaveBeenCalled();
+    expect(StripeService.chargeOneTime).not.toHaveBeenCalled();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
     expect(logAutopay).toHaveBeenCalledWith('cust-PA', 'skipped_billing_mode', { details: { billing_mode: 'per_application' } });
     expect(result.charged).toBe(0);
   });

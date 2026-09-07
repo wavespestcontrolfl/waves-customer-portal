@@ -214,7 +214,8 @@ describe('freeze contract in the render path', () => {
     // output change must abandon the previous strategy's keys.
     expect(LAWN_RENDER_STRATEGY).not.toBe('p1');
     expect(LAWN_RENDER_STRATEGY).not.toBe('p2');
-    expect(source).toMatch(/LAWN_RENDER_STRATEGY = 'p3'/);
+    // p4 changes watering advice from free-text matches to structured evidence.
+    expect(LAWN_RENDER_STRATEGY).not.toBe('p3');
   });
 
   test('a pre-freeze cached key cannot collide with a post-freeze one', async () => {
@@ -233,8 +234,8 @@ describe('freeze contract in the render path', () => {
       { id: 'svc-1', customer_id: 'c1', service_line: 'lawn' }, knex,
     );
     // Every pre-freeze lawn key carried -lap1…, pre-irrigation-stamp keys
-    // -lap2… — none can match -lap3….
-    expect(signature.startsWith('-lap3')).toBe(true);
+    // -lap2… / -lap3… — none can match the structured-evidence render.
+    expect(signature.startsWith('-lap4')).toBe(true);
     expect(signature.startsWith('-lap2')).toBe(false);
     expect(signature.startsWith('-lap1')).toBe(false);
   });

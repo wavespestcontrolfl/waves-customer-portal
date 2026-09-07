@@ -29,8 +29,10 @@
  *     correct; only the fleet-level detour score is approximate. Commit
  *     can copy coords from the linked customer row if needed later.
  */
+const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const db = require('../models/db');
 const logger = require('./logger');
+const { applyAssignable, assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
 const estimateSlotAvailability = require('./estimate-slot-availability');
 const { addETDays, etParts, etDateString } = require('../utils/datetime-et');
 const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate } = require('../utils/slot-offer-token');
@@ -843,15 +845,17 @@ async function reserveSlot({
         ? classifierStableServiceType(catalogLink.name, holdCanonicalLabel)
         : holdCanonicalLabel;
 
-      // Active-technician check: find-time only generates slots for
-      // technicians where({ active: true }), so a slotId naming an inactive
-      // or unknown tech was never offered. A crafted non-uuid techId makes
+      // Assignable-technician check: find-time only generates slots for
+      // assignable technicians (technician-eligibility.js), so a slotId naming
+      // a prospective, inactive, office-only, or unknown tech was never offered. A crafted non-uuid techId makes
       // the lookup itself throw (22P02) — treat that the same as unknown
       // (the txn rolls back on the throw below either way).
       if (techId) {
         let activeTech = null;
         try {
-          activeTech = await trx('technicians').where({ id: techId, active: true }).first('id');
+          // FOR SHARE on the reserving trx: an offboarding's FOR UPDATE cannot
+          // commit between this check and the hold's insert.
+          activeTech = await applyAssignable(trx('technicians').where({ 'technicians.id': techId })).forShare().first('technicians.id');
         } catch (techErr) {
           logger.warn(`[slot-reservation] technician lookup failed for slot ${slotId}: ${techErr.message}`);
         }
@@ -1001,7 +1005,7 @@ async function reserveSlot({
       const conflict = await trx('scheduled_services')
         .where({ scheduled_date: date })
         .modify((q) => { if (techId) q.where('technician_id', techId); })
-        .whereNotIn('status', ['cancelled'])
+        .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
         .andWhere((q) => {
           q.whereNull('reservation_expires_at')
             .orWhereRaw('reservation_expires_at > NOW()');
@@ -1027,7 +1031,7 @@ async function reserveSlot({
           .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
           .where('scheduled_services.scheduled_date', date)
           .whereNull('scheduled_services.technician_id')
-          .whereNotIn('scheduled_services.status', ['cancelled'])
+          .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
           .where((q) => {
             q.whereNull('scheduled_services.reservation_expires_at')
               .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
@@ -1292,6 +1296,22 @@ async function commitReservation({
       throw err;
     }
 
+    // Technician eligibility re-check at COMMIT (FOR SHARE on this txn): the
+    // office may have offboarded or de-listed the held tech between the
+    // customer's reserve and their accept. Same slot-unavailable recovery the
+    // accept flow already handles (customer re-picks a time).
+    if (row.technician_id) {
+      try {
+        await assertAssignableTechnician(row.technician_id, { conn: client });
+      } catch (eligErr) {
+        if (eligErr.code !== NOT_ASSIGNABLE) throw eligErr;
+        const err = new Error('slot technician is not available');
+        err.code = 'SLOT_UNAVAILABLE';
+        err.slotId = `${dateOnly(row.scheduled_date)}_${String(row.window_start).slice(0, 5).replace(':', '-')}_${row.technician_id}`;
+        throw err;
+      }
+    }
+
     // Owner blackout re-check at COMMIT: the admin may have blacked the day
     // out between the customer's reserve and their accept — the hold must
     // not graduate onto a day off. Same expired-reservation recovery path
@@ -1325,7 +1345,7 @@ async function commitReservation({
         .where({ scheduled_date: scheduledDate })
         .modify((q) => { if (row.technician_id) q.where('technician_id', row.technician_id); })
         .whereNot('id', scheduledServiceId)
-        .whereNotIn('status', ['cancelled'])
+        .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
         .andWhere((q) => {
           q.whereNull('reservation_expires_at')
             .orWhereRaw('reservation_expires_at > NOW()');
@@ -1429,6 +1449,17 @@ async function commitReservation({
       .where({ id: scheduledServiceId })
       .update(updates)
       .returning('*');
+    // Tech-facing "new visit" card (tech-visit-notifications.js): the hold
+    // kept its technician, and graduating it IS the booking — no assignment
+    // write follows to announce it. Rides `client` so it waits for the
+    // enclosing accept transaction's commit; gate-dark, never awaited.
+    if (updated?.technician_id) {
+      void require('./tech-visit-notifications').notifyTechVisitChange({
+        visitId: updated.id, kind: 'assigned', technicianId: updated.technician_id, actorId: 'customer_estimate_accept',
+        snapshot: { date: updated.scheduled_date, windowStart: updated.window_start || null, windowEnd: updated.window_end || null },
+        trx: client,
+      });
+    }
 
     // Inspection credit: graduating a held slot IS the customer's booking —
     // both estimate-accept branches (one-time and recurring) land here, and

@@ -991,6 +991,22 @@ async function livePayloadForRun(run, storedPayload = {}) {
   return {};
 }
 
+// Hand back a FRESH prep-page claim the run never delivered on — fenced
+// like the manual sender's releasePrepPage: never a delivered or opened
+// page. Fail-soft.
+async function releaseFreshPrepClaim(run) {
+  try {
+    await db('scheduled_services')
+      .where({ id: run.entity_id, prep_template_key: run.template_key })
+      .whereNull('prep_sent_at')
+      .whereNull('prep_first_viewed_at')
+      .whereRaw('COALESCE(prep_view_count, 0) = 0')
+      .update({ prep_template_key: null });
+  } catch (releaseErr) {
+    logger.warn(`[email-template-automations] prep page release failed for service ${run.entity_id}: ${releaseErr.message}`);
+  }
+}
+
 async function markRunSkipped(run, reason, metadata = {}) {
   const [skipped] = await db('email_template_automation_runs').where({ id: run.id }).update({
     status: 'skipped',
@@ -1020,22 +1036,200 @@ async function scheduleRetry(run, err, attemptNumber, retryPolicy, now = new Dat
   return updated;
 }
 
-async function executeRun(runOrId, { automation, now = new Date() } = {}) {
+function isPrepRun(run) {
+  return String(run.entity_type || '') === 'scheduled_service' && String(run.template_key || '').startsWith('prep.');
+}
+
+// One prep page per visit, across lanes: the run ATOMICALLY claims the
+// visit's /prep/:token page for its guide before dispatch — an unkeyed page
+// is keyed now (FRESH), a page already keyed to this guide passes, and a
+// page another guide owns (a manual send's claim, or another automation's
+// delivery) is refused, or the run would email a link that renders that
+// other guide. A read-then-send would race a manual claim landing in
+// between (pre-push Codex P1 on 235f8e5a5); the post-send stamp
+// (markServicePrepSent) then never retargets an owned page (GH Codex #3856
+// r19 P0). A same-guide page already STAMPED delivered (prep_sent_at — the
+// manual sender's or composer's text / email landed after this run was
+// queued; run creation takes no prep-send lock) is not sent again: the run
+// is skipped as already delivered (GH Codex #3856 r26 P1).
+// Returns { owned, fresh } or { owned: false, delivered: true }; a non-prep
+// run owns nothing fresh.
+async function claimPrepPageForRun(run) {
+  if (!isPrepRun(run)) return { owned: true, fresh: false };
+  const fresh = await db('scheduled_services')
+    .where({ id: run.entity_id })
+    .whereNull('prep_template_key')
+    .update({ prep_template_key: run.template_key })
+    .returning('id');
+  if (fresh.length > 0) return { owned: true, fresh: true };
+  const owned = await db('scheduled_services')
+    .where({ id: run.entity_id, prep_template_key: run.template_key })
+    .first('id', 'prep_sent_at');
+  if (!owned) return { owned: false, fresh: false };
+  if (owned.prep_sent_at) return { owned: false, fresh: false, delivered: true };
+  return { owned: true, fresh: false };
+}
+
+// A FRESH claim is provisional until the guide delivers. Did THIS attempt
+// prove nothing left? A throw BEFORE dispatch (onQueued never fired), or a
+// definite provider rejection after it (the shared SendGrid classifier:
+// 400/401/403/404/405/413/415/422/429 — a timeout-style 408 and every 5xx
+// stay ambiguous). Ambiguous keeps the page: it may be in the customer's
+// hands (pre-push Codex P1 on e493a0711; GH Codex #3856 r22 P2).
+function prepUndelivered(claim, dispatched, err) {
+  return claim.fresh && (!dispatched || require('./sendgrid-mail').isDefiniteRejection(err));
+}
+
+// After the library returned: a blocked send on a fresh claim hands the
+// page back (fenced like the manual sender's releasePrepPage — never a
+// delivered or opened page) so a later guide for the visit isn't refused
+// over a send nobody received (pre-push Codex P1 on 61bff479f). A CONFIRMED
+// send stamps the visit's prep_sent_at (the tracker's "prep actually went
+// out" proof) and aligns the rendered guide to the delivered template.
+// Queue time is too early — a queued run can still skip, suppress, or fail.
+// Fail-soft: a stamp hiccup never fails a run that already sent.
+async function settlePrepAfterSend(run, claim, status) {
+  if (!isPrepRun(run)) return;
+  if (status !== 'sent') {
+    if (claim.fresh) await releaseFreshPrepClaim(run);
+    return;
+  }
+  try {
+    const { markServicePrepSent } = require('./project-email');
+    await markServicePrepSent(run.entity_id, run.template_key);
+  } catch (stampErr) {
+    logger.warn(`[email-template-automations] prep_sent_at stamp failed for service ${run.entity_id}: ${stampErr.message}`);
+  }
+}
+
+async function finalizeSentRun(run, result) {
+  const status = result.blocked ? 'blocked' : 'sent';
+  const [updated] = await db('email_template_automation_runs').where({ id: run.id }).update({
+    status,
+    email_message_id: result.message?.id || null,
+    last_error: result.blocked ? result.reason || 'suppressed' : null,
+    completed_at: new Date(),
+    updated_at: new Date(),
+  }).returning('*');
+  await logRunEvent(run.id, status, result.blocked ? result.reason || 'Email suppressed' : 'Email sent', {
+    email_message_id: result.message?.id || null,
+    provider_message_id: result.message?.provider_message_id || null,
+    deduped: !!result.deduped,
+  });
+  return { status, updated: updated || { ...run, status } };
+}
+
+// Claim → send → settle / release for a prep run happen under the manual
+// sender's per-customer `prep-send:<customer>` lock — the same lease the
+// Communications composer's prep-link send and the Send prep guide button
+// take — so neither can text this visit's page between this run's fresh
+// claim and its release (pre-push Codex P1 on d5c33f299). A held lease is a
+// transient failure: nothing was claimed, so the retry path re-runs the
+// attempt later. Non-prep runs and prep runs without a customer recipient
+// take no lock (there is no manual path to collide with).
+const PREP_LOCK_HELD = 'prep send lock held by another sender';
+async function withPrepSendLock(run, fn) {
+  const customerId = isPrepRun(run) && String(run.recipient_type || '') === 'customer' ? run.recipient_id : null;
+  if (!customerId) return fn();
+  const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
+  const out = await runExclusive(`prep-send:${customerId}`, fn, { recordHealth: false, waitForSlot: false });
+  if (wasLockSkipped(out)) throw new Error(PREP_LOCK_HELD);
+  return out;
+}
+
+// One attempt's claim → provider → finalize, with the fresh-claim release
+// on a conclusive no-delivery (prepUndelivered). Returns the finalized run
+// row, or { skipReason } when the page belongs to another guide; rethrows a
+// send failure for executeRun's retry / fail decision.
+async function dispatchRun(run, automation, executionPayload) {
+  const prepClaim = await claimPrepPageForRun(run);
+  if (!prepClaim.owned) return { skipReason: prepClaim.delivered ? 'prep guide already delivered for this visit' : 'prep page owned by another guide' };
+  let prepDispatched = false;
+  try {
+    const result = await EmailTemplates.sendTemplate({
+      templateKey: run.template_key,
+      versionId: run.template_version_id || undefined,
+      to: run.recipient_email,
+      payload: executionPayload,
+      recipientType: run.recipient_type,
+      recipientId: run.recipient_id,
+      triggerEventId: run.trigger_event_id,
+      automationRunId: run.id,
+      idempotencyKey: run.idempotency_key,
+      categories: ['email_template_automation', `automation_${run.automation_key}`],
+      suppressionGroupKey: automation.suppression_group_key || undefined,
+      // Fires immediately before the provider call — the dispatch boundary.
+      onQueued: () => { prepDispatched = true; },
+    });
+    const { status, updated } = await finalizeSentRun(run, result);
+    await settlePrepAfterSend(run, prepClaim, status);
+    return { updated };
+  } catch (err) {
+    // A fresh claim this attempt conclusively did not deliver on is handed
+    // back NOW — before a retry as much as before the final failure: a
+    // retried attempt finds the page keyed and reads it as owned-not-fresh,
+    // so a claim carried into the retry would survive a conclusive final
+    // failure and pin the visit to a guide nobody received (GH Codex #3856
+    // r24 P2). The retry re-claims fresh, or is skipped if another guide
+    // took the page meanwhile — the right answer either way.
+    if (prepUndelivered(prepClaim, prepDispatched, err)) await releaseFreshPrepClaim(run);
+    throw err;
+  }
+}
+
+// The prep-send lease was held by a manual or composer send: nothing was
+// claimed and the provider was never reached, so this is not a delivery
+// attempt — the run goes back to runnable a minute out with its attempt
+// count restored, never spending the retry budget on contention (GH Codex
+// #3856 r27 P2).
+const PREP_LOCK_DEFER_MS = 60 * 1000;
+async function deferForPrepLock(run, attemptNumber, now) {
+  const runAfter = new Date(now.getTime() + PREP_LOCK_DEFER_MS);
+  const [deferred] = await db('email_template_automation_runs').where({ id: run.id }).update({
+    status: 'retry_scheduled',
+    attempts: attemptNumber - 1,
+    run_after: runAfter,
+    next_retry_at: runAfter,
+    last_error: PREP_LOCK_HELD,
+    updated_at: new Date(),
+  }).returning('*');
+  await logRunEvent(run.id, 'retry_scheduled', 'Deferred: prep send lock held by another sender', { next_retry_at: runAfter, attempt_consumed: false });
+  return deferred || { ...run, status: 'retry_scheduled' };
+}
+
+async function finalizeFailedRun(run, err, attemptNumber, retryPolicy) {
+  const [failed] = await db('email_template_automation_runs').where({ id: run.id }).update({
+    status: 'failed',
+    last_error: err.message.slice(0, 2000),
+    completed_at: new Date(),
+    updated_at: new Date(),
+  }).returning('*');
+  await logRunEvent(run.id, 'failed', err.message, {
+    attempt: attemptNumber,
+    max_attempts: retryPolicy.maxAttempts,
+  });
+  return failed || { ...run, status: 'failed', last_error: err.message };
+}
+
+function notFound(message) {
+  const err = new Error(message);
+  err.status = 404;
+  return err;
+}
+
+async function loadRunAndAutomation(runOrId, automation) {
   const run = typeof runOrId === 'string'
     ? await db('email_template_automation_runs').where({ id: runOrId }).first()
     : runOrId;
-  if (!run) {
-    const err = new Error('automation run not found');
-    err.status = 404;
-    throw err;
-  }
+  if (!run) throw notFound('automation run not found');
+  const resolvedAutomation = FINAL_STATUSES.has(run.status) ? null : (automation || await loadAutomationForRun(run));
+  if (!resolvedAutomation && !FINAL_STATUSES.has(run.status)) throw notFound('automation not found for run');
+  return { run, resolvedAutomation };
+}
+
+async function executeRun(runOrId, { automation, now = new Date() } = {}) {
+  const { run, resolvedAutomation } = await loadRunAndAutomation(runOrId, automation);
   if (FINAL_STATUSES.has(run.status)) return run;
-  const resolvedAutomation = automation || await loadAutomationForRun(run);
-  if (!resolvedAutomation) {
-    const err = new Error('automation not found for run');
-    err.status = 404;
-    throw err;
-  }
   const automationStatus = normalizeStatus(resolvedAutomation.status || 'active');
   if (automationStatus !== 'active') {
     return markRunSkipped(run, `automation status is ${automationStatus}`, { guard: 'automation_status' });
@@ -1082,64 +1276,17 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     if (conditionFailure) {
       return markRunSkipped(claimedRun, conditionFailure, { guard: 'conditions', attempt: attemptNumber });
     }
-
-    const result = await EmailTemplates.sendTemplate({
-      templateKey: claimedRun.template_key,
-      versionId: claimedRun.template_version_id || undefined,
-      to: claimedRun.recipient_email,
-      payload: executionPayload,
-      recipientType: claimedRun.recipient_type,
-      recipientId: claimedRun.recipient_id,
-      triggerEventId: claimedRun.trigger_event_id,
-      automationRunId: claimedRun.id,
-      idempotencyKey: claimedRun.idempotency_key,
-      categories: ['email_template_automation', `automation_${claimedRun.automation_key}`],
-      suppressionGroupKey: resolvedAutomation.suppression_group_key || undefined,
-    });
-    const status = result.blocked ? 'blocked' : 'sent';
-    const [updated] = await db('email_template_automation_runs').where({ id: run.id }).update({
-      status,
-      email_message_id: result.message?.id || null,
-      last_error: result.blocked ? result.reason || 'suppressed' : null,
-      completed_at: new Date(),
-      updated_at: new Date(),
-    }).returning('*');
-    await logRunEvent(run.id, status, result.blocked ? result.reason || 'Email suppressed' : 'Email sent', {
-      email_message_id: result.message?.id || null,
-      provider_message_id: result.message?.provider_message_id || null,
-      deduped: !!result.deduped,
-    });
-    // Prep guides: a CONFIRMED send stamps the visit's prep_sent_at (the
-    // tracker's "prep actually went out" proof) and aligns the rendered
-    // guide to the delivered template. Queue time is too early — a queued
-    // run can still skip, suppress, or fail right here. Fail-soft: a stamp
-    // hiccup never fails a run that already sent.
-    if (status === 'sent'
-      && String(claimedRun.entity_type || '') === 'scheduled_service'
-      && String(claimedRun.template_key || '').startsWith('prep.')) {
-      try {
-        const { markServicePrepSent } = require('./project-email');
-        await markServicePrepSent(claimedRun.entity_id, claimedRun.template_key);
-      } catch (stampErr) {
-        logger.warn(`[email-template-automations] prep_sent_at stamp failed for service ${claimedRun.entity_id}: ${stampErr.message}`);
-      }
+    const outcome = await withPrepSendLock(claimedRun, () => dispatchRun(claimedRun, resolvedAutomation, executionPayload));
+    if (outcome.skipReason) {
+      return markRunSkipped(claimedRun, outcome.skipReason, { guard: 'prep_page_owned', attempt: attemptNumber });
     }
-    return updated || { ...running, status };
+    return outcome.updated;
   } catch (err) {
+    if (err.message === PREP_LOCK_HELD) return deferForPrepLock(claimedRun, attemptNumber, now);
     if (attemptNumber < retryPolicy.maxAttempts) {
       return scheduleRetry(claimedRun, err, attemptNumber, retryPolicy, now);
     }
-    const [failed] = await db('email_template_automation_runs').where({ id: run.id }).update({
-      status: 'failed',
-      last_error: err.message.slice(0, 2000),
-      completed_at: new Date(),
-      updated_at: new Date(),
-    }).returning('*');
-    await logRunEvent(run.id, 'failed', err.message, {
-      attempt: attemptNumber,
-      max_attempts: retryPolicy.maxAttempts,
-    });
-    return failed || { ...running, status: 'failed', last_error: err.message };
+    return finalizeFailedRun(claimedRun, err, attemptNumber, retryPolicy);
   }
 }
 
@@ -1221,6 +1368,7 @@ async function listRuns({ automationKey, limit = 100 } = {}) {
 }
 
 module.exports = {
+  RUNNABLE_STATUSES,
   TRIGGER_MAPPINGS,
   processTrigger,
   processDueRuns,

@@ -123,17 +123,31 @@ function runStageUpdate(db, target, scopeRows) {
 }
 
 /**
- * bridgeLeadFunnelStage(leadId, leadStatus, database?)
+ * bridgeLeadFunnelStage(leadId, leadStatus, database?, { onlyIfLead }?)
  * Advance the funnel row linked to `leadId` to the stage `leadStatus` maps to.
+ * `onlyIfLead` (column → value on `leads`): the advance is conditioned IN
+ * THE SAME STATEMENT on the lead row still matching it — a caller that
+ * validated a lead as its opportunity pins the identity / status / estimate
+ * link it validated, so a staff edit landing between that read and this
+ * write makes the advance lose instead of booking a row that is no longer
+ * that opportunity's (codex #3834 r29 P1).
  * Returns { updated, stage } or { updated: 0, reason }.
  */
-async function bridgeLeadFunnelStage(leadId, leadStatus, database = null) {
+async function bridgeLeadFunnelStage(leadId, leadStatus, database = null, { onlyIfLead = null } = {}) {
   const db = database || require('../models/db');
   try {
     const target = LEAD_STATUS_TO_FUNNEL_STAGE[leadStatus];
     if (!leadId || !target) return { updated: 0, reason: 'no_mapping' };
 
-    const updated = await runStageUpdate(db, target, (q) => q.where({ lead_id: leadId }));
+    const updated = await runStageUpdate(db, target, (q) => {
+      q.where({ lead_id: leadId });
+      if (onlyIfLead) {
+        q.whereExists(function leadStillMatches() {
+          this.select(1).from('leads').whereRaw('leads.id = ad_service_attribution.lead_id').where(onlyIfLead).whereNull('deleted_at');
+        });
+      }
+      return q;
+    });
     return { updated, stage: target };
   } catch (err) {
     logger.warn(`[lead-funnel-bridge] stage bridge failed for lead ${leadId} (${leadStatus}): ${err.message}`);
@@ -214,32 +228,38 @@ async function resolveStoredTouch(db, lead) {
 }
 
 /**
- * stampLeadFunnelRow(database, lead, { customerId?, serviceInterest? })
+ * stampLeadFunnelRow(database, lead, { customerId?, serviceInterest?, funnelStage? })
  * Create the ONE ad_service_attribution row a lead row's own intake would
  * have stamped, rebuilt from what the row stored — its attribution snapshot
  * through the intake resolver (resolveStoredTouch), its click ids, its
  * service, its first-contact date — never from the current request's touch,
  * which would credit acquisition to the wrong visit and corrupt first-touch
- * ROI (codex #3834 r11 P2). Caller: the quote wizard's repeat-run root
- * repair (routes/public-quote.js) — a repeat skips its own row because the
- * chain root carries the prospect, and rebuilds the root's row when the
- * root's own best-effort insert never landed (codex #3834 r10 P2) — at the
- * stage the root's CURRENT status maps to, since the transitions it already
- * made bridged nothing while no row existed and a later same-stage event is
- * a monotonic no-op (codex #3834 r15 P2).
+ * ROI (codex #3834 r11 P2). Two callers:
+ *   • the quote wizard's repeat-run root repair (routes/public-quote.js): a
+ *     repeat skips its own row because the chain root carries the prospect,
+ *     and rebuilds the root's row when the root's own best-effort insert
+ *     never landed (codex #3834 r10 P2) — at the stage the root's CURRENT
+ *     status maps to, since the transitions it already made bridged
+ *     nothing while no row existed and a later same-stage event is a
+ *     monotonic no-op (codex #3834 r15 P2);
+ *   • a duplicate row taking a win whose root is not ours to book
+ *     (lead-estimate-link.js): the win would otherwise reach no funnel row at
+ *     all (codex #3834 r14 P2) — stamped straight at 'booked', the stage the
+ *     bridge would have set.
  * `customerId` / `serviceInterest` fill in only what the row lacks — the row
  * belongs to ITS customer (codex #3834 r13 P2). A stored touch with no
  * channel gets no row, exactly as the row's own intake would have.
- * Idempotent on the
+ * `funnelStage` overrides the status-derived stage (the winner is stamped
+ * at 'booked' while its row still reads 'duplicate'). Idempotent on the
  * UNIQUE lead_id; returns the id of the row THIS call inserted, or null when
  * one already existed / nothing applied / the write failed (best-effort,
  * like the bridge).
  */
-async function stampLeadFunnelRow(database, lead, { customerId = null, serviceInterest = null } = {}) {
+async function stampLeadFunnelRow(database, lead, { customerId = null, serviceInterest = null, funnelStage = null } = {}) {
   const db = database || require('../models/db');
   try {
     if (!lead) return null;
-    const stage = LEAD_STATUS_TO_FUNNEL_STAGE[lead.status] || 'lead';
+    const stage = funnelStage || LEAD_STATUS_TO_FUNNEL_STAGE[lead.status] || 'lead';
     const touch = await resolveStoredTouch(db, lead);
     if (!touch) return null;
     const interest = lead.service_interest || serviceInterest;

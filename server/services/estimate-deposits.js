@@ -1,43 +1,14 @@
 /**
- * Required estimate-acceptance deposits.
+ * Historical estimate-deposit accounting. New acceptance deposits are
+ * permanently retired (owner ruling 2026-08-10); card holds superseded
+ * them for one-time work, and recurring accepts collect no deposit.
  *
- * Policy (owner decision 2026-06-12, revised same day to FLAT amounts;
- * prepay-annual exemption removed 2026-07-05 by owner decision):
- * every estimate acceptance requires a deposit — recurring, one-time,
- * prepay-annual, with or without a booked slot — EXCEPT:
- *   - existing plan customers (WaveGuard Bronze and up), who skip the
- *     deposit but MUST book an appointment to accept, and
- *   - estimates whose prepay-annual term is ALREADY committed (post-accept
- *     summaries only — choosing prepay at accept no longer exempts; the $49
- *     credits against the annual invoice minted in the same transaction).
- * The deposit is a flat per-service-class amount — $49 for recurring plans,
- * $99 for one-time / intensive jobs (pricing_config-authoritative via
- * constants.DEPOSIT) — NEVER a percentage: the deposit's job is commitment,
- * not proportional cash collection, and flat amounts keep the ask explainable
- * ("Reserve your appointment with a $49 deposit"). It is charged before
- * acceptance commits and credited toward the first invoice as a negative
- * line item; an unapplied remainder stays on the ledger and rolls forward to
- * later service-record invoices for the same estimate (createFromService),
- * which is also how one-time pay-at-visit deposits get credited — their
- * first invoice is the completed-visit invoice.
+ * Retained deposits credit the first invoice through a negative line item,
+ * with unused credit rolling forward. Invoice voids restore that credit.
+ * Historical PaymentIntents still record through the webhook.
  *
- * DARK BY DEFAULT: the accept gate enforces only when
- * ESTIMATE_DEPOSIT_REQUIRED=true (rollout: ship dark → land the payment UI →
- * flip). The amount derives from the service class, is FIXED when the intent
- * is created, and is not re-litigated at accept — any verified received
- * deposit satisfies the gate.
- *
- * Trust boundary: the gate never believes the client. A deposit counts only
- * when (a) the Stripe webhook recorded payment_intent.succeeded, or (b) the
- * accept request names a PaymentIntent that we retrieve LIVE from Stripe and
- * whose metadata pins it to this estimate — (b) closes the webhook race
- * without trusting the caller.
- *
- * Refund discipline: any path that refunds deposit money CLAIMS the ledger
- * row first (conditional transition into 'refunding'), calls Stripe second,
- * and stamps the terminal state third — so a refund can never race an
- * accept that is concurrently consuming the same row, and a failed Stripe
- * call reverts the claim instead of stranding it.
+ * Refund paths claim the ledger row before calling Stripe and restore the
+ * claim on failure, preventing a refund from racing credit consumption.
  */
 
 const db = require('../models/db');
@@ -76,48 +47,10 @@ function computeDepositAmount({ oneTime = false } = {}) {
   return Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : (oneTime ? 99 : 49);
 }
 
-// Resolve what acceptance requires for this estimate. membership comes from
-// buildEstimateMembershipContext — isExistingCustomer means the customer
-// already has qualifying recurring plan services (WaveGuard Bronze+). oneTime
-// selects the service class for the AMOUNT — one-time accepts are NOT exempt:
-// a one-time pay-at-visit deposit credits against the completed-visit invoice
-// via the createFromService roll-forward. Choosing prepay-annual is NOT
-// exempt either (owner decision 2026-07-05): it was the only zero-money
-// accept path for a new customer, so the $49 recurring deposit applies and
-// credits against the annual invoice minted in the same accept transaction.
-// committedPrepayTerm IS exempt: it marks a post-accept summary for an
-// estimate whose prepay term already exists (legacy accepts predate the
-// deposit; the year is the commitment), never an accept-time choice.
-// oneTimeUninvoiced (one-time accept on a non-invoice-mode estimate)
-// additionally REQUIRES a booking: no invoice is created at accept, so the
-// credit's only path back to the customer is the roll-forward, which traces
-// scheduled_services.source_estimate_id — an unbooked accept would orphan
-// the paid deposit (accepted estimates are deliberately outside the terminal
-// sweep). noVisit marks the payment-only accept (guarantee-only renewal):
-// there is NO appointment to book, so the plan-customer booking commitment
-// gate cannot apply — the invoice minted at accept is the commitment.
-function resolveDepositPolicy({ estimate, committedPrepayTerm = false, membership, oneTime = false, oneTimeUninvoiced = false, noVisit = false }) {
-  if (!isDepositEnforced()) {
-    return { enforced: false, required: false, slotRequired: false, exemptReason: 'feature_disabled' };
-  }
-  if (committedPrepayTerm) {
-    return { enforced: true, required: false, slotRequired: false, exemptReason: 'prepay_annual' };
-  }
-  if (membership?.isExistingCustomer) {
-    // No deposit for plan customers — their commitment gate is booking the
-    // appointment itself. A no-visit (guarantee-only renewal) accept has no
-    // appointment to book: the renewal's primary audience IS a plan customer,
-    // and an unconditional slot requirement would 400 APPOINTMENT_REQUIRED on
-    // a UI with no slot picker.
-    return { enforced: true, required: false, slotRequired: !noVisit, exemptReason: 'existing_plan_customer' };
-  }
-  return {
-    enforced: true,
-    required: true,
-    slotRequired: oneTimeUninvoiced,
-    exemptReason: null,
-    amount: computeDepositAmount({ oneTime }),
-  };
+// Keep the established public policy shape for render, data and acceptance
+// consumers. New collection cannot be re-enabled by an environment flag.
+function resolveDepositPolicy() {
+  return { enforced: false, required: false, slotRequired: false, exemptReason: 'feature_disabled' };
 }
 
 // Resolve the scheduled_service whose payer the eventual invoice will use, so a
@@ -152,74 +85,9 @@ async function linkedScheduledServiceId(estimate, explicitId = null, { strict = 
   }
 }
 
-// Policy resolution with the LIVE existing-plan-customer fallback. The
-// pricing snapshot (estimate_data.membershipSnapshot) is deliberately frozen
-// at save time and absent on legacy customer-linked estimates, so exempting
-// only on the snapshot would charge a commitment deposit to a current
-// WaveGuard member (and bypass their appointment-only gate). Display pricing
-// stays snapshot-frozen; whether a customer owes a deposit follows their
-// CURRENT qualifying recurring services. A failed live check falls back to
-// requiring the deposit — wrongly charged money still credits forward,
-// while a wrongly granted exemption silently loses the commitment gate.
-async function resolveDepositPolicyForEstimate({ estimate, committedPrepayTerm = false, membership = null, oneTime = false, oneTimeUninvoiced = false, noVisit = false, scheduledServiceId = null, useLinkedFallback = true }) {
-  let member = membership;
-  if (estimate?.customer_id && isDepositEnforced()) {
-    try {
-      // An auto-derived tier LABEL (waveguard_tier_source = 'auto': per-visit
-      // customer stamped from upcoming recurring coverage) is not an
-      // established membership billing relationship — it must not waive the
-      // acceptance-deposit commitment gate (Codex #3011 r8 P1). Checked on
-      // LIVE provenance BEFORE honoring the frozen membershipSnapshot too
-      // (Codex r9): an estimate saved after the auto-stamp freezes
-      // isExistingCustomer: true, and that snapshot must not bypass the gate.
-      // Fail-CLOSED (Codex r10 P1): anything except a verified 'not_label' —
-      // including 'unknown' from a lookup error or a pre-migration schema —
-      // keeps the deposit required.
-      const { tierLabelStatus } = require('./self-booking-plan-sync');
-      const labelOnly = (await tierLabelStatus(estimate.customer_id)) !== 'not_label';
-      if (labelOnly && member?.isExistingCustomer) {
-        member = { ...member, isExistingCustomer: false };
-      }
-      if (!member?.isExistingCustomer && !labelOnly) {
-        const { loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
-        const rows = await loadExistingRecurringQualifyingRows(db, estimate.customer_id);
-        if (Array.isArray(rows) && rows.length > 0) {
-          member = { ...(member || {}), isExistingCustomer: true };
-        }
-      }
-    } catch (err) {
-      logger.warn('[estimate-deposits] live plan-customer check failed — deposit stays required', { error: err.message });
-    }
-  }
-  const policy = resolveDepositPolicy({ estimate, committedPrepayTerm, membership: member, oneTime, oneTimeUninvoiced, noVisit });
-  // Third-party Bill-To: a payer-billed customer's invoices route to the payer's
-  // AP inbox, and payer invoices reject homeowner deposit credit (invoice.create
-  // skips depositCredit when a payer resolves) — so an acceptance deposit
-  // collected from the homeowner could never be applied and would strand. When a
-  // deposit WOULD be required, exempt it at the source (no prompt) if the customer
-  // resolves to a payer. Only the `required` gate is overridden — slotRequired and
-  // any already-exempt policy (e.g. existing_plan_customer's booking gate) are
-  // left intact, so we never override a policy that isn't charging a deposit.
-  // resolveForInvoice never throws (fails soft to self-pay); a miss/error falls
-  // through to the computed policy, the safe direction (a wrongly-charged self-pay
-  // deposit still credits forward; only a wrongly-granted exemption is unsafe).
-  if (policy.required && estimate?.customer_id) {
-    try {
-      const PayerService = require('./payer');
-      // Match the eventual invoice's payer precedence (scheduled_services.payer_id
-      // ?? customers.payer_id): scope by the appointment the estimate is tied to
-      // (committed > persisted link > source_estimate_id) so a per-job payer with
-      // no customer default is still caught.
-      const linkedSsId = await linkedScheduledServiceId(estimate, scheduledServiceId, { fallback: useLinkedFallback });
-      const resolved = await PayerService.resolveForInvoice({ customerId: estimate.customer_id, scheduledServiceId: linkedSsId });
-      if (resolved?.payerId) {
-        return { enforced: policy.enforced, required: false, slotRequired: policy.slotRequired, exemptReason: 'payer_billed' };
-      }
-    } catch (err) {
-      logger.warn('[estimate-deposits] payer check failed — deposit policy unchanged', { error: err.message });
-    }
-  }
-  return policy;
+// Preserve the async entry point used by estimate and scheduling consumers.
+async function resolveDepositPolicyForEstimate() {
+  return resolveDepositPolicy();
 }
 
 // Scheduling-surface summary: everything the New Appointment / appointment

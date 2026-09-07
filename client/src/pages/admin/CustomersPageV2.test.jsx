@@ -11,8 +11,9 @@ vi.mock('../../components/admin/Customer360ProfileV2', () => ({
 }));
 vi.mock('../../components/admin/MobileNewCustomerSheet', () => ({ default: () => null }));
 vi.mock('../../components/AddressAutocomplete', () => ({
-  default: ({ onSelect }) => (
+  default: ({ id, value, onChange, onSelect }) => (
     <>
+      <input id={id} value={value} onChange={(e) => onChange(e.target.value)} />
       <button type="button" onClick={() => onSelect({ line1: '10 Palm Ave', line2: 'Unit 8', city: 'Naples', state: 'FL', zip: '34102' })}>
         Select unit address
       </button>
@@ -63,6 +64,25 @@ describe('CustomersPageV2 workflow state', () => {
     localStorage.setItem('waves_admin_token', 'test-token');
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1200 });
+  });
+
+  it('names desktop customer inputs and selects using their visible labels', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => (
+      String(url).includes('/admin/customers?') ? response(list) : response({})
+    )));
+    render(<MemoryRouter initialEntries={['/admin/customers']}><CustomersPageV2 /></MemoryRouter>);
+    await screen.findByText('Avery Customer');
+    fireEvent.click(screen.getByRole('button', { name: 'Add Customer' }));
+    const dialog = within(screen.getByRole('dialog'));
+    for (const name of ['First name *', 'Last name', 'Phone *', 'Email', 'Address', 'Address line 2', 'City', 'State', 'ZIP', 'Notes']) {
+      expect(dialog.getByRole('textbox', { name, exact: true })).toBe(dialog.getByLabelText(name, { exact: true }));
+    }
+    for (const name of ['Property label', 'Lead source', 'Pipeline stage', 'Tags']) {
+      expect(dialog.getByRole('combobox', { name, exact: true })).toBe(dialog.getByLabelText(name, { exact: true }));
+    }
+    fireEvent.change(dialog.getByRole('combobox', { name: 'Property label' }), { target: { value: '__custom__' } });
+    expect(dialog.getByRole('textbox', { name: 'Custom property label' })).toBeInTheDocument();
+    expect(dialog.getByRole('textbox', { name: 'Custom tag' })).toBeInTheDocument();
   });
 
   it('clears stale rows and keeps search controls available when refresh fails', async () => {

@@ -1,6 +1,5 @@
 const db = require('../models/db');
 const logger = require('./logger');
-const PaymentRouter = require('./payment-router');
 const TwilioService = require('./twilio');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { logAutopay } = require('./autopay-log');
@@ -293,8 +292,7 @@ const BillingCron = {
           continue;
         }
 
-        // Get the correct processor for this customer
-        const service = await PaymentRouter.getServiceForCustomer(customer.id);
+        const service = await require('./stripe');
 
         // Charge
         const paymentResult = await service.chargeMonthly(customer.id);
@@ -792,8 +790,7 @@ const BillingCron = {
       let baseAmount = parseFloat(payment.amount);
 
       try {
-        // Get the correct processor
-        const service = await PaymentRouter.getServiceForCustomer(payment.customer_id);
+        const service = await require('./stripe');
 
         // Re-attempt the charge. payment.amount is the GROSS the failed
         // attempt asked for — it includes the 2.9% credit-card surcharge

@@ -2,9 +2,8 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { addETDays, etDateString, etParts } = require('../utils/datetime-et');
+const { etParts } = require('../utils/datetime-et');
 const {
-  buildPlanForService,
   buildMixOrder,
   calculateProductAmount,
   effectiveAreaFactor,
@@ -15,12 +14,16 @@ const {
   summarizeMaterialCost,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
+const jobCard = require('../services/job-card');
+const { gateEnvValue } = require('../config/feature-gates');
+const { isTechnicianRequest, technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
 const { scopeFromText } = require('../services/service-report/action-scope');
-const { findLiveRestockRequest } = require('../services/procurement/live-restock-request');
 const {
   getActiveLawnProtocol,
   getProtocolWindowContext,
   summarizeProtocolContext,
+  protocolReferenceSyncIssues,
+  lockDraftProtocol,
 } = require('../services/lawn-protocol-operating-layer');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -186,88 +189,6 @@ function bridgeLink(path, label, description) {
   return { path, label, description };
 }
 
-function addReadinessIssue(issues, severity, code, message, metadata = {}) {
-  issues.push({ severity, code, message, metadata });
-}
-
-function readinessStatus(issues = []) {
-  if (issues.some((issue) => issue.severity === 'block')) return 'blocked';
-  if (issues.some((issue) => issue.severity === 'warn')) return 'warning';
-  return 'ready';
-}
-
-function summarizePlanReadiness(plan) {
-  const issues = [];
-  const assignment = plan?.appointmentAssignment || {};
-  if (!assignment.assignedAt || !assignment.equipmentSystemId || !assignment.calibrationId) {
-    addReadinessIssue(
-      issues,
-      'block',
-      'missing_protocol_assignment',
-      'Appointment has not been assigned a protocol window and equipment calibration.',
-    );
-  }
-
-  for (const block of plan?.equipmentCalibration?.blocks || []) {
-    addReadinessIssue(issues, 'block', block.code || 'equipment_block', block.message || 'Equipment calibration is blocking readiness.', block);
-  }
-  for (const warning of plan?.equipmentCalibration?.warnings || []) {
-    addReadinessIssue(issues, 'warn', warning.code || 'equipment_warning', warning.message || 'Equipment calibration has a warning.', warning);
-  }
-
-  for (const block of plan?.inventory?.blocks || []) {
-    addReadinessIssue(issues, 'block', block.code || 'inventory_block', block.message || 'Inventory is blocking readiness.', block);
-  }
-  for (const warning of plan?.inventory?.warnings || []) {
-    addReadinessIssue(issues, 'warn', warning.code || 'inventory_warning', warning.message || 'Inventory has a warning.', warning);
-  }
-
-  for (const block of plan?.propertyGate?.blocks || []) {
-    if (String(block.code || '').includes('calibration')) continue;
-    addReadinessIssue(issues, 'block', block.code || 'property_block', block.message || 'Property gate is blocking readiness.', block);
-  }
-  for (const warning of plan?.propertyGate?.warnings || []) {
-    addReadinessIssue(issues, 'warn', warning.code || 'property_warning', warning.message || 'Property gate has a warning.', warning);
-  }
-
-  if (!plan?.propertyGate?.latestAssessment?.id) {
-    addReadinessIssue(
-      issues,
-      'warn',
-      'missing_lawn_assessment_baseline',
-      'No recent lawn assessment is linked for baseline field conditions.',
-    );
-  }
-
-  const wikiRefs = plan?.protocol?.structured?.window?.wikiRefs || [];
-  if (!Array.isArray(wikiRefs) || !wikiRefs.length) {
-    addReadinessIssue(
-      issues,
-      'warn',
-      'missing_window_sop_refs',
-      'Protocol window has no SOP/wiki references attached.',
-    );
-  }
-
-  const deduped = [];
-  const seen = new Set();
-  for (const issue of issues) {
-    const key = `${issue.severity}:${issue.code}:${issue.message}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    deduped.push(issue);
-  }
-
-  return {
-    status: readinessStatus(deduped),
-    issues: deduped,
-    counts: deduped.reduce((acc, issue) => {
-      acc[issue.severity] = (acc[issue.severity] || 0) + 1;
-      return acc;
-    }, { block: 0, warn: 0, info: 0 }),
-  };
-}
-
 function markdownList(items = [], formatter = (item) => item) {
   const lines = (items || [])
     .map(formatter)
@@ -280,7 +201,7 @@ function protocolSopSlug(protocol, window) {
   return `waveguard-${protocol.protocol_key}-${window.window_key}`.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 190);
 }
 
-function renderWindowSopMarkdown({ protocol, window, products = [], gates = [], calibrations = [] }) {
+function renderWindowSopMarkdown({ protocol, window, products = [], gates = [] }) {
   const defaultProducts = products.filter((product) => product.default_in_plan);
   const conditionalProducts = products.filter((product) => !product.default_in_plan);
   const applicableGates = gates.filter((gate) => {
@@ -319,20 +240,14 @@ function renderWindowSopMarkdown({ protocol, window, products = [], gates = [], 
       return `${product.product_name} - ${product.role || 'conditional'} - ${rate}`;
     }),
     '',
-    '## Enforcement Gates',
+    '## Product Restrictions',
     markdownList(applicableGates, (gate) => `${gate.title}: ${gate.rule_text}`),
-    '',
-    '## Calibration References',
-    markdownList(calibrations, (cal) => {
-      const carrier = cal.carrier_gal_per_1000 != null ? `${cal.carrier_gal_per_1000} gal/1K` : 'carrier not set';
-      return `${cal.system_name} - ${carrier} - ${cal.calibration_status || 'status unknown'}`;
-    }),
     '',
     '## Customer Note Templates',
     markdownList(window.customer_note_templates),
     '',
     '## Operating Sentence',
-    protocol.operating_sentence || 'Every stop must be legal, calibrated, seasonally justified, and documented.',
+    protocol.operating_sentence || 'Follow product labels and document the treatment.',
   ].join('\n');
 }
 
@@ -343,25 +258,15 @@ async function loadWindowSopPayload(knex, protocolId, windowKey) {
     .where({ lawn_protocol_id: protocol.id, window_key: windowKey })
     .first();
   if (!window) return null;
-  const [products, gates, calibrations] = await Promise.all([
+  const [products, gates] = await Promise.all([
     knex('lawn_protocol_products')
       .where({ lawn_protocol_window_id: window.id })
-      .orderBy('sort_order', 'asc')
-      .catch(() => []),
+      .orderBy('sort_order', 'asc'),
     knex('lawn_protocol_gates')
       .where({ lawn_protocol_id: protocol.id })
-      .orderBy('gate_key', 'asc')
-      .catch(() => []),
-    knex('equipment_calibrations as ec')
-      .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
-      .where('ec.active', true)
-      .where('es.active', true)
-      .whereIn('es.system_type', ['tank', 'backpack'])
-      .select('ec.carrier_gal_per_1000', 'ec.calibration_status', 'es.name as system_name')
-      .orderBy('es.name', 'asc')
-      .catch(() => []),
+      .orderBy('gate_key', 'asc'),
   ]);
-  return { protocol, window, products, gates, calibrations };
+  return { protocol, window, products, gates };
 }
 
 async function loadProtocolWikiPages(knex, protocol, window) {
@@ -384,655 +289,6 @@ async function loadProtocolWikiPages(knex, protocol, window) {
     lastVerifiedAt: row.last_verified_at,
     updatedAt: row.updated_at,
   }));
-}
-
-async function buildReadinessQueue(knex, { days = 14, limit = 50 } = {}) {
-  const today = etDateString();
-  const endDate = etDateString(addETDays(new Date(), Number(days || 14)));
-
-  const services = await knex('scheduled_services as ss')
-    .leftJoin('customers as c', 'ss.customer_id', 'c.id')
-    .leftJoin('technicians as t', 'ss.technician_id', 't.id')
-    .whereBetween('ss.scheduled_date', [today, endDate])
-    .whereNotIn('ss.status', ['completed', 'cancelled', 'canceled', 'void'])
-    // Real WaveGuard members only — exclude the flat non-member 'Commercial' tier.
-    .whereIn('c.waveguard_tier', ['Bronze', 'Silver', 'Gold', 'Platinum'])
-    .where(function lawnService() {
-      this.whereILike('ss.service_type', '%lawn%')
-        .orWhereILike('ss.service_type', '%fertiliz%')
-        .orWhereILike('ss.service_type', '%turf%');
-    })
-    .select(
-      'ss.id',
-      'ss.customer_id',
-      'ss.service_type',
-      'ss.scheduled_date',
-      'ss.window_start',
-      'ss.status',
-      'ss.lawn_protocol_key',
-      'ss.lawn_protocol_window_title',
-      'ss.assigned_equipment_system_id',
-      'ss.assigned_calibration_id',
-      'c.first_name',
-      'c.last_name',
-      'c.address_line1',
-      'c.city',
-      'c.waveguard_tier',
-      't.name as technician_name',
-    )
-    .orderBy('ss.scheduled_date', 'asc')
-    .orderBy('ss.window_start', 'asc')
-    .limit(Number(limit || 50))
-    .catch(() => []);
-
-  const appointments = [];
-  for (const service of services) {
-    try {
-      const plan = await buildPlanForService(service.id, { db: knex });
-      const readiness = summarizePlanReadiness(plan);
-      appointments.push({
-        id: service.id,
-        customerId: service.customer_id,
-        customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim() || 'Customer',
-        address: service.address_line1 || null,
-        city: service.city || null,
-        serviceType: service.service_type,
-        scheduledDate: service.scheduled_date,
-        windowStart: service.window_start,
-        technicianName: service.technician_name || null,
-        waveguardTier: service.waveguard_tier || null,
-        protocolWindowTitle: plan?.protocol?.structured?.window?.title || service.lawn_protocol_window_title || null,
-        assignment: plan?.appointmentAssignment || null,
-        status: readiness.status,
-        issues: readiness.issues,
-        counts: readiness.counts,
-      });
-    } catch (err) {
-      appointments.push({
-        id: service.id,
-        customerId: service.customer_id,
-        customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim() || 'Customer',
-        address: service.address_line1 || null,
-        city: service.city || null,
-        serviceType: service.service_type,
-        scheduledDate: service.scheduled_date,
-        windowStart: service.window_start,
-        technicianName: service.technician_name || null,
-        waveguardTier: service.waveguard_tier || null,
-        protocolWindowTitle: service.lawn_protocol_window_title || null,
-        assignment: null,
-        status: 'blocked',
-        issues: [{
-          severity: 'block',
-          code: 'readiness_plan_error',
-          message: err.message || 'Could not build readiness plan for this appointment.',
-        }],
-        counts: { block: 1, warn: 0, info: 0 },
-      });
-    }
-  }
-
-  return {
-    days: Number(days || 14),
-    startDate: today,
-    endDate,
-    statusCounts: appointments.reduce((acc, appt) => {
-      acc[appt.status] = (acc[appt.status] || 0) + 1;
-      return acc;
-    }, { ready: 0, warning: 0, blocked: 0 }),
-    appointments,
-  };
-}
-
-async function getUpcomingWaveGuardLawnServices(knex, { days = 14, limit = 75 } = {}) {
-  const today = etDateString();
-  const endDate = etDateString(addETDays(new Date(), Number(days || 14)));
-
-  return knex('scheduled_services as ss')
-    .leftJoin('customers as c', 'ss.customer_id', 'c.id')
-    .leftJoin('technicians as t', 'ss.technician_id', 't.id')
-    .whereBetween('ss.scheduled_date', [today, endDate])
-    .whereNotIn('ss.status', ['completed', 'cancelled', 'canceled', 'void'])
-    // Real WaveGuard members only — exclude the flat non-member 'Commercial' tier.
-    .whereIn('c.waveguard_tier', ['Bronze', 'Silver', 'Gold', 'Platinum'])
-    .where(function lawnService() {
-      this.whereILike('ss.service_type', '%lawn%')
-        .orWhereILike('ss.service_type', '%fertiliz%')
-        .orWhereILike('ss.service_type', '%turf%');
-    })
-    .select(
-      'ss.id',
-      'ss.customer_id',
-      'ss.service_type',
-      'ss.scheduled_date',
-      'ss.window_start',
-      'ss.status',
-      'ss.lawn_protocol_key',
-      'ss.lawn_protocol_window_title',
-      'ss.assigned_equipment_system_id',
-      'ss.assigned_calibration_id',
-      'c.first_name',
-      'c.last_name',
-      'c.address_line1',
-      'c.city',
-      'c.waveguard_tier',
-      't.name as technician_name',
-    )
-    .orderBy('ss.scheduled_date', 'asc')
-    .orderBy('ss.window_start', 'asc')
-    .limit(Number(limit || 75))
-    .catch(() => []);
-}
-
-async function selectDefaultFieldVerifiedCalibration(knex, serviceDate) {
-  const dateOnly = serviceDate ? String(serviceDate).slice(0, 10) : new Date().toISOString().slice(0, 10);
-  return knex('equipment_calibrations as ec')
-    .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
-    .where('ec.active', true)
-    .where('es.active', true)
-    .where('ec.calibration_status', 'field_verified')
-    .where(function notExpired() {
-      this.whereNull('ec.expires_at').orWhere('ec.expires_at', '>=', `${dateOnly}T00:00:00`);
-    })
-    .select(
-      'ec.*',
-      'es.name as system_name',
-      'es.system_type',
-      'es.tank_capacity_gal',
-    )
-    .orderByRaw("case when es.system_type = 'tank' then 0 when es.system_type = 'backpack' then 1 else 2 end")
-    .orderBy('es.name', 'asc')
-    .first()
-    .catch(() => null);
-}
-
-function assignmentUpdateFromPlan(plan, source, actorId) {
-  const selectedCalibration = plan?.equipmentCalibration?.selected || null;
-  const structured = plan?.protocol?.structured || null;
-  const window = structured?.window || null;
-  if (!selectedCalibration?.id || !selectedCalibration?.equipment_system_id || !structured?.protocolKey || !window?.key) {
-    return null;
-  }
-  return {
-    lawn_protocol_key: structured.protocolKey,
-    lawn_protocol_version: structured.version || null,
-    lawn_protocol_window_key: window.key,
-    lawn_protocol_window_title: window.title || null,
-    assigned_equipment_system_id: selectedCalibration.equipment_system_id,
-    assigned_calibration_id: selectedCalibration.id,
-    lawn_protocol_assignment_source: source,
-    lawn_protocol_assigned_by: actorId || null,
-    lawn_protocol_assigned_at: new Date(),
-    lawn_protocol_assignment_snapshot: JSON.stringify({
-      protocol: {
-        key: structured.protocolKey,
-        version: structured.version || null,
-        windowKey: window.key,
-        windowTitle: window.title || null,
-        goal: window.goal || null,
-      },
-      equipment: {
-        systemId: selectedCalibration.equipment_system_id,
-        calibrationId: selectedCalibration.id,
-        systemName: selectedCalibration.system_name || null,
-        carrierGalPer1000: selectedCalibration.carrier_gal_per_1000 != null
-          ? Number(selectedCalibration.carrier_gal_per_1000)
-          : null,
-        calibrationStatus: selectedCalibration.calibration_status || null,
-        expiresAt: selectedCalibration.expires_at || null,
-      },
-    }),
-    updated_at: new Date(),
-  };
-}
-
-async function bulkAssignReadyAppointments(knex, req, { days = 14, limit = 75 } = {}) {
-  const services = await getUpcomingWaveGuardLawnServices(knex, { days, limit });
-  const results = [];
-
-  for (const service of services) {
-    if (service.assigned_equipment_system_id && service.assigned_calibration_id && service.lawn_protocol_key) {
-      results.push({ serviceId: service.id, status: 'skipped', reason: 'already_assigned' });
-      continue;
-    }
-
-    const calibration = await selectDefaultFieldVerifiedCalibration(knex, service.scheduled_date);
-    if (!calibration) {
-      results.push({ serviceId: service.id, status: 'skipped', reason: 'no_field_verified_calibration' });
-      continue;
-    }
-
-    try {
-      const plan = await buildPlanForService(service.id, {
-        db: knex,
-        equipmentSystemId: calibration.equipment_system_id,
-        calibrationId: calibration.id,
-      });
-      const readiness = summarizePlanReadiness({
-        ...plan,
-        appointmentAssignment: {
-          ...(plan.appointmentAssignment || {}),
-          assignedAt: new Date().toISOString(),
-          equipmentSystemId: calibration.equipment_system_id,
-          calibrationId: calibration.id,
-        },
-      });
-      if (readiness.counts.block > 0) {
-        results.push({
-          serviceId: service.id,
-          status: 'skipped',
-          reason: 'readiness_blocked',
-          issues: readiness.issues.filter((issue) => issue.severity === 'block'),
-        });
-        continue;
-      }
-
-      const update = assignmentUpdateFromPlan(plan, 'readiness_bulk_assign', req.technicianId);
-      if (!update) {
-        results.push({ serviceId: service.id, status: 'skipped', reason: 'assignment_payload_missing' });
-        continue;
-      }
-      await knex('scheduled_services').where({ id: service.id }).update(update);
-      results.push({
-        serviceId: service.id,
-        status: 'assigned',
-        customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
-        calibrationId: calibration.id,
-        equipmentSystemId: calibration.equipment_system_id,
-        protocolWindowTitle: plan?.protocol?.structured?.window?.title || null,
-      });
-    } catch (err) {
-      results.push({ serviceId: service.id, status: 'skipped', reason: 'plan_error', message: err.message });
-    }
-  }
-
-  return {
-    assigned: results.filter((row) => row.status === 'assigned').length,
-    skipped: results.filter((row) => row.status !== 'assigned').length,
-    results,
-  };
-}
-
-async function assignReadinessAppointment(knex, req, serviceId) {
-  const service = await knex('scheduled_services as ss')
-    .leftJoin('customers as c', 'ss.customer_id', 'c.id')
-    .where('ss.id', serviceId)
-    .select(
-      'ss.id',
-      'ss.scheduled_date',
-      'ss.assigned_equipment_system_id',
-      'ss.assigned_calibration_id',
-      'ss.lawn_protocol_key',
-      'c.first_name',
-      'c.last_name',
-    )
-    .first();
-  if (!service) {
-    const err = new Error('Scheduled service not found');
-    err.statusCode = 404;
-    throw err;
-  }
-  if (service.assigned_equipment_system_id && service.assigned_calibration_id && service.lawn_protocol_key) {
-    return { serviceId: service.id, status: 'skipped', reason: 'already_assigned' };
-  }
-  const calibration = await selectDefaultFieldVerifiedCalibration(knex, service.scheduled_date);
-  if (!calibration) {
-    const err = new Error('No field-verified calibration is available for this appointment.');
-    err.statusCode = 409;
-    err.code = 'no_field_verified_calibration';
-    throw err;
-  }
-  const plan = await buildPlanForService(service.id, {
-    db: knex,
-    equipmentSystemId: calibration.equipment_system_id,
-    calibrationId: calibration.id,
-  });
-  const readiness = summarizePlanReadiness({
-    ...plan,
-    appointmentAssignment: {
-      ...(plan.appointmentAssignment || {}),
-      assignedAt: new Date().toISOString(),
-      equipmentSystemId: calibration.equipment_system_id,
-      calibrationId: calibration.id,
-    },
-  });
-  if (readiness.counts.block > 0) {
-    const err = new Error('Appointment still has readiness blocks.');
-    err.statusCode = 409;
-    err.code = 'readiness_blocked';
-    err.details = readiness.issues.filter((issue) => issue.severity === 'block');
-    throw err;
-  }
-  const update = assignmentUpdateFromPlan(plan, 'readiness_single_assign', req.technicianId);
-  if (!update) {
-    const err = new Error('Assignment payload could not be created.');
-    err.statusCode = 409;
-    err.code = 'assignment_payload_missing';
-    throw err;
-  }
-  await knex('scheduled_services').where({ id: service.id }).update(update);
-  return {
-    serviceId: service.id,
-    status: 'assigned',
-    customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
-    calibrationId: calibration.id,
-    equipmentSystemId: calibration.equipment_system_id,
-    protocolWindowTitle: plan?.protocol?.structured?.window?.title || null,
-  };
-}
-
-async function loadReadinessSnapshotSummary(knex, limit = 8) {
-  if (!(await knex.schema.hasTable('lawn_protocol_readiness_snapshots'))) {
-    return { last: null, recent: [] };
-  }
-  const rows = await knex('lawn_protocol_readiness_snapshots')
-    .select(
-      'id',
-      'snapshot_date',
-      'scan_start_date',
-      'scan_end_date',
-      'days',
-      'appointment_count',
-      'ready_count',
-      'warning_count',
-      'blocked_count',
-      'generated_by_name',
-      'source',
-      'created_at',
-    )
-    .orderBy('created_at', 'desc')
-    .limit(Math.max(1, Math.min(30, Number(limit || 8))))
-    .catch(() => []);
-  return {
-    last: rows[0] || null,
-    recent: rows,
-  };
-}
-
-function compactReadinessAppointment(appt) {
-  return {
-    id: appt.id,
-    customerId: appt.customerId,
-    customerName: appt.customerName,
-    address: appt.address,
-    city: appt.city,
-    serviceType: appt.serviceType,
-    scheduledDate: appt.scheduledDate,
-    windowStart: appt.windowStart,
-    technicianName: appt.technicianName,
-    waveguardTier: appt.waveguardTier,
-    protocolWindowTitle: appt.protocolWindowTitle,
-    status: appt.status,
-    counts: appt.counts,
-    issues: (appt.issues || []).map((issue) => ({
-      severity: issue.severity,
-      code: issue.code,
-      message: issue.message,
-      metadata: issue.metadata || {},
-    })),
-  };
-}
-
-async function upsertReadinessAlert(knex, snapshot, queue) {
-  const blocked = queue.statusCounts.blocked || 0;
-  if (!(await knex.schema.hasTable('admin_alerts'))) return null;
-  const warning = queue.statusCounts.warning || 0;
-  const appointmentCount = queue.appointments?.length || 0;
-  const metadata = {
-    snapshotId: snapshot.id,
-    scanStartDate: queue.startDate,
-    scanEndDate: queue.endDate,
-    days: queue.days,
-    statusCounts: queue.statusCounts,
-  };
-  if (!blocked) {
-    const resolvedAlerts = await knex('admin_alerts')
-      .where({ type: 'lawn_protocol_readiness', status: 'open' })
-      .where(function matchingWindow() {
-        this.where({ dedupe_key: `lawn_protocol_readiness:${queue.startDate}:${queue.endDate}` })
-          .orWhereRaw("metadata->>'scanStartDate' = ? AND metadata->>'scanEndDate' = ?", [queue.startDate, queue.endDate]);
-      })
-      .update({
-        status: 'resolved',
-        resolved_at: new Date(),
-        last_seen_at: new Date(),
-        description: 'Resolved after readiness snapshot found no blocked appointments.',
-        metadata: JSON.stringify(metadata),
-        updated_at: new Date(),
-      });
-    return resolvedAlerts ? { resolved: true, count: resolvedAlerts } : null;
-  }
-
-  const title = `WaveGuard readiness: ${blocked} blocked appointment${blocked === 1 ? '' : 's'}`;
-  const description = `${blocked} of ${appointmentCount} upcoming WaveGuard lawn appointment${appointmentCount === 1 ? '' : 's'} are blocked for ${queue.startDate} through ${queue.endDate}. ${warning} appointment${warning === 1 ? '' : 's'} have warnings.`;
-  const payload = {
-    dedupe_key: `lawn_protocol_readiness:${queue.startDate}:${queue.endDate}`,
-    type: 'lawn_protocol_readiness',
-    status: 'open',
-    severity: blocked >= 5 ? 'critical' : 'high',
-    source_record_type: 'lawn_protocol_readiness_snapshot',
-    source_record_id: snapshot.id,
-    title,
-    description,
-    href: '/admin/lawn-protocol?tab=readiness',
-    detected_at: new Date(),
-    last_seen_at: new Date(),
-    created_by_rule: 'lawn_protocol_readiness_snapshot',
-    metadata: JSON.stringify(metadata),
-    updated_at: new Date(),
-  };
-
-  const [alert] = await knex('admin_alerts')
-    .insert(payload)
-    .onConflict('dedupe_key')
-    .merge({
-      status: 'open',
-      severity: payload.severity,
-      source_record_id: snapshot.id,
-      title,
-      description,
-      href: payload.href,
-      last_seen_at: payload.last_seen_at,
-      metadata: payload.metadata,
-      updated_at: payload.updated_at,
-    })
-    .returning(['id', 'dedupe_key', 'type', 'status', 'severity', 'title', 'description', 'href'])
-    .catch(() => []);
-  return alert || null;
-}
-
-async function createReadinessSnapshot(knex, req, { days = 14, limit = 75, source = 'manual_admin' } = {}) {
-  if (!(await knex.schema.hasTable('lawn_protocol_readiness_snapshots'))) {
-    const err = new Error('Readiness snapshot table is not available. Run database migrations first.');
-    err.statusCode = 409;
-    throw err;
-  }
-  const queue = await buildReadinessQueue(knex, { days, limit });
-  const actor = actorFromRequest(req);
-  const summary = {
-    statusCounts: queue.statusCounts,
-    generatedAt: new Date().toISOString(),
-    scanStartDate: queue.startDate,
-    scanEndDate: queue.endDate,
-    days: queue.days,
-  };
-  const [snapshot] = await knex('lawn_protocol_readiness_snapshots')
-    .insert({
-      scan_start_date: queue.startDate,
-      scan_end_date: queue.endDate,
-      days: queue.days,
-      appointment_count: queue.appointments.length,
-      ready_count: queue.statusCounts.ready || 0,
-      warning_count: queue.statusCounts.warning || 0,
-      blocked_count: queue.statusCounts.blocked || 0,
-      generated_by: actor.id,
-      generated_by_name: actor.name || actor.email || null,
-      source,
-      summary: JSON.stringify(summary),
-      appointments: JSON.stringify(queue.appointments.map(compactReadinessAppointment)),
-    })
-    .returning('*');
-  const alert = await upsertReadinessAlert(knex, snapshot, queue);
-  const readinessSnapshots = await loadReadinessSnapshotSummary(knex);
-  return { snapshot, alert, readinessQueue: queue, readinessSnapshots };
-}
-
-async function createProductSubstitution(knex, req, serviceId) {
-  if (!(await knex.schema.hasTable('lawn_protocol_product_substitutions'))) {
-    const err = new Error('Product substitution table is not available. Run database migrations first.');
-    err.statusCode = 409;
-    throw err;
-  }
-  const originalProductId = String(req.body?.originalProductId || '').trim();
-  const substituteProductId = String(req.body?.substituteProductId || '').trim();
-  if (!originalProductId || !substituteProductId) {
-    const err = new Error('Original product and substitute product are required.');
-    err.statusCode = 400;
-    throw err;
-  }
-  if (originalProductId === substituteProductId) {
-    const err = new Error('Substitute product must be different from the blocked product.');
-    err.statusCode = 400;
-    throw err;
-  }
-
-  const [service, originalProduct, substituteProduct] = await Promise.all([
-    knex('scheduled_services').where({ id: serviceId }).first(),
-    knex('products_catalog').where({ id: originalProductId }).first(),
-    knex('products_catalog').where({ id: substituteProductId }).first(),
-  ]);
-  if (!service) {
-    const err = new Error('Scheduled service not found.');
-    err.statusCode = 404;
-    throw err;
-  }
-  if (!originalProduct || !substituteProduct) {
-    const err = new Error('Original or substitute product was not found.');
-    err.statusCode = 400;
-    throw err;
-  }
-
-  const actor = actorFromRequest(req);
-  const payload = {
-    scheduled_service_id: serviceId,
-    original_product_id: originalProductId,
-    substitute_product_id: substituteProductId,
-    rate_per_1000: numberOrNull(req.body?.ratePer1000),
-    rate_unit: String(req.body?.rateUnit || substituteProduct.rate_unit || '').trim() || null,
-    reason: String(req.body?.reason || '').trim() || 'Inventory readiness substitution',
-    approved_by: actor.id,
-    approved_by_name: actor.name || actor.email || null,
-    approved_at: new Date(),
-    active: true,
-    metadata: JSON.stringify({
-      source: 'readiness_exception_resolution',
-      originalProductName: originalProduct.name,
-      substituteProductName: substituteProduct.name,
-    }),
-    updated_at: new Date(),
-  };
-
-  const [row] = await knex('lawn_protocol_product_substitutions')
-    .insert(payload)
-    .onConflict(['scheduled_service_id', 'original_product_id'])
-    .merge({
-      substitute_product_id: payload.substitute_product_id,
-      rate_per_1000: payload.rate_per_1000,
-      rate_unit: payload.rate_unit,
-      reason: payload.reason,
-      approved_by: payload.approved_by,
-      approved_by_name: payload.approved_by_name,
-      approved_at: payload.approved_at,
-      active: true,
-      metadata: payload.metadata,
-      updated_at: payload.updated_at,
-    })
-    .returning('*');
-
-  return {
-    ...row,
-    originalProductName: originalProduct.name,
-    substituteProductName: substituteProduct.name,
-  };
-}
-
-async function createRestockRequest(knex, req, serviceId) {
-  if (!(await knex.schema.hasTable('product_restock_requests'))) {
-    const err = new Error('Restock request table is not available. Run database migrations first.');
-    err.statusCode = 409;
-    throw err;
-  }
-  const productId = String(req.body?.productId || '').trim();
-  if (!productId) {
-    const err = new Error('Product is required.');
-    err.statusCode = 400;
-    throw err;
-  }
-  // One transaction, product row LOCKED before the insert, then the SHARED
-  // any-source live-request check under that lock: every restock creator
-  // (this route, the forecast route, the Intelligence Bar tool, the
-  // auto-reorder sweep) runs the same read under the same row lock, so a
-  // writer that resumes after a concurrent commit hands back the request
-  // that already exists instead of raising its twin (Codex r8 P1, r9 P1).
-  return knex.transaction(async (trx) => {
-    const service = await trx('scheduled_services').where({ id: serviceId }).first();
-    if (!service) {
-      const err = new Error('Scheduled service not found.');
-      err.statusCode = 404;
-      throw err;
-    }
-    const product = await trx('products_catalog').where({ id: productId }).forUpdate().first();
-    if (!product) {
-      const err = new Error('Product not found.');
-      err.statusCode = 400;
-      throw err;
-    }
-    const live = await findLiveRestockRequest(trx, product.id);
-    if (live) return { ...live, existing: true, productName: product.name, productCategory: product.category || null };
-    const [row] = await trx('product_restock_requests')
-      .insert(readinessRestockRow({ product, service, body: req.body || {}, actor: actorFromRequest(req) }))
-      .returning('*');
-    return { ...row, existing: false, productName: product.name, productCategory: product.category || null };
-  });
-}
-
-// Requested quantity defaults to (target − on hand), target to 2× the
-// low-stock threshold — explicit body values win.
-function readinessQuantities(product, body) {
-  const currentStock = numberOrNull(product.inventory_on_hand);
-  const lowStock = numberOrNull(product.low_stock_threshold);
-  const targetStock = numberOrNull(body.targetStock) ?? (lowStock != null ? lowStock * 2 : null);
-  const requestedQuantity = numberOrNull(body.requestedQuantity)
-    ?? (targetStock != null && currentStock != null ? Math.max(0, targetStock - currentStock) : null);
-  return { currentStock, targetStock, requestedQuantity };
-}
-
-// The readiness restock row from the LOCKED product, the service and the
-// request body. Pure — no decisions about whether to insert.
-function readinessRestockRow({ product, service, body, actor }) {
-  const { currentStock, targetStock, requestedQuantity } = readinessQuantities(product, body);
-  return {
-    product_id: product.id,
-    scheduled_service_id: service.id,
-    customer_id: service.customer_id || null,
-    status: 'open',
-    priority: body.priority || 'high',
-    requested_quantity: requestedQuantity,
-    unit: String(body.unit || product.inventory_unit || product.rate_unit || '').trim() || null,
-    current_stock: currentStock,
-    target_stock: targetStock,
-    vendor: String(body.vendor || product.best_vendor || '').trim() || null,
-    needed_by: body.neededBy ? String(body.neededBy).slice(0, 10) : service.scheduled_date || null,
-    reason: String(body.reason || '').trim() || `Restock needed for WaveGuard readiness: ${product.name}`,
-    source: 'lawn_readiness_exception',
-    created_by: actor.id,
-    created_by_name: actor.name || actor.email || null,
-    metadata: JSON.stringify({
-      serviceType: service.service_type || null,
-      scheduledDate: service.scheduled_date || null,
-      issueCode: body.issueCode || null,
-    }),
-  };
 }
 
 function actorFromRequest(req) {
@@ -1235,7 +491,7 @@ async function validateLawnProtocolForPublish(knex, protocolId) {
     };
   }
 
-  const issues = [];
+  const issues = await protocolReferenceSyncIssues(knex, protocol);
   const [windows, gates] = await Promise.all([
     knex('lawn_protocol_windows').where({ lawn_protocol_id: protocol.id }).orderBy('month', 'asc'),
     knex('lawn_protocol_gates').where({ lawn_protocol_id: protocol.id }).orderBy('gate_key', 'asc'),
@@ -1382,6 +638,8 @@ async function getProtocolProducts() {
       'labeled_turf_species', 'excluded_turf_species',
       'requires_surfactant', 'allows_surfactant',
       'label_source_note', 'label_url', 'sds_url', 'epa_reg_number', 'manufacturer',
+      'ppe_required', 'signal_word', 'compatibility_notes', 'pollinator_precautions',
+      'ppe_text', 'reentry_text', 'do_not_tank_mix_with', 'irrigation_notes',
     )
     .catch(() => []);
 
@@ -1559,9 +817,6 @@ router.get('/lawn-mix', async (req, res, next) => {
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
     const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);
-    const calibrationExpired = !!(
-      calibration?.expires_at && new Date(calibration.expires_at) < new Date()
-    );
     const products = await getProtocolProducts();
     const baseLines = parseProtocolLines(visit.primary, 'base');
     const conditionalLines = parseProtocolLines(visit.secondary, 'conditional');
@@ -1582,7 +837,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     const items = resolvedLines.map((line) => {
       const product = line.product;
       const selected = line.selected;
-      const carrier = calibrationExpired ? 0 : Number(calibration?.carrier_gal_per_1000 || 0);
+      const carrier = Number(calibration?.carrier_gal_per_1000 || 0);
       const areaContext = {
         plan: req.query.plan,
         weedPressure: req.query.weedPressure,
@@ -1653,7 +908,7 @@ router.get('/lawn-mix', async (req, res, next) => {
           unitSizeOz: product.unit_size_oz != null ? Number(product.unit_size_oz) : null,
           needsPricing: product.needs_pricing === true,
           rainfastMinutes: product.rainfast_minutes || null,
-          reiHours: product.rei_hours || null,
+          reiHours: product.rei_hours ?? null,
           labeledTurfSpecies: product.labeled_turf_species || [],
           excludedTurfSpecies: product.excluded_turf_species || [],
           requiresSurfactant: product.requires_surfactant,
@@ -1665,6 +920,14 @@ router.get('/lawn-mix', async (req, res, next) => {
           sdsUrl: product.sds_url || null,
           epaRegNumber: product.epa_reg_number || null,
           manufacturer: product.manufacturer || null,
+          ppeRequired: product.ppe_required || null,
+          signalWord: product.signal_word || null,
+          compatibilityNotes: product.compatibility_notes || null,
+          doNotTankMixWith: product.do_not_tank_mix_with || [],
+          irrigationNotes: product.irrigation_notes || null,
+          pollinatorPrecautions: product.pollinator_precautions || null,
+          ppeText: product.ppe_text || null,
+          reentryText: product.reentry_text || null,
         } : null,
         jobMix,
         fullTankMix,
@@ -1683,13 +946,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     if (!calibration) {
       warnings.push({
         code: 'missing_calibration',
-        message: 'No active calibration was found for the selected equipment. Mix amounts require a current carrier rate.',
-      });
-    }
-    if (calibrationExpired) {
-      warnings.push({
-        code: 'expired_calibration',
-        message: `Calibration for ${calibration.system_name || 'selected equipment'} is expired. Mix amounts are withheld until the rig is recalibrated.`,
+        message: 'No active calibration was found for the selected equipment. Mix amounts require a water application rate.',
       });
     }
     const unmatchedPricedLines = unmatchedPricedProtocolLines(items);
@@ -1846,7 +1103,7 @@ router.post('/lawn/drafts', requireAdmin, async (req, res, next) => {
 router.post('/lawn/drafts/:id/publish', requireAdmin, async (req, res, next) => {
   try {
     const published = await db.transaction(async (trx) => {
-      const draft = await trx('lawn_protocols').where({ id: req.params.id }).first();
+      const draft = await trx('lawn_protocols').where({ id: req.params.id }).forUpdate().first();
       if (!draft) {
         const err = new Error('Draft protocol not found');
         err.statusCode = 404;
@@ -1855,6 +1112,13 @@ router.post('/lawn/drafts/:id/publish', requireAdmin, async (req, res, next) => 
       if (draft.status !== 'draft') {
         const err = new Error('Only draft protocols can be published');
         err.statusCode = 400;
+        throw err;
+      }
+      // Hold the reviewed baseline through comparison and activation.
+      const active = await trx('lawn_protocols').where({ protocol_key: draft.protocol_key, status: 'active' }).forUpdate().first();
+      if (!active) {
+        const err = new Error('Active protocol changed during publication. Reload and retry.');
+        err.statusCode = 409;
         throw err;
       }
       const validation = await validateLawnProtocolForPublish(trx, draft.id);
@@ -1898,7 +1162,7 @@ router.post('/lawn/drafts/:id/publish', requireAdmin, async (req, res, next) => 
 });
 
 // GET /api/admin/protocols/lawn/command-center — office operating view that
-// bridges protocol, inventory, calibration, service reports, assessment, and wiki.
+// connects treatment plans, inventory, service reports, assessments, and wiki.
 router.get('/lawn/command-center', async (req, res, next) => {
   try {
     const serviceDate = req.query.date ? dateOnlyToETNoon(req.query.date) : new Date();
@@ -1946,28 +1210,6 @@ router.get('/lawn/command-center', async (req, res, next) => {
         },
       };
     });
-
-    const calibrations = await db('equipment_calibrations as ec')
-      .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
-      .where('ec.active', true)
-      .where('es.active', true)
-      .whereIn('es.system_type', ['tank', 'backpack'])
-      .select(
-        'ec.id',
-        'ec.equipment_system_id',
-        'ec.carrier_gal_per_1000',
-        'ec.pressure_psi',
-        'ec.engine_rpm_setting',
-        'ec.calibrated_at',
-        'ec.expires_at',
-        'es.name as system_name',
-        'es.system_type',
-        'es.tank_capacity_gal',
-        'es.default_application_type',
-      )
-      .orderByRaw("case when es.system_type = 'tank' then 0 else 1 end")
-      .orderBy('es.name', 'asc')
-      .catch(() => []);
 
     let completionStats = {
       completions30d: 0,
@@ -2033,12 +1275,6 @@ router.get('/lawn/command-center', async (req, res, next) => {
       .select('id', 'version', 'name', 'updated_at', 'created_at')
       .catch(() => []);
     const wikiPages = await loadProtocolWikiPages(db, context.protocol, structured.window);
-    const readinessQueue = await buildReadinessQueue(db).catch(() => ({
-      days: 14,
-      statusCounts: { ready: 0, warning: 0, blocked: 0 },
-      appointments: [],
-    }));
-    const readinessSnapshots = await loadReadinessSnapshotSummary(db).catch(() => ({ last: null, recent: [] }));
     const publishValidation = await validateLawnProtocolForPublish(db, context.protocol.id).catch(() => ({
       canPublish: false,
       issues: [{ severity: 'block', code: 'validation_error', message: 'Publish validation could not be completed.', metadata: {} }],
@@ -2055,21 +1291,15 @@ router.get('/lawn/command-center', async (req, res, next) => {
         lowStockProducts: products.filter((p) => ['low', 'depleted'].includes(p.inventory?.status)).length,
         depletedStockProducts: products.filter((p) => p.inventory?.status === 'depleted').length,
         unmappedProducts: products.filter((p) => !p.inventory?.mapped).length,
-        activeCalibrations: calibrations.length,
-        expiredCalibrations: calibrations.filter((row) => row.expires_at && new Date(row.expires_at) < new Date()).length,
       },
-      calibrations,
       completionStats,
       recentAudit,
       drafts,
       wikiPages,
-      readinessQueue,
-      readinessSnapshots,
       publishValidation,
       bridges: {
         fieldExecution: [
           bridgeLink('/admin/dispatch?tab=schedule', 'Appointments', 'Protocol closeout checklist is enforced on lawn appointments.'),
-          bridgeLink('/admin/equipment?tab=calibrations', 'Calibration', 'Keep tank and backpack carrier rates current.'),
           bridgeLink('/admin/lawn-assessments?tab=field', 'Field Assessment', 'Capture turf, irrigation, thatch, pest, disease, and chronic decline inputs.'),
         ],
         officeControl: [
@@ -2084,144 +1314,6 @@ router.get('/lawn/command-center', async (req, res, next) => {
       },
     });
   } catch (err) { next(err); }
-});
-
-// GET /api/admin/protocols/lawn/readiness — upcoming WaveGuard lawn appointment readiness queue.
-router.get('/lawn/readiness', async (req, res, next) => {
-  try {
-    const days = Math.max(1, Math.min(60, Number(req.query.days || 14)));
-    const limit = Math.max(1, Math.min(200, Number(req.query.limit || 75)));
-    const readinessQueue = await buildReadinessQueue(db, { days, limit });
-    const readinessSnapshots = await loadReadinessSnapshotSummary(db);
-    res.json({ readinessQueue, readinessSnapshots });
-  } catch (err) { next(err); }
-});
-
-// POST /api/admin/protocols/lawn/readiness/snapshot — store a scan and raise an admin alert when blocked rows exist.
-router.post('/lawn/readiness/snapshot', async (req, res, next) => {
-  try {
-    const days = Math.max(1, Math.min(60, Number(req.body?.days || req.query.days || 14)));
-    const limit = Math.max(1, Math.min(200, Number(req.body?.limit || req.query.limit || 75)));
-    const result = await createReadinessSnapshot(db, req, { days, limit });
-    res.json({ success: true, ...result });
-  } catch (err) {
-    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
-    next(err);
-  }
-});
-
-// POST /api/admin/protocols/lawn/readiness/bulk-assign — assign safe upcoming rows.
-router.post('/lawn/readiness/bulk-assign', async (req, res, next) => {
-  try {
-    const days = Math.max(1, Math.min(60, Number(req.body?.days || req.query.days || 14)));
-    const limit = Math.max(1, Math.min(200, Number(req.body?.limit || req.query.limit || 75)));
-    const result = await bulkAssignReadyAppointments(db, req, { days, limit });
-    const readinessQueue = await buildReadinessQueue(db, { days, limit });
-    const readinessSnapshots = await loadReadinessSnapshotSummary(db);
-    res.json({ success: true, ...result, readinessQueue, readinessSnapshots });
-  } catch (err) { next(err); }
-});
-
-// GET /api/admin/protocols/lawn/substitution-products — searchable catalog for appointment-level substitutions.
-router.get('/lawn/substitution-products', async (req, res, next) => {
-  try {
-    const q = String(req.query.q || '').trim();
-    const rows = await db('products_catalog')
-      .where(function activeProducts() {
-        this.where({ active: true }).orWhereNull('active');
-      })
-      .modify((query) => {
-        if (q) {
-          query.where(function searchProducts() {
-            this.whereILike('name', `%${q}%`)
-              .orWhereILike('category', `%${q}%`)
-              .orWhereILike('active_ingredient', `%${q}%`);
-          });
-        }
-      })
-      .select(
-        'id',
-        'name',
-        'category',
-        'active_ingredient',
-        'default_rate_per_1000',
-        'rate_unit',
-        'default_rate',
-        'default_unit',
-        'application_method',
-        'inventory_on_hand',
-        'inventory_unit',
-        'low_stock_threshold',
-      )
-      .orderBy('name', 'asc')
-      .limit(30);
-    res.json({
-      products: rows.map((row) => ({
-        id: row.id,
-        name: row.name,
-        category: row.category,
-        activeIngredient: row.active_ingredient,
-        defaultRatePer1000: row.default_rate_per_1000 != null ? Number(row.default_rate_per_1000) : null,
-        rateUnit: row.rate_unit || null,
-        // /gal dilution band for concentration products (see
-        // serializeProtocolProduct) — addProduct prefills its low end.
-        defaultRate: row.default_rate || null,
-        defaultUnit: row.default_unit || row.rate_unit || null,
-        method: row.application_method || null,
-        inventoryOnHand: row.inventory_on_hand != null ? Number(row.inventory_on_hand) : null,
-        inventoryUnit: row.inventory_unit || null,
-        lowStockThreshold: row.low_stock_threshold != null ? Number(row.low_stock_threshold) : null,
-      })),
-    });
-  } catch (err) { next(err); }
-});
-
-// POST /api/admin/protocols/lawn/readiness/:serviceId/substitutions — approve an appointment-level product substitute.
-router.post('/lawn/readiness/:serviceId/substitutions', async (req, res, next) => {
-  try {
-    const substitution = await createProductSubstitution(db, req, req.params.serviceId);
-    const days = Math.max(1, Math.min(60, Number(req.body?.days || req.query.days || 14)));
-    const readinessQueue = await buildReadinessQueue(db, { days, limit: 75 });
-    const readinessSnapshots = await loadReadinessSnapshotSummary(db);
-    res.json({ success: true, substitution, readinessQueue, readinessSnapshots });
-  } catch (err) {
-    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
-    next(err);
-  }
-});
-
-// POST /api/admin/protocols/lawn/readiness/:serviceId/restock-requests — create a product restock request from readiness.
-router.post('/lawn/readiness/:serviceId/restock-requests', async (req, res, next) => {
-  try {
-    const restockRequest = await createRestockRequest(db, req, req.params.serviceId);
-    const days = Math.max(1, Math.min(60, Number(req.body?.days || req.query.days || 14)));
-    const readinessQueue = await buildReadinessQueue(db, { days, limit: 75 });
-    const readinessSnapshots = await loadReadinessSnapshotSummary(db);
-    res.json({ success: true, restockRequest, readinessQueue, readinessSnapshots });
-  } catch (err) {
-    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
-    next(err);
-  }
-});
-
-// POST /api/admin/protocols/lawn/readiness/:serviceId/assign — assign one readiness row.
-router.post('/lawn/readiness/:serviceId/assign', async (req, res, next) => {
-  try {
-    const result = await assignReadinessAppointment(db, req, req.params.serviceId);
-    const days = Math.max(1, Math.min(60, Number(req.body?.days || req.query.days || 14)));
-    const readinessQueue = await buildReadinessQueue(db, { days, limit: 75 });
-    const readinessSnapshots = await loadReadinessSnapshotSummary(db);
-    res.json({ success: true, result, readinessQueue, readinessSnapshots });
-  } catch (err) {
-    if (err.statusCode) {
-      return res.status(err.statusCode).json({
-        error: err.message,
-        code: err.code || 'readiness_assign_failed',
-        details: err.details || null,
-      });
-    }
-    next(err);
-  }
 });
 
 // PUT /api/admin/protocols/lawn/products/:id — map/edit a protocol product row.
@@ -2260,6 +1352,7 @@ router.put('/lawn/products/:id', requireAdmin, async (req, res, next) => {
     if (req.body.reportCopy !== undefined && typeof req.body.reportCopy === 'object') updates.report_copy = JSON.stringify(req.body.reportCopy || {});
 
     const [updated] = await db.transaction(async (trx) => {
+      await lockDraftProtocol(trx, existingProtocol.id);
       const [row] = await trx('lawn_protocol_products')
         .where({ id: existing.id })
         .update(updates)
@@ -2309,6 +1402,7 @@ router.put('/lawn/windows/:windowKey', requireAdmin, async (req, res, next) => {
     if (req.body.goal !== undefined) updates.goal = String(req.body.goal || '').trim() || existing.goal;
 
     const [updated] = await db.transaction(async (trx) => {
+      await lockDraftProtocol(trx, protocol.id);
       const [row] = await trx('lawn_protocol_windows')
         .where({ id: existing.id })
         .update(updates)
@@ -2343,49 +1437,61 @@ router.post('/lawn/windows/:windowKey/wiki-sync', requireAdmin, async (req, res,
     const protocol = await protocolQuery.first();
     if (!protocol) return res.status(404).json({ error: 'Lawn protocol not found' });
 
-    const payload = await loadWindowSopPayload(db, protocol.id, req.params.windowKey);
-    if (!payload) return res.status(404).json({ error: 'Protocol window not found' });
+    const result = await db.transaction(async (trx) => {
+      const locked = await trx('lawn_protocols').where({ id: protocol.id }).forUpdate().first();
+      if (locked?.status !== protocol.status) {
+        const error = new Error('Protocol status changed during SOP synchronization. Reload and retry.');
+        error.statusCode = 409;
+        error.isOperational = true;
+        throw error;
+      }
+      const payload = await loadWindowSopPayload(trx, protocol.id, req.params.windowKey);
+      if (!payload) {
+        const error = new Error('Protocol window not found');
+        error.statusCode = 404;
+        error.isOperational = true;
+        throw error;
+      }
 
-    const slug = protocolSopSlug(payload.protocol, payload.window);
-    const title = `${payload.protocol.name} - ${payload.window.title}`;
-    const content = renderWindowSopMarkdown(payload);
-    const metadata = {
-      source: 'lawn_protocol_command_center',
-      protocolId: payload.protocol.id,
-      protocolKey: payload.protocol.protocol_key,
-      protocolVersion: payload.protocol.version,
-      windowId: payload.window.id,
-      windowKey: payload.window.window_key,
-      generatedAt: new Date().toISOString(),
-    };
-    const existing = await db('knowledge_base').where({ slug }).first();
-    const rowData = {
-      path: `kb/protocols/${slug}.md`,
-      slug,
-      title,
-      content,
-      category: 'protocols',
-      tags: JSON.stringify(['waveguard', 'lawn_protocol', 'st_augustine', payload.window.window_key]),
-      source: 'protocol-sync',
-      confidence: 'high',
-      metadata: JSON.stringify(metadata),
-      status: 'active',
-      last_verified_at: new Date(),
-      verified_by: actorFromRequest(req).name || 'protocol-sync',
-      updated_at: new Date(),
-    };
+      const slug = protocolSopSlug(payload.protocol, payload.window);
+      const title = `${payload.protocol.name} - ${payload.window.title}`;
+      const content = renderWindowSopMarkdown(payload);
+      const metadata = {
+        source: 'lawn_protocol_command_center',
+        protocolId: payload.protocol.id,
+        protocolKey: payload.protocol.protocol_key,
+        protocolVersion: payload.protocol.version,
+        windowId: payload.window.id,
+        windowKey: payload.window.window_key,
+        generatedAt: new Date().toISOString(),
+      };
+      const existing = await trx('knowledge_base').where({ slug }).first();
+      const rowData = {
+        path: `kb/protocols/${slug}.md`,
+        slug,
+        title,
+        content,
+        category: 'protocols',
+        tags: JSON.stringify(['waveguard', 'lawn_protocol', 'st_augustine', payload.window.window_key]),
+        source: 'protocol-sync',
+        confidence: 'high',
+        metadata: JSON.stringify(metadata),
+        status: 'active',
+        last_verified_at: new Date(),
+        verified_by: actorFromRequest(req).name || 'protocol-sync',
+        updated_at: new Date(),
+      };
 
-    const [entry] = existing
-      ? await db('knowledge_base').where({ id: existing.id }).update(rowData).returning('*')
-      : await db('knowledge_base').insert({ ...rowData, created_at: new Date() }).returning('*');
+      const [entry] = existing
+        ? await trx('knowledge_base').where({ id: existing.id }).update(rowData).returning('*')
+        : await trx('knowledge_base').insert({ ...rowData, created_at: new Date() }).returning('*');
 
-    let attached = false;
-    if (payload.protocol.status === 'draft') {
-      const existingRefs = Array.isArray(payload.window.wiki_refs) ? payload.window.wiki_refs : [];
-      const ref = `kb:${slug}`;
-      if (!existingRefs.includes(ref)) {
-        const nextRefs = [...existingRefs, ref];
-        await db.transaction(async (trx) => {
+      const attached = payload.protocol.status === 'draft';
+      if (attached) {
+        const existingRefs = Array.isArray(payload.window.wiki_refs) ? payload.window.wiki_refs : [];
+        const ref = `kb:${slug}`;
+        if (!existingRefs.includes(ref)) {
+          const nextRefs = [...existingRefs, ref];
           const [updatedWindow] = await trx('lawn_protocol_windows')
             .where({ id: payload.window.id })
             .update({ wiki_refs: JSON.stringify(nextRefs), updated_at: new Date() })
@@ -2399,74 +1505,26 @@ router.post('/lawn/windows/:windowKey/wiki-sync', requireAdmin, async (req, res,
             after: updatedWindow,
             metadata: { route: 'lawn/windows/:windowKey/wiki-sync', kbEntryId: entry.id, slug },
           });
-        });
-        attached = true;
-      } else {
-        attached = true;
+        }
       }
-    }
 
-    res.json({
-      success: true,
-      attached,
-      attachmentRequiresDraft: payload.protocol.status !== 'draft',
-      ref: `kb:${slug}`,
-      entry: {
-        id: entry.id,
-        slug: entry.slug,
-        title: entry.title,
-        category: entry.category,
-        status: entry.status,
-        confidence: entry.confidence,
-        updatedAt: entry.updated_at,
-      },
+      return {
+        success: true,
+        attached,
+        attachmentRequiresDraft: payload.protocol.status !== 'draft',
+        ref: `kb:${slug}`,
+        entry: {
+          id: entry.id,
+          slug: entry.slug,
+          title: entry.title,
+          category: entry.category,
+          status: entry.status,
+          confidence: entry.confidence,
+          updatedAt: entry.updated_at,
+        },
+      };
     });
-  } catch (err) { next(err); }
-});
-
-// PUT /api/admin/protocols/lawn/gates/:id — edit an enforcement/reference gate.
-router.put('/lawn/gates/:id', requireAdmin, async (req, res, next) => {
-  try {
-    const existing = await db('lawn_protocol_gates').where({ id: req.params.id }).first();
-    if (!existing) return res.status(404).json({ error: 'Protocol gate not found' });
-    const existingProtocol = await db('lawn_protocols').where({ id: existing.lawn_protocol_id }).first();
-    if (existingProtocol?.status !== 'draft') {
-      return res.status(409).json({ error: 'Create or select a draft before editing protocol gates' });
-    }
-
-    const updates = { updated_at: new Date() };
-    if (req.body.title !== undefined) updates.title = String(req.body.title || '').trim() || existing.title;
-    if (req.body.ruleText !== undefined) updates.rule_text = String(req.body.ruleText || '').trim() || existing.rule_text;
-    if (req.body.gateType !== undefined) updates.gate_type = String(req.body.gateType || '').trim() || existing.gate_type;
-    if (req.body.severity !== undefined) {
-      const severity = String(req.body.severity || '').trim();
-      updates.severity = severity || existing.severity;
-    }
-    if (req.body.logic !== undefined) {
-      if (!req.body.logic || typeof req.body.logic !== 'object' || Array.isArray(req.body.logic)) {
-        return res.status(400).json({ error: 'Gate logic must be a JSON object' });
-      }
-      updates.logic = JSON.stringify(req.body.logic);
-    }
-    if (req.body.wikiRefs !== undefined) updates.wiki_refs = JSON.stringify(stringArray(req.body.wikiRefs));
-
-    const [updated] = await db.transaction(async (trx) => {
-      const [row] = await trx('lawn_protocol_gates')
-        .where({ id: existing.id })
-        .update(updates)
-        .returning('*');
-      await logProtocolAudit(trx, req, {
-        protocolId: row.lawn_protocol_id,
-        entityType: 'gate',
-        entityId: row.id,
-        action: 'update',
-        before: existing,
-        after: row,
-        metadata: { route: 'lawn/gates/:id', gateKey: row.gate_key },
-      });
-      return [row];
-    });
-    res.json({ success: true, gate: updated });
+    res.json(result);
   } catch (err) { next(err); }
 });
 
@@ -2490,6 +1548,118 @@ router.get('/product-label/:productId', async (req, res, next) => {
       compatibilityNotes: product.compatibility_notes,
     });
   } catch (err) { next(err); }
+});
+
+// GET /api/admin/protocols/job-card/:serviceId — the drawer's Job card tab
+// (GATE_JOB_CARD, read at call time). Off → { enabled: false } and the tab
+// hides; nothing is read or written. Tech-or-admin like the rest of the
+// router. Raw access codes ride ONLY in strip.access.codes (tap-to-reveal).
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// GET /api/admin/protocols/job-card/mix?serviceId=&productId=&gallons=110|1 —
+// the Tank section's search helper: amount of one product for that much
+// water on the visit's rig (the appointment's assigned equipment). Same gate; pure read. Registered BEFORE /:serviceId so the
+// literal segment never falls into the id param.
+// A technician token reads only its CURRENT assignment — the shared
+// technicianCurrentVisitFilter predicate (assigned tech, not a
+// dead status, inside the 7-day access window); admins are unscoped. The
+// card carries gate / garage / lockbox codes, so the card route checks
+// before the build AND after it: a dispatch reassignment during the reads
+// must not hand them to the former technician.
+// Vendor pricing is owner-only (admin-inventory's technician projection):
+// a technician's card and mix answers carry no lastPrice.
+function viewerSeesPricing(req) {
+  return req.techRole !== 'technician';
+}
+async function techOwnsVisit(req, serviceId) {
+  if (!isTechnicianRequest(req)) return true;
+  const row = await db('scheduled_services')
+    .where({ id: serviceId })
+    .modify((q) => technicianCurrentVisitFilter(req, q))
+    .first('id');
+  return Boolean(row);
+}
+
+router.get('/job-card/mix', async (req, res, next) => {
+  try {
+    if (!jobCard.jobCardEnabled()) return res.json({ enabled: false });
+    const { productId, serviceId } = req.query;
+    if (!UUID_RE.test(String(productId || ''))) return res.status(400).json({ error: 'productId required' });
+    if (!UUID_RE.test(String(serviceId || ''))) return res.status(400).json({ error: 'serviceId required' });
+    const gallons = Number(req.query.gallons);
+    if (![110, 1].includes(gallons)) return res.status(400).json({ error: 'gallons must be 110 or 1' });
+    if (!(await techOwnsVisit(req, serviceId))) return res.status(404).json({ error: 'Product or visit not found' });
+    const mix = await jobCard.mixForProduct(productId, gallons, { serviceId, includePricing: viewerSeesPricing(req) });
+    if (!mix) return res.status(404).json({ error: 'Product or visit not found' });
+    res.json({ enabled: true, ...mix });
+  } catch (err) {
+    if (err.statusCode === 503) return res.status(503).json({ error: err.message });
+    next(err);
+  }
+});
+
+// GET /job-card/products?q= — the Tank search. Active catalog products by
+// name / category / active ingredient, id + name + category only: the mix
+// route owns rates and keeps vendor pricing owner-only. (The lawn
+// substitution search this replaced was retired with #3935.)
+router.get('/job-card/products', async (req, res, next) => {
+  try {
+    if (!jobCard.jobCardEnabled()) return res.json({ enabled: false, products: [] });
+    const q = String(req.query.q || '').trim();
+    if (q.length < 2) return res.json({ enabled: true, products: [] });
+    const products = await db('products_catalog')
+      .where(function activeProducts() { this.where({ active: true }).orWhereNull('active'); })
+      .where(function searchProducts() {
+        this.whereILike('name', `%${q}%`).orWhereILike('category', `%${q}%`).orWhereILike('active_ingredient', `%${q}%`);
+      })
+      .orderBy('name')
+      .limit(8)
+      .select('id', 'name', 'category');
+    res.json({ enabled: true, products });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Bounded read-only batch for the Schedule day view. The existing visit scope
+// is checked before and after each build, including a mid-read reassignment.
+router.get('/job-card/readiness', async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'private, no-store');
+    if (!jobCard.jobCardEnabled() || !gateEnvValue('GATE_DISPATCH_READINESS')) return res.json({ enabled: false });
+    const raw = req.query.serviceIds;
+    const ids = typeof raw === 'string' ? raw.split(',') : [];
+    if (!ids.length || ids.length > 6 || ids.some(id => !UUID_RE.test(id))) return res.status(400).json({ error: 'Provide 1 to 6 serviceIds' });
+    const visits = await Promise.all([...new Set(ids)].map(async serviceId => {
+      const unavailable = { serviceId, checkedAt: null, issues: [{ kind: 'readiness', status: 'unknown', label: 'Check unavailable' }] };
+      if (!(await techOwnsVisit(req, serviceId))) return unavailable;
+      try {
+        const result = await jobCard.buildJobCard(serviceId, { readinessOnly: true });
+        return result && await techOwnsVisit(req, serviceId) ? result : unavailable;
+      } catch {
+        return unavailable;
+      }
+    }));
+    if (!jobCard.jobCardEnabled() || !gateEnvValue('GATE_DISPATCH_READINESS')) return res.json({ enabled: false });
+    res.json({ enabled: true, visits });
+  } catch (err) { next(err); }
+});
+
+router.get('/job-card/:serviceId', async (req, res, next) => {
+  try {
+    if (!jobCard.jobCardEnabled()) return res.json({ enabled: false });
+    if (!UUID_RE.test(req.params.serviceId)) return res.status(400).json({ error: 'Invalid service id' });
+    if (!(await techOwnsVisit(req, req.params.serviceId))) return res.status(404).json({ error: 'Service not found' });
+    const card = await jobCard.buildJobCard(req.params.serviceId, { includePricing: viewerSeesPricing(req) });
+    if (!card) return res.status(404).json({ error: 'Service not found' });
+    if (!(await techOwnsVisit(req, req.params.serviceId))) return res.status(404).json({ error: 'Service not found' });
+    res.json(card);
+  } catch (err) {
+    // A safety-data outage (preferences, open requests, catalog) fails the
+    // card instead of rendering it incomplete.
+    if (err.statusCode === 503) return res.status(503).json({ error: err.message });
+    next(err);
+  }
 });
 
 // GET /api/admin/protocols/programs — WaveGuard lawn + service-line protocols

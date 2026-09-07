@@ -2408,28 +2408,18 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   }
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
-  // A clean, enabled named-competitor draft still must NOT auto-publish: the
-  // runner routes requiresHumanReview drafts to the approvable review queue.
-  // An operator-authorized prose mention that suppressed its finding above
-  // still forces the review park — a human signs off every draft that names
-  // a competitor outside the table, exactly as on the table-less path.
+  // Preserve the review signal for other content lanes. The supporting-blog
+  // runner uses namedCompetitorAutopublishEligible to process clean drafts
+  // automatically while retaining the comparison and sourcing checks.
   const requiresHumanReview = pass
     && ((namedCompetitorEnabled && (known.size > 0 || linkedKnown.size > 0)) || operatorAuthorizedProse);
   return { pass, findings, requiresHumanReview };
 }
 
-// Owner directive 2026-08-26: THE single scoped named-competitor autopublish
-// eligibility predicate — used identically by the runner's review-park
-// decision, both codex-remediation parks, and the PR poller's merge gate
-// (PR #3508 r4 P1: one mechanism, never per-site copies). TRUE only for a
-// brief carrying the canonical TRUE-intercept marker gsc_signal.intercept
-// (category/spoke seeds share the operator_intercept bucket and
-// operator_brief payload, so neither is sufficient) with BOTH
-// named-competitor gates on. Fail-closed: any read failure returns false and
-// the named-competitor review parks stand.
+// Clean autonomous blogs need no human sign-off. The content gate and
+// explicit autopublish kill switch still apply at drafting and merge time.
 function namedCompetitorAutopublishEligible(brief) {
   try {
-    if (brief?.gsc_signal?.intercept !== true) return false;
     // Only the fully-automatable blog action qualifies (PR #3508 r6 P1):
     // an intercept refresh_existing_page brief can carry deliberate MANUAL
     // work — publishRefresh freezes schema, so a requested Article/FAQPage

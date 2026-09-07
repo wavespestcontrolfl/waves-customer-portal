@@ -188,10 +188,10 @@ const SIGNOFF_BOILERPLATE_RE = /reply to this (?:message|text)\s*(?:[.!]|$|anyti
 const RULES = [
   {
     name: 'no-emoji',
-    applies: (ctx) => ctx.audience === 'customer',
+    applies: (ctx) => ctx.channel !== 'sms' && ctx.audience === 'customer',
     check: (text) => {
       const { found, sample } = findEmoji(text);
-      return found ? `contains emoji "${sample}" — customer messages never carry emojis (owner ruling)` : null;
+      return found ? `contains emoji "${sample}" — non-SMS customer messages must be emoji-free` : null;
     },
   },
   {

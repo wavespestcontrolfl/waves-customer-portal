@@ -96,7 +96,7 @@ function abutPlan(rows) {
  * The move keeps each row's status (rebooker keepStatus), so a pending
  * row that fails to combine is never left 'confirmed'.
  */
-async function combineRows({ serviceIds, createdBy }) {
+async function combineRows({ serviceIds, createdBy, actorId = null }) {
   const ids = (serviceIds || []).map(String);
   const tryGroup = () => VisitGroups.createOrJoinVisit({ rows: ids.map((id) => ({ id })), createdBy });
   try {
@@ -147,24 +147,45 @@ async function combineRows({ serviceIds, createdBy }) {
   // staff-advisory overlaps, admin window rules, no customer
   // notification. initiated_by is a varchar(20) on reschedule_log, so
   // the actor is the surface ('admin'), not the createdBy stamp — the
-  // visit row carries who combined it.
+  // visit row carries who combined it. suppressTechNotice: every move
+  // here is tentative until the grouping stands (a later move or
+  // tryGroup can fail and put the rows back, silently), so the techs
+  // hear once, below, and never about a move that was reverted.
   const move = (id, date, start, end, expect, extra = {}) => rebooker.reschedule(id, date, { start, end }, 'admin', 'admin', {
     adminWindowRules: true,
     overlapAdvisory: true,
     sourceSurface: 'dispatch_board',
     notifyRequested: false,
     keepStatus: true,
+    suppressTechNotice: true,
     expect,
     ...extra,
   });
   const done = [];
+  const movedTechIds = new Map();
   try {
     for (const m of moves) {
-      await move(m.id, m.scheduledDate, m.start, m.end, m.from);
+      const result = await move(m.id, m.scheduledDate, m.start, m.end, m.from);
       done.push(m);
+      movedTechIds.set(String(m.id), result?.technicianId || null);
     }
     const visit = await tryGroup();
     await releaseHold();
+    // The stop is grouped and nothing reverts the moves now: each moved
+    // row's holder (the COMMITTED holder, off the rebooker result) hears
+    // (tech-visit-notifications.js: post-commit, best-effort, never
+    // awaited, gate-dark). The combining staff member is the actor, so
+    // their own moves stay silent.
+    const techNotices = require('./tech-visit-notifications');
+    for (const m of moves) {
+      const technicianId = movedTechIds.get(String(m.id));
+      if (!technicianId) continue;
+      void techNotices.notifyVisitRescheduled({
+        visitId: m.id, technicianId, actorId,
+        previous: { date: m.from.scheduled_date, windowStart: m.from.window_start, windowEnd: m.from.window_end },
+        snapshot: { date: m.scheduledDate, windowStart: m.start, windowEnd: m.end },
+      });
+    }
     return { visit, moved: moves };
   } catch (err) {
     const stuck = [];

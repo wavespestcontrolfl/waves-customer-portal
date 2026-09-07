@@ -32,7 +32,7 @@ export default function GuaranteeStrip({ licenseNumber }) {
         {items.map((it) => (
           <div key={it.label} style={{ textAlign: 'center' }}>
             <div style={{ fontSize: 14, fontWeight: 600, color: W.blueDeeper }}>{it.label}</div>
-            <div style={{ fontSize: 12, color: W.textCaption, marginTop: 2 }}>{it.detail}</div>
+            <div style={{ fontSize: 14, color: W.textCaption, marginTop: 2 }}>{it.detail}</div>
           </div>
         ))}
       </div>

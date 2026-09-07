@@ -27,11 +27,13 @@ function recordToolEvent({ source, context, toolName, success, durationMs, circu
       const fallback = { ...row };
       delete fallback.metadata;
       db('tool_health_events').insert(fallback).catch(retryErr => {
-        logger.warn(`[tool-events] record failed: ${retryErr.message}`);
+        logger.warn(`[tool-events] record failed (${retryErr.code || retryErr.name || 'error'})`);
       });
       return;
     }
-    logger.warn(`[tool-events] record failed: ${err.message}`);
+    // code only: a knex message carries the compiled INSERT, and error_message
+    // carries a tool's failure text (customer names / emails) — AGENTS.md: no PII in logs
+    logger.warn(`[tool-events] record failed (${err.code || err.name || 'error'})`);
   });
 }
 

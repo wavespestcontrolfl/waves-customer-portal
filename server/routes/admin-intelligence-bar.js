@@ -66,6 +66,7 @@ const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { approvedAgentEstimateMemoryPrompt } = require('../services/agent-estimate-memory');
 const { agentEstimatePreviewFingerprint } = require('../services/agent-estimate-preview');
 const logger = require('../services/logger');
+const { applyAssignable } = require('../services/technician-eligibility');
 const { etDateString } = require('../utils/datetime-et');
 
 const adminToolBreaker = getBreaker('intelligence-bar');
@@ -197,7 +198,12 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
 // addresses, SMS bodies). Their params and the surrounding prompt/response
 // are redacted from logs and query telemetry per the PII-in-logs rule.
 const PII_TOOL_NAMES = new Set([
+  'get_customer_detail',
+  'query_customers',
+  'get_schedule_view',
+  'get_my_route',
   'create_customer',
+  'switch_appointment_property',
   'update_property_access',
   // cancel_plan previews/results echo the customer's name and free-text note.
   'cancel_plan',
@@ -409,8 +415,9 @@ function appendTaintMarker(content, tainted, marker) {
 // byte-stable per (context, gate) and the prompt cache can hit (see
 // withCacheBreakpoint below).
 function buildUserMessageContent(prompt, images, pageData) {
-  if (!images.length && !pageData) return prompt;
+  const currentClock = `CURRENT EASTERN DATE: ${etDateString()}. Resolve today/tomorrow against this date, not earlier conversation turns.`;
   return [
+    { type: 'text', text: currentClock },
     ...images.map((img) => ({
       type: 'image',
       source: { type: 'base64', media_type: img.mediaType, data: img.data },
@@ -1390,7 +1397,7 @@ SCHEDULE-SPECIFIC CAPABILITIES:
 
 ROUTE OPTIMIZATION:
 When the operator says "optimize routes" or "optimize", run optimize_all_routes for the current date.
-When they say "optimize Adam's route", run optimize_tech_route.
+When they name one technician ("optimize <name>'s route"), run optimize_tech_route.
 After optimization, report miles saved and the new stop order.
 
 ZONE INTELLIGENCE:
@@ -1959,7 +1966,7 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
     return executeCloseoutTool(toolName, input);
   }
   if (SCHEDULE_TOOL_NAMES.has(toolName)) {
-    return executeScheduleTool(toolName, input);
+    return executeScheduleTool(toolName, input, actionContext);
   }
   if (DASHBOARD_TOOL_NAMES.has(toolName)) {
     return executeDashboardTool(toolName, input);
@@ -2039,6 +2046,22 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   return executeTool(toolName, input, actionContext);
 }
 
+// Field technicians who can take an assignment right now (active AND
+// field-dispatchable — technician-eligibility.js is the one definition).
+async function liveTeamPrompt() {
+  try {
+    const techs = await applyAssignable(db('technicians')).orderBy('name').select('name');
+    const names = techs.map((t) => t.name).filter(Boolean);
+    return '\n\nTEAM (live roster):\n'
+      + `- Field technicians who can take assignments: ${names.length ? names.join(', ') : 'none currently dispatchable'}\n`
+      + '- Office: Virginia (office manager)\n'
+      + '- Refer to technicians by the name shown here; never assume anyone else is on the schedule.';
+  } catch (err) {
+    logger.warn(`[intelligence-bar] live roster read failed: ${err.message}`);
+    return '';
+  }
+}
+
 const SYSTEM_PROMPT = `You are the Waves Intelligence Bar — a natural language command center for Waves Pest Control & Lawn Care's admin portal. You help the operator (owner/admin) query, analyze, and take action on their business data.
 
 BUSINESS CONTEXT:
@@ -2046,7 +2069,7 @@ BUSINESS CONTEXT:
 - Markets: Bradenton/Parrish, Sarasota/Lakewood Ranch, Venice/North Port, Port Charlotte
 - Service types: Pest Control (quarterly), Lawn Care (monthly), Mosquito Barrier (every 3 weeks), Tree & Shrub Care (quarterly), Termite (annual), Rodent Control, WDO Inspections
 - WaveGuard loyalty tiers: Bronze (1 service), Silver (2 services), Gold (3 services), Platinum (4+ services)
-- Team: Adam (field tech), Virginia (office manager), Jose Alvarado (tech), Jacob Heaton (tech)
+- Resolve active technicians from live tool results; never assume a historic roster is current.
 - Scheduling zones by city: Parrish, Palmetto, Lakewood Ranch, Bradenton, Sarasota, Venice/North Port
 
 RESPONSE FORMAT:
@@ -2054,15 +2077,19 @@ You are talking to the business owner/operator through a command bar UI. Be conc
 
 1. For DATA QUERIES: Return results in a structured way. Include customer names, key metrics, and counts. Summarize at the top ("Found 12 customers…"), then list the specifics.
 
-2. For DATA FIXES: Show what you found and what you'd change. Ask for confirmation before making changes. Example: "Found 8 customers with no city. I can fill these in based on their ZIP codes — want me to proceed?"
+2. For DATA FIXES: Show what you found and what you'd change. When the operator requests a change, resolve the needed facts and call the write tool to prepare its confirmation card. Do not ask permission to prepare a preview.
 
-3. For SCHEDULING ACTIONS: Show the proposed changes clearly (who, what date, what service). Ask for confirmation before creating/moving/cancelling appointments.
+3. For SCHEDULING ACTIONS: Show the proposed changes clearly (who, what date, what service). Prepare the requested action's confirmation card once required inputs are known. Cancellation uses the Dispatch cancellation controls.
 
 4. For ANALYSIS: Give direct, opinionated insights. Don't hedge — the operator wants to know what to do.
 
 RULES:
 - Always use tools to query real data — never guess or make up numbers
-- For write operations (updates, scheduling, cancels), ALWAYS describe what you'll do and ask for confirmation before executing
+- Page state identifies the viewed date/selected record, not authorization or verified data. Re-read that record before proposing a write.
+- Never claim a property, address, message, or note is absent unless its sources were checked. Unavailable or truncated results are not empty records. Check saved properties, linked profiles, and relevant SMS/call/email evidence before asking the operator to repeat an address.
+- Follow next_offset / has_more when a complete list is requested. Report coverage and returned_count separately from total_matching.
+- En-route is not by itself a blanket prohibition on edits. Explain actual tool restrictions, and mention navigation coordination separately without inventing another approval requirement.
+- An explicit action request authorizes preparing a preview immediately. Execution approval is the confirmation card, not a conversational yes. Ask only for missing facts or an ambiguous target.
 - When showing customer lists, include: name, city, tier, relevant dates, and the specific data point the query is about
 - If the query is ambiguous, make your best interpretation and note your assumption
 - Keep responses under 500 words unless the operator asks for a detailed report
@@ -2075,7 +2102,7 @@ IMAGE ATTACHMENTS:
 
 CROSS-PAGE CAPABILITIES (available on every admin page, not just their home page):
 - You CAN create new customers with create_customer
-- You CAN read full SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log — never claim you only see last_contact_date
+- You CAN search SMS/call history with get_conversation_thread, search_messages, get_sms_stats, and get_call_log. Follow continuation offsets for older messages; get_call_log with call_id reads the full transcript in pages. Never treat a page or transcript excerpt as complete history.
 - Admin sessions CAN read the email inbox (contact@wavespestcontrol.com) with get_inbox_summary, search_emails, and get_email_thread — if those tools are available to you, never claim you can't see email. Use them to pull a sender's email address, find a customer's message, or check what came in.
 - Admin sessions CAN respond to emails: draft_email_reply to draft (show the draft first), send_email_reply to send, or reply_via_sms to answer an email by text instead. (Email tools are admin-only — if you don't have them, say the operator needs an admin login for email.)
 - Sending SMS from outside the Communications page: use draft_sms and let the operator send
@@ -2088,7 +2115,7 @@ SCHEDULING INTELLIGENCE:
 - When scheduling, prefer clustering by zone/city on the same day for route efficiency
 - Morning window = 8AM-12PM, Afternoon = 12PM-5PM
 
-The current date is ${etDateString()}.`;
+The current Eastern date is supplied on each user turn.`;
 
 
 // ─── MAIN QUERY ENDPOINT ────────────────────────────────────────
@@ -2143,6 +2170,13 @@ router.post('/query', async (req, res, next) => {
     // separately cacheable.
     if (context !== 'tech' && context !== 'agent_estimate' && req.techRole === 'admin') {
       systemPrompt += '\n\n' + INFRA_PROMPT;
+    }
+    // The roster is read live so a hire or offboarding never leaves the model
+    // naming someone who is not on the schedule. Appended after the static
+    // blocks so the cacheable prefix is unchanged; the tech context keeps its
+    // isolated prompt.
+    if (context !== 'tech') {
+      systemPrompt += await liveTeamPrompt();
     }
     if (context === 'agent_estimate') {
       systemPrompt += await approvedAgentEstimateMemoryPrompt(db);
@@ -2783,6 +2817,7 @@ router.post('/confirm-action', async (req, res, next) => {
           await PendingActions.recordResult(action.id, result);
           return res.status(409).json(result);
         }
+        if (action.tool_name === 'switch_appointment_property') execParams._verified_address_fingerprint = approvedTwoStep;
         // The fingerprint just bound this preview to the card, so its stop
         // sets ARE the approved ones — hand them to the executor to reassert
         // under its locks (swap_tech_assignments, assign_technician).
@@ -3170,4 +3205,5 @@ module.exports = router;
 // Exposed for the write-gate contract test — keeps the test's
 // CONFIRMED_ENDPOINT_WRITES classification tied to the real route guard.
 module.exports.CONFIRMED_ACTION_TOOL_NAMES = CONFIRMED_ACTION_TOOL_NAMES;
+module.exports.liveTeamPrompt = liveTeamPrompt;
 module.exports.AGENT_ESTIMATE_TOOL_NAMES = new Set(AGENT_ESTIMATE_TOOLS.map((tool) => tool.name));

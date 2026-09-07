@@ -48,6 +48,16 @@ suite('completion pricing PostgreSQL and invoice replay', () => {
     await expect(pricing.prepareCompletionPricingReview(jobId, review, { database: trx, role: 'admin' })).rejects.toMatchObject({ code: 'completion_pricing_changed' });
     expect(Number((await trx('activity_log').where({ customer_id: saved.customer_id }).count('* as n').first()).n)).toBe(1);
   }));
+  test.each([null, '', ' ', false])('empty annual override %p preserves the accepted positive price', (manualFinalAnnual) => rollbackTest(async (trx) => {
+    const { jobId, estimateId, soldLine } = await fixture(trx);
+    await trx('estimates').where({ id: estimateId }).update({ estimate_data: {
+      result: { recurring: { services: [{ ...soldLine, manualFinalAnnual }] } },
+    } });
+    const plan = await pricing.loadCompletionPricing(jobId, { database: trx, role: 'admin' });
+    expect(plan.view).toMatchObject({ canApply: true, proposedAmount: 85 });
+    await pricing.commitCompletionPricingReview(trx, { ...plan, review: { witness: plan.view.witness, applyDiscounts: true } }, { role: 'admin' });
+    expect(Number((await trx('scheduled_services').where({ id: jobId }).first()).estimated_price)).toBe(85);
+  }));
   test('tier comes from DB and stacks with a recorded stackable fixed adjustment', () => rollbackTest(async (trx) => {
     const { jobId } = await fixture(trx, { net: 100 });
     const discountId = randomUUID();

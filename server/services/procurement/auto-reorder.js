@@ -27,6 +27,12 @@
  * a receive or a disable that landed after the candidate scan raises no
  * request (result.deduped reason no_longer_low).
  *
+ * PR 2: when the dispatcher will order from the request's vendor (master +
+ * vendor gate on, adapter exists — order-dispatch.canAutoOrder) the "order
+ * manually" bell is wrong: the green path is silent and every exception
+ * bells from the ledger. The decision follows the vendor the REQUEST was
+ * built from (the locked one), never the scan snapshot.
+ *
  * Every bell is derived from the REQUEST row, never from the product's
  * current configuration: an admin edit to the vendor, reorder quantity or
  * unit after the request was raised must not send the office to order
@@ -99,6 +105,10 @@ async function vendorPricingFor(conn, productId, vendorId) {
 // row yet, and a writer waiting on it sees our request committed first.
 async function lockProductPricing(trx, productId) {
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['inventory.best_price', String(productId)]);
+}
+
+async function dispatcherOrders(conn, vendorId) {
+  return require('./order-dispatch').canAutoOrder({ conn, vendorId });
 }
 
 // The bell says exactly what the request row says (see the header).
@@ -201,7 +211,39 @@ async function handleLiveRequest(ctx, p, existing) {
   if (existing.source !== SOURCE || existing.status !== 'open') return;
   const request = await refreshOpenRequest(ctx, p, existing);
   if (!request) return;
+  // The dispatcher only ever claims a request whose OWN metadata names an
+  // auto-orderable vendor (findDispatchable). A request that could not
+  // establish a vendor id (pinned to a vendor the product has since left)
+  // is nobody's — ring so a human works it (Codex r10 P1).
+  const { vendorId } = parseMeta(request.metadata);
+  // The dispatcher's CLAIM retires any manual bell an earlier sweep rang, in
+  // the same transaction that creates the claim (Codex r19 P1 / r20 P1) —
+  // the sweep only stands down here.
+  if (vendorId && await dispatcherOrders(ctx.conn, vendorId)) return;
+  // An automatic order already out for this product (an ambiguous submit or
+  // stale recovery leaves the request OPEN with the ledger dispatched):
+  // the ledger's own bell says do-not-reorder; a gate closed or a vendor
+  // retired since must not ring "order manually" on top of it (hook r27
+  // P0). Reconciliation — receive or revoke — is what reopens the lane.
+  if (await require('./order-dispatch').findLiveAutoOrder(ctx.conn, p.id)) { ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: request.id, reason: 'auto_order_live' }); return; }
+  // A pre-submit park (no_price, dry_run, …) left this request a versioned
+  // ledger bell that already says "order manually": the generic hand-off
+  // must not ring beside it. Settle the ledger's bell first; when that
+  // fails, stand down — the ledger bell, re-rung by the dispatcher, still
+  // owns the request (Codex r31 P2).
+  if (!(await settleParkedLedgerBell(ctx, p, request))) return;
   await bellOrWarn(ctx, p, request, 'renotified');
+}
+
+async function settleParkedLedgerBell(ctx, product, request) {
+  try {
+    await ctx.conn.transaction((trx) => require('./order-dispatch').settleRequestLedgerBells(trx, request.id));
+    return true;
+  } catch (err) {
+    logger.error(`[auto-reorder] parked ledger bell for ${product.name} (request ${request.id}) NOT settled — hand-off bell withheld: ${err.message}`);
+    ctx.result.errors.push({ productId: product.id, name: product.name, requestId: request.id, message: `ledger bell: ${err.message}` });
+    return false;
+  }
 }
 
 function stillLow(fresh) {
@@ -248,6 +290,12 @@ async function createRequestLocked(conn, p) {
     // read two live requests would survive.
     const live = await findLiveRestockRequest(trx, p.id);
     if (live) return { deduped: live.source === SOURCE ? 'concurrent_auto_request' : 'concurrent_staff_request' };
+    // The same belt every staff creation path wears (assertNoLiveAutoOrder):
+    // an automatic order still out — including one that landed after its
+    // request was received by hand (evidence.landedAfterReceive), which the
+    // live-request read above cannot see — must not get a fresh request and
+    // an "order manually" bell beside it (hook r27 P1).
+    if (await require('./order-dispatch').findLiveAutoOrder(trx, p.id)) return { deduped: 'auto_order_live' };
     const qty = num(fresh.reorder_quantity);
     const unit = fresh.inventory_unit || p.inventory_unit;
     if (!unit) return { unconfigured: 'no_unit' };
@@ -304,9 +352,10 @@ async function sweepProduct(ctx, p) {
   if (outcome.unconfigured) { result.unconfigured.push({ productId: p.id, name: p.name, reason: outcome.unconfigured }); return; }
   const { request } = outcome;
   result.created.push({ productId: p.id, name: p.name, requestId: request.id, requestedQuantity: num(request.requested_quantity), vendor: request.vendor });
-  // One bell per request, deduped on the request id. Green-path silence is
-  // not possible here: with no order adapter, a human has to click. A
-  // failure here is retried by the next sweep (handleLiveRequest).
+  // One bell per request, deduped on the request id, unless the dispatcher
+  // orders from the request's (locked) vendor — then it owns the outcome
+  // bell. A failure here is retried by the next sweep (handleLiveRequest).
+  if (await dispatcherOrders(conn, parseMeta(request.metadata).vendorId)) { result.autoOrder = [...(result.autoOrder || []), request.id]; return; }
   await bellOrWarn(ctx, p, request, 'bells');
 }
 
@@ -339,4 +388,4 @@ function sweepFailureError(result) {
   return new Error(`[auto-reorder] ${failed.length} product(s) failed: ${failed.map((e) => `${e.name} (${e.message})`).join('; ')}`);
 }
 
-module.exports = { runSuppliesAutoReorderSweep, sweepFailureError, findLowStockCandidates, AUTO_REORDER_GATE: GATE, AUTO_REORDER_SOURCE: SOURCE };
+module.exports = { runSuppliesAutoReorderSweep, sweepFailureError, findLowStockCandidates, vendorPricingFor, lockProductPricing, ringRestockBell, AUTO_REORDER_GATE: GATE, AUTO_REORDER_SOURCE: SOURCE };

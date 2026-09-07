@@ -91,15 +91,12 @@ shapes) is blocked outside the rendered blog page, gate on or off:
 
 ## Autonomy posture (pilot)
 
-- Every draft containing `<AffiliateLink>` **parks for the owner**
-  (`skip_reason: affiliate_review`; reviewer_notes list each product with its
-  registry risk class/state). Approve with
-  `server/scripts/approve-autonomous-run.js --id=<run_id> --by=adam` — the
-  same publish path as the named-competitor review; the approval stamp is
-  what the PR poller's affiliate belt requires before auto-merging a head
-  that carries the component. No email-reply approval for this
-  lane: yellow-class review is exactly the kind of decision a reply-
-  "approved" would rubber-stamp.
+- Autonomous supporting blogs publish without a per-post human approval.
+  The owner superseded the pilot's approval requirement on 2026-09-05.
+  Registry eligibility, sourcing, disclosure, placement, current-head checks,
+  Codex review, and the affiliate kill switch still apply. The poller checks
+  the live Astro registry at merge time; it never fabricates approval data.
+  Other content lanes retain their existing contracts.
 - The writer never proposes affiliate products and never sees commission
   rates (rates are not a registry field by design). Product IDs enter via
   hand-authored briefs. `GATE_AFFILIATE_WRITER_PROPOSALS` is reserved for a
@@ -161,7 +158,7 @@ ships badly. Stihl is dealer-only — no program.
    `check-affiliate-links` CI (raw-URL scan, registry lint, dist scan).
 3. **Portal follow-up PR** (this one) — re-vendored blog-schema + first
    registry sync, `AffiliateLink`/`InlineCTA`/`SpiderIdBoard` cataloged in
-   `SAFE_MDX_COMPONENTS`, runner `affiliate_review` forced park, approval
+   `SAFE_MDX_COMPONENTS`, automated blog checks, legacy approval
    path extended, poller affiliate belt.
 4. **Ops** — owner signs up for programs; product-row PRs (yellow rows
    arrive with all four review fields filled — first six green Amazon rows

@@ -1,14 +1,6 @@
-const adminDispatchRouter = require('../routes/admin-dispatch');
 
-const {
-  lawnAssessmentCompletionBlockPayload,
-  preflightLawnAssessmentCompletion,
-  completionAllowsTechnicianPestRating,
-  technicianPestRatingAllowedForService,
-  shouldRejectPhotoCaptionBannedCopy,
-  internalOnlyProductsBlockPayload,
-  completionOwnershipError,
-} = adminDispatchRouter._test;
+const { lawnAssessmentCompletionBlockPayload, preflightLawnAssessmentCompletion, completionAllowsTechnicianPestRating, shouldRejectPhotoCaptionBannedCopy, internalOnlyProductsBlockPayload, completionOwnershipError } = require('../services/complete-scheduled-service');
+const { technicianPestRatingAllowedForService } = require('../routes/admin-dispatch')._test;
 
 function fakeAssessmentKnex(firstResult) {
   const builder = {

@@ -29,7 +29,8 @@ const { _private } = AnnualPrepayRenewals;
 function query({ first, returning, columnInfo, rows = [] } = {}) {
   const q = {};
   [
-    'whereIn', 'whereNull', 'whereBetween', 'whereNotIn', 'whereNotNull',
+    'whereIn', 'whereNull', 'whereBetween', 'whereNotIn',
+    'orWhereNotIn', 'whereNotNull',
     'orderBy', 'select', 'join', 'leftJoin', 'distinct', 'forUpdate',
     'whereRaw', 'orWhere', 'orWhereNotNull', 'limit', 'whereNot',
   ].forEach((method) => {
@@ -37,7 +38,8 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
   });
   q.modify = jest.fn((fn) => { if (typeof fn === 'function') fn(q); return q; });
   q.where = jest.fn((arg) => {
-    if (typeof arg === 'function') arg.call(q);
+    // Both styles: `function () { this.whereX() }` and `(q) => q.whereX()`.
+    if (typeof arg === 'function') arg.call(q, q);
     return q;
   });
   q.update = jest.fn(() => q);

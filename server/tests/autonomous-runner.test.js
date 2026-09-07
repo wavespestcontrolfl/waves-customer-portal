@@ -133,6 +133,7 @@ describe('rewrite_title_meta live adapter', () => {
           id: 'opp_meta_1',
           action_type: 'rewrite_title_meta',
           claimed_at: claimedAt,
+          claim_id: 'd0059611-8e7e-4cab-8d2f-6c3c69fca979',
         }),
         complete: jest.fn().mockResolvedValue(true),
         pendingReview: jest.fn().mockResolvedValue(true),
@@ -186,6 +187,9 @@ describe('rewrite_title_meta live adapter', () => {
 
       const result = await runner.runNext();
 
+      expect(result.queue_claim_id).toBe('d0059611-8e7e-4cab-8d2f-6c3c69fca979');
+      const inserts = require('../models/db').mock.results.flatMap((call) => call.value.insert?.mock.calls || []);
+      expect(inserts).toContainEqual([expect.objectContaining({ queue_claim_id: result.queue_claim_id })]);
       expect(result.outcome).toBe('completed_pending_review');
       expect(result.skip_reason).toBe('metadata_pr_pending_merge');
       expect(result.astro_pr_url).toBe('https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/55');
@@ -660,7 +664,7 @@ describe('blog uniqueness gating', () => {
 
       expect(result.outcome).toBe('skipped_gate_fail');
       expect(result.skip_reason).toBe('topic_targeting_unavailable');
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_blog_uniq', 'topic_targeting_unavailable', { claimToken: claimedAt });
+      expect(queue.skip).toHaveBeenCalledWith('opp_blog_uniq', 'topic_targeting_unavailable', { claimToken: claimedAt });
       expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
     } finally {
@@ -742,8 +746,8 @@ describe('isShadow', () => {
 });
 
 describe('autoPublishEnabled', () => {
-  test('default OFF when env unset → trust-build ramp applies', () => {
-    expect(autoPublishEnabled('new_supporting_blog')).toBe(false);
+  test('blogs default to unattended publishing; other actions keep their ramp', () => {
+    expect(autoPublishEnabled('new_supporting_blog')).toBe(true);
     expect(autoPublishEnabled('add_internal_links')).toBe(false);
   });
   test('AUTO_PUBLISH_<ACTION>=true enables auto-publish for that action only', () => {
@@ -1611,6 +1615,7 @@ function loadRunnerWith({
   comparisonTableGate = undefined,
   claimsLedgerValidator = undefined,
 }) {
+  queue.skip ||= jest.fn().mockResolvedValue(true);
   jest.resetModules();
   const dbMock = jest.fn(() => {
     const returning = jest.fn().mockResolvedValue([{ id: 'run_1' }]);
@@ -2315,7 +2320,7 @@ describe('runNext general shadow behavior', () => {
 
     expect(result.outcome).toBe('skipped_shadow_mode');
     expect(result.skip_reason).toBe('shadow_would_gate');
-    expect(queue.pendingReview).toHaveBeenCalledWith('opp_blog_1', 'shadow_would_gate', { claimToken: claimedAt });
+    expect(queue.skip).toHaveBeenCalledWith('opp_blog_1', 'shadow_would_gate', { claimToken: claimedAt });
     expect(queue.complete).not.toHaveBeenCalled();
     expect(queue.release).not.toHaveBeenCalled();
   });
@@ -2388,14 +2393,14 @@ describe('runNext post-publish bookkeeping', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.outcome).toBe('skipped');
       expect(result.skip_reason).toBe('gate_fail');
       expect(result.quality_gate_result.seo_completion).toMatchObject({
         passed: false,
         summary: { p0: 1 },
       });
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_seo_unavailable', 'gate_fail', { claimToken: claimedAt });
+      expect(queue.skip).toHaveBeenCalledWith('opp_seo_unavailable', 'gate_fail', { claimToken: claimedAt });
       expect(queue.release).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
@@ -2464,7 +2469,7 @@ describe('runNext post-publish bookkeeping', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.outcome).toBe('skipped');
       expect(result.skip_reason).toBe('gate_fail');
       expect(result.quality_gate_result.seo_completion).toMatchObject({
         passed: false,
@@ -2479,7 +2484,7 @@ describe('runNext post-publish bookkeeping', () => {
         pageType: 'supporting-blog',
       }));
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_seo_skipped', 'gate_fail', { claimToken: claimedAt });
+      expect(queue.skip).toHaveBeenCalledWith('opp_seo_skipped', 'gate_fail', { claimToken: claimedAt });
       expect(queue.release).not.toHaveBeenCalled();
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
@@ -2541,14 +2546,14 @@ describe('runNext post-publish bookkeeping', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.outcome).toBe('skipped');
       expect(result.skip_reason).toBe('gate_fail');
       expect(result.quality_gate_result.seo_completion).toMatchObject({
         passed: false,
         summary: { p0: 1 },
       });
       expect(result.reviewer_notes).toContain('seo_completion: P0=1');
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_seo_throw', 'gate_fail', { claimToken: claimedAt });
+      expect(queue.skip).toHaveBeenCalledWith('opp_seo_throw', 'gate_fail', { claimToken: claimedAt });
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG;
       else process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = previousShadow;
@@ -2822,11 +2827,11 @@ describe('runNext post-publish bookkeeping', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.outcome).toBe('skipped');
       expect(result.skip_reason).toBe('publish_validation_failed');
       expect(result.failure_message).toBe(err.message);
       expect(publisher.publishOrUpdatePage).toHaveBeenCalled();
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_invalid_1', 'publish_validation_failed', { claimToken: claimedAt });
+      expect(queue.skip).toHaveBeenCalledWith('opp_invalid_1', 'publish_validation_failed', { claimToken: claimedAt });
       expect(queue.release).not.toHaveBeenCalled();
       expect(queue.complete).not.toHaveBeenCalled();
     } finally {
@@ -2970,11 +2975,11 @@ describe('runNext post-publish bookkeeping', () => {
 
       const result = await runner.runNext();
 
-      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.outcome).toBe('skipped');
       expect(result.skip_reason).toBe('operator_slug_mismatch');
       expect(result.reviewer_notes).toMatch(/not auto-repairable/);
       expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-      expect(queue.pendingReview).toHaveBeenCalledWith('opp_pin_1', 'operator_slug_mismatch', { claimToken: claimedAt });
+      expect(queue.skip).toHaveBeenCalledWith('opp_pin_1', 'operator_slug_mismatch', { claimToken: claimedAt });
       expect(queue.release).not.toHaveBeenCalled();
       expect(queue.complete).not.toHaveBeenCalled();
     } finally {
@@ -3093,38 +3098,34 @@ describe('named-competitor autopublish gate', () => {
     }
   });
 
-  test('gate OFF (default): a clean named-competitor draft still parks at named_competitor_review before the publisher', async () => {
-    delete process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH;
+  test('explicit competitor kill switch skips without asking for approval', async () => {
+    process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'false';
     const publisher = { publishOrUpdatePage: jest.fn() };
-    const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher });
-
+    const { runner, queue } = namedCompetitorScenario({ publisher });
     const result = await runner.runNext();
-
-    expect(result.outcome).toBe('completed_pending_review');
-    expect(result.skip_reason).toBe('named_competitor_review');
+    expect(result).toMatchObject({ outcome: 'skipped', skip_reason: 'named_competitor_disabled' });
     expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-    expect(queue.pendingReview).toHaveBeenCalledWith('opp_named_1', 'named_competitor_review', { claimToken: claimedAt });
-    expect(queue.release).not.toHaveBeenCalled();
+    expect(queue.pendingReview).not.toHaveBeenCalled();
+    expect(queue.skip).toHaveBeenCalled();
   });
 
-  test('affiliate review (owner ruling 2026-08-31): a clean draft carrying <AffiliateLink> parks at affiliate_review — outranking named_competitor_review (email-approvable) even with the gate OFF', async () => {
+  test('clean affiliate blogs publish with no trust credit, approval, or intercept marker', async () => {
     delete process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH;
-    const publisher = { publishOrUpdatePage: jest.fn() };
-    const { runner, queue, claimedAt } = namedCompetitorScenario({
-      publisher,
-      contentGuardrails: {
-        evaluate: () => ({ pass: true, findings: [] }),
-        affiliateProductIdsIn: (body) => (/<AffiliateLink\b/.test(String(body)) ? ['rain-gauge'] : []),
-      },
-      body: '## Sec\n\n[quote](/quote/) <AffiliateLink product="rain-gauge" placement="primary-rec">x</AffiliateLink>',
+    delete process.env.AUTO_PUBLISH_NEW_SUPPORTING_BLOG;
+    process.env.TRUST_BUILD_THRESHOLD = '5';
+    const publisher = { publishOrUpdatePage: jest.fn().mockResolvedValue({
+      url: `https://www.wavespestcontrol.com${SLUG}`, status: 'pr_open', live: false,
+      pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/903',
+    }) };
+    const { runner, queue } = namedCompetitorScenario({
+      publisher, intercept: false,
+      contentGuardrails: { evaluate: () => ({ pass: true, findings: [] }), affiliateProductIdsIn: () => ['rain-gauge'] },
+      body: '## Equipment\n\n<AffiliateLink product="rain-gauge" placement="primary-rec">Rain gauge</AffiliateLink>',
     });
-
     const result = await runner.runNext();
-
-    expect(result.outcome).toBe('completed_pending_review');
-    expect(result.skip_reason).toBe('affiliate_review');
-    expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-    expect(queue.pendingReview).toHaveBeenCalledWith('opp_named_1', 'affiliate_review', { claimToken: claimedAt });
+    expect(result.skip_reason).toBe('astro_pr_pending_merge');
+    expect(publisher.publishOrUpdatePage).toHaveBeenCalledTimes(1);
+    expect(queue.release).not.toHaveBeenCalled();
   });
 
   test('gate ON: the same clean draft publishes through the normal astro-PR path', async () => {
@@ -3174,19 +3175,6 @@ describe('named-competitor autopublish gate', () => {
     expect(queue.release).not.toHaveBeenCalled();
   });
 
-  test('autopublish is scoped to the TRUE-intercept marker — a category/spoke seed (shared bucket + operator_brief, intercept:false) still parks (hook r3 P1)', async () => {
-    process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
-    const publisher = { publishOrUpdatePage: jest.fn() };
-    const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher, intercept: false });
-
-    const result = await runner.runNext();
-
-    expect(result.outcome).toBe('completed_pending_review');
-    expect(result.skip_reason).toBe('named_competitor_review');
-    expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-    expect(queue.pendingReview).toHaveBeenCalledWith('opp_named_1', 'named_competitor_review', { claimToken: claimedAt });
-  });
-
   test('autopublish requires namedCompetitorComparison too — comparison flag OFF keeps the review park (hook P1)', async () => {
     process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
     const publisher = { publishOrUpdatePage: jest.fn() };
@@ -3200,10 +3188,10 @@ describe('named-competitor autopublish gate', () => {
 
     const result = await runner.runNext();
 
-    expect(result.outcome).toBe('completed_pending_review');
-    expect(result.skip_reason).toBe('named_competitor_review');
+    expect(result.outcome).toBe('skipped');
+    expect(result.skip_reason).toBe('named_competitor_disabled');
     expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-    expect(queue.pendingReview).toHaveBeenCalledWith('opp_named_1', 'named_competitor_review', { claimToken: claimedAt });
+    expect(queue.skip).toHaveBeenCalledWith('opp_named_1', 'named_competitor_disabled', { claimToken: claimedAt });
     fg.isEnabled.mockRestore();
   });
 
@@ -3487,7 +3475,7 @@ describe('gate module-load failures fail CLOSED (regression — these silently s
     expect(result.skip_reason).toBe('content_guardrails_unavailable');
     expect(result.content_guardrails_result).toMatchObject({ pass: false });
     expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-    expect(queue.pendingReview).toHaveBeenCalledWith('opp_guardrails_unavail', 'content_guardrails_unavailable', { claimToken: claimedAt });
+    expect(queue.skip).toHaveBeenCalledWith('opp_guardrails_unavail', 'content_guardrails_unavailable', { claimToken: claimedAt });
   });
 
   test('comparison-table-gate load failure routes to review instead of skipping the disparagement checks', async () => {
@@ -3505,7 +3493,7 @@ describe('gate module-load failures fail CLOSED (regression — these silently s
     expect(result.skip_reason).toBe('comparison_table_unavailable');
     expect(result.comparison_table_result).toMatchObject({ pass: false });
     expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-    expect(queue.pendingReview).toHaveBeenCalledWith('opp_comparison_unavail', 'comparison_table_unavailable', { claimToken: claimedAt });
+    expect(queue.skip).toHaveBeenCalledWith('opp_comparison_unavail', 'comparison_table_unavailable', { claimToken: claimedAt });
   });
 
   test('claims-ledger-validator load failure on a facts-sufficient draft routes to review', async () => {
@@ -3526,7 +3514,7 @@ describe('gate module-load failures fail CLOSED (regression — these silently s
     expect(result.skip_reason).toBe('claims_ledger_unavailable');
     expect(result.claims_ledger_result).toMatchObject({ pass: false });
     expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
-    expect(queue.pendingReview).toHaveBeenCalledWith('opp_claims_unavail', 'claims_ledger_unavailable', { claimToken: claimedAt });
+    expect(queue.skip).toHaveBeenCalledWith('opp_claims_unavail', 'claims_ledger_unavailable', { claimToken: claimedAt });
   });
 });
 

@@ -1,3 +1,4 @@
+import { usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBarPageData';
 // client/src/pages/admin/DispatchPageV2.jsx
 //
 // Mobile-first orchestrator for /admin/dispatch under the dispatch-v2
@@ -37,6 +38,7 @@ import {
   useEffect,
   useRef,
   useCallback,
+  useMemo,
   lazy,
   Suspense,
 } from "react";
@@ -60,6 +62,7 @@ import TimeGridDays from "../../components/schedule/TimeGridDays";
 import MobileWeekGrid from "../../components/schedule/MobileWeekGrid";
 import MobileDayStrip from "../../components/schedule/MobileDayStrip";
 import MobileDispatchList from "../../components/schedule/MobileDispatchList";
+import useDispatchReadiness from "../../components/schedule/useDispatchReadiness";
 import ScheduleClientSearch from "../../components/schedule/ScheduleClientSearch";
 import MobileAppointmentDetailSheet from "../../components/schedule/MobileAppointmentDetailSheet";
 import MobileCheckoutSheet from "../../components/schedule/MobileCheckoutSheet";
@@ -77,7 +80,7 @@ import { ProjectDetail } from "./ProjectsPage";
 import { getAdminUser } from "../../lib/adminAuth";
 import HorizontalScroll from "../../components/HorizontalScroll";
 import useIsMobile from "../../hooks/useIsMobile";
-import { Button, Card, CardBody, cn } from "../../components/ui";
+import { Button, cn } from "../../components/ui";
 import {
   etDateString,
   etStartOfWeek,
@@ -591,6 +594,12 @@ export default function DispatchPageV2({
   const [treatmentPlanService, setTreatmentPlanService] = useState(null);
   const [auditContext, setAuditContext] = useState(null);
   const [selectedScheduleService, setSelectedScheduleService] = useState(null);
+  const ibSelectedService = detailService || selectedScheduleService || editingService || rescheduleService || completingService || continueProjectService;
+  usePublishIntelligenceBarPageData({
+    viewed_date: date,
+    appointment_id: ibSelectedService?.id,
+    customer_id: ibSelectedService?.customer_id ?? ibSelectedService?.customerId,
+  });
   const [showNewAppt, setShowNewAppt] = useState(false);
   const [newApptDefaults, setNewApptDefaults] = useState(null);
   const [scheduleRefreshKey, setScheduleRefreshKey] = useState(0);
@@ -686,6 +695,19 @@ export default function DispatchPageV2({
   useEffect(() => {
     fetchSchedule(date);
   }, [date, fetchSchedule]);
+
+  // Auto-Dispatch audit links open the existing appointment detail sheet.
+  // Inspecting a move must never enter the completion or new-booking flows.
+  useEffect(() => {
+    const id = searchParams.get("appointment");
+    if (!id || loading || !data) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete("appointment");
+    setSearchParams(next, { replace: true });
+    const visit = (data.services || []).find((service) => String(service.id) === id);
+    if (visit) setDetailService(visit);
+    else setError(new Error("That appointment is no longer on this date. Find its current placement on the schedule."));
+  }, [searchParams, setSearchParams, loading, data]);
 
   // C4 (universal one-time services, ratified Q9): /tech deep-links typed
   // jobs here as ?completeService=<scheduledServiceId> instead of alert-
@@ -966,11 +988,19 @@ export default function DispatchPageV2({
 
   function shiftDate(dir) {
     if (viewMode === "day") setDate(addDaysISO(date, dir));
-    else if (viewMode === "week") setDate(addDaysISO(date, dir * 7));
+    else if (viewMode === "week" || viewMode === "5day") setDate(addDaysISO(date, dir * 7));
     else setDate(addMonthsISO(date, dir));
   }
 
   const isReferencePanel = activeTab !== "board" && viewMode === "day";
+  const readiness = useDispatchReadiness({
+    services: data?.services,
+    date,
+    active: activeTab === "board" && viewMode === "day" && data?.date === date && !loading && !error,
+  });
+  const dayServices = useMemo(() => (data?.services || []).map(service => ({
+    ...service, readiness: readiness?.[service.id],
+  })), [data?.services, readiness]);
   if (loading && !isReferencePanel)
     return (
       <div className="py-16 text-center text-13 text-ink-secondary">
@@ -998,9 +1028,8 @@ export default function DispatchPageV2({
   if (!data && !isReferencePanel) return null;
 
   const safeData = data || {};
-  const services = safeData.services || [];
+  const services = dayServices;
   const techSummary = safeData.techSummary || [];
-  const unassigned = safeData.unassigned || [];
   const technicians = safeData.technicians || [];
   const zoneColors = safeData.zoneColors || {};
   const zoneLabels = safeData.zoneLabels || {};
@@ -1092,14 +1121,11 @@ export default function DispatchPageV2({
         0,
       );
 
-  const unassignedCount = unassigned.length;
-  const newCustomers = services.filter((s) => !s.lastServiceDate);
   const weatherData = safeData.weather || {};
   const rainProbability =
     weatherData.rainProbability ?? weatherData.rain_probability ?? null;
   const windSpeed = weatherData.windSpeed ?? weatherData.wind_speed ?? null;
   const weatherTemp = weatherData.temp ?? weatherData.temperature ?? null;
-  const hasRainAlert = rainProbability != null && rainProbability > 40;
   // Per-zone NWS rain chances for the zones on today's board (day payload
   // zoneRain: { zoneSlug: 0-100|null }). Exception-based: only zones at
   // ≥40% surface as chips on the weather bar — amber <50, alert-red ≥50
@@ -1107,26 +1133,23 @@ export default function DispatchPageV2({
   const zoneRainAlerts = Object.entries(safeData.zoneRain || {})
     .filter(([, chance]) => chance != null && chance >= 40)
     .sort(([, a], [, b]) => b - a);
-  const hasFocusAlerts =
-    (!isMobile && unassignedCount > 0) ||
-    newCustomers.length > 0 ||
-    hasRainAlert;
   const sprayHold =
     (rainProbability != null && rainProbability > 50) ||
     (windSpeed != null && windSpeed > 15);
 
+  const sprayStatus = sprayHold ? "HOLD"
+    : rainProbability == null || windSpeed == null ? "UNKNOWN" : "GO";
+
   const dateHeader =
     viewMode === "day"
       ? formatDateDisplay(date)
-      : viewMode === "week"
+      : isMultiDayView
         ? (() => {
-            // TimeGridDays renders a Mon→Sun week containing the selected
-            // date, so the header must label that same span — not
-            // selected → selected + 6, which drifts as soon as the user
-            // picks any non-Monday.
+            // Match the grid’s Monday→Friday or Monday→Sunday span,
+            // including when the selected date is not a Monday.
             const monday = etStartOfWeek(date);
-            const sunday = addDaysISO(monday, 6);
-            return `${formatETDate(dateAtNoonUTC(monday), { month: "short", day: "numeric" })} – ${formatETDate(dateAtNoonUTC(sunday), { month: "short", day: "numeric", year: "numeric" })}`;
+            const lastDay = addDaysISO(monday, expectedDayCount - 1);
+            return `${formatETDate(dateAtNoonUTC(monday), { month: "short", day: "numeric" })} – ${formatETDate(dateAtNoonUTC(lastDay), { month: "short", day: "numeric", year: "numeric" })}`;
           })()
         : formatETDate(dateAtNoonUTC(date), { month: "long", year: "numeric" });
 
@@ -1614,35 +1637,6 @@ export default function DispatchPageV2({
       {/* Board tab content */}
       {viewMode === "day" && activeTab === "board" && (
         <>
-          {hasFocusAlerts && (
-            <Card className="mb-3">
-              {" "}
-              <CardBody className="py-3">
-                {" "}
-                <div className="u-label text-ink-secondary mb-1">
-                  Today's Focus
-                </div>
-                {!isMobile && unassignedCount > 0 && (
-                  <div className="text-13 font-medium text-alert-fg">
-                    {unassignedCount} service{unassignedCount > 1 ? "s" : ""}{" "}
-                    unassigned — assign techs
-                  </div>
-                )}
-                {newCustomers.length > 0 && (
-                  <div className="text-13 font-medium text-zinc-900">
-                    {newCustomers.length} new customer
-                    {newCustomers.length > 1 ? "s" : ""} today (first visit)
-                  </div>
-                )}
-                {hasRainAlert && (
-                  <div className="text-13 font-medium text-zinc-900">
-                    Rain expected ({rainProbability}% chance) — monitor spray
-                    conditions
-                  </div>
-                )}
-              </CardBody>{" "}
-            </Card>
-          )}
           {/* Weather bar — full-bleed, single row */}
           {(() => {
             const rp = rainProbability ?? 0;
@@ -1654,7 +1648,7 @@ export default function DispatchPageV2({
                   {weatherIcon}
                 </span>{" "}
                 <span className="u-nums font-medium text-zinc-900">
-                  {weatherTemp ?? 82}°F
+                  {weatherTemp == null ? "Weather unavailable" : `${weatherTemp}°F`}
                 </span>
                 {windSpeed != null && (
                   <>
@@ -1683,7 +1677,7 @@ export default function DispatchPageV2({
                     sprayHold ? "text-alert-fg" : "text-zinc-900",
                   )}
                 >
-                  SPRAY: {sprayHold ? "HOLD" : "GO"}
+                  SPRAY: {sprayStatus}
                 </span>
                 {/* Per-zone rain chips — only zones at ≥40% render. */}
                 {zoneRainAlerts.map(([zone, chance]) => (

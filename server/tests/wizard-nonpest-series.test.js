@@ -1124,8 +1124,8 @@ describe('booking route wiring (source contracts)', () => {
     // The edit lane's merge carries the provenance key across service-only
     // edits and drops it on an explicit price edit; the resolver yields to
     // an explicit price override.
-    expect(schedule).toMatch(/const PROVENANCE_OVERRIDE_KEYS = new Set\(\['anchored_split_per_visit'\]\);/);
-    expect(schedule).toMatch(/const priceEdit = entries\.some\(\(\[key\]\) => key === 'estimated_price'\);\s*\n\s*const merged = \{ \.\.\.\(priceEdit \? \{\} : provenance\), \.\.\.existing \};/);
+    expect(schedule).toMatch(/const PROVENANCE_OVERRIDE_KEYS = new Set\(\['anchored_split_per_visit', 'appointment_address'\]\);/);
+    expect(schedule).toMatch(/const priceEdit = entries\.some\(\(\[key\]\) => key === 'estimated_price'\);\s*\n\s*const merged = \{ \.\.\.provenance, \.\.\.existing \};\s*\n\s*if \(priceEdit\) delete merged\.anchored_split_per_visit;/);
     expect(schedule).toMatch(/if \(raw\.estimated_price !== undefined && raw\.estimated_price !== null\) return parent;/);
     expect(backfillSrc2).toMatch(/BOOL_AND\(c\.estimated_price IS NOT NULL AND ROUND\(c\.estimated_price \* 100\) = s\.quotient_cents\)/);
     expect(backfillSrc2).not.toMatch(/< 1\s*\n/);

@@ -62,8 +62,10 @@ function chain(overrides = {}) {
       return builder;
     }),
     whereNot: jest.fn().mockReturnThis(),
+    whereNotExists: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
     whereNotIn: jest.fn().mockReturnThis(),
+    whereNotNull: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
     whereRaw: jest.fn().mockReturnThis(),
     orWhereRaw: jest.fn().mockReturnThis(),

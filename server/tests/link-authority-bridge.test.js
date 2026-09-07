@@ -8,6 +8,7 @@
  * the policy loosens; Judge-owned statuses never moved; §3.1 aggregate; one
  * bell per run; idempotent re-runs.
  */
+jest.mock('../services/seo/link-prospect-verifier', () => ({ reconcileOutreach: jest.fn(async () => ({ matched: 0, ambiguous: 0 })) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const { isEnabled } = require('../config/feature-gates');
@@ -76,7 +77,7 @@ describe('gate / dryRun', () => {
   test('a held lease is reported and nothing is written', async () => {
     const { db } = scenario();
     const send = jest.fn(async () => ({ ok: true }));
-    const r = await run(db, { exclusive: async () => ({ skipped: true, reason: 'lease_held' }), autoSend: true, send });
+    const r = await run(db, { exclusive: async (key, fn) => key === 'backlink-scan' ? fn() : ({ skipped: true, reason: 'lease_held' }), autoSend: true, send });
     expect(r.skipped).toBe('lease_held');
     expect(placements(db)).toHaveLength(0);
     // the send sweep still ran (nothing to send here): the lease holder was a manual run with autoSend false
@@ -1115,4 +1116,26 @@ describe('selection', () => {
     const r = await run(db, { limit: 1 });
     expect(r.selected).toBe(1);
   });
+});
+
+
+test('an active backlink scan blocks auto-send and reconciliation until the lease is available', async () => {
+  const { db } = scenario();
+  const reconcile = require('../services/seo/link-prospect-verifier').reconcileOutreach;
+  reconcile.mockClear();
+  const send = jest.fn();
+  const result = await run(db, { autoSend: true, send, exclusive: async (key, fn) => key === 'backlink-scan' ? { skipped: true, reason: 'lease_held' } : fn() });
+  expect(result.autoSend).toEqual({ attempted: 0, sent: 0, skipped: [{ code: 'backlink_scan_busy' }] });
+  expect(reconcile).not.toHaveBeenCalled();
+  expect(send).not.toHaveBeenCalled();
+});
+test('every automatic dispatch retries evidence reconciliation under the scan lease and fails closed', async () => {
+  const { db } = scenario();
+  const reconcile = require('../services/seo/link-prospect-verifier').reconcileOutreach;
+  let scanHeld = false;
+  reconcile.mockImplementationOnce(async () => { expect(scanHeld).toBe(true); throw new Error('synthetic reconciliation failure'); });
+  const send = jest.fn();
+  const result = await run(db, { autoSend: true, send, exclusive: async (key, fn) => { scanHeld = key === 'backlink-scan'; try { return await fn(); } finally { scanHeld = false; } } });
+  expect(result.errors).toContainEqual({ autoSend: 'synthetic reconciliation failure' });
+  expect(send).not.toHaveBeenCalled();
 });

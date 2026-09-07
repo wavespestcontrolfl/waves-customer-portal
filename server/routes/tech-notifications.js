@@ -33,8 +33,16 @@ router.get('/', async (req, res, next) => {
     // of the poll result. The priority is freshness-scoped, though — a stale
     // backlog of ≥20 unread non-storm rows must not displace a live storm
     // warning either, so aged rows compete with storms purely on recency.
+    // Visit notices (visit_* — tech-visit-notifications.js) never expire and
+    // a bulk assign can mint dozens at once, so they must not push an
+    // arrival/Undo prompt (bucket 0) or a fresh storm warning (bucket 1)
+    // past the limit — the client shows two at a time and promotes the rest
+    // as they clear. They share the LAST bucket with stale rows and compete
+    // there on recency: a backlog of ≥20 stale legacy rows (e.g. the old
+    // `new_appointment` type the client never rendered) must not starve
+    // every schedule-change card out of the window either.
     const rows = await q
-      .orderByRaw("CASE WHEN type != 'storm_watch_alert' AND created_at >= now() - interval '6 hours' THEN 0 ELSE 1 END")
+      .orderByRaw("CASE WHEN type LIKE 'visit\\_%' THEN 2 WHEN type = 'storm_watch_alert' THEN 1 WHEN created_at >= now() - interval '6 hours' THEN 0 ELSE 2 END")
       .orderBy('created_at', 'desc')
       .limit(20);
     res.json({ notifications: rows.map(parseRow) });

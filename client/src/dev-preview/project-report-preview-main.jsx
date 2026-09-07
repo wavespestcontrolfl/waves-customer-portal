@@ -6,6 +6,7 @@
  * /preview-project-report.html?scenario=<key> — one scenario per project
  * type the viewer renders, so template edits can be reviewed collectively.
  */
+import '../fonts.css';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';

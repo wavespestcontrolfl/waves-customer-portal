@@ -45,7 +45,6 @@ import {
   SerifHeading,
   HelpPhoneLink,
 } from '../components/brand';
-import BrandFooter from '../components/BrandFooter';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -100,37 +99,6 @@ function cityStateZip(customer = {}) {
   return [customer.city, region].filter(Boolean).join(customer.city && region ? ', ' : '');
 }
 
-function StatusPill({ tone = 'neutral', children }) {
-  const tones = {
-    paid: { bg: DOC.successBg, color: DOC.success, border: DOC.successBorder },
-    processing: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
-    refunded: { bg: 'rgba(200,16,46,0.08)', color: DOC.danger, border: 'rgba(200,16,46,0.22)' },
-    partial: { bg: '#EEF6FF', color: '#065A8C', border: '#BFE4F8' },
-    neutral: { bg: CUSTOMER_SURFACE.page, color: DOC.ink, border: CUSTOMER_SURFACE.border },
-  };
-  const t = tones[tone] || tones.neutral;
-  const glassClear = t === tones.neutral ? { 'data-glass-clear': '' } : {};
-  return (
-    <span {...glassClear} style={{
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 6,
-      minHeight: 28,
-      padding: '4px 8px',
-      borderRadius: RADIUS.input,
-      background: t.bg,
-      border: `1px solid ${t.border}`,
-      color: t.color,
-      fontSize: FS.caption,
-      fontWeight: FW.heavy,
-      letterSpacing: 0,
-      textTransform: 'uppercase',
-      whiteSpace: 'nowrap',
-    }}>
-      {children}
-    </span>
-  );
-}
 
 function DetailBlock({ label, children }) {
   return (
@@ -154,14 +122,14 @@ function SummaryRow({ label, value, strong, danger }) {
       borderTop: strong ? `1px solid ${DOC.border}` : 'none',
       color: danger ? DOC.danger : strong ? DOC.ink : DOC.muted,
       fontSize: strong ? FS.lead : FS.body,
-      fontWeight: strong ? FW.heavy : danger ? FW.bold : FW.medium,
+      fontWeight: strong || danger ? FW.bold : FW.medium,
       fontFamily: DOC_FONT,
     }}>
       <span>{label}</span>
       <span style={{
         color: danger ? DOC.danger : DOC.ink,
         fontFamily: DOC_FONT,
-        fontWeight: strong ? FW.heavy : FW.semibold,
+        fontWeight: strong ? FW.bold : FW.semibold,
         whiteSpace: 'nowrap',
       }}>
         {value}
@@ -175,7 +143,7 @@ export default function ReceiptPage() {
   // Full liquid-glass scene (owner 2026-07-09 — the quiet 'pro' wash is
   // retired; the pay lane renders the same scene as every glass surface).
   // Native data-glass markup — no classify() walker on this page.
-  useGlassSurface(true, 'full');
+  useGlassSurface(true);
   const { token } = useParams();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -316,26 +284,6 @@ export default function ReceiptPage() {
   // bounced post-redirect) — the old neutral state still said "Receipt /
   // Total charged / keep this for your records" for money never collected.
   const unpaid = !paid && !processing && invoice.status !== 'refunded' && !refundState;
-  const statusTone = refundState === 'fully_refunded'
-    ? 'refunded'
-    : refundState === 'partially_refunded'
-      ? 'partial'
-      : processing
-        ? 'processing'
-        : paid
-          ? 'paid'
-          : 'neutral';
-  const statusLabel = refundState === 'fully_refunded'
-    ? 'Refunded'
-    : refundState === 'partially_refunded'
-      ? 'Partial refund'
-      : processing
-        ? 'Processing'
-        : paid
-          ? 'Paid'
-          : unpaid
-            ? 'Not paid'
-            : 'Receipt';
   const heading = processing
     ? 'Bank payment submitted'
     : paid
@@ -396,7 +344,7 @@ export default function ReceiptPage() {
             }}
           >
             {/* Checkmark graphic removed (owner 2026-07-09 — no decorative icons on customer document pages). */}
-            <div style={{
+            <div className="waves-print-h2" style={{
               fontFamily: DOC_FONT,
               fontWeight: FW.bold,
               fontSize: FS.h2,
@@ -429,7 +377,7 @@ export default function ReceiptPage() {
           }}>
             <Icon name="warning" size={17} strokeWidth={2} style={{ color: DOC.danger, marginTop: 1, flexShrink: 0 }} />
             <div>
-              <div style={{ fontWeight: FW.heavy, color: DOC.danger, marginBottom: SP.xxs }}>Save-on-file authorization not recorded</div>
+              <div style={{ fontWeight: FW.bold, color: DOC.danger, marginBottom: SP.xxs }}>Save-on-file authorization not recorded</div>
               <div style={{ color: DOC.muted }}>
                 Your payment went through, but we couldn't record your authorization to save this payment method on file. Waves will reach out to confirm before any future charge. Questions: call <HelpPhoneLink tone="dark" inline />.
               </div>
@@ -475,7 +423,7 @@ export default function ReceiptPage() {
           }}>
             <Icon name="refresh" size={17} strokeWidth={2} style={{ color: '#065A8C', marginTop: 1 }} />
             <div>
-              <div style={{ fontWeight: FW.heavy, color: '#065A8C', marginBottom: SP.xxs }}>Partial refund issued</div>
+              <div style={{ fontWeight: FW.bold, color: '#065A8C', marginBottom: SP.xxs }}>Partial refund issued</div>
               <div style={{ color: DOC.muted }}>
                 {fmtCurrency(payment.refundAmount)} refunded
                 {payment.refundedAt ? ` on ${fmtDate(payment.refundedAt)}` : ''}
@@ -491,7 +439,7 @@ export default function ReceiptPage() {
           pdfFileName="Waves_Receipt.pdf"
           shareTitle="Waves receipt"
         />
-        <BrandCard className="waves-print-card" padding={28} style={{ marginBottom: SP.lg }}>
+        <BrandCard className="waves-print-card" padding={24} style={{ marginBottom: SP.lg }}>
           <div style={{
             display: 'flex',
             justifyContent: 'space-between',
@@ -513,7 +461,6 @@ export default function ReceiptPage() {
                 </p>
               </div>
             </div>
-            <StatusPill tone={statusTone}>{statusLabel}</StatusPill>
           </div>
 
           <div data-glass-clear="" style={{
@@ -527,7 +474,7 @@ export default function ReceiptPage() {
           }}>
             <div>
               <div style={eyebrow}>{processing ? 'Submitted amount' : unpaid ? 'Amount due' : 'Receipt total'}</div>
-              <div style={{ marginTop: 6, fontSize: FS.h1, lineHeight: LH.solid, fontWeight: FW.heavy, color: DOC.ink, fontFamily: DOC_FONT }}>
+              <div className="waves-print-h1" style={{ marginTop: 6, fontSize: FS.h1, lineHeight: LH.solid, fontWeight: FW.bold, color: DOC.ink, fontFamily: DOC_FONT }}>
                 {fmtCurrency(chargedTotal)}
               </div>
               <div style={{ marginTop: SP.xs, fontSize: FS.body, color: DOC.muted, lineHeight: LH.body }}>
@@ -546,7 +493,7 @@ export default function ReceiptPage() {
             <DetailBlock label="Billed to">
               {payer ? (
                 <>
-                  <div style={{ fontWeight: FW.heavy }}>{payer.name}</div>
+                  <div style={{ fontWeight: FW.bold }}>{payer.name}</div>
                   {payer.address && <div>{payer.address}</div>}
                   {[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') && (
                     <div>{[payer.city, [payer.state, payer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ')}</div>
@@ -555,7 +502,7 @@ export default function ReceiptPage() {
                 </>
               ) : (
                 <>
-                  <div style={{ fontWeight: FW.heavy }}>{fullName(customer)}</div>
+                  <div style={{ fontWeight: FW.bold }}>{fullName(customer)}</div>
                   {customer.address && <div>{customer.address}</div>}
                   {locationLine && <div>{locationLine}</div>}
                   {customer.email && <div style={{ color: DOC.muted }}>{customer.email}</div>}
@@ -564,7 +511,7 @@ export default function ReceiptPage() {
             </DetailBlock>
             {payer && (
               <DetailBlock label="Service address">
-                <div style={{ fontWeight: FW.heavy }}>{fullName(customer)}</div>
+                <div style={{ fontWeight: FW.bold }}>{fullName(customer)}</div>
                 {customer.address && <div>{customer.address}</div>}
                 {locationLine && <div>{locationLine}</div>}
               </DetailBlock>
@@ -706,12 +653,6 @@ export default function ReceiptPage() {
 
         <div className="waves-no-print waves-customer-help">
           Questions about this receipt? <HelpPhoneLink tone="dark" inline /> or reply to the text or email.
-        </div>
-        {/* Newsletter signup lives only on the newsletter pages (owner
-            2026-07-09, supersedes the 2026-07-08 glass-footer ruling).
-            Hidden from the receipt printout via waves-no-print. */}
-        <div className="waves-no-print">
-          <BrandFooter />
         </div>
       </div>
     </WavesShell>

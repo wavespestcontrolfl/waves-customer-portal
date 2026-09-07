@@ -131,16 +131,16 @@ describe("AdminTabRedirect", () => {
     );
   });
 
-  it("moves Auto-Dispatch deep links into the Schedule workspace", () => {
+  it("moves Auto-Dispatch deep links into Agent Ops", () => {
     const destination = renderRedirect({
       entry: "/admin/auto-dispatch?run=run-123#audit",
       source: "/admin/auto-dispatch",
-      to: "/admin/dispatch",
-      tab: "automation",
+      to: "/admin/agents",
+      tab: "dispatch",
     });
 
     expect(destination).toBe(
-      "/admin/dispatch?run=run-123&tab=automation#audit",
+      "/admin/agents?run=run-123&tab=dispatch#audit",
     );
   });
 

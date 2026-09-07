@@ -146,16 +146,16 @@ describe('filterCollidingSlots — reserve-gate parity', () => {
     expect(out).toHaveLength(0);
   });
 
-  test('keeps the slot when the unassigned booking is in a different zone', async () => {
+  test('rejects a committed overlap in a different zone even with the travel gate off', async () => {
     mockDb({ scheduledRows: [unassignedRow({ zone: 'parrish' })] });
     const out = await filterCollidingSlots([slot()], { ...RANGE, estimateZone: SARASOTA_ZONE });
-    expect(out).toHaveLength(1);
+    expect(out).toHaveLength(0);
   });
 
-  test('keeps the slot when no estimate zone resolved — zone gate off, same as reserveSlot', async () => {
+  test('rejects a committed overlap even when no estimate zone resolves', async () => {
     mockDb({ scheduledRows: [unassignedRow()] });
     const out = await filterCollidingSlots([slot()], { ...RANGE, estimateZone: null });
-    expect(out).toHaveLength(1);
+    expect(out).toHaveLength(0);
   });
 
   test('keeps a same-zone slot that touches but does not overlap the booking', async () => {
@@ -215,16 +215,22 @@ describe('getAvailableSlots — zone capacity end to end', () => {
     }
   });
 
-  test('control: the same booking in another zone leaves the 9 AM route slot offered', async () => {
+  test('a committed booking in another zone is also excluded end to end', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-14T15:00:00Z'));
     try {
       mockDb({ scheduledRows: [unassignedRow({ zone: 'parrish' })] });
       const result = await getAvailableSlots('est-zone-1', { dateFrom: '2027-05-20', dateTo: '2027-05-20' });
       const slots = [...(result.primary || []), ...(result.expander || [])];
-      expect(slots.some(overlapsBlockedWindow)).toBe(true);
+      expect(slots.some(overlapsBlockedWindow)).toBe(false);
     } finally {
       jest.useRealTimers();
     }
   });
+});
+
+test('a hold on another tech outside the zone keeps the existing hold coexistence policy', async () => {
+  mockDb({ scheduledRows: [unassignedRow({ technician_id: 'tech-2', customer_id: null, reservation_expires_at: '2099-01-01T00:00:00Z' })] });
+  const out = await filterCollidingSlots([slot()], { ...RANGE, estimateZone: null });
+  expect(out).toHaveLength(1);
 });

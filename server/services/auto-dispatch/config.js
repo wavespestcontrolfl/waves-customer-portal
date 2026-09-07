@@ -51,6 +51,17 @@ function isApplyAllowed() {
   return process.env.AUTO_DISPATCH_ALLOW_APPLY === 'true';
 }
 
+// The web flow may hand off future appointments only when the existing cron
+// can place them. Use the same gates and effective mode as the scheduler.
+function isCustomerRecurringDispatchEnabled() {
+  const { gateEnvValue, isEnabled } = require('../../config/feature-gates');
+  const config = getAutoDispatchConfig();
+  return gateEnvValue('GATE_CUSTOMER_RECURRING_DISPATCH')
+    && isEnabled('cronJobs') && isEnabled('autoDispatch')
+    && config.mode === 'apply' && config.maxChangesPerRun > 0
+    && !config.requirePortalPreferences;
+}
+
 /**
  * Resolve the effective config. `overrides` (e.g. from the manual-run admin
  * endpoint) win over env; `mode` is always validated to dry_run|apply and is
@@ -104,4 +115,4 @@ function getAutoDispatchConfig(overrides = {}) {
   };
 }
 
-module.exports = { getAutoDispatchConfig, isApplyAllowed, isRouteTiersEnabled, VALID_MODES };
+module.exports = { getAutoDispatchConfig, isApplyAllowed, isRouteTiersEnabled, isCustomerRecurringDispatchEnabled, VALID_MODES };

@@ -2,12 +2,22 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Sheet, SheetHeader, SheetBody } from '../ui/Sheet';
 import { cn } from '../ui/cn';
 
-// The SMS composer's Insert Link picker: one searchable sheet over every link
+// The SMS composer's Quick Links picker: one searchable sheet over every link
 // an operator can text a customer — the per-customer minted links (reschedule,
-// re-service, review request, pay balance, latest estimate, referral), the
-// per-office Google review links, and the whole link library (sitemap-synced
-// website pages + hand-managed rows). Presentation only: the parent owns the
-// library fetch and what happens when a row is picked.
+// re-service, review request, pay balance, latest estimate, referral, Auto
+// Pay setup), the per-office Google review links, and the whole link library
+// (sitemap-synced website pages + hand-managed rows). Presentation only: the
+// parent owns the library fetch and what happens when a row is picked.
+//
+// Rows flagged `channels` (the review request) ask Text / Email / Both before
+// firing onPick(link, channel) — owner ruling 2026-09-03: a review ask goes
+// out by text, by email, or both, the operator's choice.
+
+export const LINK_CHANNELS = [
+  ["sms", "Text", "Puts the link in this message"],
+  ["email", "Email", "Sends the review email now"],
+  ["both", "Both", "Link here, and the email goes out when you send"],
+];
 
 export const LINK_GROUP_ORDER = [
   ['customer', 'For this customer'],
@@ -80,6 +90,8 @@ export default function InsertLinkSheet({
 }) {
   const [query, setQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("all");
+  // The `channels` row whose Text / Email / Both chooser is open.
+  const [channelRowKey, setChannelRowKey] = useState(null);
   const searchRef = useRef(null);
 
   // Fresh search each open — a stale filter from the last insert is never
@@ -88,6 +100,7 @@ export default function InsertLinkSheet({
     if (open) {
       setQuery("");
       setActiveCategory("all");
+      setChannelRowKey(null);
       const t = setTimeout(() => searchRef.current?.focus({ preventScroll: true }), 60);
       return () => clearTimeout(t);
     }
@@ -101,9 +114,9 @@ export default function InsertLinkSheet({
   const hasQuery = Boolean(query.trim());
 
   return (
-    <Sheet open={open} onClose={onClose} width="sm" ariaLabel="Insert a link">
+    <Sheet open={open} onClose={onClose} width="sm" ariaLabel="Quick Links">
       <SheetHeader>
-        <span className="text-14 font-medium text-zinc-900">Insert a link</span>
+        <span className="text-14 font-medium text-zinc-900">Quick Links</span>
         <button
           type="button"
           onClick={onClose}
@@ -174,16 +187,21 @@ export default function InsertLinkSheet({
               )}
               {rows.map((link) => {
                 const busy = busyKey != null && busyKey === link.key;
+                const chooserOpen = link.channels && channelRowKey === link.key;
                 return (
+                  <div key={link.key}>
                   <button
-                    key={link.key}
                     type="button"
-                    onClick={() => onPick(link)}
+                    onClick={() => (link.channels
+                      ? setChannelRowKey(chooserOpen ? null : link.key)
+                      : onPick(link))}
                     disabled={busyKey != null}
                     title={link.title || link.name}
+                    aria-expanded={link.channels ? chooserOpen : undefined}
                     className={cn(
                       "w-full flex items-center gap-3 text-left px-5 py-2.5 u-focus-ring",
                       "hover:bg-zinc-50 disabled:opacity-60",
+                      chooserOpen && "bg-zinc-50",
                     )}
                   >
                     <span className="shrink-0 w-8 h-8 rounded-sm bg-zinc-100 text-zinc-700 grid place-items-center">
@@ -205,6 +223,26 @@ export default function InsertLinkSheet({
                       </span>
                     ) : null}
                   </button>
+                  {chooserOpen && (
+                    <div className="px-5 pb-3 pl-16 flex flex-col gap-1.5" role="group" aria-label={`Send ${link.name} by`}>
+                      {LINK_CHANNELS.map(([value, label, hint]) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => onPick(link, value)}
+                          disabled={busyKey != null}
+                          className={cn(
+                            "flex items-baseline gap-2 text-left rounded-sm px-3 py-1.5 border-hairline border-zinc-300 bg-white u-focus-ring",
+                            "hover:bg-zinc-100 disabled:opacity-60",
+                          )}
+                        >
+                          <span className="text-13 font-medium text-zinc-900 w-11 shrink-0">{label}</span>
+                          <span className="text-12 text-ink-secondary">{hint}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  </div>
                 );
               })}
             </div>

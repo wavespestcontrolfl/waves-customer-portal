@@ -32,4 +32,4 @@ NODE_ENV=test node_modules/.bin/jest \
 
 ## Deferred P2 cleanup
 
-The retained `CompletionPanel`, `formatEstimateLine`, and `acceptanceServiceLists` functions exceed the existing structural lint thresholds. Decomposing these shared legacy functions would broaden this task; that cleanup is deferred. The new pricing service and card pass lint without warnings.
+The retained `CompletionPanel`, `formatEstimateLine`, `acceptanceServiceLists`, and `completeScheduledService` functions exceed the existing structural lint thresholds. Decomposing these shared legacy functions would broaden this task; that cleanup is deferred. The new pricing service and card pass lint without warnings.

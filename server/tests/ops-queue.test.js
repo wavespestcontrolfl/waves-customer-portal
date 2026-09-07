@@ -15,10 +15,13 @@ const mockReviewItems = jest.fn();
 // table's fixture rows (or throws when the fixture is an Error).
 jest.mock('../models/db', () => {
   const make = (table) => {
+    const exclusions = [];
     const chain = new Proxy({}, {
       get(_t, prop) {
+        if (prop === 'whereNot') return (key, value) => { exclusions.push([key, value]); return chain; };
         if (prop === 'then') {
-          const rows = fixtures[table];
+          const fixture = fixtures[table];
+          const rows = Array.isArray(fixture) ? fixture.filter(row => exclusions.every(([key, value]) => row[key] !== value)) : fixture;
           return (resolve, reject) => (rows instanceof Error ? reject(rows) : resolve(rows || []));
         }
         return () => chain;
@@ -108,6 +111,7 @@ describe('getOpsQueue', () => {
       { id: 'da-1', severity: 'warn', payload: JSON.stringify({ source: 'typed_completion', customerName: 'Test Customer', serviceType: 'termite_retreat', suggestedFollowupDate: '2026-09-20' }), created_at: ago(500) },
     ];
     fixtures.admin_alerts = [
+      { id: 'retired-readiness', type: 'lawn_protocol_readiness', severity: 'critical', title: 'Retired readiness snapshot', last_seen_at: ago(1) },
       { id: 'aa-1', type: 'closeout_contradiction', severity: 'high', title: 'Closeout contradiction on a test visit', href: '/admin/dispatch', last_seen_at: ago(20) },
       { id: 'aa-2', type: 'missing_required_photos', severity: 'low', title: 'Missing photos', last_seen_at: ago(40) },
       { id: 'aa-3', type: 'report_delivery_incomplete', status: 'snoozed', severity: 'medium', title: 'Snooze elapsed alert', last_seen_at: ago(60) },

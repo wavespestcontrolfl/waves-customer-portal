@@ -27,6 +27,9 @@ jest.mock('../services/lead-funnel-bridge', () => ({
   bridgeLeadFunnelStage: jest.fn().mockResolvedValue(undefined),
   bridgeLeadsFunnelStage: jest.fn().mockResolvedValue(undefined),
 }));
+jest.mock('../services/lead-attribution', () => ({
+  settleWonFunnelRow: jest.fn().mockResolvedValue(undefined),
+}));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn().mockResolvedValue({ success: true, message_sid: 'SM-test' }),
 }));
@@ -35,6 +38,8 @@ const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { resolveCustomer, executeCommsTool } = require('../services/intelligence-bar/comms-tools');
 const { executeLeadsTool, resolveLeadForUpdate, previewBulkLeadUpdate } = require('../services/intelligence-bar/leads-tools');
+const { bridgeLeadFunnelStage, bridgeLeadsFunnelStage } = require('../services/lead-funnel-bridge');
+const { settleWonFunnelRow } = require('../services/lead-attribution');
 
 // Minimal knex chain: filter methods return the chain; terminal methods
 // resolve per-method results supplied by the test.
@@ -156,7 +161,24 @@ describe('update_lead_status (leads)', () => {
     // from, so a concurrent transition matches zero rows.
     expect(leads.where).toHaveBeenCalledWith('status', 'contacted');
     expect(leads.whereNull).toHaveBeenCalledWith('deleted_at');
-    expect(leads.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'lost' }), ['id']);
+    expect(leads.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'lost' }), ['id', 'customer_id']);
+  });
+
+  test('a won through the single-lead tool runs the shared won settlement (bridge + wizard-repeat settlement), not the bare bridge (codex #3834 r34 P1)', async () => {
+    // The customer handed to the settlement is the one the claimed UPDATE
+    // returned (c2), never the pre-update read (c1) — a reassignment that
+    // left the status alone lands in between (codex r35 P1).
+    const leads = chain({ first: { ...LEAD_A, customer_id: 'c1' }, update: [{ id: 'lead-1', customer_id: 'c2' }] });
+    const activities = chain({ insert: undefined });
+    db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+    settleWonFunnelRow.mockResolvedValueOnce({ reason: 'error' });
+
+    const res = await executeLeadsTool('update_lead_status', { lead_id: 'lead-1', new_status: 'won' });
+    expect(res.success).toBe(true);
+    expect(leads.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'won' }), ['id', 'customer_id']);
+    expect(settleWonFunnelRow).toHaveBeenCalledWith('lead-1', 'c2');
+    expect(bridgeLeadFunnelStage).not.toHaveBeenCalled();
+    expect(res.warning).toMatch(/attribution reporting may lag/);
   });
 
   test('a zero-row guarded update (concurrent transition) refuses instead of claiming success', async () => {
@@ -221,6 +243,42 @@ describe('bulk_update_leads (leads)', () => {
     expect(leads.whereNull).toHaveBeenCalledWith('deleted_at');
     expect(leads.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'lost' }), ['id']);
     expect(leads.select).not.toHaveBeenCalled();
+  });
+
+  test('a bulk WON keeps the ONE set-based bridge and runs the shared settlement only for confirmed wizard repeats (codex #3834 r34 P1, r35 P2)', async () => {
+    // Three leads won; only lead-2 is a quote_wizard row carrying the marker.
+    const leads = chain({ update: [{ id: 'lead-1' }, { id: 'lead-2' }, { id: 'lead-3' }], select: [{ id: 'lead-2', customer_id: 'c2' }] });
+    const activities = chain({ insert: undefined });
+    db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+    bridgeLeadsFunnelStage.mockResolvedValueOnce({ reason: 'error' });
+
+    const res = await executeLeadsTool('bulk_update_leads', {
+      current_status: 'estimate_sent', new_status: 'won', dry_run: false, lead_ids: ['lead-1', 'lead-2', 'lead-3'],
+    });
+    expect(res.success).toBe(true);
+    expect(bridgeLeadsFunnelStage).toHaveBeenCalledTimes(1);
+    expect(bridgeLeadsFunnelStage).toHaveBeenCalledWith(['lead-1', 'lead-2', 'lead-3'], 'won');
+    expect(leads.whereRaw).toHaveBeenCalledWith("extracted_data->>'duplicate_of_lead_id' IS NOT NULL");
+    expect(settleWonFunnelRow).toHaveBeenCalledTimes(1);
+    expect(settleWonFunnelRow).toHaveBeenCalledWith('lead-2', 'c2');
+    // The set bridge's ERROR is still the card warning.
+    expect(res.warning).toMatch(/attribution reporting may lag/);
+  });
+
+  test('a bulk WON whose repeat discovery fails after the statuses committed still reports success with the attribution warning and writes the activities (codex #3834 r37 P2)', async () => {
+    const leads = chain({ update: [{ id: 'lead-1' }] });
+    leads.select.mockRejectedValueOnce(new Error('db boom'));
+    const activities = chain({ insert: undefined });
+    db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+
+    const res = await executeLeadsTool('bulk_update_leads', {
+      current_status: 'estimate_sent', new_status: 'won', dry_run: false, lead_ids: ['lead-1'],
+    });
+    expect(res.success).toBe(true);
+    expect(res.updated).toBe(1);
+    expect(res.warning).toMatch(/attribution reporting may lag/);
+    expect(activities.insert).toHaveBeenCalled();
+    expect(settleWonFunnelRow).not.toHaveBeenCalled();
   });
 
   test('a confirmed run with dry_run:false actually updates (no silent no-op)', async () => {

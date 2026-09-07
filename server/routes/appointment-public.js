@@ -32,6 +32,7 @@ const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
+const { isEnabled } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const { noStore } = require('../middleware/no-store');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
@@ -676,6 +677,8 @@ router.get('/:token', async (req, res, next) => {
       // until end of day but has no DTSTART to file. Same verdict the ICS
       // route applies (calendarEligible over the raw visit snapshot).
       calendarEligible: visitUnknown ? false : calendarEligible(svc, visitInfoRaw),
+      // "Look for this van" scene under the header card (GATE_VAN_SCENE).
+      vanScene: isEnabled('vanScene'),
     };
     if (state !== 'upcoming') return res.json({ ...base, tech: null, plan: null, weather: null });
 

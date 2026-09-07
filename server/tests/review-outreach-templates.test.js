@@ -75,12 +75,17 @@ describe('review outreach templates', () => {
       service_type: 'pest control service',
       review_url: 'https://portal.wavespestcontrol.com/l/abcde',
     };
+    // …and the no-name fallback ('Your tech', substituted when neither the
+    // row's tech_name nor its technician_id resolves) must fit too.
+    const { tech: _named, ...noTech } = vars;
     for (const t of OUTREACH_TEMPLATES) {
       const requireLink = t.body.includes('{review_url}');
-      const body = normalizeGsmPunctuation(renderOutreachBody(t.body, vars, { requireLink }));
-      const s = countSegments(body);
-      expect({ id: t.id, encoding: s.encoding, segments: s.segmentCount })
-        .toEqual({ id: t.id, encoding: 'GSM_7', segments: 1 });
+      for (const [label, v] of [['named', vars], ['fallback', noTech]]) {
+        const body = normalizeGsmPunctuation(renderOutreachBody(t.body, v, { requireLink }));
+        const s = countSegments(body);
+        expect({ id: t.id, vars: label, encoding: s.encoding, segments: s.segmentCount })
+          .toEqual({ id: t.id, vars: label, encoding: 'GSM_7', segments: 1 });
+      }
     }
   });
 
@@ -95,7 +100,7 @@ describe('review outreach templates', () => {
 
   test('renderOutreachBody falls back to sensible defaults', () => {
     const out = renderOutreachBody('Hey {first}, {tech} here', {});
-    expect(out).toBe('Hey there, Adam here');
+    expect(out).toBe('Hey there, Your tech here');
   });
 
   test('requireLink appends the review URL when an edited body dropped it', () => {

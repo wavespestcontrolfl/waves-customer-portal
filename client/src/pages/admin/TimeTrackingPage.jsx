@@ -2352,6 +2352,12 @@ const EMPTY_TECH_FORM = {
   name: "",
   phone: "",
   email: "",
+  // Employment: "active" = on staff and can sign in; "prospective" = a
+  // hire who has not started (placeholder — no sign-in, no slots).
+  employmentStatus: "active",
+  // Field eligibility is separate from employment: an office admin stays
+  // active without ever appearing as a dispatch target.
+  fieldDispatchable: false,
   autoFlipEnabled: true,
   // Payroll profile
   payRate: "",
@@ -2375,6 +2381,10 @@ export function TeamTab({ showToast }) {
   const [showPayrollSection, setShowPayrollSection] = useState(false);
   const [saving, setSaving] = useState(false);
   const [earningsTech, setEarningsTech] = useState(null);
+  const [capabilitiesTech, setCapabilitiesTech] = useState(null);
+  // The capabilities routes are admin-only; the roster itself is readable by
+  // technicians, so the action is hidden for them rather than 403ing.
+  const isAdmin = useMemo(() => readStaffRole() === "admin", []);
   // Photo upload state. fileInputRef is shared across rows because
   // mounting one <input type=file>per tech is needless DOM. Uploads
   // are serialized: while uploadingId is non-null, every row's Photo
@@ -2442,11 +2452,20 @@ export function TeamTab({ showToast }) {
     setSaving(true);
     try {
       if (editingId) {
-        await adminFetch(`/admin/timetracking/technicians/${editingId}`, {
+        const res = await adminFetch(`/admin/timetracking/technicians/${editingId}`, {
           method: "PUT",
           body: JSON.stringify(form),
         });
-        showToast("Technician updated");
+        // Leaving the dispatch pool through Edit (Employment → Inactive or
+        // Prospective, or field eligibility removed) surfaces the same
+        // remaining-assignment notice as the Deactivate button: future work
+        // stays on the schedule for manual reassignment.
+        const pending = (res && res.futureAssignedVisits) || [];
+        showToast(
+          pending.length
+            ? `Technician updated — ${pending.length} upcoming visit${pending.length === 1 ? "" : "s"} still assigned; reassign on the Schedule`
+            : "Technician updated",
+        );
       } else {
         await adminFetch("/admin/timetracking/technicians", {
           method: "POST",
@@ -2485,10 +2504,17 @@ export function TeamTab({ showToast }) {
       )
     ) return;
     try {
-      await adminFetch(`/admin/timetracking/technicians/${tech.id}`, {
+      const res = await adminFetch(`/admin/timetracking/technicians/${tech.id}`, {
         method: "DELETE",
       });
-      showToast(`${tech.name} deactivated`);
+      const pending = (res && res.futureAssignedVisits) || [];
+      // Future work is left on the schedule for manual reassignment — the
+      // server never cancels or rewrites visits on deactivation.
+      showToast(
+        pending.length
+          ? `${tech.name} deactivated — ${pending.length} upcoming visit${pending.length === 1 ? "" : "s"} still assigned; reassign on the Schedule`
+          : `${tech.name} deactivated`,
+      );
       load();
     } catch (e) {
       showToast("Failed to deactivate: " + String(e.message || "Unknown error"));
@@ -2501,6 +2527,8 @@ export function TeamTab({ showToast }) {
       name: tech.name,
       phone: tech.phone || "",
       email: tech.email || "",
+      employmentStatus: tech.employment_status || (tech.active ? "active" : "inactive"),
+      fieldDispatchable: tech.field_dispatchable === true,
       autoFlipEnabled: tech.auto_flip_enabled !== false, // default true if undefined
       payRate: tech.pay_rate != null ? String(tech.pay_rate) : "",
       hireDate: tech.hire_date ? String(tech.hire_date).split("T")[0] : "",
@@ -2626,7 +2654,54 @@ export function TeamTab({ showToast }) {
                 style={sInput}
               />{" "}
             </div>{" "}
+            <div>
+              {" "}
+              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+                Employment
+              </div>{" "}
+              <select
+                value={form.employmentStatus}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, employmentStatus: e.target.value }))
+                }
+                style={sInput}
+              >
+                <option value="active">Active — on staff</option>
+                <option value="prospective">Prospective — not started</option>
+                {editingId && <option value="inactive">Inactive — offboarded</option>}
+              </select>{" "}
+            </div>{" "}
           </div>
+          {/* Field eligibility (Field Team Program, Phase 0). Employment
+              says whether someone is on staff; this says whether they may
+              take field work. Prospective placeholders and office-only
+              admins stay OFF, so no booking path can put a customer on
+              them. */}
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              marginBottom: 12,
+              cursor: "pointer",
+            }}
+          >
+            {" "}
+            <input
+              type="checkbox"
+              checked={form.fieldDispatchable === true}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, fieldDispatchable: e.target.checked }))
+              }
+              style={{ width: 14, height: 14, cursor: "pointer" }}
+            />{" "}
+            <span style={{ fontSize: 12, color: D.heading }}>
+              Can be assigned field work
+            </span>{" "}
+            <span style={{ fontSize: 11, color: D.muted }}>
+              (off: never offered as a booking slot or a dispatch target)
+            </span>{" "}
+          </label>
           {/* Auto-flip opt-out (Phase 2E). Default ON. When OFF, the
               vehicle-exit pipeline skips this tech entirely — useful
               for a tech generating false-positive auto-flip SMS while
@@ -2981,7 +3056,7 @@ export function TeamTab({ showToast }) {
           </thead>{" "}
           <tbody>
             {techs.map((t) => (
-              <tr key={t.id} style={{ opacity: t.active ? 1 : 0.5 }}>
+              <tr key={t.id} style={{ opacity: (t.employment_status || (t.active ? "active" : "inactive")) === "inactive" ? 0.5 : 1 }}>
                 {" "}
                 <td
                   style={{
@@ -3084,14 +3159,32 @@ export function TeamTab({ showToast }) {
                   }}
                 >
                   {" "}
-                  <span
-                    style={sBadge(
-                      t.active ? D.green + "22" : D.red + "22",
-                      t.active ? D.green : D.red,
-                    )}
-                  >
-                    {t.active ? "Active" : "Inactive"}
-                  </span>{" "}
+                  {(() => {
+                    const status = t.employment_status || (t.active ? "active" : "inactive");
+                    const tone = status === "active" ? D.green : status === "prospective" ? D.amber : D.red;
+                    const label = status === "active" ? "Active" : status === "prospective" ? "Prospective" : "Inactive";
+                    return (
+                      <span style={sBadge(tone + "22", tone)}>{label}</span>
+                    );
+                  })()}{" "}
+                  {t.employment_status === "active" && !t.field_dispatchable && (
+                    <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+                      Office only
+                    </div>
+                  )}
+                  {t.employment_status === "active" && t.field_dispatchable && (
+                    <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+                      Field dispatchable
+                    </div>
+                  )}
+                  {/* Capability counts matter only for someone who takes (or will
+                      take) field work — an office-only admin never reaches
+                      auto-dispatch, so the line would be noise there. */}
+                  {t.capability_summary && (t.field_dispatchable || t.employment_status === "prospective") && (
+                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+                      {summarizeCapabilityCounts(t.capability_summary)}
+                    </div>
+                  )}
                 </td>{" "}
                 <td
                   style={{
@@ -3130,6 +3223,22 @@ export function TeamTab({ showToast }) {
                     >
                       Earnings
                     </button>{" "}
+                    {isAdmin && (
+                      <button
+                        onClick={() => setCapabilitiesTech(t)}
+                        style={{
+                          padding: "4px 10px",
+                          background: "transparent",
+                          border: `1px solid ${D.border}`,
+                          borderRadius: 6,
+                          color: D.teal,
+                          fontSize: 14,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Capabilities
+                      </button>
+                    )}{" "}
                     <button
                       onClick={() => handlePhotoClick(t.id)}
                       disabled={uploadingId !== null}
@@ -3155,6 +3264,7 @@ export function TeamTab({ showToast }) {
                       onClick={() => (
                         t.active ? handleDeactivate(t) : handleActivate(t)
                       )}
+                      title={t.employment_status === "prospective" ? "Marks this hire as started. They set their password with Forgot password on the admin login (needs their email on this row)." : undefined}
                       style={{
                         padding: "4px 10px",
                         background: "transparent",
@@ -3191,7 +3301,374 @@ export function TeamTab({ showToast }) {
           showToast={showToast}
         />
       )}
+      {capabilitiesTech && (
+        <CapabilitiesModal
+          tech={capabilitiesTech}
+          onClose={() => setCapabilitiesTech(null)}
+          onSaved={load}
+          showToast={showToast}
+        />
+      )}
     </div>
+  );
+}
+
+// The signed-in staff profile AdminLayoutV2 stores at login; role decides
+// which roster actions render (the server enforces it regardless).
+function readStaffRole() {
+  try {
+    return JSON.parse(localStorage.getItem("waves_admin_user") || "{}").role || null;
+  } catch {
+    return null;
+  }
+}
+
+// Roster sublabel for the Team table: "5 qualified", "2 need review · 1 off",
+// or "Capabilities not set" when the row predates the editor.
+function summarizeCapabilityCounts(summary) {
+  const parts = [];
+  if (summary.qualified) parts.push(`${summary.qualified} qualified`);
+  if (summary.review_required) parts.push(`${summary.review_required} need${summary.review_required === 1 ? "s" : ""} review`);
+  if (summary.off) parts.push(`${summary.off} off`);
+  if (!parts.length) return "Capabilities not set";
+  if (summary.unset) parts.push(`${summary.unset} not set`);
+  return parts.join(" \u00b7 ");
+}
+
+const CAPABILITY_STATE_OPTIONS = [
+  { value: "qualified", label: "Qualified", hint: "Auto-dispatch offers this work freely." },
+  { value: "review_required", label: "Needs review", hint: "Offered, but scored lower until verified." },
+  { value: "off", label: "Off", hint: "Never auto-dispatched; existing visits stay put." },
+];
+
+// Capabilities editor (Field Team Program, Phase 0 item 4) — the five dispatch
+// categories auto-dispatch reads from technician_capabilities. Saving stamps
+// the signed-in admin as verifier. A category turned Off never moves a visit;
+// anything already assigned in that category is named in the toast for
+// manual reassignment on the Schedule.
+function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
+  const isMobile = useIsMobile(640);
+  const [rows, setRows] = useState(null);
+  // What the server returned — dirty rows and the optimistic baseline are
+  // computed against it at save time.
+  const [initialRows, setInitialRows] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [saving, setSaving] = useState(false);
+  // `attempt` re-runs the fetch for the Retry button (and after a stale save).
+  const [attempt, setAttempt] = useState(0);
+  const dialogRef = useRef(null);
+  const titleId = `capabilities-title-${tech.id}`;
+
+  // Dialog semantics: focus moves into the dialog on open, stays inside it
+  // (Tab cycles), Escape closes, and focus returns to the opener on close.
+  useEffect(() => {
+    const opener = document.activeElement;
+    const node = dialogRef.current;
+    const focusable = () => Array.from(node?.querySelectorAll('button, input, [tabindex]:not([tabindex="-1"])') || []).filter((el) => !el.disabled);
+    focusable()[0]?.focus();
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.preventDefault(); onClose(); return; }
+      if (e.key !== "Tab") return;
+      const els = focusable();
+      if (!els.length) return;
+      const first = els[0];
+      const last = els[els.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      if (opener && typeof opener.focus === "function") opener.focus();
+    };
+  }, [onClose]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setLoadError(null);
+      try {
+        const res = await adminFetch(
+          `/admin/timetracking/technicians/${tech.id}/capabilities`,
+        );
+        if (!cancelled) {
+          const loaded = res.capabilities || [];
+          setInitialRows(loaded);
+          setRows(
+            loaded.map((c) => ({
+              ...c,
+              // Editing starts every unset category at "Needs review" so a
+              // save without touching a row still gives auto-dispatch a
+              // real answer instead of the 'unset' half-credit.
+              state: c.state === "unset" ? "review_required" : c.state,
+              notes: c.notes || "",
+            })),
+          );
+        }
+      } catch (e) {
+        // Rendered in the modal (not just a transient toast) so the admin can
+        // see the failure and retry without closing.
+        if (!cancelled) setLoadError(e.message || "Request failed");
+      }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tech.id, attempt]);
+
+  const setRow = (category, patch) =>
+    setRows((prev) =>
+      prev.map((r) => (r.service_category === category ? { ...r, ...patch } : r)),
+    );
+
+  const handleSave = async () => {
+    if (!rows || !initialRows) return;
+    // Only rows this admin changed (plus categories that had no row yet) are
+    // sent, each pinned to the updated_at it was edited from — a concurrent
+    // save by someone else on another category is never reverted, and a
+    // concurrent change to the SAME category is refused (409) and reloaded.
+    const byCat = new Map(initialRows.map((c) => [c.service_category, c]));
+    const dirty = rows.filter((r) => {
+      const was = byCat.get(r.service_category);
+      if (!was || was.state === "unset") return true;
+      return was.state !== r.state || (was.notes || "") !== r.notes.trim();
+    });
+    if (!dirty.length) {
+      showToast("No capability changes to save");
+      onClose();
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await adminFetch(
+        `/admin/timetracking/technicians/${tech.id}/capabilities`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            capabilities: dirty.map((r) => {
+              const was = byCat.get(r.service_category);
+              return {
+                service_category: r.service_category,
+                state: r.state,
+                notes: r.notes.trim() || null,
+                expected_updated_at: was && was.updated_at ? new Date(was.updated_at).toISOString() : null,
+              };
+            }),
+          }),
+        },
+      );
+      const pending = (res && res.futureAssignedVisits) || [];
+      showToast(
+        pending.length
+          ? `Capabilities saved — ${pending.length} upcoming visit${pending.length === 1 ? "" : "s"} in a category now off; reassign on the Schedule`
+          : "Capabilities saved",
+      );
+      onSaved();
+      onClose();
+    } catch (e) {
+      if (/HTTP 409/.test(e.message)) {
+        showToast("Someone else changed this technician's capabilities — reloaded, please review and save again");
+        setAttempt((n) => n + 1);
+      } else {
+        showToast("Failed: " + e.message);
+      }
+    }
+    setSaving(false);
+  };
+
+  const fmtVerified = (r) => {
+    if (!r.verified_at) return r.source === "system_default" ? "Default — not yet verified" : "Not verified";
+    // Eastern wall clock, like every other date on the portal — a verification
+    // near midnight must not shift a day on an admin's phone set elsewhere.
+    const when = formatETDate(r.verified_at, { month: "short", day: "numeric", year: "numeric" });
+    return `Verified ${when}${r.verified_by_name ? ` by ${r.verified_by_name}` : ""}`;
+  };
+
+  return createPortal(
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.45)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 200,
+        // Standalone iOS PWA: viewport-fit=cover puts this overlay under the
+        // status bar / home indicator without the safe-area insets.
+        padding:
+          "calc(16px + env(safe-area-inset-top, 0px)) 16px calc(16px + env(safe-area-inset-bottom, 0px))",
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: D.card,
+          border: `1px solid ${D.border}`,
+          borderRadius: 12,
+          width: "100%",
+          maxWidth: 640,
+          maxHeight: "90vh",
+          overflowY: "auto",
+          padding: isMobile ? 16 : 24,
+          boxSizing: "border-box",
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, marginBottom: 4 }}>
+          <div id={titleId} style={{ fontSize: 16, fontWeight: 600, color: D.heading }}>
+            Capabilities — {tech.name}
+          </div>
+          <button
+            onClick={onClose}
+            style={{ background: "transparent", border: "none", color: D.muted, fontSize: 14, cursor: "pointer" }}
+          >
+            Close
+          </button>
+        </div>
+        <div style={{ fontSize: 14, color: D.muted, marginBottom: 16 }}>
+          What auto-dispatch may place on this technician's route. Nothing
+          here moves a visit that is already scheduled.
+        </div>
+
+        {loadError && !loading ? (
+          <div
+            role="alert"
+            style={{ padding: 20, textAlign: "center", color: D.text, fontSize: 14, display: "flex", flexDirection: "column", gap: 10, alignItems: "center" }}
+          >
+            <div>Couldn't load capabilities: {loadError}</div>
+            <button
+              type="button"
+              onClick={() => setAttempt((n) => n + 1)}
+              style={{
+                padding: "6px 14px",
+                background: "transparent",
+                border: `1px solid ${D.border}`,
+                borderRadius: 6,
+                color: D.teal,
+                fontSize: 14,
+                cursor: "pointer",
+              }}
+            >
+              Retry
+            </button>
+          </div>
+        ) : loading || !rows ? (
+          <div style={{ padding: 24, textAlign: "center", color: D.muted, fontSize: 14 }}>
+            Loading…
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {rows.map((r) => (
+              <div
+                key={r.service_category}
+                style={{
+                  border: `1px solid ${D.border}`,
+                  borderRadius: 8,
+                  padding: 12,
+                  display: "grid",
+                  gridTemplateColumns: isMobile ? "1fr" : "200px 1fr",
+                  gap: 10,
+                  alignItems: "start",
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
+                    {r.label}
+                  </div>
+                  <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>
+                    {fmtVerified(r)}
+                  </div>
+                </div>
+                <div>
+                  <div
+                    role="radiogroup"
+                    aria-label={`${r.label} capability`}
+                    style={{ display: "flex", gap: 6, flexWrap: "wrap" }}
+                  >
+                    {CAPABILITY_STATE_OPTIONS.map((opt) => {
+                      const selected = r.state === opt.value;
+                      return (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          role="radio"
+                          aria-checked={selected}
+                          title={opt.hint}
+                          onClick={() => setRow(r.service_category, { state: opt.value })}
+                          style={{
+                            padding: "6px 12px",
+                            borderRadius: 6,
+                            border: `1px solid ${selected ? D.teal : D.border}`,
+                            background: selected ? D.teal : "transparent",
+                            color: selected ? D.white : D.text,
+                            fontSize: 14,
+                            fontWeight: 500,
+                            cursor: "pointer",
+                          }}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <input
+                    value={r.notes}
+                    onChange={(e) => setRow(r.service_category, { notes: e.target.value })}
+                    aria-label={`${r.label} note`}
+                    placeholder="Note (optional) — e.g. ride-along completed 9/4"
+                    maxLength={500}
+                    style={{ ...sInput, fontSize: 14, marginTop: 8 }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 20 }}>
+          <button
+            onClick={onClose}
+            style={{
+              padding: "8px 14px",
+              background: "transparent",
+              border: `1px solid ${D.border}`,
+              borderRadius: 8,
+              color: D.text,
+              fontSize: 14,
+              cursor: "pointer",
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving || loading || !rows || !!loadError}
+            style={{
+              padding: "8px 14px",
+              background: D.teal,
+              border: `1px solid ${D.teal}`,
+              borderRadius: 8,
+              color: D.white,
+              fontSize: 14,
+              fontWeight: 500,
+              cursor: saving ? "wait" : "pointer",
+              opacity: saving || loading ? 0.6 : 1,
+            }}
+          >
+            {saving ? "Saving…" : "Save capabilities"}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

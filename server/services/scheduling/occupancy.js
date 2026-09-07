@@ -23,9 +23,9 @@
  *     rows): the SQL overlap predicate above evaluates NULL for them, so
  *     every existing gate ignores them. This module deliberately keeps that
  *     convention — placeholder rows must remain inert to conflicts.
- *   - Statuses: the default exclusion set is ['cancelled'] — the exact set
- *     createSelfBooking's commit gate uses (anything not cancelled occupies
- *     its window, including completed same-day rows). Callers whose existing
+ *   - Statuses: cancelled, skipped, no-show and rescheduled rows do not
+ *     occupy time. This is the set createSelfBooking's commit gate uses (only live route stops occupy
+ *     their windows, including completed same-day rows). Callers whose existing
  *     gates exclude more (rebooker excludes 'completed' too so a done
  *     morning visit never blocks an afternoon move) pass excludeStatuses to
  *     match their own commit semantics exactly — an offer/commit mismatch in
@@ -35,6 +35,7 @@
  * slot-reservation.js) are verified correct and intentionally NOT refactored
  * onto this module — possible follow-up, not this lane.
  */
+const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const defaultDb = require('../../models/db');
 const { guardedCoordSelects } = require('./day-stops');
 const { travelGapEnabled, travelGapConflicts } = require('./travel-gap');
@@ -291,7 +292,7 @@ async function acquireOccupancyLocks(trx, dateStrs) {
 }
 
 // Matches createSelfBooking's commit-gate status predicate. See header.
-const DEFAULT_EXCLUDE_STATUSES = ['cancelled'];
+const DEFAULT_EXCLUDE_STATUSES = NOT_A_ROUTE_STOP_STATUSES;
 
 const CONFLICT_COLUMNS = [
   'id', 'customer_id', 'technician_id', 'scheduled_date',
@@ -351,9 +352,29 @@ async function findConflictingVisits({
   excludeStatuses = DEFAULT_EXCLUDE_STATUSES,
   includeHolds = true,
   travel,
+  arrivalWindow,
 } = {}) {
   if (!date || !windowStart || !windowEnd) return [];
   const excludeIds = (excludeServiceIds || []).filter(Boolean).map(String);
+
+  // Only staff callers explicitly opt into this advisory placement check.
+  // Public booking/reservation and customer reschedule contracts stay on
+  // their existing overlap/travel probes. The save caller already holds
+  // the date-wide occupancy lock; this is a read of that same transaction.
+  if (arrivalWindow) {
+    const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('./arrival-route');
+    if (arrivalWindowRoutingEnabled()) {
+      const fit = await checkArrivalPlacement({
+        conn: db, ...arrivalWindow, date: String(date).split('T')[0],
+        windowStart, windowEnd, excludeServiceIds: excludeIds,
+      });
+      return fit.feasible ? [] : [{
+        ...fit.target, id: arrivalWindow.serviceId,
+        window_start: windowStart, window_end: windowEnd,
+        conflict_reason: fit.reason, warning: fit.warning,
+      }];
+    }
+  }
 
   if (travel !== undefined && travelGapEnabled()) {
     return findConflictingVisitsWithTravel({

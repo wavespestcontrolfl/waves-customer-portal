@@ -11,7 +11,7 @@ const { canonicalEmail } = require("../../services/ads/ad-audience-consent");
 
 let idSeq = 0;
 const uid = () => `00000000-0000-4000-8000-${String(++idSeq).padStart(12, '0')}`;
-const TABLES = ['seo_link_domains', 'seo_link_acquisition_paths', 'seo_link_prospects', 'seo_link_placement_authorities', 'seo_link_floor_waivers', 'seo_link_approvals', 'seo_link_policy', 'seo_link_domain_sources',
+const TABLES = ['seo_link_attempts', 'seo_link_domains', 'seo_link_acquisition_paths', 'seo_link_prospects', 'seo_link_placement_authorities', 'seo_link_floor_waivers', 'seo_link_approvals', 'seo_link_policy', 'seo_link_domain_sources',
   // the §13 customer-recipient exclusion's contact sources (link-outreach-mandate)
   'customers', 'notification_prefs', 'leads'];
 
@@ -38,11 +38,16 @@ function makeDb(seed = {}) {
     };
     const q = {
       where(a, b, c) {
-        if (typeof a === 'object') st.preds.push((r) => Object.entries(a).every(([k, v]) => eq(r[k], v)));
+        if (typeof a === 'function') { const sub = builder(table); a.call(sub, sub); st.preds.push(sub._matches); }
+        else if (typeof a === 'object') st.preds.push((r) => Object.entries(a).every(([k, v]) => eq(r[k], v)));
         else if (c !== undefined) st.preds.push((r) => op(b, r[a], c));
         else st.preds.push((r) => eq(r[a], b));
         return q;
       },
+      _matches: matches,
+      orWhere(...args) { const prior = [...st.preds]; const sub = builder(table); sub.where(...args); st.preds = [(r) => prior.every((p) => p(r)) || sub._matches(r)]; return q; },
+      whereNot(col, value) { st.preds.push((r) => !eq(r[col], value)); return q; },
+      count() { st.countRows = true; return q; },
       whereNull(col) { st.preds.push((r) => r[col] == null); return q; },
       whereNotNull(col) { st.preds.push((r) => r[col] != null); return q; },
       whereIn(col, arr) { st.preds.push((r) => arr.includes(r[col])); return q; },
@@ -74,7 +79,8 @@ function makeDb(seed = {}) {
       // `col as alias` projections (the recipient lookup selects `id as id` / `customer_id as id`)
       select(...cols) { const named = cols.filter((c) => typeof c === 'string'); st.cols = named.length ? named : null; return q; },
       forUpdate() { raws.push(`FOR UPDATE ${table}`); return q; },
-      async first(...cols) { if (cols.length) st.cols = cols; if (st.count) return { c: String(rows.filter(matches).reduce((n, r) => n + st.count(r), 0)) }; return resolve()[0]; },
+      skipLocked() { return q; },
+      async first(...cols) { if (cols.length) st.cols = cols; if (st.countRows) return { n: String(rows.filter(matches).length) }; if (st.count) return { c: String(rows.filter(matches).reduce((n, r) => n + st.count(r), 0)) }; return resolve()[0]; },
       // resolves to the affected count; `.returning('*')` yields the updated rows (the sender's CAS + finalize)
       update(patch) {
         const apply = () => { if (db._failUpdate === table) throw new Error(`injected failure on ${table}`); if (db._beforeUpdate) db._beforeUpdate(table, db); const hit = rows.filter(matches); for (const r of hit) Object.assign(r, patch); return hit; };

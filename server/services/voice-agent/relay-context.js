@@ -117,7 +117,14 @@ async function beginRelaySessionClaim(callSid, sessionKey = null, sessionGenerat
     //     the same socket still cannot claim twice (the r25 race).
     // Legacy shape (no sessionKey) keeps the strict one-claim predicate.
     const q = db('call_log').where({ twilio_call_sid: key });
+    const trackSegments = process.env.GATE_VOICE_RELAY_RECOVERY === 'true' && owner;
+    q.whereRaw("COALESCE(metadata->>'relay_segments_sealed', 'false') <> 'true'");
     if (owner) {
+      // Sandy PR 2B: a claimant must be minted at or after the row's LATEST
+      // reconnect stamp (codex r5 P1) — a token from a reconnect render whose
+      // response was lost, still valid after a retry re-stamped the row, is
+      // below the current close-time fence and may not take the call.
+      q.whereRaw("COALESCE((metadata->>'relay_reconnect_ms')::bigint, 0) <= ?", [generation]);
       q.whereRaw(
         `((metadata->>'${RELAY_CLAIM_KEY}') IS NULL `
         + `OR ((metadata->>'${RELAY_CLAIM_OWNER_KEY}') IS DISTINCT FROM ? `
@@ -135,8 +142,13 @@ async function beginRelaySessionClaim(callSid, sessionKey = null, sessionGenerat
           ? db.raw(
             `jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${RELAY_CLAIM_KEY}}', to_jsonb(now()::text), true), `
             + `'{${RELAY_CLAIM_OWNER_KEY}}', to_jsonb(?::text), true), `
-            + `'{${RELAY_CLAIM_GEN_KEY}}', to_jsonb(?::bigint), true)`,
-            [owner, generation],
+            + `'{${RELAY_CLAIM_GEN_KEY}}', to_jsonb(?::bigint), true)`
+            + (trackSegments ? ` || jsonb_build_object('relay_segment_owners',
+              COALESCE(metadata->'relay_segment_owners', '[]'::jsonb)
+              || CASE WHEN metadata->>'${RELAY_CLAIM_OWNER_KEY}' IS NOT NULL
+                 THEN jsonb_build_array(metadata->>'${RELAY_CLAIM_OWNER_KEY}') ELSE '[]'::jsonb END
+              || jsonb_build_array(?::text))` : ''),
+            [owner, generation, ...(trackSegments ? [owner] : [])],
           )
           : db.raw(
             `jsonb_set(COALESCE(metadata, '{}'::jsonb), '{${RELAY_CLAIM_KEY}}', to_jsonb(now()::text), true)`,
@@ -209,6 +221,32 @@ async function claimOwnedElsewhere(q, callSid, sessionKey) {
     const owner = meta && meta[RELAY_CLAIM_OWNER_KEY];
     return !!(owner && owner !== String(sessionKey));
   } catch {
+    return false;
+  }
+}
+
+/**
+ * The call→lead provenance stamp (call_log.metadata.relay_lead_id) — written by
+ * capture_lead and by the close-time capture floor (codex #3884 r3 P2: a reused
+ * lead keeps its original twilio_call_sid, so this is the only exact linkage;
+ * recovery uses this evidence after taking over the call. With a transaction,
+ * capture and evidence commit together; independent callers remain fail-soft.
+ */
+async function stampCallLeadLinkage(callSid, leadId, { trx = null, sessionKey = null } = {}) {
+  if (!callSid || !leadId) return false;
+  try {
+    const db = trx || require('../../models/db');
+    const query = db('call_log').where({ twilio_call_sid: callSid });
+    // Transactional capture already holds the owner-checked row lock. A
+    // post-capture stamp must not overwrite a replacement socket's linkage.
+    if (!trx) query.whereRaw("(metadata->>'relay_session_claim_owner' IS NULL OR metadata->>'relay_session_claim_owner' = ?)", [sessionKey]);
+    const rows = await query.update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ relay_lead_id: String(leadId) })]),
+    });
+    return Number(rows) > 0;
+  } catch (linkErr) {
+    if (trx) throw linkErr; // the capture and its recovery evidence commit together
+    logger.warn(`[voice-relay] call→lead linkage stamp failed callSid=${callSid}: ${linkErr.message}`);
     return false;
   }
 }
@@ -663,8 +701,17 @@ async function verifyInboundCaller({ callSid, from, sessionKey = null, sessionGe
     if (String(row.direction || 'inbound') !== 'inbound') return { verified: false, reason: 'not_inbound' };
     if (lastTenDigits(row.from_phone) !== aniKey) return { verified: false, reason: 'ani_mismatch' };
     // A permanent row is not a live call — bound it to one (see the header).
+    // A RECONNECTED call (Sandy PR 2B) may be older than the window: its
+    // reconnect stamp was written seconds ago by the signed /relay-complete
+    // webhook, so a stamp inside the same window is the same freshness
+    // proof for the resumed socket (hook r29 P1) — the bound stays tight
+    // against a replayed old CallSid either way.
+    let meta = null;
+    try { meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {}); } catch { meta = null; }
     const startedAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
-    if (!Number.isFinite(startedAt) || Date.now() - startedAt > VERIFY_CALL_MAX_AGE_MS) {
+    const reconnectedAt = Number(meta && meta.relay_reconnect_ms) || NaN;
+    const current = (ts) => Number.isFinite(ts) && Date.now() - ts <= VERIFY_CALL_MAX_AGE_MS;
+    if (!Number.isFinite(startedAt) || !(current(startedAt) || current(reconnectedAt))) {
       return { verified: false, reason: 'call_not_current' };
     }
     // …and one live call is ONE session. The burn happens here, after every
@@ -674,11 +721,7 @@ async function verifyInboundCaller({ callSid, from, sessionKey = null, sessionGe
     if (!(await beginRelaySessionClaim(callSid, sessionKey, sessionGeneration))) {
       return { verified: false, reason: 'call_sid_already_claimed' };
     }
-    let attestation = null;
-    try {
-      const meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
-      attestation = (meta && meta.stir_verstat) || null;
-    } catch { attestation = null; }
+    const attestation = (meta && meta.stir_verstat) || null;
     return { verified: true, attestation };
   } catch (err) {
     // FAIL CLOSED: an unverifiable caller is an unknown caller.
@@ -948,18 +991,18 @@ function buildKnownCallerBlock({ customer, services, nextAppointment, lastVisit,
 }
 
 /**
- * Resolve the caller's identity + KNOWN CALLER block for one session.
- * Returns { customer: { id, first_name }, tier, block, dataTurn } or null
- * (gate off, unknown, ambiguous, blocked caller ID, error, timeout — all
- * identical: no block, no account access, agent behaves exactly as today).
- *
- * `block` goes in the SYSTEM role. `dataTurn` (the RECENT TEXTS block) does
- * NOT: SMS bodies are customer-AUTHORED text, and the system role is where an
- * instruction is most likely to be obeyed — it is injected as a user-role data
- * turn by relay-conversation instead.
+ * ⭐ THE SESSION'S PROOF, ON ITS OWN — the CallSid/ANI verification and the
+ * one-per-call claim, bounded, published through `onVerified` the moment
+ * THEY settle (never from a race loser; a late genuine success still
+ * upgrades). Independent of the account-context gate: Sandy PR 2B's
+ * recovery rests on this claim (the segment append and the resumed leg's
+ * prior context are released only to the claim owner), so it runs whenever
+ * a session needs the proof, context or not (codex r2 P1). Resolves to
+ * { verified, attested } — the race verdict resolveCallerContext hydrates
+ * from.
  */
-async function resolveCallerContext(from, { callSid = null, sessionKey = null, sessionGeneration = null, onVerified = null, onLateContext = null } = {}) {
-  // Reported to the SESSION, not returned: a caller can be verified and still
+function verifyRelaySession({ callSid = null, from = null, sessionKey = null, sessionGeneration = null, onVerified = null } = {}) {
+  // Reported to the SESSION through the callback, not only returned: a caller can be verified and still
   // match no account (an unmatched-but-real caller may use lookup_customer; a
   // WS client that declared an ANI may not), and it is decided only after
   // EVERY rule below has had its say — including the attestation requirement.
@@ -988,7 +1031,6 @@ async function resolveCallerContext(from, { callSid = null, sessionKey = null, s
       try { onVerified(ok === true); } catch { /* the flag is the caller's */ }
     }
   };
-  if (!isContextEnabled()) return null;
   const verifyWork = (async () => {
     // The WS setup frame is unverified input — cross-check it against the
     // signature-verified /voice webhook's call_log row BEFORE any account read.
@@ -1073,6 +1115,23 @@ async function resolveCallerContext(from, { callSid = null, sessionKey = null, s
     .then((v) => { if (v && v.verified === true) publishVerified(true); })
     .catch(() => {}); // a late loser must never surface as unhandled
 
+  return verified;
+}
+
+/**
+ * Resolve the caller's identity + KNOWN CALLER block for one session.
+ * Returns { customer: { id, first_name }, tier, block, dataTurn } or null
+ * (gate off, unknown, ambiguous, blocked caller ID, error, timeout — all
+ * identical: no block, no account access, agent behaves exactly as today).
+ *
+ * `block` goes in the SYSTEM role. `dataTurn` (the RECENT TEXTS block) does
+ * NOT: SMS bodies are customer-AUTHORED text, and the system role is where an
+ * instruction is most likely to be obeyed — it is injected as a user-role data
+ * turn by relay-conversation instead.
+ */
+async function resolveCallerContext(from, { callSid = null, sessionKey = null, sessionGeneration = null, onVerified = null, onLateContext = null } = {}) {
+  if (!isContextEnabled()) return null;
+  const verified = verifyRelaySession({ callSid, from, sessionKey, sessionGeneration, onVerified });
   const work = (async () => {
     const v = await verified;
     if (!v.verified) return null;
@@ -1725,6 +1784,7 @@ async function servicesCatalogText() {
 }
 
 module.exports = {
+  stampCallLeadLinkage,
   isOfficeOpenAt,
   isContextEnabled,
   requiresAttestation,
@@ -1739,6 +1799,7 @@ module.exports = {
   clockMinutes,
   speakClock,
   resolveCallerContext,
+  verifyRelaySession,
   verifyInboundCaller,
   findUniqueCustomerByAni,
   buildKnownCallerBlock,

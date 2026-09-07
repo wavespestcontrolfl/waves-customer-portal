@@ -5,6 +5,7 @@
 // an em dash or curly quote flips the SMS to UCS-2 (70-char segments).
 import { describe, expect, it } from "vitest";
 import {
+  reviewEmailNote,
   appendStaticLinkClause,
   buildCustomerLinkPrefill,
   buildReschedulePrefill,
@@ -161,7 +162,7 @@ describe("buildCustomerLinkPrefill", () => {
 });
 
 describe("CUSTOMER_COMPOSER_LINKS", () => {
-  it("carries all fifteen customer rows in the customer category", () => {
+  it("carries all seventeen customer rows in the customer category", () => {
     expect(CUSTOMER_COMPOSER_LINKS.map((l) => l.key)).toEqual([
       "reschedule",
       "reservice",
@@ -176,6 +177,7 @@ describe("CUSTOMER_COMPOSER_LINKS", () => {
       "service_report",
       "contract",
       "statement",
+      "project_report",
       "portal_login",
       "cancel_plan",
     ]);
@@ -194,5 +196,23 @@ describe("CUSTOMER_COMPOSER_LINKS", () => {
     expect(cancel.dynamic).toBeUndefined();
     expect(cancel.url).toBe("portal.wavespestcontrol.com/login?next=%2F%3Ftab%3Dplan");
     expect(new URLSearchParams(cancel.url.split("?")[1]).get("next")).toBe("/?tab=plan");
+  });
+
+  it("only the review request row asks for a channel (Text / Email / Both)", () => {
+    const withChooser = CUSTOMER_COMPOSER_LINKS.filter((l) => l.channels).map((l) => l.key);
+    expect(withChooser).toEqual(["review_request"]);
+  });
+});
+
+describe("reviewEmailNote", () => {
+  it("is silent for a Text-only send and names the outcome of a Both send", () => {
+    expect(reviewEmailNote(undefined)).toBe("");
+    expect(reviewEmailNote({ sent: true })).toBe(" Review request emailed too.");
+    expect(reviewEmailNote({ sent: false, reason: "email_off" })).toMatch(/skipped — review emails are off/);
+    expect(reviewEmailNote({ sent: false, reason: "no_email" })).toMatch(/no email on file/);
+    expect(reviewEmailNote({ sent: false, reason: "text_not_sent" })).toMatch(/text did not go out/);
+    expect(reviewEmailNote({ sent: false, reason: "email_uncertain" })).toMatch(/may or may not have gone out — check the customer's email log/);
+    expect(reviewEmailNote({ sent: false, reason: "already_reviewed" })).toMatch(/already marked as having left a review/);
+    expect(reviewEmailNote({ sent: false, reason: "something_new" })).toMatch(/could not be sent/);
   });
 });

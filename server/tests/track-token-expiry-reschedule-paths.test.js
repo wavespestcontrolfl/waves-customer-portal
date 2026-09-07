@@ -25,6 +25,18 @@ const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
 const { executeScheduleTool } = require('../services/intelligence-bar/schedule-tools');
 
+// An UPDATE result that resolves to the row count like knex AND answers
+// `.returning([...])` with the committed row (the reschedule writer reads the
+// committed technician_id off the CAS write).
+function updateResult(count, rows) {
+  const p = Promise.resolve(count);
+  return {
+    then: p.then.bind(p),
+    catch: p.catch.bind(p),
+    returning: jest.fn().mockResolvedValue(rows ?? (count ? [{ id: 'svc-1', technician_id: 'tech-1' }] : [])),
+  };
+}
+
 function chain(overrides = {}) {
   const builder = {};
   Object.assign(builder, {
@@ -42,7 +54,7 @@ function chain(overrides = {}) {
     leftJoin: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     first: jest.fn(),
-    update: jest.fn().mockResolvedValue(1),
+    update: jest.fn().mockImplementation(() => updateResult(1)),
     insert: jest.fn().mockResolvedValue(),
     count: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
@@ -74,7 +86,7 @@ describe('track token expiry on reschedule paths', () => {
       }),
     });
     const updateQuery = chain({
-      update: jest.fn().mockResolvedValue(1),
+      update: jest.fn().mockImplementation(() => updateResult(1)),
     });
     const logInsert = chain();
     // Post-commit best-effort shift of a call-created follow-up child.

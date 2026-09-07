@@ -1,6 +1,5 @@
-const {
-  calculateLawnOverallScore, lawnScoreDelta, lawnScoreValue,
-} = require('../services/service-report/report-data');
+const { calculateLawnOverallScore, lawnScoreValue } = require('../../shared/lawn-scores.cjs');
+const { lawnScoreDelta } = require('../services/service-report/report-data');
 const { answerServiceReportQuestion } = require('../services/service-report/report-assistant');
 
 describe('lawn score — null categories are excluded, not coerced to 0', () => {

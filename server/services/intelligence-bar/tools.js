@@ -1,3 +1,4 @@
+const { recurringDispatchDuePatch } = require('../scheduling/recurring-dispatch-due');
 /**
  * Intelligence Bar — Claude Tool Definitions & Execution
  * server/services/intelligence-bar/tools.js
@@ -12,6 +13,7 @@ const { lockCustomerComms } = require('../../utils/customer-comms-lock');
 // Shared admin window rules + gated occupancy probe (scheduling/window-rules.js).
 const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 const logger = require('../logger');
+const { applyAssignable, assertAssignableTechnician } = require('../technician-eligibility');
 const { createDefaultCustomerRows } = require('../customer-default-rows');
 const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
@@ -19,6 +21,7 @@ const {
 } = require('../../utils/datetime-et');
 const { FORMER_CUSTOMER_STAGES, ALL_PIPELINE_STAGES, stageLifecycleStamps } = require('../customer-stages');
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
+const { effectiveServiceAddress } = require('../stamped-address');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { EMAIL_FANOUT_DISCLOSURE } = require('../customer-email-fanout');
 const { CONTACT_FANOUT_DISCLOSURE } = require('../customer-contact-fanout');
@@ -69,6 +72,10 @@ Supports SQL-like conditions via the filters parameter.`,
             stage: { type: 'string' },
             lead_source: { type: 'string' },
             active: { type: 'boolean' },
+            has_email: { type: 'boolean' },
+            has_city: { type: 'boolean' },
+            has_phone: { type: 'boolean' },
+            has_address: { type: 'boolean' },
             null_city: { type: 'boolean', description: 'true = customers with no city set' },
             null_email: { type: 'boolean', description: 'true = customers with no email set' },
             null_phone: { type: 'boolean', description: 'true = customers with no phone set' },
@@ -81,6 +88,7 @@ Supports SQL-like conditions via the filters parameter.`,
             max_monthly_rate: { type: 'number' },
           },
         },
+        offset: { type: 'integer', minimum: 0, description: 'Continue from next_offset in the previous result' },
         search: { type: 'string', description: 'Free-text search across name, phone, email, address, company' },
         sort_by: { type: 'string', enum: ['name', 'city', 'monthly_rate', 'lead_score', 'last_service_date', 'health_score', 'lifetime_revenue', 'member_since'] },
         sort_dir: { type: 'string', enum: ['asc', 'desc'] },
@@ -106,7 +114,7 @@ Only returns active customers with prior service history in that category.`,
   },
   {
     name: 'get_customer_detail',
-    description: 'Get full detail for one customer: profile, service history, upcoming services, billing, health score, tags, notes.',
+    description: 'Get customer profile, active saved properties, linked account profiles, and bounded pages of service history, appointments and invoices. Read coverage before claiming any source is empty.',
     input_schema: {
       type: 'object',
       properties: {
@@ -121,10 +129,11 @@ Only returns active customers with prior service history in that category.`,
     input_schema: {
       type: 'object',
       properties: {
-        date: { type: 'string', description: 'YYYY-MM-DD (single day)' },
+        offset: { type: 'integer', minimum: 0, description: 'Continue from next_offset' },
+        date: { type: 'string', description: 'YYYY-MM-DD (single day; defaults to today ET)' },
         date_from: { type: 'string', description: 'YYYY-MM-DD start of range' },
         date_to: { type: 'string', description: 'YYYY-MM-DD end of range' },
-        technician_name: { type: 'string', description: 'Filter by tech name (e.g. Adam, Jose, Jacob)' },
+        technician_name: { type: 'string', description: 'Filter by technician name (as shown on the schedule)' },
         city: { type: 'string', description: 'Filter by customer city/zone' },
       },
     },
@@ -194,10 +203,10 @@ Your call returns a PREVIEW; the operator approves or rejects it on the confirma
   },
   {
     name: 'update_customer',
-    description: `Update one or more fields on a single customer. Updatable fields: first_name, last_name, email, phone, city, state, zip, address_line1, waveguard_tier, pipeline_stage, lead_source, monthly_rate, active, notes.
+    description: `Update one or more fields on a single customer. Updatable fields: first_name, last_name, email, phone, city, state, zip, address_line1, address_line2, waveguard_tier, pipeline_stage, lead_source, monthly_rate, active, notes.
 Changing the email also ripples automatically: ${EMAIL_FANOUT_DISCLOSURE}. Likewise ${CONTACT_FANOUT_DISCLOSURE}. Mention the ripple when proposing an email, name, or phone change.
 Billing-lane side effect: if the update gives the customer a WaveGuard membership tier plus a positive monthly_rate while no billing lane is set, billing_mode is stamped 'monthly_membership' in the same write (that is the lane such rows already bill under) and the owner is notified to verify it — mention this when proposing a tier or monthly_rate change.
-IMPORTANT: Always confirm with the operator before updating. Return what you plan to change and ask for approval.`,
+IMPORTANT: When asked to update, call this tool immediately once the required facts are known to prepare a preview. The operator approves execution on the confirmation card; do not ask for conversational permission to prepare it.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -331,7 +340,7 @@ Use for: "build the report for the customer we just finished", "who did we finis
   },
   {
     name: 'cancel_appointment',
-    description: 'Cancel a scheduled appointment.',
+    description: 'Appointment cancellation is unavailable in this bar because fees and invoice effects require Dispatch review. Direct the operator to the Dispatch cancellation controls; do not promise a confirmation card.',
     input_schema: {
       type: 'object',
       properties: {
@@ -377,10 +386,10 @@ async function executeTool(toolName, input, actionContext = {}) {
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
       case 'update_property_access': return await updatePropertyAccess(input);
       case 'cancel_plan': return await cancelPlan(input, actionContext);
-      case 'create_appointment': return await createAppointment(input);
+      case 'create_appointment': return await createAppointment(input, actionContext);
       case 'get_recent_completions': return await getRecentCompletions(input);
-      case 'reschedule_appointment': return await rescheduleAppointment(input);
-      case 'cancel_appointment': return await cancelAppointment(input);
+      case 'reschedule_appointment': return await rescheduleAppointment(input, actionContext);
+      case 'cancel_appointment': return await cancelAppointment(input, actionContext);
       case 'draft_sms': return await draftSms(input);
       default:
         return { error: `Unknown tool: ${toolName}` };
@@ -395,8 +404,9 @@ async function executeTool(toolName, input, actionContext = {}) {
 // ─── READ IMPLEMENTATIONS ───────────────────────────────────────
 
 async function queryCustomers(input) {
-  const { filters = {}, search, sort_by, sort_dir, limit: rawLimit } = input;
-  const limit = Math.min(rawLimit || 50, 200);
+  const { filters = {}, search, sort_by, sort_dir, limit: rawLimit = 50 } = input;
+  const limit = Math.max(1, Math.min(Math.trunc(rawLimit), 200));
+  const offset = Math.max(0, Math.trunc(input.offset || 0));
 
   let query = db('customers')
     .select(
@@ -411,40 +421,37 @@ async function queryCustomers(input) {
       db.raw("(SELECT COALESCE(overall_score, 0) FROM customer_health_scores WHERE customer_health_scores.customer_id = customers.id ORDER BY scored_at DESC NULLS LAST, created_at DESC LIMIT 1) as health_score"),
     );
 
-  // Apply filters
+  const supportedFilters = new Set(Object.keys(TOOLS.find(t => t.name === 'query_customers').input_schema.properties.filters.properties));
+  const unsupported = Object.keys(filters).filter(key => !supportedFilters.has(key));
+  if (unsupported.length) return { error: `Unsupported customer filters: ${unsupported.join(', ')}` };
+
+  // Table-driven exact filters keep the public names and DB columns aligned.
+  for (const [key, column] of Object.entries({ state: 'state', zip: 'zip', stage: 'pipeline_stage', lead_source: 'lead_source', active: 'active' })) {
+    if (filters[key] != null) query = query.where(column, filters[key]);
+  }
   if (filters.city) query = query.whereILike('city', `%${filters.city}%`);
-  if (filters.state) query = query.where('state', filters.state);
-  if (filters.zip) query = query.where('zip', filters.zip);
   if (filters.tier === 'none') query = query.whereNull('waveguard_tier');
   else if (filters.tier) query = query.where('waveguard_tier', filters.tier);
-  if (filters.stage) query = query.where('pipeline_stage', filters.stage);
-  if (filters.lead_source) query = query.where('lead_source', filters.lead_source);
-  if (filters.active !== undefined) query = query.where('active', filters.active);
   if (filters.tag) {
     query = query.whereExists(function () {
       this.select('*').from('customer_tags').whereRaw('customer_tags.customer_id = customers.id').where('tag', filters.tag);
     });
   }
 
-  // Null field checks
-  if (filters.null_city) query = query.where(function () { this.whereNull('city').orWhere('city', ''); });
-  if (filters.null_email) query = query.where(function () { this.whereNull('email').orWhere('email', ''); });
-  if (filters.null_phone) query = query.where(function () { this.whereNull('phone').orWhere('phone', ''); });
-  if (filters.null_address) query = query.where(function () { this.whereNull('address_line1').orWhere('address_line1', ''); });
-
-  // Health score range
-  if (filters.min_health_score || filters.max_health_score) {
-    query = query.whereExists(function () {
-      let sub = this.select('*').from('customer_health_scores')
-        .whereRaw('customer_health_scores.customer_id = customers.id');
-      if (filters.min_health_score) sub = sub.where('overall_score', '>=', filters.min_health_score);
-      if (filters.max_health_score) sub = sub.where('overall_score', '<=', filters.max_health_score);
-    });
+  for (const [field, column] of Object.entries({ email: 'email', city: 'city', phone: 'phone', address: 'address_line1' })) {
+    if (filters[`null_${field}`]) query = query.whereRaw("NULLIF(??, '') IS NULL", [column]);
+    const hasValue = filters[`has_${field}`];
+    if (typeof hasValue === 'boolean') query = query.whereRaw("(NULLIF(??, '') IS NOT NULL) = ?", [column, hasValue]);
   }
 
-  // Monthly rate range
-  if (filters.min_monthly_rate) query = query.where('monthly_rate', '>=', filters.min_monthly_rate);
-  if (filters.max_monthly_rate) query = query.where('monthly_rate', '<=', filters.max_monthly_rate);
+  // Health score range
+  const latestHealth = '(SELECT overall_score FROM customer_health_scores WHERE customer_health_scores.customer_id = customers.id ORDER BY scored_at DESC NULLS LAST, created_at DESC LIMIT 1)';
+  for (const [key, expression, comparison] of [
+    ['min_health_score', latestHealth, '>='], ['max_health_score', latestHealth, '<='],
+    ['min_monthly_rate', 'monthly_rate', '>='], ['max_monthly_rate', 'monthly_rate', '<='],
+  ]) {
+    if (filters[key] != null) query = query.whereRaw(`${expression} ${comparison} ?`, [filters[key]]);
+  }
 
   // Service type filter (customers who have records of this type)
   if (filters.service_type) {
@@ -460,6 +467,7 @@ async function queryCustomers(input) {
     const s = `%${search}%`;
     query = query.where(function () {
       this.whereILike('first_name', s).orWhereILike('last_name', s)
+        .orWhereRaw("TRIM(first_name || ' ' || COALESCE(last_name, '')) ILIKE ?", [s])
         .orWhereILike('phone', s).orWhereILike('email', s)
         .orWhereILike('address_line1', s).orWhereILike('city', s)
         .orWhereILike('company_name', s);
@@ -470,12 +478,13 @@ async function queryCustomers(input) {
   const sortMap = {
     name: 'last_name', city: 'city', monthly_rate: 'monthly_rate',
     lead_score: 'lead_score', health_score: 'health_score',
-    lifetime_revenue: 'lifetime_revenue', member_since: 'member_since',
+    lifetime_revenue: 'lifetime_revenue', member_since: 'member_since', last_service_date: 'last_service_date',
   };
   const sortCol = sortMap[sort_by] || 'last_name';
-  query = query.orderBy(sortCol, sort_dir === 'desc' ? 'desc' : 'asc');
+  query = query.orderBy(sortCol, sort_dir);
 
-  const customers = await query.limit(limit);
+  const matched = await query.clone().clearSelect().clearOrder().count('* as count').first();
+  const customers = await query.orderBy('customers.id').limit(limit).offset(offset);
   const total = await db('customers').count('* as count').first();
 
   return {
@@ -503,7 +512,10 @@ async function queryCustomers(input) {
       last_contact_date: c.last_contact_date,
       lead_source: c.lead_source,
     })),
-    total_matching: customers.length,
+    total_matching: Number(matched.count),
+    returned_count: customers.length,
+    has_more: offset + customers.length < Number(matched.count),
+    next_offset: offset + customers.length < Number(matched.count) ? offset + customers.length : null,
     total_customers: parseInt(total.count),
   };
 }
@@ -618,6 +630,16 @@ async function getCustomerDetail(customerId) {
     .orderBy('created_at', 'desc')
     .limit(5);
 
+  const propertyCoverage = {};
+  const properties = await require('../customer-properties').listProperties(customerId)
+    .then(rows => { propertyCoverage.properties = 'complete'; return rows; })
+    .catch(() => { propertyCoverage.properties = 'unavailable'; return null; });
+  const accountProperties = customer.account_id ? await db('customers')
+    .where({ account_id: customer.account_id }).whereNull('deleted_at').whereNot({ id: customerId })
+    .select('id', 'profile_label', 'address_line1', 'address_line2', 'city', 'state', 'zip')
+    .then(rows => { propertyCoverage.linked_profiles = 'complete'; return rows; })
+    .catch(() => { propertyCoverage.linked_profiles = 'unavailable'; return null; }) : [];
+
   const tags = await db('customer_tags').where('customer_id', customerId).select('tag');
 
   const health = await db('customer_health_scores')
@@ -633,7 +655,7 @@ async function getCustomerDetail(customerId) {
       last_name: customer.last_name,
       email: customer.email,
       phone: customer.phone,
-      address: formatAddress({ line1: customer.address_line1, city: customer.city, state: customer.state, zip: customer.zip }),
+      address: formatAddress(effectiveServiceAddress({}, customer)),
       city: customer.city,
       state: customer.state,
       zip: customer.zip,
@@ -649,6 +671,9 @@ async function getCustomerDetail(customerId) {
       lawn_type: customer.lawn_type,
       notes: customer.crm_notes,
     },
+    properties,
+    account_properties: accountProperties,
+    coverage: { ...propertyCoverage, service_history: 'latest 10', upcoming_services: 'next 10', invoices: 'latest 5' },
     tags: tags.map(t => t.tag),
     health_score: health ? {
       overall: health.overall_score,
@@ -671,6 +696,8 @@ async function getCustomerDetail(customerId) {
       type: s.service_type,
       status: s.status,
       time_window: s.window_start ? `${s.window_start}-${s.window_end}` : null,
+      service_address: formatAddress(effectiveServiceAddress(s, customer)),
+      property_id: s.property_id,
     })),
     recent_invoices: invoices.map(i => ({
       id: i.id,
@@ -683,7 +710,8 @@ async function getCustomerDetail(customerId) {
 
 
 async function getScheduleView(input) {
-  const { date, date_from, date_to, technician_name, city } = input;
+  const { date = (!input.date_from && !input.date_to ? etDateString() : undefined), date_from, date_to, technician_name, city } = input;
+  const offset = Math.max(0, Math.trunc(input.offset || 0));
 
   let query = db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -693,6 +721,9 @@ async function getScheduleView(input) {
       'scheduled_services.service_type', 'scheduled_services.status',
       'scheduled_services.window_start', 'scheduled_services.window_end',
       'scheduled_services.route_order', 'scheduled_services.notes',
+      'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+      'scheduled_services.service_address_city', 'scheduled_services.service_address_state', 'scheduled_services.service_address_zip',
+      'customers.address_line2', 'customers.state', 'customers.zip',
       'customers.id as customer_id', 'customers.first_name', 'customers.last_name',
       'customers.city', 'customers.address_line1', 'customers.phone',
       'technicians.name as tech_name',
@@ -707,14 +738,17 @@ async function getScheduleView(input) {
     query = query.where('scheduled_services.scheduled_date', '>=', date_from);
   }
 
+  if (date_to && !date && !date_from) query = query.where('scheduled_services.scheduled_date', '<=', date_to);
+
   if (technician_name) {
     query = query.whereILike('technicians.name', `%${technician_name}%`);
   }
   if (city) {
-    query = query.whereILike('customers.city', `%${city}%`);
+    query = query.whereRaw('COALESCE(scheduled_services.service_address_city, customers.city) ILIKE ?', [`%${city}%`]);
   }
 
-  const appointments = await query.orderBy('scheduled_services.scheduled_date').orderByRaw('COALESCE(route_order, 999)').limit(200);
+  const fetched = await query.orderBy('scheduled_services.scheduled_date').orderByRaw('COALESCE(route_order, 999)').orderBy('scheduled_services.id').limit(201).offset(offset);
+  const appointments = fetched.slice(0, 200);
 
   return {
     appointments: appointments.map(a => ({
@@ -726,13 +760,17 @@ async function getScheduleView(input) {
       route_order: a.route_order,
       customer_id: a.customer_id,
       customer_name: `${a.first_name || ''} ${a.last_name || ''}`.trim(),
-      customer_city: a.city,
-      customer_address: a.address_line1,
+      customer_city: effectiveServiceAddress(a, a).city,
+      customer_address: formatAddress(effectiveServiceAddress(a, a)),
       customer_phone: a.phone,
       technician: a.tech_name,
       notes: a.notes,
     })),
-    total: appointments.length,
+    returned_count: appointments.length,
+    has_more: fetched.length > 200,
+    next_offset: fetched.length > 200 ? offset + 200 : null,
+    date: date || null,
+    coverage: 'Requested date range; cancelled appointments excluded',
   };
 }
 
@@ -1944,9 +1982,7 @@ async function getRecentCompletions(input = {}) {
 // string is persisted in tool-health telemetry, so it carries no typed name;
 // the candidates array holds the detail and only reaches the operator.
 async function resolveTechnicianByName(name) {
-  const matches = await db('technicians')
-    .whereILike('name', `%${name}%`)
-    .where('active', true)
+  const matches = await applyAssignable(db('technicians').whereILike('technicians.name', `%${name}%`))
     .limit(2);
   if (matches.length > 1) {
     return {
@@ -1958,7 +1994,7 @@ async function resolveTechnicianByName(name) {
   return matches[0] || null;
 }
 
-async function createAppointment(input) {
+async function createAppointment(input, actionContext = {}) {
   const { customer_id, scheduled_date, service_type, technician_name, time_window, notes } = input;
 
   const dateStr = validScheduleDate(scheduled_date);
@@ -2009,8 +2045,8 @@ async function createAppointment(input) {
   if (input.technician_id) {
     // Same active bar as name resolution — a model-provided id, or a tech
     // deactivated during the confirmation window, must not take new visits.
-    const tech = await db('technicians').where('id', input.technician_id).where('active', true).first();
-    if (!tech) return { error: 'Technician not found or no longer active' };
+    const tech = await resolveActiveTechnicianById(input.technician_id);
+    if (!tech) return { error: 'Technician not found or no longer assignable' };
     technician_id = tech.id;
     resolvedTechnicianName = tech.name;
   } else if (technician_name) {
@@ -2081,6 +2117,9 @@ async function createAppointment(input) {
       err.customerNoLongerLive = true;
       throw err;
     }
+    // Re-asserted FOR SHARE on the writing trx: the name/id resolution above
+    // ran before this transaction opened.
+    await assertAssignableTechnician(technician_id, { conn: trx });
     const [created] = await trx('scheduled_services').insert({
       customer_id,
       // Sole-active-property anchor for the visit-group stamp below —
@@ -2165,6 +2204,19 @@ async function createAppointment(input) {
     throw err;
   }
 
+  // Tech-facing "new visit" card (tech-visit-notifications.js): this writer
+  // inserts the assigned row itself, bypassing assignDispatchJob, so it tells
+  // the tech itself. Queued FIRST after commit, before the awaited redemption
+  // and reminder steps, so a reassignment seconds after creation cannot
+  // overtake it in the visit's notice queue. Best-effort, never awaited;
+  // gate-dark; silent when the operator IS the tech.
+  if (technician_id) {
+    void require('../tech-visit-notifications').notifyTechVisitChange({
+      visitId: appointment.id, kind: 'assigned', technicianId: technician_id, actorId: actionContext.technicianId || null,
+      snapshot: { date: dateStr, windowStart: win.start || null, windowEnd: windowEnd || null },
+    });
+  }
+
   // Card-confirmed bookings are approved credit-free (W0B): skip ONLY the
   // immediate redemption so this Confirm can never mint credit — an offer
   // created after the card is applied by the hourly sweep, the documented
@@ -2242,7 +2294,7 @@ async function createAppointment(input) {
 }
 
 
-async function rescheduleAppointment(input) {
+async function rescheduleAppointment(input, actionContext = {}) {
   const { appointment_id, new_date, new_time_window, reason } = input;
 
   const appt = await db('scheduled_services').where('id', appointment_id).first();
@@ -2399,6 +2451,9 @@ async function rescheduleAppointment(input) {
   // schedule conflicts): the move commits and the tool result carries a
   // warning.
   let updatedRows = 0;
+  // The technician on the COMMITTED row (the CAS does not pin technician_id,
+  // so the pre-read `appt` may name a tech who was swapped out meanwhile).
+  let committedTechId = null;
   let overlapAdvisory = null;
   await db.transaction(async (trx) => {
       // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
@@ -2422,7 +2477,7 @@ async function rescheduleAppointment(input) {
       // would strand its siblings and parent at the old stop. Throws an
       // operational 409 the executor surfaces as the tool error.
       await require('../visit-groups').assertRowMovableAlone(trx, appointment_id, appt.visit_id);
-      updatedRows = await applyTrackLifecycleCas(
+      const committed = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', appointment_id)
           .where('status', String(appt.status))
@@ -2458,6 +2513,7 @@ async function rescheduleAppointment(input) {
       )
         .update({
           scheduled_date: dateStr,
+          ...recurringDispatchDuePatch(appt, { scheduled_date: dateStr, window_start: newStart }),
           window_start: newStart,
           window_end: newWindowEnd,
           // A DATE move carries the stop into another tech-day: clear its
@@ -2480,10 +2536,25 @@ async function rescheduleAppointment(input) {
           ...(wasLive ? { status: 'confirmed' } : {}),
           ...liveReset,
           updated_at: new Date(),
-        });
+        })
+        .returning(['id', 'technician_id']);
+      updatedRows = committed.length;
+      committedTechId = committed[0]?.technician_id || null;
   });
   if (updatedRows === 0) {
     return { error: 'Appointment changed concurrently (status, date, or window) while the reschedule was pending — nothing was moved. Re-check the appointment and retry if still applicable.' };
+  }
+  // Tech-facing notice (tech-visit-notifications.js): this writer moves the
+  // row itself, so it tells the holder itself. Post-commit, best-effort,
+  // never awaited; the operator's own move stays silent.
+  if (committedTechId) {
+    void require('../tech-visit-notifications').notifyVisitRescheduled({
+      visitId: appt.id,
+      technicianId: committedTechId,
+      actorId: actionContext.technicianId || null,
+      previous: { date: observedDate, windowStart: appt.window_start, windowEnd: appt.window_end },
+      snapshot: { date: dateStr, windowStart: newStart, windowEnd: newWindowEnd },
+    });
   }
 
   // Rebooker-parity side effects of the live → confirmed flip above:
@@ -2572,7 +2643,7 @@ async function rescheduleAppointment(input) {
 }
 
 
-async function cancelAppointment(input) {
+async function cancelAppointment(input, actionContext = {}) {
   const { appointment_id, reason } = input;
 
   const appt = await db('scheduled_services').where('id', appointment_id).first();
@@ -2665,7 +2736,10 @@ async function cancelAppointment(input) {
         jobId: appointment_id,
         fromStatus: appt.status,
         toStatus: 'cancelled',
-        transitionedBy: null,
+        // The acting staff row: audit attribution on the history row, and
+        // the actor the tech-facing cancel notice (job-status.js) keeps
+        // silent for — an operator cancelling their own visit gets no card.
+        transitionedBy: actionContext.technicianId || null,
         notes: reason ? `Cancelled via Intelligence Bar: ${reason}` : 'Cancelled via Intelligence Bar',
         trx,
       });
@@ -2894,7 +2968,7 @@ async function searchFieldIntelligence(input) {
 // proposal-time pinning so a model-provided uuid still yields a NAMED tech
 // on the confirmation card.
 async function resolveActiveTechnicianById(id) {
-  return db('technicians').where('id', id).where('active', true).first();
+  return applyAssignable(db('technicians').where('technicians.id', id)).first();
 }
 
 module.exports = { TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS };

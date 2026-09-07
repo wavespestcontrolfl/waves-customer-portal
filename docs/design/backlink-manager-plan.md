@@ -1841,3 +1841,12 @@ cutover (replaced by the provider race), v1 open decisions 2–3.
 3. `auto_outreach_daily_cap` starting value (proposal: 10; hard ceiling stays
    `LINK_OUTREACH_DAILY_CAP=12`) — Adam, at step 4.
 4. Whether `OWNER_MEMBERSHIP` cards should batch weekly (one digest) or ring per card — Adam.
+
+
+### Free execution integration
+
+Authority-bound leases, durable submission caps, provider ownership, final mutation checks and held evidence are implemented for free deterministic submissions. Submit-first and send-first ordering reuse the existing communication lifecycle. Backlink matching ships separately. Live rollout remains an owner step.
+
+### Verified outreach matching
+
+Completed backlink scans can match fresh target-specific outreach evidence. Ambiguous identity requires an audited owner assignment; a backlink cannot be assigned to two active sibling placements. Matching retires an unsent follow-up and leaves live/indexed verification to the verifier. Execution leases ship separately.

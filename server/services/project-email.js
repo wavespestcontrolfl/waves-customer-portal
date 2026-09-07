@@ -317,11 +317,18 @@ async function ensureServicePrepToken(serviceId, templateKey) {
 // the template that was just delivered, in one write. Last DELIVERED guide
 // wins — a queued-but-skipped or failed resend never moves either field, so
 // the emailed URL keeps rendering the guide the customer actually received.
+// Conditional: stamps a row this key owns, or claims an unkeyed one. One
+// prep page per visit across every lane — a delivery of a DIFFERENT guide
+// must never retarget the page another lane's customer link already
+// renders (GH Codex #3856 r19 P0); the automation executor skips such a
+// run before dispatch, so its own link is never wrong either. Returns the
+// row count (0 = the page belongs to another guide).
 async function markServicePrepSent(serviceId, templateKey) {
   const key = clean(templateKey);
   if (!isPrepTemplateKey(key)) throw new Error(`Not a prep template key: ${templateKey}`);
-  await db('scheduled_services')
+  return db('scheduled_services')
     .where({ id: serviceId })
+    .where((q) => q.where({ prep_template_key: key }).orWhereNull('prep_template_key'))
     .update({ prep_sent_at: db.fn.now(), prep_template_key: key });
 }
 
@@ -515,6 +522,9 @@ module.exports = {
   buildProjectPayload,
   ensurePrepToken,
   ensureServicePrepToken,
+  // The customer-facing project title (type-gated fee-cue + amount scrub) —
+  // shared with the composer's project report link (GH Codex #3893 r4 P1).
+  projectTitle,
   markServicePrepSent,
   isPrepTemplateKey,
   prepTemplateForProjectType,

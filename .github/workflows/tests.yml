@@ -58,7 +58,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: '.nvmrc'
           cache: npm
       - run: npm ci
       - name: Migrate from an empty database
@@ -87,6 +87,31 @@ jobs:
             | grep -v products-catalog-label-fields \
             | tee /dev/stderr \
             | xargs npx jest --ci --silent --runInBand
+      - name: Shared reservation arrival transaction tests
+        working-directory: server
+        env:
+          RESERVATION_ARRIVAL_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/reservation-arrival-postgres.test.js
+      - name: Staff arrival-window transaction tests
+        working-directory: server
+        env:
+          ARRIVAL_ROUTE_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/arrival-window-placement-db.test.js tests/admin-arrival-window-save-db.test.js
+      - name: Protocol publication transaction tests
+        working-directory: server
+        env:
+          PROTOCOL_PUBLISH_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/protocol-publish-postgres.test.js
+      - name: Blog queue ownership transaction tests
+        working-directory: server
+        env:
+          BLOG_QUEUE_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/blog-queue-ownership-postgres.test.js
+      - name: Intelligence Bar operational transaction tests
+        working-directory: server
+        env:
+          IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/intelligence-bar-operational-postgres.test.js
       - name: Tool contract tests (202 IB/agent tools vs the migrated schema)
         # Blocks on critical only (schema drift, missing tables/columns);
         # execute-smoke warnings (e.g. uuid-typed params fed 'test') are
@@ -103,9 +128,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: '.nvmrc'
           cache: npm
       - run: npm ci
+      - name: Worktree and managed startup checks
+        run: npm run test:dev-workflow
       - name: Client tests (vitest)
         working-directory: client
         run: npm run test:coverage
@@ -113,6 +140,90 @@ jobs:
         # Vite production compilation catches chunking, CSS/import, and
         # service-worker asset failures that the jsdom test runtime cannot.
         run: npm run build
+
+  browser-previews:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:qa-workflow
+      - name: Portal, payment, report and completion previews
+        run: npm run qa:previews
+      - name: Estimate interaction and PDF previews
+        if: ${{ !cancelled() }}
+        env:
+          ESTIMATE_PREVIEW_SCENARIOS: pest,lawn,wdo,preslab,proposal,expired
+          ESTIMATE_PREVIEW_ARTIFACT_DIR: .tmp/qa/estimates
+        run: npm run audit:estimate-previews
+      - name: Browser QA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-qa-${{ github.sha }}
+          path: .tmp/qa/
+          retention-days: 7
+
+  application-qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: waves
+          POSTGRES_PASSWORD: waves
+          POSTGRES_DB: waves_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run worktree:setup
+      - name: Select the disposable CI database cluster
+        run: |
+          node -e "require('node:fs').writeFileSync('.tmp/dev/database.env', 'WAVES_DATABASE_ENVIRONMENT=test\nDATABASE_URL=postgresql://waves:waves@localhost:5432/waves_test\n', {mode: 0o600})"
+      - run: npm run qa:database
+      - name: Migrate the private QA database
+        # A legacy repair migration removes an earlier placeholder's ledger
+        # entry. The second pass settles that entry before doctor checks it.
+        run: |
+          npm run dev:migrate
+          npm run dev:migrate
+      - name: Real auth, booking, settlement and report journeys
+        run: npm run qa:e2e
+      - name: Remove synthetic accounts and journey records
+        if: always()
+        run: npm run qa:cleanup
+      - name: Verify retained journey results survived cleanup
+        run: |
+          node -e "const r = require('./.tmp/qa/e2e/report.json'); require('node:assert/strict').equal(r.steps.filter(s => s.passed).length, 6)"
+      - name: Application QA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-qa-${{ github.sha }}
+          path: |
+            .tmp/qa/e2e/report.json
+            .tmp/qa/e2e/cleanup.json
+            .tmp/qa/e2e/*.png
+            .tmp/qa/e2e/trace.zip
+          retention-days: 7
 
   native-android:
     runs-on: ubuntu-latest
@@ -124,7 +235,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: '.nvmrc'
           cache: npm
       - uses: actions/setup-java@v4
         with:
@@ -149,7 +260,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: '.nvmrc'
           cache: npm
       - name: Verify pinned iOS toolchain
         run: |
@@ -184,7 +295,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: '.nvmrc'
           cache: npm
       - run: npm ci
       - name: Blog schema vendor check
@@ -193,6 +304,8 @@ jobs:
         run: npm run check:portal-brand
       - name: Domain rules gate
         run: npm run check:domain-rules
+      - name: Local session supervisor lifecycle tests
+        run: python3 -m unittest discover -s scripts/agents/tests -v
       - name: Lint changed files (errors-only, same scope as the pre-commit hook)
         # Changed-files-only is deliberate — the repo has no lint history and
         # eslint.config.js encodes that decision. Full-repo lint would flag

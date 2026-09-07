@@ -80,7 +80,7 @@ const GLASS_THEME = {
   headingFont: "-apple-system,BlinkMacSystemFont,'SF Pro Display','Segoe UI',Inter,Arial,sans-serif",
   headingWeight: '700',
   headingTracking: '-0.02em',
-  cardRadius: '20px',
+  cardRadius: '12px', // the sheet's card radius (owner 2026-09-03) — was 20
   // Soft float + inset white top highlight — the estimate cards are
   // quiet; the deep [data-glass] shadow reads too heavy on email cards.
   cardShadow: '0 18px 60px rgba(4,57,94,0.12),inset 0 1px 0 rgba(255,255,255,0.6)',
@@ -91,11 +91,13 @@ const GLASS_THEME = {
   // [data-glass-accent] in glass-theme.css, which pins #1B2C5B.
   ctaText: '#1B2C5B',
   // Match the live report action bar ([data-glass-accent]): 10px radius,
-  // ~48px full-width bars — with bolder labels per owner call 07-06.
+  // full-width gold bars. Label weight and size follow the customer sheet
+  // (owner 2026-09-03 / batch D 2026-09-05): weights stop at 700, button
+  // text is 16, gold accent actions are 44 tall minimum.
   ctaRadius: '10px',
-  ctaWeight: '900',
-  ctaPad: '11px 20px', // slimmer bars per owner (round 3) — ~42px tall
-  ctaSize: '14px', // matches the report action bar's label size
+  ctaWeight: '700',
+  ctaPad: '13px 20px', // ~44px tall with 16px text
+  ctaSize: '16px',
   // Quiet float only — the gold outer glow read as glare (owner call
   // 07-06 round 3); subtle inset top highlight retained.
   ctaShadow: '0 8px 20px rgba(180,110,0,0.20),inset 0 1px 0 rgba(255,255,255,0.5)',
@@ -305,7 +307,7 @@ function ctaChip(href, label) {
  * actually takes) and the legacy SMTP fallback (invoice-email.js).
  */
 function stripeFooterLine() {
-  return `<div style="margin-top:12px;font-size:12px;">Powered by <a href="https://stripe.com" style="color:#635BFF;font-weight:700;text-decoration:none;">stripe</a>&nbsp;&nbsp;|&nbsp;&nbsp;<a href="https://stripe.com/invoicing" style="color:${activeTheme().muted};text-decoration:underline;">Learn more about Stripe Invoicing</a></div>`;
+  return `<div style="margin-top:12px;font-size:14px;">Powered by <a href="https://stripe.com" style="color:#635BFF;font-weight:700;text-decoration:none;">stripe</a>&nbsp;&nbsp;|&nbsp;&nbsp;<a href="https://stripe.com/invoicing" style="color:${activeTheme().muted};text-decoration:underline;">Learn more about Stripe Invoicing</a></div>`;
 }
 
 function glassPillHeader(T) {
@@ -481,7 +483,7 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
       <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:560px;">
         <tr><td align="left" style="padding:30px 4px 0 4px;">
           <h1 class="dm-ink" style="margin:0 0 14px 0;font-family:${T.headingFont};font-size:34px;line-height:1.08;letter-spacing:-0.03em;color:${T.ink};font-weight:700;">${heading}</h1>
-          <div class="dm-page-text" style="font-family:${T.font};font-size:15px;line-height:1.6;color:${T.body};">
+          <div class="dm-page-text" style="font-family:${T.font};font-size:16px;line-height:1.6;color:${T.body};">
             ${intro}
           </div>
         </td></tr>
@@ -495,7 +497,7 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
         </td></tr>` : ''}
         ${footerNote ? `
         <tr><td align="center" style="padding:28px 4px 0 4px;">
-          <div class="dm-muted" style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
+          <div class="dm-muted" style="font-family:${T.font};font-size:14px;line-height:1.6;color:${T.muted};text-align:center;">
             ${footerNote}
           </div>
         </td></tr>` : ''}
@@ -515,11 +517,11 @@ function glassServiceEmail({ preheader, body, footerNote, darkAwareBody = false 
   const contentHtml = `${glassPillHeader(T)}
       <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:620px;">
         <tr><td style="padding:28px 0 0 0;">
-          ${glassCard(T, `<div style="font-family:${T.font};font-size:15px;line-height:1.58;color:${T.body};">${body || ''}</div>`, '26px 28px', { darkAware: darkAwareBody })}
+          ${glassCard(T, `<div style="font-family:${T.font};font-size:16px;line-height:1.58;color:${T.body};">${body || ''}</div>`, '26px 28px', { darkAware: darkAwareBody })}
         </td></tr>
         ${footerNote ? `
         <tr><td align="center" style="padding:24px 4px 0 4px;">
-          <div class="dm-muted" style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
+          <div class="dm-muted" style="font-family:${T.font};font-size:14px;line-height:1.6;color:${T.muted};text-align:center;">
             ${footerNote}
           </div>
         </td></tr>` : ''}
@@ -554,7 +556,7 @@ function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferre
   // (owner 2026-07-29), never beside it in narrow/quirky clients.
   const heroBlock = `<div style="display:block;text-align:center;"><a href="${WAVES_WEBSITE_URL}" style="text-decoration:none;display:inline-block;"><img src="${GLASS_LOGO_IMG}" alt="${identity.title}" width="72" height="72" style="display:block;width:72px;height:72px;max-width:100%;border:0;margin:0 auto;" /></a></div>
           <h1 class="dm-ink" style="margin:8px 0 0 0;font-family:${T.headingFont};font-size:20px;line-height:1.2;letter-spacing:-0.02em;color:${T.ink};font-weight:700;">${identity.title}</h1>${identity.tagline ? `
-          <p class="dm-muted" style="margin:6px 0 0 0;font-family:${T.font};font-size:15px;line-height:1.5;color:${T.muted};">${identity.tagline}</p>` : ''}`;
+          <p class="dm-muted" style="margin:6px 0 0 0;font-family:${T.font};font-size:16px;line-height:1.5;color:${T.muted};">${identity.tagline}</p>` : ''}`;
 
   const footerExtras = `${webVersionLine}${preferredSourcesLine}${unsubscribeLine}${footerNote
     ? `<div class="dm-muted" style="margin-top:8px;font-family:${T.font};font-size:14px;color:${T.muted};text-align:center;">${footerNote}</div>`
@@ -565,7 +567,7 @@ function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferre
           ${heroBlock}
         </td></tr>
         <tr><td style="padding:24px 0 0 0;">
-          ${glassCard(T, `<div style="font-family:${T.font};font-size:15px;line-height:1.6;color:${T.body};">${body || ''}</div>`, '26px 28px', { darkAware: darkAwareBody })}
+          ${glassCard(T, `<div style="font-family:${T.font};font-size:16px;line-height:1.6;color:${T.body};">${body || ''}</div>`, '26px 28px', { darkAware: darkAwareBody })}
         </td></tr>
         ${footerExtras ? `<tr><td align="center" style="padding:24px 4px 0 4px;">${footerExtras}</td></tr>` : ''}
         <tr><td align="center" style="padding:16px 4px 0 4px;">

@@ -21,7 +21,10 @@
 //
 // Server twin: server/services/pdf/pdf-tokens.js mirrors the literal values
 // for PDFKit documents (CommonJS, can't import this ES module). Change
-// values in BOTH places or the print documents drift.
+// values in BOTH places or the print documents drift. Exception: the type
+// scale. PDF_TYPE is a print scale in points (h1 20 / h2 14 / body 10) and
+// stays put when the screen scale moves (h1 34→40, h2 24→26 on 2026-09-05
+// were screen-legibility calls; paper is batch D, separately approved).
 
 import { COLORS as B, FONTS } from './theme-brand';
 import { CUSTOMER_SURFACE } from './theme-customer';
@@ -34,19 +37,19 @@ import { CUSTOMER_SURFACE } from './theme-customer';
 export const DOC_FONT = FONTS.body; // "'Inter', system-ui, sans-serif"
 export const DOC_FONT_SERIF = FONTS.serif;
 
-// Fixed type scale. 13px is banned on customer surfaces (glass ruling);
-// 11 exists only for uppercase micro-labels/eyebrows.
+// Fixed SCREEN type scale (paper keeps h1 34 / h2 24 via .waves-print-h1/-h2
+// in glass-theme.css's print block). Nothing renders under 14px on a customer surface — the
+// runtime sheet in glass/glass-theme.css floors it and check-portal-brand
+// refuses smaller literals and tokens at build time (no micro/caption).
 export const FS = {
-  micro: 11, // uppercase eyebrows, footnote labels ONLY
-  caption: 12, // captions, legal, meta rows
-  body: 14, // default body / buttons / table cells
-  bodyLg: 15, // primary prose paragraphs
+  body: 14, // meta rows, table cells, buttons, eyebrows, fine print
+  bodyLg: 16, // primary prose paragraphs (owner D1 2026-09-05: body prose is 16 on customer surfaces)
   lead: 16, // lead-ins, input text (16 = no iOS zoom)
   sub: 18, // sub-headings, intro lines
   h4: 16,
   h3: 20,
-  h2: 24,
-  h1: 34,
+  h2: 26,
+  h1: 40,
 };
 
 // Standard weights. Variable-font one-offs (650/750/850) snap to these.
@@ -55,7 +58,6 @@ export const FW = {
   medium: 500,
   semibold: 600,
   bold: 700,
-  heavy: 800, // display/eyebrow emphasis only
 };
 
 export const LH = {
@@ -90,10 +92,10 @@ export function docHeading(level) {
 // conflicting .section-eyebrow rules; this replaces both.)
 export const DOC_EYEBROW = {
   fontFamily: DOC_FONT,
-  fontSize: FS.caption,
-  fontWeight: FW.bold,
+  fontSize: FS.body,
+  fontWeight: FW.semibold,
   lineHeight: LH.heading,
-  letterSpacing: '0.11em',
+  letterSpacing: '0.06em',
   textTransform: 'uppercase',
   color: 'var(--text-muted, #3F4A65)',
   marginBottom: 8,
@@ -122,6 +124,10 @@ export const SP = {
 // needs the width inline.
 export const DOC_COLUMN = 'min(100% - 32px, 760px)';
 export const DOC_COLUMN_MAX = 760;
+// The 640px flow column (chrome audit 2026-09-03): appointment / track /
+// reschedule / re-service — the short transactional flows. Documents
+// (estimates, reports, invoices, notices) use DOC_COLUMN_MAX.
+export const FLOW_COLUMN_MAX = 640;
 export const DOC_PAGE_MARGIN = '28px auto 56px';
 
 // ---------- color roles ----------

@@ -159,7 +159,7 @@ describe('getCachedLookup', () => {
     // _source 'county': records WITHOUT county evidence age out on the
     // short roll-miss TTL (tested below) — the base-TTL fixtures model the
     // common county-backed case.
-    property_record: { squareFootage: 1348, _source: 'county' },
+    property_record: { squareFootage: 1348, lotSize: 10043, propertyType: 'Single Family', _source: 'county' },
     lat: '26.9897000',
     lng: '-82.1390000',
     data_saved_at: new Date(Date.now() - 3600000).toISOString(),
@@ -260,6 +260,32 @@ describe('getCachedLookup', () => {
     expect(await getCachedLookup('100 Main St')).toBeNull();
   });
 
+  it('refreshes older incomplete county records, including records with a known build year', async () => {
+    for (const missing of ['squareFootage', 'lotSize']) {
+      const partial = { ...freshRow.property_record, yearBuilt: 2020, [missing]: null };
+      mockDbHandler = () => fakeTable({ row: {
+        ...freshRow, property_record: partial,
+        data_saved_at: new Date(Date.now() - 30 * 86400000).toISOString(),
+      } });
+      expect(await getCachedLookup('100 Main St')).toBeNull();
+    }
+    // A condo's absent private lot is intentional and does not shorten TTL.
+    mockDbHandler = () => fakeTable({ row: {
+      ...freshRow, property_record: { ...freshRow.property_record, propertyType: 'Condo', lotSize: null },
+      data_saved_at: new Date(Date.now() - 30 * 86400000).toISOString(),
+    } });
+    expect(await getCachedLookup('100 Main St')).toBeTruthy();
+  });
+
+  it('rejects old AI claims labeled as county evidence even inside the cache TTL', async () => {
+    mockDbHandler = () => fakeTable({ row: {
+      ...freshRow, property_record: { ...freshRow.property_record,
+        _fieldEvidence: { squareFootage: { evidence: [{ provider: 'openai', sourceType: 'county' }] } },
+      },
+    } });
+    expect(await getCachedLookup('100 Main St')).toBeNull();
+  });
+
   it('kill switch disables reads but not override reads', async () => {
     process.env.PROPERTY_LOOKUP_CACHE_DISABLED = '1';
     mockDbHandler = () => fakeTable({
@@ -282,6 +308,7 @@ describe('getCachedLookup', () => {
       ...freshRow,
       property_record: {
         squareFootage: 2362,
+        propertyType: 'Single Family',
         stories: 2,
         lotSize: 6985,
         yearBuilt: new Date().getFullYear() - 1,
@@ -323,6 +350,7 @@ describe('saveLookup', () => {
   const result = {
     propertyRecord: {
       county: 'Charlotte',
+      squareFootage: 1348, lotSize: 10043, propertyType: 'Single Family',
       _parcel: { parcelId: '402217351013', county: 'Charlotte' },
       _aiProviders: ['charlotte_pao'],
     },
@@ -405,6 +433,17 @@ describe('saveLookup', () => {
     await expect(saveLookup('100 Main St', result)).resolves.toBeUndefined();
   });
 
+  it('stores incomplete county measurements on the short TTL', async () => {
+    const writes = [];
+    mockDbHandler = () => fakeTable({ writes });
+    await saveLookup('100 Main St', {
+      ...result, propertyRecord: { ...result.propertyRecord, squareFootage: null, yearBuilt: 2020 },
+    });
+    const ttl = writes[0][1].expires_at.getTime() - Date.now();
+    expect(ttl).toBeGreaterThan(20 * 86400000);
+    expect(ttl).toBeLessThanOrEqual(21 * 86400000);
+  });
+
   it('a stale-imagery-conflict save gets the short TTL, a normal save keeps the base TTL', async () => {
     const writes = [];
     mockDbHandler = () => fakeTable({ writes });
@@ -413,6 +452,7 @@ describe('saveLookup', () => {
       propertyRecord: {
         ...result.propertyRecord,
         squareFootage: 2362,
+        propertyType: 'Single Family',
         stories: 2,
         lotSize: 6985,
         yearBuilt: new Date().getFullYear() - 1,

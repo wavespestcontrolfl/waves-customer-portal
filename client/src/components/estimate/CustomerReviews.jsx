@@ -146,7 +146,7 @@ export default function CustomerReviews({ onJoinNeighbors = null }) {
   return (
     <section style={estimateCard()}>
       <div style={{
-        fontSize: 12, fontWeight: 700, color: W.textCaption,
+        fontSize: 14, fontWeight: 700, color: W.textCaption,
         textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8,
       }}>
         Reviews

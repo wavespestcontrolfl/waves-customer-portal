@@ -241,6 +241,8 @@ describe('new_job_application bell', () => {
       'completion_sms_failed',
       'customer_voicemail_callback',
       'job_complete',
+      // A Sandy → office transfer that lost its summary (relay-transfer.js).
+      'sandy_transfer_no_context',
       'service_report_delivery_failed',
       'service_report_pdf_failed',
       'service_report_token_mint_failed',

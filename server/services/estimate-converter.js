@@ -10,6 +10,7 @@
 const db = require('../models/db');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('./logger');
+const { isAssignable } = require('./technician-eligibility');
 const AvailabilityEngine = require('./availability');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pricing-engine/constants');
 // Canonical service-key tier membership (aliased: this module's local
@@ -227,6 +228,7 @@ function recurringServiceKey(svc = {}) {
     if (raw.includes('rodent') && /bait|station|monitor/.test(raw)) return 'commercial_rodent_bait';
     if (raw.includes('pest')) return 'commercial_pest';
   }
+  if (!raw.includes('commercial') && /\b(?:foam\s*recurring|recurring\s*(?:termite\s*)?foam)\b/.test(words)) return 'foam_recurring';
   if (raw.includes('pest')) return 'pest_control';
   if (raw.includes('lawn')) return 'lawn_care';
   if (raw.includes('tree') || raw.includes('shrub') || raw.includes('ornamental')) return 'tree_shrub';
@@ -2238,7 +2240,7 @@ function recurringServicesFromEstimateData(estimateData = {}) {
     data.recurring?.services,
     data.result?.recurring?.services,
     data.result?.results?.recurring?.services,
-    Array.isArray(data.services) ? data.services.filter((svc) => svc.recurring || svc.frequency) : [],
+    Array.isArray(data.services) ? data.services.filter((svc) => svc.recurring || svc.frequency || svc.visitsPerYear || svc.visits) : [],
     // Deduped by recurringServiceKey, so this coalesces with (never duplicates)
     // any matching recurring.services row from the admin/mapped save shape.
     recurringLinesFromEngineResult(data),
@@ -2559,6 +2561,112 @@ function recurringLineAnnualAmount(item = {}) {
   const monthly = Number(item.mo ?? item.monthly ?? 0);
   if (Number.isFinite(monthly) && monthly > 0) return Math.round(monthly * 12 * 100) / 100;
   return 0;
+}
+
+// Per-line per-visit amounts for a slot-reserved accept that sold MORE than
+// one recurring program. The reserved row (and the first-application invoice
+// minted on it) carries the accept route's SAME-DAY total — every program's
+// first application on one trip — so a promoted same-trip parent stays
+// unpriced on purpose (the reserved row's invoice covers it; closeout reads
+// that as sibling_first_application). The seeded CHILDREN of both series were
+// the defect: the seeder copies the parent price, so the reserved series
+// repeated the combined figure on every later visit and the promoted series
+// carried NULL (prod 2026-09-04: pest children at $151.80 = $91.80 pest +
+// $60.00 lawn, eight lawn children unpriced). Returns each line's own
+// per-visit amount ONLY when the split reproduces the reserved price to the
+// cent — a plan-credit slice, a manual discount, or an unknown visit count
+// breaks the equality and returns null, and the callers keep the parent-copy
+// behavior rather than invent a price (unpriced = NULL, never a guess).
+// When the accept route passes its per-row first-visit amounts
+// (firstApplicationRowAmounts — the figures it summed into the reserved
+// price, preference credits included), those are the authority and the
+// annual/visits reconstruction is not used.
+// Route-rows authority for the split: one row per family (the station-rental
+// rider folds into the bait share the converter bills it on), every amount
+// rounded to what the children will store. Returns a resolver that hands
+// each line its row once (a second ask for the same family is 0) plus an
+// exhaustiveness check, or null when the rows cannot be keyed.
+function routeRowLineAmounts(rowAmounts) {
+  const byKey = new Map();
+  for (const row of rowAmounts) {
+    const key = recurringServiceKey(row || {});
+    const amount = Number(row?.amount);
+    if (!key || !(amount > 0) || byKey.has(key)) return null;
+    byKey.set(key, amount);
+  }
+  for (const baitKey of ['termite_bait', 'commercial_termite_bait']) {
+    if (byKey.has('termite_station_rental') && byKey.has(baitKey)) {
+      byKey.set(baitKey, byKey.get(baitKey) + byKey.get('termite_station_rental'));
+      byKey.delete('termite_station_rental');
+    }
+  }
+  if (byKey.has('termite_station_rental')) return null;
+  // Reconcile the amounts that will be STORED (codex #3938 r4 P2): round
+  // each row first, so a sub-cent drift between the raw rows and the
+  // reserved price declines rather than stamping figures that no longer
+  // add up to it.
+  for (const [key, amount] of byKey) byKey.set(key, roundMoney(amount));
+  const used = new Set();
+  return {
+    amountFor(svc) {
+      const key = recurringServiceKey(svc);
+      if (!byKey.has(key) || used.has(key)) return 0;
+      used.add(key);
+      return byKey.get(key);
+    },
+    allRowsConsumed: () => used.size === byKey.size,
+  };
+}
+
+// Line-derived per-visit amount for the split when the route passed no rows:
+// the line's annual over its visits, rounded — the same per-visit rule as
+// perApplicationChargeAmount (billing-cadence.js). Pest bills at the
+// ACCEPTED cadence (acceptedPestSelectionVisits doctrine) — but the line's
+// annual was priced at ITS cadence, so an accept that CHANGED the pest
+// cadence leaves no per-service figure to split from (codex #3938 r1 P1):
+// decline rather than divide a quote-time annual by the accepted count.
+function lineAnnualPerVisitAmount(svc, acceptedPlanFrequency) {
+  const annual = recurringLineAnnualAmount(svc);
+  const lineVisits = visitsPerYearForRecurringService(svc);
+  const acceptedVisits = acceptedPestSelectionVisits(svc, acceptedPlanFrequency);
+  if (acceptedVisits && lineVisits && acceptedVisits !== lineVisits) return 0;
+  const visits = acceptedVisits ?? lineVisits;
+  if (!(annual > 0) || !(visits > 0)) return 0;
+  return roundMoney(annual / visits);
+}
+
+function reservedAcceptPerVisitSplit({
+  reservedPrice,
+  reservedService,
+  promotedServices = [],
+  acceptedPlanFrequency = null,
+  rowAmounts = null,
+} = {}) {
+  const target = roundMoney(reservedPrice);
+  // A reserved row rewritten to a COMBINED service performs two lines
+  // (combinedFrom) — its share is their sum; a promoted combo unit likewise.
+  const toLines = (value) => (Array.isArray(value) ? value : [value]).filter(Boolean);
+  const reservedLines = toLines(reservedService);
+  const promotedLines = promotedServices.map(toLines);
+  if (!(target > 0) || !reservedLines.length || !promotedLines.length
+    || promotedLines.some((lines) => !lines.length)) return null;
+  const routeRows = Array.isArray(rowAmounts) ? routeRowLineAmounts(rowAmounts) : null;
+  if (Array.isArray(rowAmounts) && !routeRows) return null;
+  const lineAmount = routeRows
+    ? (svc) => routeRows.amountFor(svc)
+    : (svc) => lineAnnualPerVisitAmount(svc, acceptedPlanFrequency);
+  const sumLines = (lines) => lines.reduce((acc, svc) => {
+    if (acc === null) return null;
+    const amount = lineAmount(svc);
+    return amount > 0 ? acc + amount : null;
+  }, 0);
+  const reserved = sumLines(reservedLines);
+  const promoted = promotedLines.map(sumLines);
+  if (reserved === null || promoted.some((amount) => amount === null)) return null;
+  if (routeRows && !routeRows.allRowsConsumed()) return null;
+  const sum = roundMoney(promoted.reduce((acc, amount) => acc + amount, reserved));
+  if (sum !== target) return null;
+  return { reserved: roundMoney(reserved), promoted: promoted.map(roundMoney) };
 }
 
 // FL nonresidential sales tax DEFAULT (6% state + 1% surtax). Used only as the
@@ -3072,7 +3180,7 @@ function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow 
   const serviceKey = RecurringAppointmentSeeder.serviceKeyFor(svc);
   const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow.service_type });
   const key = serviceKey && serviceKey !== 'service' ? serviceKey : parentKey;
-  if (key === 'pest_control' && pattern === 'quarterly') return 60;
+  if (key === 'pest_control' && [null, 'quarterly', 'bimonthly', 'monthly'].includes(pattern)) return 60;
   // Tree & Shrub visits book flat 60-minute slots (owner directive — the
   // same value estimate-slot-availability uses), so seeded follow-ups match
   // what a self-booked T&S slot would reserve.
@@ -3144,7 +3252,9 @@ const PREPAY_COVERAGE_INVALID = 'prepay_coverage_invalid';
 // lawn at 60 — copying would make auto-scheduled accepts shorter than
 // reserved ones (path-dependent capacity, overlapping dispatch). These keys
 // link the id and change nothing else; duration keeps today's derivation.
+// Pest catalog defaults are also shorter than the 60-minute estimate slot.
 const IDENTITY_ONLY_CATALOG_KEYS = new Set([
+  ...Object.values(PEST_CADENCE_CATALOG_KEYS),
   ...Object.values(LAWN_CADENCE_CATALOG_KEYS),
   'palm_injection_semiannual',
 ]);
@@ -3161,7 +3271,11 @@ function identityOnlyCatalogKey(catalogServiceKey) {
       && TREE_SHRUB_IDENTITY_ONLY_KEYS.has(catalogServiceKey));
 }
 
-function remainingUnitCatalogKey(svc = {}) {
+function remainingUnitCatalogKey(svc = {}, acceptedPlanFrequency = null) {
+  if (acceptedPestSelectionVisits(svc, acceptedPlanFrequency)) {
+    const pattern = converterFollowUpSeedingPattern(svc, {}, undefined, acceptedPlanFrequency);
+    return PEST_CADENCE_CATALOG_KEYS[pattern] || null;
+  }
   const key = String(svc.serviceKey || svc.service_key || '').trim();
   if (/^tree_shrub(_program|_quarterly|_6week)$/.test(key)) return key;
   // GATE_SEPARATE_COMBO_VISITS: a legacy lawn+T&S line carries only its
@@ -3417,9 +3531,17 @@ function seedingFamilyKey(svc = {}, parentRow = {}) {
   return key;
 }
 
-function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = null) {
+function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = null, acceptedPlanFrequency = null) {
   const key = seedingFamilyKey(svc, parentRow);
-  if (key === 'pest_control') return pattern === 'quarterly';
+  if (key === 'pest_control') {
+    if (svc.isCommercial || isCommercialRecurringLine(svc, parentRow)) return false;
+    if (pattern === 'quarterly') return true;
+    if (!['bimonthly', 'monthly'].includes(pattern)) return false;
+    if (acceptedPestSelectionVisits(svc, acceptedPlanFrequency)) return true;
+    const visits = visitsPerYearForRecurringService(svc);
+    return !visitCountFieldsConflict(svc) && !visitCountFieldsInvalid(svc)
+      && (visits == null || visits === visitsPerYearForCadence(pattern));
+  }
   // Recurring foam is offered on all three cadences (quarterly/bimonthly/
   // monthly), so seed follow-ups for whichever pattern the customer accepted —
   // otherwise the accepted plan would stop after the first visit.
@@ -3687,7 +3809,7 @@ async function registerSeededFollowUpReminders(rows = [], customerId) {
         `${scheduledDate}T${windowStart}`,
         row.service_type || 'Quarterly Pest Control',
         'estimate_followup',
-        { sendConfirmation: false },
+        { sendConfirmation: false, fromCommittedRow: true },
       );
     }
   } catch (err) {
@@ -3716,7 +3838,13 @@ function cadenceFallbackForSeeding(svc = {}, fallbackFrequency) {
   return fallbackFrequency;
 }
 
-function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequency) {
+function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequency, acceptedPlanFrequency = null) {
+  // Residential pest's accepted selection is its service cadence. The line
+  // and reserved label can still carry the quote's earlier cadence.
+  if (acceptedPestSelectionVisits(svc, acceptedPlanFrequency)) {
+    const acceptedPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(acceptedPlanFrequency);
+    return supportsConverterFollowUpSeeding(svc, parentRow, acceptedPattern, acceptedPlanFrequency) ? acceptedPattern : null;
+  }
   // A 9-visit mosquito line has exactly ONE valid cadence, so resolve it before
   // generic inference rather than as a fallback. Inference reads cadence FIELDS
   // and display text first, so any stray or legacy frequency on the row —
@@ -3767,6 +3895,14 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
     const lawnField = lawnCadenceFieldForService(svc);
     if (mapped && (lawnField == null || lawnField === mapped)) return mapped;
   }
+  // The existing service resolver distinguishes a numeric-nine ornamental
+  // program from legacy nine-application mosquito/count-only rows.
+  if (seedingFamilyKey(svc, parentRow) === 'tree_shrub'
+    && explicitServiceCadence(svc) === 'every_6_weeks') {
+    if (visitCountFieldsConflict(svc) || visitCountFieldsInvalid(svc)
+      || svc.isCommercial === true || isCommercialRecurringLine(svc, parentRow)) return null;
+    return supportsConverterFollowUpSeeding(svc, parentRow, 'every_6_weeks') ? 'every_6_weeks' : null;
+  }
   const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
     service: { ...svc, service_type: parentRow?.service_type },
     fallbackFrequency: cadenceFallbackForSeeding(svc, fallbackFrequency),
@@ -3785,7 +3921,12 @@ function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequ
 // SEASONAL_FEB_OCT (annual-prepay renewal doesn't support the season walk yet)
 // so seasonal prepay fails closed on every acceptance path, matching the
 // prepay-on-book and /secure lanes (prepayCoverageCadenceForPattern → null).
-function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
+function annualPrepayCoverageCadence(svc = {}, fallbackFrequency, acceptedPlanFrequency = null) {
+  // Coverage and the recurring series must use the same accepted pest cadence.
+  if (acceptedPestSelectionVisits(svc, acceptedPlanFrequency)
+    && !svc.isCommercial && !isCommercialRecurringLine(svc)) {
+    return RecurringAppointmentSeeder.normalizeRecurringPattern(acceptedPlanFrequency);
+  }
   if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito'
     && visitsPerYearForRecurringService(svc) === 9) {
     return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
@@ -3815,10 +3956,26 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
     const lawnField = lawnCadenceFieldForService(svc);
     if (mapped && (lawnField == null || lawnField === mapped)) return mapped;
   }
+  if (seedingFamilyKey(svc) === 'tree_shrub'
+    && explicitServiceCadence(svc) === 'every_6_weeks') {
+    if (visitCountFieldsConflict(svc) || visitCountFieldsInvalid(svc)
+      || visitsPerYearForRecurringService(svc) !== 9
+      || svc.isCommercial === true || isCommercialRecurringLine(svc)) return PREPAY_COVERAGE_INVALID;
+    return 'every_6_weeks';
+  }
   const inferred = RecurringAppointmentSeeder.inferRecurringPattern({
     service: svc,
     fallbackFrequency,
   }) || null;
+  if (seedingFamilyKey(svc) === 'pest_control'
+    && ['monthly', 'bimonthly'].includes(inferred)
+    && !supportsConverterFollowUpSeeding(svc, {}, inferred)) return PREPAY_COVERAGE_INVALID;
+  if (seedingFamilyKey(svc) === 'tree_shrub') {
+    const visits = visitsPerYearForRecurringService(svc);
+    if (CADENCE_FIELD_SENTINELS.has(explicitServiceCadence(svc))
+      || visitCountFieldsConflict(svc) || visitCountFieldsInvalid(svc)
+      || (visits != null && visitsPerYearForCadence(inferred) !== visits)) return PREPAY_COVERAGE_INVALID;
+  }
   // Palm validation mirror (pre-push P1): the seeding gate refuses any
   // non-semiannual palm cadence, contradictory visit counts, and
   // commercial lines — the prepay term must not record a cadence the
@@ -3866,10 +4023,8 @@ function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
 // derivation didn't, so a quarterly-built quote accepted bi-monthly minted a
 // bimonthly term covering only 4 visits and payment-time coverage would seed
 // an 8-month series inside the 12-month term). The accepted count applies
-// only when it matches the cadence the series will actually seed: a line
-// whose own cadence FIELD contradicts the acceptance still resolves that
-// field's cadence, coverage must track the real series, and the line count
-// keeps deciding there.
+// only when it matches the cadence the series will actually seed. Callers
+// without an accepted selection retain the line-count derivation.
 function annualPrepayCoverageVisits(svc = {}, cadence, acceptedPlanFrequency) {
   const cadenceVisits = visitsPerYearForCadence(cadence);
   const acceptedVisits = acceptedPestSelectionVisits(svc, acceptedPlanFrequency);
@@ -3901,9 +4056,9 @@ async function rolledSeasonalFirstDate(baseDateStr) {
 }
 
 async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, opts = {}) {
-  const pattern = converterFollowUpSeedingPattern(svc, parentRow, opts.fallbackFrequency);
+  const pattern = converterFollowUpSeedingPattern(svc, parentRow, opts.fallbackFrequency, opts.acceptedPlanFrequency);
   if (!pattern) return { pattern: null, insertedCount: 0, insertedRows: [] };
-  const visitsPerYear = visitsPerYearForRecurringService(svc);
+  const visitsPerYear = annualPrepayCoverageVisits(svc, pattern, opts.acceptedPlanFrequency);
   const serviceDurationMinutes = durationMinutesForRecurringService(svc, pattern, parentRow);
   const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(database, parentRow, {
     pattern,
@@ -3911,6 +4066,9 @@ async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, op
     skipWeekends: true,
     weekendShift: 'forward',
     durationMinutes: serviceDurationMinutes || parentRow?.estimated_duration_minutes || undefined,
+    // undefined = the seeder's parent-copy price (every caller but the
+    // multi-program reserved accept).
+    estimatedPrice: opts.estimatedPrice,
   });
   if (opts.registerReminders !== false) {
     await registerSeededFollowUpReminders(seedResult.insertedRows, parentRow.customer_id);
@@ -4911,7 +5069,7 @@ const EstimateConverter = {
               if (key === 'pest_control' && prePassRetiredPestPair) {
                 const svcName = svc.name || svc.serviceName || svc.service_name || 'Pest Control';
                 const pestPattern = converterFollowUpSeedingPattern(
-                  svc, { service_type: svcName }, inferredFrequencyKey,
+                  svc, { service_type: svcName }, inferredFrequencyKey, acceptedPlanFrequency,
                 );
                 if (pestPattern) {
                   await addUnit(svcName, PEST_CADENCE_CATALOG_KEYS[pestPattern] || null);
@@ -4930,7 +5088,7 @@ const EstimateConverter = {
               if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito') {
                 const svcName = svc.name || svc.serviceName || svc.service_name || 'Mosquito';
                 const mosquitoPattern = converterFollowUpSeedingPattern(
-                  svc, { service_type: svcName }, inferredFrequencyKey,
+                  svc, { service_type: svcName }, inferredFrequencyKey, acceptedPlanFrequency,
                 );
                 if (mosquitoPattern) {
                   await addUnit(
@@ -4961,7 +5119,7 @@ const EstimateConverter = {
                 const svcName = svc.name || svc.serviceName || svc.service_name
                   || (fam === 'lawn_care' ? 'Lawn Care' : fam === 'tree_shrub' ? 'Tree & Shrub' : 'Palm Injection');
                 const pattern = converterFollowUpSeedingPattern(
-                  svc, { service_type: svcName }, inferredFrequencyKey,
+                  svc, { service_type: svcName }, inferredFrequencyKey, acceptedPlanFrequency,
                 );
                 if (pattern) {
                   await addUnit(
@@ -4977,7 +5135,7 @@ const EstimateConverter = {
             for (const combo of combos) await addUnit(combo.route.name, combo.route.catalogServiceKey);
             for (const unit of standalone) await addUnit(unit.service.name, unit.catalogServiceKey);
             for (const svc of remaining) {
-              await addUnit(svc.name || svc.serviceName || svc.service_name || 'Service', remainingUnitCatalogKey(svc));
+              await addUnit(svc.name || svc.serviceName || svc.service_name || 'Service', remainingUnitCatalogKey(svc, acceptedPlanFrequency));
             }
           }
           if (lockUnits.length > 1) {
@@ -5018,6 +5176,10 @@ const EstimateConverter = {
       // the rewritten row span two lines. Aligning multi-service reserved
       // accepts with the auto-schedule path is a separate owner decision.
       let reservedSeedSvc = null;
+      // Per-line per-visit amounts for a multi-program reserved accept
+      // (reservedAcceptPerVisitSplit) — computed beside the promotions, read
+      // by both seeding calls. null = keep the seeder's parent-copy price.
+      let reservedPerVisitSplit = null;
       // Hoisted so the seed binding below the promotion try can read the
       // same authoritative identities (audit P0).
       let reservedServiceKeyById = new Map();
@@ -5072,6 +5234,9 @@ const EstimateConverter = {
               // billing-rider completion profile); bait resolves the station
               // service.
               catalogServiceKey: isBond ? (line.service || null) : 'termite_bait',
+              // The scheduling shape above is name/cadence only; the split
+              // below prices from the accepted LINE (codex #3938 r1 P1).
+              pricingLine: line,
             };
           });
         // Mosquito promotion (codex r16 P1): a recurring mosquito line beside
@@ -5087,11 +5252,11 @@ const EstimateConverter = {
           .filter((line) => {
             if (RecurringAppointmentSeeder.serviceKeyFor(line) !== 'mosquito') return false;
             const lineName = line.name || line.serviceName || line.service_name || 'Mosquito';
-            return !!converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey);
+            return !!converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey, acceptedPlanFrequency);
           })
           .map((line) => {
             const lineName = line.name || line.serviceName || line.service_name || 'Mosquito';
-            const seasonal = converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey)
+            const seasonal = converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey, acceptedPlanFrequency)
               === RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
             return {
               // Normalized name ON the unit (codex r17 P1): the insert below
@@ -5189,6 +5354,9 @@ const EstimateConverter = {
             service: combo.service,
             catalogServiceKey: combo.route.catalogServiceKey,
             noteKind: 'combined program',
+            // The synthetic combined line has no money fields; the split
+            // prices the two accepted lines it performs.
+            pricingLines: combo.combinedFrom,
           }));
         // Pest promotes ONLY under GATE_SEPARATE_COMBO_VISITS and only in
         // the retired pest+bait pair shape (a standalone bait unit exists):
@@ -5203,13 +5371,13 @@ const EstimateConverter = {
           .filter((line) => {
             if (String(recurringServiceKey(line) || '') !== 'pest_control') return false;
             const lineName = line.name || line.serviceName || line.service_name || 'Pest Control';
-            return !!converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey);
+            return !!converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey, acceptedPlanFrequency);
           })
           .map((line) => {
             const lineName = line.name || line.serviceName || line.service_name || 'Pest Control';
-            const pattern = converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey);
+            const pattern = converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey, acceptedPlanFrequency);
             return {
-              service: { ...line, name: lineName, frequency: line.frequency || pattern },
+              service: { ...line, name: lineName, frequency: pattern },
               catalogServiceKey: PEST_CADENCE_CATALOG_KEYS[pattern] || null,
               noteKind: 'pest program',
             };
@@ -5245,13 +5413,13 @@ const EstimateConverter = {
             }
             const lineName = line.name || line.serviceName || line.service_name
               || (fam === 'lawn_care' ? 'Lawn Care' : fam === 'tree_shrub' ? 'Tree & Shrub' : 'Palm Injection');
-            return !!converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey);
+            return !!converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey, acceptedPlanFrequency);
           })
           .map((line) => {
             const fam = seedingFamilyKey(line);
             const lineName = line.name || line.serviceName || line.service_name
               || (fam === 'lawn_care' ? 'Lawn Care' : fam === 'tree_shrub' ? 'Tree & Shrub' : 'Palm Injection');
-            const pattern = converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey);
+            const pattern = converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey, acceptedPlanFrequency);
             return {
               // Normalized name ON the unit (same rule as the mosquito
               // promotion): the insert below reads only unit.service.name.
@@ -5269,8 +5437,7 @@ const EstimateConverter = {
                 : fam === 'tree_shrub' ? 'tree & shrub program' : 'lawn program',
             };
           });
-        for (const unit of [...(reservedStandalone || []), ...promotedComboUnits, ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits, ...promotedRetiredPestUnits]) {
-          if (!reservedStart?.scheduled_date) break;
+        const unitAlreadyReserved = (unit) => {
           // A reserved row already covering this program means nothing to
           // add — matched by LABEL or by CATALOG IDENTITY (id-resolved key
           // or snapshot), codex r20 P1.
@@ -5283,7 +5450,7 @@ const EstimateConverter = {
           // match by CATALOG IDENTITY only; every other family keeps
           // label-or-identity.
           const unitIsPalmInjection = unit.catalogServiceKey === 'palm_injection_semiannual';
-          const alreadyReserved = reservedRows.some((row) => {
+          return reservedRows.some((row) => {
             // POST-rewrite identity under the gate: a row the rider route
             // is about to rewrite covers what it will BECOME (audit P0).
             const reservedKey = (process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
@@ -5347,7 +5514,60 @@ const EstimateConverter = {
             }
             return identityMatch || recurringServiceKey({ name: row.service_type }) === unitKey;
           });
-          if (alreadyReserved) continue;
+        };
+        const promotedUnits = [...(reservedStandalone || []), ...promotedComboUnits, ...promotedTermiteUnits, ...promotedMosquitoUnits, ...promotedLawnPalmUnits, ...promotedRetiredPestUnits];
+        // One reserved row with a stamped price: it stands for exactly one
+        // accepted line — or, when the combined route is about to rewrite it,
+        // for the pair it will perform (codex #3938 r2 P1) — and its price is
+        // the route's same-day total. Split it back into per-line per-visit
+        // amounts for the CHILDREN of every series seeded below.
+        const reservedRewrite = reservedStart
+          ? comboRewritePairs.find(({ row }) => row.id === reservedStart.id) || null
+          : null;
+        if (reservedStart && reservedRows.length === 1
+          && comboRewritePairs.length === (reservedRewrite ? 1 : 0)
+          && Number(reservedStart.estimated_price) > 0 && promotedUnits.length) {
+          const reservedLinesForSplit = reservedRewrite
+            ? (reservedRewrite.combo.combinedFrom || [])
+            : [recurringServiceForScheduledRow(
+              recurringServicesForConversion,
+              reservedStart,
+              process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+                ? seedFamilyForReservedIdentity(
+                  reservedServiceKeyById.get(reservedStart.service_id)
+                    || String(reservedStart.service_key_snapshot || '') || null,
+                )
+                : null,
+            )].filter(Boolean);
+          // The units that will insert below — the same verdict the loop
+          // takes, so a promotion the reserved row already covers never
+          // counts as a second line (codex #3938 r1 P1: a family heuristic
+          // dropped the recurring palm program beside a reserved ONE-TIME
+          // palm row). With a one-time palm item sold, a palm-family
+          // reserved row may be THAT item's visit (the binding below
+          // decides) — no split then.
+          const splitUnits = (reservedLinesForSplit.length
+            && !(estimateHasOneTimePalmItem
+              && reservedLinesForSplit.some((line) => isPalmInjectionFamily(line, reservedStart))))
+            ? promotedUnits.filter((unit) => !unitAlreadyReserved(unit))
+            : [];
+          const split = reservedAcceptPerVisitSplit({
+            reservedPrice: reservedStart.estimated_price,
+            reservedService: reservedLinesForSplit,
+            promotedServices: splitUnits.map((unit) => unit.pricingLines || unit.pricingLine || unit.service),
+            acceptedPlanFrequency,
+            rowAmounts: Array.isArray(opts.firstApplicationRowAmounts) ? opts.firstApplicationRowAmounts : null,
+          });
+          if (split) {
+            reservedPerVisitSplit = {
+              reserved: split.reserved,
+              byUnit: new Map(splitUnits.map((unit, index) => [unit, split.promoted[index]])),
+            };
+          }
+        }
+        for (const unit of promotedUnits) {
+          if (!reservedStart?.scheduled_date) break;
+          if (unitAlreadyReserved(unit)) continue;
           try {
             // Copy the customer's picked slot onto the added row (Codex r2):
             // same trip, same window, same tech/zone — otherwise dispatch
@@ -5383,9 +5603,12 @@ const EstimateConverter = {
             try {
               const catalogRow = await database('services')
                 .where({ service_key: unit.catalogServiceKey })
-                .first('id', 'default_duration_minutes');
+                .first('id', 'name', 'default_duration_minutes');
               if (catalogRow) {
                 standaloneRow.service_id = catalogRow.id;
+                standaloneRow.service_type = Object.values(PEST_CADENCE_CATALOG_KEYS).includes(unit.catalogServiceKey)
+                  ? (catalogRow.name || standaloneRow.service_type) : standaloneRow.service_type;
+                unit.service.name = standaloneRow.service_type;
                 if (catalogRow.default_duration_minutes && !identityOnlyCatalogKey(unit.catalogServiceKey)) {
                   standaloneRow.estimated_duration_minutes = catalogRow.default_duration_minutes;
                 }
@@ -5442,6 +5665,19 @@ const EstimateConverter = {
               });
               if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
               if (matches.length > 0) return { kept: matches[0] };
+              // The same-trip parent inherits the reserved start's technician. If
+              // that tech can no longer take work (offboarded / office-only since
+              // the reserve), insert it unassigned; FOR SHARE on this trx so the
+              // change cannot commit underneath. Insert line below is frozen by
+              // the booking insert-site contract and stays untouched.
+              if (standaloneRow.technician_id) {
+                const parentTech = await trx('technicians').where({ id: standaloneRow.technician_id }).forShare()
+                  .first('id', 'employment_status', 'field_dispatchable');
+                if (!isAssignable(parentTech)) {
+                  logger.warn(`[estimate-converter] technician ${standaloneRow.technician_id} is not assignable; inserting standalone parent unassigned`);
+                  delete standaloneRow.technician_id;
+                }
+              }
               const inserted = await trx('scheduled_services').insert(standaloneRow).returning('*');
               // Visit groups (visit-group-scope.md §2): a same-trip row and
               // the reserved start share one physical stop — stamp them at
@@ -5456,6 +5692,20 @@ const EstimateConverter = {
               const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
                 ? inserted[0]
                 : { ...standaloneRow, id: Array.isArray(inserted) ? inserted[0] : inserted };
+              // Tech-facing "new visit" card (tech-visit-notifications.js,
+              // codex r9 P1): this promoted same-trip parent inherits the
+              // reserved start's technician and is inserted directly — no
+              // assignment write follows, and the reserved row's own
+              // graduation card names only itself. Rides `trx` so it waits
+              // for the enclosing commit; gate-dark, never awaited. Its
+              // seeded children stay silent (series fan-out, by design).
+              if (parentRow.technician_id) {
+                void require('./tech-visit-notifications').notifyTechVisitChange({
+                  visitId: parentRow.id, kind: 'assigned', technicianId: parentRow.technician_id, actorId: 'customer_estimate_accept',
+                  snapshot: { date: parentRow.scheduled_date, windowStart: parentRow.window_start || null, windowEnd: parentRow.window_end || null },
+                  trx,
+                });
+              }
               // Held-slot acceptance is a booking too (Codex #3178 r3 P1)
               // — the auto-schedule path below is not the only way an
               // accepted estimate becomes an appointment.
@@ -5470,7 +5720,12 @@ const EstimateConverter = {
               try {
                 seedResult = await seedRecurringFollowUpsForParent(trx, parentRow, unit.service, {
                   fallbackFrequency: unit.service.frequency,
+                  acceptedPlanFrequency,
                   registerReminders: registerSeededRowsInline,
+                  // The promoted parent is deliberately unpriced (the reserved
+                  // row's first-application invoice covers the shared trip);
+                  // its follow-ups bill this line's own per-visit amount.
+                  estimatedPrice: reservedPerVisitSplit?.byUnit.get(unit),
                 });
               } catch (seedErr) {
                 logger.error(`[estimate-converter] standalone bait follow-up seeding failed for estimate ${estimateId}: ${seedErr.message}`);
@@ -5623,7 +5878,7 @@ const EstimateConverter = {
           }
         }
         const reservedSeedingPattern = converterFollowUpSeedingPattern(
-          reservedGuardSvc || {}, reservedStart, inferredFrequencyKey,
+          reservedGuardSvc || {}, reservedStart, inferredFrequencyKey, acceptedPlanFrequency,
         );
         if (reservedSeedingPattern === RecurringAppointmentSeeder.SEASONAL_FEB_OCT) {
           const reservedMonth = Number(String(scheduledDateOnly(reservedStart.scheduled_date) || '').slice(5, 7));
@@ -5691,7 +5946,9 @@ const EstimateConverter = {
                   ? ((reservedSeedingPattern === 'semiannual' && isPalmInjectionFamily(seedSvc || {}, reservedStart)) ? 'palm_injection_semiannual' : null)
                   : reservedFam === 'lawn_care'
                     ? (LAWN_CADENCE_CATALOG_KEYS[reservedSeedingPattern] || null)
-                    : null;
+                    : reservedFam === 'pest_control'
+                      ? (PEST_CADENCE_CATALOG_KEYS[reservedSeedingPattern] || null)
+                      : null;
                 if (reservedCatalogKey) {
                   try {
                     const catalogRow = await trx('services')
@@ -5743,7 +6000,11 @@ const EstimateConverter = {
               if (matches.length > 0) return { kept: matches[0] };
               const seedResult = await seedRecurringFollowUpsForParent(trx, reservedStart, seedSvc, {
                 fallbackFrequency: inferredFrequencyKey,
+                acceptedPlanFrequency,
                 registerReminders: registerSeededRowsInline,
+                // The reserved row keeps the same-day total it was accepted
+                // and invoiced at; its follow-ups bill only this line.
+                estimatedPrice: reservedPerVisitSplit?.reserved,
               });
               return { seedResult };
             });
@@ -5802,11 +6063,12 @@ const EstimateConverter = {
       const scheduleUnits = [
         ...combos.map((combo) => ({ svc: combo.service, combo, catalogServiceKey: combo.route.catalogServiceKey })),
         ...standalone.map((unit) => ({ svc: unit.service, catalogServiceKey: unit.catalogServiceKey })),
-        ...remaining.map((svc) => ({ svc, catalogServiceKey: remainingUnitCatalogKey(svc) })),
+        ...remaining.map((svc) => ({ svc, catalogServiceKey: remainingUnitCatalogKey(svc, acceptedPlanFrequency) })),
       ];
       for (const unit of scheduleUnits) {
         const svc = unit.svc;
         let combinedServiceId = null;
+        let acceptedPestServiceName = null;
         if (unit.catalogServiceKey) {
           // service_id makes profile resolution sturdy against later
           // renames; name-based resolution still works without it, so a
@@ -5824,9 +6086,12 @@ const EstimateConverter = {
             // kill switches, and the booking/picker catalog filters.
             const catalogRow = await database('services')
               .where({ service_key: unit.catalogServiceKey })
-              .first('id', 'default_duration_minutes');
+              .first('id', 'name', 'default_duration_minutes');
             if (catalogRow) {
               combinedServiceId = catalogRow.id;
+              if (Object.values(PEST_CADENCE_CATALOG_KEYS).includes(unit.catalogServiceKey)) {
+                acceptedPestServiceName = catalogRow.name;
+              }
               if (catalogRow.default_duration_minutes && !identityOnlyCatalogKey(unit.catalogServiceKey)) {
                 svc.estimatedDurationMinutes = catalogRow.default_duration_minutes;
               }
@@ -5854,7 +6119,7 @@ const EstimateConverter = {
             throw palmCatalogMissingError();
           }
         }
-        const serviceName = svc.name || svc.serviceName || svc.service_name || 'Service';
+        const serviceName = acceptedPestServiceName || svc.name || svc.serviceName || svc.service_name || 'Service';
         // A palm unit with recurring EVIDENCE that did NOT resolve the
         // semiannual catalog identity (contradictory/conflicting/invalid
         // data declines seeding by design, leaving catalogServiceKey null)
@@ -5882,7 +6147,7 @@ const EstimateConverter = {
         // service_type, which is exactly what seedRecurringFollowUpsForParent
         // sees after the insert below.
         const seedingPattern = converterFollowUpSeedingPattern(
-          svc, { service_type: serviceName }, inferredFrequencyKey,
+          svc, { service_type: serviceName }, inferredFrequencyKey, acceptedPlanFrequency,
         );
         const seasonalUnit = seedingPattern === RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
         // Row notes are customer-visible — say "seasonal (Feb–Oct)", not the
@@ -6002,6 +6267,7 @@ const EstimateConverter = {
             try {
               seedResult = await seedRecurringFollowUpsForParent(trx, parentRow, svc, {
                 fallbackFrequency: inferredFrequencyKey,
+                acceptedPlanFrequency,
                 registerReminders: registerSeededRowsInline,
               });
             } catch (seedErr) {
@@ -6322,7 +6588,7 @@ const EstimateConverter = {
             // path supplied explicit coverage values — the ordinary
             // acceptance path rejects the same line.
             const overrideValidation = annualPrepayCoverageCadence(
-              recurringServicesForConversion[0], inferredFrequencyKey,
+              recurringServicesForConversion[0], inferredFrequencyKey, acceptedPlanFrequency,
             );
             if (overrideValidation === PREPAY_COVERAGE_INVALID) {
               recurringPrepayCoverageInvalid = true;
@@ -6334,7 +6600,7 @@ const EstimateConverter = {
           } else if (recurringServicesForConversion.length === 1) {
             const coverageSvc = recurringServicesForConversion[0];
             const svcType = coverageSvc.name || coverageSvc.serviceName || coverageSvc.service_name || null;
-            const cadence = annualPrepayCoverageCadence(coverageSvc, inferredFrequencyKey);
+            const cadence = annualPrepayCoverageCadence(coverageSvc, inferredFrequencyKey, acceptedPlanFrequency);
             if (cadence === RecurringAppointmentSeeder.SEASONAL_FEB_OCT) {
               // seasonal_feb_oct is UNSUPPORTED as a prepay coverage cadence
               // (see prepayCoverageCadenceForPattern): the coverage seeder fills
@@ -7159,6 +7425,7 @@ async function buildSeriesAddressScope(database, estimate, customerId) {
 }
 
 module.exports = EstimateConverter;
+module.exports.reservedAcceptPerVisitSplit = reservedAcceptPerVisitSplit;
 module.exports.buildSeriesAddressScope = buildSeriesAddressScope;
 module.exports.visitCountAliasValues = visitCountAliasValues;
 module.exports.visitCountFieldsConflict = visitCountFieldsConflict;

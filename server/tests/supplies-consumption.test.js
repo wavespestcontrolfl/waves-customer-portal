@@ -20,18 +20,24 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
 
-const { consumeCompletionSupplies, appliesToLine } = require('../services/supplies-consumption');
+const { consumeCompletionSupplies, settleOwedCompletionSupplies, completionSuppliesOwed, appliesToLine } = require('../services/supplies-consumption');
 const { notifyAdmin } = require('../services/notification-service');
 
-function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged = false }) {
+function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged = false, handedOff = false, settledAfterBell = false, openLookupBell = false }) {
   const updates = [];
   const inserts = [];
   const trx = (table) => {
     const q = {};
     q.where = () => q;
-    q.whereRaw = () => q;
+    q._sql = '';
+    q.whereRaw = (sql) => { q._sql += sql; return q; };
     q.forUpdate = () => q;
-    q.first = async () => (table === 'product_inventory_movements' ? (techLogged ? { id: 'mv-tech' } : null) : products[0]);
+    q.first = async () => {
+      if (table === 'product_inventory_movements') return techLogged ? { id: 'mv-tech' } : null;
+      // handedOff 'auto' = the only matching bell is one this module retired itself (metadata.autoRetired): the settled read's predicate excludes it.
+      if (table === 'notifications') return handedOff === 'auto' ? (q._sql.includes('autoRetired') ? null : { id: 'bell-auto' }) : handedOff ? { id: 'bell-1' } : null;
+      return products[0];
+    };
     q.update = async (row) => { updates.push({ table, row }); return 1; };
     q.whereNull = () => q;
     q.insert = (row) => ({
@@ -50,9 +56,14 @@ function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged
   trx.raw = (s) => s;
   const db = (table) => {
     const q = {};
-    for (const m of ['whereNotNull', 'where', 'whereRaw', 'whereNull']) q[m] = () => q;
+    for (const m of ['whereNotNull', 'where', 'whereNull']) q[m] = () => q;
+    q.whereRaw = (sql, bindings) => { if (table === 'notifications' && bindings) q._key = bindings[0]; return q; };
     q.select = async () => products;
-    q.update = async (row) => { updates.push({ table, row }); return 1; };
+    q.update = async (row) => { updates.push({ table, row, ...(q._key ? { key: q._key } : {}) }); return 1; };
+    q.first = async () => {
+      if (table === 'notifications') return openLookupBell && q._key === 'supplies-consumption-failed:lookup:svc-1' ? { id: 'bell-lookup' } : null; // retireLookupBellIfSettled's open-bell probe
+      return table === 'product_inventory_movements' && (settledAfterBell || openLookupBell) ? { id: 'mv-race' } : null; // the post-bell settled re-check / lookupSettled
+    };
     return q;
   };
   db.transaction = async (fn) => fn(trx);
@@ -123,6 +134,58 @@ test('an internal-only completion profile (Waves Assessment) consumes nothing ev
   expect(inserts).toHaveLength(0);
 });
 
+const notice = { ...sign, id: 'prod-notice', name: 'Termite protection notice', per_completion_service_lines: '["termite"]', inventory_on_hand: '10' };
+
+test('a WDO inspection project consumes the termite-scoped notice (owner ruling 2026-09-06)', async () => {
+  const { db, inserts } = fakeDb({ products: [notice] });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceType: 'WDO Inspection', serviceLine: 'termite', projectType: 'wdo_inspection' });
+  expect(res.skipped).toEqual([]);
+  expect(res.consumed).toEqual([{ productId: 'prod-notice', name: 'Termite protection notice', usage: 1, unit: 'each', before: 10, after: 9, costUsed: null }]);
+  expect(inserts).toHaveLength(1);
+});
+
+test('a WDO inspection project still leaves the pest-scoped yard sign alone', async () => {
+  const { db, inserts } = fakeDb({ products: [{ ...sign, per_completion_service_lines: '["pest"]' }] });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceType: 'WDO Inspection', serviceLine: 'termite', projectType: 'wdo_inspection' });
+  expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'service_line_excluded' }]);
+  expect(inserts).toHaveLength(0);
+});
+
+test('a visual Termite Inspection Service on the normal path posts no notice — the exception is the WDO project, not the termite line (codex #3996 P2)', async () => {
+  const { db, inserts } = fakeDb({ products: [notice] });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceType: 'Termite Inspection Service', serviceLine: 'termite' });
+  expect(res.skipped).toEqual([{ reason: 'inspection_service' }]);
+  expect(inserts).toHaveLength(0);
+});
+
+// ---- owed-marker lifecycle shared by the recap route and the project close
+test('completionSuppliesOwed reads the marker off jsonb or text flags and fails closed on garbage', () => {
+  expect(completionSuppliesOwed({ field_flags: { completion_supplies_owed: true } })).toBe(true);
+  expect(completionSuppliesOwed({ field_flags: '{"completion_supplies_owed":true}' })).toBe(true);
+  expect(completionSuppliesOwed({ field_flags: { completion_supplies_owed: 'true' } })).toBe(false);
+  expect(completionSuppliesOwed({ field_flags: null })).toBe(false);
+  expect(completionSuppliesOwed({ field_flags: '{not json' })).toBe(false);
+  expect(completionSuppliesOwed(null)).toBe(false);
+});
+
+test('settleOwedCompletionSupplies consumes, then clears the owed marker on the record', async () => {
+  const { db, updates, inserts } = fakeDb({ products: [sign] });
+  const res = await settleOwedCompletionSupplies(db, { ...args, serviceType: 'Quarterly Pest Control', serviceLine: 'pest' });
+  expect(res.consumed).toHaveLength(1);
+  expect(inserts).toHaveLength(1);
+  const clear = updates.filter((u) => u.table === 'service_records');
+  expect(clear).toHaveLength(1);
+  expect(String(clear[0].row.field_flags)).toContain("- 'completion_supplies_owed'");
+});
+
+test('settleOwedCompletionSupplies keeps the marker when the hand-off bell was lost', async () => {
+  notifyAdmin.mockResolvedValueOnce(null); // the bell could not persist
+  const { db, updates } = fakeDb({ products: [sign], throwOnInsert: true });
+  const res = await settleOwedCompletionSupplies(db, { ...args, serviceType: 'Quarterly Pest Control', serviceLine: 'pest' });
+  expect(res.errors.some((e) => e.reason === 'failure_bell_not_sent')).toBe(true);
+  expect(updates.filter((u) => u.table === 'service_records')).toHaveLength(0);
+});
+
 test('a treatment service type is not an inspection', async () => {
   const { db, inserts } = fakeDb({ products: [sign] });
   await consumeCompletionSupplies(db, { ...args, serviceType: 'Quarterly Pest Control' });
@@ -157,6 +220,26 @@ test('movement carries unit_cost / cost_used from cost_per_unit in the inventory
   expect(mismatch.inserts[0]).toMatchObject({ unit_cost: null, cost_used: null });
 });
 
+test('a product whose hand-off bell landed on an earlier attempt is NOT deducted on the retry — the office adjusts it by hand; no movement, no decrement, bell left alone (Codex r17 P1)', async () => {
+  const { db, updates, inserts } = fakeDb({ products: [sign], handedOff: true });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.consumed).toHaveLength(0);
+  expect(res.skipped).toEqual([{ productId: 'prod-sign', reason: 'handed_off' }]);
+  expect(inserts).toHaveLength(0);
+  expect(updates).toHaveLength(0);
+});
+
+test('a failure bell that lands after a concurrent retry already deducted the kit is retired right away (Codex r18 P1)', async () => {
+  notifyAdmin.mockClear();
+  const { db, updates } = fakeDb({ products: [sign], throwOnInsert: true, settledAfterBell: true });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.errors).toEqual([{ productId: 'prod-sign', message: 'insert boom' }]);
+  expect(notifyAdmin).toHaveBeenCalledTimes(1);
+  const retired = updates.filter((u) => u.table === 'notifications');
+  expect(retired).toHaveLength(1);
+  expect(retired[0].row.read_at).toBeInstanceOf(Date);
+});
+
 test('duplicate (index ignored the insert) → no decrement', async () => {
   const { db, updates } = fakeDb({ products: [sign], duplicate: true });
   const res = await consumeCompletionSupplies(db, args);
@@ -170,6 +253,10 @@ describe('service-line scope', () => {
 
   test('appliesToLine: null = every line; jsonb string or array both parse; unknown line excluded', () => {
     expect(appliesToLine(null, 'termite')).toBe(true);
+    // Malformed scope fails CLOSED, never widens to every line.
+    expect(appliesToLine('{not json', 'pest')).toBe(false);
+    expect(appliesToLine('"pest"', 'pest')).toBe(false);
+    expect(appliesToLine({ pest: true }, 'pest')).toBe(false);
     expect(appliesToLine(['pest'], 'pest')).toBe(true);
     expect(appliesToLine(JSON.stringify(['pest']), 'pest')).toBe(true);
     expect(appliesToLine(['pest'], 'termite')).toBe(false);
@@ -180,12 +267,15 @@ describe('service-line scope', () => {
     expect(appliesToLine({ pest: true }, 'pest')).toBe(false);
   });
 
-  test('a product whose scope is malformed is skipped with a recorded error, no movement', async () => {
+  test('a product whose scope is malformed is skipped with a recorded error, no movement — and handed to staff by the per-product bell (Codex #3832 hook P1)', async () => {
+    notifyAdmin.mockClear();
     const { db, inserts } = fakeDb({ products: [{ ...sign, per_completion_service_lines: 'not json' }] });
     const res = await consumeCompletionSupplies(db, { ...args, serviceLine: 'pest' });
     expect(res.errors).toEqual([{ productId: 'prod-sign', reason: 'invalid_service_lines' }]);
     expect(res.consumed).toHaveLength(0);
     expect(inserts).toHaveLength(0);
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin.mock.calls[0][3].dedupeKey).toBe('supplies-consumption-failed:prod-sign:svc-1');
   });
 
   test('a pest visit consumes the kit item', async () => {
@@ -249,7 +339,10 @@ test('notifyAdmin resolving null (its own persistence failure) counts as a lost 
 
 test('a failed consumables lookup rings ONE visit-scoped deduped bell (Codex r14 P2)', async () => {
   notifyAdmin.mockClear();
-  const db = () => { throw new Error('relation lost'); };
+  const db = (table) => {
+    if (table === 'products_catalog') throw new Error('relation lost');
+    const q = {}; for (const m of ['where', 'whereRaw', 'whereNull']) q[m] = () => q; q.first = async () => null; q.update = async () => 1; return q; // the post-bell settled re-check finds nothing
+  };
   db.transaction = async () => { throw new Error('unreachable'); };
   const res = await consumeCompletionSupplies(db, args);
   expect(res.errors).toEqual([{ reason: 'lookup_failed', message: 'relation lost' }]);
@@ -257,12 +350,102 @@ test('a failed consumables lookup rings ONE visit-scoped deduped bell (Codex r14
   expect(notifyAdmin.mock.calls[0][3].dedupeKey).toBe('supplies-consumption-failed:lookup:svc-1');
 });
 
-test('a successful deduction retires the failure bells an earlier attempt rang for this product + visit (Codex r15 P2)', async () => {
+// The lookup-failure bell's post-bell re-check re-runs the lookup: the bell is
+// retired only when EVERY kit product that applies to the line has a usage
+// movement; a lookup that fails again, or one product still owed, keeps the
+// bell and the owed marker (Codex r24 P1 → r27 P1).
+function lookupBellDb({ retryProducts, movements }) {
+  const updates = [];
+  let lookups = 0;
+  const db = (table) => {
+    if (table === 'products_catalog') {
+      lookups += 1;
+      if (lookups === 1 || retryProducts === null) throw new Error('relation lost');
+      const q = {}; for (const m of ['where', 'whereNotNull']) q[m] = () => q; q.select = async () => retryProducts; return q;
+    }
+    const q = {}; let productId = null;
+    q.where = (w) => { if (w && w.product_id) productId = w.product_id; return q; };
+    for (const m of ['whereRaw', 'whereNull']) q[m] = () => q;
+    q.first = async () => (table === 'product_inventory_movements' && movements.includes(productId) ? { id: `mv-${productId}` } : null);
+    q.update = async (row) => { updates.push({ table, row }); return 1; };
+    return q;
+  };
+  db.raw = (sql) => sql;
+  return { db, updates };
+}
+const card = { id: 'prod-card', name: 'Door card', per_completion_usage: '1', per_completion_service_lines: null };
+const lawnOnly = { id: 'prod-lawn', name: 'Lawn flag', per_completion_usage: '1', per_completion_service_lines: '["lawn"]' };
+
+test('a lookup bell is retired when the re-run lookup shows EVERY applicable kit product already deducted by the concurrent retry (Codex r24 P1)', async () => {
+  notifyAdmin.mockClear();
+  const { db, updates } = lookupBellDb({ retryProducts: [sign, card, lawnOnly], movements: ['prod-sign', 'prod-card'] });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceLine: 'pest' }); // lawnOnly does not apply to a pest visit
+  expect(res.errors).toEqual([{ reason: 'lookup_failed', message: 'relation lost' }]);
+  expect(notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(updates).toEqual([{ table: 'notifications', row: expect.objectContaining({ read_at: expect.any(Date) }) }]);
+});
+
+test('a lookup bell STAYS when one applicable kit product has no movement yet — one movement is not visit-wide settlement (Codex r27 P1)', async () => {
+  notifyAdmin.mockClear();
+  const { db, updates } = lookupBellDb({ retryProducts: [sign, card], movements: ['prod-sign'] });
+  const res = await consumeCompletionSupplies(db, { ...args, serviceLine: 'pest' });
+  expect(res.errors).toEqual([{ reason: 'lookup_failed', message: 'relation lost' }]);
+  expect(notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(updates).toEqual([]);
+});
+
+test('a lookup bell STAYS when the re-run lookup fails again, whatever movements exist (Codex r27 P1)', async () => {
+  notifyAdmin.mockClear();
+  const { db, updates } = lookupBellDb({ retryProducts: null, movements: ['prod-sign'] });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.errors).toEqual([{ reason: 'lookup_failed', message: 'relation lost' }]);
+  expect(updates).toEqual([]);
+});
+
+test('a successful deduction retires the failure bell an earlier attempt rang for this product + visit — and ONLY that one: the visit-wide lookup bell stays until every kit product is proven settled (Codex r15 P2, hook r27 P1)', async () => {
   const { db, updates } = fakeDb({ products: [sign] });
   await consumeCompletionSupplies(db, args);
   const retired = updates.filter((u) => u.table === 'notifications');
   expect(retired).toHaveLength(1);
+  expect(retired[0].key).toBe('supplies-consumption-failed:prod-sign:svc-1'); // never the lookup key from a product clear
   expect(retired[0].row.read_at).toBeInstanceOf(Date);
+  expect(String(retired[0].row.metadata)).toContain('autoRetired'); // stamped so it never reads as a staff hand-off (Codex r26 P1)
+});
+
+test('a deduction whose obsolete bell could NOT be retired reports bell_retire_failed so the owed marker stays for the next retry (Codex r30 P1)', async () => {
+  const { db } = fakeDb({ products: [sign] });
+  const inner = db;
+  const failing = (table) => { const q = inner(table); if (table === 'notifications') q.update = async () => { throw new Error('notifications lost connection'); }; return q; };
+  failing.transaction = db.transaction; failing.raw = db.raw;
+  const res = await consumeCompletionSupplies(failing, args);
+  expect(res.consumed).toHaveLength(1);
+  expect(res.errors).toEqual([{ productId: 'prod-sign', reason: 'bell_retire_failed', message: expect.any(String) }]);
+});
+
+test('an open lookup bell is retired at the end of a run only when every applicable kit product has a movement (hook r27 P1)', async () => {
+  const { db, updates } = fakeDb({ products: [sign], openLookupBell: true });
+  await consumeCompletionSupplies(db, args); // sign is deducted in this run → the one applicable product is settled
+  const keys = updates.filter((u) => u.table === 'notifications').map((u) => u.key);
+  expect(keys).toEqual(['supplies-consumption-failed:prod-sign:svc-1', 'supplies-consumption-failed:lookup:svc-1']);
+});
+
+test('an open lookup bell whose end-of-run re-check is INDETERMINATE (the catalog re-read fails) is a bell_retire_failed — the owed marker stays, the bell is not retired (Codex r31 P1)', async () => {
+  const { db, updates } = fakeDb({ products: [sign], openLookupBell: true });
+  let catalogReads = 0;
+  const flaky = (table) => { const q = db(table); if (table === 'products_catalog') { catalogReads += 1; if (catalogReads > 1) q.select = async () => { throw new Error('catalog lost connection'); }; } return q; };
+  flaky.transaction = db.transaction; flaky.raw = db.raw;
+  const res = await consumeCompletionSupplies(flaky, args);
+  expect(res.consumed).toHaveLength(1); // the main deduction landed
+  expect(res.errors).toEqual([{ reason: 'bell_retire_failed', message: expect.stringMatching(/could not be re-checked/) }]);
+  expect(updates.filter((u) => u.table === 'notifications').map((u) => u.key)).toEqual(['supplies-consumption-failed:prod-sign:svc-1']); // the product bell only; the lookup bell stands
+});
+
+test('a lookup bell this module auto-retired (a concurrent retry deducted the kit) does NOT hand off the next kit product — it is deducted (Codex r26 P1)', async () => {
+  const { db, inserts } = fakeDb({ products: [sign], handedOff: 'auto' });
+  const res = await consumeCompletionSupplies(db, args);
+  expect(res.skipped).toEqual([]);
+  expect(res.consumed).toHaveLength(1);
+  expect(inserts).toHaveLength(1);
 });
 
 test('an already_consumed retry (the movement exists) still retires the stale failure bells (Codex r17 P2)', async () => {
@@ -333,5 +516,41 @@ describeOrSkip('supplies auto-reorder schema (DB-backed)', () => {
       await knex('product_inventory_movements').where({ product_id: product.id }).del();
       await knex('products_catalog').where({ id: product.id }).del();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Recap hook source contract (routes/admin-dispatch.js is pinned by source in
+// the house style): a priorCompleted recap still consumes when it is a RETRY
+// of the completing recap — service record created inside the 15-minute
+// window — because submitRecap commits the status before the consumption
+// call (PR 2 pre-push P1). Edits of historical completions keep consuming
+// nothing.
+// ---------------------------------------------------------------------------
+describe('recap consumption hook — retry window (source contract)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+  const hook = src.slice(src.indexOf('async function recapSuppliesOwed('), src.indexOf("router.post('/:serviceId/pest-recap'"));
+  const route = src.slice(src.indexOf("router.post('/:serviceId/pest-recap'"), src.indexOf('router.post(', src.indexOf("router.post('/:serviceId/pest-recap'") + 10));
+
+  test('the retry signal is the durable completion_supplies_owed marker the recap transition wrote, read and cleared by the hook — never record age', () => {
+    const recapSrc = fs.readFileSync(path.join(__dirname, '../services/pest-recap.js'), 'utf8');
+    // update branch: the shared marker helper; insert branch: the literal inside the fresh field_flags object. Both gated on !recapPriorCompleted.
+    expect(recapSrc.match(/completion_supplies_owed: true/g)).toHaveLength(1);
+    expect(recapSrc).toMatch(/\.\.\.\(recapPriorCompleted \? \{\} : \{ field_flags: completionSuppliesOwedMarker\(trx\) \}\)/);
+    expect(hook).toMatch(/if \(result\.priorCompleted !== true\) return true;/);
+    expect(hook).toMatch(/completionSuppliesOwed\(await db\('service_records'\)\.where\(\{ id: result\.recordId \}\)\.first\('field_flags'\)\)/);
+    // A failed marker read is NOT owed (hook r27 P1): a historical completion edited today has no movement for the index to stop; the marker stays for the next recap.
+    expect(hook).toMatch(/settlement deferred, marker kept/);
+    expect(hook).not.toMatch(/consuming anyway:/); // the old warn-and-return-true branch
+    // Consume + clear-unless-bell-lost is the SHARED lifecycle (settleOwedCompletionSupplies, unit-tested above), not a route-local copy (GH codex #3996 r3 P1).
+    expect(hook).toMatch(/await settleOwedCompletionSupplies\(db, \{/);
+    expect(hook).toMatch(/serviceRecordId: result\.recordId \|\| null,/);
+    expect(hook).not.toMatch(/handoffLost|- 'completion_supplies_owed'/);
+    expect(hook).not.toMatch(/RECAP_RETRY_WINDOW_MS|created_at/);
+    expect(hook).toMatch(/if \(!\(await recapSuppliesOwed\(result\)\)\) return;/);
+    expect(route).toMatch(/await settleRecapSupplies\(req\.params\.serviceId, result\);/); // the recap route runs the settlement after submitRecap
+    expect(route).toMatch(/if \(!result\.ok\) return res\.status\(recapStatusForReason\(result\.reason\)\)/);
   });
 });

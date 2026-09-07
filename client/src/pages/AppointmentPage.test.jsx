@@ -147,12 +147,14 @@ describe('AppointmentPage upcoming visit', () => {
     await waitFor(() => {
       expect(screen.queryByRole('button', { name: 'Confirm this appointment' })).not.toBeInTheDocument();
     });
-    expect(screen.getByText('Confirmed')).toBeInTheDocument();
     const posted = fetchMock.mock.calls.find(([, o]) => o?.method === 'POST');
     expect(String(posted[0])).toContain('/confirm');
     // The POST carries the slot on screen so the server can refuse to
     // confirm a visit an office bulk reschedule moved underneath it.
     expect(JSON.parse(posted[1].body)).toEqual({ date: '2026-08-05', windowStart: '09:00', membershipKey: null });
+    // The tap has visible feedback — plain text, no chip (codex P1).
+    expect(await screen.findByRole('status')).toHaveTextContent("Confirmed. We'll see you then.");
+    expect(screen.queryByRole('button', { name: 'Confirm this appointment' })).not.toBeInTheDocument();
   });
 
   it('a grouped visit (no reschedule token) lists its services and offers the call/text path instead of a slot picker', async () => {
@@ -172,7 +174,7 @@ describe('AppointmentPage upcoming visit', () => {
 
     renderPage();
 
-    expect(await screen.findByText('Confirmed')).toBeInTheDocument();
+    await screen.findByText(/is booked/);
     expect(screen.queryByRole('button', { name: 'Confirm this appointment' })).not.toBeInTheDocument();
   });
 
@@ -234,14 +236,14 @@ describe('AppointmentPage non-upcoming states', () => {
     }
   });
 
-  it('a confirm answer of confirmed:false (a sibling stayed pending) does not flip the pill to Confirmed', async () => {
+  it('a confirm answer of confirmed:false (a sibling stayed pending) still retires the CTA without erroring', async () => {
     stubFetch({ post: jsonResponse({ success: true, confirmed: false }) });
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Confirm this appointment' }));
     await waitFor(() => {
       expect(screen.queryByRole('button', { name: 'Confirm this appointment' })).not.toBeInTheDocument();
     });
-    expect(screen.queryByText('Confirmed')).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('a past grouped visit gets the call/text guidance, never a "Pick a new time" link that /reschedule refuses', async () => {

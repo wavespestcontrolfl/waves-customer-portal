@@ -629,6 +629,15 @@ async function autopayLinkSendCheck(body, toLast10, { trustedCustomerId } = {}) 
 const ANY_SCHEME = { anyScheme: true };
 const IMMEDIATE_ONLY_LINK_KINDS = [
   {
+    // A project report page (WDO / specialty) shows the customer's name,
+    // address and findings, can flip to a 402 payment hold, and only /sms
+    // binds it to the recipient's account — same class as a service report.
+    label: 'Project report',
+    fragment: /\/report\/project\//i,
+    token: (run, host) => canonicalPortalToken(run, host, PROJECT_REPORT_PATH_RE, ANY_SCHEME),
+    applies: async () => true,
+  },
+  {
     label: 'Contract signing',
     fragment: /\/contract\//i,
     token: (run, host) => canonicalPortalToken(run, host, /^\/contract\/([A-Za-z0-9_-]{16,})$/i, ANY_SCHEME),
@@ -701,7 +710,7 @@ function shortRowDestination(row, hosts) {
   if (appointment) return { kind: 'appointment', token: appointment };
   const report = canonicalPortalToken(target, hosts, REPORT_TOKEN_RE, ANY_SCHEME);
   if (report) return { kind: 'service_report', token: report };
-  if (row.kind === 'appointment' || row.kind === 'service_report') return { kind: row.kind, token: null };
+  if (['appointment', 'service_report'].includes(row.kind)) return { kind: row.kind, token: null };
   return null;
 }
 // /l/:code answers 410 past expires_at (public-shortlinks) — the same
@@ -713,6 +722,15 @@ function expiredShortRow(row) {
 
 const APPOINTMENT_TOKEN_RE = /^\/appointment\/([A-Za-z0-9_-]{16,})$/i;
 const REPORT_TOKEN_RE = /^\/report\/([A-Za-z0-9_-]{16,})$/i;
+// /report/project/<vanity-slug>-<12-hex prefix> or /report/project/<32 hex>.
+// The whole segment is taken and project-report-links.js
+// extractProjectReportTokenLookup judges it — the viewer ignores the slug
+// and accepts any characters ahead of the -<12 hex> suffix, so a narrower
+// character class here would let a working vanity URL (`_` / `.` in the
+// slug) slip the immediate-only fence and the account binding (GH Codex
+// #3893 r5 P1). Judged before the service-report seam, which skips these runs.
+const PROJECT_REPORT_PATH_RE = /^\/report\/project\/([^/]+)$/i;
+const PROJECT_REPORT_RUN_RE = /\/report\/project\//i;
 
 // Appointment page links (GH Codex #3844 r2 P1): every /appointment route
 // 404s the moment GATE_APPOINTMENT_PAGE is off, and a queued message has no
@@ -873,6 +891,20 @@ function recipientAccountBinder({ toLast10, trustedCustomerId }) {
 // the send (GH Codex #3844 r3 P2).
 // Every verified prep page's customer + pest identity lands in `preps` so a
 // real send can write the tagger's dedupe marker (markPrepGuidesSent).
+function guideLabelForTemplateKey(templateKey) {
+  const { PREP_CONFIG } = require('./prep-guide-sender');
+  return Object.values(PREP_CONFIG).find((c) => c.emailTemplateKey === templateKey)?.label || null;
+}
+// The guide the composer's prep line names for this page token, or null
+// when the body carries no such line for it.
+function namedGuideForToken(body, token) {
+  const needle = `/prep/${String(token).toLowerCase()}`;
+  for (const m of String(body || '').matchAll(PREP_LINE_RE)) {
+    if (String(m[2]).toLowerCase().includes(needle)) return m[1].trim();
+  }
+  return null;
+}
+
 async function checkPrepLinks(ctx, preps) {
   const { PREP_CONFIG } = require('./prep-guide-sender');
   for (const run of linkRuns(ctx.runs, /\/prep\//i)) {
@@ -901,12 +933,29 @@ async function checkPrepLinks(ctx, preps) {
     }
     const bad = await ownedByRecipient(ctx, source.customerId, 'prep guide link');
     if (bad) return bad;
+    // The text must name the guide the page renders: the composer's line
+    // carries the label the insert saw, and the page's key can differ
+    // (a concurrent mint for another guide won the unkeyed visit; a fresh
+    // claim released and re-claimed by another guide keeps the same token).
+    // An operator-edited line that no longer matches the shape is not
+    // checked — nothing to compare (GH Codex #3856 r27 P0).
+    const named = namedGuideForToken(ctx.body, token);
+    const rendersLabel = guideLabelForTemplateKey(source.templateKey);
+    if (named && rendersLabel && named.toLowerCase() !== rendersLabel.toLowerCase()) {
+      return refuseSend(`This prep guide link names ${named} but the page now shows the ${rendersLabel} guide — remove the link and insert a fresh one.`);
+    }
     ctx.bearers += 1;
     // The marker is keyed by the tagger's pest type; a guide outside
     // PREP_CONFIG (a project prep page) has no replay guard to satisfy.
     const pestType = Object.keys(PREP_CONFIG).find((k) => PREP_CONFIG[k].emailTemplateKey === source.templateKey);
-    if (pestType && !preps.some((p) => p.customerId === source.customerId && p.pestType === pestType)) {
-      preps.push({ customerId: source.customerId, pestType });
+    // One entry per texted PAGE (visit): two links for different visits of
+    // the same customer + pest each need their delivery stamp, or the
+    // second visit's queued automation sends the guide again (pre-push
+    // Codex P1 on 899bacd69). The interaction marker dedupes per customer +
+    // pest in markPrepGuidesSent.
+    const target = { customerId: source.customerId, pestType, serviceId: serviceId || null, templateKey: source.templateKey };
+    if (pestType && !preps.some((p) => p.customerId === target.customerId && p.pestType === pestType && p.serviceId === target.serviceId)) {
+      preps.push(target);
     }
   }
   return null;
@@ -1001,7 +1050,8 @@ async function checkReportLinks(ctx, shortRows, onRecipientAccount) {
     if (!bad) ctx.bearers += 1;
     return bad;
   };
-  for (const run of linkRuns(ctx.runs, /\/report\//i)) {
+  // /report/project/… runs are the project-report seam's (checkProjectReportLinks).
+  for (const run of linkRuns(ctx.runs, /\/report\//i).filter((run) => !PROJECT_REPORT_RUN_RE.test(run))) {
     const token = canonicalPortalToken(run, ctx.hosts, REPORT_TOKEN_RE);
     if (!token) return refuseSend('A service report link in this message is not on the Waves portal — remove it before sending.');
     const bad = await bind(await publicReport({ report_view_token: token }));
@@ -1016,10 +1066,42 @@ async function checkReportLinks(ctx, shortRows, onRecipientAccount) {
   return null;
 }
 
+// Project reports (WDO / specialty; long vanity or full-token form): the
+// public viewer's own lookup (extractProjectReportTokenLookup — a 12-hex
+// prefix must resolve to exactly one project, as /data does), never a
+// payment-held report (the page answers 402 with a pay card, not the
+// report), then the account binding — a household shares its projects.
+async function checkProjectReportLinks(ctx, onRecipientAccount, projectReports) {
+  for (const run of linkRuns(ctx.runs, PROJECT_REPORT_RUN_RE)) {
+    const segment = canonicalPortalToken(run, ctx.hosts, PROJECT_REPORT_PATH_RE);
+    const lookup = segment && require('./project-report-links').extractProjectReportTokenLookup(segment);
+    if (!lookup) return refuseSend('A project report link in this message is not on the Waves portal — remove it before sending.');
+    const project = await linkableProjectReport(lookup);
+    // Issued only (the builder's own predicate — status AND sent_at): a
+    // /send that failed after stamping report_token leaves a draft, and a
+    // closed-but-never-sent project keeps a token too; texting either would
+    // bypass the project send flow's readiness and official-document checks
+    // (GH Codex #3893 r1 + r3 P1).
+    if (!issuedProjectReport(project)) {
+      return refuseSend('This project report is no longer viewable — remove the link before sending.');
+    }
+    if (PROJECT_REPORT_HELD_STATUSES.includes(String(project.report_hold_status || ''))) {
+      return refuseSend('This project report is on a payment hold — the page shows a pay card, not the report. Remove the link before sending.');
+    }
+    const bad = await onRecipientAccount(project.customer_id, 'project report link');
+    if (bad) return bad;
+    ctx.bearers += 1;
+    // The send flow's delivery claim is taken by the caller BEFORE dispatch
+    // (claimProjectReportSends), keyed to the delivery state seen here.
+    projectReports.push({ id: project.id, deliveryStatus: project.delivery_status || null });
+  }
+  return null;
+}
+
 // The account-scoped kinds together: the appointment gate is re-read at the
 // send (every /appointment route 404s the moment it is off — r2 P1), then
 // each kind binds to the recipient's account.
-async function checkAccountBoundLinks(ctx) {
+async function checkAccountBoundLinks(ctx, projectReports) {
   // ANY_SCHEME here too: an http://<owned>/l/<code> run must not vanish from
   // the seam (nothing later sees the /l/ occurrence) — it is judged, and its
   // plaintext scheme refused like the long forms' (GH Codex #3844 r12 P1).
@@ -1032,7 +1114,8 @@ async function checkAccountBoundLinks(ctx) {
   }
   const onRecipientAccount = recipientAccountBinder(ctx);
   return (await checkAppointmentLinks(ctx, shortRows, onRecipientAccount))
-    || checkReportLinks(ctx, shortRows, onRecipientAccount);
+    || (await checkReportLinks(ctx, shortRows, onRecipientAccount))
+    || checkProjectReportLinks(ctx, onRecipientAccount, projectReports);
 }
 
 // Contract signing links: a stored hash (a link the customer may hold —
@@ -1140,6 +1223,7 @@ async function checkCardLinks(ctx, cards) {
 async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestination = true, contractId = null } = {}) {
   const ctx = {
     runs: decodedRuns(body),
+    body,
     hosts: ownedPortalHosts(),
     toLast10: String(toLast10 || ''),
     trustedCustomerId,
@@ -1151,12 +1235,18 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
   const contracts = [];
   const statements = [];
   const preps = [];
-  const refusal = (await checkContractLinks(ctx, contracts))
-    || (await checkPrepLinks(ctx, preps))
-    || (await checkStatementLinks(ctx, statements))
-    || (await checkAccountBoundLinks(ctx))
-    || (await checkCardLinks(ctx, cards));
-  if (refusal) return refusal;
+  const projectReports = [];
+  const checks = [
+    () => checkContractLinks(ctx, contracts),
+    () => checkPrepLinks(ctx, preps),
+    () => checkStatementLinks(ctx, statements),
+    () => checkAccountBoundLinks(ctx, projectReports),
+    () => checkCardLinks(ctx, cards),
+  ];
+  for (const check of checks) {
+    const refusal = await check();
+    if (refusal) return refusal;
+  }
   if (ctx.bearers && !ctx.usDestination) return refuseSend(NON_US_REFUSAL);
   const out = {
     ok: true,
@@ -1164,6 +1254,7 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
     ...(contracts.length ? { contracts } : {}),
     ...(statements.length ? { statements } : {}),
     ...(preps.length ? { preps } : {}),
+    ...(projectReports.length ? { projectReports } : {}),
   };
   // Owner rule for EVERY bearer send (GH Codex #3844 r7 + r9 P1s): the text
   // goes to a phone that may be a customer's, and /sms applies that
@@ -1186,6 +1277,36 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
 }
 
 /**
+ * Prep links only, re-run INSIDE the manual sender's per-customer
+ * `prep-send:<customer>` lock immediately before dispatch: bearerLinkSendCheck
+ * ran before the lock, so a manual send's provisional page it verified can
+ * have failed and been released (prep_template_key cleared → 404) between
+ * that read and the lock — serialization alone does not protect the earlier
+ * read (pre-push Codex P1 on 7f82e7564). Same predicates as the pre-lock
+ * check (checkPrepLinks); the caller reports a refusal as a not-sent result.
+ */
+async function recheckPrepLinks(body, toLast10, { trustedCustomerId, usDestination = true } = {}) {
+  const ctx = {
+    runs: decodedRuns(body),
+    body,
+    hosts: ownedPortalHosts(),
+    toLast10: String(toLast10 || ''),
+    trustedCustomerId,
+    usDestination,
+    bearers: 0,
+    contractId: null,
+  };
+  // The entries resolved HERE are the ones the post-send bookkeeping must
+  // use: a provisional page released and re-claimed for another guide
+  // between the checks renders a different key now, and stamping / settling
+  // the pre-lock guide would record the wrong pest as delivered (pre-push
+  // Codex P1 on e8b68e9cc).
+  const preps = [];
+  const refusal = await checkPrepLinks(ctx, preps);
+  return refusal || { ok: true, preps };
+}
+
+/**
  * A REAL provider send of a composer prep link is a delivered prep text:
  * write the SAME customer_interactions marker the appointment tagger's
  * replay guard (hasSentPrepSms — sms_outbound + "<pestType> prep info
@@ -1194,14 +1315,49 @@ async function bearerLinkSendCheck(body, toLast10, { trustedCustomerId, usDestin
  * (GH Codex #3844 r8 P2). Fail-soft: the text already went out.
  */
 async function markPrepGuidesSent(preps, actorId) {
-  for (const { customerId, pestType } of preps) {
-    await db('customer_interactions').insert({
-      customer_id: customerId,
-      interaction_type: 'sms_outbound',
-      admin_user_id: actorId || null,
-      subject: `${pestType} prep info sent`,
-      body: 'Prep SMS sent via the Communications composer (prep guide link).',
-    });
+  const { settleHeldEnrollment } = require('./prep-guide-sender');
+  const marked = new Set(); // customer + pest — one replay marker per pair
+  for (const { customerId, pestType, serviceId, templateKey } of preps) {
+    // The visit-level delivery fence FIRST: a texted page is a delivered
+    // page — prep_sent_at is what every release predicate (the manual
+    // sender's releasePrepPage, the executor's releaseFreshPrepClaim) fences
+    // on, so an automation whose fresh claim this text rode cannot hand the
+    // key back after a blocked or failed send and 404 a URL the customer
+    // holds (pre-push Codex P1 on d5c33f299). Conditional on the key that
+    // rendered; a lost stamp never fails a text that already left.
+    if (serviceId) {
+      try {
+        await db('scheduled_services')
+          .where({ id: serviceId, prep_template_key: templateKey })
+          .whereNull('prep_sent_at')
+          .update({ prep_sent_at: db.fn.now() });
+      } catch (stampErr) {
+        logger.warn(`[composer-customer-links] prep_sent_at stamp failed for service ${serviceId}: ${stampErr.message}`);
+      }
+    }
+    if (marked.has(`${customerId}:${pestType}`)) continue;
+    marked.add(`${customerId}:${pestType}`);
+    // A sequence-backed guide (flea / bed bug / cockroach) texted here is the
+    // prep delivery: the customer's live enrolment still awaiting its prep
+    // step is settled, as the manual sender does, or the runner — which
+    // consults neither the stamp above nor the marker — emails the same
+    // prep on its next tick (GH Codex #3856 r30 P1). Fail-soft inside, and
+    // BEFORE the audit marker: the duplicate-send fence must not depend on
+    // a bookkeeping insert succeeding (GH Codex #3856 r31 P1).
+    await settleHeldEnrollment(customerId, templateKey);
+    try {
+      await db('customer_interactions').insert({
+        customer_id: customerId,
+        interaction_type: 'sms_outbound',
+        admin_user_id: actorId || null,
+        subject: `${pestType} prep info sent`,
+        body: 'Prep SMS sent via the Communications composer (prep guide link).',
+      });
+    } catch (markErr) {
+      // The text already left; a lost marker only costs the tagger's replay
+      // guard for this pest, and the next prep in the batch still settles.
+      logger.warn(`[composer-customer-links] prep replay marker failed for customer ${customerId} (${pestType}): ${markErr.message}`);
+    }
   }
 }
 
@@ -1460,6 +1616,14 @@ async function buildCardRequestLink(visit) {
  * delivery, and this text is the operator's own send. Raw URL — the prep
  * sender never shortens prep links either.
  */
+// The composer's prep line. The send fence (checkPrepLinks) parses this
+// exact shape back out of the body: the guide it NAMES must be the guide
+// the page RENDERS.
+const PREP_LINE_RE = /prep checklist for the upcoming (.+?) is here: (\S+)/gi;
+function prepGuideLine(label, url) {
+  return `Your prep checklist for the upcoming ${label} is here: ${url}\n\n`;
+}
+
 async function buildPrepGuideLink(customerIds) {
   const { PREP_CONFIG, nextUpcomingVisit } = require('./prep-guide-sender');
   const { ensureServicePrepToken } = require('./project-email');
@@ -1471,12 +1635,12 @@ async function buildPrepGuideLink(customerIds) {
   const sortKey = (v) => `${dateOnly(v.scheduled_date)} ${v.window_start ? String(v.window_start).padStart(8, '0') : '~'} ${v.id}`;
   let pick = null;
   for (const [pestType, config] of Object.entries(PREP_CONFIG)) {
-    const visit = await nextUpcomingVisit(customerIds, config.serviceKeyword);
+    const visit = await nextUpcomingVisit(customerIds, config.serviceKeywords[0]);
     if (!visit) continue;
     if (!pick || sortKey(visit) < sortKey(pick.visit)) pick = { visit, config, pestType };
   }
   if (!pick) {
-    return { url: null, line: '', reason: 'No upcoming flea, bed bug, or cockroach visit on this account' };
+    return { url: null, line: '', reason: 'No upcoming visit of a prep-guide service on this account' };
   }
   let { config, pestType } = pick;
   const { visit } = pick;
@@ -1505,10 +1669,23 @@ async function buildPrepGuideLink(customerIds) {
     return { url: null, line: '', reason: `The ${config.label} prep guide has no active version in Email Templates — activate it before texting a prep link` };
   }
   const token = await ensureServicePrepToken(visit.id, config.emailTemplateKey);
+  // The mint is not locked against a concurrent manual send or automation
+  // claiming this unkeyed visit for ANOTHER guide: the losing mint still
+  // returns the winning token, whose page renders that other guide. Re-read
+  // the key the row actually carries and name THAT guide in the line — or
+  // refuse when it is one the composer cannot name (GH Codex #3856 r27 P0).
+  const keyed = await db('scheduled_services').where({ id: visit.id }).first('prep_template_key');
+  if (keyed?.prep_template_key && keyed.prep_template_key !== config.emailTemplateKey) {
+    const stored = Object.entries(PREP_CONFIG).find(([, c]) => c.emailTemplateKey === keyed.prep_template_key);
+    if (!stored) {
+      return { url: null, line: '', reason: 'This appointment\'s prep page is set to a guide the composer cannot name — send it from Send prep guide instead' };
+    }
+    [pestType, config] = stored;
+  }
   const url = `${publicPortalUrl()}/prep/${token}`;
   return {
     url,
-    line: `Your prep checklist for the upcoming ${config.label} is here: ${url}\n\n`,
+    line: prepGuideLine(config.label, url),
     // Immediate sends only — /sms binds the page to the recipient.
     immediateOnly: true,
     prep: { pestType, label: config.label, scheduledDate: dateOnly(visit.scheduled_date) },
@@ -1679,6 +1856,163 @@ async function buildContractSigningLink(customerIds) {
   };
 }
 
+// A project whose public viewer would answer 402 (pay card) instead of the
+// report — reports-public heldReportPaymentContext's own set.
+const PROJECT_REPORT_HELD_STATUSES = ['held', 'releasing'];
+// Reports that have been issued: the same status set project-report-links
+// numbers vanity paths over — AND delivery evidence: completing a project-
+// backed visit mints report_token and closes the project even when the
+// report was never sent (project-completion.js report_not_sent), and the
+// public viewer has no status gate past the token, so a closed row alone is
+// not an issued report; the project send flow stamps sent_at (GH Codex
+// #3893 r3 P1).
+// Owner ruling (2026-09-05, GH Codex #3893 r17): the project report takes
+// the SERVICE REPORT's bar, not the price notice's. The report email is the
+// delivery; a composer text of the same public page is a deliberate
+// operator re-share, exactly as a service report link is — so no per-leg
+// SMS evidence is required (the r15–r17 rounds each narrowed "was it
+// texted" and each opened the next gap: email-only stamps, queued
+// after-hours texts, kill-switch sentinels). A migrated 'legacy_sent'
+// delivery stays out (owner ruling, same day): its delivery_status is its
+// only issuance record, and the send claim below must never overwrite it.
+const PROJECT_REPORT_STATUSES = ['sent', 'closed'];
+const PROJECT_REPORT_LEGACY_DELIVERY = 'legacy_sent';
+const PROJECT_REPORT_NOT_LEGACY_SQL = "delivery_status IS DISTINCT FROM 'legacy_sent'";
+const issuedProjectReport = (project) => Boolean(project)
+  && PROJECT_REPORT_STATUSES.includes(String(project.status || ''))
+  && Boolean(project.sent_at)
+  && project.delivery_status !== PROJECT_REPORT_LEGACY_DELIVERY;
+// The columns the eligibility predicates read — never `*`: projects carries
+// multi-MB blobs (wdo_signature, property_profile, wdo_history) that the
+// list route also skips, and a Quick Link scan may touch 15 rows (r16 P2).
+const PROJECT_REPORT_LINK_COLUMNS = ['id', 'customer_id', 'status', 'sent_at', 'delivery_status', 'report_token', 'report_hold_status'];
+// What the line and toast read for the ONE chosen project: the title scrub
+// (projectTitle — findings' and archived filings' recorded fees) and the
+// vanity path (report_token, customer_id, id).
+const PROJECT_REPORT_TITLE_COLUMNS = ['id', 'customer_id', 'title', 'project_type', 'project_date', 'report_token', 'findings', 'wdo_sent_filings'];
+
+/**
+ * The project send flow's duplicate-delivery claim (admin-projects /send):
+ * a resend of an issued report holds delivery_status 'sending' — status and
+ * sent_at unchanged — for its provider window, and treats a claim older
+ * than ten minutes as a crashed send it may take over. A composer text of
+ * the report link is the duplicate that claim exists to stop, and a
+ * read-only look at 'sending' cannot close the check-to-dispatch race (GH
+ * Codex #3893 r10 + r11 P1) — so the composer send takes the SAME claim,
+ * exactly as it takes the card request claim:
+ *   claimProjectReportSends — BEFORE dispatch: the flow's own conditional
+ *     UPDATE (not 'sending', or a stale claim), keyed to the delivery state
+ *     the seam saw so the hand-back is exact; a lost claim means the flow
+ *     is sending right now (or the state moved) — every claim this call won
+ *     is handed back and the send refuses.
+ *   releaseProjectReportSends — after the provider answered, sent or not:
+ *     the composer's text is a re-share, not a delivery, so the row's
+ *     delivery state is restored, token-guarded (only THIS claim is
+ *     cleared). A stale claim taken over restores to 'failed', as the flow
+ *     itself normalizes a crashed send.
+ * A migrated 'legacy_sent' row never reaches here (issuedProjectReport
+ * excludes it), so its delivery_status — its only issuance evidence — is
+ * never overwritten by a claim.
+ */
+async function claimProjectReportSends(projectReports) {
+  const crypto = require('crypto');
+  const won = [];
+  const CLAIMED = 'This project report is being re-sent right now — give it a moment, then send again.';
+  // One claim per project: the same report linked twice (vanity and full
+  // form, or a repeated URL) is one send, and a second claim against the
+  // state the first replaced would refuse a message with no competitor
+  // (pre-push Codex P1).
+  const unique = [...new Map(projectReports.map((p) => [p.id, p])).values()];
+  for (const { id, deliveryStatus } of unique) {
+    const token = crypto.randomBytes(12).toString('hex');
+    const seenSending = deliveryStatus === 'sending';
+    const q = db('projects').where({ id });
+    if (seenSending) q.whereRaw("delivery_status = 'sending' AND updated_at < now() - interval '10 minutes'");
+    else if (deliveryStatus == null) q.whereNull('delivery_status');
+    else q.where({ delivery_status: deliveryStatus });
+    let claimed;
+    try {
+      claimed = await q.update({ delivery_status: 'sending', delivery_claim_token: token, updated_at: db.fn.now() });
+    } catch (err) {
+      await releaseProjectReportSends({ projects: won });
+      throw err;
+    }
+    if (!claimed) {
+      await releaseProjectReportSends({ projects: won });
+      return { ok: false, error: CLAIMED };
+    }
+    won.push({ id, token, previousStatus: seenSending ? 'failed' : deliveryStatus });
+  }
+  return { ok: true, claim: { projects: won } };
+}
+
+async function releaseProjectReportSends(claim) {
+  for (const { id, token, previousStatus } of claim.projects) {
+    await db('projects')
+      .where({ id, delivery_status: 'sending', delivery_claim_token: token })
+      .update({ delivery_status: previousStatus, delivery_claim_token: null, updated_at: db.fn.now() });
+  }
+}
+
+// The project a public report segment opens, exactly as the viewer resolves
+// it (reports-public loadProjectForReport): a full token matches its row; a
+// vanity prefix must match exactly one.
+async function linkableProjectReport(lookup) {
+  if (lookup.type === 'full') return db('projects').where({ report_token: lookup.value }).first(...PROJECT_REPORT_LINK_COLUMNS);
+  const rows = await db('projects').select(PROJECT_REPORT_LINK_COLUMNS).where('report_token', 'like', `${lookup.value}%`).limit(2);
+  return rows.length === 1 ? rows[0] : null;
+}
+
+/**
+ * Project report link — the account's newest issued project report (WDO /
+ * specialty; a household shares them like service reports), skipping one on
+ * a payment hold (its page is a pay card until the invoice settles). The
+ * vanity path the report emails use (projectReportPathForProject); the
+ * token is the project's permanent report_token, nothing minted.
+ */
+async function buildProjectReportLink(customerIds) {
+  const PAGE = 15;
+  let pick = null;
+  for (let offset = 0; ; offset += PAGE) {
+    // The eligibility scan carries only what the pick needs; the chosen
+    // project's title fields are loaded once below (r16 P2).
+    const rows = await db('projects')
+      .select('id', 'customer_id', 'report_hold_status')
+      .whereIn('customer_id', customerIds)
+      .whereIn('status', PROJECT_REPORT_STATUSES)
+      .whereNotNull('sent_at')
+      .whereRaw(PROJECT_REPORT_NOT_LEGACY_SQL)
+      .whereNotNull('report_token')
+      // Newest issued first; ties by creation — projects.id is a random
+      // UUID, not a chronological key (r8 P2).
+      .orderByRaw('sent_at DESC, created_at DESC, id DESC')
+      .offset(offset)
+      .limit(PAGE);
+    pick = rows.find((row) => !PROJECT_REPORT_HELD_STATUSES.includes(String(row.report_hold_status || ''))) || null;
+    if (pick || rows.length < PAGE) break;
+  }
+  if (!pick) return { url: null, line: '', reason: 'No project report on this account yet' };
+  const project = await db('projects').where({ id: pick.id }).first(...PROJECT_REPORT_TITLE_COLUMNS);
+  if (!project) return { url: null, line: '', reason: 'No project report on this account yet' };
+  const customer = await db('customers').where({ id: project.customer_id }).first('first_name', 'last_name');
+  const path = await require('./project-report-links').projectReportPathForProject(db, project, customer || {});
+  if (!path) return { url: null, line: '', reason: 'No project report on this account yet' };
+  const url = `${publicPortalUrl()}${path}`;
+  // The email path's own customer-facing title: a legacy or deploy-window
+  // title can carry the inspection fee literally or as a bare amount, and
+  // projectTitle runs the same type-gated cue + recorded-amount scrub the
+  // public /data headline does (GH Codex #3893 r4 P1). Reads findings.
+  const title = require('./project-email').projectTitle(project);
+  return {
+    url,
+    line: `Here is your ${title} report: ${url}\n\n`,
+    // Immediate sends only — /sms binds the report to the recipient's
+    // account and re-checks the payment hold.
+    immediateOnly: true,
+    projectReport: { id: project.id, title, projectType: project.project_type || null, projectDate: dateOnly(project.project_date) },
+  };
+}
+
 /**
  * Payer statement pay link — FAIL CLOSED on identity: a statement covers
  * the bill-to's whole book and its pay page charges the PAYER's Stripe
@@ -1744,9 +2078,12 @@ module.exports = {
   bearerLinkSendCheck,
   markStatementsSent,
   markPrepGuidesSent,
+  recheckPrepLinks,
   claimCardRequestSends,
   releaseCardRequestSends,
   markCardRequestSends,
+  claimProjectReportSends,
+  releaseProjectReportSends,
   buildAppointmentPageLink,
   CARD_REQUEST_SKIP_REASONS,
   buildCardRequestLink,
@@ -1754,4 +2091,5 @@ module.exports = {
   buildServiceReportLink,
   buildContractSigningLink,
   buildStatementLink,
+  buildProjectReportLink,
 };

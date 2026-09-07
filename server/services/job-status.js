@@ -311,7 +311,7 @@ async function buildPayloads(trx, jobId, fromStatus, toStatus, transitionedBy) {
  */
 async function transitionJobStatus({
   jobId, fromStatus, toStatus, transitionedBy, lat, lng, notes, trx, notifyCustomer,
-  cancelNoticeToken, legacyOutboundActivation,
+  cancelNoticeToken, legacyOutboundActivation, suppressTechNotice = false,
 }) {
   if (!jobId || !toStatus || fromStatus == null) {
     throw new Error(
@@ -859,6 +859,30 @@ async function transitionJobStatus({
     })();
   }
 
+  // Tech-facing cancel notice (tech-visit-notifications.js): the assigned
+  // tech hears a cancel from any path — dispatch status, series, bulk,
+  // customer, track-transitions. Both call sites below run after commit;
+  // best-effort, silent for the actor's own cancel and while the gate is off.
+  // Only a real transition notifies: a cancelled → cancelled retry re-runs
+  // the idempotent side effects, not the card. `suppressTechNotice` is for
+  // a caller whose cancel may still be compensated (the cancellation
+  // processor reverts when the tech went live mid-request) — it sends the
+  // notice itself once the cancel is known to stand.
+  function notifyTechOfCancel(adminPayload) {
+    if (suppressTechNotice) return;
+    if (String(toStatus) !== 'cancelled' || String(fromStatus) === 'cancelled' || !adminPayload?.tech_id) return;
+    // `trx` rides along: a savepoint's executionPromise resolves at savepoint
+    // release, and the notice must wait for the OUTERMOST commit
+    // (commitPromiseOf inside the service) — same rule as the dispatch
+    // broadcast. With no trx it runs now (the write is already committed).
+    void require('./tech-visit-notifications').notifyVisitCancelled({
+      visitId: jobId, technicianId: adminPayload.tech_id, actorId: transitionedBy || null,
+      snapshot: { date: adminPayload.scheduled_date, windowStart: adminPayload.window_start, windowEnd: adminPayload.window_end },
+      previousStatus: fromStatus,
+      trx: trx || null,
+    });
+  }
+
   function maybeReparkFollowupObligation() {
     // Cancelling/skipping/no-showing a completion-linked follow-up child
     // resurfaces the source visit's owed follow-up as a fresh dispatch
@@ -940,6 +964,7 @@ async function transitionJobStatus({
         .then(() => {
           emitBoth(customerId, customerPayload, adminPayload);
           maybeReparkFollowupObligation();
+          notifyTechOfCancel(adminPayload);
           processCancelNoticeClaim();
           processLegacyOutboundActivation();
         })
@@ -965,6 +990,7 @@ async function transitionJobStatus({
   // trx committed by here.
   emitBoth(captured.customerId, captured.customerPayload, captured.adminPayload);
   maybeReparkFollowupObligation();
+  notifyTechOfCancel(captured.adminPayload);
   processCancelNoticeClaim();
   processLegacyOutboundActivation();
   return {

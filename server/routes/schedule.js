@@ -33,6 +33,7 @@ const { calendarIcsAvailable, arrivalWindowEndsAt, UPCOMING_STATUSES, groupedIcs
 // (codex r3 P1).
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
 const { hasCancellableWork } = require('../services/cancellation-eligibility');
+const { accountPropertyIds } = require('../services/account-properties');
 
 router.use(authenticate);
 
@@ -551,6 +552,69 @@ router.post('/:id/reschedule', async (req, res, next) => {
 // =========================================================================
 // GET /api/schedule/next — Get the next upcoming service
 // =========================================================================
+// Every property on the account with its next visit — the Visits tab's
+// property picker and "next visit at each property" chips for accounts that
+// own more than one profile. One row per property (primary first), `next`
+// null when nothing is on the calendar. Same status / dispatch-owned guards
+// as GET /next; intentionally lean (no ics / reschedule links — those stay
+// per-property behind the session switch).
+router.get('/account-next', async (req, res, next) => {
+  try {
+    // Same `days` horizon as GET / (default 90): a visit beyond it is not on
+    // the property's Visits tab, so it must not appear as that property's
+    // "next visit" either (codex r2 P2).
+    const { value, error } = listQuerySchema.validate(req.query, { stripUnknown: true });
+    if (error) return res.status(400).json({ error: error.details[0].message });
+    const cutoffDate = etDateString(addETDays(new Date(), value.days));
+    const ids = await accountPropertyIds(req);
+    const properties = await db('customers')
+      .whereIn('id', ids)
+      .select('id', 'profile_label', 'is_primary_profile', 'address_line1', 'address_line2', 'city', 'state', 'zip')
+      .orderBy('is_primary_profile', 'desc')
+      .orderBy('profile_label', 'asc');
+    const rows = await db('scheduled_services')
+      .whereIn('scheduled_services.customer_id', ids)
+      .whereIn('scheduled_services.status', ['pending', 'confirmed'])
+      .where((qb) => qb
+        .whereNull('scheduled_services.source_action')
+        .orWhereNotIn('scheduled_services.source_action', DISPATCH_OWNED_PENDING_SOURCE_ACTIONS)
+        .orWhereNot('scheduled_services.status', 'pending')
+        .orWhere('scheduled_services.customer_confirmed', true))
+      .where('scheduled_services.scheduled_date', '>=', etDateString())
+      .where('scheduled_services.scheduled_date', '<=', cutoffDate)
+      .select('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.scheduled_date', 'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.service_type', 'scheduled_services.status', 'scheduled_services.customer_confirmed')
+      .orderBy('scheduled_services.scheduled_date', 'asc')
+      .orderBy('scheduled_services.window_start', 'asc');
+    const nextByCustomer = new Map();
+    for (const row of rows) {
+      const key = String(row.customer_id);
+      if (!nextByCustomer.has(key)) nextByCustomer.set(key, row);
+    }
+    res.json({
+      properties: properties.map((p) => {
+        const n = nextByCustomer.get(String(p.id)) || null;
+        return {
+          id: p.id,
+          profileLabel: p.profile_label || (p.is_primary_profile ? 'Primary' : 'Service property'),
+          isPrimaryProfile: p.is_primary_profile === true,
+          address: { line1: p.address_line1, line2: p.address_line2, city: p.city, state: p.state, zip: p.zip },
+          next: n ? {
+            id: n.id,
+            date: n.scheduled_date,
+            windowStart: n.window_start,
+            windowEnd: n.window_end,
+            serviceType: normalizeServiceType(n.service_type),
+            status: n.status,
+            customerConfirmed: n.customer_confirmed === true,
+          } : null,
+        };
+      }),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/next', async (req, res, next) => {
   try {
     const nextService = await db('scheduled_services')

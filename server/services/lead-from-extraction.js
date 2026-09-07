@@ -888,6 +888,13 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
           }
         }
         await runCapture(trx);
+        // The takeover waits on this transaction's call-row lock. Its resume
+        // read must see a committed lead even if this socket is still waiting
+        // for post-commit work and already appended its close segment.
+        if (opts.sessionKey && process.env.GATE_VOICE_RELAY_RECOVERY === 'true') {
+          const { stampCallLeadLinkage } = require('./voice-agent/relay-context');
+          await stampCallLeadLinkage(opts.callSid, leadId, { trx });
+        }
       });
       if (superseded) {
         logger.warn(`[voice-agent-lead] capture skipped — session superseded callSid=${opts.callSid}`);

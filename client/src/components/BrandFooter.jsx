@@ -145,7 +145,7 @@ export default function BrandFooter({ borderColor, variant, appBadges = true }) 
         {/* nowrap per link + explicit spaces around the separators (JSX emits
             none between elements) so narrow screens break between items,
             never inside an email or mid-phone-number. */}
-        <div style={{ fontSize: 13, color: B.grayDark, marginBottom: 10 }}>
+        <div style={{ fontSize: 14, color: B.grayDark, marginBottom: 10 }}>
           <a href={`mailto:${CONTACT_EMAIL}`} style={{ color: B.navy, textDecoration: 'none', fontWeight: 500, whiteSpace: 'nowrap' }}>{CONTACT_EMAIL}</a>
           {' '}<span aria-hidden="true" style={{ margin: '0 4px', color: B.grayMid }}>·</span>{' '}
           <a href={`tel:${CONTACT_PHONE_TEL}`} style={{ color: B.navy, textDecoration: 'none', fontWeight: 500, whiteSpace: 'nowrap' }}>{CONTACT_PHONE_DISPLAY}</a>
@@ -155,7 +155,7 @@ export default function BrandFooter({ borderColor, variant, appBadges = true }) 
         {/* Glass estimates (PR B) replace the single office address
             with the four GBP city profiles — service-area-first framing. */}
         {glassCopyActive() ? (
-          <div style={{ fontSize: 13, color: B.grayDark, marginBottom: 10 }}>
+          <div style={{ fontSize: 14, color: B.grayDark, marginBottom: 10 }}>
             {GLASS_FOOTER_CITY_LINKS.map((city, index) => (
               <span key={city.label}>
                 {index > 0 ? <span aria-hidden="true" style={{ margin: '0 4px', color: B.grayMid }}>·</span> : null}
@@ -171,19 +171,19 @@ export default function BrandFooter({ borderColor, variant, appBadges = true }) 
             ))}
           </div>
         ) : (
-          <div style={{ fontSize: 13, color: B.grayDark, marginBottom: 10 }}>{WAVES_ADDRESS_LINE}</div>
+          <div style={{ fontSize: 14, color: B.grayDark, marginBottom: 10 }}>{WAVES_ADDRESS_LINE}</div>
         )}
         {/* One legal stack per page (owner 2026-07-06): shell pages get
             Privacy/Terms + copyright from TrustFooter, so the contact
             variant only carries them standalone (codex P2, PR #2439). */}
         {!inShell ? (
           <>
-            <div style={{ fontSize: 13, color: B.grayDark, marginBottom: 8 }}>
+            <div style={{ fontSize: 14, color: B.grayDark, marginBottom: 8 }}>
               <a href={PRIVACY_URL} target="_blank" rel="noopener noreferrer" style={{ color: B.navy, textDecoration: 'none', fontWeight: 500, whiteSpace: 'nowrap' }}>Privacy Policy</a>
               {' '}<span aria-hidden="true" style={{ margin: '0 4px', color: B.grayMid }}>·</span>{' '}
               <a href={TERMS_URL} target="_blank" rel="noopener noreferrer" style={{ color: B.navy, textDecoration: 'none', fontWeight: 500, whiteSpace: 'nowrap' }}>Terms of Service</a>
             </div>
-            <div style={{ fontSize: 12, color: B.grayDark }}>© {new Date().getFullYear()} Waves Pest Control, LLC. All rights reserved.</div>
+            <div style={{ fontSize: 14, color: B.grayDark }}>© {new Date().getFullYear()} Waves Pest Control, LLC. All rights reserved.</div>
           </>
         ) : null}
       </div>
@@ -193,19 +193,20 @@ export default function BrandFooter({ borderColor, variant, appBadges = true }) 
   if (variant === 'document') {
     return (
       <div style={{
-        textAlign: 'center', marginTop: 28, paddingTop: 18,
+        // In-shell the page column's bottom padding is the gap above the rule.
+        textAlign: 'center', marginTop: inShell ? 0 : 28, paddingTop: 18,
         borderTop: `1px solid ${borderColor || B.grayLight}`,
       }}>
         <img src="/waves-logo.png" alt="" style={{ height: 26, opacity: 0.62, marginBottom: 8 }} />
-        <div style={{ fontSize: 13, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Waves Pest Control, LLC</div>
-        <div style={{ fontSize: 12, color: B.grayDark, marginTop: 5, lineHeight: 1.6 }}>Family-owned pest control and lawn care in Southwest Florida</div>
-        <div style={{ fontSize: 12, color: B.grayDark, marginTop: 5, lineHeight: 1.6 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: B.navy, fontFamily: FONTS.heading }}>Waves Pest Control, LLC</div>
+        <div style={{ fontSize: 14, color: B.grayDark, marginTop: 5, lineHeight: 1.6 }}>Family-owned pest control and lawn care in Southwest Florida</div>
+        <div style={{ fontSize: 14, color: B.grayDark, marginTop: 5, lineHeight: 1.6 }}>
           <ServiceAreaLinks color={B.grayDark} />
         </div>
         {/* Shell pages get the copyright from TrustFooter — the document
             sign-off keeps only the identity block there (codex P2, PR #2439). */}
         {!inShell ? (
-          <div style={{ fontSize: 11, color: B.grayMid, marginTop: 10 }}>© {new Date().getFullYear()} Waves Pest Control, LLC. All rights reserved.</div>
+          <div style={{ fontSize: 14, color: B.grayMid, marginTop: 10 }}>© {new Date().getFullYear()} Waves Pest Control, LLC. All rights reserved.</div>
         ) : null}
       </div>
     );
@@ -232,7 +233,7 @@ export default function BrandFooter({ borderColor, variant, appBadges = true }) 
   // line here; the legal line lives in WavesShell's TrustFooter.
   const sep = <span aria-hidden="true" style={{ margin: '0 6px', color: mutedColor }}>·</span>;
   // Small bullet between contact items (flex child, so no extra margins).
-  const dot = <span aria-hidden="true" style={{ fontSize: 8, color: mutedColor, lineHeight: 1 }}>•</span>;
+  const dot = <span aria-hidden="true" style={{ fontSize: 14, color: mutedColor, lineHeight: 1 }}>•</span>;
   const contactLink = { color: headingColor, textDecoration: 'none', fontWeight: 500, whiteSpace: 'nowrap' };
 
   return (
@@ -240,7 +241,8 @@ export default function BrandFooter({ borderColor, variant, appBadges = true }) 
     // walker — without it the walker's "All rights reserved" climb can reach
     // the shell root (© line lives in TrustFooter) and restyle the header.
     <div data-brand-footer="" style={{
-      textAlign: 'center', marginTop: 32, padding: '20px 16px',
+      // In-shell the page column's bottom padding is the gap above the rule.
+      textAlign: 'center', marginTop: inShell ? 0 : 32, padding: '20px 16px',
       borderTop: `1px solid ${borderColor || defaultBorder}`,
       fontFamily: FONTS.body,
       display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16,
@@ -251,13 +253,13 @@ export default function BrandFooter({ borderColor, variant, appBadges = true }) 
         <img src="/waves-logo.png" alt="" style={{ height: 28, opacity: logoOpacity }} />
         <div style={{ fontSize: 15, fontWeight: 700, color: headingColor, fontFamily: FONTS.heading, lineHeight: 1.4 }}>Waves Pest Control</div>
         {/* Tagline + cities match the contact links: same ink, weight 500. */}
-        <div style={{ fontSize: 13, fontWeight: 500, color: headingColor, lineHeight: 1.4 }}>Family-owned pest control &amp; lawn care</div>
+        <div style={{ fontSize: 14, fontWeight: 500, color: headingColor, lineHeight: 1.4 }}>Family-owned pest control &amp; lawn care</div>
         {/* Contact row: one horizontal line — email • phone • site with small
             bullet separators, no underlines. Bullet + item form one nowrap
             unit so a wrap never strands a bullet at the end of a line. */}
         <div style={{
           display: 'flex', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center',
-          columnGap: 10, rowGap: 4, fontSize: 13, color: bodyColor, lineHeight: 1.4, fontFamily: FONTS.body,
+          columnGap: 10, rowGap: 4, fontSize: 14, color: bodyColor, lineHeight: 1.4, fontFamily: FONTS.body,
         }}>
           <a href={`mailto:${CONTACT_EMAIL}`} style={contactLink}>{CONTACT_EMAIL}</a>
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10, whiteSpace: 'nowrap' }}>
@@ -272,7 +274,7 @@ export default function BrandFooter({ borderColor, variant, appBadges = true }) 
               2026-07-23) — the estimate's in-content safety link (#2890)
               is the one sanctioned surface for it. */}
         </div>
-        <div style={{ fontSize: 13, fontWeight: 500, color: headingColor, lineHeight: 1.4 }}>
+        <div style={{ fontSize: 14, fontWeight: 500, color: headingColor, lineHeight: 1.4 }}>
           <ServiceAreaLinks color={headingColor} />
         </div>
       </div>
@@ -296,15 +298,15 @@ export default function BrandFooter({ borderColor, variant, appBadges = true }) 
       {appBadges ? <StoreBadges ctaColor={headingColor} /> : null}
       {!inShell ? (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-          <div style={{ fontSize: 13, lineHeight: 1.5 }}>
+          <div style={{ fontSize: 14, lineHeight: 1.5 }}>
             <a href={PRIVACY_URL} target="_blank" rel="noopener noreferrer" style={contactLink}>Privacy Policy</a>
             {' '}{sep}{' '}
             <a href={TERMS_URL} target="_blank" rel="noopener noreferrer" style={contactLink}>Terms of Service</a>
           </div>
-          <div style={{ fontSize: 12, color: mutedColor, lineHeight: 1.6 }}>
+          <div style={{ fontSize: 14, color: mutedColor, lineHeight: 1.6 }}>
             © {new Date().getFullYear()} Waves Pest Control, LLC. All rights reserved.
           </div>
-          <div style={{ fontSize: 12, color: mutedColor, lineHeight: 1.6 }}>
+          <div style={{ fontSize: 14, color: mutedColor, lineHeight: 1.6 }}>
             Licensed &amp; insured · {WAVES_FL_LICENSE_LINE}
           </div>
         </div>

@@ -19,8 +19,8 @@
       "name": "emoji in customer text",
       "text": "See you tomorrow at 10am! 🐜",
       "context": { "channel": "sms", "audience": "customer" },
-      "expect": { "pass": false, "rules": ["no-emoji"] },
-      "provenance": "owner ruling 2026-08-10: zero emojis in customer messages, ever"
+      "expect": { "pass": true },
+      "provenance": "Owner permits emojis in SMS for everyone; supersedes the earlier SMS emoji ban."
     },
     {
       "name": "url shortener in sms",

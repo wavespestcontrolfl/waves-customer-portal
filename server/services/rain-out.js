@@ -18,6 +18,8 @@
  * tech doesn't reschedule into tomorrow's 65% thunderstorms.
  */
 
+const Joi = require('joi');
+const { NOT_A_ROUTE_STOP_STATUSES } = require('./stops-ahead');
 const db = require('../models/db');
 const logger = require('./logger');
 const SmartRebooker = require('./rebooker');
@@ -150,15 +152,12 @@ async function renderCustomMovedBody({ firstName, serviceType, date, window, cus
 const CUSTOM_SMS_MAX_SEGMENTS = 2;
 
 // Send-layer blockers the note guards can't see because they live in the
-// TEMPLATE's static text (an admin-saved emoji, a broken-render marker
-// like '1970'): discovering them AFTER the move strands a moved visit with
+// TEMPLATE's static text (a broken-render marker like '1970'): discovering them AFTER the move strands a moved visit with
 // no SMS, so commit() runs the send layer's own checks on the assembled
 // body pre-move (codex r9 P2).
 function customBodySendBlocked(body) {
   const { validateOutbound } = require('./sms-guard');
-  if (!validateOutbound(body).ok) return true;
-  const { _internals: { findEmoji } } = require('./messaging/validators/voice');
-  return findEmoji(body).found;
+  return !validateOutbound(body).ok;
 }
 
 /**
@@ -313,12 +312,6 @@ function sanitizeCustomerNote(raw) {
     || containsBareHost(gsm) || containsBareHost(canonical)) {
     return { error: 'note_link_blocked' };
   }
-  // Same emoji rule sendCustomerMessage enforces (validators/voice.js) —
-  // checked HERE so an emoji note rejects BEFORE the move commits, instead
-  // of committing the reschedule and then silently blocking the SMS with
-  // EMOJI_FOR_CUSTOMER (codex PR P2).
-  const { _internals: { findEmoji } } = require('./messaging/validators/voice');
-  if (findEmoji(gsm).found) return { error: 'note_emoji_blocked' };
   // The outbound sms-guard rejects bodies containing unsubstituted {vars},
   // "undefined"/"null"/"1970" etc. AFTER assembly — a note like "Gate code
   // 1970 still works" would commit the move and then lose the SMS (codex
@@ -706,7 +699,7 @@ async function loadOccupancy({
   // Same status exclusions the rebooker enforces at its commit gate. The
   // generic admin slot-check passes the admin set (skipped / no_show freed)
   // so its hints agree with the save-side probe (window-rules.js).
-  excludeStatuses = ['cancelled', 'completed'],
+  excludeStatuses = [...NOT_A_ROUTE_STOP_STATUSES, 'completed'],
 } = {}) {
   const { listOccupiedWindows } = require('./scheduling/occupancy');
   const rows = await listOccupiedWindows({
@@ -1016,6 +1009,12 @@ async function checkTarget({ serviceId, target, caller = null }) {
 const SLOT_CHECK_TARGET_CAP = 25;
 const SLOT_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+const ARRIVAL_SLOT_FIELDS = Joi.object({
+  serviceId: Joi.string().guid().allow(null),
+  technicianId: Joi.string().guid().allow(null),
+  durationMinutes: Joi.number().positive().allow(null),
+}).unknown(true).prefs({ convert: false });
+
 async function checkSlots({ targets, caller = null } = {}) {
   if (!Array.isArray(targets) || targets.length === 0) return { ok: false, reason: 'bad_target' };
   if (targets.length > SLOT_CHECK_TARGET_CAP) return { ok: false, reason: 'too_many_targets' };
@@ -1027,10 +1026,14 @@ async function checkSlots({ targets, caller = null } = {}) {
     if (hhmmToMinutes(t?.window?.start) == null || hhmmToMinutes(t?.window?.end) == null) {
       return { ok: false, reason: 'bad_target' };
     }
+    if (ARRIVAL_SLOT_FIELDS.validate(t).error) return { ok: false, reason: 'bad_target' };
     parsed.push({
       date,
       window: { start: t.window.start, end: t.window.end },
       excludeServiceIds: Array.isArray(t?.excludeServiceIds) ? t.excludeServiceIds.map(String) : [],
+      serviceId: t.serviceId,
+      technicianId: t.technicianId,
+      durationMinutes: t.durationMinutes,
     });
   }
   // No service in hand, so nameScopeFor degrades to admin-or-nobody: admins
@@ -1055,12 +1058,26 @@ async function checkSlots({ targets, caller = null } = {}) {
     occupancyByDate.set(date, occupancy);
   }));
   // results[i] answers targets[i] — the bulk bars rely on the alignment.
-  const results = parsed.map((p) => ({
-    conflicts: conflictsForTarget(occupancyByDate.get(p.date), null, p.date, p.window, {
-      // Always an array (possibly empty) so conflictsForTarget never falls
-      // back to its [serviceId] default — there is no serviceId here.
-      excludeServiceIds: p.excludeServiceIds,
-    }),
+  const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('./scheduling/arrival-route');
+  const results = await Promise.all(parsed.map(async (p) => {
+    if (p.serviceId && arrivalWindowRoutingEnabled()) {
+      try {
+        const fit = await checkArrivalPlacement({
+          serviceId: p.serviceId, date: p.date, technicianId: p.technicianId,
+          windowStart: p.window.start, windowEnd: p.window.end,
+          durationMinutes: p.durationMinutes, excludeServiceIds: p.excludeServiceIds,
+        });
+        return { conflicts: fit.feasible ? [] : [{ id: p.serviceId, warning: fit.warning, reason: fit.reason }] };
+      } catch (err) {
+        logger.info(`[slot-check] arrival route snapshot failed: ${err.message}`);
+        return { conflicts: [{ warning: 'Could not verify arrival windows. Review the route before driving it.', reason: 'route_unverified' }] };
+      }
+    }
+    return {
+      conflicts: conflictsForTarget(occupancyByDate.get(p.date), null, p.date, p.window, {
+        excludeServiceIds: p.excludeServiceIds,
+      }),
+    };
   }));
   return { ok: true, results };
 }
@@ -1822,6 +1839,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         try {
           const seriesResult = await SmartRebooker.rescheduleSeries(job.id, target.date, newWindow, reasonCode, initiatedBy, {
             allowLive: true,
+            ...(actorUserId ? { actorId: actorUserId } : {}),
             overlapAdvisory: true,
             sourceSurface: 'quick_move',
             // The intent is recorded WITH the operation (durable): the live
@@ -1871,6 +1889,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         // caught below as a per-member failure the tech re-runs.
         const moveResult = await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, initiatedBy, {
           allowLive: true,
+          // The acting staff row (Quick Move's actorUserId): a tech moving
+          // their own visit must not be told about it.
+          ...(actorUserId ? { actorId: actorUserId } : {}),
           overlapAdvisory: true,
           excludeServiceIds: [job.id],
           // Quick Move's series behavior is owned by GATE_COLLECTIVE_SERIES_

@@ -9,6 +9,8 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { effectiveServiceAddress } = require('../stamped-address');
+const { TERMINAL_APPOINTMENT_STATUSES } = require('./proposal-pins');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { getProtocol: readProtocol } = require('../protocol-reader');
 const { openInvoiceFacts } = require('../visit-context/balance');
@@ -207,7 +209,9 @@ async function getMyRoute(techId, techName, date) {
       'scheduled_services.window_start', 'scheduled_services.window_end',
       'scheduled_services.route_order', 'scheduled_services.notes',
       'customers.id as customer_id', 'customers.first_name', 'customers.last_name',
-      'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
+      'customers.address_line1', 'customers.address_line2', 'customers.city', 'customers.state', 'customers.zip',
+      'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+      'scheduled_services.service_address_city', 'scheduled_services.service_address_state', 'scheduled_services.service_address_zip',
       'customers.phone', 'customers.waveguard_tier', 'customers.lawn_type',
     )
     .orderByRaw('COALESCE(route_order, 999), window_start');
@@ -222,17 +226,18 @@ async function getMyRoute(techId, techName, date) {
 
   const stops = await query;
   const completed = stops.filter(s => s.status === 'completed').length;
-  const nextStop = stops.find(s => s.status !== 'completed');
+  const remainingStops = stops.filter(s => !TERMINAL_APPOINTMENT_STATUSES.includes(s.status));
+  const nextStop = remainingStops[0];
 
   return {
     date: d,
     total_stops: stops.length,
     completed,
-    remaining: stops.length - completed,
+    remaining: remainingStops.length,
     next_stop: nextStop ? {
       id: nextStop.id,
       customer: `${nextStop.first_name} ${nextStop.last_name}`,
-      address: formatAddress({ line1: nextStop.address_line1, city: nextStop.city, state: nextStop.state, zip: nextStop.zip }),
+      address: formatAddress(effectiveServiceAddress(nextStop, nextStop)),
       service_type: nextStop.service_type,
       time_window: nextStop.window_start || null,
       notes: nextStop.notes,
@@ -244,7 +249,7 @@ async function getMyRoute(techId, techName, date) {
       id: s.id,
       customer_id: s.customer_id,
       customer: `${s.first_name} ${s.last_name}`,
-      address: `${s.address_line1}, ${s.city}`,
+      address: formatAddress(effectiveServiceAddress(s, s)),
       service_type: s.service_type,
       status: s.status,
       time_window: s.window_start || null,
@@ -283,6 +288,15 @@ async function getStopDetails(input, techId = null) {
   // (facts, notes, alerts) in a sibling service.
   if (input.service_id) todayQuery.where('id', input.service_id);
   const todayService = await todayQuery.first();
+  let addressService = todayService;
+  if (input.service_id && !addressService) {
+    const requested = db('scheduled_services').where({ id: input.service_id, customer_id: customer.id })
+      .whereNotIn('status', TECH_ACCESS_DEAD_STATUSES);
+    if (techId) requested.where('technician_id', techId);
+    addressService = await requested.first();
+    if (!addressService) return { error: 'Customer not found' };
+  }
+
 
   // Access/property facts follow the same GATE_VISIT_FACTS policy as the
   // visit brief (GET /:id/visit-brief): gate on, the shared fail-soft access
@@ -343,7 +357,7 @@ async function getStopDetails(input, techId = null) {
     customer: {
       name: `${customer.first_name} ${customer.last_name}`,
       phone: customer.phone,
-      address: formatAddress({ line1: customer.address_line1, city: customer.city, state: customer.state, zip: customer.zip }),
+      address: formatAddress(effectiveServiceAddress(addressService || {}, customer)),
       tier: customer.waveguard_tier,
       lawn_type: customer.lawn_type,
       property_sqft: customer.property_sqft,

@@ -79,6 +79,18 @@ const adminScheduleRouter = require('../routes/admin-schedule');
 // Real ET "today" — the date a same-day move targets.
 const TODAY_ET = jest.requireActual('../utils/datetime-et').etDateString();
 
+// An UPDATE result that resolves to the row count like knex AND answers
+// `.returning([...])` with the committed row (the bulk reschedule reads the
+// committed technician_id off the CAS write).
+function updateResult(count, rows) {
+  const p = Promise.resolve(count);
+  return {
+    then: p.then.bind(p),
+    catch: p.catch.bind(p),
+    returning: jest.fn().mockResolvedValue(rows ?? (count ? [{ id: 'svc-1', technician_id: 'tech-1' }] : [])),
+  };
+}
+
 function chain(overrides = {}) {
   const builder = {};
   Object.assign(builder, {
@@ -97,7 +109,7 @@ function chain(overrides = {}) {
     select: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockResolvedValue([]),
     first: jest.fn().mockResolvedValue(undefined),
-    update: jest.fn().mockResolvedValue(1),
+    update: jest.fn().mockImplementation(() => updateResult(1)),
     insert: jest.fn().mockResolvedValue(),
     ...overrides,
   });
@@ -231,7 +243,7 @@ test('one live member on a FROZEN visit is refused by the bulk mover too (codex 
 });
 
 test('an UNGROUPED row pins visit_id IS NULL in its CAS (a row grouped since the read misses instead of moving alone)', async () => {
-  const updateChain = chain({ update: jest.fn().mockResolvedValue(0) });
+  const updateChain = chain({ update: jest.fn().mockImplementation(() => updateResult(0)) });
   wireTrx({
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'confirmed', visit_id: null }) }),
@@ -402,7 +414,7 @@ test('a row that changes status between the read and the write is skipped, not r
   // at the top of the trx. If the visit completes in between, an update by id
   // alone would rewrite the finished row back onto the schedule as
   // 'confirmed'. The status-conditional UPDATE matches zero rows instead.
-  const updateChain = chain({ update: jest.fn().mockResolvedValue(0) });
+  const updateChain = chain({ update: jest.fn().mockImplementation(() => updateResult(0)) });
   const trx = wireTrx({
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'en_route', technician_id: 'tech-1' }) }),
@@ -627,7 +639,7 @@ test('a row moved concurrently (stale date/window snapshot) is refused by the fi
   // resize must miss too — not have its end overwritten by a stale-duration
   // derivation), so the stale writer matches zero rows and lands in failed[]
   // instead.
-  const updateChain = chain({ update: jest.fn().mockResolvedValue(0) });
+  const updateChain = chain({ update: jest.fn().mockImplementation(() => updateResult(0)) });
   const trx = wireTrx({
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'confirmed' }) }),

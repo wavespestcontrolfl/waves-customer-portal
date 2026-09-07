@@ -1,8 +1,10 @@
+const { NOT_A_ROUTE_STOP_STATUSES } = require('../services/stops-ahead');
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
+const { isAssignable, assertAssignableTechnician } = require('../services/technician-eligibility');
 const { promoteCustomerOnBooking } = require('../services/customer-stages');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('../services/logger');
@@ -513,6 +515,8 @@ router.get('/config', async (req, res, next) => {
       // Multi-service selector on /book — fail-closed dark-ship flag; the
       // server independently refuses composite service keys while off.
       multi_service: isEnabled('multiServiceBooking'),
+      // "Look for this van" scene on the confirmation step (GATE_VAN_SCENE).
+      van_scene: isEnabled('vanScene'),
       advance_days_min: config.advance_days_min ?? 1,
       advance_days_max: config.advance_days_max ?? 14,
       slot_duration_minutes: config.slot_duration_minutes ?? 60,
@@ -879,7 +883,7 @@ function roundPublicCoord(value) {
 // rangeTo], applies the per-day cap / lunch / whole-hour rules, then returns the
 // curated best-4 plus a full per-day breakdown. `timeOfDay` ('morning' |
 // 'afternoon' | 'evening' | 'any') filters candidates for Waves AI searches.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '' }) {
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], excludeSelfBookingId = null, serviceKey = '' }) {
   // Rain chips (GATE_BOOKING_RAIN_CHIPS): kick off ONE bounded office-point
   // daily outlook so it overlaps the slot computation; stamped onto days/slots
   // just before the return. Bounded + cached + fail-open in the service (null
@@ -915,13 +919,8 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // "no open window" message despite real weekend availability. Match the
     // estimate flow so both booking surfaces offer the same days.
     includeWeekends: true,
-    // The default best-4 window is narrow, so 200 ranked candidates is ample.
-    // A specific-date / "Find more dates" browse (expandOpenDays) can span the
-    // full 90-day horizon across several techs — capping at 200 there would
-    // drop the lowest-scored (furthest-out) dates and make the calendar mark
-    // them unavailable, so pull every feasible candidate. find-time only slices
-    // a pre-computed list, so this is cheap.
-    topN: expandOpenDays ? Number.MAX_SAFE_INTEGER : 200,
+    // Display selection happens only after every feasible day is evaluated.
+    topN: Number.MAX_SAFE_INTEGER,
   });
 
   // Enforce max_self_books_per_day — filter out dates already at cap.
@@ -948,8 +947,9 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   const bookingCounts = await db(function effectiveDates() {
     this.select('id', db.raw(`${effectiveDateSql} AS effective_date`, inactiveStatuses))
       .from('self_booked_appointments')
-      .whereNot('status', 'cancelled')
-      .as('sb');
+      .whereNot('status', 'cancelled');
+    if (excludeSelfBookingId) this.whereNot('id', excludeSelfBookingId);
+    this.as('sb');
   })
     .whereBetween('effective_date', [rangeFrom, rangeTo])
     .select('effective_date as date')
@@ -963,7 +963,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   // day_full: the offer surface promising what the gate declines, which is the
   // exact divergence this filter exists to prevent.
   const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-  const voiceCounts = await db('scheduled_services')
+  const voiceCountQuery = db('scheduled_services')
     .where('source_action', VOICE_AGENT_BOOKING_SOURCE_ACTION)
     // Same inactive set the commit-time counter uses — a skipped (office-
     // rejected) AI request releases its slot instead of holding the day full.
@@ -972,6 +972,8 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     .select('scheduled_date')
     .count('* as count')
     .groupBy('scheduled_date');
+  if (excludeServiceIds.length) voiceCountQuery.whereNotIn('id', excludeServiceIds);
+  const voiceCounts = await voiceCountQuery;
   // Never throws on a missing/unparseable date: an availability BUILDER that
   // dies mid-count would take the whole offer surface down with it.
   const dayKey = (d) => {
@@ -1169,16 +1171,14 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     slots.sort((a, b) => a.start_time.localeCompare(b.start_time));
     const best = slots.reduce((acc, s) => (acc == null || s.rank < acc.rank ? s : acc), null);
     const labels = dateLabels(date);
-    // Default landing keeps the tight 4-per-day cap; a specific-date / AI
-    // search opens it up so the customer sees the full block of options.
-    const perDayCap = expandOpenDays ? 8 : 4;
-    const cappedSlots = slots.map(s => ({ ...s, is_best_fit: s === best })).slice(0, perDayCap);
+    // Keep every feasible start for selection and confirmation; recommendations
+    // remain curated separately. Route proximity is a per-slot fact.
+    const daySlots = slots.map(s => ({ ...s, is_best_fit: s === best, nearby: s.detour_minutes != null && s.detour_minutes <= NEARBY_DETOUR_MINUTES }));
     days.push({
       date,
       ...labels,
-      // A day is "nearby" when at least one of its slots is route-efficient.
-      nearby: cappedSlots.some(s => s.detour_minutes != null && s.detour_minutes <= NEARBY_DETOUR_MINUTES),
-      slots: cappedSlots,
+      nearby: daySlots.some(s => s.nearby),
+      slots: daySlots,
     });
   }
   days.sort((a, b) => a.date.localeCompare(b.date));
@@ -1955,9 +1955,12 @@ async function createSelfBooking(payload = {}) {
     if (technician_id) {
       const techIdStr = String(technician_id);
       const tech = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(techIdStr)
-        ? await db('technicians').where('id', techIdStr).first('id', 'active')
+        ? await db('technicians').where('id', techIdStr).first('id', 'employment_status', 'field_dispatchable')
         : null;
-      if (!tech || tech.active === false) {
+      // Assignability (active employment AND field-dispatchable), not just the
+      // legacy active flag — a tech who went prospective/office-only between
+      // the offer and the confirm must not take the visit.
+      if (!isAssignable(tech)) {
         return { ok: false, status: 400, error: 'That time slot is no longer available. Please pick another.' };
       }
     }
@@ -2555,7 +2558,7 @@ async function createSelfBooking(payload = {}) {
       const conflictQuery = trx('scheduled_services')
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .where('scheduled_services.scheduled_date', slotDateStr)
-        .whereNotIn('scheduled_services.status', ['cancelled'])
+        .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
         .where((q) => {
           q.whereNull('scheduled_services.reservation_expires_at')
             .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
@@ -2671,6 +2674,18 @@ async function createSelfBooking(payload = {}) {
         });
         if (keptGuardError) logger.warn(`[booking:confirm] in-booking duplicate-series guard failed (post-commit guard decides): ${keptGuardError.message}`);
         if (keptMatches.length > 0) pestDuplicateKeptAtBooking = keptMatches[0];
+      }
+      // Re-asserted FOR SHARE on the writing trx (the pre-transaction check
+      // above is the fast path): an offboarding cannot commit in between. A
+      // miss here is a "pick another slot" outcome, so it rides the SLOT_TAKEN
+      // recovery below (just-created profile rolled back, generic message).
+      try {
+        await assertAssignableTechnician(technician_id || null, { conn: trx });
+      } catch (eligErr) {
+        if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
+        const err = new Error('That time slot is no longer available. Please pick another.');
+        err.code = 'SLOT_TAKEN';
+        throw err;
       }
       const [scheduledRow] = await trx('scheduled_services').insert({
         ...(pestDuplicateKeptAtBooking ? { wizard_recovery_reconciled_at: trx.fn.now() } : {}),
@@ -2851,6 +2866,18 @@ async function createSelfBooking(payload = {}) {
         return { ok: false, status: 409, error: txErr.message, code: txErr.code || null };
       }
       throw txErr;
+    }
+
+    // Tech-facing notice (tech-visit-notifications.js): a self-booking that
+    // landed on a tech's route is a "new visit" to them. Post-commit,
+    // gate-dark, never awaited; a double-submit replay returns { existing }
+    // with no serviceRow and sends nothing.
+    if (txResult?.serviceRow?.technician_id) {
+      const row = txResult.serviceRow;
+      void require('../services/tech-visit-notifications').notifyTechVisitChange({
+        visitId: row.id, kind: 'assigned', technicianId: row.technician_id, actorId: 'customer_self_serve',
+        snapshot: { date: row.scheduled_date, windowStart: row.window_start, windowEnd: row.window_end },
+      });
     }
 
     // New bookings mark their recovery intents converted INSIDE the transaction

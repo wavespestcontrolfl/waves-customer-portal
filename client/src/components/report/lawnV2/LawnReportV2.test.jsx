@@ -273,3 +273,18 @@ describe('ScoreRing settles on beforeprint without ever scrolling into view', ()
     expect(arc().style.transition).toBe('none');
   });
 });
+
+
+describe('Stacked lawn trends', () => {
+  it('explains each score and keeps metric cards in one column', () => {
+    const points = [{ label: 'Jul 10', value: 81 }, { label: 'Sep 5', value: 83 }];
+    const { container } = render(<LawnTrends trends={{ overall: points, weed: points, coverage: points, color: points, stress: points }} />);
+    expect(screen.getAllByText('What this means')).toHaveLength(5);
+    expect(screen.queryByText('higher is better')).toBeNull();
+    expect(screen.queryByText('Your overall lawn score across recent visits.')).toBeNull();
+    expect(screen.getAllByText('Latest reading: 83. Previous reading: 81.')).toHaveLength(5);
+    const grid = [...container.querySelectorAll('div')].find((node) => node.style.display === 'grid' && node.style.gridTemplateColumns === 'minmax(0, 1fr)');
+    expect(grid).toBeTruthy();
+    expect(grid.children).toHaveLength(4);
+  });
+});

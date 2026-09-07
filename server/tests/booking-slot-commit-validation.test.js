@@ -286,9 +286,11 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(src).not.toMatch(/slot_end \? timeToMin\(slot_end\) : \(timeToMin\(slot_start\) \+ duration\)/);
   });
 
-  test('technician_id must name a real, ACTIVE technician (uuid-shape guarded)', () => {
-    expect(src).toMatch(/await db\('technicians'\)\.where\('id', techIdStr\)\.first\('id', 'active'\)/);
-    expect(src).toMatch(/if \(!tech \|\| tech\.active === false\)/);
+  test('technician_id must name a real, ASSIGNABLE technician (uuid-shape guarded)', () => {
+    expect(src).toMatch(/await db\('technicians'\)\.where\('id', techIdStr\)\.first\('id', 'employment_status', 'field_dispatchable'\)/);
+    // technician-eligibility.js decides (active employment AND field-dispatchable), not the legacy flag
+    expect(src).toMatch(/if \(!isAssignable\(tech\)\)/);
+    expect(src).not.toMatch(/tech\.active === false/);
   });
 
   test('ET date bounds enforced at commit, from the shared config, before any write', () => {
@@ -314,7 +316,7 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
       'if (slot_end && timeToMin(slot_end) !== endMin)', // slot_end agreement
       'const geometryError = validateBookingSlotGeometry({', // grid/hours/lunch
       'if (!callbackVisit && (!serviceKey || !verifySlotOfferField({', // signed-offer proof (rounds 2+3; internal callbacks are availability-revalidated by their caller)
-      "await db('technicians').where('id', techIdStr).first('id', 'active')", // real active tech
+      "await db('technicians').where('id', techIdStr).first('id', 'employment_status', 'field_dispatchable')", // real assignable tech
       'let sourceEstimateId = null;', // accept-retry correlation validation
     ]) {
       const idx = src.indexOf(validation);

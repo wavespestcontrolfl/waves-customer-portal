@@ -60,10 +60,10 @@ const ambiguousSend = (row) => M.AMBIGUOUS_SEND_STATUSES.includes(row.outreach_s
 // — and EXCEPT while a submit-first placement's ONE follow-up is still owed past its outcome (M.followUpOwed — the
 // domain guard reads the same): its conversation is not over and the inbox stays held
 const conversationClosed = (row, path) => !ambiguousSend(row)
-  && (Boolean(row.conversation_closed_at) || (CONVERSATION_CLOSED_STATUSES.includes(row.status) && !M.followUpOwed(row, path)));
+  && (Boolean(row.conversation_closed_at) || (CONVERSATION_CLOSED_STATUSES.includes(row.status) && !M.followUpOwed(row, path) && !M.initialSendOwed(row, path)));
 // `path` = the placement's acquisition path (execution_after_send) — the follow-up lifecycle is path-dependent
 const CONVERSATION_OPEN = (row, path = null) => !conversationClosed(row, path) && (
-  ['contacted', 'negotiating'].includes(row.status)
+  M.initialSendOwed(row, path) || ['contacted', 'negotiating'].includes(row.status)
   || (row.status === 'awaiting_owner' && ['contacted', 'negotiating'].includes(row.parked_from_status))
   || ['sending', 'sent', 'send_error'].includes(row.outreach_status));
 
@@ -102,6 +102,8 @@ class Rollback extends Error { constructor(result) { super(result.code); this.re
 // (awaiting_owner, §3.3b) — the owner's click is what the park waits for; an
 // automatic send acts on `prospect` rows only (a parked row is the owner's).
 const SENDABLE_STATUSES = Object.freeze(['prospect', 'awaiting_owner']);
+const JUDGE_STATUSES = ['placed', 'live', 'indexed'];
+const lateSend = (placement, path) => JUDGE_STATUSES.includes(placement.status) && P.submitFirst(path || {});
 
 const { etDateString, parseETDateTime, addETDaysAtWallClock } = require('../../utils/datetime-et');
 const OUTREACH_TYPE_SET = new Set(OUTREACH_TYPES);
@@ -140,7 +142,7 @@ function textToHtml(text) {
  * matters: lane gate first (off → nothing), then draft shape, then idempotency,
  * then rate limit. Returns { ok:true } or { ok:false, code }.
  */
-function checkSendPreconditions({ prospect, gateOn, dailyCount, cap, followUp = false }) {
+function checkSendPreconditions({ prospect, gateOn, dailyCount, cap, followUp = false, late = false }) {
   if (!gateOn) return { ok: false, code: 'gate_off' };
   if (!prospect) return { ok: false, code: 'not_found' };
   if (!OUTREACH_TYPE_SET.has(prospect.link_type)) return { ok: false, code: 'not_outreach' };
@@ -153,7 +155,7 @@ function checkSendPreconditions({ prospect, gateOn, dailyCount, cap, followUp = 
   }
   // Only an open (or owner-parked) prospect is sendable — a row moved to a terminal
   // lifecycle status (lost/rejected/placed/contacted) must not be sent even if a stale draft lingers.
-  if (!SENDABLE_STATUSES.includes(prospect.status)) return { ok: false, code: 'not_actionable' };
+  if (!SENDABLE_STATUSES.includes(prospect.status) && !late) return { ok: false, code: 'not_actionable' };
   if (prospect.outreach_status !== 'drafted') return { ok: false, code: 'no_draft' };
   const bad = draftRefusal(M.draftOf(prospect, false));
   if (bad) return bad;
@@ -225,7 +227,8 @@ async function saveDraft({ prospectId, to, subject, body, owner = null }) {
     return { ok: false, code: 'already_sent' };
   }
   // Only draft an open (or owner-parked) prospect — not one moved to a terminal lifecycle status.
-  if (!SENDABLE_STATUSES.includes(prospect.status)) return { ok: false, code: 'not_actionable' };
+  const draftPath = prospect.path_id && !SENDABLE_STATUSES.includes(prospect.status) ? await db('seo_link_acquisition_paths').where({ id: prospect.path_id }).first() : null;
+  if (!SENDABLE_STATUSES.includes(prospect.status) && !lateSend(prospect, draftPath)) return { ok: false, code: 'not_actionable' };
   // Ambiguous states must be reconciled DELIBERATELY (reconcileSendError), never
   // silently requeued here, since the message may already have reached Gmail:
   //   send_error                → reconcile.
@@ -247,6 +250,7 @@ async function saveDraft({ prospectId, to, subject, body, owner = null }) {
     : null;
 
   const patch = {
+    outreach_draft_attempts: 0,
     outreach_to_email: to.trim(),
     outreach_subject: subject,
     outreach_body: body,
@@ -295,6 +299,7 @@ async function saveDraft({ prospectId, to, subject, body, owner = null }) {
     // `drafted` — unclaimable by the runner, refused by the send valve.
     let write = trx('seo_link_prospects')
       .where({ id: prospectId, status: prospect.status, link_type: prospect.link_type })
+      .where((b) => b.whereNull('lease_mode').orWhere('lease_mode', 'draft'))
       .whereNull('outreach_sent_at')
       .where((b) => b.whereNull('outreach_status').orWhereIn('outreach_status', ['none', 'drafted']));
     write = prospect.path_id == null ? write.whereNull('path_id') : write.where('path_id', prospect.path_id);
@@ -337,9 +342,11 @@ async function sendOutreach({ prospectId, approvedBy = 'admin', mode = 'owner', 
   // Fast-fail non-rate preconditions on the pre-read (dailyCount=0 → rate branch
   // no-ops; the cap is enforced atomically in the claim txn). The authoritative
   // content comes from the row the claim returns, not this read.
-  const pre = checkSendPreconditions({ prospect, gateOn, dailyCount: 0, cap, followUp });
+  const prePath = prospect?.path_id ? await db('seo_link_acquisition_paths').where({ id: prospect.path_id }).first() : null;
+  const late = prospect && lateSend(prospect, prePath);
+  const pre = checkSendPreconditions({ prospect, gateOn, dailyCount: 0, cap, followUp, late });
   if (!pre.ok) return pre;
-  if (mode === 'auto' && !followUp && prospect.status !== 'prospect') return { ok: false, code: 'not_actionable' };
+  if (mode === 'auto' && !followUp && prospect.status !== 'prospect' && !late) return { ok: false, code: 'not_actionable' };
 
   // Connectivity pre-check BEFORE we claim, so the common "Gmail not connected"
   // misconfig fails cleanly with the draft untouched — rather than claiming the row
@@ -498,7 +505,7 @@ async function claimUnderLock(trx, { prospectId, prospect, cap, mode, reviewedLo
     // Hermes lease as we take the row in-flight, so a stale worker report (optimistic
     // concurrency on claimed_at) can't overwrite the send.
     // — and drop any closure stamp a reopened row still carries: from here the conversation is OPEN for the §13 guard
-    .update({ [K.status]: 'sending', [K.token]: sendToken, [K.attemptedAt]: attemptAt, claimed_at: null, claimed_by: null, conversation_closed_at: null, updated_at: attemptAt })
+    .update({ [K.status]: 'sending', [K.token]: sendToken, [K.attemptedAt]: attemptAt, claimed_at: null, claimed_by: null, leased_provider: null, lease_mode: null, conversation_closed_at: null, updated_at: attemptAt })
     .returning('*');
   if (!claimedRows || claimedRows.length === 0) throw new Rollback({ ok: false, code: 'already_sent' });
   return { ok: true, row: claimedRows[0], authority, draft, thread };
@@ -602,13 +609,15 @@ async function lockedSendRow(trx, { prospectId, prospect, mode, inbox, followUp 
   const moved = await require('./link-registry').settleRetiredPlacements(trx, { prospectIds: [prospectId] });
   if (moved) return { ok: false, code: 'path_moved' };
   const current = await trx('seo_link_prospects').where({ id: prospectId }).first();
+  if (current?.claimed_at && current.lease_mode === 'acquire') return { ok: false, code: 'acquisition_in_progress', error: 'A submission is in progress; retry after its lease settles.' };
+  const onPath = current?.path_id ? await trx('seo_link_acquisition_paths').where({ id: current.path_id }).forUpdate().first() : null;
+  const late = current && lateSend(current, onPath);
   const sendable = followUp
     ? current && current.outreach_status === 'sent' && current.follow_up_status === 'drafted'
-    : current && SENDABLE_STATUSES.includes(current.status) && (mode !== 'auto' || current.status === 'prospect') && !M.AMBIGUOUS_SEND_STATUSES.includes(current.follow_up_status);
+    : current && (SENDABLE_STATUSES.includes(current.status) || late) && (mode !== 'auto' || current.status === 'prospect' || late) && !M.AMBIGUOUS_SEND_STATUSES.includes(current.follow_up_status);
   if (!sendable) return { ok: false, code: 'not_actionable' };
   if (current.target_domain !== prospect.target_domain) return { ok: false, code: 'not_actionable', error: 'the placement moved to another domain while you looked at it — reload and send again' };
   if (!current.path_id && !followUp) return { ok: false, code: 'path_unlinked', error: 'this prospect is not linked to an acquisition path yet; the registry catch-up links it within the hour' };
-  const onPath = await trx('seo_link_acquisition_paths').where({ id: current.path_id }).forUpdate().first(); // a follow-up's NULL path_id (deleted) reads no path: settled below
   // the pitch sends on a standing path at the revision the draft was bound to; the drafted follow-up's route is
   // SETTLED here (retired, re-drafted or refused — settleDraftedFollowUp), the one place that reads its binding
   const settled = followUp
@@ -750,13 +759,10 @@ function domainRefusal(domain, path) {
   return null;
 }
 
-// a SUBMIT-FIRST outreach path (execution_after_send=false, §6.4 / §7): the pitch follows the acquisition — nothing
-// sends while the execution instance is open. (The LATE SEND itself, on the Judge-owned placed row, arrives with the
-// acquire claim that can produce that row — PR 4; until then no submit-first placement can reach it.)
-async function submitStepOwed(trx, { placement, path }) {
-  if (!P.submitFirst(path)) return false; // the flag on a path with no acquire step orders nothing
-  const exec = await trx(AUTH).where({ prospect_id: placement.id, dimension: 'execution', instance_kind: '-' }).whereNull('ended_at').first('id', 'satisfied_at');
-  return !exec || !exec.satisfied_at;
+// A submit-first pitch follows completed execution on its own path. Verifier promotion alone does not complete
+// that step; the sender and both approval views use this predicate over the active execution instance.
+function submitStepOwed(path, execution) {
+  return P.submitFirst(path || {}) && (execution?.path_id !== path.id || !execution?.satisfied_at);
 }
 
 /**
@@ -786,7 +792,8 @@ async function openSendInstance(trx, { placement, path, policy, followUp = false
   // way (link-owner-queue), and the board's direct send is not the way around it
   if (path.legal_attestation === true && !require('./link-owner-queue').legalTermsUrlOf(path)) return { ok: false, code: 'not_authorized', error: 'the agreement is not viewable (no terms url in the evidence) — re-investigate before sending' };
   if (row.level === P.LEVELS.AUTO_OUTREACH && !stillAutoOutreach(row, ctx, followUp)) return { ok: false, code: 'not_authorized', error: 'the outreach policy moved since the automatic decision — the nightly bridge re-decides it' };
-  if (await submitStepOwed(trx, { placement, path })) return { ok: false, code: 'not_authorized', error: 'submit-first path: the pitch follows the publisher\'s form / account step, which has not completed' };
+  const execution = await trx(AUTH).where({ prospect_id: placement.id, dimension: 'execution', instance_kind: '-' }).whereNull('ended_at').first('path_id', 'satisfied_at');
+  if (submitStepOwed(path, execution)) return { ok: false, code: 'not_authorized', error: 'submit-first path: the pitch follows the publisher\'s form / account step, which has not completed' };
   return { ok: true, row, ctx, hash, revision };
 }
 
@@ -930,7 +937,8 @@ async function reconcileInitial({ prospect, outcome, approvedBy }) {
   if (st !== 'send_error' && !staleSending) return { ok: false, code: 'not_reconcilable' };
   // a re-queued draft is listed by the pending queue and accepted by the sender only on a row still awaiting its
   // conversation: a row moved on by hand (watching / lost / placed …) would take a draft nothing lists or sends
-  if (outcome === 'requeue' && !SENDABLE_STATUSES.includes(prospect.status)) return { ok: false, code: 'not_requeueable', error: `the placement has moved on (${prospect.status}) — a re-queued draft would be listed nowhere and sent by nothing; move it back to prospect first, or settle the send as sent` };
+  const path = prospect.path_id && outcome === 'requeue' && !SENDABLE_STATUSES.includes(prospect.status) ? await db('seo_link_acquisition_paths').where({ id: prospect.path_id }).first() : null;
+  if (outcome === 'requeue' && !SENDABLE_STATUSES.includes(prospect.status) && !lateSend(prospect, path)) return { ok: false, code: 'not_requeueable', error: `the placement has moved on (${prospect.status}) — a re-queued draft would be listed nowhere and sent by nothing; move it back to prospect first, or settle the send as sent` };
 
   const now = new Date();
   const note = outcome === 'sent'
@@ -1179,6 +1187,8 @@ module.exports = {
   STALE_SENDING_MS,
   REPLY_CHECK_TIMEOUT_MS,
   SENDABLE_STATUSES,
+  lateSend,
+  submitStepOwed,
   CONVERSATION_CLOSED_STATUSES,
   conversationOpen: CONVERSATION_OPEN,
   AMBIGUOUS_SEND_STATUSES: M.AMBIGUOUS_SEND_STATUSES,

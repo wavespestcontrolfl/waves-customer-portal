@@ -1,5 +1,7 @@
 const {
   amountToPounds,
+  buildPlanForService,
+  selectProtocolVisit,
   buildMixOrder,
   calculateNutrientLedgerFromRows,
   calculateNutrients,
@@ -149,7 +151,7 @@ describe('waveguard-plan-engine helpers', () => {
     expect(result.blocks.map((b) => b.code)).toContain('nitrogen_blackout');
   });
 
-  test('summarizeCalibration hard-blocks missing and expired calibration', () => {
+  test('mix inputs remain required but calibration expiry and verification are not approvals', () => {
     expect(summarizeCalibration({
       calibration: null,
       date: new Date('2026-05-01T12:00:00'),
@@ -165,7 +167,8 @@ describe('waveguard-plan-engine helpers', () => {
       date: new Date('2026-05-01T12:00:00'),
     });
 
-    expect(expired.blocks[0].code).toBe('expired_calibration');
+    expect(expired.blocks).toEqual([]);
+    expect(expired.selected.carrier_gal_per_1000).toBe(2);
   });
 
   test('summarizeCalibration blocks ambiguous active equipment calibrations', () => {
@@ -928,4 +931,71 @@ describe('waveguard-plan-engine helpers', () => {
       instruction: 'Add after flowables and before adjuvants.',
     });
   });
+});
+
+describe('buildPlanForService strict mode (job-card hook P1)', () => {
+  const { buildPlanForService } = require('../services/waveguard-plan-engine');
+  const service = { id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'WaveGuard Lawn Care' };
+  const knex = (table) => {
+    const chain = {};
+    for (const m of ['leftJoin', 'where', 'select', 'orderBy']) chain[m] = () => chain;
+    chain.first = () => (table === 'scheduled_services as ss'
+      ? Promise.resolve(service)
+      : Promise.reject(new Error('db down')));
+    return chain;
+  };
+  knex.schema = { hasTable: async () => false };
+
+  test('strict: a failed safety read (turf profile) throws instead of reading as "nothing on file"', async () => {
+    await expect(buildPlanForService('svc1', { db: knex, strict: true })).rejects.toThrow('db down');
+  });
+
+  test('strict: a failed product_aliases read throws too — aliases are how de-branded lines find their product (hook P1)', async () => {
+    const aliasesDown = (table) => {
+      const chain = {};
+      for (const m of ['leftJoin', 'where', 'whereIn', 'select', 'orderBy']) chain[m] = () => chain;
+      chain.first = () => (table === 'scheduled_services as ss' ? Promise.resolve(service) : { catch: () => Promise.resolve(null) });
+      chain.catch = (fn) => (table === 'product_aliases'
+        ? Promise.resolve().then(() => fn(new Error('aliases down')))
+        : Promise.resolve(table === 'products_catalog' ? [{ id: 'p', name: 'Celsius WG' }] : []));
+      return chain;
+    };
+    aliasesDown.schema = { hasTable: async () => false };
+    await expect(buildPlanForService('svc1', { db: aliasesDown, strict: true })).rejects.toThrow('aliases down');
+  });
+});
+
+describe('missing grass protocol fallback', () => {
+  const date = new Date('2026-09-05T16:00:00Z');
+  test.each([null, {}, { grass_type: '', track_key: null }])('blank grass selects September St. Augustine: %j', (profile) => {
+    expect(selectProtocolVisit(profile, date)).toMatchObject({ trackKey: 'st_augustine', month: 'Sep', visit: { month: 'Sep' } });
+  });
+  test.each(['bermuda', 'zoysia', 'bahia', 'st_augustine'])('preserves recorded %s', (grass) => {
+    expect(selectProtocolVisit({ grass_type: grass }, date).trackKey).toBe(grass);
+    expect(selectProtocolVisit(null, date, grass).trackKey).toBe(grass);
+  });
+  test('preserves the explicit track and recognizes legacy customer grass names', () => {
+    expect(selectProtocolVisit({ track_key: 'zoysia', grass_type: 'st_augustine' }, date).trackKey).toBe('zoysia');
+    expect(selectProtocolVisit({}, date, 'Empire Zoysia').trackKey).toBe('zoysia');
+  });
+  test.each(['mixed', 'unknown', 'unrecognized turf'])('does not replace a recorded %s selection with St. Augustine', (grass) => {
+    expect(selectProtocolVisit({ grass_type: grass }, date).trackKey).toBeNull();
+  });
+});
+
+test('a failed profile lookup cannot become a St. Augustine plan', async () => {
+  const db = (table) => {
+    const query = {};
+    for (const method of ['leftJoin', 'where', 'select']) query[method] = () => query;
+    query.first = () => table === 'scheduled_services as ss'
+      ? Promise.resolve({ id: 'test-service', customer_id: 'test-property', scheduled_date: '2026-09-05' })
+      : Promise.reject(new Error('Turf profile lookup failed'));
+    return query;
+  };
+  await expect(buildPlanForService('test-service', { db })).rejects.toThrow('Turf profile lookup failed');
+});
+
+test.each(['unknown', 'mixed'])('explicit %s turf never falls back to legacy St. Augustine', (grass_type) => {
+  const { selectProtocolVisit } = require('../services/waveguard-plan-engine');
+  expect(selectProtocolVisit({ grass_type }, new Date('2026-09-05T12:00:00Z'), 'St. Augustine').trackKey).toBeNull();
 });

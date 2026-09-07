@@ -21,6 +21,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+process.env.GATE_EDIT_APPT_ADDRESS = 'true';
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../models/db', () => {
@@ -114,6 +115,7 @@ function discoverAllTools() {
 // attaches confirmed server-side; the boolean is NOT in any model-facing
 // schema. New writes go here + write-gates.js.
 const WRITE_TWO_STEP = [
+  'switch_appointment_property',
   'create_agent_estimate_draft',
   'set_estimate_presentation',
   'create_customer',
@@ -457,6 +459,13 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
 
   // Minimal valid inputs per tool, deliberately WITHOUT confirmed.
   const UNCONFIRMED_CALLS = [
+    ['schedule-tools', 'executeScheduleTool', 'switch_appointment_property', {
+      appointment_id: '00000000-0000-0000-0000-000000000001', property_id: '00000000-0000-0000-0000-000000000002',
+    }, {
+      scheduled_services: [{ id: '00000000-0000-0000-0000-000000000001', customer_id: 'fixture-customer', status: 'en_route', scheduled_date: '2099-01-02' }],
+      customers: [{ id: 'fixture-customer', address_line1: '100 Test Street' }],
+      customer_properties: [{ id: '00000000-0000-0000-0000-000000000002', customer_id: 'fixture-customer', active: true, address_line1: '200 Test Street', city: 'Test City', state: 'FL', zip: '34201' }],
+    }],
     ['estimate-tools', 'executeEstimateTool', 'create_agent_estimate_draft', {
       leadId: 'lead-1',
       customerName: 'Road Tester',
@@ -634,7 +643,7 @@ describe('token-health getAll is side-effect free (backs the READ_ONLY classific
 // state: zero IB tools carried the flag and smoke ran them all).
 
 describe('contract-test registry flags gated bare writes as sideEffects', () => {
-  test('legacy + confirmed-endpoint writes are flagged; two-step previews stay smokable', async () => {
+  test('legacy + confirmed-endpoint writes and explicit side-effect metadata stay excluded from live smoke', async () => {
     const { discover } = require('../contract-tests/registry');
     const records = await discover();
     const ib = new Map(records.filter(r => r.surface === 'intelligence-bar').map(r => [r.name, r]));
@@ -643,9 +652,9 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
       .filter(name => ib.get(name)?.sideEffects !== true);
     expect(wrongly_smokable).toEqual([]);
 
-    // Two-step executors are contract-tested pure previews without
-    // confirmed — smoke coverage on them is real and safe.
-    const wrongly_skipped = WRITE_TWO_STEP.filter(name => ib.get(name)?.sideEffects === true);
-    expect(wrongly_skipped).toEqual([]);
+    // Existing pure previews remain smokable. The optional address writer
+    // explicitly opts out of live smoke; its preview is exercised above.
+    const explicitlySkipped = WRITE_TWO_STEP.filter(name => ib.get(name)?.sideEffects === true);
+    expect(explicitlySkipped).toEqual(['switch_appointment_property']);
   });
 });

@@ -107,6 +107,12 @@ async function computeCurrentPlacement(service, prefs, ctx) {
         'scheduled_services.window_start',
         'scheduled_services.window_end',
         'scheduled_services.estimated_duration_minutes',
+        'scheduled_services.service_address_line1',
+        'scheduled_services.service_address_city',
+        'scheduled_services.service_address_zip',
+        'customers.address_line1 as customer_address_line1',
+        'customers.city as customer_city',
+        'customers.zip as customer_zip',
         'scheduled_services.lat as svc_lat',
         'scheduled_services.lng as svc_lng',
         'customers.latitude as customer_latitude',
@@ -185,6 +191,20 @@ async function findValidCandidateSlots(service, prefs, ctx) {
     dateTo = shiftDateStr(origDate, tol);
     if (!dateTo || dateTo > horizonCap) dateTo = horizonCap;
   }
+  // Customer re-anchors carry a permanent due date. Repeated route nudges
+  // must stay within the SAME ±3 days, including when route tiers are off.
+  if (service.recurring_dispatch_due_date) {
+    const due = toDateStr(service.recurring_dispatch_due_date);
+    const dueFrom = shiftDateStr(due, -3);
+    const dueTo = shiftDateStr(due, 3);
+    if (!service.window_start) {
+      // No promised time to freeze: first placement can use tomorrow onward.
+      dateFrom = etDateString(addETDays(ctx.nowDate, 1));
+      dateTo = horizonCap;
+    }
+    if (dateFrom < dueFrom) dateFrom = dueFrom;
+    if (dateTo > dueTo) dateTo = dueTo;
+  }
   if (dateFrom > dateTo) {
     // Window collapsed (visit sits at the very edge of the horizon) — nothing to do.
     const current = await computeCurrentPlacement(service, prefs, ctx);
@@ -204,9 +224,9 @@ async function findValidCandidateSlots(service, prefs, ctx) {
   const siblingRows = await ctx.db('scheduled_services')
     .where(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
     .whereNot('id', service.id)
-    // 'rescheduled' siblings are phantom customer requests on a stale date, so
-    // they must NOT block an actually-open day (mirrors the seeder's dedup).
-    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    // Due placement must honor reschedule holds preserved by the customer
+    // re-anchor. Legacy optimization retains the seeder's request exclusion.
+    .whereNotIn('status', service.recurring_dispatch_due_date ? ['cancelled'] : ['cancelled', 'rescheduled'])
     .whereBetween('scheduled_date', [dateFrom, dateTo])
     .select('scheduled_date');
   const siblingDates = new Set(siblingRows.map((r) => toDateStr(r.scheduled_date)));

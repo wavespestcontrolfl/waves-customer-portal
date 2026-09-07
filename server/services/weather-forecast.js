@@ -165,6 +165,12 @@ const HOURLY_CACHE_TTL_MS = 10 * 60 * 1000;
  *          offset), or null when NWS is unreachable. Fail-open like
  *          the daily lookup — callers must tolerate null.
  */
+function parseWindMph(text) {
+  const nums = String(text || '').match(/\d+(?:\.\d+)?/g);
+  if (!nums || nums.length === 0) return null;
+  return Math.max(...nums.map(Number));
+}
+
 async function getHourlyRainOutlook(lat, lng) {
   if (lat == null || lng == null || lat === '' || lng === '') return null;
   const latNum = Number(lat);
@@ -191,6 +197,12 @@ async function getHourlyRainOutlook(lat, lng) {
         ? p.probabilityOfPrecipitation.value
         : null,
       shortForecast: p.shortForecast || null,
+      // Temperature (°F) and sustained wind (mph) ride the same period so the
+      // job-card spray check can read label limits off one NWS fetch. NWS
+      // renders windSpeed as "5 mph" / "5 to 10 mph" — the upper bound is
+      // the conservative number for a max-wind label limit.
+      temperatureF: Number.isFinite(p?.temperature) ? p.temperature : null,
+      windMph: parseWindMph(p?.windSpeed),
     }));
 
   if (hours.length === 0) return null;
@@ -212,5 +224,5 @@ module.exports = {
   getDailyRainOutlookBounded,
   getHourlyRainOutlook,
   forecastLinkForZip,
-  _test: { cacheKey, _cache, _hourlyCache, _dailyFailCooldown },
+  _test: { cacheKey, _cache, _hourlyCache, _dailyFailCooldown, parseWindMph },
 };

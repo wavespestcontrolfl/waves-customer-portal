@@ -289,17 +289,21 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
   // geo); `eligible()` builds a row the orchestrator's gate accepts.
   const FAR = (() => { const d = new Date(); d.setUTCDate(d.getUTCDate() + 40); return d.toISOString().slice(0, 10); })();
   const eligible = (over = {}) => ({ id: 's2', service_type: 'Lawn Fertilization', is_recurring: true, recurring_parent_id: 'p2', status: 'confirmed', scheduled_date: FAR, auto_dispatch_locked: false, auto_dispatch_excluded: false, customer_active: true, customer_latitude: 27.5, customer_longitude: -82.4, ...over });
-  const fakeTrx = ({ siblings = [], caps = [], seriesClash = null, planAlert = null } = {}) => {
+  // `capsByTech` answers the capability read per technician_id (the fence's
+  // where clause); plain `caps` answers regardless of tech.
+  const fakeTrx = ({ siblings = [], caps = [], capsByTech = null, seriesClash = null, planAlert = null } = {}) => {
     const calls = [];
     let ssCalls = 0;
     const trx = jest.fn((table) => {
       calls.push(String(table).split(' ')[0]);
       const isSS = String(table).startsWith('scheduled_services');
       const probe = isSS && ssCalls++ > 0;
+      let techFilter = null;
       const api = {
-        where: (w) => { if (typeof w === 'function') w.call(api); return api; },
+        where: (w) => { if (typeof w === 'function') w.call(api); else if (w && w.technician_id) techFilter = w.technician_id; return api; },
         orWhere: () => api, whereIn: () => api, whereNotIn: () => api, whereNull: () => api, leftJoin: () => api,
-        select: async () => (isSS ? siblings : caps),
+        forShare: () => api,
+        select: async () => (isSS ? siblings : (capsByTech ? (capsByTech[techFilter] || []) : caps)),
         first: async () => (table === 'recurring_plan_alerts' ? planAlert : (probe ? seriesClash : null)),
       };
       return api;
@@ -309,14 +313,51 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
   };
   const primary = { id: 's1', status: 'confirmed' };
 
-  test('applyAutoDispatchMove hands the unit mover a member guard', async () => {
+  test('applyAutoDispatchMove hands the unit mover a member guard AND the rebooker a per-row move guard', async () => {
     const queue = [
       readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false }),
       { where() { return this; }, update: jest.fn().mockResolvedValue(1) },
     ];
     db.mockImplementation(() => queue.shift());
     await applyAutoDispatchMove(SERVICE, BEST, 'run1', {});
-    expect(typeof SmartRebooker.reschedule.mock.calls[0][5].memberGuard).toBe('function');
+    const opts = SmartRebooker.reschedule.mock.calls[0][5];
+    expect(typeof opts.memberGuard).toBe('function');
+    expect(typeof opts.moveGuard).toBe('function');
+  });
+
+  test('move guard: the tapped row (standalone or primary) is re-checked against the receiving tech inside the move trx — Off refuses, active/missing pass, tech unchanged included', async () => {
+    const { makeMoveGuard } = require('../services/auto-dispatch/apply');
+    const lawnRow = { ...SERVICE, service_type: 'Lawn Fertilization' };
+    const lawn = classifyServiceCategory(lawnRow.service_type);
+    // Same tech as the row (BEST.technician_id === SERVICE.technician_id): still read.
+    const guard = makeMoveGuard({ service: lawnRow, best: BEST });
+    let trx = fakeTrx({ caps: [{ service_category: lawn, active: false }] });
+    await expect(guard({ trx, technicianId: 't1' })).rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', statusCode: 409 });
+    // technician row share-locked FIRST (serializes with the editor's FOR UPDATE), then the read
+    expect(trx.__calls).toEqual(['technicians', 'technician_capabilities']);
+    trx = fakeTrx({ caps: [{ service_category: lawn, active: true }] });
+    await expect(guard({ trx, technicianId: 't1' })).resolves.toBeUndefined();
+    trx = fakeTrx({ caps: [] });
+    await expect(guard({ trx, technicianId: 't1' })).resolves.toBeUndefined();
+    // The DESTINATION (placement) tech is what gets checked, not the tech the
+    // rebooker says the row is kept on: the unit mover strips technicianId
+    // from member moves, so that "kept" tech is the old one. Old tech Off for
+    // lawn + destination active → passes; destination Off → refuses.
+    const toT2 = makeMoveGuard({ service: lawnRow, best: { ...BEST, technician_id: 't2' } });
+    trx = fakeTrx({ capsByTech: { t1: [{ service_category: lawn, active: false }], t2: [{ service_category: lawn, active: true }] } });
+    await expect(toT2({ trx, technicianId: 't1' })).resolves.toBeUndefined();
+    trx = fakeTrx({ capsByTech: { t1: [{ service_category: lawn, active: true }], t2: [{ service_category: lawn, active: false }] } });
+    await expect(toT2({ trx, technicianId: 't1' })).rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+    // No receiving tech at all → nothing to check, no read.
+    const unassigned = makeMoveGuard({ service: { ...lawnRow, technician_id: null }, best: { ...BEST, technician_id: null } });
+    trx = fakeTrx();
+    await expect(unassigned({ trx, technicianId: null })).resolves.toBeUndefined();
+    expect(trx.__calls).toEqual([]);
+    // A grouped SIBLING moved by the unit mover: the rebooker hands its own row,
+    // which is what gets checked — not the closure's primary.
+    const pestPrimary = makeMoveGuard({ service: { ...SERVICE, service_type: 'Quarterly Pest Control' }, best: BEST });
+    trx = fakeTrx({ caps: [{ service_category: lawn, active: false }] });
+    await expect(pestPrimary({ trx, technicianId: 't1', service: { id: 's2', service_type: 'Lawn Fertilization' } })).rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
   });
 
   test('no siblings ⇒ nothing to check; a non-live sibling (customer reschedule request) refuses', async () => {
@@ -346,22 +387,27 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     expect(routeTiers.loadReminderFreeze).not.toHaveBeenCalled();
   });
 
-  test('technician reassignment: the chosen tech DEACTIVATED for a sibling category refuses; missing/qualified passes; unchanged tech never reads capabilities', async () => {
+  test('the receiving tech DEACTIVATED for a sibling category refuses; missing/qualified passes; an UNCHANGED tech is re-read too (Off can land mid-run)', async () => {
     const lawn = classifyServiceCategory('Lawn Fertilization');
     const members = [primary, { id: 's2', status: 'confirmed' }];
     const best = { ...BEST, technician_id: 't9' };
     const guard = makeMemberGuard({ service: SERVICE, best, config: {}, techChanged: true });
     let trx = fakeTrx({ siblings: [eligible()], caps: [{ service_category: lawn, active: false }] });
     await expect(guard({ trx, members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
-    expect(trx.__calls).toEqual(['scheduled_services', 'recurring_plan_alerts', 'scheduled_services', 'technician_capabilities']); // member read, plan check, series probe, capability
+    expect(trx.__calls).toEqual(['scheduled_services', 'recurring_plan_alerts', 'scheduled_services', 'technicians', 'technician_capabilities']); // member read, plan check, series probe, tech-row share lock, capability
     trx = fakeTrx({ siblings: [eligible()], caps: [] });
     await expect(guard({ trx, members })).resolves.toBeUndefined();
     trx = fakeTrx({ siblings: [eligible()], caps: [{ service_category: lawn, active: true }] });
     await expect(guard({ trx, members })).resolves.toBeUndefined();
+    // Same tech: the run's capability map is a start-of-run snapshot, so the
+    // apply fence still reads the committed row — an Off written by the Team
+    // tab during the run refuses; qualified passes.
     const same = makeMemberGuard({ service: SERVICE, best, config: {}, techChanged: false });
-    trx = fakeTrx({ siblings: [eligible()] });
+    trx = fakeTrx({ siblings: [eligible()], caps: [{ service_category: lawn, active: false }] });
+    await expect(same({ trx, members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's2' });
+    expect(trx.__calls).toContain('technician_capabilities');
+    trx = fakeTrx({ siblings: [eligible()], caps: [{ service_category: lawn, active: true }] });
     await expect(same({ trx, members })).resolves.toBeUndefined();
-    expect(trx.__calls).not.toContain('technician_capabilities');
   });
 
   test('route tiers on: each sibling must admit best.date inside its OWN tier/drift window; unknown anchor evidence refuses (local codex audit)', async () => {
@@ -462,4 +508,58 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     trx = fakeTrx({ siblings: [eligible()], seriesClash: null });
     await expect(guard({ trx, members })).resolves.toBeUndefined();
   });
+});
+
+
+test('apply refuses a stale or out-of-bounds recurring due-date placement before calling the rebooker', async () => {
+  const row = { ...SERVICE, recurring_dispatch_due_date: '2026-08-04' };
+  db.mockImplementation(() => readRow(row));
+  await expect(applyAutoDispatchMove(row, BEST, 'run1')).rejects.toMatchObject({ code: 'RECURRING_DUE_DATE_LIMIT' });
+  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+
+  db.mockImplementation(() => readRow({ ...row, recurring_dispatch_due_date: '2026-08-05' }));
+  await expect(applyAutoDispatchMove(row, { ...BEST, date: '2026-08-06' }, 'run1')).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
+});
+
+const LOCATION = {
+  property_id: 'property-original', service_address_line1: '100 Example Street', service_address_line2: '',
+  service_address_city: 'Example City', service_address_state: 'FL', service_address_zip: '00000', lat: '27.4', lng: '-82.5',
+};
+test.each(Object.keys(LOCATION))('rejects a changed %s before applying a scored move', async (field) => {
+  const scored = { ...SERVICE, ...LOCATION };
+  db.mockImplementation(() => readRow({ ...scored, [field]: field === 'lat' || field === 'lng' ? '28.5' : 'changed' }));
+  await expect(applyAutoDispatchMove(scored, BEST, 'run1', {})).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
+  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+});
+
+test('pins the complete location in the atomic rebooker expectation', async () => {
+  const scored = { ...SERVICE, ...LOCATION };
+  const queue = [readRow(scored), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+  db.mockImplementation(() => queue.shift());
+  await applyAutoDispatchMove(scored, BEST, 'run1', {});
+  expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toMatchObject(LOCATION);
+});
+
+
+test('confirmation after scoring prevents deferred placement', async () => {
+  const scored = { ...SERVICE, status: 'pending', window_start: null, window_end: null, recurring_dispatch_due_date: SERVICE.scheduled_date, customer_confirmed: false };
+  db.mockImplementation(() => readRow({ ...scored, customer_confirmed: true }));
+  await expect(applyAutoDispatchMove(scored, { ...BEST, date: SERVICE.scheduled_date }, 'run1'))
+    .rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
+  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+});
+
+test('pins confirmation in the deferred placement write and rechecks each locked member', async () => {
+  const scored = { ...SERVICE, recurring_dispatch_due_date: SERVICE.scheduled_date, customer_confirmed: false };
+  const queue = [readRow(scored), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+  db.mockImplementation(() => queue.shift());
+  await applyAutoDispatchMove(scored, { ...BEST, date: SERVICE.scheduled_date }, 'run1');
+  const options = SmartRebooker.reschedule.mock.calls[0][5];
+  expect(options.expect).toMatchObject({ customer_confirmed: false });
+  const trx = jest.fn();
+  for (const id of [scored.id, 'grouped-sibling']) {
+    await expect(options.moveGuard({ trx, service: { ...scored, id, customer_confirmed: true } }))
+      .rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+  }
+  expect(trx).not.toHaveBeenCalled();
 });

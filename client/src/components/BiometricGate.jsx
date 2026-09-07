@@ -15,7 +15,7 @@ export function useBiometricLock() {
 // must be opaque (it hides account content from the iOS app-switcher snapshot).
 // It also must not own the scene lifecycle — unlocking over a page that runs its
 // own useGlassSurface would tear that page's scene down. So the overlay paints
-// its own copy of the applyGlassScene('full') mesh + orbs (glass-engine.js —
+// its own copy of the applyGlassScene() mesh + orbs (glass-engine.js —
 // keep the two in sync), and the native launch image mirrors the same scene:
 // client/resources/splash-2732x2732.png + capacitor.config.json backgroundColor.
 const GLASS_SCENE_BG = [
@@ -27,7 +27,7 @@ const GLASS_SCENE_BG = [
   'linear-gradient(180deg,#E0EEF9 0%,#F5FAFE 45%,#E5EFF7 100%)',
 ].join(',');
 
-// Same orb spec as applyGlassScene('full').
+// Same orb spec as applyGlassScene().
 const GLASS_ORBS = [
   ['10%', '6%', 380, 'rgba(10,126,194,.36)'],
   ['62%', '22%', 460, 'rgba(56,170,225,.34)'],

@@ -218,7 +218,8 @@ function buildFactsBlock({ firstName, serviceType, techName, serviceDaysAgo, cal
   const lines = [];
   lines.push(`Customer first name: ${firstName || "there"}`);
   lines.push(`Service: ${serviceType || "pest control"}${serviceDaysAgo != null ? ` (completed ${serviceDaysAgo === 0 ? "today" : `${serviceDaysAgo} day${serviceDaysAgo === 1 ? "" : "s"} ago`})` : ""}`);
-  lines.push(`Technician: ${techName || "Adam"}`);
+  // No technician on the visit → say nothing rather than name someone.
+  if (techName) lines.push(`Technician: ${techName}`);
   if (calls.length) {
     lines.push("", "PHONE CALL HISTORY (newest first):");
     calls.forEach((c, i) => {

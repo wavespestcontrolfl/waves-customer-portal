@@ -475,10 +475,8 @@ describe('autonomous versus lane (pest showdown)', () => {
       const cards = plans.map((p) => `${p.versusPair.key}|${p.city}`);
       expect(new Set(cards).size).toBe(cards.length);
       expect(new Set(plans.map((p) => p.city)).size).toBeGreaterThan(1);
-      // All eligible pairs surface before any repeats — no half-hidden bank.
-      const eligibleCount = Studio.PEST_VERSUS_PAIRS
-        .filter((p) => !p.months || p.months.includes(Number(yearMonth.slice(5)))).length;
-      expect(new Set(plans.map((p) => p.versusPair.key)).size).toBe(eligibleCount);
+      // No pair repeats inside a month either (8 fires against a 24-pair bank).
+      expect(new Set(plans.map((p) => p.versusPair.key)).size).toBe(plans.length);
     }
   });
 
@@ -502,7 +500,7 @@ describe('autonomous versus lane (pest showdown)', () => {
         }
       }
     }
-    const combos = Studio.PEST_VERSUS_PAIRS.length * 4; // 6 pairs x 4 cities
+    const combos = Studio.SHOWDOWN_BANK.length * 4; // 44 cards x 4 cities
     const lastSeen = new Map();
     let minGap = Infinity;
     cards.forEach((c, i) => {
@@ -510,7 +508,7 @@ describe('autonomous versus lane (pest showdown)', () => {
       if (lastSeen.has(c)) minGap = Math.min(minGap, i - lastSeen.get(c));
       lastSeen.set(c, i);
     });
-    expect(minGap).toBe(combos); // 24 fires between identical cards, never 23
+    expect(minGap).toBe(combos); // 96 fires between identical cards, never fewer
   });
 
   test('cards stay unique across a season boundary (fixed modulus, no remapping)', () => {
@@ -520,8 +518,17 @@ describe('autonomous versus lane (pest showdown)', () => {
     // within 14 days (2027-06-18 and 2027-07-02 both gave chinch-bug for
     // Lakewood Ranch). The swarmer's July slot must yield to the campaign
     // lane, not remap the sequence.
-    const plans = [...fireDays('2027-06'), ...fireDays('2027-07')]
-      .map((d) => Studio.selectAutonomousVersusPlan(d));
+    // With a 24-pair bank a gated pair's slot lands roughly once a quarter,
+    // so walk a whole year: every season boundary is crossed, at least one
+    // out-of-season slot yields, and no card repeats inside the year (a year
+    // has ~95 fires, under the 96-fire cycle).
+    const plans = [];
+    for (let m = 1; m <= 12; m++) {
+      const lastDay = new Date(Date.UTC(2027, m, 0)).getUTCDate(); // Feb has no 30th
+      for (const d of [2, 6, 10, 14, 18, 22, 26, 30].filter((x) => x <= lastDay)) {
+        plans.push(Studio.selectAutonomousVersusPlan(etNoon(`2027-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`)));
+      }
+    }
     expect(plans.some((p) => p === null)).toBe(true); // out-of-season slots skipped
     const cards = plans.filter(Boolean).map((p) => `${p.versusPair.key}|${p.city}`);
     expect(new Set(cards).size).toBe(cards.length);
@@ -529,13 +536,23 @@ describe('autonomous versus lane (pest showdown)', () => {
 
   test('season-gated pairs stay out of off-season months, at selection AND approval', () => {
     process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
-    // Termite swarmer cards are swarm-season content (Feb–Jun) — never August.
-    for (const plan of fireDays('2026-08').map((d) => Studio.selectAutonomousVersusPlan(d)).filter(Boolean)) {
-      expect(plan.versusPair.key).not.toBe('termite_swarmer_vs_winged_ant');
+    // Gated pairs (swarmer Feb–Jun, webworm May–Oct) never surface outside
+    // their months, and each is still reachable in season — checked across
+    // two years so every gated pair's slot lands both in and out of season.
+    const gated = Studio.PEST_VERSUS_PAIRS.filter((p) => Array.isArray(p.months));
+    expect(gated.map((p) => p.key)).toContain('termite_swarmer_vs_winged_ant');
+    const inSeasonHits = new Set();
+    for (let y = 2026; y <= 2027; y++) {
+      for (let m = 1; m <= 12; m++) {
+        for (const plan of fireDays(`${y}-${String(m).padStart(2, '0')}`).map((d) => Studio.selectAutonomousVersusPlan(d)).filter(Boolean)) {
+          const pair = gated.find((p) => p.key === plan.versusPair.key);
+          if (!pair) continue;
+          expect({ key: pair.key, month: m, inSeason: pair.months.includes(m) }).toEqual({ key: pair.key, month: m, inSeason: true });
+          inSeasonHits.add(pair.key);
+        }
+      }
     }
-    // In season the pair is still reachable.
-    const marchKeys = fireDays('2026-03').map((d) => Studio.selectAutonomousVersusPlan(d).versusPair.key);
-    expect(marchKeys).toContain('termite_swarmer_vs_winged_ant');
+    expect([...inSeasonHits].sort()).toEqual(gated.map((p) => p.key).sort());
 
     // A draft created in season must not be APPROVABLE out of season — the
     // stored versusPair is re-checked against the current ET month.
@@ -817,6 +834,19 @@ describe('studio link relevance + legacy-card alert predicates', () => {
     // Previously-unlisted intents now resolve, so an exact live post can be linked.
     expect(Studio.serviceIntentKeywords({ topic: 'black widow vs brown widow', service: 'general pest' })).toEqual(expect.arrayContaining(['spider']));
     expect(Studio.serviceIntentKeywords({ topic: 'wasps nesting under eaves' })).toEqual(expect.arrayContaining(['wasp', 'hornet']));
+    // Mud daubers stand alone (Codex r3 on #3990): a bee or yellowjacket page is not a mud-dauber guide.
+    const dauber = Studio.serviceIntentKeywords({ topic: 'mud daubers on the lanai ceiling', service: 'general pest' });
+    expect(dauber).toEqual(expect.arrayContaining(['mud dauber']));
+    expect(dauber).not.toContain('wasp');
+    expect(dauber).not.toContain('bee');
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Yellowjackets around the pool deck' }, dauber)).toBe(false);
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Mud dauber nests on lanai ceilings' }, dauber)).toBe(true);
+    // Damp-area arthropods keep separate intents (Codex r5 on #3990).
+    const damp = Studio.serviceIntentKeywords({ topic: 'earwigs and springtails after downpours', service: 'general pest' });
+    expect(damp).toEqual(expect.arrayContaining(['earwig', 'springtail']));
+    expect(damp).not.toContain('silverfish');
+    expect(damp).not.toContain('millipede');
+    expect(Studio.rowMatchesIntentKeywords({ title: 'Silverfish in the bathroom' }, damp)).toBe(false);
     expect(Studio.serviceIntentKeywords({ topic: 'palmetto bugs in the garage' })).toEqual(expect.arrayContaining(['roach']));
     // End-to-end: the resolved keywords select the right row and reject the look-alike.
     const kws = Studio.serviceIntentKeywords({ topic: 'summer roaches moving indoors', service: 'general pest' });
@@ -866,5 +896,367 @@ describe('studio link relevance + legacy-card alert predicates', () => {
     expect(Studio.legacyCardShipped([{ platform: 'facebook', success: true, imageUrl: 'https://cdn.example.com/scene.jpg' }, { platform: 'gbp', success: true, imageUrl: gbpCard }], new Set([gbpCard]), 'https://cdn.example.com/scene.jpg')).toBe(true);
     // Nothing rendered → never alerts.
     expect(Studio.legacyCardShipped([{ platform: 'facebook', success: true, imageUrl: card }], new Set(), card)).toBe(false);
+  });
+});
+
+describe('content bank refill (2026-09-06)', () => {
+  test('every month carries six campaign topics, each with a known angle/cta and a service line', () => {
+    const angles = new Set(['signs to check', 'what we are seeing', 'new Florida homeowner', 'do not ignore this', 'myth/fact']);
+    const ctas = new Set(['book inspection', 'request estimate', 'read guide']);
+    for (let m = 1; m <= 12; m++) {
+      const topics = Studio.SEASONAL_AUTONOMOUS_TOPICS[m];
+      expect({ month: m, count: topics.length }).toEqual({ month: m, count: 6 });
+      expect(new Set(topics.map((t) => t.topic)).size).toBe(6);
+      for (const t of topics) {
+        expect(angles.has(t.angle)).toBe(true);
+        expect(ctas.has(t.cta)).toBe(true);
+        expect(t.service).toMatch(/^(general pest|lawn care|termite|mosquito|rodent|tree & shrub)$/);
+      }
+    }
+  });
+
+  test('the versus bank holds 24 unique pairs with the original six first (rotation order stable)', () => {
+    expect(Studio.PEST_VERSUS_PAIRS).toHaveLength(24);
+    expect(new Set(Studio.PEST_VERSUS_PAIRS.map((p) => p.key)).size).toBe(24);
+    expect(Studio.PEST_VERSUS_PAIRS.slice(0, 6).map((p) => p.key)).toEqual([
+      'carpenter_ant_vs_ghost_ant', 'subterranean_vs_drywood_termite', 'termite_swarmer_vs_winged_ant',
+      'paper_wasp_vs_mud_dauber', 'chinch_bug_vs_drought_stress', 'roof_rat_vs_norway_rat',
+    ]);
+    for (const pair of Studio.PEST_VERSUS_PAIRS) {
+      expect(pair.left.points).toHaveLength(3);
+      expect(pair.right.points).toHaveLength(3);
+      expect(pair.verdict.length).toBeLessThanOrEqual(90);
+      if (pair.months) expect(pair.months.every((m) => m >= 1 && m <= 12)).toBe(true);
+    }
+  });
+
+  test('every seasonal topic builds compliant campaign drafts', () => {
+    const context = {
+      location: { city: 'Sarasota', id: 'sarasota', name: 'Sarasota' },
+      services: [],
+      content: [],
+      recentSocials: [],
+      pestPressure: { explanation: 'Pest Pressure is a 0-5 score that estimates the current level of pest activity at your property.' },
+      reviews: [],
+      competitorPatterns: Studio.DEFAULT_COMPETITOR_PATTERNS,
+    };
+    for (let m = 1; m <= 12; m++) {
+      for (const t of Studio.SEASONAL_AUTONOMOUS_TOPICS[m]) {
+        const drafts = Studio.buildCampaignDrafts({ ...t, city: 'Sarasota', channels: ['facebook', 'instagram', 'linkedin', 'gbp'] }, context);
+        const validation = Studio.validateDrafts(drafts);
+        for (const [platform, result] of Object.entries(validation)) {
+          expect({ topic: t.topic, platform, issues: result.issues || [], valid: result.valid })
+            .toEqual({ topic: t.topic, platform, issues: [], valid: true });
+        }
+      }
+    }
+  });
+});
+
+describe('campaign lane rotation walks the slot sequence (Codex r1 + r2 on #3990)', () => {
+  const etNoonLocal = (iso) => new Date(`${iso}T16:00:00Z`);
+  const days = (ym, count) => [...Array(count)].map((_, i) => `${ym}-${String(i + 1).padStart(2, '0')}`);
+  let prev;
+  beforeEach(() => { prev = process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS; });
+  afterEach(() => {
+    if (prev === undefined) delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
+    else process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = prev;
+  });
+
+  test('versus lane on: the 16 odd-day slots of a month reach every topic and city with no topic+city repeat', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    const slots = days('2026-07', 31).filter((iso) => Number(iso.slice(8)) % 2 === 1);
+    const plans = slots.map((iso) => Studio.selectAutonomousCampaign(etNoonLocal(iso)));
+    expect(new Set(plans.map((p) => p.topic)).size).toBe(6);
+    expect(new Set(plans.map((p) => p.city)).size).toBe(4);
+    const combos = plans.map((p) => `${p.topic}|${p.city}`);
+    expect(new Set(combos).size).toBe(combos.length);
+  });
+
+  test('versus lane off (default): the 24 slots of a 31-day month are exactly the full topic×city bank', () => {
+    delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
+    const slots = days('2026-07', 31).filter((iso) => Number(iso.slice(8)) % 4 !== 0);
+    expect(slots).toHaveLength(24);
+    const combos = slots.map((iso) => { const p = Studio.selectAutonomousCampaign(etNoonLocal(iso)); return `${p.topic}|${p.city}`; });
+    expect(new Set(combos).size).toBe(24);
+  });
+
+  test('across months the walk never repeats a combination inside 24 slots (bank size 6 × 4)', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    // Compare by bank position (topic index + city) since the topic LIST
+    // changes at the month boundary; the walk itself must be gap-24.
+    const seen = new Map();
+    let minGap = Infinity;
+    let i = 0;
+    for (const ym of ['2026-07', '2026-08', '2026-09', '2026-10']) {
+      const len = new Date(Date.UTC(Number(ym.slice(0, 4)), Number(ym.slice(5)), 0)).getUTCDate();
+      for (const iso of days(ym, len).filter((d) => Number(d.slice(8)) % 2 === 1)) {
+        const p = Studio.selectAutonomousCampaign(etNoonLocal(iso));
+        const bank = Studio.SEASONAL_AUTONOMOUS_TOPICS[Number(ym.slice(5))];
+        const key = `${bank.findIndex((t) => t.topic === p.topic)}|${p.city}`;
+        if (seen.has(key)) minGap = Math.min(minGap, i - seen.get(key));
+        seen.set(key, i);
+        i += 1;
+      }
+    }
+    expect(minGap).toBe(24);
+  });
+
+  test('a yielded even day (review had no candidate) never duplicates the slot before or after it', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    for (const d of [4, 8, 12, 16, 20, 24, 28]) {
+      const pick = (day) => { const p = Studio.selectAutonomousCampaign(etNoonLocal(`2026-07-${String(day).padStart(2, '0')}`)); return `${p.topic}|${p.city}`; };
+      expect(pick(d)).not.toBe(pick(d - 1));
+      expect(pick(d)).not.toBe(pick(d + 1));
+    }
+  });
+});
+
+describe('campaign lane skips recently published cards (Codex r3 on #3990)', () => {
+  const etNoonLocal = (iso) => new Date(`${iso}T16:00:00Z`);
+
+  test('a yielded review day whose card was published is not replayed when the walk reaches it', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    const yielded = Studio.selectAutonomousCampaign(etNoonLocal('2026-07-04')); // review day, no candidate
+    const recent = new Set([`${yielded.topic}|${yielded.city}`]);
+    // Every owned slot in the following month walks past that state instead of repeating it.
+    for (let d = 5; d <= 31; d += 2) {
+      const p = Studio.selectAutonomousCampaign(etNoonLocal(`2026-07-${String(d).padStart(2, '0')}`), { recent });
+      expect(`${p.topic}|${p.city}`).not.toBe(`${yielded.topic}|${yielded.city}`);
+    }
+    delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
+  });
+
+  test('a yielded day changes the topic, not just the city, against both neighbouring owned slots', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    // 2026-07-04 (review day) and 2026-07-06 (versus day) are not slots; 3/5/7 are.
+    for (const [before, yielded, after] of [[3, 4, 5], [5, 6, 7], [7, 8, 9]]) {
+      const topicOn = (d) => Studio.selectAutonomousCampaign(etNoonLocal(`2026-07-${String(d).padStart(2, '0')}`)).topic;
+      expect(topicOn(yielded)).not.toBe(topicOn(before));
+      expect(topicOn(yielded)).not.toBe(topicOn(after));
+    }
+    delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
+  });
+
+  test('when every state is recent, the walk still never repeats the subject that posted last (Codex r4 on #3990)', () => {
+    // 24 daily campaign fires (reviews/versus dark) fill the whole July cycle.
+    const seasonal = Studio.SEASONAL_AUTONOMOUS_TOPICS[7];
+    const all = [];
+    for (let slot = 0; slot < 24; slot += 1) {
+      const c = Studio.campaignCardAt(seasonal, slot);
+      all.push(`${c.topic.topic}|${c.city}`);
+    }
+    for (let d = 20; d <= 30; d += 1) {
+      const last = Studio.selectAutonomousCampaign(etNoonLocal(`2026-07-${d}`), { recent: new Set(all) });
+      // The next day's recent window starts with what just posted.
+      const recent = new Set([`${last.topic}|${last.city}`, ...all]);
+      const next = Studio.selectAutonomousCampaign(etNoonLocal(`2026-07-${d + 1}`), { recent });
+      expect(next.topic).not.toBe(last.topic);
+      expect(seasonal.some((t) => t.topic === next.topic)).toBe(true);
+    }
+  });
+
+  test('the skip walks forward to the next unpublished state and never leaves the month bank', () => {
+    const first = Studio.selectAutonomousCampaign(etNoonLocal('2026-07-01'));
+    const next = Studio.selectAutonomousCampaign(etNoonLocal('2026-07-01'), { recent: new Set([`${first.topic}|${first.city}`]) });
+    expect(`${next.topic}|${next.city}`).not.toBe(`${first.topic}|${first.city}`);
+    expect(Studio.SEASONAL_AUTONOMOUS_TOPICS[7].some((t) => t.topic === next.topic)).toBe(true);
+  });
+});
+
+describe('showdown bank formats: myth vs fact + three signs (PR 3)', () => {
+  const etNoon = (iso) => new Date(`${iso}T16:00:00Z`);
+  const V = require('../services/social-media').validateContent;
+
+  test('the bank holds the 24 pairs plus 10 myths and 10 signs, unique keys, pairs in their original order, no two format cards adjacent', () => {
+    expect(Studio.PEST_MYTHS).toHaveLength(10);
+    expect(Studio.PEST_SIGNS).toHaveLength(10);
+    expect(Studio.SHOWDOWN_BANK).toHaveLength(44);
+    expect(new Set(Studio.SHOWDOWN_BANK.map((e) => e.key)).size).toBe(44);
+    expect(Studio.SHOWDOWN_BANK.filter((e) => !e.format).map((e) => e.key)).toEqual(Studio.PEST_VERSUS_PAIRS.map((p) => p.key));
+    const marks = Studio.SHOWDOWN_BANK.map((e) => (e.format ? 'F' : 'P')).join('');
+    expect(marks).not.toContain('FF');
+    expect(marks.slice(0, 8)).toContain('F'); // a follower sees a format change within the first month
+    for (const m of Studio.PEST_MYTHS) {
+      expect(m.format).toBe('myth');
+      expect(m.myth.length).toBeLessThanOrEqual(95);
+      expect(m.fact.length).toBeLessThanOrEqual(100);
+      expect(m.verdict.length).toBeLessThanOrEqual(90);
+    }
+    for (const g of Studio.PEST_SIGNS) {
+      expect(g.format).toBe('signs');
+      expect(g.signs).toHaveLength(3);
+      expect(g.verdict.length).toBeLessThanOrEqual(90);
+    }
+  });
+
+  test('every format card is grounded: verified facts-bank ids and/or a named public reference, surfaced in the plan sources', () => {
+    for (const entry of [...Studio.PEST_MYTHS, ...Studio.PEST_SIGNS]) {
+      const g = entry.grounding || {};
+      const facts = Array.isArray(g.facts) ? g.facts : [];
+      const refs = Array.isArray(g.refs) ? g.refs : [];
+      expect({ key: entry.key, grounded: facts.length + refs.length > 0 }).toEqual({ key: entry.key, grounded: true });
+      for (const id of facts) expect(id).toMatch(/^service_[a-z_]+_\d{2}$/);
+      const line = Studio.showdownGrounding(entry);
+      for (const id of facts) expect(line).toContain(id);
+      for (const ref of refs) expect(line).toContain(ref);
+    }
+    expect(Studio.showdownGrounding(Studio.PEST_VERSUS_PAIRS[0])).toBeNull();
+    // Spring-only wasp advice is season-gated like the swarmer pair.
+    expect(Studio.PEST_SIGNS.find((g) => g.key === 'signs_paper_wasps').months).toEqual([2, 3, 4, 5]);
+    expect(Studio.PEST_MYTHS.find((m) => m.key === 'myth_dryer_sheets_wasps').months).toEqual([2, 3, 4, 5]);
+    expect(Studio.versusPublishBlocker({ versusPair: { key: 'signs_paper_wasps' } }, etNoon('2026-11-30'))).toMatch(/out of season/);
+    expect(Studio.versusPublishBlocker({ versusPair: { key: 'signs_paper_wasps' } }, etNoon('2026-03-30'))).toBeNull();
+  });
+
+  test('the lane steps past recently published showdown keys, so a grown bank does not replay last month', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    const day = etNoon('2026-09-10');
+    const natural = Studio.selectAutonomousVersusPlan(day);
+    const skipped = Studio.selectAutonomousVersusPlan(day, { recent: new Set([natural.versusPair.key]) });
+    expect(skipped.versusPair.key).not.toBe(natural.versusPair.key);
+    // The next bank entry, not a random one; the city is still the day's city.
+    const idx = Studio.SHOWDOWN_BANK.findIndex((e) => e.key === natural.versusPair.key);
+    expect(skipped.versusPair.key).toBe(Studio.SHOWDOWN_BANK[(idx + 1) % Studio.SHOWDOWN_BANK.length].key);
+    expect(skipped.city).toBe(natural.city);
+    // Once past the natural slot, an out-of-season candidate is skipped rather than yielding (Codex r2).
+    const waspIdx = Studio.SHOWDOWN_BANK.findIndex((e) => e.key === 'signs_paper_wasps');
+    const before = Studio.SHOWDOWN_BANK[(waspIdx - 1 + Studio.SHOWDOWN_BANK.length) % Studio.SHOWDOWN_BANK.length];
+    let fall = null;
+    for (let d = 2; d <= 30 && !fall; d += 4) {
+      const p = Studio.selectAutonomousVersusPlan(etNoon(`2026-11-${String(d).padStart(2, '0')}`));
+      if (p?.versusPair.key === before.key) fall = etNoon(`2026-11-${String(d).padStart(2, '0')}`);
+    }
+    if (fall) {
+      const stepped = Studio.selectAutonomousVersusPlan(fall, { recent: new Set([before.key]) });
+      expect(stepped).not.toBeNull();
+      expect(stepped.versusPair.key).not.toBe('signs_paper_wasps');
+    }
+    // Every key recent → the plain sequence (never a dead lane).
+    const all = new Set(Studio.SHOWDOWN_BANK.map((e) => e.key));
+    expect(Studio.selectAutonomousVersusPlan(day, { recent: all }).versusPair.key).toBe(natural.versusPair.key);
+    // A month of fires with last month's cards in the window never repeats one of them.
+    const lastMonth = new Set([2, 6, 10, 14, 18, 22, 26, 30].map((d) => Studio.selectAutonomousVersusPlan(etNoon(`2026-08-${String(d).padStart(2, '0')}`))?.versusPair.key).filter(Boolean));
+    for (const d of [2, 6, 10, 14, 18, 22, 26, 30]) {
+      const plan = Studio.selectAutonomousVersusPlan(etNoon(`2026-09-${String(d).padStart(2, '0')}`), { recent: lastMonth });
+      if (plan) expect(lastMonth.has(plan.versusPair.key)).toBe(false);
+    }
+    delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
+  });
+
+  test('every format draft passes the publish validator and carries the copy without the card', () => {
+    for (const entry of [...Studio.PEST_MYTHS, ...Studio.PEST_SIGNS]) {
+      const drafts = Studio.buildVersusDrafts(entry, 'Bradenton');
+      for (const [platform, text] of Object.entries(drafts)) {
+        expect({ key: entry.key, platform, issues: V(text, platform).issues }).toEqual({ key: entry.key, platform, issues: [] });
+        expect(text).toContain(entry.verdict);
+        if (entry.format === 'myth') expect(text).toContain(entry.myth);
+        else for (const sign of entry.signs) expect(text).toContain(sign);
+      }
+      expect(drafts.gbp).toContain('Bradenton');
+      expect(drafts.gbp).toContain('Schedule an inspection');
+      expect(drafts.instagram).toContain('#wavespestcontrol');
+    }
+  });
+
+  test('the lane fires format cards through the same plan shape: topic, sources, booking link, never season-gated', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    const seen = { myth: null, signs: null };
+    for (let m = 1; m <= 12 && !(seen.myth && seen.signs); m++) {
+      for (const d of [2, 6, 10, 14, 18, 22, 26, 30]) {
+        if (m === 2 && d === 30) continue;
+        const plan = Studio.selectAutonomousVersusPlan(etNoon(`2026-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`));
+        if (plan?.versusPair?.format && !seen[plan.versusPair.format]) seen[plan.versusPair.format] = plan;
+      }
+    }
+    expect(seen.myth).not.toBeNull();
+    expect(seen.signs).not.toBeNull();
+    expect(seen.myth.topic).toBe(`Myth vs fact: ${seen.myth.versusPair.title}`);
+    expect(seen.signs.topic).toBe(seen.signs.versusPair.title);
+    for (const plan of [seen.myth, seen.signs]) {
+      expect(plan.angle).toBe('pest showdown');
+      expect(plan.preview.suggestedLink).toBe('https://www.wavespestcontrol.com/book/');
+      expect(plan.preview.sources[0].detail).toContain(plan.versusPair.verdict);
+      if (!plan.versusPair.months) {
+        expect(Studio.versusPublishBlocker({ versusPair: plan.versusPair }, etNoon('2026-01-02'))).toBeNull();
+        expect(Studio.versusPublishBlocker({ versusPair: plan.versusPair }, etNoon('2026-08-02'))).toBeNull();
+      }
+      expect(plan.preview.sources.find((src) => src.type === 'reference').detail).toBe(Studio.showdownGrounding(plan.versusPair));
+    }
+    const card = Studio.buildVersusCardInput(seen.signs.versusPair, seen.signs);
+    expect(card.variant).toBe('versus');
+    expect(card.format).toBe('signs');
+    expect(card.signs).toHaveLength(3);
+    delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
+  });
+});
+
+describe('versus card label (Codex r3 on #3990)', () => {
+  test('general-pest pairs render a neutral Pest ID label; service pairs keep their service', () => {
+    const roach = Studio.PEST_VERSUS_PAIRS.find((p) => p.key === 'german_roach_vs_american_roach');
+    expect(Studio.buildVersusCardInput(roach, { city: 'Venice', service: roach.service }).service).toBe('Pest ID');
+    // No-see-ums are separate scope: the pair keeps the mosquito scene bank but never the Mosquito label (Codex r6 on #3990).
+    const nsu = Studio.PEST_VERSUS_PAIRS.find((p) => p.key === 'no_see_um_vs_mosquito');
+    expect(Studio.buildVersusCardInput(nsu, { city: 'Venice', service: nsu.service }).service).toBe('Pest ID');
+    const lawn = Studio.PEST_VERSUS_PAIRS.find((p) => p.key === 'chinch_bug_vs_drought_stress');
+    expect(Studio.buildVersusCardInput(lawn, { city: 'Venice', service: lawn.service }).service).toBe('Lawn Care');
+  });
+});
+
+describe('RUN_KINDS / runKindFor (2026-09-06: every run kind on the creative engine)', () => {
+  const pair = Studio.PEST_VERSUS_PAIRS.find((p) => p.key === 'paper_wasp_vs_mud_dauber');
+
+  test('versus plans classify as versus and hand the engine the versus overlay input', () => {
+    const plan = { versusPair: pair, city: 'Sarasota', service: pair.service, topic: 'Paper Wasp vs Mud Dauber' };
+    const kind = Studio.runKindFor(plan);
+    expect(kind).toBe(Studio.RUN_KINDS.versus);
+    expect(kind.variant).toBe('versus');
+    expect(kind.cardInput(plan, {})).toMatchObject({ variant: 'versus', city: 'Sarasota', left: pair.left, right: pair.right, verdict: pair.verdict });
+    expect(kind.photoTemplateKey).toBe('waves_photo_versus_v1');
+    expect(kind.cardTemplateKey).toBe('waves_versus_square');
+  });
+
+  test('milestone plans classify as milestone (company-wide: no city on the card)', () => {
+    const plan = { milestone: 300, averageRating: 4.8, city: 'Venice' };
+    const kind = Studio.runKindFor(plan);
+    expect(kind).toBe(Studio.RUN_KINDS.milestone);
+    expect(kind.cardInput(plan, {})).toMatchObject({ variant: 'milestone', count: 300, averageRating: 4.8, city: null });
+    expect(kind.photoTemplateKey).toBe('waves_photo_milestone_v1');
+  });
+
+  test('a review plan wins over any other payload; everything else is a campaign', () => {
+    const review = Studio.runKindFor({ reviewGraphic: { googleReviewId: 'r1', city: 'Venice', excerpt: 'Great', reviewerDisplayName: 'K.' }, versusPair: pair });
+    expect(review).toBe(Studio.RUN_KINDS.review);
+    expect(review.cardInput({ reviewGraphic: { googleReviewId: 'r1', city: 'Venice', excerpt: 'Great', reviewerDisplayName: 'K.' } }).variant).toBe('review');
+    // A review payload WITHOUT a source id is not a review run (liveness rule).
+    expect(Studio.runKindFor({ reviewGraphic: { city: 'Venice' } })).toBe(Studio.RUN_KINDS.campaign);
+    const campaign = Studio.runKindFor({ city: 'Parrish', topic: 'ants moving around lanais', service: 'general pest', cta: 'book inspection' });
+    expect(campaign.variant).toBe('campaign');
+    expect(campaign.cardInput({ city: 'Parrish', topic: 'ants', service: 'general pest' }, { inputs: {} }).variant).toBe('campaign');
+    expect(campaign.cardTemplateKey).toBe('waves_campaign_square');
+  });
+
+  test('every kind renders its card through the shared uploader signature', () => {
+    for (const kind of Object.values(Studio.RUN_KINDS)) {
+      expect(typeof kind.renderCard).toBe('function');
+      expect(kind.renderCard.length).toBe(3); // (plan, preview, platform)
+    }
+  });
+});
+
+describe('fixedCardIsFallback (Codex r3 on #3987: alert scope)', () => {
+  test('campaign: the fixed card is always the fallback (hero or scene expected), even beside a successful scene', () => {
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: true, engineProduced: true, creativeEligible: true, engineEnabled: true })).toBe(true);
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: true, engineProduced: false, creativeEligible: false, engineEnabled: false })).toBe(true);
+  });
+
+  test('versus/milestone/review: the GBP card beside a successful scene is the designed visual, never an alert', () => {
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: false, engineProduced: true, creativeEligible: true, engineEnabled: true })).toBe(false);
+  });
+
+  test('versus/milestone/review: the card is a fallback only when the engine was on and eligible yet produced nothing', () => {
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: false, engineProduced: false, creativeEligible: true, engineEnabled: true })).toBe(true);
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: false, engineProduced: false, creativeEligible: true, engineEnabled: false })).toBe(false); // engine off = designed
+    expect(Studio.fixedCardIsFallback({ isCampaignRun: false, engineProduced: false, creativeEligible: false, engineEnabled: true })).toBe(false); // GBP-only run
   });
 });

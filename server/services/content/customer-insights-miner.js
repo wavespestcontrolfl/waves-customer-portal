@@ -133,7 +133,10 @@ function gateCallRecord(row, { consentColumnPresent }) {
   // Gated here rather than in the query so the run summary counts it, and so a
   // pre-migration DB (the query is wrapped in a warn-only try/catch) cannot
   // silently zero out the whole call source.
-  if (row.transcription_provider === 'conversation_relay') return { ok: false, reason: 'ai_agent_call' };
+  // …and a TRANSFERRED call's composite (Sandy PR 2A): stored under the
+  // recording's provider, but it opens with the relay's "[AI segment]" —
+  // the same generated dialogue, same exclusion.
+  if (row.transcription_provider === 'conversation_relay' || String(row.transcription || '').startsWith('[AI segment]')) return { ok: false, reason: 'ai_agent_call' };
   if (row.call_recording_consent_disclaimer_played !== true) return { ok: false, reason: 'consent_not_played' };
   if (['wrong_number', 'spam'].includes(row.call_outcome)) return { ok: false, reason: 'non_service_call' };
   const text = row.lead_synopsis || row.transcription;

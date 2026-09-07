@@ -50,11 +50,13 @@ jest.mock('../models/db', () => {
   mockWhere.mockImplementation(() => builder); // chainable: .where(...).where(...)
   builder.where = mockWhere;
   const fn = jest.fn(() => builder);
+  fn.raw = (sql, bindings) => ({ sql, bindings });
   fn.transaction = async (cb) => cb(fn); // reclassify releases + settles in one transaction
   return fn;
 });
 
 const worker = require('../services/seo/link-prospect-worker');
+worker.SIGNUP_TYPES = ['directory', 'citation', 'social'];
 const { fillCitationForm } = require('../services/seo/browser-form-filler');
 const runner = require('../services/seo/signup-runner');
 const { buildNap, parseAddress, validateSubmitUrl, leaseGuardedReclassify, LOCATION_MATCH_SQL } = runner._internals;
@@ -69,14 +71,14 @@ describe('alreadyPlacedAt location predicate (v2 identity)', () => {
   });
 });
 
-const prospect = (o = {}) => ({ id: 'p1', target_domain: 'citysquares.com', target_url: 'https://citysquares.com/add', offered_link_rel: 'nofollow', lease_token: '2026-06-22T00:00:00.000Z', ...o });
+const prospect = (o = {}) => ({ id: 'p1', link_type: 'directory', target_domain: 'citysquares.com', target_url: 'https://citysquares.com/add', offered_link_rel: 'nofollow', lease_token: '2026-06-22T00:00:00.000Z', ...o });
 
 beforeEach(() => {
   worker.claim.mockReset(); worker.report.mockReset();
-  // A 'placed' report writes status='placed' + quality_signals.location in the real worker;
+  // A 'placed' report stores the reported location_key in the real worker;
   // mirror that into the placement registry so the next prospect's alreadyPlacedAt sees it.
   worker.report.mockImplementation(async (body) => {
-    if (body && body.outcome === 'placed' && mockQueryKey.last) mockPlaced.add(mockQueryKey.last);
+    if (body && body.outcome === 'placed' && body.location) mockPlaced.add(`${mockQueryKey.domain}|${body.location}`);
     return { ok: true };
   });
   worker.releaseClaims.mockReset(); worker.releaseClaims.mockResolvedValue({ released: 0 });
@@ -90,7 +92,7 @@ describe('leaseGuardedReclassify (optimistic lease guard)', () => {
     const n = await leaseGuardedReclassify({ id: 'p1', lease_token: '2026-06-22T00:00:00.000Z', target_domain: 'x.com' }, { automation_policy: 'skip' });
     // .where({id}).where('claimed_at', <lease date>).update(...)
     expect(mockWhere).toHaveBeenCalledWith('claimed_at', new Date('2026-06-22T00:00:00.000Z'));
-    expect(mockUpdate).toHaveBeenCalledWith(expect.objectContaining({ automation_policy: 'skip', claimed_at: null, claimed_by: null }));
+    expect(mockUpdate).toHaveBeenCalledWith(expect.objectContaining({ automation_policy: 'skip', claimed_at: null, claimed_by: null, leased_provider: null, lease_mode: null }));
     expect(n).toBe(1);
     // a reclassify IS a lease release: the placement settles onto its live path (Codex PR #3687 r29 P1)
     expect(require('../services/seo/link-prospect-worker').settleReleasedPlacements).toHaveBeenCalledWith(['p1'], expect.anything()); // inside the release transaction
@@ -143,11 +145,14 @@ describe('validateSubmitUrl (SSRF/host guard)', () => {
   });
 });
 
+jest.mock('../services/seo/link-execution-authority', () => ({ releaseSlots: jest.fn(async () => {}), beginSubmission: jest.fn(async () => true) }));
+
 describe('run — safety gates', () => {
-  test('live run with NO allowlist refuses to submit', async () => {
+  test('without a domain filter, the authority claim decides whether any work is allowed', async () => {
+    worker.claim.mockResolvedValueOnce([]);
     const r = await runner.run({ dryRun: false, allow: [] });
-    expect(r.note).toBe('no_allowlist');
-    expect(worker.claim).not.toHaveBeenCalled();
+    expect(r.claimed).toBe(0);
+    expect(worker.claim).toHaveBeenCalledWith(expect.objectContaining({ provider: 'deterministic_runner', mode: 'acquire' }));
   });
   test('dry-run skips both registry catch-ups (no writes of any kind); a live run performs board→registry, then attempts, BEFORE claiming', async () => {
     const { backfillLegacyAttempts, backfillLegacyBoard } = require('../services/seo/link-registry-backfill');
@@ -182,12 +187,12 @@ describe('run — safety gates', () => {
   test('dry-run uses a READ-ONLY preview claim (no lease/write)', async () => {
     worker.claim.mockResolvedValue([]);
     await runner.run({ dryRun: true, allow: ['citysquares.com'] });
-    expect(worker.claim).toHaveBeenCalledWith({ n: 5, type: 'signup', automationPolicy: 'submit_free', preview: true });
+    expect(worker.claim).toHaveBeenCalledWith({ n: 5, type: 'signup', provider: 'deterministic_runner', mode: 'acquire', preview: true, domains: ['citysquares.com'] });
   });
   test('live run pushes the allowlist into the claim query', async () => {
     worker.claim.mockResolvedValue([]);
     await runner.run({ dryRun: false, allow: ['citysquares.com'] });
-    expect(worker.claim).toHaveBeenCalledWith({ n: 5, type: 'signup', automationPolicy: 'submit_free', domains: ['citysquares.com'] });
+    expect(worker.claim).toHaveBeenCalledWith({ n: 5, type: 'signup', provider: 'deterministic_runner', mode: 'acquire', preview: false, domains: ['citysquares.com'] });
   });
   test('dry-run previews, never submits, and never leases/releases (no writes)', async () => {
     worker.claim.mockResolvedValue([prospect()]);
@@ -229,14 +234,16 @@ describe('run — safety gates', () => {
 });
 
 describe('run — outcomes', () => {
-  test('placed → reports placed + writes a ledger row', async () => {
+  test('placed reports through the provider-bound lease without inserting a second submit attempt', async () => {
     worker.claim.mockResolvedValue([prospect()]);
     fillCitationForm.mockResolvedValue({ outcome: 'placed', liveUrl: 'https://citysquares.com/biz/waves', pending: false, screenshot: Buffer.from('png') });
     const r = await runner.run({ allow: ['citysquares.com'] });
     expect(r.placed).toBe(1);
+    await fillCitationForm.mock.calls[0][1].beforeSubmit();
+    expect(require('../services/seo/link-execution-authority').beginSubmission).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ citation: { website: 'https://wavespestcontrol.com', location: 'bradenton' } }));
     expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', live_url: 'https://citysquares.com/biz/waves', evidence_url: 'backlink-evidence/x.png' }));
     // v2 ledger (seo_link_attempts): CHECKed enum outcome, provider + action, verbatim engine outcome in detail
-    expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', provider: 'deterministic_runner', action: 'submit', path_id: null, detail: expect.stringContaining('"legacy_outcome":"placed"') }));
+    expect(mockInsert).not.toHaveBeenCalled();
     expect(require('../services/seo/link-registry-backfill').backfillLegacyAttempts).toHaveBeenCalled();
   });
   test('blocked_captcha → RECLASSIFIES (needs_account) + releases, no retry report', async () => {
@@ -290,13 +297,13 @@ describe('run — outcomes', () => {
       expect(mockUpdate).toHaveBeenCalledWith(expect.objectContaining({ automation_policy: 'skip', claimed_at: null, last_classified_at: expect.any(Date) }));
     }
   });
-  test('no_submit_evidence → retryable failed (nothing observably submitted → safe to retry)', async () => {
+  test('no_submit_evidence retains its screenshot for the worker to reconcile against the mutation boundary)', async () => {
     worker.claim.mockResolvedValue([prospect()]);
-    fillCitationForm.mockResolvedValue({ outcome: 'failed', errorCode: 'no_submit_evidence' });
+    fillCitationForm.mockResolvedValue({ outcome: 'failed', errorCode: 'no_submit_evidence', screenshot: Buffer.from('png') });
     const r = await runner.run({ allow: ['citysquares.com'] });
     expect(r.failed).toBe(1);
     expect(r.skipped).toBe(0);
-    expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'failed' }));
+    expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'failed', evidence_url: 'backlink-evidence/x.png' }));
   });
   test('a run-level config error (no_anthropic) ABORTS the batch + releases claims, NO ledger write, no attempts burned', async () => {
     worker.claim.mockResolvedValue([prospect({ id: 'p1' }), prospect({ id: 'p2' })]);
@@ -324,4 +331,33 @@ describe('run — outcomes', () => {
       { id: 'p2', lease_token: '2026-06-22T00:00:00.000Z' },
     ]);
   });
+});
+
+
+test.each([undefined, '-'])('unscoped signup location %s reports the actual GBP location for duplicate detection', async (location_key) => {
+  worker.claim.mockResolvedValue([prospect({ location_key })]);
+  fillCitationForm.mockResolvedValue({ outcome: 'placed', pending: true });
+  await runner.run();
+  expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', location: 'bradenton' }));
+});
+
+test('citation execution submits and verifies the homepage even on a service-page board row', async () => {
+  worker.claim.mockResolvedValue([prospect({ target_page: 'https://wavespestcontrol.com/pest-control/' })]);
+  fillCitationForm.mockResolvedValue({ outcome: 'placed', pending: true });
+  await runner.run();
+  expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ cited_homepage: true, location: 'bradenton' }));
+  expect(fillCitationForm.mock.calls[0][0].nap.website).toBe('https://wavespestcontrol.com');
+});
+
+
+test.each(['submit_rejected', 'submit_blocked'])('held %s keeps evidence and failure details on the reserved attempt', async errorCode => {
+  worker.claim.mockResolvedValue([prospect()]);
+  fillCitationForm.mockResolvedValue({ outcome: 'failed', errorCode, notes: 'Synthetic validation rejection', screenshot: Buffer.from('png') });
+  await runner.run();
+  expect(mockWhere).toHaveBeenCalledWith({ prospect_id: 'p1', lease_token: '2026-06-22T00:00:00.000Z', action: 'submit' });
+  const write = mockUpdate.mock.calls.map(([patch]) => patch).find(patch => patch.evidence_url);
+  expect(write.evidence_url).toBe('backlink-evidence/x.png');
+  expect(write.detail.sql).toContain('COALESCE(detail');
+  expect(JSON.parse(write.detail.bindings[0])).toMatchObject({ error_code: errorCode, error_message: 'Synthetic validation rejection' });
+  expect(mockInsert).not.toHaveBeenCalled();
 });

@@ -47,14 +47,14 @@ router.get('/overview', async (req, res, next) => {
 
     // Get previous period for comparison
     const d = parseETDateTime(start + 'T12:00');
-    let prevStart, prevEnd;
+    let prevStart;
     if (period === 'month') {
       prevStart = etMonthStart(d, -1);
-      prevEnd = etMonthEnd(d, -1);
+    } else if (period === 'quarter') {
+      prevStart = etMonthStart(d, -3);
     } else {
       const { year, month } = etParts(d);
       prevStart = `${year - 1}-${String(month).padStart(2, '0')}-01`;
-      prevEnd = start;
     }
 
     const services = await db('service_records')
@@ -65,7 +65,8 @@ router.get('/overview', async (req, res, next) => {
       .select('service_records.*', 'technicians.name as tech_name', 'customers.waveguard_tier', 'customers.monthly_rate as cust_monthly');
 
     const prevServices = await db('service_records')
-      .where('service_date', '>=', prevStart).where('service_date', '<=', prevEnd)
+      // Half-open bounds keep the first day of this period out of both totals.
+      .where('service_date', '>=', prevStart).where('service_date', '<', start)
       .where('status', 'completed');
 
     const totalRev = services.reduce((s, r) => s + parseFloat(r.revenue || 0), 0);

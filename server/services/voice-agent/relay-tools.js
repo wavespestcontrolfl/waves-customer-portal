@@ -412,11 +412,15 @@ const BOOKING_TOOLS = [
  * GATE_VOICE_AI_BOOKING (both checked at call time, not module load, so an
  * env flip takes effect without a restart of the test/process).
  */
-function activeTools() {
+function activeTools({ officeOpen = null } = {}) {
   const { isContextEnabled } = require('./relay-context');
-  if (!isContextEnabled()) return TOOLS;
+  // PR 2A: transfer_to_office rides every tool set — it needs no account
+  // context, only the gate and an OPEN office (null = unknown = closed).
+  const { isTransferAvailable, TRANSFER_TOOLS } = require('./relay-transfer');
+  const transfer = isTransferAvailable(officeOpen) ? TRANSFER_TOOLS : [];
+  if (!isContextEnabled()) return [...TOOLS, ...transfer];
   const { isBookingEnabled } = require('./relay-booking');
-  return isBookingEnabled() ? [...TOOLS, ...CONTEXT_TOOLS, ...BOOKING_TOOLS] : [...TOOLS, ...CONTEXT_TOOLS];
+  return isBookingEnabled() ? [...TOOLS, ...CONTEXT_TOOLS, ...BOOKING_TOOLS, ...transfer] : [...TOOLS, ...CONTEXT_TOOLS, ...transfer];
 }
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -631,6 +635,12 @@ function sandboxDryRunText(name, input = {}, ctx = {}, { estimateMissing = [] } 
  */
 async function executeTool(name, input = {}, ctx = {}) {
   try {
+    if (name === 'transfer_to_office') {
+      // Gate + office state re-checked inside (fail closed); the packet is
+      // server-built and the staff leg is rendered by /relay-complete.
+      const { transferToOfficeText } = require('./relay-transfer');
+      return await transferToOfficeText(input, ctx);
+    }
     if (name === 'request_booking') {
       // Both gates re-checked inside (fail closed, defense in depth); the
       // body re-validates the slot through the live availability engine and
@@ -1360,22 +1370,7 @@ async function executeTool(name, input = {}, ctx = {}) {
       // deliberately gets NO lead (leadId null), but a HOT call from them still
       // owes the owner a page — the obligation marker must not depend on a lead
       // existing, or a crashed page for an existing customer never sweeps.
-      if (capturedLeadId && ctx.callSid) {
-        try {
-          const db = require('../../models/db');
-          const linkage = { relay_lead_id: String(capturedLeadId) };
-          await db('call_log')
-            .where({ twilio_call_sid: ctx.callSid })
-            .update({
-              metadata: db.raw(
-                "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
-                [JSON.stringify(linkage)],
-              ),
-            });
-        } catch (linkErr) {
-          logger.warn(`[voice-relay] call→lead linkage stamp failed callSid=${ctx.callSid}: ${linkErr.message}`);
-        }
-      }
+      if (capturedLeadId && ctx.callSid) await require('./relay-context').stampCallLeadLinkage(ctx.callSid, capturedLeadId, { sessionKey: ctx.sessionKey || null });
       // capture_lead usually runs AFTER request_booking (the prompt says so),
       // so back-fill the card that was already written for this call.
       if (capturedLeadId && typeof ctx.bookingRequested === 'function' && ctx.bookingRequested()) {
@@ -1520,12 +1515,19 @@ async function executeTool(name, input = {}, ctx = {}) {
     return `Unknown tool "${String(name || '').replace(/[^\w.-]/g, '').slice(0, 40)}". Do not retry; continue the conversation.`;
   } catch (err) {
     logger.error(`[voice-relay] tool "${name}" failed: ${err.message}`);
+    // The failure is answered with a string; the session reads this flag so
+    // the handoff record never reports a failed tool as ok.
+    if (ctx && typeof ctx === 'object') ctx.toolFailed = true;
     if (name === 'capture_lead') {
       return 'The lead could not be saved right now, but proceed to wrap up the call politely; the call is still recorded for follow-up.';
     }
     if (name === 'request_booking') {
       return 'The booking request could not be placed — NOTHING was booked. Tell the caller a Waves '
         + 'team member will call to schedule, and capture the lead with their preferred time.';
+    }
+    if (name === 'transfer_to_office') {
+      return 'The transfer could not be started. Do NOT try again — take their details with capture_lead '
+        + 'and say a Waves team member will call them back.';
     }
     if (CONTEXT_TOOL_NAMES.includes(name)) {
       return 'Could not look that up right now. Do not guess — tell the caller a Waves team member will follow up with the details.';

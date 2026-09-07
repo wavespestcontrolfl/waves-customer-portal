@@ -15,6 +15,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const db = require('../models/db');
+const effectiveActionSql = require('../services/content/opportunity-action-sql');
 const { THRESHOLDS, minScoreToActFor } = require('../services/content/scoring-config');
 const queue = require('../services/content/opportunity-queue');
 const { routeIdentity } = require('../services/seo/gsc-opportunity-miner')._internals;
@@ -92,7 +93,8 @@ describe('claimNext action-aware floor', () => {
     await queue.claimNext({});
 
     const [sql, bindings] = db.raw.mock.calls[0];
-    expect(sql).toMatch(/score >= CASE WHEN action_type = 'new_supporting_blog' OR \(bucket = 'listicle_family' AND action_type = 'refresh_existing_page'\) OR \(bucket IN \('no_content_yet', 'local_gap'\) AND action_type = 'create_or_refresh_city_service_page'\) THEN \?::numeric WHEN action_type = 'rewrite_title_meta' OR \(bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite'\) THEN \?::numeric ELSE \?::numeric END/);
+    expect(sql).toContain(`CASE WHEN ${effectiveActionSql}`);
+    expect(sql.split(effectiveActionSql).join('action_type')).toMatch(/score >= CASE WHEN action_type = 'new_supporting_blog' OR \(bucket = 'listicle_family' AND action_type = 'refresh_existing_page'\) OR \(bucket IN \('no_content_yet', 'local_gap'\) AND action_type = 'create_or_refresh_city_service_page'\) THEN \?::numeric WHEN action_type = 'rewrite_title_meta' OR \(bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite'\) THEN \?::numeric ELSE \?::numeric END/);
     // bindings: [claimed_at, maxAttempts, blogFloor, rewriteFloor,
     // minScore] — the lifetime-claim-budget filter binds between the claim
     // timestamp and the score floors.
@@ -157,10 +159,9 @@ describe('peek action-aware floor', () => {
 
     await queue.peek({ minScore: THRESHOLDS.minScoreToAct });
 
-    expect(q.whereRaw).toHaveBeenCalledWith(
-      expect.stringMatching(/CASE WHEN action_type = 'new_supporting_blog' OR \(bucket = 'listicle_family' AND action_type = 'refresh_existing_page'\) OR \(bucket IN \('no_content_yet', 'local_gap'\) AND action_type = 'create_or_refresh_city_service_page'\) THEN \?::numeric WHEN action_type = 'rewrite_title_meta' OR \(bucket = 'link_boost' AND signal_metadata->>'source_bucket' = 'ctr_rewrite'\) THEN \?::numeric ELSE \?::numeric END/),
-      [THRESHOLDS.blogMinScoreToAct, THRESHOLDS.minScoreToAct, THRESHOLDS.minScoreToAct],
-    );
+    const [floorSql, bindings] = q.whereRaw.mock.calls.find(([sql]) => sql.startsWith('score >= CASE'));
+    expect(floorSql).toContain(`CASE WHEN ${effectiveActionSql}`);
+    expect(bindings).toEqual([THRESHOLDS.blogMinScoreToAct, THRESHOLDS.minScoreToAct, THRESHOLDS.minScoreToAct]);
   });
 
   test('peek with an explicit override applies it to blogs too', async () => {

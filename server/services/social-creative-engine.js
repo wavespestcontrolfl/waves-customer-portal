@@ -86,6 +86,11 @@ const SCENE_LIBRARY = {
     { key: 'termite-wood-grain', scene: 'extreme close-up of honeycombed, termite-damaged wood grain on a door frame corner, soft raking light' },
     { key: 'termite-inspection-light', scene: 'a bright flashlight beam sweeping across a wooden sill plate in a dim garage corner, dust motes visible in the beam' },
     { key: 'termite-discarded-wings', scene: 'a small scatter of discarded translucent insect wings on a windowsill beside a potted orchid, shallow depth of field' },
+    { key: 'termite-pellet-pile', scene: 'macro of a small conical pile of tiny six-sided drywood termite pellets on a white windowsill below a pinhole in painted wood trim, soft side light', only: ['drywood', 'pellet', 'frass'] },
+    { key: 'termite-porch-light-swarm', scene: 'a Florida front porch light at dusk with a small cloud of winged insects around it, stucco wall and a palm silhouette, warm glow', only: ['swarm'] },
+    { key: 'termite-garage-baseboard', scene: 'a tidy garage corner where the drywall meets the slab, a thin trail of dirt-colored tube running up the wall, bright overhead light', only: ['subterranean', 'mud tube', 'inspection', 'entry'] },
+    { key: 'termite-wood-fence', scene: 'a weathered wooden fence post base in a Florida yard with soft, crumbling wood at the soil line, morning light and dewy grass', only: ['subterranean', 'damage', 'wdo', 'inspection', 'fence'] },
+    { key: 'termite-attic-rafter', scene: 'a flashlight beam on a pine attic rafter with a small dark blister on the surface, dust in the air, dim surroundings', only: ['drywood', 'attic', 'inspection'] },
   ],
   mosquito: [
     { key: 'mosquito-lanai-dusk', scene: 'a screened lanai with a pool at blue-hour dusk, string lights on, lush tropical plants pressing against the screen from outside' },
@@ -93,6 +98,10 @@ const SCENE_LIBRARY = {
     { key: 'mosquito-after-rain', scene: 'a Florida backyard right after an afternoon thunderstorm, wet St. Augustine grass, puddles reflecting palm trees and a dramatic clearing sky' },
     { key: 'mosquito-gutter', scene: 'close-up of a clogged house gutter holding stagnant water and leaves, bright blue sky behind the roofline' },
     { key: 'mosquito-birdbath', scene: 'a stone birdbath full of still water in a landscaped Southwest Florida yard, hibiscus flowers, late-afternoon golden light' },
+    { key: 'mosquito-bromeliad-cup', scene: 'macro of rainwater held in the central cup of a red bromeliad in a Florida landscape bed, tropical foliage around it' },
+    { key: 'mosquito-rain-barrel', scene: 'a rain barrel beside a stucco Florida home with water at the rim after a storm, wet pavers and bright clearing sky' },
+    { key: 'mosquito-boat-tarp', scene: 'a boat on a trailer in a Florida driveway with rainwater pooled in the folds of its tarp, palm trees and blue sky' },
+    { key: 'mosquito-mangrove-dusk', scene: 'a calm Southwest Florida mangrove shoreline at dusk, still water reflecting pink sky, no people', only: ['coast', 'dusk', 'no-see-um'] },
   ],
   lawn: [
     { key: 'lawn-chinch-patch', scene: 'a St. Augustine grass lawn with an irregular straw-brown dead patch spreading beside lush green blades, bright midday Florida sun' },
@@ -100,18 +109,34 @@ const SCENE_LIBRARY = {
     { key: 'lawn-fungus-rings', scene: 'brown circular patches on an otherwise green Florida lawn after summer rain, soft overcast light' },
     { key: 'lawn-property-line', scene: 'a property line where one lawn is thick deep-green St. Augustine and the neighboring side is patchy and yellowed, palm trees and blue sky' },
     { key: 'lawn-sprinkler-sunrise', scene: 'irrigation sprinklers running over a healthy green Florida lawn at sunrise, backlit water droplets and long shadows' },
+    { key: 'lawn-webworm-moth', scene: 'a small tan lawn moth resting on a St. Augustine grass blade at dusk, shallow depth of field, warm light', only: ['webworm'] },
+    { key: 'lawn-armyworm-caterpillar', scene: 'macro of a striped green-brown caterpillar with a pale inverted Y on its head crawling along a St. Augustine grass blade, morning light', only: ['armyworm', 'caterpillar'] },
+    { key: 'lawn-sedge-patch', scene: 'a cluster of bright yellow-green nutsedge shooting above a darker St. Augustine lawn in a low wet corner, midday sun', only: ['sedge', 'weed', 'soggy'] },
+    { key: 'lawn-dollarweed-cluster', scene: 'close-up of round coin-shaped dollarweed leaves spreading through damp St. Augustine turf near a sprinkler head', only: ['dollarweed', 'weed', 'wet', 'irrigation'] },
+    { key: 'lawn-peeled-sod', scene: 'a corner of St. Augustine sod lifted back like carpet to show bare soil and roots beneath, bright Florida daylight', only: ['grub', 'root', 'peel'] },
+    { key: 'lawn-mowing-stripes', scene: 'freshly mowed St. Augustine lawn with clean stripes in front of a stucco Florida home, late-afternoon light' },
+    { key: 'lawn-edge-sidewalk', scene: 'the sunny edge of a Florida lawn along a concrete sidewalk with a band of straw-colored grass next to green turf', only: ['chinch', 'drought', 'edge', 'brown'] },
   ],
   rodent: [
     { key: 'rodent-soffit-gap', scene: 'close-up of a small gnawed gap at the corner of a soffit and roofline on a stucco Florida home, bright daylight' },
     { key: 'rodent-attic-beam', scene: 'a flashlight beam illuminating rafters and blown-in insulation inside a dim residential attic' },
     { key: 'rodent-garage-seal', scene: 'the corner of a tidy garage where daylight glows through a small gap under the garage door weather seal' },
     { key: 'rodent-palm-roofline', scene: 'a Florida home tile roofline with an overhanging palm frond touching the roof, clear blue sky' },
+    { key: 'rodent-citrus-hollow', scene: 'an orange hanging on a backyard citrus tree with a neat round hole gnawed in its side, green leaves and blue sky', only: ['rat', 'fruit', 'citrus'] },
+    { key: 'rodent-utility-line', scene: 'a power line running from a pole to the eave of a tile-roof Florida home, palm fronds nearby, clear morning sky' },
+    { key: 'rodent-vent-screen', scene: 'close-up of a rooftop plumbing vent and a soffit vent screen on a stucco home, bright daylight' },
+    { key: 'rodent-storage-boxes', scene: 'stacked cardboard boxes on a garage shelf with a narrow gap behind them, light from an open garage door', only: ['garage', 'storage', 'boxes', 'holiday'] },
   ],
   tree_shrub: [
     { key: 'shrub-hibiscus-curl', scene: 'close-up of a hibiscus shrub with curled yellowing leaves in a Southwest Florida landscape bed, bright sun' },
     { key: 'shrub-palm-browning', scene: 'a queen palm with browning lower fronds against a bright blue sky in a residential yard' },
     { key: 'shrub-ornamental-bed', scene: 'a manicured tropical landscape bed with crotons and ixora along a stucco home, morning light' },
     { key: 'shrub-sooty-mold', scene: 'macro of glossy green ornamental leaves dusted with black sooty mold, shallow depth of field' },
+    { key: 'shrub-whitefly-spiral', scene: 'macro of the underside of a broad green leaf with white spiral wax patterns on it, soft light', only: ['whitefly'] },
+    { key: 'shrub-mealybug-cotton', scene: 'close-up of small white cottony clumps tucked in the leaf joints of a hibiscus stem, bright garden light', only: ['mealybug'] },
+    { key: 'shrub-palm-boots', scene: 'the trunk of a sabal palm with old frond boots, dappled light in a Southwest Florida yard', only: ['palm'] },
+    { key: 'shrub-ficus-hedge', scene: 'a tall trimmed ficus hedge along a Florida driveway with a few thinning, yellowed sections, midday sun', only: ['ficus', 'whitefly', 'hedge'] },
+    { key: 'shrub-cold-burn-palm', scene: 'a queen palm with a few bronzed lower fronds after a cool morning, bright clear winter sky, stucco home behind', only: ['cold', 'palm', 'frond'] },
   ],
   general: [
     { key: 'pest-ants-lanai', scene: 'a thin trail of ants crossing lanai pavers toward a doorway, shallow depth of field, warm evening light' },
@@ -119,6 +144,13 @@ const SCENE_LIBRARY = {
     { key: 'pest-door-gap', scene: 'daylight glowing through the gap under an exterior door, photographed from inside a dim room' },
     { key: 'pest-mulch-wall', scene: 'close-up of landscape mulch and palmetto plants right up against a home stucco wall, dappled light' },
     { key: 'pest-porch-light', scene: 'a warm porch light glowing at night with small insects circling it, deep blue sky and tropical landscaping silhouettes' },
+    { key: 'pest-paper-wasp-nest', scene: 'a small open umbrella-shaped paper wasp nest hanging under the eave of a stucco Florida home, morning light', only: ['wasp'] },
+    { key: 'pest-mud-dauber-tubes', scene: 'close-up of grey mud tubes built by a mud dauber on a lanai ceiling beam, soft shade', only: ['dauber', 'wasp'] },
+    { key: 'pest-web-lanai-corner', scene: 'a spider web in the corner of a screened lanai catching golden sunrise light, pool blurred behind', only: ['spider', 'web', 'widow'] },
+    { key: 'pest-lanai-floor-rain', scene: 'wet lanai pavers after a Florida downpour with a few small dark millipedes near the sliding door track, overcast light', only: ['millipede'] },
+    { key: 'pest-garage-door-seal', scene: 'the bottom corner of a garage door where the rubber seal meets the concrete, daylight glowing through a small gap' },
+    { key: 'pest-holiday-boxes', scene: 'holiday storage bins stacked in a Florida garage with a wreath box on top, warm overhead light', only: ['holiday', 'boxes', 'storage', 'wreath', 'garland'] },
+    { key: 'pest-outdoor-kitchen', scene: 'a clean outdoor kitchen on a Florida lanai with a grill and countertop at golden hour, tropical plants beyond the screen', only: ['holiday', 'cookout', 'guest', 'yellowjacket', 'outdoor kitchen'] },
   ],
   review: [
     { key: 'review-home-curb', scene: 'a well-kept single-story Florida home with a clean driveway, green St. Augustine lawn and palm trees at golden hour' },
@@ -126,6 +158,22 @@ const SCENE_LIBRARY = {
     { key: 'review-backyard-shade', scene: 'a lush green backyard lawn with a large shade tree, late-afternoon light, no people' },
     { key: 'review-front-entry', scene: 'a welcoming Florida front entry with potted plants and a clean walkway, soft morning light' },
     { key: 'review-coastal-street', scene: 'a quiet Southwest Florida residential street lined with palms and tidy lawns under a blue sky with puffy clouds' },
+    { key: 'review-sunset-lanai', scene: 'a screened lanai overlooking a pond with a sunset sky in Southwest Florida, patio chairs empty, warm light' },
+    { key: 'review-driveway-palms', scene: 'a paver driveway leading to a tidy Florida home framed by two royal palms, bright morning light' },
+    { key: 'review-porch-swing', scene: 'a front porch with a swing and potted ferns on a Florida bungalow, soft afternoon light, no people' },
+  ],
+  // Pest-neutral ID contexts for versus cards: the places a homeowner FINDS
+  // and compares pests, with no insect drawn — so the card's two named pests
+  // are never contradicted by a third one in the photo.
+  pest_id: [
+    { key: 'id-eave-corner', scene: 'the underside of a stucco Florida home eave at the corner where the soffit meets the wall, bright morning light, empty' },
+    { key: 'id-lanai-screen-corner', scene: 'the corner of a screened lanai frame with the pool and palms blurred behind, golden hour, empty' },
+    { key: 'id-foundation-edge', scene: 'the base of a pale concrete block foundation wall meeting a mulch bed on a Florida home, raking afternoon light' },
+    { key: 'id-garage-corner', scene: 'a clean, bright garage corner where the drywall meets the slab, an open garage door letting in daylight' },
+    { key: 'id-front-step', scene: 'a Florida front entry step and door threshold with a potted plant beside it, soft morning light' },
+    { key: 'id-garden-bed-edge', scene: 'the edge of a tropical landscape bed against a stucco wall, mulch and crotons, dappled light' },
+    { key: 'id-window-sill', scene: 'an interior window sill and track of a Florida home with bright daylight through the glass and palms blurred outside, empty and clean' },
+    { key: 'id-pool-cage-post', scene: 'the base of an aluminum pool cage post where it meets sun-warmed pavers, pool water and palms softly blurred behind' },
   ],
 };
 
@@ -133,20 +181,58 @@ const SCENE_LIBRARY = {
 // engine has no studio import — the studio imports the engine, never the
 // reverse). First match wins; anything unmatched gets the general pest bank.
 const BUCKET_KEYWORDS = [
-  { bucket: 'termite', match: ['termite', 'swarm', 'wdo', 'wood destroying'] },
-  { bucket: 'mosquito', match: ['mosquito', 'standing water'] },
-  { bucket: 'lawn', match: ['lawn', 'turf', 'grass', 'weed', 'fungus', 'fertil', 'chinch', 'st. augustine'] },
+  { bucket: 'termite', match: ['termite', 'swarm', 'swarmer', 'swarming', 'wdo', 'wood destroying'] },
+  { bucket: 'mosquito', match: ['mosquito', 'standing water', 'no-see-um', 'crane fly', 'bromeliad', 'gutters'] },
+  { bucket: 'lawn', match: ['lawn', 'turf', 'grass', 'weed', 'fungus', 'fertilizer', 'fertilize', 'fertilizing', 'fertilization', 'chinch', 'st. augustine', 'webworm', 'armyworm', 'sedge', 'dollarweed', 'large patch', 'dollar spot', 'grub', 'mole cricket', 'irrigation'] },
   { bucket: 'rodent', match: ['rodent', 'rat', 'rats', 'mouse', 'mice'] },
-  { bucket: 'tree_shrub', match: ['tree', 'shrub', 'ornamental', 'palm'] },
+  { bucket: 'tree_shrub', match: ['tree', 'shrub', 'ornamental', 'palm', 'whitefly', 'whiteflies', 'mealybug', 'hibiscus', 'ixora', 'ficus', 'sooty mold'] },
 ];
 
+// Overlay the renderer composites for each run kind (photo = campaign).
+const OVERLAY_VARIANTS = {
+  review: 'photo_review',
+  versus: 'photo_versus',
+  milestone: 'photo_milestone',
+};
+
+// Whole-word keyword tests. Bucket routing takes the word or its English
+// plural ('rat' → rat/rats, never the middle of "temperatures"); an `only`
+// list matches at a word START so its stems keep working ('pellet' →
+// pellets, 'swarm' → swarmers) while 'rat' still cannot hit "temperatures".
+function escapeRe(kw) {
+  return kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+function textHasWord(text, kw) {
+  return new RegExp(`\\b${escapeRe(kw)}(?:s|es)?\\b`).test(text);
+}
+function textHasWordStart(text, kw) {
+  return new RegExp(`\\b${escapeRe(kw)}`).test(text);
+}
+
 function resolveSceneBucket({ service, topic, variant } = {}) {
-  if (variant === 'review') return 'review';
+  // A milestone is a company-wide thank-you, so it takes the review bank's
+  // calm home scenes rather than a pest close-up.
+  if (variant === 'review' || variant === 'milestone') return 'review';
   const text = `${service || ''} ${topic || ''}`.toLowerCase();
   for (const group of BUCKET_KEYWORDS) {
-    if (group.match.some((keyword) => text.includes(keyword))) return group.bucket;
+    if (group.match.some((keyword) => textHasWord(text, keyword))) return group.bucket;
   }
+  // A versus card compares two pests; the general bank's scenes each show ONE
+  // specific pest (an ant trail under "Paper Wasp vs Mud Dauber" would read
+  // as the wrong insect), so general-pest comparisons take the pest-neutral
+  // ID bank instead. Service-specific pairs (lawn, termite, …) matched above
+  // and keep their bank — those scenes show the damage both sides share.
+  if (variant === 'versus') return 'pest_id';
   return 'general';
+}
+
+// A concept with an `only` list is diagnostic-specific (a pellet pile, a
+// webworm moth) and may back a post only when the topic or service names
+// one of those words — otherwise a swarmer post could carry frass imagery.
+// Concepts without `only` are service-wide and always applicable.
+function conceptsApplicableTo(bank, { service, topic } = {}) {
+  const text = `${service || ''} ${topic || ''}`.toLowerCase();
+  return bank.filter((concept) => !Array.isArray(concept.only) || concept.only.some((word) => textHasWordStart(text, word)));
 }
 
 // Deterministic rotation seed anchored to the Eastern business date (matches
@@ -162,7 +248,7 @@ function rotationSeed(now = new Date()) {
 // are ignored (a repeat beats no image).
 function pickConcepts({ service, topic, variant, count = 1, excludeKeys = [], now = new Date() } = {}) {
   const bucket = resolveSceneBucket({ service, topic, variant });
-  const bank = SCENE_LIBRARY[bucket] || SCENE_LIBRARY.general;
+  const bank = conceptsApplicableTo(SCENE_LIBRARY[bucket] || SCENE_LIBRARY.general, { service, topic });
   const excluded = new Set((excludeKeys || []).map((key) => String(key || '')));
   const fresh = bank.filter((concept) => !excluded.has(concept.key));
   const pool = fresh.length ? fresh : bank;
@@ -243,7 +329,7 @@ async function generateVariants({
   if (!concepts.length) return [];
 
   const generator = new ImageGenerator({ envChain: CREATIVE_FLAGS.chain });
-  const overlayVariant = variant === 'review' ? 'photo_review' : 'photo';
+  const overlayVariant = OVERLAY_VARIANTS[variant] || 'photo';
   const seedBase = SocialCardRenderer.filenameSlug(`${variant}-${city || 'waves'}-${topic || 'creative'}`);
 
   const results = await Promise.all(concepts.map(async (concept, index) => {
@@ -355,6 +441,7 @@ module.exports = {
   generateVariants,
   generateVideoVariant,
   isVideoDay,
+  conceptsApplicableTo,
   pickConcepts,
   resolveSceneBucket,
   rotationSeed,
