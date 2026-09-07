@@ -112,27 +112,35 @@ const TERMINAL_CALL_STATUSES = ['completed', 'busy', 'failed', 'no-answer', 'can
 const ACTIVE_BRIDGE_WINDOW_MS = 15 * 60 * 1000;
 
 /**
- * The newest bridge row from `source` to this customer that has not reached
- * a terminal status inside the window — a call that may still be ringing or
- * connected, so a second bridge must not originate. A row Twilio never called
- * back on ages out of the window rather than locking the caller out for good.
+ * The newest bridge row from `source` that has not reached a terminal status
+ * inside the window — a call that may still be ringing or connected, so a
+ * second bridge must not originate — to this customer OR from this line
+ * (`fromPhone`, the caller-ID line, one per tech: two visits started from two
+ * PWA instances would otherwise ring the same cell twice, codex #4072 r20
+ * P2). A row Twilio never called back on ages out of the window rather than
+ * locking the caller out for good.
  */
-async function activeBridgeCall({ source, customerId, withinMs = ACTIVE_BRIDGE_WINDOW_MS }) {
-  if (!source || !customerId) return null;
+async function activeBridgeCall({ source, customerId, fromPhone = null, withinMs = ACTIVE_BRIDGE_WINDOW_MS }) {
+  if (!source || (!customerId && !fromPhone)) return null;
   return db('call_log')
-    .where({ source, customer_id: customerId, direction: 'outbound' })
+    .where({ source, direction: 'outbound' })
+    .where(function scope() {
+      if (customerId) this.orWhere({ customer_id: customerId });
+      if (fromPhone) this.orWhere({ from_phone: fromPhone });
+    })
     .whereNotIn('status', TERMINAL_CALL_STATUSES)
     .where('created_at', '>', new Date(Date.now() - withinMs))
     .orderBy('created_at', 'desc')
     .first('id', 'status', 'created_at');
 }
 
-// A sidless non-terminal row is invisible to every callback and would hold
-// activeBridgeCall's interlock for the whole window, so the backfill is
-// retried through a transient failure, and a row that still cannot be
-// linked is closed as failed — with the reason on it — rather than left
-// 'initiated' forever (codex #4072 r13 P2). Code-only logs: the message can
-// quote the statement's bindings.
+// A sidless row is invisible to every callback that looks it up by sid, so
+// the backfill is retried through a transient failure (codex #4072 r13 P2).
+// A row that still cannot be linked stays NON-terminal, flagged: the call
+// Twilio accepted is live, and the prompt / status callbacks adopt the sid
+// onto the row by its id (r17 / r18) — closing it as failed would let
+// activeBridgeCall admit a second bridge while the first is connected (r20
+// P2). Code-only logs: the message can quote the statement's bindings.
 const SID_BACKFILL_DELAYS_MS = [0, 250, 1000, 3000];
 async function backfillCallSid(callLogId, sid, delaysMs = SID_BACKFILL_DELAYS_MS) {
   let lastErr = null;
@@ -143,12 +151,11 @@ async function backfillCallSid(callLogId, sid, delaysMs = SID_BACKFILL_DELAYS_MS
       return true;
     } catch (err) { lastErr = err; }
   }
-  logger.error(`[call-bridge] call_log sid backfill failed for ${callLogId} after ${delaysMs.length} attempts (${String(lastErr?.code || lastErr?.name || 'error')})`);
+  logger.error(`[call-bridge] call_log sid backfill failed for ${callLogId} after ${delaysMs.length} attempts (${String(lastErr?.code || lastErr?.name || 'error')}) — the callbacks adopt the sid by row id`);
   await db('call_log').where({ id: callLogId }).update({
-    status: 'failed',
     metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{sid_backfill_failed}', 'true'::jsonb, true)"),
     updated_at: new Date(),
-  }).catch((err) => logger.warn(`[call-bridge] unlinked-row close skipped for ${callLogId} (${String(err?.code || err?.name || 'error')})`));
+  }).catch((err) => logger.warn(`[call-bridge] unlinked-row flag skipped for ${callLogId} (${String(err?.code || err?.name || 'error')})`));
   return false;
 }
 

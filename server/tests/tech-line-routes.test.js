@@ -290,9 +290,10 @@ describe('POST /call', () => {
     expect(r.body).toEqual({ success: true, callSid: 'CA-1', callLogId: 'log-1', from: LINE });
     // Row check → durable claim → bridge; no transaction pins a pool
     // connection across the Twilio call (codex #4072 r8 / r9 / r15 P2).
-    expect(activeBridgeCall).toHaveBeenCalledWith({ source: 'tech-click', customerId: 'c1' });
+    // Scoped to the customer AND the tech's line; the claim is per line (codex r20 P2).
+    expect(activeBridgeCall).toHaveBeenCalledWith({ source: 'tech-click', customerId: 'c1', fromPhone: '+19413529161' });
     const claimIdx = db.raw.mock.calls.findIndex((c) => CLAIM_SQL.test(String(c[0])));
-    expect(db.raw.mock.calls[claimIdx][1]).toEqual(['tech-bridge:c1']);
+    expect(db.raw.mock.calls[claimIdx][1]).toEqual(['tech-bridge:+19413529161']);
     expect(activeBridgeCall.mock.invocationCallOrder[0]).toBeLessThan(db.raw.mock.invocationCallOrder[claimIdx]);
     expect(db.raw.mock.invocationCallOrder[claimIdx]).toBeLessThan(placeBridgeCall.mock.invocationCallOrder[0]);
     expect(db.transaction).toBeUndefined();

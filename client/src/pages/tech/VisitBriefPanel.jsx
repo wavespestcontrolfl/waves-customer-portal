@@ -601,6 +601,14 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   const line = busy ? heldLine.current : liveLine;
   const lineUnknown = busy ? false : liveLineUnknown;
   useEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
+  // A dispatch refresh can remove or reassign the stop while its action is
+  // in flight; the panel then unmounts without ever reporting false, and
+  // the list's busy lock would refuse every header for the rest of the
+  // session (codex #4072 r20 P2). Latest callback through a ref — the
+  // parent passes a fresh arrow each render — cleanup on unmount only.
+  const onBusyChangeRef = useRef(onBusyChange);
+  onBusyChangeRef.current = onBusyChange;
+  useEffect(() => () => { onBusyChangeRef.current?.(false); }, []);
   async function callFromLine() {
     if (callState.busy) return;
     const name = service.customer_name || service.customerName || 'the customer';

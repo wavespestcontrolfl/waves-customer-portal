@@ -103,14 +103,14 @@ describe('backfillCallSid (codex #4072 r13 P2)', () => {
     expect(updates[2]).toMatchObject({ twilio_call_sid: 'CA-1' });
   });
 
-  test('a row that still cannot be linked is closed as failed with the reason, never left initiated and sidless', async () => {
+  test('a row that still cannot be linked stays NON-terminal, flagged — the callbacks adopt the sid by row id (codex r20 P2)', async () => {
     const updates = [];
     const chain = { where: jest.fn(() => chain), update: jest.fn(async (u) => { updates.push(u); if (u.twilio_call_sid) throw new Error('connection reset'); return 1; }) };
     db.mockImplementation(() => chain);
     db.raw = jest.fn((sql) => sql);
     expect(await backfillCallSid('log-1', 'CA-1', [0, 0])).toBe(false);
     expect(updates).toHaveLength(3);
-    expect(updates[2]).toMatchObject({ status: 'failed' });
+    expect(updates[2].status).toBeUndefined();
     expect(String(updates[2].metadata)).toContain('sid_backfill_failed');
   });
 });
@@ -124,9 +124,14 @@ describe('activeBridgeCall', () => {
     chain.first = jest.fn(async () => ({ id: 'log-9', status: 'ringing' }));
     db.mockImplementation((table) => { expect(table).toBe('call_log'); return chain; });
     const before = Date.now();
-    const row = await activeBridgeCall({ source: 'tech-click', customerId: 'c1' });
+    const row = await activeBridgeCall({ source: 'tech-click', customerId: 'c1', fromPhone: '+19413529161' });
     expect(row).toEqual({ id: 'log-9', status: 'ringing' });
-    expect(chain.where).toHaveBeenCalledWith({ source: 'tech-click', customer_id: 'c1', direction: 'outbound' });
+    expect(chain.where).toHaveBeenCalledWith({ source: 'tech-click', direction: 'outbound' });
+    // Customer OR line scope (codex r20 P2): the grouped where builds both.
+    const scope = chain.where.mock.calls.find((c) => typeof c[0] === 'function')[0];
+    const grouped = { orWhere: jest.fn() }; scope.call(grouped);
+    expect(grouped.orWhere).toHaveBeenCalledWith({ customer_id: 'c1' });
+    expect(grouped.orWhere).toHaveBeenCalledWith({ from_phone: '+19413529161' });
     // Twilio's terminal set: a completed / failed / unanswered bridge never blocks the next one.
     expect(chain.whereNotIn).toHaveBeenCalledWith('status', ['completed', 'busy', 'failed', 'no-answer', 'canceled']);
     const [col, op, since] = chain.where.mock.calls.find((c) => c[0] === 'created_at');
@@ -138,7 +143,7 @@ describe('activeBridgeCall', () => {
 
   test('no customer or source → null without a query', async () => {
     db.mockImplementation(() => { throw new Error('must not query'); });
-    expect(await activeBridgeCall({ source: 'tech-click', customerId: null })).toBeNull();
+    expect(await activeBridgeCall({ source: 'tech-click', customerId: null, fromPhone: null })).toBeNull();
     expect(await activeBridgeCall({ source: null, customerId: 'c1' })).toBeNull();
   });
 });

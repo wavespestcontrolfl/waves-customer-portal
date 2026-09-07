@@ -125,6 +125,18 @@ describe('VisitBriefPanel — own tech line', () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
+  it('unmounting mid-send reports not-busy to the parent so the list lock cannot stick on a vanished stop', async () => {
+    const request = vi.fn(() => new Promise(() => {}));
+    const onBusyChange = vi.fn();
+    const { unmount } = render(<VisitBriefPanel stop={stop} detail={detail} techLine={LINE} request={request} onBusyChange={onBusyChange} />);
+    fireEvent.click(screen.getByRole('button', { name: /Text/ }));
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'hi' } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Send' })); });
+    expect(onBusyChange).toHaveBeenLastCalledWith(true);
+    unmount();
+    expect(onBusyChange).toHaveBeenLastCalledWith(false);
+  });
+
   it('a declined confirm never calls the server', () => {
     const request = vi.fn();
     vi.spyOn(window, 'confirm').mockReturnValue(false);

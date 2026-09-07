@@ -282,12 +282,14 @@ router.post('/call', async (req, res, next) => {
     // timer, not call state, so a tap after it lapses (or from a reloaded
     // page) must not ring the tech and dial the customer again while the
     // first bridge is still ringing or connected (codex #4072 r8 P2) — the
-    // row check covers a live call; the claim covers two taps racing the
-    // first row's insert (r9 P2), without pinning a pool connection (r15).
-    if (await activeBridgeCall({ source: 'tech-click', customerId: target.customer.id })) {
-      return res.status(409).json({ error: 'A call to this customer from your line is still ringing or connected', code: 'CALL_IN_FLIGHT' });
+    // row check covers a live call to this customer OR from this line (two
+    // visits from two PWAs would ring the same cell twice, r20 P2); the
+    // claim, keyed on the line, covers two taps racing the first row's
+    // insert (r9 P2), without pinning a pool connection (r15).
+    if (await activeBridgeCall({ source: 'tech-click', customerId: target.customer.id, fromPhone: ctx.line.number })) {
+      return res.status(409).json({ error: 'A call from your line is still ringing or connected', code: 'CALL_IN_FLIGHT' });
     }
-    const claimKey = `tech-bridge:${target.customer.id}`;
+    const claimKey = `tech-bridge:${ctx.line.number}`;
     if (!(await claimSend(claimKey, BRIDGE_CLAIM_WINDOW))) {
       return res.status(409).json({ error: 'A call to this customer was just started from your line — try again in a minute', code: 'CALL_IN_FLIGHT' });
     }
