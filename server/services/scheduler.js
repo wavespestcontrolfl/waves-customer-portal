@@ -720,13 +720,25 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // HOURLY :20 — geocode backstop. Several customer-create paths never call
-  // ensureCustomerGeocoded (and the ones that do swallow transient Google
-  // failures), leaving latitude/longitude NULL — which silently drops those
-  // stops from route optimization. Sweep fills any gap within the hour.
+  // HOURLY :20 — customer self-heal backstops. Several customer-create
+  // paths never call ensureCustomerGeocoded (and the ones that do swallow
+  // transient Google failures), leaving latitude/longitude NULL — which
+  // silently drops those stops from route optimization; the same paths
+  // never create the lazily-backfilled primary customer_properties row
+  // either, so a booking for a fresh lead anchored to NULL (prod
+  // 2026-09-07: 144 rows missing). Both sweeps fill their gap within the
+  // hour. Primary first: the geocode sweep's coordinate mirror then lands
+  // on a row that exists. Separate job_health names so the watchdog can
+  // tell which half is failing.
   cron.schedule('20 * * * *', async () => {
+    const { runExclusive } = require('../utils/cron-lock');
     try {
-      const { runExclusive } = require('../utils/cron-lock');
+      const { sweepMissingPrimaryProperties } = require('./customer-properties');
+      await runExclusive('primary-property-backstop', () => sweepMissingPrimaryProperties());
+    } catch (err) {
+      logger.error(`[customer-properties] primary backstop sweep failed: ${err.message}`);
+    }
+    try {
       const { sweepUngeocodedCustomers } = require('./geocoder');
       await runExclusive('geocoder-backstop', () => sweepUngeocodedCustomers());
     } catch (err) {

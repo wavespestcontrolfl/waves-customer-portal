@@ -25,6 +25,12 @@ for new data**.
 - **Admin API** (`admin-customers.js`): `GET/POST/PATCH /:id/properties`
   (read lazily backfills a primary; POST adds a non-primary; PATCH edits
   occupancy/label). Read is open; writes require admin.
+- **Hourly backstop** (`sweepMissingPrimaryProperties`, scheduler :20 tick,
+  job `primary-property-backstop`): none of the customer-insert paths create
+  the primary, so any live, addressed customer with no property row gets one
+  within the hour (newest first, per-row lock + re-check, same core as the
+  lazy reads). A later consumer may therefore assume the row exists after at
+  most an hour — never at insert time.
 
 Service: `server/services/customer-properties.js` (pure helpers `normStreet` /
 `normalizeOccupancy` / `isNewStreet` are unit-tested in

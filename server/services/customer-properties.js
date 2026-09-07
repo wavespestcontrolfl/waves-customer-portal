@@ -535,6 +535,54 @@ async function syncPrimaryCoordsFromCustomer(customerId, conn = db) {
 }
 
 /**
+ * Hourly backstop for the lazily-created PRIMARY row. The primary is
+ * created on first READ (properties tab, call pipeline, estimate linkage),
+ * and none of the customer-insert paths (website quote, web-form / GBP
+ * lead, Twilio, proposal win, …) create one — prod 2026-09-07: 144 live,
+ * addressed customers had no property row, and every booking anchored for
+ * them fell to NULL. This sweep fills the gap within the hour so no later
+ * consumer has to assume the row exists. Per customer, one transaction:
+ * customers row FOR UPDATE, re-check (still live, still addressed, still
+ * no row — a concurrent read may have backfilled it), then the same core
+ * every lazy read uses. Newest first (a stale lead can wait an hour; a
+ * fresh lead is the one about to be booked). Best-effort per row: a
+ * failure is counted and logged by code only (a knex error message embeds
+ * the SQL bindings, i.e. the address) and the sweep moves on.
+ */
+async function sweepMissingPrimaryProperties({ limit = 100 } = {}) {
+  const rows = await db('customers as c')
+    .whereNull('c.deleted_at')
+    .whereRaw("btrim(coalesce(c.address_line1, '')) <> ''")
+    .whereNotExists(db('customer_properties as p').select(1).whereRaw('p.customer_id = c.id'))
+    .orderBy('c.created_at', 'desc')
+    .limit(limit)
+    .select('c.id');
+  const results = { checked: rows.length, created: 0, skipped: 0, failed: 0 };
+  for (const row of rows) {
+    try {
+      const r = await db.transaction(async (trx) => {
+        const customer = await trx('customers').where({ id: row.id }).forUpdate().first();
+        if (!customer || customer.deleted_at || !String(customer.address_line1 || '').trim()) return { created: false };
+        const any = await trx('customer_properties').where({ customer_id: row.id }).first('id');
+        if (any) return { created: false };
+        return ensurePrimaryCore(customer, { source: 'backfill' }, trx);
+      });
+      if (r.created) results.created += 1; else results.skipped += 1;
+    } catch (err) {
+      results.failed += 1;
+      logger.error(`[customer-properties] primary backstop failed for customer ${row.id}: ${err.code || err.name || 'error'}`);
+    }
+  }
+  if (results.checked > 0) {
+    logger.info(
+      `[customer-properties] primary backstop sweep: checked=${results.checked}, ` +
+      `created=${results.created}, skipped=${results.skipped}, failed=${results.failed}`,
+    );
+  }
+  return results;
+}
+
+/**
  * The UNAMBIGUOUS property for a booking that carries no explicit property
  * identity: the customer's sole ACTIVE property (GH codex #3699 r3 — the
  * visit-group stamp needs a property anchor, and the estimate-linkage
@@ -627,6 +675,7 @@ async function anchorSoleProperty(target, cols, conn = db) {
 }
 
 module.exports = {
+  sweepMissingPrimaryProperties,
   soleActivePropertyId,
   anchorSoleProperty,
   bookingPropertyStamp,
