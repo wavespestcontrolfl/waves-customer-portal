@@ -10,7 +10,7 @@ const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/
 const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isEnabled, gateEnvValue } = require('../config/feature-gates');
-const { runExclusive } = require('../utils/cron-lock');
+const { runExclusive, recordMissedTick } = require('../utils/cron-lock');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
@@ -1391,9 +1391,17 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // Overdue promises to callers (call_commitments) — daily 7:20am ET, one
-  // exception bell per overdue promise per ET day. No-op while
-  // GATE_CALL_COMMITMENTS is off. See services/call-commitments-watchdog.js.
+  // Recover interrupted SMS profile capture every five minutes.
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;
+    try {
+      await runSmsRecoveryTick();
+    } catch {
+      logger.error('[sms-operations] profile capture did not complete');
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Keep the existing daily call watchdog independent of timer latency.
   cron.schedule('0 20 7 * * *', async () => {
     try {
       const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
@@ -6629,8 +6637,23 @@ function initBankingSync() {
   }, { timezone: 'America/New_York' });
 }
 
+// One SMS profile-capture recovery tick. runExclusive returns
+// { skipped: true, reason } WITHOUT running the sweep when it cannot acquire
+// a DB connection; lease_held is a normal overlap. A lost tick is ledgered
+// through the missed-tick path so job health never reads as quiet.
+async function runSmsRecoveryTick({ now = Date.now() } = {}) {
+  const { runSmsOperationalActions } = require('./sms-operational-actions');
+  const res = await runSmsOperationalActions();
+  if (res && res.skipped === true && res.reason !== 'lease_held') {
+    logger.error(`[sms-operations] profile capture tick skipped (${res.reason})`);
+    await recordMissedTick('sms-operational-actions', now, `tick skipped: ${res.reason}`);
+  }
+  return res;
+}
+
 module.exports = {
   initScheduledJobs,
+  runSmsRecoveryTick,
   initBankingSync,
   purposeForScheduledMessageType,
   resolveScheduledRecipient,

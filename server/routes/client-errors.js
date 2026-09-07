@@ -1,8 +1,18 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const Sentry = require('@sentry/node');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 
 const router = express.Router();
+const NATIVE_LINK_ERRORS = new Set([
+  'plugin-error', 'listener-error', 'lookup-timeout', 'lookup-error',
+  'storage-unavailable', 'navigation-failed',
+]);
+
+function isRoutineNativeReport(req) {
+  return req.body?.context === 'native-links'
+    && !NATIVE_LINK_ERRORS.has(req.body?.nativeLink?.outcome);
+}
 
 // Client-reported errors (React error boundaries, admin handler catches). There
 // was no client-side error telemetry — render crashes and handler failures only
@@ -15,24 +25,25 @@ const router = express.Router();
 // phones, addresses, or names — regex scrubbing can never catch them all. So we
 // do NOT forward any free-form string: each field is strictly transformed into a
 // known non-sensitive shape (validated error name, allowlisted route root,
-// validated context label, component-name-only stack) before it reaches Sentry.
+// context label, or native handoff labels) before it reaches Sentry.
 const limiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 30,
+  max: (req) => (isRoutineNativeReport(req) ? 10 : 30),
+  keyGenerator: (req) => `${isRoutineNativeReport(req) ? 'native-info' : 'error'}:${unauthenticatedAuthLimitKey(req)}`,
   standardHeaders: true,
   legacyHeaders: false,
 });
 
-// A GLOBAL ceiling (one shared bucket) on top of the per-IP limit: distributed
-// callers could otherwise bypass the per-IP cap and exhaust the Sentry event
-// quota, hiding real errors. Client crashes are rare, so 60/min across everyone
-// is generous; excess is dropped before it reaches Sentry.
+// Reserve the original 60/min cross-user budget for actual errors. Routine
+// native stages have their own smaller 20/min budget in the SAME limiter;
+// ordinary app boots must not debit either error bucket and hide real crashes.
+// All budgets are fixed regardless of caller-supplied platform/route labels.
 const globalLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 60,
+  max: (req) => (isRoutineNativeReport(req) ? 20 : 60),
   standardHeaders: false,
   legacyHeaders: false,
-  keyGenerator: () => 'global',
+  keyGenerator: (req) => (isRoutineNativeReport(req) ? 'native-info' : 'global'),
 });
 
 // A JS error name. Identifier-shape checks still let attacker PII through (a
@@ -58,6 +69,37 @@ const CONTEXT_LABELS = new Set([
 ]);
 const contextLabel = (value) =>
   (CONTEXT_LABELS.has(String(value || '')) ? String(value) : undefined);
+
+// Native links often fail without a JS exception. Accept only finite labels;
+// neither a launch URL nor its token ever belongs in a diagnostic event.
+const NATIVE_PLATFORMS = new Set(['ios', 'android']);
+const NATIVE_LINK_SOURCES = new Set(['boot', 'launch', 'event']);
+const NATIVE_LINK_OUTCOMES = new Set([
+  'started', 'plugin-error', 'listener-ready', 'listener-error', 'lookup-timeout',
+  'lookup-error', 'empty', 'superseded', 'received', 'rejected', 'replay-skipped',
+  'storage-unavailable', 'already-current', 'navigation-requested', 'navigation-failed',
+]);
+const NATIVE_LINK_ROUTES = new Set(['home', 'shortlink', 'estimate', 'other', 'none']);
+function captureNativeLink(value) {
+  const { platform, source, outcome, route, target } = value || {};
+  if (!NATIVE_PLATFORMS.has(platform) || !NATIVE_LINK_SOURCES.has(source)
+    || !NATIVE_LINK_OUTCOMES.has(outcome) || !NATIVE_LINK_ROUTES.has(route)
+    || !NATIVE_LINK_ROUTES.has(target)) return;
+
+  Sentry.captureMessage(`Native link: ${outcome}`, {
+    level: NATIVE_LINK_ERRORS.has(outcome) ? 'error' : 'info',
+    fingerprint: ['native-link', platform, source, outcome],
+    tags: {
+      source: 'client',
+      client_context: 'native-links',
+      native_platform: platform,
+      link_source: source,
+      link_outcome: outcome,
+      link_route: route,
+      link_target: target,
+    },
+  });
+}
 
 // Known top-level route roots. The route is reduced to just its root so no token
 // or injected value in the tail can persist; unknown roots become "other".
@@ -103,15 +145,20 @@ const routeLabel = (value) => {
   return ROUTE_ROOTS.has(first) ? first : 'other';
 };
 
-// POST /api/client-errors  { name, context, route }
+// POST /api/client-errors  { name, context, route }, or
+// { context: 'native-links', nativeLink: { platform, source, outcome, route, target } }
 // componentStack is intentionally NOT accepted: React component names are
 // unbounded, so on a public endpoint an attacker could inject a person's name as
-// a fake "component". Only the three allowlisted/transformed fields are kept.
+// a fake "component". Only allowlisted/transformed fields are kept.
 // Per-IP limiter FIRST so only requests that pass it debit the shared global
 // bucket — otherwise one noisy IP could drain the all-caller quota with requests
 // its own per-IP cap would have rejected anyway.
 router.post('/', limiter, globalLimiter, (req, res) => {
   try {
+    if (req.body?.context === 'native-links') {
+      captureNativeLink(req.body.nativeLink);
+      return res.status(204).end();
+    }
     const { name, context, route } = req.body || {};
     const name_ = errorName(name);
     const context_ = contextLabel(context);

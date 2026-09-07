@@ -50,10 +50,18 @@ test('new and changed actions cannot hide behind a baseline or a stale review', 
 
 test('verified coverage requires actual policy and evidence for the reviewed implementation', () => {
   const action = census[0];
-  const record = { ...action, baselineFingerprint: 'old', status: 'verified', reviewedFingerprint: action.fingerprint, tools: ['save'], evidence: ['database test'] };
+  const record = { ...action, baselineFingerprint: 'old', status: 'verified', reviewedFingerprint: action.fingerprint, tools: ['save'], evidence: ['database test'], permission: 'admin', approval: 'ui_confirm', inputsAndEffects: 'Validated source name; persists a source' };
   expect(checkCoverage([action], { actions: [record] }, {})).toHaveLength(1);
   expect(checkCoverage([action], { actions: [record] }, { save: {} })).toEqual([]);
   expect(checkCoverage([action], { actions: [{ ...record, evidence: [] }] }, { save: {} })).toHaveLength(1);
+  for (const key of ['permission', 'approval', 'inputsAndEffects']) {
+    for (const value of [undefined, '', ' ', 'requires_action_review', ' requires_action_review ']) {
+      expect(checkCoverage([action], { actions: [{ ...record, [key]: value }] }, { save: {} })).toHaveLength(1);
+    }
+  }
+  for (const evidence of ['fixture', [''], [{}]]) {
+    expect(checkCoverage([action], { actions: [{ ...record, evidence }] }, { save: {} })).toHaveLength(1);
+  }
 });
 
 

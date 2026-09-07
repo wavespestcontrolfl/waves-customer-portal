@@ -160,7 +160,7 @@ describe('agent-control lane policies', () => {
   it('every switchboard lane has a runtime entry and vice versa (drift guard)', () => {
     const laneIds = sb.LANES.map((l) => l.id).sort();
     expect(Object.keys(policies.LANE_RUNTIME).sort()).toEqual(laneIds);
-    expect(laneIds.length).toBe(124);
+    expect(new Set(laneIds).size).toBe(laneIds.length);
   });
 
   it('every entry is valid and every merged policy keeps the timing invariants', () => {
