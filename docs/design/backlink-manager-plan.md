@@ -1792,7 +1792,7 @@ unset its gate; budget kill = the issuer program's limit.
    Policy panel; `GATE_LINK_AUTHORITY`; shipped as four PRs (owner ruling 2026-09-02/03): 1 = policy row +
    decision + panel (#3765); 2a-i = `seo_link_floor_waivers` + `seo_link_approvals` schema + the §3.3b
    instance columns (dark, nothing reads them); 2a-ii = the nightly
-   bridge (gated: selection-only while the gate is off; ONE bell per run, never per card; every bridged
+   bridge (gated: selection-only while the gate is off; a domain the weekly enrichment has not reached — spam_score null — is not selected until it is, so INVALID never bounces it to the investigator for a nightly model pass; ONE bell per run, never per card; every bridged
    placement targets the homepage until a topic is persisted on the domain; spend = 0 and D30 = null
    until steps 5/7); 2b = Owner-queue cards + Approve/Reject/Watch/Acquire-anyway; 3 = the outreach
    mandate; 4 = claim re-check, `mode=payment`, allowlist retirement; the post-scan inbound cross-link for outreach
