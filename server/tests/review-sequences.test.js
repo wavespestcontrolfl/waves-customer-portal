@@ -602,12 +602,12 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(at.getTime()).toBeLessThanOrEqual(MON_1030);
   });
 
-  test('an already-due later step keeps ~20h spacing after the touch that just sent (no back-to-back asks)', () => {
-    // Weekend-shifted Day-3 SMS just fired Monday morning; the Day-4 email's
-    // base time (Sunday) is already past — it must NOT fire a minute later.
-    const now = new Date('2026-08-03T10:15:00-04:00');
+  test('an already-due later step keeps the 3-day rule after the touch that just sent (owner ruling 2026-09-07)', () => {
+    // Weekend-shifted Day-4 SMS just fired Monday 8:00 AM; the email's base
+    // time is already past — it must NOT fire before Thursday 8:00 AM.
+    const now = new Date('2026-08-03T08:00:00-04:00');
     const at = nextTouchRunAt({ startedAt: WED, step: { day: 4, channel: 'email' }, now });
-    expect(at.getTime()).toBe(now.getTime() + 20 * 3600000);
+    expect(at.getTime()).toBe(new Date('2026-08-06T08:00:00-04:00').getTime());
   });
 
   test('a future step is scheduled exactly at started_at + day offset', () => {
@@ -820,6 +820,88 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     });
   });
 
+  describe('3-day rule at dispatch (owner ruling 2026-09-07)', () => {
+    const parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
+    function fixture(id, { lastAskAgoMs, step = { day: 4, channel: 'sms', templateKey: 'soft_reminder' } }) {
+      return {
+        customers: [{ id: `${id}-c`, first_name: 'Dana', last_name: 'Q', phone: '+19410000150', nearest_location_id: 'bradenton' }],
+        review_sequences: [{
+          id, customer_id: `${id}-c`, status: 'active', current_step: 1, touches_sent: 1, tech_name: 'Adam',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }, step]),
+          started_at: new Date(Date.now() - 4 * 86400000), next_run_at: new Date(Date.now() - 60000),
+        }],
+        // The Day-0 ask actually went out lastAskAgoMs ago (held by the send
+        // window, retried, etc. — the plan's day offset no longer tells).
+        review_requests: [{ id: `${id}-d0`, sequence_id: id, sequence_step: 0, customer_id: `${id}-c`, channel: 'sms', template_key: 'day0_ask', status: 'sent', sms_sent_at: new Date(Date.now() - lastAskAgoMs), created_at: new Date(Date.now() - lastAskAgoMs) }],
+      };
+    }
+
+    test('a follow-up due by the plan but under 72h after the last delivered ask is held to lastSent + 72h, nothing dropped', async () => {
+      const lastAskAgoMs = 40 * 3600000;
+      const mock = makeMock(fixture('seq-3d1', { lastAskAgoMs }));
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(out.sent).toBe(0);
+      const seq = mock.__state.rows.review_sequences[0];
+      expect(seq.status).toBe('active');
+      expect(seq.current_step).toBe(1);
+      const expected = Date.now() - lastAskAgoMs + 72 * 3600000;
+      expect(Math.abs(seq.next_run_at.getTime() - expected)).toBeLessThan(5000);
+      expect(parse(seq.decision)).toMatchObject({ reason: 'spacing', ownerAction: 'none' });
+      expect(new Date(parse(seq.decision).plannedAt).getTime()).toBe(seq.next_run_at.getTime());
+    });
+
+    test('a follow-up 72h or more after the last delivered ask sends', async () => {
+      const mock = makeMock(fixture('seq-3d2', { lastAskAgoMs: 73 * 3600000 }));
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(out.sent).toBe(1);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('a weekdays-only follow-up held by the rule lands on a weekday morning', async () => {
+      // Force lastSent + 72h onto a Saturday: pick lastSent = Wednesday 09:00 ET.
+      const wed = new Date('2026-08-05T09:00:00-04:00');
+      const realNow = Date.now;
+      Date.now = () => wed.getTime() + 60 * 3600000; // Friday 21:00 ET
+      try {
+        const mock = makeMock(fixture('seq-3d3', { lastAskAgoMs: 60 * 3600000, step: { day: 4, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true } }));
+        db.mockImplementation(mock);
+
+        await ReviewService.processReviewSequences();
+
+        const seq = mock.__state.rows.review_sequences[0];
+        expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+        // Saturday 09:00 → Monday 10:00–10:30 ET
+        const { etParts } = require('../utils/datetime-et');
+        expect(etParts(seq.next_run_at)).toMatchObject({ dayOfWeek: 1, hour: 10 });
+      } finally {
+        Date.now = realNow;
+      }
+    });
+
+    test('the first ask has no timing gate: a Day-0 step with no prior ask sends at its scheduled time', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'fa-c', first_name: 'Ana', last_name: 'M', phone: '+19410000151', nearest_location_id: 'sarasota' }],
+        review_sequences: [{
+          id: 'seq-fa', customer_id: 'fa-c', status: 'active', current_step: 0, touches_sent: 0, tech_name: 'Adam',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }]),
+          started_at: new Date(Date.now() - 600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+      });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.processReviewSequences();
+
+      expect(out.sent).toBe(1);
+    });
+  });
+
   test('enrollPostService is idempotent per customer — an active cadence blocks a second enrollment', async () => {
     mockGates.reviewSequences = true;
     const mock = makeMock({
@@ -927,7 +1009,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(result.started).toBe(true);
     plan = JSON.parse(mock.__state.rows.review_sequences[0].plan);
     expect(plan).toHaveLength(3);
-    expect(plan.map((s) => s.day)).toEqual([0, 4, 6]);
+    expect(plan.map((s) => s.day)).toEqual([0, 4, 7]);
   });
 
   test('an owner-named multi-treatment service (roach/bed bug) works without child linkage: first visit = one ask, repeat visit inside 60d = full cadence', async () => {

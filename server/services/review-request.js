@@ -387,13 +387,20 @@ function shiftToWeekdayMorning(date) {
   return parseETDateTime(naive);
 }
 
+// The 3-day rule (owner ruling 2026-09-07): once a review ask has gone out,
+// no further ask to that customer for 72 hours, measured from the ask's
+// actual send — Monday 8:00 AM means nothing before Thursday 8:00 AM. It
+// is the ONLY timing rule between asks: the first ask has no gate on when
+// it goes (no spacing against other texts or calls), and the 30-day
+// cooldown between campaigns and the 3-ask/180-day cap are separate.
+const ASK_SPACING_MS = 72 * 3600000;
+
 /**
  * When the next sequence touch should fire. Base schedule is
  * started_at + step.day days; three corrections:
  *  - catch-up: a base time already in the past fires in ~60s, EXCEPT
- *  - min spacing: a later step never fires sooner than ~20h after the touch
- *    that just went out (a weekend-shifted Day-3 SMS would otherwise be
- *    chased by the already-due Day-4 email a minute later);
+ *  - the 3-day rule: a later step never fires sooner than 72h after the
+ *    touch that just went out (`now` is the send moment);
  *  - weekdaysOnly steps land Mon-Fri (ET) — Sat/Sun shifts to Monday 10 AM.
  */
 function nextTouchRunAt({ startedAt, step, now = new Date() }) {
@@ -401,7 +408,7 @@ function nextTouchRunAt({ startedAt, step, now = new Date() }) {
   let at = new Date(new Date(startedAt).getTime() + dayOffset * 86400000);
   if (at <= now) at = new Date(now.getTime() + 60000);
   if (dayOffset > 0) {
-    const minAt = new Date(now.getTime() + 20 * 3600000);
+    const minAt = new Date(now.getTime() + ASK_SPACING_MS);
     if (at < minAt) at = minAt;
   }
   if (step?.weekdaysOnly) at = shiftToWeekdayMorning(at);
@@ -4515,6 +4522,26 @@ const ReviewService = {
     );
     if (externallyAsked) return stop("superseded");
 
+    // The 3-day rule, re-checked at the dispatch boundary (owner ruling
+    // 2026-09-07): the schedule computed at the last send can be overtaken —
+    // a Day-0 held by the send window and sent late, a retry, a same-series
+    // first-treatment ask — so the last DELIVERED ask decides, not the plan.
+    // A held step keeps its place: next_run_at moves to lastSent + 72h (then
+    // the weekday shift), the decision says why, and nothing is dropped.
+    const lastAskAtMs = recentAskRows.reduce((max, r) => {
+      const t = new Date(r.sms_sent_at || r.sent_at).getTime();
+      return Number.isFinite(t) && t > max ? t : max;
+    }, 0);
+    if (lastAskAtMs && Date.now() - lastAskAtMs < ASK_SPACING_MS) {
+      const stepForSpacing = plan[seq.current_step] || {};
+      let spacedAt = new Date(lastAskAtMs + ASK_SPACING_MS);
+      if (stepForSpacing.weekdaysOnly) spacedAt = shiftToWeekdayMorning(spacedAt);
+      await db("review_sequences")
+        .where({ id: seq.id, status: "active" })
+        .update({ next_run_at: spacedAt, decision: sequenceDecision({ reason: "spacing", plannedAt: spacedAt, nextEvalAt: spacedAt }), updated_at: new Date() });
+      return { ran: false, deferred: true, reason: "spacing", retryAt: spacedAt };
+    }
+
     // Mid-cadence manual-ask standdown (codex #3235 r1 P1): the owner can
     // hand-send an ask AFTER enrollment (evening of a next-morning Day-0, or
     // between Day 0 and Day 4). Scoped to evidence since the sequence
@@ -5469,6 +5496,7 @@ const ReviewService = {
 };
 
 ReviewService.__private = {
+  ASK_SPACING_MS,
   retryAtForDeferredSend,
   calculateReviewSendTime,
   sequenceDecision,
