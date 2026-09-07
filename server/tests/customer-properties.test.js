@@ -139,10 +139,88 @@ describe('soleActivePropertyId (GH #3699 r3: property anchor for the visit-group
   test('two or more active properties → null (office places those)', async () => {
     expect(await soleActivePropertyId('c1', connWith([{ id: 'p1' }, { id: 'p2' }]))).toBeNull();
   });
-  test('none, no customer, or a read error → null (best-effort)', async () => {
-    expect(await soleActivePropertyId('c1', connWith([]))).toBeNull();
+  test('no customer, or a read error → null (best-effort)', async () => {
     expect(await soleActivePropertyId(null, connWith([{ id: 'p1' }]))).toBeNull();
     expect(await soleActivePropertyId('c1', () => { throw new Error('down'); })).toBeNull();
+  });
+
+  // No row at all → the anchor backfills the lazily-created primary from the
+  // customers mirror (prod 2026-09-07: 144 addressed customers, every lead /
+  // public booking for them anchored to NULL) and returns it as the sole
+  // property. Fake knex: `customer_properties` reads answer with `rows`
+  // (then, after an insert, the inserted primary); `customers` answers with
+  // the mirror row; `transaction(fn)` hands back the same fake (a savepoint).
+  const fakeConn = ({ rows = [], customer = null, insertError = null, isTransaction = false } = {}) => {
+    const state = { rows: [...rows], inserted: [], failures: [] };
+    const conn = (table) => {
+      if (table === 'customers') {
+        return { where: () => ({ first: async () => customer }) };
+      }
+      const q = {
+        where: () => q,
+        limit: () => q,
+        select: async () => state.rows,
+        first: async () => state.rows.find((r) => r.is_primary) || null,
+        insert: (row) => ({
+          returning: async () => {
+            if (insertError) throw insertError;
+            const id = `p-new-${state.inserted.length + 1}`;
+            state.inserted.push({ ...row, id });
+            state.rows.push({ id, is_primary: true, active: true });
+            return [{ id }];
+          },
+        }),
+      };
+      return q;
+    };
+    conn.isTransaction = isTransaction;
+    conn.transaction = async (fn) => fn(conn);
+    conn.state = state;
+    return conn;
+  };
+  const addressed = { id: 'c1', address_line1: '6136 46th Ln E', city: 'Bradenton', state: 'FL', zip: '34203', contact_role: null };
+
+  test('no property row + an on-file address → backfills the primary and anchors to it', async () => {
+    const conn = fakeConn({ customer: addressed });
+    expect(await soleActivePropertyId('c1', conn)).toBe('p-new-1');
+    expect(conn.state.inserted).toHaveLength(1);
+    expect(conn.state.inserted[0]).toMatchObject({
+      customer_id: 'c1', is_primary: true, active: true, source: 'backfill',
+      address_line1: '6136 46th Ln E', city: 'Bradenton', zip: '34203', occupancy_type: 'owner_occupied',
+    });
+  });
+  test('backfill runs inside the caller transaction as a savepoint', async () => {
+    const conn = fakeConn({ customer: addressed, isTransaction: true });
+    expect(await soleActivePropertyId('c1', conn)).toBe('p-new-1');
+  });
+  test('no property row and no on-file address → nothing to backfill, null', async () => {
+    const conn = fakeConn({ customer: { id: 'c1', address_line1: '' } });
+    expect(await soleActivePropertyId('c1', conn)).toBeNull();
+    expect(conn.state.inserted).toHaveLength(0);
+  });
+  test('an inactive-only primary is a deliberate deactivation — not recreated, null', async () => {
+    const conn = fakeConn({ customer: addressed });
+    conn.state.rows = []; // active read finds nothing …
+    const inactive = { id: 'p-old', is_primary: true, active: false };
+    const origConn = conn;
+    // … but the primary existence check (no active filter) sees the row.
+    const wrapped = (table) => {
+      const q = origConn(table);
+      if (table === 'customer_properties') q.first = async () => inactive;
+      return q;
+    };
+    wrapped.isTransaction = false;
+    wrapped.transaction = async (fn) => fn(wrapped);
+    expect(await soleActivePropertyId('c1', wrapped)).toBeNull();
+    expect(conn.state.inserted).toHaveLength(0);
+  });
+  test('a backfill failure degrades to null (best-effort, never throws into a booking)', async () => {
+    const conn = fakeConn({ customer: addressed, insertError: Object.assign(new Error('boom'), { code: '42P01' }) });
+    expect(await soleActivePropertyId('c1', conn)).toBeNull();
+  });
+  test('the primary race (23505) is not a sole property either — null', async () => {
+    const conn = fakeConn({ customer: addressed, insertError: Object.assign(new Error('dup'), { code: '23505' }) });
+    expect(await soleActivePropertyId('c1', conn)).toBeNull();
   });
 });
 

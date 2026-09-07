@@ -553,9 +553,25 @@ async function soleActivePropertyId(customerId, conn = db) {
     .where({ customer_id: customerId, active: true })
     .limit(2)
     .select('id');
+  const inSavepoint = (fn) => (conn.isTransaction ? conn.transaction((sp) => fn(sp)) : fn(conn));
   try {
-    const rows = conn.isTransaction ? await conn.transaction((sp) => read(sp)) : await read(conn);
-    return rows.length === 1 ? rows[0].id : null;
+    const rows = await inSavepoint(read);
+    if (rows.length === 1) return rows[0].id;
+    if (rows.length) return null;
+    // No property row at all: the primary is created LAZILY (the migration
+    // backfilled existing customers; a customer created since — website
+    // quote, web-form / GBP lead, Twilio, proposal win — gets one on the
+    // first read that backfills). Prod 2026-09-07: 144 addressed customers
+    // had no row, and every lead-page / public booking for them anchored
+    // to NULL, so the visit-group stamp refused. This anchor is such a
+    // read: backfill the primary from the customers mirror (same core the
+    // properties tab and the estimate linkage use), then it IS the sole
+    // property. An inactive-only primary is left alone (created=false) —
+    // a deliberate deactivation stays office-placed. Runs in the same
+    // savepoint discipline as the read so a failed statement cannot
+    // poison the caller's transaction.
+    const ensured = await inSavepoint((c) => ensurePrimaryCore(customerId, {}, c));
+    return ensured.created ? ensured.propertyId : null;
   } catch {
     return null;
   }

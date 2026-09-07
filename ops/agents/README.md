@@ -89,6 +89,10 @@ railway run --service Postgres node ops/agents/pull-page-tokens.js
 # Read-only: why didn't this completed one-time visit auto-charge the card on file?
 railway run --service Postgres node ops/agents/completion-charge-why.js --visit=<scheduled_service_id>
 
+# Dry-run (default), then real run: primary customer_properties row for addressed customers that have none
+railway run --service Postgres -- node ops/agents/primary-property-backfill.js
+railway run --service Postgres -- node ops/agents/primary-property-backfill.js --execute
+
 # Dry-run (default), then real run, of the retention draft purge
 railway run --service Postgres node ops/agents/retention-purge.js
 railway run --service Postgres node ops/agents/retention-purge.js --execute
