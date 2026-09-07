@@ -708,6 +708,10 @@ export class ApiClient {
     return this.request('/property/preferences');
   }
 
+  getWateringPlan() {
+    return this.request('/property/watering-plan');
+  }
+
   getStationMap() {
     return this.request('/property/station-map');
   }

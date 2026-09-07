@@ -2067,6 +2067,10 @@ const gates = {
   // Kill = unset GATE_IRRIGATION_WEEK_PLAN.
   irrigationWeekPlan: process.env.GATE_IRRIGATION_WEEK_PLAN === 'true',
 
+  // Saved Monday plan in My Property + the existing property-alerts sweep.
+  // Explicit opt-in everywhere; email plan and property-alert gates still apply.
+  irrigationAppPlan: process.env.GATE_IRRIGATION_APP_PLAN === 'true',
+
   // Existing-customer campaign drafts (V1) — the seasonal-reactivation cron and
   // the daily upsell generator write message_drafts status='pending' rows
   // (campaign_type reactivation/upsell) for OWNER APPROVAL in the drafts queue.
