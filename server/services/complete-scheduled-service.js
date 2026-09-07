@@ -4796,6 +4796,19 @@ async function completeScheduledService(completionInput, packetRecord = null) {
               err.code = 'VISIT_PROPERTY_CHANGED';
               throw err;
             }
+            // Service identity likewise: the lawn ledger eligibility, the lawn
+            // plan and the report line were all derived from the handler-entry
+            // service_type. An update-details edit that flipped the line
+            // between the load and this lock would write (or omit) a lawn
+            // actuals row against the wrong identity — abort, same shape.
+            if (Object.prototype.hasOwnProperty.call(lockedSvcRow, 'service_type')
+              && String(lockedSvcRow.service_type || '') !== String(svc.service_type || '')) {
+              const err = new Error('This appointment\'s service type changed while completing — reload the job and complete it again.');
+              err.statusCode = 409;
+              err.isOperational = true;
+              err.code = 'VISIT_SERVICE_CHANGED';
+              throw err;
+            }
             const normStampVal = (v) => (v == null || v === '' ? null : Number(v));
             const preLockSeq = normStampVal(svc.time_on_site_correction_seq);
             const preLockStamp = normStampVal(svc.time_on_site_adjusted_minutes);

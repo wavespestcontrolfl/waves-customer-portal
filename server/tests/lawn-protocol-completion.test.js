@@ -33,7 +33,7 @@ describe('recordLawnProtocolCompletion checklist semantics', () => {
   // asserted. Table name keeps its "as" alias, hence startsWith.
   function fakeTrx(insertedCompletions, insertedActuals = [], deletes = []) {
     return (table) => ({
-      columnInfo: () => Promise.resolve({ property_id: {} }),
+      whereIn: () => ({ select: () => Promise.resolve([]) }),
       where: (criteria) => ({
         first: () => Promise.resolve(null),
         del: () => { deletes.push({ table, criteria }); return Promise.resolve(0); },
@@ -87,7 +87,7 @@ describe('recordLawnProtocolCompletion checklist semantics', () => {
     const completions = [];
     const actuals = [];
     const trx = (table) => ({
-      columnInfo: () => Promise.resolve({}),
+      whereIn: () => ({ select: () => Promise.resolve([]) }),
       where: () => ({ first: () => Promise.resolve(null), del: () => Promise.resolve(0) }),
       leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([]) }) }),
       insert: (row) => {
@@ -180,7 +180,7 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
 
   function fakeTrx(completions, actuals, deletes) {
     return (table) => ({
-      columnInfo: () => Promise.resolve({ property_id: {} }),
+      whereIn: () => ({ select: () => Promise.resolve([]) }),
       where: (criteria) => ({
         first: () => Promise.resolve(null),
         del: () => { deletes.push({ table, criteria }); return Promise.resolve(0); },
@@ -244,15 +244,16 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
     expect(JSON.parse(actuals[0].metadata)).toMatchObject({
       applicationMethod: 'spot_spray', areaValue: 2500, areaUnit: 'sqft', applicationArea: 'Front yard, Side yards', zoneIds: ['zone-a'],
     });
-    expect(actuals[1]).toMatchObject({ status: 'skipped', product_id: 'prod-2', product_name: 'Fixture pre-emergent', skip_reason: 'Not applied' });
-    expect(JSON.parse(actuals[1].metadata)).toEqual({ source: 'tech_closeout', reasonSupplied: false, substitution: null });
+    // 'prod-2' resolves to nothing (no catalog row, no substitution, no protocol product) → name kept, uuid FK left NULL.
+    expect(actuals[1]).toMatchObject({ status: 'skipped', product_id: null, product_name: 'Fixture pre-emergent', skip_reason: 'Not applied' });
+    expect(JSON.parse(actuals[1].metadata)).toEqual({ source: 'tech_closeout', reasonSupplied: false, substitution: null, unresolvedProductId: 'prod-2' });
   });
 
   test('gate on: a removed substitute resolves to its original protocol product', async () => {
     process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
     const protocolRow = { id: 'pp-1', product_id: 'orig-1', catalog_product_name: 'Original iron', role: 'micronutrient', rate_per_1000: 3, rate_unit: 'fl oz' };
     const trx = (table) => ({
-      columnInfo: () => Promise.resolve({}),
+      whereIn: () => ({ select: () => Promise.resolve([]) }),
       where: () => ({ first: () => Promise.resolve({ id: 'row-1' }), del: () => Promise.resolve(0) }),
       leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([protocolRow]) }) }),
       insert: (row) => {

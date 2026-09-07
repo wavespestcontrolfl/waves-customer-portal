@@ -194,16 +194,13 @@ async function recordLawnProtocolCompletion(trx, {
       .map((sub) => [String(sub.substituteProductId), sub]),
   );
 
-  // property_id ships in migration 20260907000110; a completion on a
-  // checkout that has not run it yet must not fail the whole closeout.
-  const completionCols = await trx('lawn_protocol_service_completions').columnInfo().catch(() => ({}));
-  const propertyId = service?.property_id || null;
   const [completion] = await trx('lawn_protocol_service_completions')
     .insert({
       service_record_id: serviceRecord.id,
       scheduled_service_id: service?.id || serviceRecord.scheduled_service_id || null,
       customer_id: service?.customer_id || serviceRecord.customer_id || null,
-      ...(completionCols.property_id ? { property_id: propertyId } : {}),
+      // Frozen service property (migration 20260907000110 ships in this PR).
+      property_id: service?.property_id || null,
       lawn_protocol_id: protocolRow?.id || null,
       lawn_protocol_window_id: windowRow?.id || null,
       protocol_key: structured?.protocolKey || null,
@@ -311,7 +308,21 @@ async function recordLawnProtocolCompletion(trx, {
     });
   }
 
-  for (const skipped of normalizeSkippedProducts(completionInput.skippedProducts || completionInput.skipped_products)) {
+  // A skipped product id must resolve before it lands in the uuid FK column —
+  // a product retired while the form was open would otherwise fail the whole
+  // closeout. Known = catalog row, an approved substitute on this plan, or a
+  // protocol product; anything else keeps its name with product_id NULL.
+  const skippedProducts = normalizeSkippedProducts(completionInput.skippedProducts || completionInput.skipped_products);
+  const skippedIds = [...new Set(skippedProducts.map((row) => row.productId).filter(Boolean).map(String))];
+  const catalogIds = skippedIds.length
+    ? await trx('products_catalog').whereIn('id', skippedIds).select('id').then((rows) => rows.map((row) => String(row.id))).catch(() => [])
+    : [];
+  const knownProductIds = new Set([
+    ...catalogIds,
+    ...substitutionBySubstituteProductId.keys(),
+    ...protocolProducts.map((row) => String(row.product_id || '')).filter(Boolean),
+  ]);
+  for (const skipped of skippedProducts) {
     // A removed default may be an approved substitute: the closeout knows the
     // substitute catalog id, the protocol row holds the original. Resolve
     // through the plan's substitution map so the skipped row keeps its
@@ -325,14 +336,17 @@ async function recordLawnProtocolCompletion(trx, {
     await trx('lawn_protocol_product_actuals').insert({
       lawn_protocol_service_completion_id: completion.id,
       protocol_product_id: protocolProduct?.id || null,
-      product_id: skipped.productId || protocolProduct?.product_id || null,
+      product_id: (skipped.productId && knownProductIds.has(String(skipped.productId)) ? skipped.productId : null) || protocolProduct?.product_id || null,
       product_name: skipped.productName || protocolProduct?.catalog_product_name || protocolProduct?.product_name || 'Skipped protocol product',
       role: skipped.role || protocolProduct?.role || null,
       status: 'skipped',
       planned_rate_per_1000: protocolProduct?.rate_per_1000 || null,
       planned_rate_unit: protocolProduct?.rate_unit || null,
       skip_reason: skipped.reason,
-      metadata: JSON.stringify({ source: 'tech_closeout', reasonSupplied: skipped.reasonSupplied, substitution: substitution || null }),
+      metadata: JSON.stringify({
+        source: 'tech_closeout', reasonSupplied: skipped.reasonSupplied, substitution: substitution || null,
+        unresolvedProductId: skipped.productId && !knownProductIds.has(String(skipped.productId)) ? skipped.productId : null,
+      }),
     });
   }
 
