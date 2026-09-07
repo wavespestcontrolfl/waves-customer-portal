@@ -430,6 +430,20 @@ test('sameDayFloorMin is applied while choosing: a topN:1 range answer walks tod
   expect((await post({ ...BASE, hint: true, sameDayFloorMin: '2pm' })).status).toBe(400);
 });
 
+test('a picked hour outside the engine\'s day bounds is not scored (no picked key) rather than called a conflict', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot()], evaluated: 1 });
+  // 07:00 is before the 08:00 day open; 16:30 + 60 min runs past the
+  // 17:00 close. Neither is ever enumerated, so neither is a verdict.
+  for (const hour of ['07:00', '16:30']) {
+    const body = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: hour })).json();
+    expect(body.picked).toBeUndefined();
+  }
+  // Just inside the bounds and outside every gap: a real "doesn't fit".
+  const body = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '16:00' })).json();
+  expect(body.picked).toEqual({ start: '16:00', fits: false });
+});
+
 test('a same-day picked hour before the engine\'s now+30 floor is not scored (no picked key), later hours are', async () => {
   process.env.GATE_BEST_TIME_HINTS = 'true';
   // ET now is pinned at 12:00 → the engine floors today at 12:30, so a

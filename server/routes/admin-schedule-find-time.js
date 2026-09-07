@@ -23,7 +23,8 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
-const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { findAvailableSlots, DAY_START_HOUR, DAY_END_HOUR } = require('../services/scheduling/find-time');
+const { ADMIN_DAY_END_MINUTES } = require('../services/scheduling/window-rules');
 const { loadOccupancy, conflictsForTarget } = require('../services/rain-out');
 const { gateEnvValue } = require('../config/feature-gates');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
@@ -341,7 +342,14 @@ router.post('/', async (req, res) => {
     // blank — rather than reported as "doesn't fit" (pre-push P1).
     const nowEt = etParts();
     const pickedTooSoon = from === today && toMin(pickedStart) < nowEt.hour * 60 + nowEt.minute + 30;
-    if (hint && pickedStart && !pickedTooSoon) {
+    // Likewise an hour the engine never enumerates — before its day open,
+    // or ending after its day close (the arrival simulation runs later
+    // than the gap walk) — is absent from rawSlots for bounds reasons, not
+    // route reasons: the edit picker allows 07:00, so it stays unscored.
+    const dayEndMin = useArrivalWindows ? ADMIN_DAY_END_MINUTES : DAY_END_HOUR * 60;
+    const pickedOutOfBounds = pickedStart !== undefined
+      && (toMin(pickedStart) < DAY_START_HOUR * 60 || toMin(pickedStart) + spanMin > dayEndMin);
+    if (hint && pickedStart && !pickedTooSoon && !pickedOutOfBounds) {
       const pickedMin = toMin(pickedStart);
       const gap = rawSlots.find((s) => {
         if (s.date !== from) return false;
