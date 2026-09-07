@@ -95,6 +95,19 @@ it('discovers a packet after a lost response and resumes the saved server closeo
   expect(screen.queryByRole('button', { name: 'Complete visit' })).not.toBeInTheDocument();
 });
 
+it('reopens a failed saved packet as an office exception without offering another retry', async () => {
+  const view = mount();
+  await prepareBoth();
+  view.unmount();
+  packet = { id: 'packet', status: 'failed', officeReview: true };
+  mount();
+  expect(await screen.findByText('Visit recorded. The office has an alert to review the service closeout, billing, or delivery.')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Resume closeout' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Complete visit' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Open form' })).not.toBeInTheDocument();
+  await waitFor(async () => expect(await getCompletionResumeBody('visit:visit')).toBeNull());
+});
+
 it('offers the server-authorized summary revoke action after completion', async () => {
   mount();
   await prepareBoth();

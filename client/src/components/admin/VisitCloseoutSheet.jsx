@@ -30,7 +30,7 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
       getCompletionResumeBody(storageKey),
     ]).then(async ([detail, stored]) => {
       // A lost final response can leave a draft after the server finished.
-      if (detail.packet?.status === 'done') await deleteCompletionResumeBody(storageKey);
+      if (['done', 'failed'].includes(detail.packet?.status)) await deleteCompletionResumeBody(storageKey);
       const day = await adminFetch(`/admin/schedule?date=${encodeURIComponent(detail.serviceDate)}`);
       const rows = detail.members.map((member) => (day.services || []).find((service) => service.id === member.id));
       if (rows.some((row) => !row || row.visitId !== visitId)) throw new Error('The service list changed. Refresh the schedule before closing this visit.');
@@ -43,8 +43,8 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
   }, [visitId, storageKey, reload]);
 
   const packet = visit?.packet;
-  const finished = result ? ['done', 'office_required'].includes(result.state) : packet?.status === 'done';
-  const officeReview = result ? result.state === 'office_required' : packet?.officeReview;
+  const finished = result ? ['done', 'office_required'].includes(result.state) : ['done', 'failed'].includes(packet?.status);
+  const officeReview = result ? result.state === 'office_required' : packet?.status === 'failed' || packet?.officeReview;
   const ready = services.length > 1 && services.every((service) => draft?.forms?.[service.id]?.body);
   const prepared = services.filter((service) => draft?.forms?.[service.id]?.body).length;
 
@@ -124,7 +124,9 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
         {error && <div role="alert" className="rounded-sm border border-alert-fg p-4 text-alert-fg">{error}</div>}
         {!visit && error && <Button className="text-sm" onClick={() => setReload((value) => value + 1)}>Try again</Button>}
         {visit && <>
-          <p className="text-zinc-600">{packet
+          <p className="text-zinc-600">{officeReview
+            ? 'The service records are saved. The office must review this closeout before the remaining work can finish.'
+            : packet
             ? 'The service records are saved. Any remaining invoice, payment, or report delivery continues from this closeout.'
             : 'Review each service form, then close out the visit once. Only eligible completed work is included in the shared invoice.'}</p>
           <div className="space-y-3">
@@ -145,7 +147,7 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
           </div>
           {!packet && <p className="text-sm text-zinc-600" role="status">{prepared} of {services.length} forms ready. Saved forms and photos stay on this device until the visit is recorded.</p>}
           {packet && !finished && <p role="status" className="rounded-sm bg-zinc-100 p-4">Records saved. Closeout is still processing; you can safely resume it.</p>}
-          {finished && <p role="status" className={`rounded-sm border p-4 ${officeReview ? 'border-alert-fg text-alert-fg' : 'border-zinc-200 bg-zinc-50'}`}>{officeReview ? 'Visit recorded. The office has an alert to review billing or delivery.' : 'Visit closeout is complete.'}</p>}
+          {finished && <p role="status" className={`rounded-sm border p-4 ${officeReview ? 'border-alert-fg text-alert-fg' : 'border-zinc-200 bg-zinc-50'}`}>{officeReview ? 'Visit recorded. The office has an alert to review the service closeout, billing, or delivery.' : 'Visit closeout is complete.'}</p>}
           {result?.payment && <p className="text-sm text-zinc-600">Payment: {{ paid: 'Paid', prepaid: 'Prepaid', no_charge: 'No charge', payment_needed: 'Invoice queued for delivery', payment_failed: 'Card declined; invoice queued for delivery', payment_pending: 'Awaiting confirmation', processing: 'Awaiting confirmation', office_required: 'Office review' }[result.payment.state] || 'Recorded'}.</p>}
           {visit.summaryRevoked && <p className="text-sm text-zinc-600">The shared summary link has been revoked.</p>}
           {visit.canRevokeSummary && <Button variant="secondary" className="text-sm" disabled={busy} onClick={revokeSummary}>Revoke shared summary link</Button>}
