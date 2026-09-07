@@ -210,6 +210,64 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     expect((await db('invoices').where('id', freshInvoiceId).first()).customer_address_snapshot).toBeNull();
   }, 60000);
 
+  test('invoice mint racing a primary flip retains its read address with the bar disabled', async () => {
+    process.env.GATE_IB_PLATFORM = 'false';
+    const customerId = crypto.randomUUID();
+    await db('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Mint race', phone: '+15555550129',
+      address_line1: '1600 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201' });
+    const properties = require('../services/customer-properties');
+    await properties.ensurePrimaryProperty(customerId);
+    const oldPrimary = await db('customer_properties').where({ customer_id: customerId, is_primary: true }).first();
+    const added = await properties.addManualProperty(customerId, address(1700), { actorId: actor });
+    const Invoice = require('../services/invoice');
+    const Payer = require('../services/payer');
+    const resolvePayer = Payer.resolveForInvoice;
+    let customerRead, mintFailed, releaseMint;
+    const read = new Promise((resolve, reject) => { customerRead = resolve; mintFailed = reject; });
+    const release = new Promise(resolve => { releaseMint = resolve; });
+    const payer = jest.spyOn(Payer, 'resolveForInvoice').mockImplementationOnce(async args => {
+      const result = await resolvePayer.call(Payer, args);
+      customerRead(args.customer);
+      await release;
+      return result;
+    });
+    const input = { customerId, title: 'Synthetic service', lineItems: [{ description: 'Synthetic service', quantity: 1, unit_price: 89 }] };
+    const creating = Invoice.create(input);
+    void creating.catch(mintFailed);
+    try {
+      expect((await read).address_line1).toBe('1600 Example Grove');
+      expect(await db('invoices').where({ customer_id: customerId }).first()).toBeUndefined();
+      const applied = await db.transaction(trx => require('../services/property-role-proposals').applyPropertyRoleProposals(trx, {
+        customerId, proposals: [{ kind: 'primary_flip', new_primary_property_id: added.propertyId,
+          old_primary_property_id: oldPrimary.id, new_primary_address_key: properties.addressKey(address(1700)),
+          old_primary_address_key: properties.addressKey(oldPrimary) }],
+      }));
+      expect(applied.applied).toBe(1);
+    } finally {
+      releaseMint();
+      payer.mockRestore();
+    }
+    const invoice = await creating;
+    expect((await db('invoices').where('id', invoice.id).first()).customer_address_snapshot.address_line1).toBe('1600 Example Grove');
+    expect(Number(invoice.total)).toBe(89);
+    expect(invoice.payer_id).toBeNull();
+    expect((await Invoice.getById(invoice.id)).customer.address_line1).toBe('1600 Example Grove');
+    expect((await Invoice.getByToken(invoice.token)).customer.address_line1).toBe('1600 Example Grove');
+    const liveCustomer = await db('customers').where('id', customerId).first();
+    expect(liveCustomer.address_line1).toBe('1700 Example Grove');
+    const written = jest.spyOn(require('pdfkit').prototype, 'text');
+    try {
+      const buffer = await require('../services/pdf/invoice-pdf').buildInvoicePDFBuffer({ ...invoice, customer: liveCustomer });
+      expect(buffer.subarray(0, 4).toString()).toBe('%PDF');
+      const rendered = written.mock.calls.map(args => String(args[0])).join('\n');
+      expect(rendered).toContain('1600 Example Grove');
+      expect(rendered).not.toContain('1700 Example Grove');
+    } finally { written.mockRestore(); }
+    const later = await Invoice.create(input);
+    expect(later.customer_address_snapshot.address_line1).toBe('1700 Example Grove');
+    expect((await Invoice.getByToken(later.token)).customer.address_line1).toBe('1700 Example Grove');
+  }, 60000);
+
   test('manual primary waits for preferences before holding comms or customer locks', async () => {
     const service = require('../services/customer-properties');
     const saved = await service.addManualProperty(customerB, address(1300), { actorId: actor });

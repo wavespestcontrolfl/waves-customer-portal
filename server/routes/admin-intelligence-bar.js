@@ -844,18 +844,21 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // name→row resolution happens NOW, so the operator approves a specific
     // pinned id and /confirm-action can never re-resolve "Smith" to a
     // different row than the card showed.
-    if (toolUse.name === 'send_sms' && !params.phone && (params.customer_id || params.customer_name)) {
+    if (toolUse.name === 'send_sms' && (params.customer_id || params.customer_name || taskContext?.target)) {
       // customer_id-only proposals get the SAME pin as name proposals
       // (codex r3 P1): the card must show WHO gets this irreversible text,
       // and the executor's fresh phone read must match the approved one.
       const customer = await resolveCommsCustomer(
-        params.customer_id ? { customer_id: params.customer_id } : { customer_name: params.customer_name },
+        params.customer_id || taskContext?.target ? { customer_id: params.customer_id || taskContext.target.customer_id } : { customer_name: params.customer_name },
       );
       // Generic error strings: a failed proposal's error is persisted in
       // tool-health telemetry, so it must not carry the typed name.
       if (!customer) return { failed: true, modelResult: { error: 'No customer matches that name.' } };
       if (customer.error) return { failed: true, modelResult: customer };
       if (!customer.phone) return { failed: true, modelResult: { error: 'Customer has no phone number' } };
+      if (params.phone && String(params.phone).replace(/\D/g, '').slice(-10) !== String(customer.phone).replace(/\D/g, '').slice(-10)) {
+        return { failed: true, modelResult: { error: 'The message recipient does not match the selected customer', code: 'target_relationship_mismatch' } };
+      }
       params.customer_id = customer.id;
       params.customer_name = `${customer.first_name} ${customer.last_name || ''}`.trim();
       // Pin the APPROVED phone too: sendSms re-reads the customer at
@@ -1200,6 +1203,14 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         return { failed: true, modelResult: { error: 'Could not load every matched lead for the confirmation card — narrow the criteria and retry.' } };
       }
       preview = { ...preview, matches: dryRun.matches, preview: dryRun.preview, action: dryRun.action, all_names: allNames };
+      if (task && taskContext.bulkLeadRequest && !taskContext.targets?.length) {
+        if (!dryRun.versions || matchedIds.some(id => !dryRun.versions[id])) {
+          return { failed: true, modelResult: { error: 'Could not verify every selected lead version. Rebuild the confirmation card.' } };
+        }
+        taskContext = { ...taskContext, bulkLeadSelection: TaskContext.bulkLeadSelection(toolUse.name,
+          matchedIds.map(id => ({ kind: 'lead_id', id })), params) };
+        params._approved_lead_versions = dryRun.versions;
+      }
     }
     if (toolUse.name === 'bulk_update_customers') {
       // Name every pinned target (codex r7 on #3648): the card hides raw

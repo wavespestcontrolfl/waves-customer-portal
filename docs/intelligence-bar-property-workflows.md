@@ -34,8 +34,9 @@ irrigation-review effects are disclosed before confirmation.
 Existing invoice documents previously read the live customer address. A nullable
 `invoices.customer_address_snapshot` freezes that address in the shared primary
 flip operation, including the existing triage path with the platform gate off;
-invoices created while the platform gate is enabled save their own
-snapshot. Admin/public invoice loaders and invoice/receipt PDFs use it, including
+every new invoice saves its own snapshot regardless of the platform gate.
+This also protects a concurrent invoice insert that read the previous address
+before a primary flip committed. Admin/public invoice loaders and invoice/receipt PDFs use it, including
 email and project callers that supply a live customer object. Payer authority,
 recipients, amounts, statuses, and permanent receipt tokens are unchanged.
 Stored snapshots remain authoritative when the gate is turned off.
@@ -109,9 +110,9 @@ After integrating the reviewed foundation and PR #4015, the combined foundation
 and property Postgres suites pass all 19 tests. The two legacy route/invoice
 suites pass 56 tests after updating their mocks to the shared service contract;
 13 bar tests and 24 profile-state tests also pass. Both browser viewports were
-rerun successfully. The current census retains 1,717 sites after integrating
+rerun successfully. The current census retains 1,734 sites after integrating
 foundation read-scope and current-main email changes: four verified
-property operations, ten transport exceptions, and 1,703 unsupported/unverified
+property operations, ten transport exceptions, and 1,720 unsupported/unverified
 domain sites.
 
 Review remediation adds four further real-Postgres cases (eight property tests
@@ -122,6 +123,16 @@ commercial, seasonal, vacant and incomplete properties. The affected five server
 unit suites pass 74 tests; the property panel passes 14 rendered tests. The build,
 brand check and census pass. Desktop/mobile browser runs also exercise an
 ineligible property becoming eligible after an occupancy edit.
+
+A ninth Postgres case pauses the real invoice factory after its customer read,
+commits a primary flip, then finishes the invoice insert with the platform gate
+off. Persisted data, both invoice loaders and the actual PDF retain the original
+address; an invoice created after the flip uses the new address. All nine cases
+pass across the full-suite and corrected targeted fixture runs. Five invoice
+unit suites also pass 82 tests, including pricing preview, tier and deposit
+agreement. Static review found one production invoice insert, in the shared
+factory. The existing additive migration must precede this code; no additional
+migration or gate activation is required.
 
 The local preview is `http://127.0.0.1:5292/admin/customers` while the isolated
 harness runs. Vite must run from `client/`, with its explicit proxy pointing to

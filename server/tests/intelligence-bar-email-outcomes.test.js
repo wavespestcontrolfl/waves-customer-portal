@@ -33,6 +33,18 @@ test('a missing Gmail message ID remains unknown', async () => {
   expect(executionOutcome(result)).toBe('outcome_unknown');
 });
 
+test('an uncertain Gmail submission remains unknown in the action result', async () => {
+  gmail.sendMessage.mockRejectedValue(Object.assign(new Error('Synthetic send timeout'), { providerOutcome: { outcomeUnknown: true } }));
+  const result = await executeEmailTool('send_email_reply', { email_id: 'email-fixture', body: 'Synthetic reply' });
+  expect(executionOutcome(result)).toBe('outcome_unknown');
+  expect(result.warning).toContain('Check the sent thread');
+});
+
+test('a definitive Gmail rejection remains failed', async () => {
+  gmail.sendMessage.mockRejectedValue(Object.assign(new Error('Synthetic forbidden'), { code: 403 }));
+  expect(executionOutcome(await executeEmailTool('send_email_reply', { email_id: 'email-fixture', body: 'Synthetic reply' }))).toBe('failed');
+});
+
 test('an SMS reply keeps provider acceptance and its ID', async () => {
   sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'sms-fixture', auditLogId: 'audit-fixture' });
   const result = await executeEmailTool('reply_via_sms', { customer_id: 'customer-fixture', message: 'Synthetic reply' });

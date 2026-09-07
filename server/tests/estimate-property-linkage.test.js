@@ -139,6 +139,13 @@ describe('resolveEstimatePropertyLinkage', () => {
     ).rejects.toMatchObject({ statusCode: 400 });
   });
 
+  test('a property link without its customer identity is refused', async () => {
+    await expect(resolveEstimatePropertyLinkage(
+      makeDb({ id: PROPERTY_ID, customer_id: CUSTOMER_ID, active: true }),
+      { propertyId: PROPERTY_ID, customerId: null },
+    )).rejects.toMatchObject({ statusCode: 400 });
+  });
+
   test('a valid owned property and group id pass through as write fields', async () => {
     const GROUP_ID = '99999999-8888-7777-6666-555555555555';
     await expect(

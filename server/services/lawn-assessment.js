@@ -9,7 +9,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { anthropicText } = require('./llm/call');
+const { anthropicText, geminiText } = require('./llm/call');
 const { normalizeGrassType } = require('./lawn-grass-context');
 
 // Coerce a model's grass_type to a canonical key, or null when it can't tell
@@ -24,11 +24,10 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 
-// Gemini vision scorer model — live default is the registry's best
-// (gemini-3.5-flash); override via GEMINI_VISION_MODEL / MODEL_GEMINI_VISION.
-// On any miss (HTTP/parse/empty) callGeminiVision retries the registry's
-// GEMINI_VISION_FALLBACK so a live-model entitlement/availability issue never
-// costs us the Gemini scorer. Fan-out/averaging logic is unchanged.
+// Gemini vision scorer model — live default is the registry's best; override
+// via GEMINI_VISION_MODEL / MODEL_GEMINI_VISION. On any miss (HTTP/parse/empty)
+// callGeminiVision retries the registry's GEMINI_VISION_FALLBACK when it names
+// a different model (by default it does not). Fan-out/averaging is unchanged.
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
 const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 
@@ -187,7 +186,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType, context = {}) {
           { text: buildVisionPrompt(context) },
         ],
       }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 500 },
+      generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
     }),
   });
 
@@ -197,7 +196,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType, context = {}) {
   }
 
   const data = await response.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  const text = geminiText(data);
   if (!text) return null;
 
   const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
