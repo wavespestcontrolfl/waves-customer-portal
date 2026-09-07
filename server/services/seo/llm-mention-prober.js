@@ -22,7 +22,11 @@ const logger = require('../logger');
 const dataforseo = require('./dataforseo');
 const MODELS = require('../../config/models');
 const { stripThinkingBlocks } = require('../llm/deep');
-const twilioNumbers = require('../../config/twilio-numbers');
+const benchmark = require('../../data/aeo-benchmark-v1.json');
+const {
+  MEASUREMENT_VERSION, observationDate, asJsonArray, cleanUrls, isOwnedUrl,
+  isMeasuredAnswer, ownedCitations, citationMatchesPage, summarizeObservations,
+} = require('./aeo-measurement');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 // Trend/share-of-voice window. Fetch by date range rather than a fixed row cap
@@ -34,26 +38,8 @@ let Anthropic = null;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { /* SDK absent in some envs */ }
 
 // ── Detection constants ──────────────────────────────────────────────────────
-// Brand mention in prose — covers both the pest and lawn sides of the business
-// (Waves Pest Control / Waves Lawn Care) plus their primary domains.
-const WAVES_RE = /waves\s+(pest|lawn)|wavespestcontrol|waveslawncare/i;
-// Every owned domain counts as a Waves citation — the hub plus the spoke fleet
-// (bradentonflpestcontrol.com, sarasotaflpestcontrol.com, …) — sourced from the
-// tracking-domain config so it stays in sync as domains are added/removed.
-const OWNED_DOMAINS = Array.from(new Set([
-  'wavespestcontrol.com',
-  ...(twilioNumbers.domainTracking || []).map(d => d.domain),
-  ...(twilioNumbers.lawnDomainTracking || []).map(d => d.domain),
-].filter(Boolean).map(d => String(d).toLowerCase())));
-
-// Owned-domain match on the URL *hostname* with exact-host-or-subdomain
-// boundaries — never a substring of the full URL, so `?source=wavespestcontrol.com`
-// and superdomains like `wavespestcontrol.com.evil.example` are not counted.
-function isOwnedUrl(u) {
-  let host;
-  try { host = new URL(u).hostname.toLowerCase().replace(/^www\./, ''); } catch { return false; }
-  return OWNED_DOMAINS.some(d => host === d || host.endsWith(`.${d}`));
-}
+// A source URL alone is not a brand mention in the answer.
+const WAVES_RE = /\bwaves\s+(?:pest\s+control|lawn(?:\s+care)?)\b/i;
 
 const COMPETITORS = [
   'turner pest', 'hoskins', 'orkin', 'terminix', 'truly nolen',
@@ -61,32 +47,79 @@ const COMPETITORS = [
 ];
 const URL_RE = /https?:\/\/[^\s)<>\]"']+/gi;
 
-// pg returns jsonb columns already parsed as JS arrays/objects, but legacy rows
-// (and string inserts) may still be strings — normalize either shape to an array.
-function asJsonArray(val) {
-  if (Array.isArray(val)) return val;
-  if (typeof val === 'string') { try { const p = JSON.parse(val); return Array.isArray(p) ? p : []; } catch { return []; } }
-  return [];
+// Cost guard — hard ceiling on probes per run regardless of query × platform math.
+const configuredProbeCap = Number(process.env.LLM_MENTIONS_MAX_PROBES || 200);
+const MAX_PROBES_PER_RUN = Number.isSafeInteger(configuredProbeCap) && configuredProbeCap >= 0 ? configuredProbeCap : 200;
+
+function observationGroups(rows, keyFor) {
+  const groups = new Map();
+  for (const row of rows) {
+    const key = keyFor(row);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  return [...groups].map(([key, observations]) => ({ key, ...summarizeObservations(observations) }));
 }
 
-// Cost guard — hard ceiling on probes per run regardless of query × platform math.
-const MAX_PROBES_PER_RUN = Number(process.env.LLM_MENTIONS_MAX_PROBES || 200);
+function buildDashboard(rows, queries) {
+  const questionMap = new Map(benchmark.questions.map(q => [q.query, q]));
+  const managed = new Map(queries.map(q => [q.query, q]));
+  const latest = new Map();
+  // Input is newest first. Keep different provider model versions separate so
+  // an env swap cannot silently become a before/after content improvement.
+  for (const row of rows) {
+    const key = `${row.query}::${row.llm_platform}::${row.model_version}`;
+    if (!latest.has(key)) latest.set(key, row);
+  }
+  const grid = [...latest.values()].map(row => ({
+    ...row,
+    waves_cited_urls: ownedCitations(row),
+    measured: isMeasuredAnswer(row),
+    benchmark_id: questionMap.get(row.query)?.id || null,
+    target_cited: ownedCitations(row).some(url => citationMatchesPage(url, questionMap.get(row.query)?.target_path)),
+    city: managed.get(row.query)?.city || questionMap.get(row.query)?.city || 'SWFL',
+    intent: questionMap.get(row.query)?.intent || 'custom',
+  }));
+  const fixed = grid.filter(row => row.benchmark_id);
+  const pageCites = new Map();
+  const competitors = new Map();
+  for (const row of rows) {
+    for (const url of ownedCitations(row)) pageCites.set(url, (pageCites.get(url) || 0) + 1);
+  }
+  for (const row of grid.filter(isMeasuredAnswer)) {
+    for (const competitor of asJsonArray(row.competitors_mentioned)) {
+      if (competitor?.name) competitors.set(competitor.name, (competitors.get(competitor.name) || 0) + 1);
+    }
+  }
+  const byPlatform = observationGroups(grid, row => `${row.llm_platform} · ${row.model_version || 'legacy'}`);
+  return {
+    summary: {
+      ...summarizeObservations(grid),
+      queriesTracked: new Set(grid.map(row => row.query)).size,
+      platforms: [...new Set(grid.map(row => row.llm_platform))],
+    },
+    benchmark: {
+      version: benchmark.version,
+      questions: benchmark.questions.length,
+      activeQuestions: benchmark.questions.filter(q => managed.has(q.query)).length,
+      observedQuestions: new Set(fixed.filter(isMeasuredAnswer).map(row => row.query)).size,
+      ...summarizeObservations(fixed),
+      byPlatform: observationGroups(fixed, row => `${row.llm_platform} · ${row.model_version || 'legacy'}`),
+      byCity: observationGroups(fixed, row => row.city),
+      byIntent: observationGroups(fixed, row => row.intent),
+    },
+    byPlatform,
+    trend: observationGroups(rows.filter(row => questionMap.has(row.query)), row => `${observationDate(row.check_date)} · ${row.llm_platform} · ${row.model_version || 'legacy'}`),
+    grid,
+    citedPages: [...pageCites].map(([url, count]) => ({ url, count })).sort((a, b) => b.count - a.count).slice(0, 20),
+    competitors: [...competitors].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count),
+  };
+}
 
 class LLMMentionProber {
-  /** Managed query list; falls back to a minimal default set if table empty. */
+  /** The managed list is authoritative, including an intentionally empty list. */
   async getQueries() {
-    let rows = [];
-    try {
-      rows = await db('seo_llm_mention_queries').where('active', true).orderBy('created_at', 'asc');
-    } catch { /* table may not exist pre-migration */ }
-    if (rows.length) return rows;
-    return [
-      { id: null, query: 'best pest control bradenton florida', city: 'Bradenton', service: 'pest control' },
-      { id: null, query: 'pest control sarasota fl reviews', city: 'Sarasota', service: 'pest control' },
-      { id: null, query: 'lawn care service lakewood ranch', city: 'Lakewood Ranch', service: 'lawn care' },
-      { id: null, query: 'termite inspection bradenton', city: 'Bradenton', service: 'termite' },
-      { id: null, query: 'mosquito control southwest florida', city: null, service: 'mosquito' },
-    ];
+    return db('seo_llm_mention_queries').where('active', true).orderBy('created_at', 'asc');
   }
 
   // ── Per-provider probes. Each returns { text, citedUrls, model, grounded } or null. ──
@@ -99,6 +132,7 @@ class LLMMentionProber {
     try {
       const res = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
+        signal: AbortSignal.timeout(60000),
         headers: {
           'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
           'Content-Type': 'application/json',
@@ -114,9 +148,10 @@ class LLMMentionProber {
       const text = msg.content || '';
       const annotations = Array.isArray(msg.annotations) ? msg.annotations : [];
       const citedUrls = annotations
+        .filter(a => a?.type === 'url_citation')
         .map(a => a?.url_citation?.url || a?.url)
         .filter(Boolean);
-      return { text, citedUrls, model, grounded: true };
+      return { text, citedUrls, model: data.model || model, grounded: true, answerAvailable: !msg.refusal && !!text.trim() };
     } catch (err) {
       logger.warn(`[llm-mentions] OpenAI probe failed: ${err.message}`);
       return null;
@@ -125,13 +160,13 @@ class LLMMentionProber {
 
   async probeGemini(query) {
     if (!process.env.GEMINI_API_KEY) return null;
-    // gemini-2.0-flash is retired ("no longer available to new users", 404).
-    // 2.5-flash is the current stable grounding-capable model; override via env.
+    // Preserve the configured benchmark model across comparable runs.
     const model = process.env.GEMINI_MENTIONS_MODEL || 'gemini-2.5-flash';
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`;
       const res = await fetch(url, {
         method: 'POST',
+        signal: AbortSignal.timeout(60000),
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ parts: [{ text: query }] }],
@@ -141,10 +176,17 @@ class LLMMentionProber {
       if (!res.ok) { logger.warn(`[llm-mentions] Gemini ${res.status} for "${query}"`); return null; }
       const data = await res.json();
       const cand = data?.candidates?.[0] || {};
-      const text = (cand.content?.parts || []).map(p => p.text || '').join('\n');
+      const text = (cand.content?.parts || []).filter(p => !p.thought).map(p => p.text || '').join('\n');
       const chunks = cand.groundingMetadata?.groundingChunks || [];
-      const citedUrls = chunks.map(c => c?.web?.uri).filter(Boolean);
-      return { text, citedUrls, model, grounded: true };
+      // A grounding chunk is a search source. Only a support tying it to an
+      // answer segment makes it a citation (generateContent response contract).
+      const supports = cand.groundingMetadata?.groundingSupports || [];
+      const indexes = supports.flatMap(s => s.segment?.text || s.segment?.endIndex > s.segment?.startIndex
+        ? (s.groundingChunkIndices || []) : []);
+      const attributed = indexes.filter(Number.isInteger).map(i => chunks[i]?.web?.uri).filter(Boolean);
+      const sourceUrls = cleanUrls(chunks.map(c => c?.web?.uri));
+      const { citedUrls, complete } = await this.resolveGoogleCitations(attributed);
+      return { text, citedUrls, sourceUrls, citationsComplete: complete, model: data.modelVersion || model, grounded: true };
     } catch (err) {
       logger.warn(`[llm-mentions] Gemini probe failed: ${err.message}`);
       return null;
@@ -159,7 +201,7 @@ class LLMMentionProber {
       // re-runs the whole web_search budget (max_uses), so the default of 2
       // could fan one probe out to 3x the searches on a transient 429/5xx.
       // The probe already degrades to null on error.
-      const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0 });
+      const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, maxRetries: 0, timeout: 60000 });
       const resp = await client.messages.create({
         model,
         max_tokens: 1024,
@@ -169,12 +211,12 @@ class LLMMentionProber {
       const blocks = resp.content || [];
       const text = blocks.filter(b => b.type === 'text').map(b => b.text).join('\n');
       const citedUrls = [];
-      for (const b of blocks) {
+      for (const b of blocks.filter(block => block.type === 'text')) {
         for (const c of (b.citations || [])) {
           if (c.url) citedUrls.push(c.url);
         }
       }
-      return { text, citedUrls, model, grounded: true };
+      return { text, citedUrls, model: resp.model || model, grounded: true, answerAvailable: resp.stop_reason !== 'refusal' && !!text.trim() };
     } catch (err) {
       logger.warn(`[llm-mentions] Claude probe failed: ${err.message}`);
       return null;
@@ -214,11 +256,16 @@ class LLMMentionProber {
       const items = task?.result?.[0]?.items || [];
       const aio = items.find(i => i.type === 'ai_overview');
       if (!aio) return { text: '', citedUrls: [], model: 'dataforseo:ai_overview', grounded: true };
-      const text = aio.markdown || JSON.stringify(aio);
-      const citedUrls = [...(aio.references || []), ...(aio.items || [])]
-        .map(r => r?.url)
-        .filter(Boolean);
-      return { text, citedUrls, model: 'dataforseo:ai_overview', grounded: true };
+      // Never scan a serialized result object as prose: source titles/URLs can
+      // name Waves even when the actual overview does not.
+      const text = aio.markdown || (aio.items || []).map(item => item.text || '').join('\n');
+      // Top-level references are pages that MAY have been used. Only links
+      // and references attached to a textual answer element prove usage.
+      const elements = asJsonArray(aio.items).filter(item => item.type === 'ai_overview_element' && (item.text || item.markdown));
+      const citedUrls = elements.flatMap(item => [...asJsonArray(item.references), ...asJsonArray(item.links)]).map(r => r?.url).filter(Boolean);
+      const sourceUrls = asJsonArray(aio.references).map(r => r?.url).filter(Boolean);
+      return { text, citedUrls, sourceUrls, citationsComplete: elements.length > 0 || sourceUrls.length === 0,
+        model: 'dataforseo:ai_overview', grounded: true };
     } catch (err) {
       logger.warn(`[llm-mentions] AI Overview probe failed: ${err.message}`);
       return null;
@@ -227,12 +274,12 @@ class LLMMentionProber {
 
   async probePerplexity(query) {
     if (!process.env.PERPLEXITY_API_KEY) return null;
-    // Sonar models are search-grounded by default — every answer is a live-web
-    // answer, which is exactly what a Perplexity user sees.
+    // Keep Sonar API observations separate from the consumer interface.
     const model = process.env.PERPLEXITY_MENTIONS_MODEL || 'sonar';
     try {
       const res = await fetch('https://api.perplexity.ai/chat/completions', {
         method: 'POST',
+        signal: AbortSignal.timeout(60000),
         headers: {
           'Authorization': `Bearer ${process.env.PERPLEXITY_API_KEY}`,
           'Content-Type': 'application/json',
@@ -245,44 +292,71 @@ class LLMMentionProber {
       if (!res.ok) { logger.warn(`[llm-mentions] Perplexity ${res.status} for "${query}"`); return null; }
       const data = await res.json();
       const text = data?.choices?.[0]?.message?.content || '';
-      // Citations: legacy top-level `citations` (URL strings) and the newer
-      // `search_results` ({title,url,date}) — harvest both, parse() dedupes.
-      const citedUrls = [
-        ...(Array.isArray(data?.citations) ? data.citations : []),
-        ...(Array.isArray(data?.search_results) ? data.search_results.map(r => r?.url) : []),
-      ].filter(u => typeof u === 'string' && u);
-      return { text, citedUrls, model, grounded: true };
+      // Sonar's [n] markers address the citation array. Unused search results
+      // and unused entries in that array are not attached to the answer.
+      const citations = asJsonArray(data.citations);
+      const used = [...text.matchAll(/\[(\d+)\]/g)].map(match => Number(match[1]) - 1);
+      const citedUrls = used.map(index => citations[index]).filter(Boolean);
+      const sourceUrls = [...citations, ...asJsonArray(data.search_results).map(r => r?.url)];
+      return { text, citedUrls, sourceUrls, model: data.model || model, grounded: true };
     } catch (err) {
       logger.warn(`[llm-mentions] Perplexity probe failed: ${err.message}`);
       return null;
     }
   }
 
+  async resolveGoogleCitations(urls) {
+    const citedUrls = [];
+    let complete = true;
+    for (const value of cleanUrls(urls)) {
+      const url = new URL(value);
+      if (url.hostname !== 'vertexaisearch.cloud.google.com') {
+        citedUrls.push(value);
+        continue;
+      }
+      // Follow only the provider's known redirect endpoint, with no forwarded
+      // credentials and no request to the destination. Unresolved attribution
+      // is excluded from citation rates rather than recorded as a Waves miss.
+      if (url.protocol !== 'https:' || !url.pathname.startsWith('/grounding-api-redirect/')) {
+        complete = false;
+        continue;
+      }
+      try {
+        const res = await fetch(value, { redirect: 'manual', signal: AbortSignal.timeout(5000) });
+        const [destination] = cleanUrls([res.headers.get('location')]);
+        if (res.body) await res.body.cancel();
+        if (res.status >= 300 && res.status < 400 && destination
+          && new URL(destination).hostname !== url.hostname) citedUrls.push(destination);
+        else complete = false;
+      } catch { complete = false; }
+    }
+    return { citedUrls, complete };
+  }
+
   /** Map platform key → probe fn. */
   get providers() {
-    return {
-      chatgpt: q => this.probeOpenAI(q),
-      gemini: q => this.probeGemini(q),
-      claude: q => this.probeClaude(q),
-      google_ai_overview: q => this.probeGoogleAIOverview(q),
-      perplexity: q => this.probePerplexity(q),
-    };
+    const providers = {};
+    if (process.env.OPENAI_API_KEY) providers.chatgpt = q => this.probeOpenAI(q);
+    if (process.env.GEMINI_API_KEY) providers.gemini = q => this.probeGemini(q);
+    if (process.env.ANTHROPIC_API_KEY && Anthropic) providers.claude = q => this.probeClaude(q);
+    if (dataforseo.configured) providers.google_ai_overview = q => this.probeGoogleAIOverview(q);
+    if (process.env.PERPLEXITY_API_KEY) providers.perplexity = q => this.probePerplexity(q);
+    return providers;
   }
 
   /** Deterministic parse of a probe result into a mention row payload. */
   parse(probe) {
     const text = probe.text || '';
-    const lower = text.toLowerCase();
+    const prose = text.replace(URL_RE, url => ' '.repeat(url.length));
+    const lower = prose.toLowerCase();
 
-    // Citations: union of provider-native + URLs parsed from prose.
-    const inlineUrls = (text.match(URL_RE) || []).map(u => u.replace(/[.,)]+$/, ''));
-    const citedUrls = Array.from(new Set([...(probe.citedUrls || []), ...inlineUrls]));
+    // Only provider-attributed citations count. Bare URLs in generated prose
+    // and the broader source pool remain evidence, not citation successes.
+    const citedUrls = cleanUrls(probe.citedUrls);
     const wavesCitedUrls = citedUrls.filter(isOwnedUrl);
 
-    // Mentioned if the brand shows up in prose OR any owned domain is cited —
-    // the latter covers lawn/spoke visibility even when the prose names no brand.
-    const brandInText = WAVES_RE.test(text);
-    const wavesMentioned = brandInText || wavesCitedUrls.length > 0;
+    const brandInText = WAVES_RE.test(prose);
+    const wavesMentioned = brandInText;
 
     // Brand ordering → rank position of first Waves reference among brands.
     const positions = [];
@@ -305,6 +379,9 @@ class LLMMentionProber {
       rankPosition: rankPosition && rankPosition > 0 ? rankPosition : null,
       citedUrls,
       wavesCitedUrls,
+      sourceUrls: cleanUrls(probe.sourceUrls),
+      answerAvailable: probe.answerAvailable ?? !!text.trim(),
+      citationsComplete: probe.citationsComplete !== false,
     };
   }
 
@@ -344,7 +421,17 @@ class LLMMentionProber {
     const batchId = crypto.randomUUID();
     const checkDate = etDateString();
     const queries = await this.getQueries();
-    const platforms = Object.keys(this.providers);
+    const providers = this.providers;
+    const platforms = Object.keys(providers);
+
+    // A larger benchmark must not starve the tail of the managed list under
+    // the existing probe ceiling. Observe the least recently measured queries
+    // first for EACH engine; a partial query must not starve its later engines
+    // when the configured ceiling is smaller than the full provider set.
+    const history = await db('seo_llm_mentions').select('query', 'llm_platform').max('check_date as last_checked').groupBy('query', 'llm_platform');
+    const lastChecked = new Map(history.map(row => [`${row.query}::${row.llm_platform}`, observationDate(row.last_checked)]));
+    const pending = queries.flatMap(qrow => platforms.map(platform => ({ qrow, platform, key: `${qrow.query}::${platform}` })));
+    pending.sort((a, b) => (lastChecked.get(a.key) || '').localeCompare(lastChecked.get(b.key) || '') || a.key.localeCompare(b.key));
 
     // Today's already-recorded (query, platform) pairs → idempotency set.
     const existing = await db('seo_llm_mentions')
@@ -352,131 +439,72 @@ class LLMMentionProber {
       .select('query', 'llm_platform');
     const done = new Set(existing.map(r => `${r.query}::${r.llm_platform}`));
 
-    let probed = 0, inserted = 0, wavesHits = 0;
-    for (const qrow of queries) {
-      for (const platform of platforms) {
-        if (probed >= MAX_PROBES_PER_RUN) {
-          logger.warn(`[llm-mentions] Hit MAX_PROBES_PER_RUN (${MAX_PROBES_PER_RUN}); stopping early`);
-          break;
-        }
-        if (done.has(`${qrow.query}::${platform}`)) continue;
-
-        const probe = await this.providers[platform](qrow.query);
-        if (!probe) continue; // provider unconfigured or errored — no API cost, leave the slot for a retry next run
-        probed++; // only real (non-null) probes count against the cost ceiling
-
-        const parsed = this.parse(probe);
-        const sentiment = parsed.wavesMentioned
-          ? await this.classifySentiment(parsed.mentionContext)
-          : 'neutral';
-        if (parsed.wavesMentioned) wavesHits++;
-
-        // onConflict ignore is the race backstop: two overlapping runs (e.g.
-        // scheduler on multiple pods + an admin scan) both build `done` before
-        // either insert, so the unique (query, llm_platform, check_date) index
-        // is what actually prevents duplicate same-day observations.
-        const ins = await db('seo_llm_mentions').insert({
-          query_id: qrow.id || null,
-          batch_id: batchId,
-          llm_platform: platform,
-          query: qrow.query,
-          response_raw: (probe.text || '').substring(0, 8000),
-          mention_context: parsed.mentionContext,
-          waves_mentioned: parsed.wavesMentioned,
-          competitors_mentioned: JSON.stringify(parsed.competitors),
-          cited_urls: JSON.stringify(parsed.citedUrls),
-          waves_cited_urls: JSON.stringify(parsed.wavesCitedUrls),
-          rank_position: parsed.rankPosition,
-          sentiment,
-          model_version: probe.model,
-          grounded: !!probe.grounded,
-          check_date: checkDate,
-        }).onConflict(['query', 'llm_platform', 'check_date']).ignore();
-        if (ins.rowCount !== 0) inserted++;
+    let attempted = 0, probed = 0, inserted = 0, wavesHits = 0;
+    for (const { qrow, platform } of pending) {
+      if (attempted >= MAX_PROBES_PER_RUN) {
+        logger.warn(`[llm-mentions] Hit MAX_PROBES_PER_RUN (${MAX_PROBES_PER_RUN}); stopping early`);
+        break;
       }
-      if (probed >= MAX_PROBES_PER_RUN) break;
+      if (done.has(`${qrow.query}::${platform}`)) continue;
+
+      attempted++; // a failed request may still have incurred provider cost
+      const probe = await providers[platform](qrow.query);
+      if (!probe) continue;
+      probed++;
+
+      const parsed = this.parse(probe);
+      const sentiment = parsed.wavesMentioned
+        ? await this.classifySentiment(parsed.mentionContext)
+        : 'neutral';
+      if (parsed.wavesMentioned) wavesHits++;
+
+      // onConflict ignore is the race backstop: two overlapping runs (e.g.
+      // scheduler on multiple pods + an admin scan) both build `done` before
+      // either insert, so the unique (query, llm_platform, check_date) index
+      // is what actually prevents duplicate same-day observations.
+      const ins = await db('seo_llm_mentions').insert({
+        query_id: qrow.id || null,
+        batch_id: batchId,
+        llm_platform: platform,
+        query: qrow.query,
+        response_raw: (probe.text || '').substring(0, 8000),
+        mention_context: parsed.mentionContext,
+        waves_mentioned: parsed.wavesMentioned,
+        competitors_mentioned: JSON.stringify(parsed.competitors),
+        cited_urls: JSON.stringify(parsed.citedUrls),
+        waves_cited_urls: JSON.stringify(parsed.wavesCitedUrls),
+        source_urls: JSON.stringify(parsed.sourceUrls),
+        measurement_version: MEASUREMENT_VERSION,
+        answer_available: parsed.answerAvailable,
+        citations_complete: parsed.citationsComplete,
+        rank_position: parsed.rankPosition,
+        sentiment,
+        model_version: probe.model,
+        grounded: !!probe.grounded,
+        check_date: checkDate,
+      }).onConflict(['query', 'llm_platform', 'check_date']).ignore();
+      if (ins.rowCount !== 0) inserted++;
     }
 
     logger.info(`[llm-mentions] batch ${batchId}: ${probed} probed, ${inserted} recorded, ${wavesHits} Waves hits`);
-    return { batchId, probed, inserted, wavesHits };
+    return { batchId, attempted, probed, inserted, wavesHits };
   }
 
   /**
-   * Dashboard payload: share-of-voice over time, latest per query × platform,
-   * competitor presence, and which Waves pages get cited.
+   * Mention and linked-citation rates use answered, attributable V2 probes.
+   * Legacy, no-answer and unresolved-source observations remain visible but
+   * never become citation misses. API probes are not consumer UI measurements.
    */
   async getDashboard() {
     const since = etDateString(addETDays(new Date(), -(TREND_DAYS - 1)));
     const rows = await db('seo_llm_mentions')
       .where('check_date', '>=', since)
       .orderBy('check_date', 'desc');
-
-    // Latest row per (query, platform) for the current-state grid.
-    const latest = new Map();
-    for (const r of rows) {
-      const key = `${r.query}::${r.llm_platform}`;
-      if (!latest.has(key)) latest.set(key, r);
-    }
-    const grid = Array.from(latest.values());
-
-    const byPlatform = {};
-    for (const r of grid) {
-      const p = (byPlatform[r.llm_platform] ||= { platform: r.llm_platform, total: 0, mentioned: 0 });
-      p.total++;
-      if (r.waves_mentioned) p.mentioned++;
-    }
-    for (const p of Object.values(byPlatform)) {
-      p.shareOfVoice = p.total ? Math.round((p.mentioned / p.total) * 100) : 0;
-    }
-
-    // Share-of-voice trend by check_date.
-    const trendMap = new Map();
-    for (const r of rows) {
-      const d = String(r.check_date).slice(0, 10);
-      const t = trendMap.get(d) || { date: d, total: 0, mentioned: 0 };
-      t.total++; if (r.waves_mentioned) t.mentioned++;
-      trendMap.set(d, t);
-    }
-    const trend = Array.from(trendMap.values())
-      .map(t => ({ ...t, shareOfVoice: t.total ? Math.round((t.mentioned / t.total) * 100) : 0 }))
-      .sort((a, b) => a.date.localeCompare(b.date))
-      .slice(-TREND_DAYS);
-
-    // Which Waves pages get cited (across the recent window).
-    const pageCites = {};
-    for (const r of rows) {
-      for (const u of asJsonArray(r.waves_cited_urls)) pageCites[u] = (pageCites[u] || 0) + 1;
-    }
-    const citedPages = Object.entries(pageCites)
-      .map(([url, count]) => ({ url, count }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 20);
-
-    // Competitor presence across the grid.
-    const compCount = {};
-    for (const r of grid) {
-      for (const c of asJsonArray(r.competitors_mentioned)) compCount[c.name] = (compCount[c.name] || 0) + 1;
-    }
-    const competitors = Object.entries(compCount)
-      .map(([name, count]) => ({ name, count }))
-      .sort((a, b) => b.count - a.count);
-
-    return {
-      summary: {
-        queriesTracked: new Set(grid.map(r => r.query)).size,
-        platforms: Object.keys(byPlatform),
-        overallShareOfVoice: grid.length
-          ? Math.round((grid.filter(r => r.waves_mentioned).length / grid.length) * 100)
-          : 0,
-      },
-      byPlatform: Object.values(byPlatform),
-      trend,
-      grid,
-      citedPages,
-      competitors,
-    };
+    const queries = await this.getQueries();
+    return buildDashboard(rows.filter(row => queries.some(q => q.query === row.query)), queries);
   }
 }
 
 module.exports = new LLMMentionProber();
 module.exports.LLMMentionProber = LLMMentionProber;
+module.exports.buildDashboard = buildDashboard;

@@ -2,6 +2,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const dataforseo = require('./dataforseo');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
+const { summarizeObservations } = require('./aeo-measurement');
 
 const TOXIC_DOMAINS = /casino|poker|pharma|pills|crypto|bitcoin|adult|xxx|gambling|cheap-/i;
 const SPAM_TLDS = /\.xyz$|\.top$|\.buzz$|\.click$|\.site$|\.online$/i;
@@ -931,10 +932,7 @@ class BacklinkMonitor {
       velocity,
       newGapsSince7d,
       newHighValueGapsSince7d,
-      llmStats: {
-        total: llmMentions.length,
-        wavesMentioned: llmMentions.filter(m => m.waves_mentioned).length,
-      },
+      llmStats: summarizeObservations(llmMentions),
       citationStats: {
         total: citations.length,
         active: citations.filter(c => c.status === 'active').length,
