@@ -129,12 +129,10 @@ describe("CustomersPageV2 new-customer route", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "Filter customers" }),
     );
-    // The Dialog primitive owns the stacking contract: z-[120] clears all
-    // shell chrome (top bar 90 / tab bar 95 / backdrop 99 / sidebar 100).
-    // Inline zIndex on the style prop would override the class — assert the
-    // dialog carries the class and no caller-supplied z-index.
+    // The Dialog primitive owns the stacking contract: its default `layer`
+    // (120) clears all shell chrome (top bar 90 / tab bar 95 / backdrop 99 /
+    // sidebar 100). The page passes no `layer`, so the default must apply.
     const dialog = screen.getByRole("dialog");
-    expect(dialog).toHaveClass("z-[120]");
-    expect(dialog.style.zIndex).toBe("");
+    expect(dialog.style.zIndex).toBe("120");
   });
 });

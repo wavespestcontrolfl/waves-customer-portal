@@ -71,7 +71,7 @@ function Fact({ label, children }) {
   );
 }
 
-export default function CancelPlanDialog({ customer, onClose, onDone }) {
+export default function CancelPlanDialog({ customer, onClose, onDone, layer }) {
   const [wholeAccount, setWholeAccount] = useState(true);
   const [families, setFamilies] = useState([]);
   const [effectiveDate, setEffectiveDate] = useState("now");
@@ -200,7 +200,7 @@ export default function CancelPlanDialog({ customer, onClose, onDone }) {
     : (preview?.scopeLabels?.length ? preview.scopeLabels.join(", ") : "the selected services");
 
   return (
-    <Dialog open onClose={() => !running && onClose()} size="md">
+    <Dialog open onClose={() => !running && onClose()} size="md" layer={layer}>
       <DialogHeader>
         <DialogTitle>Cancel plan</DialogTitle>
         <div className="text-14 text-ink-secondary mt-1">

@@ -1,3 +1,4 @@
+const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
@@ -2513,7 +2514,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           }, { noVariants: !!options.reviewedMessages });
           if (!currentSmsBody) throw new Error('SMS template estimate_sent is missing or inactive');
           const smsBody = options.reviewedMessages
-            ? options.reviewedMessages.sms?.split(smsTemplatesRouter.stripPortalUrlScheme(longUrl)).join(smsTemplatesRouter.stripPortalUrlScheme(smsViewUrl))
+            ? options.reviewedMessages.sms?.split(stripSmsUrlScheme(longUrl)).join(stripSmsUrlScheme(smsViewUrl))
             : currentSmsBody;
           if (!smsBody) throw new Error('The reviewed text message is unavailable; nothing was sent');
           if (await estimateInvalidatedJustBeforeHandoff(estimate.id)) {

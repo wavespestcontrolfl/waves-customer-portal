@@ -341,28 +341,28 @@ describe('snapshot lifecycle — exactness contract', () => {
 
   test('a render pinned to the signature\'s snapshot accepts only that sent_at; pinned-none renders no plan', async () => {
     stubSelect(row(POLICY));
-    expect((await loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: NOW.toISOString() })).plan.action).toBe('run');
-    expect(await loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: new Date('2026-08-24T12:00:00Z').toISOString() })).toBeNull();
-    expect(await loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: null })).toBeNull();
+    expect((await loadCurrentWeekPlan('c1', { now: NOW, pinnedAvailableAt: NOW.toISOString() })).plan.action).toBe('run');
+    expect(await loadCurrentWeekPlan('c1', { now: NOW, pinnedAvailableAt: new Date('2026-08-24T12:00:00Z').toISOString() })).toBeNull();
+    expect(await loadCurrentWeekPlan('c1', { now: NOW, pinnedAvailableAt: null })).toBeNull();
     expect((await loadCurrentWeekPlan('c1', { now: NOW })).plan.action).toBe('run'); // unpinned = live
     // Strict (pinned render): a failed lookup refuses instead of rendering plan-less.
     db.mockImplementation(() => ({ where() { return this; }, whereNotNull() { return this; }, first: async () => { throw new Error('db down'); } }));
-    await expect(loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: NOW.toISOString(), strict: true })).rejects.toThrow('db down');
+    await expect(loadCurrentWeekPlan('c1', { now: NOW, pinnedAvailableAt: NOW.toISOString(), strict: true })).rejects.toThrow('db down');
     expect(await loadCurrentWeekPlan('c1', { now: NOW })).toBeNull();
   });
 
   test('strict + pinned to a real send: missing row, policy change and a different send REFUSE (code pinned_week_plan_unavailable), never render plan-less (codex gh-r16)', async () => {
-    const strictPin = { now: NOW, pinnedSentAt: NOW.toISOString(), strict: true };
+    const strictPin = { now: NOW, pinnedAvailableAt: NOW.toISOString(), strict: true };
     stubSelect(null);
     await expect(loadCurrentWeekPlan('c1', strictPin)).rejects.toMatchObject({ code: 'pinned_week_plan_unavailable', reason: 'missing' });
     stubSelect(row({ ...POLICY, maxDaysPerWeek: 2 }));
     await expect(loadCurrentWeekPlan('c1', strictPin)).rejects.toMatchObject({ code: 'pinned_week_plan_unavailable', reason: 'policy_changed' });
     stubSelect(row(POLICY, { sent_at: new Date('2026-08-24T12:00:00Z') }));
-    await expect(loadCurrentWeekPlan('c1', strictPin)).rejects.toMatchObject({ code: 'pinned_week_plan_unavailable', reason: 'sent_at_mismatch' });
+    await expect(loadCurrentWeekPlan('c1', strictPin)).rejects.toMatchObject({ code: 'pinned_week_plan_unavailable', reason: 'availability_mismatch' });
     // The same states are plain absence when not pinned to a send.
     stubSelect(null);
     expect(await loadCurrentWeekPlan('c1', { now: NOW, strict: true })).toBeNull();
-    expect(await loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: null, strict: true })).toBeNull();
+    expect(await loadCurrentWeekPlan('c1', { now: NOW, pinnedAvailableAt: null, strict: true })).toBeNull();
     stubSelect(row(POLICY));
     expect((await loadCurrentWeekPlan('c1', strictPin)).plan.action).toBe('run');
   });
@@ -387,7 +387,7 @@ describe('snapshot lifecycle — exactness contract', () => {
     planRow.sent_at = null;
     rig([{ status: 'sent', categories: JSON.stringify(['plan:other']), provider_message_id: 'sg', queued_at: NOW, updated_at: NOW }]);
     expect(await loadCurrentWeekPlan('c1', { now: NOW })).toBeNull();
-    await expect(loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: NOW.toISOString(), strict: true })).rejects.toMatchObject({ code: 'pinned_week_plan_unavailable', reason: 'unstamped' });
+    await expect(loadCurrentWeekPlan('c1', { now: NOW, pinnedAvailableAt: NOW.toISOString(), strict: true })).rejects.toMatchObject({ code: 'pinned_week_plan_unavailable', reason: 'unstamped' });
   });
 
   test('renewWeekPlanClaim renews only the claimant\'s UNSENT row; loadPriorWeekPlan reads last week\'s delivered plan (codex gh-r19/r31)', async () => {
@@ -494,7 +494,9 @@ describe('snapshot lifecycle — exactness contract', () => {
       returning: async () => returned,
       where(w) { calls.where = w; return this; },
       whereNull(c) { calls.whereNull = c; return this; },
-      update: async (patch) => { calls.update = patch; return 1; },
+      update(patch) { calls.update = patch; return this; },
+      whereNotNull() { return this; },
+      then(resolve) { return Promise.resolve(1).then(resolve); },
       del: async () => { calls.deleted = true; return 1; },
     }));
     const plan = { action: 'hold', reasons: [] };
@@ -537,7 +539,7 @@ describe('snapshot lifecycle — exactness contract', () => {
     await discardUnsentWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok-1' });
     expect(calls.deleted).toBe(true);
     expect(calls.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23', claim_token: 'tok-1' });
-    expect(calls.whereNull).toBe('sent_at');
+    expect(calls.whereNull).toBe('published_at');
     // A DB error is reported distinctly so the sweep can fall back to the pre-plan email.
     db.mockImplementation(() => ({ insert() { throw new Error('db down'); } }));
     const errored = await persistWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan, decisionInputs: { runMinutes: 20 }, claimToken: 'tok-3' });

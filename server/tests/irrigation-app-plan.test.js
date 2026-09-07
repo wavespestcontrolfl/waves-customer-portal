@@ -33,7 +33,7 @@ function fixture({ forecast = 0.3, rain = 0.6, customerInputs = {} } = {}) {
   });
   if (!decision.weekPlan) throw new Error(`Fixture produced no plan: ${decision.reason}`);
   const snapshot = JSON.parse(JSON.stringify({
-    weekEnding: '2026-09-06', planAsOf: now, sentAt: now,
+    weekEnding: '2026-09-06', planAsOf: now, sentAt: now, availableAt: now,
     decisionInputs: decision.decisionInputs, plan: decision.weekPlan, restriction: decision.restriction,
   }));
   findEligibleCustomers.mockResolvedValue([customer]);

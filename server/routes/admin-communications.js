@@ -15,7 +15,6 @@ const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { parseETDateTime, etDateString, etParts } = require('../utils/datetime-et');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { buildRescheduleLink } = require('../services/reschedule-link');
-const smsTemplatesRouter = require('./admin-sms-templates');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../services/messaging/compliance-contact-checks');
@@ -1859,15 +1858,8 @@ async function firstNameForPhone(last10, customerIds) {
   return agreedFirstName(rows);
 }
 
-// Composer link inserts are SMS bodies the operator sends verbatim — they
-// never pass through getTemplate, so the owned-host scheme strip (owner
-// directive 2026-08-01: portal links go bare in SMS) has to happen here.
-// Same renderer function as the template path (admin-sms-templates
-// stripPortalUrlScheme) so the two paths can never disagree about which
-// hosts go bare; third-party hosts keep their scheme.
-const stripSmsLinkScheme = typeof smsTemplatesRouter.stripPortalUrlScheme === 'function'
-  ? smsTemplatesRouter.stripPortalUrlScheme
-  : (s) => s;
+// Composer inserts use the same SMS formatting as templates and sends.
+const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 
 // POST /api/admin/communications/reschedule-link  { phone, customerId? }
 // Composer helper: resolve the recipient's next upcoming reschedulable visit
@@ -1950,8 +1942,8 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     if (!url) return res.status(404).json({ error: 'This appointment has no reschedule link' });
 
     res.json({
-      url: stripSmsLinkScheme(url),
-      line: stripSmsLinkScheme(line),
+      url: stripSmsUrlScheme(url),
+      line: stripSmsUrlScheme(line),
       firstName: recipientFirstName,
       appointment: {
         id: svc.id,
@@ -2064,8 +2056,8 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
     if (!url) return res.status(404).json({ error: 'This customer has no re-service link' });
 
     res.json({
-      url: stripSmsLinkScheme(url),
-      line: stripSmsLinkScheme(line),
+      url: stripSmsUrlScheme(url),
+      line: stripSmsUrlScheme(line),
       customerId: eligible.id,
       lanes,
       firstName: recipientFirstName,
@@ -2263,8 +2255,8 @@ async function statementLinkInsert(builders, last10, bodyCustomerId) {
     status: 200,
     body: {
       kind: 'statement',
-      url: stripSmsLinkScheme(result.url),
-      line: stripSmsLinkScheme(result.line),
+      url: stripSmsUrlScheme(result.url),
+      line: stripSmsUrlScheme(result.line),
       statement: result.statement || undefined,
       immediateOnly: result.immediateOnly || undefined,
       customerId: (selected || owners[0])?.id,
@@ -2473,8 +2465,8 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     res.json({
       kind,
       channel,
-      url: stripSmsLinkScheme(result.url),
-      line: stripSmsLinkScheme(result.line),
+      url: stripSmsUrlScheme(result.url),
+      line: stripSmsUrlScheme(result.line),
       firstName: recipientFirstName,
       ...Object.fromEntries(LINK_RESULT_FIELDS.map((field) => [field, result[field] || undefined])),
       // Owner-bound kinds (and the account-scoped bearers above): the
