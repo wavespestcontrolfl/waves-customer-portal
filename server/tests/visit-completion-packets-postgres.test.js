@@ -329,29 +329,41 @@ postgres('visit completion packet records on PostgreSQL', () => {
     }
   });
 
-  test('a later photo upload failure rolls back the packet and cleans up earlier uploaded objects', async () => {
+  test.each(['completionPhotos', 'gaugePhoto'])('a later %s upload failure rolls back the packet and cleans up earlier objects', async (field) => {
     const config = require('../config');
     const priorBucket = config.s3.bucket;
     config.s3.bucket = 'fixture-photo-bucket';
     const send = jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send')
       .mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('Fixture upload unavailable')).mockResolvedValue({});
     const input = submission();
-    for (const item of input.items) item.body.completionPhotos = [{
+    const flags = require('../services/feature-flags').isUserFeatureEnabled;
+    if (field === 'gaugePhoto') {
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ service_type: 'WaveGuard Lawn Care' });
+      flags.mockImplementation(async (_id, flag) => flag === 'turf-height-capture');
+    }
+    const photo = {
       data: `data:image/png;base64,${Buffer.from('synthetic photo').toString('base64')}`, name: 'fixture.png',
-    }];
+    };
+    for (const item of input.items) item.body[field] = field === 'completionPhotos' ? [{ ...photo }] : { ...photo };
     try {
       await expect(saveVisitCompletionRecords(input))
         .rejects.toMatchObject({ code: 'visit_completion_photos_upload_failed', statusCode: 503 });
       expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
       expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      expect(await mockPg('turf_height_readings').where({ customer_id: fixture.customerId })).toHaveLength(0);
       expect(await mockPg('service_completion_attempts').whereIn('service_id', fixture.serviceIds)).toHaveLength(0);
       const commands = send.mock.calls.map(([command]) => command);
       expect(commands.map((command) => command.constructor.name)).toEqual(['PutObjectCommand', 'PutObjectCommand', 'DeleteObjectCommand']);
       expect(commands[2].input.Key).toBe(commands[0].input.Key);
       expect((await mockPg('scheduled_services').whereIn('id', fixture.serviceIds)).every((row) => row.status === 'on_site')).toBe(true);
+      const retried = await saveVisitCompletionRecords(input);
+      expect(retried).toMatchObject({ status: 202, body: { replayed: false } });
+      expect(await mockPg('service_photos').whereIn('service_record_id', retried.body.items.map((item) => item.serviceRecordId)))
+        .toHaveLength(2);
     } finally {
       send.mockRestore();
       config.s3.bucket = priorBucket;
+      flags.mockImplementation(async () => false);
     }
   });
 
@@ -539,6 +551,18 @@ postgres('visit completion packet records on PostgreSQL', () => {
       expect(await database('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
       expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test('the termite station-cap fallback leaves its transaction usable after a failed read', async () => {
+    const { stationCapWouldOverflow } = require('../services/termite-stations');
+    await withReadFailure((query) => query.sql.includes('from "termite_stations"'), async (database) => {
+      await database.transaction(async (trx) => {
+        expect(await stationCapWouldOverflow(trx, fixture.customerId, [{ shape: { type: 'circle', cx: 0.5, cy: 0.5, r: 0.01 } }]))
+          .toBe(false);
+        await trx('customers').where({ id: fixture.customerId }).update({ first_name: 'Recovered' });
+        expect(await trx('customers').where({ id: fixture.customerId }).first('first_name')).toEqual({ first_name: 'Recovered' });
+      });
     });
   });
 });

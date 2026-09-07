@@ -1147,6 +1147,13 @@ function treeShrubPhotoUploadRequiredError(uploadResult, minimum = TREE_SHRUB_MI
   return err;
 }
 
+function packetPhotoUploadRequiredError(uploadResult) {
+  const serverFailure = uploadResult.errors.some((error) => !error.statusCode || error.statusCode >= 500);
+  return Object.assign(new Error('Every submitted photo must upload before the visit can close.'), {
+    code: 'visit_completion_photos_upload_failed', statusCode: serverFailure ? 503 : 400, isOperational: true,
+  });
+}
+
 // formatRescheduleTemplateVars was removed with the inline single-reschedule
 // send — that path now routes through admin-schedule's
 // sendRescheduleNoticeForVisit (recipient routing + arrival-window copy).
@@ -5676,7 +5683,8 @@ async function completeScheduledService(completionInput, packetRecord = null) {
         // a persistence failure aborts completion (the existing catch cleans up +
         // the tech retries). The photo upload runs in its own SAVEPOINT so a
         // photo/S3 failure can't block the reading row; its uploaded row is
-        // registered for cleanup if the outer txn later aborts.
+        // registered for cleanup if the outer txn later aborts. Packets must
+        // persist a supplied photo because their snapshots omit image bytes.
         if (turfHeightApplicable && (manualHeightIn != null || gaugePhoto)) {
           const turfRow = await trx('customer_turf_profiles')
             .where({ customer_id: svc.customer_id, active: true }).first();
@@ -5694,8 +5702,10 @@ async function completeScheduledService(completionInput, packetRecord = null) {
                 if (gaugeUpload?.photos?.length) {
                   preCommitCompletionPhotoRows = preCommitCompletionPhotoRows.concat(gaugeUpload.photos);
                 }
+                if (packetRecord && gaugeUpload.failed > 0) throw packetPhotoUploadRequiredError(gaugeUpload);
               });
             } catch (photoErr) {
+              if (packetRecord) throw photoErr;
               gaugePhotoId = null; // optional — never block the reading row
               logger.warn(`[turf-height] optional lawn-length photo skipped for service=${completionInput.serviceId}: ${photoErr.message}`);
             }
@@ -6150,10 +6160,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             );
           }
           if (packetRecord && completionPhotoUploadResult.failed > 0) {
-            const serverFailure = completionPhotoUploadResult.errors.some((error) => !error.statusCode || error.statusCode >= 500);
-            throw Object.assign(new Error('Every submitted photo must upload before the visit can close.'), {
-              code: 'visit_completion_photos_upload_failed', statusCode: serverFailure ? 503 : 400, isOperational: true,
-            });
+            throw packetPhotoUploadRequiredError(completionPhotoUploadResult);
           }
           completionPhotosUploadedBeforeCommit = true;
           const photoNotes = {
