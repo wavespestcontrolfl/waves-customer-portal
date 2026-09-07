@@ -152,7 +152,7 @@ dev database; no production migration or gate activation is authorized.
   one-use helpers would only move branches. Further simplification must keep
   every tested authorization path.
 
-Part D integration preserves private execution pins outside model schemas, the native owner/idempotency endpoint, and original persisted approval formats. Review cards disclose review identity; thread continuations retain their own cursor through early model outages and refuse unseen concurrent appends. The integrated database suite covers 28 scenarios across the full run and focused thread rerun; 235 affected unit tests pass. Browser verification for this integrated state remains pending.
+Part D integration preserves private execution pins outside model schemas, the native owner/idempotency endpoint, and original persisted approval formats. Review cards disclose review identity; thread continuations retain their own cursor through early model outages and refuse unseen concurrent appends. The integrated database suite passes all 28 scenarios in one run; 251 affected unit tests pass, with one additional passing bulk-preview regression. Desktop/mobile Chrome verifies A-only note persistence, expired approval recovery, and review identity with cancellation and zero publishing. The bulk recheck uses the same private cohort field as execution, while stored approval formats stay unchanged.
 
 Main integration at `db70ae441` adds the three new prep-guide/Quick Links
 request sites, retaining 1,739 cumulative sites as unsupported/unverified in A.

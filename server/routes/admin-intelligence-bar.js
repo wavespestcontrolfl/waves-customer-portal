@@ -2978,7 +2978,7 @@ router.post('/confirm-action', async (req, res, next) => {
         // set inexact — refuse instead of a silent partial update.
         const recheck = await previewBulkLeadUpdate({
           current_status: execParams.current_status,
-          lead_ids: execParams.lead_ids,
+          _approved_lead_ids: execParams.lead_ids,
           new_status: execParams.new_status,
         });
         const still = new Set((recheck?.matched_ids || []).map(String));

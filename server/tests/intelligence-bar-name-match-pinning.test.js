@@ -234,6 +234,16 @@ describe('bulk_update_leads (leads)', () => {
     expect(res.matched_ids).toEqual(['lead-1', 'lead-2']);
   });
 
+  test('the confirmation preview filters reads to its server-approved cohort', async () => {
+    const leads = chain({ select: [LEAD_A] });
+    db.mockReturnValue(leads);
+    const res = await previewBulkLeadUpdate({ current_status: 'contacted', new_status: 'lost',
+      _approved_lead_ids: ['lead-1'] });
+    expect(leads.whereIn).toHaveBeenCalledWith('id', ['lead-1']);
+    expect(res.matched_ids).toEqual(['lead-1']);
+    expect(leads.update).not.toHaveBeenCalled();
+  });
+
   test('execution is ONE guarded UPDATE: pinned ids AND the criteria ride in the same WHERE, RETURNING reports the real set', async () => {
     // Only two of the three pinned leads still match the criteria at
     // confirm time — the guarded UPDATE returns exactly those.

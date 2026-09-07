@@ -96,7 +96,7 @@ mocked provider response is not evidence of end-to-end capability.
 ## Transport exceptions
 
 The census records every discovered request/export site, including Intelligence
-Bar transport itself. The ten changed/new query, task, and receipt sites are
+Bar transport itself. The five current query, task, and receipt sites are
 reviewed exceptions: a model must not receive a tool that invokes its own query
 route, chooses another session, or obtains/consumes confirmation credentials.
 These exceptions do not grant coverage to any customer, estimate, inventory,
@@ -136,11 +136,39 @@ source commit and remain **unmapped**. The prior fingerprint and retired sites
 remain recorded. This addresses CI's merged-main census drift without claiming
 support for those new portal actions.
 
-Current foundation census: 1,732 UI sites; ten transport exceptions; 1,722 domain
-sites still unsupported/unverified in the matrix. Registration of existing tools
+Current foundation census: 1,739 retained UI sites; five current transport
+exceptions; 1,734 sites still unsupported/unverified in the matrix. Historical
+transport calls remain recorded after their frontend sites changed. Registration of existing tools
 has deliberately not been relabeled as verified application parity.
 
 ## Verification evidence
+
+The split integration at `1a63489ed` imports current main `db70ae441` and the
+reviewed registry, target, and recovery services. Its 28 real PostgreSQL route
+scenarios pass in one run (87.61 seconds); the bulk-preview follow-up adds a
+passing focused database rerun that excludes an unrelated same-status lead.
+The final private cohort field is passed by both execution and confirmation
+recheck. The persisted approval format stays unchanged.
+
+The integrated unit run passes 251 tests across ten suites; the additional
+bulk-preview regression passes with 69 existing confirmation/pinning tests.
+Client bar/card/hook tests pass 26 tests; two separate session-identity tests
+cover the existing UUID fallback. These deterministic tests use the scripted
+model and isolated database, not a live-model evaluation.
+
+Repeated confirmations, an intervening model outage, and pre-model ambiguity
+selection retain the original or latest successfully appended thread cursor.
+An unseen concurrent conversation append is refused without changing its tail.
+Review drafting rejects a foreign customer review before model generation;
+review approval shows the review identity, hides its execution token, and
+refuses changed customer linkage before publishing.
+
+Desktop (1440) and mobile (390) Chrome screenshots verify the review identity
+card and cancel action, with no JS exceptions or horizontal overflow. The
+review reply remains unset in PostgreSQL after cancellation. Earlier runtime
+screenshots verify A-only note persistence and expired approvals without
+executable controls. Native iOS notches/keyboards, voice and live-provider
+delivery remain unverified. Earlier regression evidence is retained below.
 
 - Real Express route + bearer authentication + domain executor + isolated Railway
   development Postgres, scripted model and controlled Gmail: twenty-five tests pass in

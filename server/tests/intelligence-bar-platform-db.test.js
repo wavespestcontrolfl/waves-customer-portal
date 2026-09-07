@@ -485,6 +485,10 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       .toMatchObject({ code: 'target_changed' });
     const late = crypto.randomUUID();
     await db('leads').insert({ id: late, first_name: 'Synthetic', last_name: 'Late bulk', status: 'unresponsive', updated_at: old });
+    const { previewBulkLeadUpdate } = require('../services/intelligence-bar/leads-tools');
+    const recheck = await previewBulkLeadUpdate({ current_status: params.current_status,
+      new_status: params.new_status, _approved_lead_ids: ids });
+    expect(new Set(recheck.matched_ids)).toEqual(new Set(ids));
     const confirmed = await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash,
       params: { lead_ids: [late] } });
     expect(confirmed.body).toMatchObject({ success: true, outcome: 'completed', result: { updated: existingIds.length + 2 } });
