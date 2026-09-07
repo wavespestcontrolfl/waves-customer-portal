@@ -535,17 +535,18 @@ async function syncPrimaryCoordsFromCustomer(customerId, conn = db) {
 }
 
 /**
- * Hourly backstop for the lazily-created PRIMARY row. The primary is
+ * Daily backstop for the lazily-created PRIMARY row. The primary is
  * created on first READ (properties tab, call pipeline, estimate linkage),
  * and none of the customer-insert paths (website quote, web-form / GBP
  * lead, Twilio, proposal win, …) create one — prod 2026-09-07: 144 live,
  * addressed customers had no property row, and every booking anchored for
- * them fell to NULL. This sweep fills the gap within the hour so no later
- * consumer has to assume the row exists. Per customer, one transaction:
+ * them fell to NULL. This sweep fills the gap within the day so no later
+ * consumer has to assume the row exists (the booking anchor backfills
+ * its own at booking time — this catches customers nothing read). Per customer, one transaction:
  * customers row FOR UPDATE, re-check (still live, still addressed, still
  * no row — a concurrent read may have backfilled it), then the same core
- * every lazy read uses. Newest first (a stale lead can wait an hour; a
- * fresh lead is the one about to be booked). Best-effort per row: a
+ * every lazy read uses. Newest first (a fresh lead is the one about to be
+ * booked). Best-effort per row: a
  * failure is counted and logged by code only (a knex error message embeds
  * the SQL bindings, i.e. the address) and the sweep moves on.
  */

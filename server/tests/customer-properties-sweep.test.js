@@ -1,6 +1,6 @@
-// Hourly primary-property backstop (scheduler :20 tick): live, addressed
+// Daily primary-property backstop (scheduler 3:20 AM ET): live, addressed
 // customers with NO customer_properties row get the lazily-created primary
-// within the hour — the customer-insert paths never create one.
+// within the day — the customer-insert paths never create one.
 const mockDb = jest.fn();
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -44,7 +44,7 @@ function installDb({ candidates = [], customersById = {}, props = {}, insertErro
 
 const live = (id, over = {}) => ({ id, deleted_at: null, address_line1: '100 Main St', city: 'Sampleville', state: 'FL', zip: '34200', latitude: 27.1, longitude: -82.1, contact_role: null, ...over });
 
-describe('sweepMissingPrimaryProperties (hourly primary backstop)', () => {
+describe('sweepMissingPrimaryProperties (daily primary backstop)', () => {
   beforeEach(() => { mockDb.mockReset(); logger.error.mockClear(); });
 
   test('creates the primary from the customers mirror for every row-less live customer', async () => {
@@ -87,11 +87,8 @@ describe('sweepMissingPrimaryProperties (hourly primary backstop)', () => {
 });
 
 describe('scheduler wiring', () => {
-  test('the hourly :20 tick runs the primary backstop under its own job_health name, before the geocode sweep', () => {
+  test('a daily 3:20 AM ET tick runs the primary backstop under its own job_health name', () => {
     const src = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
-    const primary = src.indexOf("runExclusive('primary-property-backstop', () => sweepMissingPrimaryProperties())");
-    const geocode = src.indexOf("runExclusive('geocoder-backstop', () => sweepUngeocodedCustomers())");
-    expect(primary).toBeGreaterThan(-1);
-    expect(geocode).toBeGreaterThan(primary);
+    expect(src).toMatch(/cron\.schedule\('20 3 \* \* \*', async \(\) => \{[\s\S]{0,600}runExclusive\('primary-property-backstop', \(\) => sweepMissingPrimaryProperties\(\)\)/);
   });
 });
