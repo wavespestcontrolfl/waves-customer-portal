@@ -454,7 +454,10 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   const selectedDate = selected?.date || null;
   const selectedStart = selected?.window?.start || null;
   const selectedEnd = selected?.window?.end || null;
-  const wantsCounter = isCustomReason ? customAvailable : note.trim().length > 0;
+  // A preset note on a customer with no phone never sends (commit() skips
+  // the cap and moves the visit un-texted) — no counter, no Move lock.
+  const hasPhone = !!options?.service?.hasPhone;
+  const wantsCounter = isCustomReason ? customAvailable : (hasPhone && note.trim().length > 0);
   useEffect(() => {
     if (!(wantsCounter && notify && selectedDate && selectedStart)) {
       setSmsSeg(null);

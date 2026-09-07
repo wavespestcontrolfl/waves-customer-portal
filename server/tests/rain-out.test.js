@@ -2856,6 +2856,26 @@ describe('rain-out service', () => {
         .toBe(' New time, forecast & other options: https://waves.test/r/tok123');
     });
 
+    test('gate on: a customer with no phone is never held to the cap — the move proceeds un-texted, nothing is measured', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle({ phone: null });
+
+      // The same over-budget note the test above rejects. Nothing can send
+      // (sendMovedSms answers no_phone and the sheet reports the un-texted
+      // move), so a message that never goes out must not block the move
+      // (codex r5 P2).
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'x'.repeat(200) });
+
+      expect(result.ok).toBe(true);
+      expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+      expect(result.results[0]).toMatchObject({ id: 'svc-1', ok: true, smsSent: false, smsReason: 'no_phone' });
+      // Not measured at all: no snapshot render, no link build, no SMS.
+      expect(renderSmsTemplate).not.toHaveBeenCalled();
+      expect(buildRescheduleLink).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
     test('gate on: a note that fits sends as v3 notice + note, measured on the same shape it sent', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();

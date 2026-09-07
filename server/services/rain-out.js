@@ -1824,7 +1824,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       // this check just passed (codex pre-push P1).
       prebuiltSms = { url, body };
     }
-  } else if (notifyCustomer && note) {
+  } else if (notifyCustomer && note && service.phone) {
     // Preset reason with a note: the same 2-segment cap, measured on the
     // v3 notice + the appended note (the note rides the anchor stop only,
     // so route scope measures the anchor's text — siblings get the
@@ -1841,7 +1841,10 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // refuses — r2 P2; the code is the one measured, so the body can only
     // shrink). The two moving parts the send re-renders — the weather
     // lead and a grouped stop's landed window — were measured at their
-    // longest.
+    // longest. A customer with no phone is never held to the cap: nothing
+    // sends (sendMovedSms answers no_phone and the move proceeds un-texted,
+    // which the sheet reports), so a message that never goes out must not
+    // block the move (codex r5 P2).
     let snap;
     try {
       snap = await v3TemplateSnapshot();
