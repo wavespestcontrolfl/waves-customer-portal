@@ -222,6 +222,7 @@ function buildCadenceReport(products, lawn = protocols.lawn) {
         + Number(visit.material_cost) * MATERIAL_REFERENCE_SQFT / 10000
         + Number(visit.conditional_cost), 0) * factor) : null;
       const currentBudget = LAWN_MATERIAL_BUDGETS[trackKey]?.[applications] ?? null;
+      if (currentBudget == null) issues.push({ reason: 'missing_budget' });
       rows.push({
         track: trackKey, tier, protocolTier, applications, flaggedCalendarSlots: visits.length,
         currentAnnualBudget: currentBudget,

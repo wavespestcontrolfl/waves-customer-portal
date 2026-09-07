@@ -40,6 +40,18 @@ test('unmatched treatment without a dollar annotation makes the annual calculati
   expect(row.issues).toContainEqual(expect.objectContaining({ reason: 'unmatched_product' }));
 });
 
+test('a track without shared budget entries cannot report a complete reconciliation', () => {
+  const result = buildCadenceReport([product], { synthetic_track: { name: 'Synthetic Track', visits: [visit] } });
+  expect(result.rows).toHaveLength(3);
+  for (const row of result.rows) {
+    expect(row.currentAnnualBudget).toBeNull();
+    expect(row.catalogSelectedSubtotal).toBeGreaterThan(0);
+    expect(row.catalogSelectedAnnual).toBeNull();
+    expect(row.catalogCalculationComplete).toBe(false);
+    expect(row.issues).toContainEqual({ reason: 'missing_budget' });
+  }
+});
+
 test.each([
   'Synthetic Fertilizer + Secondary Blend ($3+$1)',
   'Synthetic Fertilizer ($3) + Secondary Blend ($1)',
