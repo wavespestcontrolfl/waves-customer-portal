@@ -137,6 +137,8 @@ const WAVES_NAMED_RE = /\bwaves\b|\badam\b|\bbenetti\b|\bwe\b|\bour\b/gi;
 const COMPARISON_PHRASE_RE = /\b(?:[Uu]nlike|[Ll]ike|[Ss]uch as|[Cc]ompared (?:to|with)|[Vv]ersus|[Vv]s\.?|[Rr]ather than|[Ii]nstead of)\s+[A-Z][\w'&-]+\b(?:\s+[A-Z][\w'&-]+\b){0,2},?(?!\s*,?\s*(?:which|who|that|whose)\b)/g;
 const COMPARISON_INTRO_RE = /\b(?:[Uu]nlike|[Ll]ike|[Ss]uch as|[Cc]ompared (?:to|with)|[Vv]ersus|[Vv]s\.?|[Rr]ather than|[Ii]nstead of)\s+[A-Z][\w'&-]+(?:\s+[A-Z][\w'&-]+){0,2},?\s*$/;
 
+const REFERRAL_RE = new RegExp(`\\b(?:contact|call|try|use|see|hire|choose|consider|recommends?|refer(?:s|red)? (?:you )?to|ask)\\s+(?:\\w+\\s+){0,2}(?:${cohort.other_entities.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'i');
+
 function lastIndexOfMatch(re, text) {
   let last = -1;
   re.lastIndex = 0;
@@ -181,11 +183,19 @@ function asserted(compiled, answer) {
     // Passive attribution after the match: "fumigation is offered by Orkin".
     const agent = after.match(/^\s*(?:is|are|was|were|gets?|comes)?\s*\w*\s*(?:by|from|through)\s+([A-Z][\w'&-]+(?:\s+[A-Z][\w'&-]+){0,2})/);
     if (agent && lastIndexOfMatch(OTHER_ENTITY_RE, agent[1]) >= 0 && lastIndexOfMatch(WAVES_NAMED_RE, agent[1]) < 0) continue;
+    // A referral in the same sentence ("For fumigation services, contact
+    // Orkin") is about the competitor, not a Waves service.
+    const sentence = answer.slice(0, start).split(/[.!?;\n]/).pop() + answer.slice(start).split(/[.!?;\n]/)[0];
+    if (REFERRAL_RE.test(sentence)) continue;
     // A negation INSIDE the match ("bond is not optional") also denies it,
     // unless the pattern deliberately matched a negated phrase from its first
-    // word ("not a franchise" as evidence of independence).
-    const inner = NEGATION_RE.exec(match[0]);
-    if ((inner && inner.index > 0) || NEGATION_RE.test(before) || AFTER_NEGATION_RE.test(after)) continue;
+    // word ("not a franchise" as evidence of independence). Only the match's
+    // final clause counts: "bond is not optional but renews annually" still
+    // asserts annual renewal.
+    const innerClause = match[0].split(CLAUSE_BOUNDARY_RE).pop();
+    const inner = NEGATION_RE.exec(innerClause);
+    const innerAtStart = inner && inner.index === 0 && innerClause === match[0];
+    if ((inner && !innerAtStart) || NEGATION_RE.test(before) || AFTER_NEGATION_RE.test(after)) continue;
     return true;
   }
   return false;

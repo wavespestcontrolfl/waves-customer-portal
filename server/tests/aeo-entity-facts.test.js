@@ -119,6 +119,7 @@ test('a claim about a competitor is not a wrong claim about Waves', () => {
   expect(score('E6', 'Unlike Waves, Orkin offers fumigation.').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', 'Fumigation is offered by Orkin, not Waves.').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', 'Fumigation is offered by Waves.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves does not offer fumigation. For fumigation services, contact Orkin.').forbidden.fumigation_offered).toBe(false);
   expect(score('E8', 'Orkin is a national chain and is a franchise.').forbidden.franchise).toBe(false);
   expect(score('E8', 'Waves is a national chain and is a franchise.').forbidden.franchise).toBe(true);
   expect(score('E8', 'Orkin is a franchise, but Waves is a franchise too.').forbidden.franchise).toBe(true);
@@ -150,6 +151,7 @@ test('coordinated predicates and colon lists scope negation to the assertion it 
 test('a negation inside the match denies it unless the pattern matched the negated phrase itself, and curly apostrophes count', () => {
   expect(score('E7', 'The termite bond is not optional and is not renewable.').expected).toMatchObject({ bond_optional: false, bond_renewable: false });
   expect(score('E7', 'The termite bond is optional and renews annually.').expected).toMatchObject({ bond_optional: true, bond_renewable: true });
+  expect(score('E7', 'The bond is not optional but renews annually.').expected).toMatchObject({ bond_optional: false, bond_renewable: true });
   expect(score('E8', 'Waves is not a franchise.').expected.independent).toBe(true);
   expect(score('E6', 'Waves doesn\u2019t offer fumigation.').forbidden.fumigation_offered).toBe(false);
   expect(score('E8', 'Waves isn\u2019t a franchise.').forbidden.franchise).toBe(false);
