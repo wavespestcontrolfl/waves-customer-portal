@@ -91,6 +91,23 @@ test('any asserted headquarters outside the footprint is a wrong claim; footprin
   expect(score('E5', 'Offices located in Bradenton, Sarasota, Venice and Parrish.').forbidden.out_of_footprint_hq).toBe(false);
 });
 
+test('a qualified service name still reaches its own denial', () => {
+  expect(score('E6', 'Fumigation for drywood termites is not offered.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Fumigation for drywood termites is offered.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Tent fumigation of the whole structure is not something Waves does.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', "Fumigation for drywood termite colonies isn't available.").forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Fumigation for drywood termites is offered, not baiting.').forbidden.fumigation_offered).toBe(true);
+});
+
+test('a competitor named as an object does not become the subject a later pronoun inherits', () => {
+  expect(score('E5', 'Waves Pest Control is not affiliated with Orkin. It is based in Lakewood Ranch and serves Manatee, Sarasota and Charlotte counties.')).toMatchObject({ right: 4, missing: 0 });
+  expect(score('E6', 'Waves Pest Control is not affiliated with Orkin. It offers fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves competes with Orkin and Terminix. It offers fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E1', 'Waves is not owned by Orkin; it is owned by Adam Benetti.')).toMatchObject({ expected: { founder: true }, forbidden: { wrong_founder: false } });
+  expect(score('E5', 'Orkin is national. It serves Manatee County.').expected.manatee).toBe(false);
+  expect(score('E6', 'Orkin, unlike Waves, offers fumigation.').forbidden.fumigation_offered).toBe(false);
+});
+
 test('a denial in the same clause is not a wrong claim, whether it comes before or after the claim', () => {
   expect(score('E7', 'The bond does not cover termite damage repairs. Re-treatment is not free.').forbidden).toMatchObject({ damage_repair_coverage: false, free_retreat_guarantee: false });
   expect(score('E6', 'Fumigation is not offered by Waves Pest Control.').forbidden.fumigation_offered).toBe(false);

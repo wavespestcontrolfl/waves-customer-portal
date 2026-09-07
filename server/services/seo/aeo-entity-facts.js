@@ -80,7 +80,10 @@ function trailClause(text, matchIsLabel) {
 // ("at no additional cost") does not reach back to the match.
 // Also a bare negative label value ("Fumigation: No") and an unavailable /
 // excluded predicate ("fumigation is unavailable").
-const AFTER_NEGATION_RE = /^\s*(?:(?!(?:and|or|but)\b)[\w']+\s+){0,2}(?:not(?! only)|never|neither|nor|cannot)\b|^\s*(?:(?!(?:and|or|but)\b)[\w']+\s+){0,1}\w+n't\b|^\s*no\b|^\s*(?:(?:is|are|was|were|remains?|stays?)\s+)?(?:unavailable|excluded|off the (?:menu|table)|discontinued)\b/i;
+// A prepositional qualifier on the service name ("fumigation for drywood
+// termites is not offered") sits between the match and its predicate.
+const QUALIFIER = "(?:(?:for|of|in|on|to|against|with|under)\\s+(?:(?!(?:and|or|but|not|no|is|are|was|were|does|do|did)\\b)[\\w'-]+\\s+){1,4})?";
+const AFTER_NEGATION_RE = new RegExp(`^\\s*${QUALIFIER}(?:(?:(?!(?:and|or|but)\\b)[\\w']+\\s+){0,2}(?:not(?! only)|never|neither|nor|cannot)\\b|(?:(?!(?:and|or|but)\\b)[\\w']+\\s+){0,1}\\w+n't\\b|no\\b|(?:(?:is|are|was|were|remains?|stays?)\\s+)?(?:unavailable|excluded|off the (?:menu|table)|discontinued)\\b)`, 'i');
 
 // A numbered marker is 1–3 digits: "2024. Waves was …" is a year, not item 2024.
 const LIST_MARKER_RE = /^[ \t]*(?:[-*+\u2022]|\d{1,3}[.)])[ \t]+/;
@@ -156,10 +159,22 @@ function lastIndexOfMatch(re, text) {
   return last;
 }
 
+// A competitor named as an OBJECT ("not affiliated with Orkin", "owned by
+// Orkin", "rather than Orkin") is not the subject a later pronoun inherits;
+// only a competitor in subject position is.
+const OBJECT_INTRO_RE = /\b(?:with|by|to|from|of|than|against|as|not|nor|or|and|including|includes?|versus|vs\.?)\s+(?:the\s+|a\s+|an\s+)?$/i;
+
+function lastSubjectIndex(re, text) {
+  let last = -1;
+  re.lastIndex = 0;
+  for (const m of text.matchAll(re)) if (!OBJECT_INTRO_RE.test(text.slice(0, m.index))) last = m.index;
+  return last;
+}
+
 function aboutAnotherEntity(beforeClause, answerPrefix) {
   if (COMPARISON_INTRO_RE.test(beforeClause)) return true;
   const named = answerPrefix.replace(COMPARISON_PHRASE_RE, ' ');
-  return lastIndexOfMatch(OTHER_ENTITY_RE, named) > lastIndexOfMatch(WAVES_NAMED_RE, named);
+  return lastSubjectIndex(OTHER_ENTITY_RE, named) > lastIndexOfMatch(WAVES_NAMED_RE, named);
 }
 
 function matchesAnywhere(compiled, text) {
