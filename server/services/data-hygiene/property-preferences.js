@@ -42,8 +42,12 @@ async function resolvePropertyPreferencesTarget({ trx, proposal, currentRaw }) {
 const hasValue = (value) => !(value === null || value === undefined || value === '' || value === false
   || (Array.isArray(value) && value.length === 0));
 
+// Values, not just names: an edit to a pre-existing input after approval is
+// affirmative irrigation evidence too.
 const irrigationEvidence = (target, field) => ({
-  inputs: IRRIGATION_INPUT_FIELDS.filter((candidate) => candidate !== field && hasValue(target[candidate])),
+  inputs: Object.fromEntries(IRRIGATION_INPUT_FIELDS
+    .filter((candidate) => candidate !== field && hasValue(target[candidate]))
+    .map((candidate) => [candidate, target[candidate]])),
   confirmed: parseConfirmedFields(target.irrigation_confirmed_fields),
 });
 
@@ -74,8 +78,8 @@ async function applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw
 async function revertPropertyPreferenceCompanions({ trx, proposal, target, companions = {} }) {
   if (!('irrigation_system' in companions) || target.irrigation_system !== true) return { reverted: [] };
   const now = irrigationEvidence(target, proposal.field);
-  const baseline = companions.irrigation_baseline || { inputs: [], confirmed: [] };
-  const laterEvidence = now.inputs.some((field) => !baseline.inputs.includes(field))
+  const baseline = companions.irrigation_baseline || { inputs: {}, confirmed: [] };
+  const laterEvidence = Object.entries(now.inputs).some(([field, value]) => !(field in baseline.inputs) || !valuesEqual(value, baseline.inputs[field]))
     || now.confirmed.some((field) => !baseline.confirmed.includes(field));
   if (laterEvidence) return { reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } };
   await trx('property_preferences')

@@ -5,10 +5,13 @@ const {
   recordExtractionAttempt,
   shouldSkipExtraction,
 } = require('./source-extraction-store');
-const { upsertSensitiveProposal, findPendingExtractionProposal } = require('./proposal-store');
+const { upsertSensitiveProposal, findPendingExtractionProposal, stalePendingExtractionProposals } = require('./proposal-store');
 const { valuesEqual } = require('./property-preferences');
 
 const EXTRACTOR_VERSION = 'message-property-preferences-v3';
+// The unified-inbox row is written moments after the sms_log row of the same
+// SMS; siblings inside this window are the same message, not older or newer.
+const SAME_MESSAGE_WINDOW_MS = 120_000;
 const DEFAULT_LOOKBACK_DAYS = 180;
 const DEFAULT_LIMIT = 1000;
 
@@ -127,13 +130,16 @@ async function runMessageExtractionPhase({
 
         // The SMS profile lane proposes the same dual-written message under the
         // customer preference advisory lock. Check and insert under that lock
-        // so the two writers serialize: never stack on a pending sibling, and
-        // never propose against a field that changed since the candidate load.
+        // so the two writers serialize. Siblings inside the same-message window
+        // are this message's twin (skip); a clearly newer sibling outranks this
+        // message (skip); clearly older siblings are superseded by it (retire).
         const result = await db.transaction(async (trx) => {
           await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(proposal.scope_id)]);
-          if (await findPendingExtractionProposal({ trx, scope_id: proposal.scope_id, field: proposal.field })) return { inserted: false };
+          const beforeTwinWindow = new Date(new Date(row.created_at).getTime() - SAME_MESSAGE_WINDOW_MS);
+          if (await findPendingExtractionProposal({ trx, scope_id: proposal.scope_id, field: proposal.field, newerThan: beforeTwinWindow })) return { inserted: false };
           const live = await trx('property_preferences').where({ customer_id: proposal.scope_id }).first(proposal.field);
           if (!valuesEqual(live ? live[proposal.field] : null, proposal.current_value)) return { inserted: false };
+          await stalePendingExtractionProposals({ trx, scope_id: proposal.scope_id, field: proposal.field, notNewerThan: beforeTwinWindow });
           return upsertSensitiveProposal(proposal, { run_id: runId, trx });
         });
         if (result.inserted) {

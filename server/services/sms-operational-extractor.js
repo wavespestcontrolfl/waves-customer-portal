@@ -54,7 +54,7 @@ function matchesExplicitAccessCode({ quote, field, value }) {
   // even if the model proposes them verbatim. Preserve the empty field for
   // the real code: a multi-word value needs at least one digit or key symbol.
   const candidate = String(value || '').trim();
-  if (/\b(?:unknown|none|null|undefined|unsure|uncertain|unavailable|pending|missing|not|no|never|forgot(?:ten)?|forget|maybe|perhaps|same|usual|last|previous|prior|before|earlier|again|old|new|different|changed|later|soon|text|call|ask|check|see)\b|n['’]t|^n[ /]?a$/i.test(candidate)) return false;
+  if (/\b(?:unknown|none|null|undefined|unsure|uncertain|unavailable|pending|missing|not|no|never|forgot(?:ten)?|forget|maybe|perhaps|same|usual|last|previous|prior|before|earlier|again|old|new|different|changed|later|soon|text|call|ask|check|see|broken|disabled|reset|removed|inactive|expired|invalid|off|down|gone|lost|stuck|jammed|dead|out|open|locked|unlocked)\b|n['’]t|^n[ /]?a$/i.test(candidate)) return false;
   if (/\s/.test(candidate) && !/[#*\d]/.test(candidate)) return false;
   if (!/[A-Za-z\d]/.test(candidate)) return false;
   // A credential is a short token (lettered lockboxes exist) or a digit/symbol

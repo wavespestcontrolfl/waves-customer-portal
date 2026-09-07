@@ -103,14 +103,20 @@ function factVerdict(fact, { properties, current = {}, expectedCurrent = current
 // existing sensitive-proposal path: the same row shape, vault and approve
 // route the data-hygiene extraction phase uses (create-on-apply when the
 // customer has no preferences row yet).
+// The unified-inbox twin of an SMS is written moments after the sms_log row;
+// siblings inside this window are the same message, not older or newer ones.
+const SAME_MESSAGE_WINDOW_MS = 120_000;
+const afterTwinWindow = (message) => new Date(new Date(message.created_at).getTime() + SAME_MESSAGE_WINDOW_MS);
+
 async function proposeFact(trx, message, fact, current) {
   // The same SMS is also dual-written to the unified inbox, where the admin
   // extraction phase may already have proposed this field from a regex
   // fragment, and an older SMS can be retried after a newer one succeeded.
-  // The customer's newest statement wins: a pending sibling newer than this
-  // message supersedes it; otherwise retire the older siblings first.
-  if (await findPendingExtractionProposal({ trx, scope_id: message.customer_id, field: fact.field, newerThan: message.created_at })) return null;
-  await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field, notNewerThan: message.created_at });
+  // The customer's newest statement wins: a pending sibling clearly newer
+  // than this message supersedes it; otherwise retire the twin and the
+  // older siblings first.
+  if (await findPendingExtractionProposal({ trx, scope_id: message.customer_id, field: fact.field, newerThan: afterTwinWindow(message) })) return null;
+  await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field, notNewerThan: afterTwinWindow(message) });
   const proposal = await upsertSensitiveProposal({
     rule_id: 'extract.sms_profile', rule_version: VERSION, resource_type: 'property_preferences',
     resource_id: current?.id || null, scope_type: 'customer', scope_id: message.customer_id, field: fact.field,
@@ -141,6 +147,12 @@ async function applyFacts(trx, message, facts, context) {
     if (!AUTO_APPLY_FIELDS.has(fact.field)) {
       const proposalId = await proposeFact(trx, message, fact, persistedCurrent);
       outcomes.push({ ...fact, outcome: proposalId ? 'proposed' : 'superseded', proposal_id: proposalId });
+      continue;
+    }
+    // A clearly newer pending proposal for this typed field (the extraction
+    // phase saw a later message) outranks an older retried SMS: leave it to staff.
+    if (await findPendingExtractionProposal({ trx, scope_id: message.customer_id, field: fact.field, newerThan: afterTwinWindow(message) })) {
+      outcomes.push({ ...fact, outcome: 'superseded' });
       continue;
     }
     const proposal = { scope_id: message.customer_id, field: fact.field, resource_id: persistedCurrent?.id || null };
