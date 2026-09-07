@@ -68,6 +68,11 @@ test('markdown, bulleted lists and label-value answers score like plain prose', 
   expect(score('E6', 'Waves does not offer:\n* Insulation\n* Fumigation').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', 'Waves does not offer:\n- wildlife trapping or removal\n- attic insulation installation or replacement\n- tent fumigation for drywood termite colonies').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', '- Fumigation: not offered.\n- Termite: offered.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves does not offer [fumigation](https://example.com/fumigation/).').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'See https://example.com/services/fumigation/ for what Waves does not do.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Fumigation: No.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Fumigation is unavailable from Waves.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves offers fumigation. Wildlife trapping: no.').forbidden.fumigation_offered).toBe(true);
 });
 
 test('list items are separate assertions unless a negated intro governs them', () => {
@@ -94,6 +99,10 @@ test('a claim about a competitor is not a wrong claim about Waves', () => {
   expect(score('E8', 'Waves is a franchise like Orkin.').forbidden.franchise).toBe(true);
   expect(score('E6', 'Terminix provides fumigation; Waves does not.').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', 'Like Terminix, Waves provides fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Unlike Waves, Orkin offers fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E8', 'Orkin is a national chain and is a franchise.').forbidden.franchise).toBe(false);
+  expect(score('E8', 'Waves is a national chain and is a franchise.').forbidden.franchise).toBe(true);
+  expect(score('E8', 'Orkin is a franchise, but Waves is a franchise too.').forbidden.franchise).toBe(true);
 });
 
 test('coordinated predicates and colon lists scope negation to the assertion it modifies', () => {

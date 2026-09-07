@@ -22,6 +22,9 @@ function compile(def) {
     label: def.label,
     scanRe: new RegExp(def.pattern, flags.includes('g') ? flags : `${flags}g`),
     rejectValue: typeof def.reject_value === 'string' ? def.reject_value : undefined,
+    // 'prose' (default) matches the answer text with URLs removed; 'any' also
+    // matches the collected URLs (a site or tel: link satisfies website/phone).
+    scope: def.scope === 'any' ? 'any' : 'prose',
   };
 }
 
@@ -63,15 +66,21 @@ function trailClause(text, matchIsLabel) {
 // is not offered", "does not own"), within two words and before any comma. A
 // later contrastive exclusion ("…, not fumigation") or a negated modifier
 // ("at no additional cost") does not reach back to the match.
-const AFTER_NEGATION_RE = /^\s*(?:(?!(?:and|or|but)\b)[\w']+\s+){0,2}(?:not(?! only)|never|neither|nor|cannot)\b|^\s*(?:(?!(?:and|or|but)\b)[\w']+\s+){0,1}\w+n't\b/i;
+// Also a bare negative label value ("Fumigation: No") and an unavailable /
+// excluded predicate ("fumigation is unavailable").
+const AFTER_NEGATION_RE = /^\s*(?:(?!(?:and|or|but)\b)[\w']+\s+){0,2}(?:not(?! only)|never|neither|nor|cannot)\b|^\s*(?:(?!(?:and|or|but)\b)[\w']+\s+){0,1}\w+n't\b|^\s*no\b|^\s*(?:(?:is|are|was|were|remains?|stays?)\s+)?(?:unavailable|excluded|off the (?:menu|table)|discontinued)\b/i;
 
 const LIST_MARKER_RE = /^[ \t]*(?:[-*+\u2022]|\d+[.)])[ \t]+/;
 
+const URL_RE = /https?:\/\/[^\s)<>\]"']+|\btel:\+?[\d-]+|\bmailto:[^\s)>]+/gi;
+
 // Engines answer in Markdown with typographic quotes. Scoring reads plain
-// prose: emphasis and headings are stripped and a link keeps its text AND its
-// URL. List items stay on their own lines (each item is its own assertion)
-// EXCEPT under a negated list intro ("does not offer:"), whose items are
-// joined into one comma list so the intro governs every one of them.
+// prose: emphasis and headings are stripped, and every URL (link destination
+// or bare link) is lifted out so a path like /fumigation/ can never become an
+// assertion; the URLs are returned separately for scope:'any' facts. List
+// items stay on their own lines (each item is its own assertion) EXCEPT under
+// a negated list intro ("does not offer:"), whose items are joined into one
+// comma list so the intro governs every one of them.
 function stripEmphasis(line) {
   return line
     .replace(/^[ \t]*#{1,6}[ \t]+/, '')
@@ -80,10 +89,12 @@ function stripEmphasis(line) {
 }
 
 function normalizeAnswer(text) {
+  const urls = [];
   const flat = String(text || '')
     .replace(/[\u2018\u2019\u02BC\u2032]/g, "'")
     .replace(/[\u201C\u201D]/g, '"')
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)');
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, label, href) => { urls.push(href); return label; })
+    .replace(URL_RE, url => { urls.push(url); return ' '; });
   const lines = [];
   let governed = false;
   for (const raw of flat.split('\n')) {
@@ -100,19 +111,41 @@ function normalizeAnswer(text) {
     }
     lines.push(line);
   }
-  return lines.join('\n').replace(/:\n/g, ': ').replace(/:,\s*/g, ': ');
+  return { prose: lines.join('\n').replace(/:\n/g, ': ').replace(/:,\s*/g, ': '), urls: urls.join('\n') };
 }
 
-// A claim only counts against Waves when Waves (or a pronoun standing for it)
-// is the subject. "Unlike Orkin, a franchise, Waves is independently owned"
-// and "Orkin is a franchise" describe another company.
-const OTHER_ENTITY_RE = new RegExp(`\\b(?:${cohort.other_entities.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'i');
-const WAVES_SUBJECT_RE = /\bwaves\b|\badam\b|\bbenetti\b|\bwe\b|\bour\b|\bit\b|\bits\b|\bthey\b|\btheir\b|\bthe (?:company|business|firm|llc|operator)\b/i;
+// An assertion only counts for or against Waves when Waves (or a pronoun
+// standing for it) is its subject. The subject is read from the clause after
+// comparison phrases are removed ("Unlike Waves, Orkin offers fumigation" is
+// about Orkin); a clause with no subject of its own ("… and is a franchise")
+// inherits the last subject named earlier in the sentence.
+const OTHER_ENTITY_RE = new RegExp(`\\b(?:${cohort.other_entities.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'gi');
+const WAVES_SUBJECT_RE = /\bwaves\b|\badam\b|\bbenetti\b|\bwe\b|\bour\b|\bit\b|\bits\b|\bthey\b|\btheir\b|\bthe (?:company|business|firm|llc|operator)\b/gi;
+const COMPARISON_PHRASE_RE = /\b(?:unlike|like|such as|compared (?:to|with)|versus|vs\.?|rather than|instead of)\s+[A-Z][\w'&-]+(?:\s+[A-Z][\w'&-]+){0,2},?/g;
 const COMPARISON_INTRO_RE = /\b(?:unlike|like|such as|compared (?:to|with)|versus|vs\.?|rather than|instead of)\s+[A-Z][\w'&-]+(?:\s+[A-Z][\w'&-]+){0,2},?\s*$/;
 
-function aboutAnotherEntity(before) {
-  if (COMPARISON_INTRO_RE.test(before)) return true;
-  return OTHER_ENTITY_RE.test(before) && !WAVES_SUBJECT_RE.test(before);
+function lastIndexOfMatch(re, text) {
+  let last = -1;
+  re.lastIndex = 0;
+  for (const m of text.matchAll(re)) last = m.index;
+  return last;
+}
+
+function aboutAnotherEntity(beforeClause, sentencePrefix) {
+  if (COMPARISON_INTRO_RE.test(beforeClause)) return true;
+  const clause = beforeClause.replace(COMPARISON_PHRASE_RE, ' ');
+  const otherInClause = lastIndexOfMatch(OTHER_ENTITY_RE, clause);
+  const wavesInClause = lastIndexOfMatch(WAVES_SUBJECT_RE, clause);
+  if (otherInClause >= 0 || wavesInClause >= 0) return otherInClause > wavesInClause;
+  const sentence = sentencePrefix.replace(COMPARISON_PHRASE_RE, ' ');
+  return lastIndexOfMatch(OTHER_ENTITY_RE, sentence) > lastIndexOfMatch(WAVES_SUBJECT_RE, sentence);
+}
+
+function matchesAnywhere(compiled, text) {
+  compiled.scanRe.lastIndex = 0;
+  const hit = compiled.scanRe.test(text);
+  compiled.scanRe.lastIndex = 0;
+  return hit;
 }
 
 function asserted(compiled, answer) {
@@ -128,7 +161,7 @@ function asserted(compiled, answer) {
     const after = trailClause(answer.slice(end), before.trim() === '');
     // Facts and claims alike must be about Waves: "Orkin serves Manatee"
     // earns no footprint credit and "Orkin is a franchise" is no wrong claim.
-    if (aboutAnotherEntity(before)) continue;
+    if (aboutAnotherEntity(before, answer.slice(0, start).split(/[.!?;\n]/).pop())) continue;
     // A negation INSIDE the match ("bond is not optional") also denies it,
     // unless the pattern deliberately matched a negated phrase from its first
     // word ("not a franchise" as evidence of independence).
@@ -164,12 +197,15 @@ function isEntityQuestion(query) {
 function scoreEntityAnswer(query, text) {
   const question = entityQuestion(query);
   if (!question) return null;
-  const answer = normalizeAnswer(text);
+  const { prose, urls } = normalizeAnswer(text);
   const expected = {};
-  for (const key of question.expect) expected[key] = asserted(FACTS[key], answer);
+  for (const key of question.expect) {
+    const fact = FACTS[key];
+    expected[key] = asserted(fact, prose) || (fact.scope === 'any' && matchesAnywhere(fact, urls));
+  }
   const forbidden = {};
   for (const key of new Set([...cohort.global_forbid, ...question.forbid])) {
-    forbidden[key] = asserted(CLAIMS[key], answer);
+    forbidden[key] = asserted(CLAIMS[key], prose);
   }
   const right = Object.values(expected).filter(Boolean).length;
   return {
