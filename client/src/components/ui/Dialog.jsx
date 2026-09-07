@@ -19,6 +19,7 @@ export function Dialog({
   onClose,
   children,
   size = 'md',
+  layer = 120,
   className,
   style,
   'aria-label': ariaLabel,
@@ -67,12 +68,15 @@ export function Dialog({
   return createPortal(
     <div
       className={cn(
-        // z-[120] sits decisively above ALL shell chrome — mobile header (90),
-        // tab bar (95), sidebar backdrop (99), sidebar (100) — and above the
-        // C360 estimates panel (110). At the old z-[100] the overlay TIED the
-        // sidebar and only won by portal DOM order. Palette/notification
-        // popovers (9998/9999) still deliberately beat modals.
-        'fixed inset-0 z-[120] flex items-center justify-center p-4',
+        // The default layer (120) sits decisively above ALL shell chrome —
+        // mobile header (90), tab bar (95), sidebar backdrop (99), sidebar
+        // (100) — and above the C360 estimates panel (110). At the old z-[100]
+        // the overlay TIED the sidebar and only won by portal DOM order.
+        // Palette/notification popovers (9998/9999) still deliberately beat
+        // modals. A dialog opened from INSIDE a higher fixed overlay (the
+        // Customer 360 profile is z-[1000]) passes `layer`, mirroring Sheet —
+        // otherwise it paints beneath the overlay that opened it.
+        'fixed inset-0 flex items-center justify-center p-4',
         // `!` beats the inline safe-area padding below; that padding stays for
         // every card layout (compact dialogs, and content dialogs from `sm` up).
         !isCompact && 'max-sm:!p-0',
@@ -81,12 +85,19 @@ export function Dialog({
       aria-modal="true"
       aria-label={ariaLabel}
       aria-labelledby={!ariaLabel && hasTitle ? titleId : undefined}
+      // The dialog is portaled to <body>, but React still bubbles its
+      // synthetic events through the REACT tree — so a click inside it would
+      // reach whatever opened it (a row's onClick, an overlay's onClose).
+      // A modal owns its clicks: stop them at the boundary.
+      onClick={(e) => e.stopPropagation()}
       style={{
         paddingTop: 'max(16px, env(safe-area-inset-top, 0px))',
         paddingRight: 'max(16px, env(safe-area-inset-right, 0px))',
         paddingBottom: 'max(16px, env(safe-area-inset-bottom, 0px))',
         paddingLeft: 'max(16px, env(safe-area-inset-left, 0px))',
         ...style,
+        // Stacking is owned by `layer`, never by a caller's style.zIndex.
+        zIndex: layer,
       }}
     >
       <div

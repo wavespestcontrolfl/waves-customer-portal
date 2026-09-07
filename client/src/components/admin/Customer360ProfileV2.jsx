@@ -8218,10 +8218,14 @@ export default function Customer360ProfileV2({
         />
       )}
       {cancelPlanOpen && (
+        // This profile is a z-[1000] overlay and its own sub-modals sit at
+        // 1100/1120; ui/Dialog defaults to layer 120, which paints BENEATH
+        // the profile, so the dialog is raised to the sub-modal layer.
         <CancelPlanDialog
           customer={c}
           onClose={() => setCancelPlanOpen(false)}
           onDone={reloadCustomer}
+          layer={1120}
         />
       )}
       {refundPayment && (
