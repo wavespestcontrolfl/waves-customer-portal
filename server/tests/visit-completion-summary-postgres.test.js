@@ -152,6 +152,16 @@ postgres('visit summary recipient recovery', () => {
     expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
   });
 
+  test('an admin-cancelled scheduled summary settles without queuing or sending again', async () => {
+    const queued = await heldSummary();
+    await mockPg('sms_log').where({ id: queued.id, status: 'scheduled' }).del();
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
+      .toMatchObject({ status: 'suppressed', last_error: 'scheduled_message_cancelled' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(await mockPg('sms_log').where({ customer_id: fixture.customerId })).toHaveLength(0);
+  });
+
   test.each(['contact', 'consent', 'revocation'])('a queued summary suppresses after %s changes', async (change) => {
     const queued = await heldSummary();
     if (change === 'contact') await mockPg('customers').where({ id: fixture.customerId }).update({ service_contact_phone: '+12025550125' });

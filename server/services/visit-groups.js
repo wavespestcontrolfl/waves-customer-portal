@@ -1412,7 +1412,7 @@ async function claimVisitNotification(row, kind) {
       // whose detach seam has not run yet still carries the old visit_id.
       const fresh = await t('scheduled_services').where({ id: row.id }).forUpdate()
         .first('id', 'visit_id', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end');
-      if (!fresh || String(fresh.visit_id || '') !== String(visit.id)) return { state: 'detached', token: null };
+      if (!fresh || String(fresh.visit_id) !== String(visit.id)) return { state: 'detached', token: null };
       // The visit owns assignment: a one-child reassignment that committed
       // ahead of its detach seam is a detached row (codex r12).
       if (visit.technician_id && String(fresh.technician_id || '') !== String(visit.technician_id)) return { state: 'detached', token: null };
@@ -1430,6 +1430,16 @@ async function claimVisitNotification(row, kind) {
       // visit's date — a move that committed while we waited must claim
       // under the date it actually holds).
       const dedupeKey = dedupeKeyFor(visit, effectType);
+      if (effectType === 'completion_sms') {
+        // Communications cancels a still-scheduled row by deleting it. The
+        // queue and pending marker were committed together, so its absence
+        // proves that this queued summary was cancelled before dispatch.
+        await t('visit_effects').where({ visit_id: visit.id, effect_type: effectType, dedupe_key: dedupeKey, status: 'pending' })
+          .whereNotNull('scheduled_at').whereNotExists(t('sms_log').select(t.raw('1'))
+            .where({ customer_id: visit.customer_id, direction: 'outbound' })
+            .whereRaw("metadata->>'visit_summary_claim_token' = visit_effects.claim_token"))
+          .update({ status: 'suppressed', last_error: 'scheduled_message_cancelled', updated_at: t.fn.now() });
+      }
       const rows = await t('visit_effects')
         .insert({
           visit_id: visit.id,
