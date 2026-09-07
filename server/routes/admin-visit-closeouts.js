@@ -28,7 +28,7 @@ router.use('/:visitId', async (req, res, next) => {
     })).find(Boolean);
     if (ownership) return res.status(ownership.status).json(ownership.payload);
     const packet = await db('visit_completion_packets').where({ visit_id: visit.id }).first('id', 'status', 'error');
-    if (!packet && !isEnabled('visitCloseout')) return res.status(404).json({ error: 'Visit closeout is unavailable.' });
+    if (!packet && Number(visit.behavior_version) < 2 && !isEnabled('visitCloseout')) return res.status(404).json({ error: 'Visit closeout is unavailable.' });
     req.visitCloseout = { visit, members, packet };
     return next();
   } catch (err) { return next(err); }

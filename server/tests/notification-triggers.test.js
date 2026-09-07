@@ -5,6 +5,9 @@ jest.mock('../services/notification-service', () => ({
 jest.mock('../services/push-notifications', () => ({
   sendToAdminUsers: jest.fn(async () => ({ subscriptions: 0, sent: 0, expired: 0, failed: 0, skipped: 0, results: [] })),
 }));
+jest.mock('../services/admin-unread', () => ({
+  getUnreadCountForAdmin: jest.fn(async () => ({ count: 0, at: Date.now() })),
+}));
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
@@ -305,6 +308,24 @@ describe('triggerNotification bell outcome', () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce(null);
     expect(await triggerNotification('twilio_failure', {}, { dedupeKey: 'fixture_completion_record' }))
       .toMatchObject({ bellWritten: false, retryable: true });
+  });
+
+  test('the durable push check runs after badge work and immediately before sending', async () => {
+    const order = [];
+    db.mockImplementation((table) => tableMock(table === 'technicians' ? [{ id: 'admin-1', role: 'admin' }] : []));
+    require('../services/admin-unread').getUnreadCountForAdmin.mockImplementationOnce(async () => {
+      order.push('badge');
+      return { count: 0, at: Date.now() };
+    });
+    require('../services/push-notifications').sendToAdminUsers.mockImplementationOnce(async () => {
+      order.push('send');
+      return { sent: 1 };
+    });
+    await triggerNotification('job_complete', {}, { beforePush: async ({ dispatching }) => {
+      order.push(dispatching ? 'claim' : 'eligibility');
+      return true;
+    } });
+    expect(order).toEqual(['eligibility', 'badge', 'claim', 'send']);
   });
 
   test('an intentionally suppressed durable bell is not a retryable failure', async () => {

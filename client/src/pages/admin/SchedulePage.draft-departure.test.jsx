@@ -80,6 +80,23 @@ describe('completion draft departure', () => {
     expect(screen.getByLabelText('Send completion SMS to customer').checked).toBe(false);
   });
 
+  it('restores edits newer than the prepared form and retains its photos', async () => {
+    const photos = [{ data: 'data:image/jpeg;base64,c3ludGhldGlj', name: 'fixture.jpg' }];
+    const preparedDraft = { serviceId: service.id, savedAt: new Date(Date.now() - 1000).toISOString(),
+      notes: 'Prepared note', servicePhotos: photos };
+    const onPrepared = vi.fn().mockResolvedValue(undefined);
+    const first = await mount({ preparedDraft, onPrepared });
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    fireEvent.change(notes(), { target: { value: 'Newer unsaved edit' } });
+    first.unmount();
+    await mount({ preparedDraft, onPrepared });
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    expect(notes().value).toBe('Newer unsaved edit');
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: /^Save service form/i })));
+    expect(onPrepared.mock.calls[0][1].technicianNotes).toBe('Newer unsaved edit');
+    expect(onPrepared.mock.calls[0][2].servicePhotos).toEqual(photos);
+  });
+
   it('keeps an unopened saved draft intact and does not resurrect a discarded draft', async () => {
     localStorage.setItem(key, JSON.stringify({ serviceId: service.id, notes: 'Saved note' }));
     const first = await mount();

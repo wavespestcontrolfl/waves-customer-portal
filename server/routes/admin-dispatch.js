@@ -2724,7 +2724,7 @@ router.get('/:serviceId/completion-status', async (req, res) => {
       const membership = await db('scheduled_services as ss')
         .leftJoin('service_visits as sv', 'sv.id', 'ss.visit_id')
         .where('ss.id', req.params.serviceId)
-        .first('ss.visit_id', 'sv.status as visit_status');
+        .first('ss.visit_id', 'sv.status as visit_status', 'sv.behavior_version');
       if (membership && membership.visit_id
           && String(membership.visit_status || '') !== 'dissolved') {
         // READ-ONLY here (codex #3590 r2 P1: nothing may mutate the visit
@@ -2735,7 +2735,7 @@ router.get('/:serviceId/completion-status', async (req, res) => {
         // claim) applies the Phase-1 dissolve fallback atomically.
         const packet = await db('visit_completion_packets')
           .where({ visit_id: membership.visit_id }).first('id');
-        if (packet || ['closing', 'closed'].includes(String(membership.visit_status || ''))) {
+        if (packet || Number(membership.behavior_version) >= 2 || ['closing', 'closed'].includes(String(membership.visit_status || ''))) {
           return res.status(409).json({
             error: 'This service is part of a grouped visit — complete it from the visit sheet, or use "Separate these services" first.',
             code: 'visit_grouped',

@@ -12108,9 +12108,7 @@ export function CompletionPanel({
     treeShrubCloseoutRequired && !isIncompleteVisit && treeShrubCloseoutBlocks.length > 0;
   const structuredCloseoutRequired =
     (calibrationRequired || treeShrubCloseoutRequired) && !isIncompleteVisit;
-  const baseCompletionCtaLabel = onPrepared
-    ? (submitting ? "Saving form…" : "Save service form")
-    : submitting
+  const baseCompletionCtaLabel = submitting
     ? "Completing..."
     : committedReplayReady
       ? "Resume Closeout"
@@ -12138,9 +12136,11 @@ export function CompletionPanel({
     "Complete & Send Invoice": "Apply discounts & send invoice",
     "Complete & Send Recap": "Apply discounts & send recap",
   };
-  const completionCtaLabel = applyingCompletionDiscounts
-    ? discountCompletionLabels[baseCompletionCtaLabel] || baseCompletionCtaLabel
-    : baseCompletionCtaLabel;
+  const completionCtaLabel = onPrepared
+    ? (submitting ? "Saving form…" : "Save service form")
+    : applyingCompletionDiscounts
+      ? discountCompletionLabels[baseCompletionCtaLabel] || baseCompletionCtaLabel
+      : baseCompletionCtaLabel;
 
   useEffect(() => {
     const iv = setInterval(() => setElapsed(elapsedSince(onSiteTime)), 1000);
@@ -12398,11 +12398,15 @@ export function CompletionPanel({
     setSavedDraft(null);
     setShowDraftPrompt(false);
     try {
-      const raw = preparedDraft?.serviceId === service.id
-        ? JSON.stringify(preparedDraft)
-        : localStorage.getItem(completionDraftKey(service.id));
-      if (raw) {
-        const draft = JSON.parse(raw);
+      const raw = localStorage.getItem(completionDraftKey(service.id));
+      const localDraft = raw ? JSON.parse(raw) : null;
+      const prepared = preparedDraft?.serviceId === service.id ? preparedDraft : null;
+      const localIsNewer = localDraft?.serviceId === service.id
+        && (!prepared || (Date.parse(localDraft.savedAt) || 0) > (Date.parse(prepared.savedAt) || 0));
+      const draft = localIsNewer
+        ? { ...localDraft, ...(prepared?.servicePhotos ? { servicePhotos: prepared.servicePhotos } : {}) }
+        : prepared;
+      if (draft) {
         if (draft && draft.serviceId === service.id) {
           setSavedDraft(draft);
           setShowDraftPrompt(true);

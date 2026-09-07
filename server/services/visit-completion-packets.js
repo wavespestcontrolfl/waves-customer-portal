@@ -122,7 +122,7 @@ async function saveVisitCompletionPacket(input, database = db) {
         return recordsResult(existing, saved, billing, true);
       }
       if (visit.status !== 'open') return failure(409, 'visit_not_open', 'This visit is no longer open for closeout.');
-      if (!require('../config/feature-gates').isEnabled('visitCloseout')) {
+      if (Number(visit.behavior_version) < 2 && !require('../config/feature-gates').isEnabled('visitCloseout')) {
         return failure(404, 'visit_closeout_disabled', 'Visit closeout is unavailable.');
       }
       if (!process.env.DATA_HYGIENE_VAULT_KEY) {

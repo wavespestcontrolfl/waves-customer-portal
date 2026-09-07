@@ -88,7 +88,10 @@ a `payer_statements` row (never a homeowner record), charges the PAYER's Stripe
 customer only, exposes only the consolidated statement + serviced addresses
 already on it (no homeowner PII/links); settlement happens via the webhook,
 not the route,
-`/api/receipt/:token`, `/api/contracts/:token`, `/api/booking/*`,
+`/api/receipt/:token` (inspection-credit terms come only from this invoice's
+persisted offers; a combined visit includes its billed packet members, matched
+by packet and customer identity. Unrelated visits and payer-billed invoices
+never expose homeowner credit terms), `/api/contracts/:token`, `/api/booking/*`,
 `/api/public/estimates/:token/ask`,
 `/api/public/estimates/:token/find-slots`,
 `/api/public/estimates/:token/available-slots` and `/reserve` (the recurring
