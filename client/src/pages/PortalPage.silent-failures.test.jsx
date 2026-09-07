@@ -169,6 +169,28 @@ describe('dashboard appointment confirmation', () => {
 });
 
 describe('schedule survives notification-preference failures', () => {
+  it('revalidates the full schedule when confirmation overlaps a refresh', async () => {
+    let confirm;
+    let staleRefresh;
+    let canonicalRefresh;
+    const oldSchedule = { upcoming: [{ id: 'visit-a', date: futureDate, serviceType: 'Original fixture appointment', status: 'pending', customerConfirmed: false, windowStart: '09:00' }] };
+    api.confirmAppointment.mockImplementationOnce(() => new Promise(resolve => { confirm = resolve; }));
+    api.getSchedule.mockResolvedValueOnce(oldSchedule)
+      .mockImplementationOnce(() => new Promise(resolve => { staleRefresh = resolve; }))
+      .mockImplementationOnce(() => new Promise(resolve => { canonicalRefresh = resolve; }));
+    render(<PortalReadProvider enabled><PortalRefreshArea><ScheduleTab customer={customer} properties={[]} /></PortalRefreshArea></PortalReadProvider>);
+    fireEvent.click(await screen.findByRole('button', { name: /Confirm/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    await act(async () => confirm({ success: true }));
+    expect(api.getSchedule).toHaveBeenCalledTimes(3);
+    expect(screen.getByRole('heading', { name: 'Saved upcoming visits' })).toBeInTheDocument();
+    await act(async () => canonicalRefresh({ upcoming: [{ id: 'visit-b', date: futureDate, serviceType: 'Replacement fixture appointment', status: 'pending', customerConfirmed: false, windowStart: '10:00' }] }));
+    await act(async () => staleRefresh(oldSchedule));
+    expect(screen.getByText('Replacement fixture appointment')).toBeInTheDocument();
+    expect(screen.queryByText('Original fixture appointment')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Confirm/i })).toBeEnabled();
+  });
+
   it('refreshes the next-visit summaries for the other properties on the account', async () => {
     const properties = [{ id: customer.id, profileLabel: 'Home' }, { id: 'cust-2', profileLabel: 'Second property' }];
     api.getAccountUpcoming.mockResolvedValueOnce({ properties: [{ id: 'cust-2', next: {

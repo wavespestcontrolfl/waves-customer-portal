@@ -4528,7 +4528,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
       await api.confirmAppointment(id);
       const ts = new Date();
       setConfirmTimestamps(prev => ({ ...prev, [id]: ts }));
-      scheduleRead.update(previous => ({ ...previous, upcoming: previous.upcoming.map(s => s.id === id ? { ...s, status: 'confirmed', customerConfirmed: true } : s) }));
+      await scheduleRead.refresh();
     } catch (err) {
       console.error(err);
       showCustomerAlert('Could not confirm this appointment. Refreshing latest status...');
