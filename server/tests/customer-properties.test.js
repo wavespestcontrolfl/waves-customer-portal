@@ -218,7 +218,26 @@ describe('soleActivePropertyId (GH #3699 r3: property anchor for the visit-group
     const conn = fakeConn({ customer: addressed, insertError: Object.assign(new Error('boom'), { code: '42P01' }) });
     expect(await soleActivePropertyId('c1', conn)).toBeNull();
   });
-  test('the primary race (23505) is not a sole property either — null', async () => {
+  test('a lost primary race (23505) re-reads and anchors to the winner\'s committed primary', async () => {
+    const conn = fakeConn({ customer: addressed, insertError: Object.assign(new Error('dup'), { code: '23505' }) });
+    // First active read: nothing; the concurrent anchor commits before the re-read.
+    let reads = 0;
+    const base = conn;
+    const racing = (table) => {
+      const q = base(table);
+      if (table === 'customer_properties') {
+        const select = q.select;
+        q.select = async () => { reads += 1; return reads === 1 ? [] : [{ id: 'p-winner' }]; };
+        void select;
+      }
+      return q;
+    };
+    racing.isTransaction = false;
+    racing.transaction = async (fn) => fn(racing);
+    expect(await soleActivePropertyId('c1', racing)).toBe('p-winner');
+    expect(reads).toBe(2);
+  });
+  test('a lost race with nothing committed after all → null', async () => {
     const conn = fakeConn({ customer: addressed, insertError: Object.assign(new Error('dup'), { code: '23505' }) });
     expect(await soleActivePropertyId('c1', conn)).toBeNull();
   });

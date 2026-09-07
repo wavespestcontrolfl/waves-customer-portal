@@ -571,7 +571,13 @@ async function soleActivePropertyId(customerId, conn = db) {
     // savepoint discipline as the read so a failed statement cannot
     // poison the caller's transaction.
     const ensured = await inSavepoint((c) => ensurePrimaryCore(customerId, {}, c));
-    return ensured.created ? ensured.propertyId : null;
+    if (ensured.created) return ensured.propertyId;
+    // Not created: a concurrent anchor may have just committed the primary
+    // (found by the core's existence check, or the 23505 race) — re-read so
+    // the committed state decides; an inactive-only primary or no address
+    // still reads as no active row → null.
+    const after = await inSavepoint(read);
+    return after.length === 1 ? after[0].id : null;
   } catch {
     return null;
   }
