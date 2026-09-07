@@ -103,20 +103,28 @@ function matchProtocolProduct(protocolProducts = [], product = {}) {
   }) || null;
 }
 
-function normalizeSkippedProducts(input = []) {
+// The completion route validates the shape ({ productId (uuid), productName,
+// reason? } — unknown keys rejected) before the writer sees it, so there are
+// no aliases to reconcile here.
+function normalizeSkippedProducts(input) {
   if (!Array.isArray(input)) return [];
-  return input
-    .map((row) => ({
-      protocolProductId: row.protocolProductId || row.protocol_product_id || null,
-      productId: row.productId || row.product_id || null,
-      productName: row.productName || row.product_name || row.name || 'Skipped protocol product',
-      role: row.role || null,
-      reason: row.reason || row.skipReason || row.skip_reason || 'Not applied',
-      // Whether the technician typed a reason or the default stands in;
-      // the closeout never demands a reason for a removed default.
-      reasonSupplied: !!(row.reason || row.skipReason || row.skip_reason),
-    }))
-    .filter((row) => row.productName);
+  return input.map((row) => ({
+    productId: row.productId,
+    productName: row.productName,
+    reason: row.reason || 'Not applied',
+    // Whether the technician typed a reason or the default stands in;
+    // the closeout never demands a reason for a removed default.
+    reasonSupplied: !!row.reason,
+  }));
+}
+
+// Both actual-row kinds (applied, skipped) resolve their protocol row the
+// same way: an approved substitute maps back to the protocol row of the
+// product it replaced; anything else matches by product id, then name.
+function resolveProtocolProduct(protocolProducts, substitution, product) {
+  return substitution?.originalProductId
+    ? protocolProducts.find((row) => String(row.product_id || '') === String(substitution.originalProductId)) || null
+    : matchProtocolProduct(protocolProducts, product);
 }
 
 async function recordLawnProtocolCompletion(trx, {
@@ -173,7 +181,7 @@ async function recordLawnProtocolCompletion(trx, {
   // all-lawn ledger an explicitly missing area stays NULL — the planned turf
   // area is never substituted for it (scope 2026-09-06). Legacy keeps the
   // plan fallback so the WaveGuard-only rows are unchanged while dark.
-  const enteredSqft = Number(completionInput.treatedSqft || completionInput.treated_sqft || 0) || null;
+  const enteredSqft = Number(completionInput.treatedSqft || 0) || null;
   const treatedSqft = enteredSqft || (allLawn ? null : (Number(plan?.mixCalculator?.lawnSqft || 0) || null));
   const treatedSqftSource = enteredSqft ? 'visit' : (treatedSqft ? 'plan' : 'missing');
   const carrier = Number(completionInput.carrierGalPer1000 || completionInput.carrier_gal_per_1000 || plan?.mixCalculator?.carrierGalPer1000 || 0) || null;
@@ -251,13 +259,9 @@ async function recordLawnProtocolCompletion(trx, {
   // after the delete rolls the old rows back with it.
   await trx('lawn_protocol_product_actuals').where({ lawn_protocol_service_completion_id: completion.id }).del();
 
-  for (const serviceProduct of serviceProducts || []) {
-    const substitution = serviceProduct.product_id
-      ? substitutionBySubstituteProductId.get(String(serviceProduct.product_id))
-      : null;
-    const protocolProduct = substitution?.originalProductId
-      ? protocolProducts.find((row) => String(row.product_id || '') === String(substitution.originalProductId))
-      : matchProtocolProduct(protocolProducts, serviceProduct);
+  for (const serviceProduct of serviceProducts) {
+    const substitution = substitutionBySubstituteProductId.get(String(serviceProduct.product_id)) || null;
+    const protocolProduct = resolveProtocolProduct(protocolProducts, substitution, serviceProduct);
     // actual_rate_per_1000 is a per-1,000 sq ft number — a per-basis
     // recorded rate must not land in it verbatim (codex P2/P1, PR #3419):
     // an /acre rate converts EXACTLY (1 acre = 43.56 k sq ft) with its
@@ -330,25 +334,22 @@ async function recordLawnProtocolCompletion(trx, {
     // substitute catalog id, the protocol row holds the original. Resolve
     // through the plan's substitution map so the skipped row keeps its
     // protocol identity, role, planned rate and substitution relationship.
-    const substitution = skipped.productId ? substitutionBySubstituteProductId.get(String(skipped.productId)) : null;
-    const protocolProduct = skipped.protocolProductId
-      ? protocolProducts.find((row) => String(row.id) === String(skipped.protocolProductId))
-      : substitution?.originalProductId
-        ? protocolProducts.find((row) => String(row.product_id || '') === String(substitution.originalProductId))
-        : matchProtocolProduct(protocolProducts, skipped);
+    const substitution = substitutionBySubstituteProductId.get(String(skipped.productId)) || null;
+    const protocolProduct = resolveProtocolProduct(protocolProducts, substitution, skipped);
+    const knownProductId = knownProductIds.has(String(skipped.productId)) ? skipped.productId : null;
     await trx('lawn_protocol_product_actuals').insert({
       lawn_protocol_service_completion_id: completion.id,
       protocol_product_id: protocolProduct?.id || null,
-      product_id: (skipped.productId && knownProductIds.has(String(skipped.productId)) ? skipped.productId : null) || protocolProduct?.product_id || null,
-      product_name: skipped.productName || protocolProduct?.catalog_product_name || protocolProduct?.product_name || 'Skipped protocol product',
-      role: skipped.role || protocolProduct?.role || null,
+      product_id: knownProductId || protocolProduct?.product_id || null,
+      product_name: skipped.productName,
+      role: protocolProduct?.role || null,
       status: 'skipped',
       planned_rate_per_1000: protocolProduct?.rate_per_1000 || null,
       planned_rate_unit: protocolProduct?.rate_unit || null,
       skip_reason: skipped.reason,
       metadata: JSON.stringify({
         source: 'tech_closeout', reasonSupplied: skipped.reasonSupplied, substitution: substitution || null,
-        unresolvedProductId: skipped.productId && !knownProductIds.has(String(skipped.productId)) ? skipped.productId : null,
+        unresolvedProductId: knownProductId ? null : skipped.productId,
       }),
     });
   }
