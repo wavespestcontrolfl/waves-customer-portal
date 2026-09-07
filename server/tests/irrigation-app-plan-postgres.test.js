@@ -1,14 +1,28 @@
 // Real PostgreSQL round trip; the module DB is bound to a rollback-only
 // fixture transaction so the production reader executes its actual queries.
 let mockTransaction;
+let mockFailedPlanReads = 0;
 jest.mock('../models/db', () => {
-  const query = (...args) => mockTransaction(...args);
+  const query = (...args) => {
+    const builder = mockTransaction(...args);
+    const first = builder.first;
+    builder.first = function (...fields) {
+      if (args[0] === 'irrigation_week_plans' && fields[0] === 'id' && mockFailedPlanReads > 0) {
+        mockFailedPlanReads -= 1;
+        return Promise.reject(new Error('Synthetic transport failure before query'));
+      }
+      return first.apply(this, fields);
+    };
+    return builder;
+  };
   query.raw = (...args) => mockTransaction.raw(...args);
   query.transaction = (...args) => mockTransaction.transaction(...args);
   query.fn = { now: () => mockTransaction.fn.now() };
   return query;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/apns', () => ({ send: jest.fn(async () => ({ ok: true })), status: () => ({ configured: true }) }));
+jest.mock('../services/fcm', () => ({ send: jest.fn(async () => ({ ok: true })), status: () => ({ configured: true }) }));
 jest.mock('../services/email-template-library', () => ({
   ...jest.requireActual('../services/email-template-library'),
   sendTemplate: jest.fn(), activeSuppressionsFor: jest.fn(async () => []),
@@ -45,6 +59,8 @@ const SKIP = !process.env.DATABASE_URL;
   });
   beforeEach(async () => {
     jest.clearAllMocks();
+    mockFailedPlanReads = 0;
+    delete process.env.GATE_PROPERTY_ALERTS;
     gates.irrigationWeekPlan = true;
     gates.irrigationWeeklyEmail = true;
     process.env.GATE_IRRIGATION_APP_PLAN = 'true';
@@ -81,10 +97,11 @@ const SKIP = !process.env.DATABASE_URL;
     expect(require('../services/logger').warn).not.toHaveBeenCalled();
     expect(saved.claimed).toBe(true);
   }, 30000);
-  afterEach(async () => { await mockTransaction?.rollback(); });
+  afterEach(async () => { jest.useRealTimers(); await mockTransaction?.rollback(); });
   afterAll(async () => {
     delete process.env.GATE_IRRIGATION_APP_PLAN;
     delete process.env.GATE_IRRIGATION_WEEK_PLAN;
+    delete process.env.GATE_PROPERTY_ALERTS;
     delete process.env.IRRIGATION_RESTRICTION_POLICY;
     global.fetch = originalFetch;
     gates.irrigationWeekPlan = false;
@@ -175,6 +192,31 @@ const SKIP = !process.env.DATABASE_URL;
     expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(2);
   }, 30000);
 
+  test('an email-disabled customer gets the published plan advisory once through the real bell and alert ledgers', async () => {
+    // The final provider fence reads the live clock; freeze Date only while
+    // leaving PostgreSQL's sockets and timers real.
+    jest.useFakeTimers({ doNotFake: ['hrtime', 'nextTick', 'performance', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
+    jest.setSystemTime(now);
+    await resetDraft();
+    process.env.GATE_PROPERTY_ALERTS = 'true';
+    await mockTransaction('notification_prefs').insert({ customer_id: customerId, email_enabled: false, weather_alerts: true });
+    await mockTransaction('push_subscriptions').insert({ customer_id: customerId, role: 'customer', platform: 'ios',
+      device_token: `qa-${randomUUID()}`, subscription_data: '{}', active: true });
+    expect((await runWeeklyIrrigationEmailSweep({ now })).published).toBe(1);
+    const { runPropertyAlertsSweep } = require('../services/property-alerts');
+    expect((await runPropertyAlertsSweep({ now, knex: mockTransaction })).delivered).toBe(1);
+    expect((await runPropertyAlertsSweep({ now, knex: mockTransaction })).delivered).toBe(0);
+    expect(require('../services/apns').send).toHaveBeenCalledTimes(1);
+    expect(require('../services/apns').send.mock.calls[0][1]).toMatchObject({ ephemeral: true });
+    expect((await mockTransaction('notifications').where({ recipient_id: customerId })).length).toBe(1);
+    const alerts = await mockTransaction('customer_alerts').where({ customer_id: customerId });
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].payload).toMatchObject({ availableAt: now.toISOString(), delivery: { push: { accepted: 1 } } });
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    expect((await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).first()).sent_at).toBeNull();
+    delete process.env.GATE_PROPERTY_ALERTS;
+  }, 30000);
+
   test("a published decision refuses a different claimant decision and still supplies next week's rain accounting", async () => {
     const original = await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).first();
     await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).update({ published_at: now, claimed_at: null });
@@ -219,6 +261,22 @@ const SKIP = !process.env.DATABASE_URL;
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
   }, 30000);
 
+  test.each(['cutoff', 'app_gate'])('a %s crossed during calculation retains the independent pre-plan email', async (cause) => {
+    await resetDraft();
+    let time = now;
+    fetchServiceWeekWeather.mockImplementationOnce(async () => {
+      if (cause === 'cutoff') time = new Date('2026-09-07T16:01:00Z');
+      else delete process.env.GATE_IRRIGATION_APP_PLAN;
+      return { rainInches: 0.6, et0Inches: 1.6 };
+    });
+    const result = await runWeeklyIrrigationEmailSweep({ now, clock: () => time });
+    expect(result).toMatchObject({ published: 0, sent: 1, failed: 0 });
+    const call = EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
+    expect(call.payload.week_plan).toBeUndefined();
+    expect(call.categories.some(category => category.startsWith('plan:'))).toBe(false);
+    expect(await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).whereNotNull('published_at').first()).toBeUndefined();
+  }, 30000);
+
   test('closing the email window after publication retains the plan and sends no legacy fallback', async () => {
     await resetDraft();
     let time = now;
@@ -231,6 +289,55 @@ const SKIP = !process.env.DATABASE_URL;
     expect(result).toMatchObject({ published: 1, sent: 0, plan: { window_closed: 1 } });
     expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
     expect(await loadCustomerWateringPlan(customerId, { now: time })).not.toBeNull();
+  }, 30000);
+
+  test.each([1, 2])('an unreadable sent check never authorizes a fallback over a published plan (%s failed reads)', async (failedReads) => {
+    await resetDraft();
+    gates.irrigationWeeklyEmail = false;
+    expect((await runWeeklyIrrigationEmailSweep({ now })).published).toBe(1);
+    gates.irrigationWeeklyEmail = true;
+    mockFailedPlanReads = failedReads;
+    EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async (options) => {
+      expect(await options.onQueued()).toBe(false);
+      return { aborted: true, providerAttempted: false };
+    });
+    const result = await runWeeklyIrrigationEmailSweep({ now });
+    expect(result.sent).toBe(0);
+    expect(result.plan.claim_error).toBeGreaterThan(0);
+    expect(await loadCustomerWateringPlan(customerId, { now })).not.toBeNull();
+  }, 30000);
+
+  test('a gate-off retry crossing the cutoff cannot fall back over an app publication', async () => {
+    await resetDraft();
+    gates.irrigationWeeklyEmail = false;
+    expect((await runWeeklyIrrigationEmailSweep({ now })).published).toBe(1);
+    await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).update({ claimed_at: null });
+    gates.irrigationWeeklyEmail = true;
+    delete process.env.GATE_IRRIGATION_APP_PLAN;
+    let time = now;
+    EmailTemplateLibrary.sendTemplate.mockImplementation(async (options) => {
+      time = new Date('2026-09-07T16:01:00Z');
+      expect(await options.onQueued()).toBe(false);
+      return { aborted: true, providerAttempted: false };
+    });
+    const result = await runWeeklyIrrigationEmailSweep({ now, clock: () => time });
+    expect(result.sent).toBe(0);
+    expect(result.plan.window_closed).toBe(1);
+    expect((await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).first()).published_at).toEqual(now);
+  }, 30000);
+
+  test('a customer merge retains the published plan over a draft without recording an email send', async () => {
+    const loser = randomUUID();
+    await mockTransaction('customers').insert({ id: loser, first_name: 'Sample', phone: '9415550101', active: true });
+    const draft = await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).first();
+    const [published] = await mockTransaction('irrigation_week_plans').insert({ ...draft, id: randomUUID(), customer_id: loser, published_at: now }).returning('*');
+    const { repointWeekPlansKeepAvailable } = require('../services/customer-dedupe')._test;
+    await repointWeekPlansKeepAvailable(mockTransaction, 'irrigation_week_plans', 'customer_id', customerId, loser);
+    expect(await mockTransaction('irrigation_week_plans').where({ customer_id: customerId })).toEqual([
+      expect.objectContaining({ id: published.id, published_at: now, sent_at: null }),
+    ]);
+    expect(await mockTransaction('irrigation_week_plans').where({ customer_id: loser })).toHaveLength(0);
+    expect((await loadCustomerWateringPlan(customerId, { now })).sentAt).toBeNull();
   }, 30000);
 
 });

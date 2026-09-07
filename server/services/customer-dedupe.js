@@ -646,13 +646,14 @@ async function repointRowwiseDropCollisions(trx, table, column, winnerId, loserI
 }
 
 // irrigation_week_plans: UNIQUE(customer_id, week_ending). The row that
-// matters is the DELIVERED one (sent_at) — it is the decision the customer
+// matters is the available one (published_at or sent_at) — it is the decision the customer
 // received and the report renders, and the Monday sweep's first dedupe key
 // (hasSentWeekPlan). Keeping the winner's row blindly could delete the
 // loser's sent snapshot in favour of an unsent one: the report then hides
 // the plan the customer got and the sweep resends a possibly different
-// plan (codex #3565 gh-r15). Rule: a sent row beats an unsent row; both
-// sent or both unsent → the winner's stays.
+// plan (codex #3565 gh-r15). An available row beats a draft; equal
+// availability ranks retain the winner's row. App publication never mints
+// an email delivery timestamp.
 // "Delivered" for a week-plan row: stamped sent_at, OR a durable customer-week
 // delivery record (email_messages at trigger_event_id
 // `irrigation.weekly:<customer>:<week>`, provider-accepted status) whose
@@ -679,19 +680,20 @@ async function weekPlanDelivered(trx, row, customerId) {
   });
 }
 
-async function repointWeekPlansKeepSent(trx, table, column, winnerId, loserId) {
-  const rows = await trx(table).where(column, loserId).select('id', 'week_ending', 'sent_at', 'decision_hash');
+async function repointWeekPlansKeepAvailable(trx, table, column, winnerId, loserId) {
+  const rows = await trx(table).where(column, loserId).select('id', 'week_ending', 'sent_at', 'published_at', 'decision_hash');
   let moved = 0;
   let replaced = 0;
   let dropped = 0;
   let stamped = 0;
-  // Rank: stamped (sent_at) > provider-accepted but unstamped > undelivered.
+  // Rank: available (published_at or sent_at) > accepted email awaiting a
+  // stamp > unpublished draft.
   // The higher rank survives; ties keep the winner's row. A retained row that
   // is accepted-but-unstamped is stamped here — once the two customers'
   // delivery records share one identity, weekPlanDeliveryState may name the
   // deleted row's hash, so the survivor could otherwise never be stamped
   // and the report plan would stay absent (codex gh-r18).
-  const rank = async (row, customerId) => (row ? (row.sent_at ? 2 : (await weekPlanDelivered(trx, row, customerId) ? 1 : 0)) : -1);
+  const rank = async (row, customerId) => (row ? (row.published_at || row.sent_at ? 2 : (await weekPlanDelivered(trx, row, customerId) ? 1 : 0)) : -1);
   for (const row of rows) {
     try {
       await trx.transaction(async (sp) => {
@@ -709,7 +711,7 @@ async function repointWeekPlansKeepSent(trx, table, column, winnerId, loserId) {
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;
     }
-    const winnerRow = await trx(table).where({ [column]: winnerId, week_ending: row.week_ending }).first('id', 'sent_at', 'week_ending', 'decision_hash');
+    const winnerRow = await trx(table).where({ [column]: winnerId, week_ending: row.week_ending }).first('id', 'sent_at', 'published_at', 'week_ending', 'decision_hash');
     const loserRank = await rank(row, loserId);
     const winnerRank = await rank(winnerRow, winnerId);
     let kept;
@@ -731,7 +733,7 @@ async function repointWeekPlansKeepSent(trx, table, column, winnerId, loserId) {
       stamped += 1;
     }
   }
-  return `moved ${moved}, replaced ${replaced} winner row(s) with the loser's better-delivered snapshot, dropped ${dropped} duplicate row(s), stamped ${stamped} accepted-but-unstamped survivor(s)`;
+  return `moved ${moved}, replaced ${replaced} winner row(s) with the loser's available snapshot, dropped ${dropped} duplicate row(s), stamped ${stamped} accepted-but-unstamped survivor(s)`;
 }
 
 // collections_flags: at most one ACTIVE row per (customer, flag) — both
@@ -788,7 +790,7 @@ const UNIQUE_COLLISION_HANDLERS = {
   // snapshot survives (sent_at, or a provider-accepted delivery record
   // naming its decision; ties keep the winner's); never abort the merge
   // (codex #3565 gh-r14/r15/r17).
-  irrigation_week_plans: repointWeekPlansKeepSent,
+  irrigation_week_plans: repointWeekPlansKeepAvailable,
   collections_flags: repointFlagsReleaseCollisions,
 };
 
@@ -4318,7 +4320,7 @@ module.exports = {
     isEmptyValue,
     mergeSingletonPrefRow,
     repointRowwiseDropCollisions,
-    repointWeekPlansKeepSent,
+    repointWeekPlansKeepAvailable,
   repointFlagsReleaseCollisions,
     mergeConversationRows,
     UNIQUE_COLLISION_HANDLERS,

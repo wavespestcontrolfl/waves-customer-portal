@@ -1498,19 +1498,28 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
           const stampAt = (v) => (v ? new Date(v).getTime() : null);
           if (stampAt(current.irrigation_home_changed_at) !== stampAt(customer.irrigation_home_changed_at)) return false;
           const at = tick();
-          if (!planWindowOpen(at) || !gateEnvValue('GATE_IRRIGATION_APP_PLAN') || !gateEnvValue('GATE_IRRIGATION_WEEK_PLAN')) return false;
+          if (!planWindowOpen(at) || !gateEnvValue('GATE_IRRIGATION_APP_PLAN') || !gateEnvValue('GATE_IRRIGATION_WEEK_PLAN')) return 'email_only';
           if (!samePolicy(snapshot.restriction, currentRestrictionPolicy(at, { county: snapshot.decisionInputs.county, horizonEnd: planWeekEnd }))) return false;
           return (await trx('irrigation_week_plans')
             .where({ customer_id: customer.id, week_ending: weekEnding, claim_token: snapshotArgs.claimToken, decision_hash: snapshotArgs.decisionHash })
             .update({ published_at: trx.raw('COALESCE(published_at, ?)', [at]), updated_at: trx.fn.now() })) > 0;
         });
-        if (!published) { summary.plan.unavailable += 1; continue; }
-        snapshotArgs.published = true;
-        if (!saved?.publishedAt) summary.published += 1;
+        if (published === 'email_only') {
+          // Valid property inputs still support the independent pre-plan
+          // email when app publication loses its Monday window or gate.
+          // The queue-time availability check protects any earlier plan.
+          summary.plan.unavailable += 1;
+          await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
+          decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches, forecastEt0Inches, weekPlanEnabled: false });
+          snapshotArgs = null;
+        } else if (published) {
+          snapshotArgs.published = true;
+          if (!saved?.publishedAt) summary.published += 1;
+        } else { summary.plan.unavailable += 1; continue; }
       }
       // An unavailable plan never falls into an email-only template when
       // email is disabled. Publication does not consume the email send cap.
-      if (!canEmail) continue;
+      if (!canEmail || !decision.shouldSend) continue;
       if (summary.attempted >= maxSendAttempts) { summary.skipped.capped += 1; continue; }
       // Consume the cap BEFORE the provider call: an error thrown after
       // SendGrid accepts (audit/DB failure) must still count as an attempt.
@@ -1548,8 +1557,15 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         // unreadable one (null, after retries) both abort inside the
         // library (fail closed; a reclaimed snapshot must never be
         // followed by this worker's older decision).
-        onQueued: snapshotArgs?.claimToken
-          ? async () => {
+        onQueued: async () => {
+            if (!snapshotArgs?.claimToken) {
+              // Every pre-plan fallback rechecks publication at dispatch,
+              // including a DB-error fallback or a gate-off, late retry.
+              // Unknown availability cannot authorize a contradictory email.
+              const available = await hasSentWeekPlan({ customerId: customer.id, weekEnding, includePublished: true });
+              if (available === null) stampCheckFailedAtQueue = true;
+              return available === false;
+            }
             // Re-read the move stamp at dispatch UNDER the property-
             // preferences advisory lock: a plain MVCC read would not wait
             // for an address-change transaction that already holds the lock
@@ -1592,8 +1608,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
             if (!planWindowOpen(tick())) { windowClosedAtQueue = true; return false; }
             claimRenewal = queueVerdict.renewed;
             return claimRenewal === true;
-          }
-          : null,
+          },
             });
           } catch (err) {
             if (err?.code !== 'EMAIL_SEND_IN_PROGRESS' || attempt >= IN_PROGRESS_RETRIES) throw err;
