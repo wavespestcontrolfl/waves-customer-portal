@@ -16,8 +16,11 @@
 # read-only subcommands. No shell `git` at all — `git diff --no-index
 # --text <path>` prints any file, so a prompt-injected PR could read the
 # runner's environment through it; code reading goes through Read / Grep /
-# Glob and `gh pr diff`. Re-review a PR by hand with `@claude review`
-# (handled by claude.yml).
+# Glob and `gh pr diff`. Credential locations are Read-denied as well
+# (`.git/**` — the action rewrites the origin URL with its token —, /proc,
+# /dev, the runner temp and _actions trees, ~/.gitconfig, ~/.config), which
+# also blocks Grep there; checkout runs with persist-credentials: false.
+# Re-review a PR by hand with `@claude review` (handled by claude.yml).
 #
 # One-time setup: repo secret ANTHROPIC_API_KEY (Console key). To bill a
 # Claude subscription instead, set CLAUDE_CODE_OAUTH_TOKEN from
@@ -48,7 +51,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-      issues: write
+      issues: read
       actions: read
     steps:
       # Inert until the secret exists: skip (green, with a notice) rather
@@ -67,6 +70,8 @@ jobs:
         if: steps.creds.outputs.present == 'true'
         with:
           fetch-depth: 1
+          # No checkout token left in .git/config for the reviewer to read.
+          persist-credentials: false
 
       - uses: anthropics/claude-code-action@v1
         if: steps.creds.outputs.present == 'true'
@@ -99,7 +104,7 @@ jobs:
             --max-turns 200
             --max-budget-usd ${{ vars.CLAUDE_REVIEW_MAX_USD || '25' }}
             --allowedTools "Agent,Task,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*)"
-            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git checkout:*),Bash(git switch:*),Bash(git rm:*),Bash(git reset:*),Bash(git stash:*),Bash(git branch:*),Bash(git config:*),Bash(git fetch:*),Bash(git pull:*),Bash(git merge:*),Bash(git rebase:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),Bash(git status:*),mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
+            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git checkout:*),Bash(git switch:*),Bash(git rm:*),Bash(git reset:*),Bash(git stash:*),Bash(git branch:*),Bash(git config:*),Bash(git fetch:*),Bash(git pull:*),Bash(git merge:*),Bash(git rebase:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),Bash(git status:*),mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files,Read(./.git/**),Read(//proc/**),Read(//dev/**),Read(//home/runner/work/_temp/**),Read(//home/runner/work/_actions/**),Read(~/.gitconfig),Read(~/.git-credentials),Read(~/.config/**)"
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
