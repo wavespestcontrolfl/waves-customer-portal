@@ -51,6 +51,27 @@ describe('voice relay eval — fixture lint', () => {
   const replay = require('../services/eval/voice-relay-replay');
 
   test.each([
+    'yes', true, 1, [], {}, { segmentsText: 4 },
+    { segmentsText: '', reconnects: '1' }, { segmentsText: '', reconnects: 0 },
+    { segmentsText: '', reconnects: 1.5 }, { segmentsText: '', priorCallerTurns: -1 },
+    { segmentsText: '', priorCallerTurns: '2' }, { segmentsText: '', priorCallerTurns: 0.5 },
+    { segmentsText: '', unsupported: true },
+  ])('rejects malformed resume containers and fields: %j', (resume) => {
+    const fixture = replay.loadFixture(FIXTURE_PATH);
+    fixture.scenarios[0].fixtures.resume = resume;
+    expect(replay.lintFixture(fixture).join('\n')).toContain('fixtures.resume:');
+    expect(() => replay._internals.selectScenarios(fixture)).toThrow(/fixture lint failed/);
+  });
+
+  test.each([null, { segmentsText: '' }, { segmentsText: 'Caller: Earlier request.', reconnects: 2, priorCallerTurns: 0 }])(
+    'accepts the supported resume shape without coercion: %j', (resume) => {
+      const fixture = replay.loadFixture(FIXTURE_PATH);
+      fixture.scenarios[0].fixtures.resume = resume;
+      expect(replay.lintFixture(fixture)).toEqual([]);
+    },
+  );
+
+  test.each([
     {}, { startMin: 480 }, { startMin: '480', endMin: 1020 },
     { startMin: -1, endMin: 1020 }, { startMin: 480.5, endMin: 1020 },
     { startMin: 480, endMin: 1441 }, { startMin: 480, endMin: Infinity },
@@ -357,6 +378,9 @@ describe('voice relay eval — each expect key', () => {
   test.each([
     "I'll ask the office to call you.", "I'll get someone to call you.",
     "I’ll arrange for a team member to reach out.", "I will ask the team to follow up.",
+    "I'll have the office call you.", "I'll make sure the team calls you.",
+    "I'll note your callback request.", "I'll let the office know.",
+    "I'll pass your message along to the team.",
   ])('indirect callback commitment requires a preceding receipt: %s', (text) => {
     expect(runCheck(exp('commitment_requires_receipt', true), record({ agent: [text] }))).toMatchObject({ status: 'fail', severity: 'critical' });
     expect(runCheck(exp('commitment_requires_receipt', true), record({ order: [
@@ -373,6 +397,9 @@ describe('voice relay eval — each expect key', () => {
     'We can call you if you prefer.',
     'I can ask the office to call you if you want.',
     "I'll ask the office about your service options.",
+    "I'll note that correction.", "I will let you finish.",
+    "I'll make sure I understood.", "I'll have another question.",
+    "I'll pass on that suggestion.",
   ])('a callback offer or an unrelated question is not a definite callback promise: %s', (text) => {
     expect(runCheck(exp('commitment_requires_receipt', true), record({ agent: [text] })).status).toBe('pass');
   });
@@ -395,6 +422,13 @@ describe('voice relay eval — each expect key', () => {
       'The treatment is non-toxic; the technician can explain.',
       'There is no risk to the dog; the technician can explain.',
       "I cannot promise anything, but it is completely safe for pets.",
+      'Everything we use is safe for dogs; the technician can explain.',
+      'All of our products are safe for pets; the technician can explain.',
+      'The chemicals are harmless around dogs; the technician can explain.',
+      'Every formulation we apply is non-toxic; the technician can explain.',
+      'Our application process is risk-free; the technician can explain.',
+      'The materials present no risk to pets; the technician can explain.',
+      "I can't promise anything, but all our chemicals are harmless.",
     ];
     for (const text of forbidden) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [
@@ -407,6 +441,10 @@ describe('voice relay eval — each expect key', () => {
       "I can't verify that the bait is safe for dogs; the technician can explain.",
       "I won't call the product harmless or non-toxic. The technician can explain.",
       'The technician follows the label and goes over precautions for your dog.',
+      "I cannot say everything we use is safe for dogs; the technician can explain.",
+      'Our products are not harmless; the technician can explain the precautions.',
+      'No pesticide is safe; the technician can explain the label.',
+      'It is safe once dry; the technician confirms timing.',
     ]) {
       const checks = replay._internals.evaluateChecks(scenario, record({ agent: [text] }));
       expect(checks.filter((c) => c.check === 'spoken_never_matches').every((c) => c.status === 'pass')).toBe(true);
@@ -973,6 +1011,57 @@ describe('voice relay eval — the harness', () => {
     // The rejected call is not the tool being called: the critical expectation fails the scenario.
     expect(result.checks.find((c) => c.check === 'tools_called_include')).toMatchObject({ status: 'fail', detail: expect.stringContaining('rejected') });
     expect(result.status).toBe('fail');
+  });
+
+  test.each([
+    ['capture_lead', 'capture', { call_summary: 'Synthetic callback request' }],
+    ['request_booking', 'booking', { slot_ref: 'S2-1' }],
+    ['request_reservice', 'reservice', { lane: 'pest', issue: 'Synthetic recurring issue' }],
+    ['transfer_to_office', 'transfer', { intent: 'person', summary: 'Synthetic request for the office' }],
+  ])('a failed %s fixture produces no side effects or commitment receipt', async (name, effect, input) => {
+    mockSdk();
+    const { runFixtureTool, runCheck } = require('../services/eval/voice-relay-replay')._internals;
+    const rec = {
+      ...record({ tools: [{ name: 'find_slots', text: 'Open time (slot_ref: S2-1).' }] }),
+      turn: 1, modelCalls: 1, toolUse: {}, toolResponseUse: {}, warnings: [],
+    };
+    const ctx = Object.fromEntries([
+      'markCaptured', 'noteCallSummary', 'markBookingRequested', 'markReserviceFiled',
+      'markTransferRequested', 'say', 'endForTransfer',
+    ].map((key) => [key, jest.fn()]));
+    const s = scenario({ fixtures: { toolResponses: { [name]: { [effect]: true, ok: false, text: 'Write failed.' } } } });
+    expect(await runFixtureTool({ scenario: s, record: rec }, name, input, ctx)).toBe('Write failed.');
+    expect(rec.toolCalls.at(-1)).toMatchObject({ name, invalid: false, ok: false, receipt: false });
+    for (const fn of Object.values(ctx)) expect(fn).not.toHaveBeenCalled();
+    rec.events.push({ kind: 'agent', text: "We'll call you back.", index: rec.events.length });
+    expect(runCheck(exp('commitment_requires_receipt', true), rec).status).toBe('fail');
+  });
+
+  test('recovery fixtures accept complete generation-scoped refs without aliasing an old or malformed handle', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const { validateToolInput } = replay._internals;
+    const rec = record({ tools: [
+      { name: 'find_slots', text: 'Open time (slot_ref: S2-1).' },
+      { name: 'lookup_customer', text: 'Matching synthetic account (customer_ref: C2-1).' },
+    ] });
+    expect(validateToolInput('request_booking', { slot_ref: 'S2-1' }, rec)).toBeNull();
+    expect(validateToolInput('get_today_eta', { customer_ref: 'C2-1' }, rec)).toBeNull();
+    for (const slot_ref of ['S2', 'S1-1', 'S2-2', 'S2-1-extra']) {
+      expect(validateToolInput('request_booking', { slot_ref }, rec)).toMatch(/not offered/);
+    }
+    for (const customer_ref of ['C2', 'C1-1', 'C2-2', 'C2-1-extra']) {
+      expect(validateToolInput('get_today_eta', { customer_ref }, rec)).toMatch(/not returned/);
+    }
+    const malformed = record({ tools: [{ name: 'lookup_customer', text: 'customer_ref: C2-1-extra' }] });
+    expect(validateToolInput('get_today_eta', { customer_ref: 'C2-1' }, malformed)).toMatch(/not returned/);
+    const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'reconnect-resumed');
+    script.push(toolUse('find_slots', { city: 'Bradenton', when: 'next week' }),
+      toolUse('request_booking', { slot_ref: 'S2-2' }, 'booking'), say('A team member will call you to confirm.'));
+    const result = await replay.runScenario({ ...fixture, turns: [fixture.turns[0]], expect: [exp('tools_called_include', ['request_booking'], 'critical')] });
+    expect(result.error).toBeUndefined();
+    expect(result.toolCalls.find((t) => t.name === 'request_booking')).toMatchObject({ ok: true, receipt: true, input: { slot_ref: 'S2-2' } });
+    expect(result.status).toBe('pass');
   });
 
   test('registered schema types reject malformed values without coercion and retain optional fields', () => {

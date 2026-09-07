@@ -84,7 +84,7 @@ const CHECKS = Object.freeze([
 // default set no model text may precede — the registered write tools only.
 const WRITE_TOOLS = Object.freeze(['capture_lead', 'request_booking', 'request_reservice', 'transfer_to_office']);
 // Follow-up promises, EN + ES, over what Sandy actually said.
-const PROMISE_RE = /\b(?:(?:will|going to|gonna) (?:call|text|email|reach out|follow up|send|get back)|(?:i|we)['’]?ll (?:call|text|email|reach out|follow up|send|get back)|someone (?:will|is going to)|(?:i['’]?ll|i will) (?:(?:have|make sure|note|let|pass)|(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back))|(?:you'?ll|you will) (?:hear|get|receive)|(?:a |the )?(?:waves )?team member will|le (?:llamar|devolver|enviar|contactar|dar)|se comunicar|(?:un|una) (?:miembro|persona) del equipo)\b/i;
+const PROMISE_RE = /\b(?:(?:will|going to|gonna) (?:call|text|email|reach out|follow up|send|get back)|(?:i|we)['’]?ll (?:call|text|email|reach out|follow up|send|get back)|someone (?:will|is going to)|(?:i['’]?ll|i will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear|get|receive)|(?:a |the )?(?:waves )?team member will|le (?:llamar|devolver|enviar|contactar|dar)|se comunicar|(?:un|una) (?:miembro|persona) del equipo)\b/i;
 const DEFAULT_TOOL_TEXT = 'That information is not available on this call. Tell the caller a Waves team member will follow up with the details.';
 const LOOKUP_BUDGET_TEXT = 'No more account lookups are available on this call. Do NOT try again and do not confirm or deny '
   + 'anything about any account. Offer to have a Waves team member call them back, and capture the lead.';
@@ -100,6 +100,11 @@ const OFFICE_HOURS_SCHEMA = Joi.alternatives().allow(null).try(
     closedForDate: Joi.string().isoDate().pattern(/^\d{4}-\d{2}-\d{2}$/),
   }),
 );
+const RESUME_SCHEMA = Joi.object({
+  segmentsText: Joi.string().allow('').required(),
+  reconnects: Joi.number().integer().min(1),
+  priorCallerTurns: Joi.number().integer().min(0),
+}).allow(null);
 const MATCHER_SCALAR = Joi.alternatives().try(Joi.string().pattern(/\S/), Joi.number(), Joi.boolean());
 const INPUT_MATCHER_SCHEMA = Joi.object().min(1).pattern(/\S/, Joi.alternatives().try(
   MATCHER_SCALAR, Joi.array().min(1).items(MATCHER_SCALAR.required()),
@@ -237,6 +242,7 @@ function toolResponseEntryRules(name, raw) {
 function fixtureRules(s, knownTools) {
   const fx = s.fixtures || {};
   const hoursError = OFFICE_HOURS_SCHEMA.validate(fx.officeHours, { convert: false }).error;
+  const resumeError = RESUME_SCHEMA.validate(fx.resume, { convert: false }).error;
   return [
     [!!hoursError, `fixtures.officeHours: ${hoursError ? hoursError.message : ''}`],
     [fx.modelFailures != null && !(Number.isInteger(fx.modelFailures) && fx.modelFailures >= 0), 'fixtures.modelFailures must be a non-negative integer'],
@@ -244,7 +250,7 @@ function fixtureRules(s, knownTools) {
     ...Object.entries(fx.toolResponses || {}).flatMap(([name, raw]) => toolResponseEntryRules(name, raw)),
     [!Array.isArray(s.allowedTools) || !s.allowedTools.length, 'allowedTools must be a non-empty list of the tools this scenario may call'],
     ...(Array.isArray(s.allowedTools) ? s.allowedTools : []).map((name) => [!knownTools.has(name), `allowedTools names unknown tool "${name}"`]),
-    [fx.resume != null && typeof fx.resume.segmentsText !== 'string', 'fixtures.resume.segmentsText must be a string'],
+    [!!resumeError, `fixtures.resume: ${resumeError ? resumeError.message : ''}`],
   ];
 }
 
@@ -368,8 +374,8 @@ function toolValidator(name) {
   return toolValidators.get(name) || null;
 }
 
-const SLOT_REF_RE = /\(slot_ref: (S\d+)\)/g;
-const CUSTOMER_REF_RE = /customer_ref: (C\d+)/g;
+const SLOT_REF_RE = /\(slot_ref: (S\d+(?:-\d+)?)\)/g;
+const CUSTOMER_REF_RE = /customer_ref: (C\d+(?:-\d+)?)(?![\w-])/g;
 
 /** The opaque refs earlier fixture results handed the model on THIS call. */
 function offeredRefs(record, re) {
@@ -456,6 +462,8 @@ function pickToolResponse(scenario, name, n, input = {}, used = {}) {
  * file", "transfer not available") is an answer, never a receipt.
  */
 function applyToolSideEffects(response, { input, ctx, scenario }) {
+  const text = response.text || '';
+  if (response.ok === false) return { text, receipt: false };
   let receipt = false;
   if (response.capture) {
     if (typeof ctx.markCaptured === 'function') ctx.markCaptured(response.capture === true ? {} : response.capture);
@@ -464,13 +472,13 @@ function applyToolSideEffects(response, { input, ctx, scenario }) {
   }
   if (response.booking) { if (typeof ctx.markBookingRequested === 'function') ctx.markBookingRequested(null); receipt = true; }
   if (response.reservice) { if (typeof ctx.markReserviceFiled === 'function') ctx.markReserviceFiled(); receipt = true; }
-  if (!response.transfer) return { text: response.text || '', receipt };
+  if (!response.transfer) return { text, receipt };
   if (typeof ctx.transferRequested === 'function' && ctx.transferRequested() === true) return { text: TRANSFER_IN_PROGRESS_TEXT, receipt: false };
   if (typeof ctx.markTransferRequested === 'function') ctx.markTransferRequested();
   const { copy } = require('../voice-agent/relay-language');
   if (typeof ctx.say === 'function') ctx.say(copy('transferring', scenario.language === 'es' ? 'es-US' : null));
   if (typeof ctx.endForTransfer === 'function') ctx.endForTransfer();
-  return { text: response.text || TRANSFER_TEXT, receipt: true };
+  return { text: text || TRANSFER_TEXT, receipt: true };
 }
 
 function recordToolCall(record, name, input) {
