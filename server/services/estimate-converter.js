@@ -3821,7 +3821,7 @@ async function registerSeededFollowUpReminders(rows = [], customerId) {
 // Acceptance is successful only when the sold recurring cadence has a
 // complete persisted series. Keep this as an admin-facing audit signal: a
 // missing child must never be hidden by a successful invoice/acceptance.
-async function verifyAcceptedRecurringSchedule(database, { estimateId, customerId }) {
+async function verifyAcceptedRecurringSchedule(database, { estimateId, customerId, bookedAppointmentIds = [] }) {
   const estimate = await database('estimates').where({ id: estimateId, customer_id: customerId })
     .select('id', 'customer_id', 'property_id', 'estimate_data', 'accepted_at', 'accepted_service_mode', 'monthly_total', 'annual_total', 'onetime_total')
     .first();
@@ -3839,7 +3839,8 @@ async function verifyAcceptedRecurringSchedule(database, { estimateId, customerI
     .where(function linkedToEstimate() {
       this.where('s.source_estimate_id', estimateId).orWhereIn('s.recurring_parent_id', function linkedParents() {
         this.select('id').from('scheduled_services').where({ source_estimate_id: estimateId, customer_id: customerId });
-      }).orWhereIn('s.id', retainedParentIds).orWhereIn('s.recurring_parent_id', retainedParentIds);
+      }).orWhereIn('s.id', retainedParentIds).orWhereIn('s.recurring_parent_id', retainedParentIds)
+        .orWhereIn('s.id', bookedAppointmentIds);
     })
     .select('s.id', 's.customer_id', 's.property_id', 's.source_estimate_id', 's.recurring_parent_id',
       's.service_type', 's.service_key_snapshot', 's.is_callback', 's.followup_included', 's.status', 's.scheduled_date',
@@ -7081,7 +7082,7 @@ const EstimateConverter = {
       // A nested Knex transaction uses a savepoint when acceptance owns the
       // transaction, so an audit SQL error cannot poison later acceptance writes.
       recurringScheduleCheck = await database.transaction((auditTrx) =>
-        verifyAcceptedRecurringSchedule(auditTrx, { estimateId, customerId }));
+        verifyAcceptedRecurringSchedule(auditTrx, { estimateId, customerId, bookedAppointmentIds: opts.bookedAppointmentIds }));
     } catch (err) {
       recurringScheduleCheck = { ok: false, gaps: [], error: 'verification_failed' };
       logger.warn(`[estimate-converter] recurring schedule verification failed for estimate ${estimateId}: ${err.message}`);

@@ -134,6 +134,31 @@ test.each(['let_lapse', 'cancel_series', 'extend_series'])(
     if (!stopped) expect(result.gaps[0].issues).toContain('missing_applications');
   });
 
+test('the acceptance reader includes booked IDs inside its customer-scoped query', async () => {
+  const knex = require('knex')({ client: 'pg' });
+  let visitQuery;
+  const database = (table) => {
+    const query = knex(table);
+    query.then = (resolve, reject) => {
+      if (table === 'scheduled_services as s') visitQuery = query.toSQL();
+      return Promise.resolve(table === 'estimates' ? { id: 'estimate-new', customer_id: 'customer-1' } : []).then(resolve, reject);
+    };
+    return query;
+  };
+  const verify = vm.runInNewContext(`${source.slice(start, end)}; verifyAcceptedRecurringSchedule`, {
+    etDateString,
+    require: () => ({ acceptedScheduleFindings: () => [], readActiveFamilyHolds: async () => [],
+      readStoppedRecurringRoots: async () => new Set() }),
+    logger: { warn: jest.fn(), error: jest.fn() },
+  });
+  await verify(database, { estimateId: 'estimate-new', customerId: 'customer-1', bookedAppointmentIds: ['booked-1'] });
+  expect(visitQuery.sql).toContain('where "s"."customer_id" = ? and (');
+  expect(visitQuery.sql).toContain('or "s"."id" in (?))');
+  expect(visitQuery.bindings[0]).toBe('customer-1');
+  expect(visitQuery.bindings.at(-1)).toBe('booked-1');
+  await knex.destroy();
+});
+
 test('an audit exception returns an explicit failure without aborting conversion', async () => {
   const checkStart = source.indexOf('    let recurringScheduleCheck =');
   const checkEnd = source.indexOf('    logger.info(', checkStart);
@@ -143,12 +168,13 @@ test('an audit exception returns an explicit failure without aborting conversion
   const result = await vm.runInNewContext(`(async () => { ${source.slice(checkStart, checkEnd)} return recurringScheduleCheck; })()`, {
     verifyAcceptedRecurringSchedule: verifyAudit,
     database: { transaction },
+    opts: { bookedAppointmentIds: ['booked-1'] },
     estimateId: 'estimate-new',
     customerId: 'customer-1',
     logger: { warn: jest.fn() },
   });
   expect(transaction).toHaveBeenCalledTimes(1);
-  expect(verifyAudit).toHaveBeenCalledWith(auditTrx, { estimateId: 'estimate-new', customerId: 'customer-1' });
+  expect(verifyAudit).toHaveBeenCalledWith(auditTrx, { estimateId: 'estimate-new', customerId: 'customer-1', bookedAppointmentIds: ['booked-1'] });
   expect(result).toEqual({ ok: false, gaps: [], error: 'verification_failed' });
 });
 
@@ -174,6 +200,7 @@ postgresTest('a PostgreSQL audit statement error rolls back its savepoint and pr
           await auditTrx.raw('SELECT 1 / 0');
         },
         database: trx,
+        opts: {},
         estimateId: 'estimate-new',
         customerId: 'customer-1',
         logger: { warn: jest.fn() },
