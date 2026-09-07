@@ -54,8 +54,9 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     const express = require('express'); const app = express(); app.use(express.json());
     app.use('/api/admin/intelligence-bar', require('../routes/admin-intelligence-bar'));
     app.use('/api/admin/customers', require('../routes/admin-customers'));
+    app.use('/api/admin/triage', require('../routes/admin-triage'));
     app.use('/api/receipt', require('../routes/receipt-v2'));
-    app.use((err, req, res, next) => res.status(err.statusCode || err.status || 500).json({ error: err.message, code: err.code }));
+    app.use(require('../middleware/errors').errorHandler);
     server = await new Promise(resolve => { const running = app.listen(0, '127.0.0.1', () => resolve(running)); });
     origin = `http://127.0.0.1:${server.address().port}`;
   }, 30000);
@@ -65,6 +66,7 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     for (const key of Object.keys(process.env)) if (!(key in originalEnv)) delete process.env[key];
     Object.assign(process.env, originalEnv);
   });
+  afterEach(() => { process.env.GATE_IB_PLATFORM = 'true'; delete process.env.GATE_CALL_PROPERTY_ROLE; });
 
   test('two properties, relabel, primary change preserve billing and service locations; B is untouched', async () => {
     const beforeB = await db('customers').where({ id: customerB }).first();
@@ -136,6 +138,121 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     } finally { await billing.rollback(); }
     const changed = await service.changePrimaryProperty(customerB, saved.propertyId, { actorId: actor, expectedVersion: preview._version });
     expect(changed.verification.persisted).toBe(true);
+  }, 30000);
+
+  test('billing contention is a confirmed failure through portal and IB, never an unknown outcome', async () => {
+    const service = require('../services/customer-properties');
+    const saved = await service.addManualProperty(customerA, address(1500), { actorId: actor });
+    const invoiceId = crypto.randomUUID();
+    await db('invoices').insert({ id: invoiceId, customer_id: customerA, token: crypto.randomBytes(32).toString('hex'), invoice_number: `QA-${invoiceId.slice(0, 8)}` });
+    // Include the invoice in the preview; contention is the only failure.
+    const refreshed = await propose('set_primary_property', { customer_id: customerA, property_id: saved.propertyId }, 'Make the saved 1500 Example Grove property primary');
+    const livePreview = await service.previewManualPropertyChange(customerA, 'primary', {}, saved.propertyId);
+    const billing = await db.transaction();
+    try {
+      await billing('invoices').where('id', invoiceId).forUpdate().first();
+      const portal = await api(`/api/admin/customers/${customerA}/properties/${saved.propertyId}/primary`, { expectedVersion: livePreview._version });
+      expect(portal).toMatchObject({ status: 409, body: { code: 'property_busy' } });
+      const ib = await confirm(refreshed);
+      expect(ib.body).toMatchObject({ success: false, outcome: 'failed', result: { code: 'property_busy' } });
+      expect((await db('customer_properties').where('id', saved.propertyId).first()).is_primary).toBe(false);
+    } finally { await billing.rollback(); }
+  }, 60000);
+
+  test('triage primary flip freezes historical invoices and refuses billing contention atomically', async () => {
+    process.env.GATE_CALL_PROPERTY_ROLE = 'true';
+    process.env.GATE_IB_PLATFORM = 'false';
+    const service = require('../services/customer-properties');
+    const customerId = crypto.randomUUID(), invoiceId = crypto.randomUUID(), visitId = crypto.randomUUID(), callId = crypto.randomUUID(), cardId = crypto.randomUUID();
+    const invoiceToken = crypto.randomBytes(32).toString('hex');
+    await db('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Triage', phone: '+15555550123', address_line1: '1100 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201' });
+    await service.ensurePrimaryProperty(customerId);
+    const oldPrimary = await db('customer_properties').where({ customer_id: customerId, is_primary: true }).first();
+    const saved = await service.addManualProperty(customerId, address(1200), { actorId: actor });
+    await db('invoices').insert({ id: invoiceId, customer_id: customerId, token: invoiceToken, invoice_number: `QA-${invoiceId.slice(0, 8)}`, status: 'paid', total: 89, subtotal: 89, paid_at: new Date(), line_items: JSON.stringify([]) });
+    await db('scheduled_services').insert({ id: visitId, customer_id: customerId, scheduled_date: require('../utils/datetime-et').etDateString(new Date()), service_type: 'General Pest Control', status: 'pending', is_recurring: true, recurring_ongoing: true });
+    await db('call_log').insert({ id: callId, customer_id: customerId, twilio_call_sid: `QA${callId}`, status: 'completed' });
+    const proposals = [
+      { kind: 'occupancy_change', property_id: oldPrimary.id, current_occupancy: oldPrimary.occupancy_type, proposed_occupancy: 'rental_investment' },
+      { kind: 'primary_flip', new_primary_property_id: saved.propertyId, old_primary_property_id: oldPrimary.id,
+        new_primary_address_key: service.addressKey(address(1200)), old_primary_address_key: service.addressKey(oldPrimary) },
+    ];
+    const [card] = await db('triage_items').insert({ id: cardId, call_log_id: callId, category: 'address_review', reason_code: 'property_role_confirm', status: 'open', payload: { customer_id: customerId, property_role_proposals: proposals } }).returning('*');
+    const billing = await db.transaction();
+    try {
+      await billing('invoices').where('id', invoiceId).forUpdate().first();
+      const refused = await api(`/api/admin/triage/${cardId}/apply-property-roles`, { expected_updated_at: card.updated_at });
+      expect(refused).toMatchObject({ status: 409, body: { code: 'property_busy' } });
+      expect((await db('triage_items').where('id', cardId).first()).status).toBe('open');
+      expect((await db('customer_properties').where('id', oldPrimary.id).first()).occupancy_type).toBe(oldPrimary.occupancy_type);
+      await billing.raw("SET LOCAL lock_timeout = '2s'");
+      await billing('customers').where('id', customerId).forUpdate().first();
+    } finally { await billing.rollback(); }
+    const applied = await api(`/api/admin/triage/${cardId}/apply-property-roles`, { expected_updated_at: card.updated_at });
+    expect(applied).toMatchObject({ status: 200, body: { applied: 2, skipped: 0 } });
+    expect((await db('customers').where('id', customerId).first()).address_line1).toBe('1200 Example Grove');
+    expect((await db('invoices').where('id', invoiceId).first()).customer_address_snapshot.address_line1).toBe('1100 Example Grove');
+    expect((await require('../services/invoice').getByToken(invoiceToken)).customer.address_line1).toBe('1100 Example Grove');
+    const receipt = await api(`/api/receipt/${invoiceToken}`);
+    expect(receipt.status).toBe(200);
+    expect(JSON.stringify(receipt.body)).toContain('1100 Example Grove');
+    expect(JSON.stringify(receipt.body)).not.toContain('1200 Example Grove');
+    expect(await db('scheduled_services').where('id', visitId).first('property_id', 'service_address_line1')).toEqual({ property_id: oldPrimary.id, service_address_line1: '1100 Example Grove' });
+    expect((await db('triage_items').where('id', cardId).first()).status).toBe('resolved');
+
+    // A new legacy invoice must not be snapshotted by no-op or stale batches.
+    const freshInvoiceId = crypto.randomUUID();
+    await db('invoices').insert({ id: freshInvoiceId, customer_id: customerId, token: crypto.randomBytes(32).toString('hex'), invoice_number: `QA-${freshInvoiceId.slice(0, 8)}` });
+    const apply = require('../services/property-role-proposals').applyPropertyRoleProposals;
+    await db.transaction(trx => apply(trx, { customerId, proposals: [proposals[1]] }));
+    await db.transaction(trx => apply(trx, { customerId, proposals: [{ ...proposals[1], new_primary_property_id: crypto.randomUUID() }] }));
+    await db.transaction(trx => apply(trx, { customerId, proposals: [{ kind: 'occupancy_change', property_id: oldPrimary.id, current_occupancy: 'rental_investment', proposed_occupancy: 'seasonal' }] }));
+    expect((await db('invoices').where('id', freshInvoiceId).first()).customer_address_snapshot).toBeNull();
+  }, 60000);
+
+  test('manual primary waits for preferences before holding comms or customer locks', async () => {
+    const service = require('../services/customer-properties');
+    const saved = await service.addManualProperty(customerB, address(1300), { actorId: actor });
+    const preview = await service.previewManualPropertyChange(customerB, 'primary', {}, saved.propertyId);
+    const preferences = await db.transaction();
+    let pending;
+    try {
+      await preferences.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerB)]);
+      pending = service.changePrimaryProperty(customerB, saved.propertyId, { actorId: actor, expectedVersion: preview._version });
+      // Wait for the actual lock waiter, rather than assuming the write started.
+      let waiting = false;
+      for (let attempt = 0; attempt < 100 && !waiting; attempt++) {
+        const result = await db.raw("SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted AND classid = hashtext(?)::oid AND objid = hashtext(?)::oid", ['property-preferences', String(customerB)]);
+        waiting = result.rows.length > 0;
+        if (!waiting) await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      expect(waiting).toBe(true);
+      await preferences.raw("SET LOCAL lock_timeout = '2s'");
+      await require('../utils/customer-comms-lock').lockCustomerComms(preferences, customerB);
+      await preferences('customers').where('id', customerB).forUpdate().first();
+    } finally { await preferences.rollback(); }
+    expect((await pending).verification.persisted).toBe(true);
+  }, 30000);
+
+  test('property editor eligibility matches preview guards and updates after occupancy changes', async () => {
+    const service = require('../services/customer-properties');
+    const saved = await service.addManualProperty(customerB, address(1400), { actorId: actor });
+    for (const changes of [
+      { occupancy_type: 'rental_investment' }, { occupancy_type: 'commercial' }, { occupancy_type: 'seasonal' }, { occupancy_type: 'vacant' },
+      { occupancy_type: 'unknown', property_type: 'office' }, { property_type: null, city: '' },
+    ]) {
+      await db('customer_properties').where('id', saved.propertyId).update(changes);
+      const listed = await api(`/api/admin/customers/${customerB}/properties`);
+      const row = listed.body.properties.find(p => p.id === saved.propertyId);
+      expect(row.primary_change_eligible).toBe(false);
+      expect(row.primary_change_unavailable).toBeTruthy();
+      const preview = await api(`/api/admin/customers/${customerB}/properties/${saved.propertyId}/primary-preview`);
+      expect(preview.status).toBe(409);
+    }
+    await db('customer_properties').where('id', saved.propertyId).update({ city: 'Sarasota' });
+    const updated = await api(`/api/admin/customers/${customerB}/properties/${saved.propertyId}`, { occupancy_type: 'owner_occupied' }, 'PATCH');
+    expect(updated.body.properties.find(p => p.id === saved.propertyId).primary_change_eligible).toBe(true);
+    expect((await api(`/api/admin/customers/${customerB}/properties/${saved.propertyId}/primary-preview`)).status).toBe(200);
   }, 30000);
 
   test('unregistered old account address is preserved; an addressless account gets an accurately verified first property', async () => {

@@ -123,9 +123,13 @@ function isNewAddress(existingProps, candidate = {}) {
 /** Active properties for a customer, primary first. */
 async function listProperties(customerId, conn = db) {
   if (!customerId) return [];
-  return conn('customer_properties')
+  const properties = await conn('customer_properties')
     .where({ customer_id: customerId, active: true })
     .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }]);
+  return properties.map(property => {
+    const unavailable = primaryPropertyUnavailable(property);
+    return { ...property, primary_change_eligible: !unavailable, primary_change_unavailable: unavailable?.message || null };
+  });
 }
 
 /**
@@ -679,15 +683,21 @@ async function previewManualPropertyChange(customerId, kind, input = {}, propert
   return preview;
 }
 
-async function previewPrimaryPropertyChange(conn, customerId, target, primary, customer) {
-  if (target.is_primary) throw propertyActionError('This property is already primary', 409, 'already_primary');
+function primaryPropertyUnavailable(target) {
+  if (target.is_primary) return { message: 'This property is already primary', code: 'already_primary' };
   if (require('./pricing-engine/commercial-helpers').normalizePropertyType(target.property_type) === 'commercial'
     || !['owner_occupied', 'unknown'].includes(normalizeOccupancy(target.occupancy_type))) {
-    throw propertyActionError('The existing primary-residence workflow requires an owner-occupied or unclassified residential property', 409, 'primary_role_unavailable');
+    return { message: 'Primary requires an owner-occupied or unclassified residential property.', code: 'primary_role_unavailable' };
   }
   if (!['address_line1', 'city', 'state', 'zip'].every(field => String(target[field] || '').trim())) {
-    throw propertyActionError('Complete the saved property’s street, city, state and ZIP before making it primary', 409, 'property_incomplete');
+    return { message: 'Complete the street, city, state and ZIP before making this property primary.', code: 'property_incomplete' };
   }
+  return null;
+}
+
+async function previewPrimaryPropertyChange(conn, customerId, target, primary, customer) {
+  const unavailable = primaryPropertyUnavailable(target);
+  if (unavailable) throw propertyActionError(unavailable.message, 409, unavailable.code);
   const invoices = await conn('invoices').where({ customer_id: customerId }).whereNull('customer_address_snapshot').orderBy('id').select('id');
   const oldAddress = primary || (customer.address_line1 ? customer : null);
   return { previous_primary: oldAddress ? { id: primary?.id || null, address: propertyAddressLabel(oldAddress) } : null,
@@ -704,20 +714,11 @@ async function previewPrimaryPropertyChange(conn, customerId, target, primary, c
 async function writeManualProperty(customerId, kind, input, propertyId, options, apply) {
   const changes = manualPropertyFields(kind, input);
   return db.transaction(async trx => {
+    if (kind === 'primary') {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+    }
     await require('../utils/customer-comms-lock').lockCustomerComms(trx, customerId);
     const loaded = await manualPropertyContext(customerId, trx, true);
-    if (kind === 'primary') {
-      // Credit application locks invoice -> customer, while merge undo locks
-      // comms -> customer -> invoice. Never wait on invoices while holding the
-      // property operation's customer lock: NOWAIT safely refuses contention
-      // and rolls back, avoiding a cycle with either existing workflow.
-      try {
-        await trx('invoices').where({ customer_id: customerId }).orderBy('id').forUpdate().noWait().select('id');
-      } catch (err) {
-        if (err.code === '55P03') throw propertyActionError('Billing records are being updated. Try the primary-property change again after that operation finishes.', 409, 'property_busy');
-        throw err;
-      }
-    }
     const preview = await previewManualPropertyChange(customerId, kind, changes, propertyId, trx, loaded);
     if (options.expectedVersion && options.expectedVersion !== preview._version) {
       throw propertyActionError('The customer or properties changed. Request a fresh preview.', 409, 'preview_changed');
@@ -767,7 +768,6 @@ async function changePrimaryProperty(customerId, propertyId, options = {}) {
     const primary = await trx('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first();
     if (customer.address_line1 && !primary) throw propertyActionError('The existing account property could not be preserved. Review the saved properties before changing the primary.', 409, 'primary_missing');
     const target = properties.find(p => p.id === propertyId);
-    await require('./invoice-address').freezeCustomerInvoiceAddresses(trx, customer);
     const result = await require('./property-role-proposals').applyPropertyRoleProposals(trx, { customerId, proposals: [{
       kind: 'primary_flip', new_primary_property_id: propertyId, new_primary_address_key: addressKey(target),
       old_primary_property_id: primary?.id || null, old_primary_address_key: primary ? addressKey(primary) : null,

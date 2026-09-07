@@ -15,6 +15,17 @@ function invoiceCustomerAddress(invoice, customer) {
 }
 
 async function freezeCustomerInvoiceAddresses(trx, customer) {
+  // Billing can hold invoice -> customer while primary changes hold customer
+  // -> invoice. Refuse contention instead of waiting and forming a lock cycle.
+  try {
+    await trx('invoices').where({ customer_id: customer.id }).whereNull('customer_address_snapshot')
+      .orderBy('id').forUpdate().noWait().select('id');
+  } catch (err) {
+    if (err.code !== '55P03') throw err;
+    throw Object.assign(new Error('Billing records are being updated. Try the primary-property change again after that operation finishes.'), {
+      status: 409, statusCode: 409, isOperational: true, code: 'property_busy',
+    });
+  }
   return trx('invoices').where({ customer_id: customer.id }).whereNull('customer_address_snapshot')
     .update({ customer_address_snapshot: invoiceAddressSnapshot(customer) });
 }

@@ -318,9 +318,12 @@ export default function CustomerPropertiesPanelV2({
                   ))}
                 </select>
                 {canEdit && canChangePrimary && !p.is_primary && (
-                  <Button variant="secondary" size="sm" className="text-14" disabled={writeBusy} onClick={() => previewPrimary(p.id)}>
-                    Make primary
-                  </Button>
+                  <div className="max-w-64">
+                    <Button variant="secondary" size="sm" className="text-14" disabled={writeBusy || !p.primary_change_eligible} onClick={() => previewPrimary(p.id)}>
+                      Make primary
+                    </Button>
+                    {p.primary_change_unavailable && <p className="mt-1 text-14 text-ink-secondary">{p.primary_change_unavailable}</p>}
+                  </div>
                 )}
               </div>
             ))}

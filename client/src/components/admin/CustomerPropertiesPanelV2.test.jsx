@@ -7,6 +7,7 @@ import CustomerPropertiesPanelV2 from './CustomerPropertiesPanelV2';
 
 const PRIMARY = { id: 'p1', address_line1: '10 Palm Ave', city: 'Naples', state: 'FL', zip: '34102', is_primary: true, occupancy_type: 'rental_investment', label: null };
 const SECOND = { id: 'p2', address_line1: '20 Oak St', city: 'Naples', state: 'FL', zip: '34103', is_primary: false, occupancy_type: 'rental_investment', label: 'Vacation rental' };
+const ELIGIBLE = { ...SECOND, occupancy_type: 'owner_occupied', primary_change_eligible: true, primary_change_unavailable: null };
 
 function jsonResponse(body, status = 200) {
   return Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }));
@@ -25,7 +26,7 @@ describe('CustomerPropertiesPanelV2', () => {
     const fetchMock = vi.fn((url, opts = {}) => {
       if (url.endsWith('/primary-preview')) return jsonResponse(preview);
       if (opts.method === 'POST') return jsonResponse({ properties: [{ ...PRIMARY, is_primary: false }, { ...SECOND, is_primary: true }] });
-      return jsonResponse({ properties: [PRIMARY, SECOND], canChangePrimary: true });
+      return jsonResponse({ properties: [PRIMARY, ELIGIBLE], canChangePrimary: true });
     });
     vi.stubGlobal('fetch', fetchMock);
     render(<CustomerPropertiesPanelV2 customerId="c1" canEdit onChanged={onChanged} />);
@@ -45,7 +46,7 @@ describe('CustomerPropertiesPanelV2', () => {
     let finishPreview;
     vi.stubGlobal('fetch', vi.fn((url) => {
       if (url.endsWith('/primary-preview')) return new Promise(resolve => { finishPreview = resolve; });
-      return jsonResponse({ properties: [PRIMARY, SECOND], canChangePrimary: true });
+      return jsonResponse({ properties: [PRIMARY, ELIGIBLE], canChangePrimary: true });
     }));
     const view = render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
     fireEvent.click(await screen.findByRole('button', { name: 'Make primary' }));
@@ -68,6 +69,22 @@ describe('CustomerPropertiesPanelV2', () => {
     expect(screen.queryByText('Primary')).not.toBeInTheDocument();
     expect(screen.getByText(/not a residence/)).toBeInTheDocument();
     expect(fetchMock.mock.calls[0][0]).toBe('/api/admin/customers/c1/properties');
+  });
+
+  it('shows server eligibility and refreshes it after an occupancy edit', async () => {
+    const reason = 'Primary requires an owner-occupied or unclassified residential property.';
+    const fetchMock = vi.fn((url, opts = {}) => jsonResponse({ properties: [PRIMARY,
+      opts.method === 'PATCH' ? ELIGIBLE : { ...SECOND, primary_change_eligible: false, primary_change_unavailable: reason }], canChangePrimary: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
+    const button = await screen.findByRole('button', { name: 'Make primary' });
+    expect(button).toBeDisabled();
+    expect(screen.getByText(reason)).toBeVisible();
+    fireEvent.click(button);
+    expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/primary-preview'))).toBe(false);
+    fireEvent.change(screen.getByLabelText('Occupancy for 20 Oak St'), { target: { value: 'owner_occupied' } });
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(screen.queryByText(reason)).not.toBeInTheDocument();
   });
 
   it('labels the primary as PRIMARY for an owner and hides editing for non-admins', async () => {

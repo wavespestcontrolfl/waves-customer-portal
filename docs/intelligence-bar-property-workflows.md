@@ -32,18 +32,24 @@ coordinates, and saved measurements become the account mirror. Occupancy and
 irrigation-review effects are disclosed before confirmation.
 
 Existing invoice documents previously read the live customer address. A nullable
-`invoices.customer_address_snapshot` freezes that address before a manual primary
-change; invoices created while the platform gate is enabled save their own
+`invoices.customer_address_snapshot` freezes that address in the shared primary
+flip operation, including the existing triage path with the platform gate off;
+invoices created while the platform gate is enabled save their own
 snapshot. Admin/public invoice loaders and invoice/receipt PDFs use it, including
 email and project callers that supply a live customer object. Payer authority,
 recipients, amounts, statuses, and permanent receipt tokens are unchanged.
 Stored snapshots remain authoritative when the gate is turned off.
 
-The operation takes the existing comms/customer/property locks, then acquires
+The operation takes the existing property-preferences/comms/customer/property locks, then acquires
 invoice locks with `NOWAIT`. Billing and merge workflows use different invoice
 lock orders, so contention produces a retryable refusal and rollback instead
 of waiting in a deadlock. A duplicate-add refusal also rolls back any attempted
 primary-address completion; a failed request does not leave a partial write.
+Triage batches freeze before companion occupancy writes and leave the card open
+on contention. Stale, already-applied and occupancy-only proposals do not freeze
+invoices. A busy refusal keeps its operational error metadata through the portal
+error handler and IB confirmation, producing a failed result rather than an
+unknown outcome.
 
 Database verification also exposed a pre-existing invoice detail query selecting
 the nonexistent `customers.card_on_file` column. It now uses the default
@@ -57,6 +63,8 @@ closing an overlay restores only a still-mounted page scope. Confirmed property
 receipts refresh the matching open record and property list. A result for A
 does not refresh B. Escape closes the topmost bar without closing Customer 360.
 The primary impact dialog uses the shared Dialog and sits above the record drawer.
+The server returns primary eligibility from the same guard used by the preview;
+ineligible rows show a disabled control with a reason, refreshed after occupancy edits.
 Initial loads and refreshes share request sequencing and customer guards, so
 an older read or an A save finishing after navigation cannot replace B's profile.
 
@@ -104,6 +112,15 @@ suites pass 56 tests after updating their mocks to the shared service contract;
 rerun successfully. The current census retains 1,695 sites: four verified
 property operations, ten transport exceptions, and 1,681 unsupported/unverified
 domain sites.
+
+Review remediation adds four further real-Postgres cases (eight property tests
+passing): triage invoice preservation and atomic billing-contention rollback,
+manual/IB busy outcome classification through the production error handler,
+the preferences-before-customer lock order, and primary eligibility for rental,
+commercial, seasonal, vacant and incomplete properties. The affected five server
+unit suites pass 74 tests; the property panel passes 14 rendered tests. The build,
+brand check and census pass. Desktop/mobile browser runs also exercise an
+ineligible property becoming eligible after an occupancy edit.
 
 The local preview is `http://127.0.0.1:5292/admin/customers` while the isolated
 harness runs. Vite must run from `client/`, with its explicit proxy pointing to
