@@ -259,7 +259,9 @@ export default function TechHomePage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Route failed to load (${res.status})`);
-      setSchedule(scheduleRowsFromResponse(data).map((service) => ({ ...service, visitCloseoutEnabled: data.visitCloseout === true })));
+      setSchedule(scheduleRowsFromResponse(data).map((service) => ({
+        ...service, visitCloseoutEnabled: service.visitCloseoutEnabled === true || data.visitCloseout === true,
+      })));
       setRainChance(typeof data.rainChance === 'number' ? data.rainChance : null);
     } catch (err) {
       console.error('Failed to fetch schedule:', err);
