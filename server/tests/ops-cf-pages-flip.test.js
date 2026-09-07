@@ -2,19 +2,26 @@
  * ops/agents/cf-pages-flip.js — the env-flip safety contract (Codex r1 on
  * #4038): only { PUBLIC_*: string } maps, never a secret_text target, the
  * redeploy is a RETRY of the live production deployment (never the branch
- * head), and the env change is rolled back when the deployment cannot be
- * created, lands on another commit, or fails. Cloudflare is a fake fetch.
+ * head), a newer in-flight production build is refused, the deployment is
+ * followed to a TERMINAL state (soft timeout only warns; hard ceiling deletes
+ * best-effort + tells the operator to verify), and the env change is rolled
+ * back when the deployment cannot be created, lands on another commit, or
+ * fails — never while it is still running. Cloudflare is a fake fetch.
  */
 const path = require('path');
 const flip = require(path.resolve(__dirname, '../../ops/agents/cf-pages-flip.js'));
 
-function fakeCloudflare({ liveCommit = 'abc123', retryCommit = 'abc123', retryFails = false, finalStatus = 'success' } = {}) {
+function fakeCloudflare({ liveCommit = 'abc123', retryCommit = 'abc123', retryFails = false, finalStatus = 'success', statuses = null, newerBuilding = false } = {}) {
   const calls = [];
   const project = {
     name: 'hub', production_branch: 'main',
     deployment_configs: { production: { env_vars: { PUBLIC_EXISTING: { type: 'plain_text', value: 'old' }, PUBLIC_SECRETISH: { type: 'secret_text', value: 'x' } } } },
     canonical_deployment: { id: 'dep_live', latest_stage: { name: 'deploy', status: 'success' }, deployment_trigger: { metadata: { commit_hash: liveCommit } } },
+    latest_deployment: newerBuilding
+      ? { id: 'dep_newer', environment: 'production', latest_stage: { name: 'build', status: 'active' }, deployment_trigger: { metadata: { commit_hash: 'fff999' } } }
+      : { id: 'dep_live', environment: 'production', latest_stage: { name: 'deploy', status: 'success' }, deployment_trigger: { metadata: { commit_hash: liveCommit } } },
   };
+  let polls = 0;
   const fetchImpl = async (url, init = {}) => {
     const method = init.method || 'GET';
     const p = url.replace(/^.*\/pages\/projects/, '');
@@ -26,7 +33,12 @@ function fakeCloudflare({ liveCommit = 'abc123', retryCommit = 'abc123', retryFa
       if (retryFails) return { json: async () => ({ success: false, errors: [{ message: 'retry refused' }] }) };
       return ok({ id: 'dep_new', deployment_trigger: { metadata: { commit_hash: retryCommit } } });
     }
-    if (method === 'GET' && p === '/hub/deployments/dep_new') return ok({ id: 'dep_new', url: 'https://x', latest_stage: { name: 'deploy', status: finalStatus } });
+    if (method === 'GET' && p === '/hub/deployments/dep_new') {
+      const st = statuses ? statuses[Math.min(polls, statuses.length - 1)] : finalStatus;
+      polls += 1;
+      return ok({ id: 'dep_new', url: 'https://x', latest_stage: { name: 'deploy', status: st } });
+    }
+    if (method === 'DELETE' && p.startsWith('/hub/deployments/dep_new')) return ok({});
     return { json: async () => ({ success: false, errors: [{ message: 'unexpected ' + method + ' ' + p }] }) };
   };
   const cf = flip.makeClient({ token: 't', account: 'a', fetchImpl });
@@ -73,13 +85,53 @@ describe('applyAndDeploy', () => {
     expect(patches(calls)[1]).toEqual({ PUBLIC_NEW: null });
   });
 
-  test('deployment never finishes → timeout → rolled back', async () => {
+  test('soft timeout only warns — the deployment is followed to its terminal state (success = keep env, no rollback)', async () => {
+    // active for 4 polls (past the soft timeout), then success.
+    const { cf, calls } = fakeCloudflare({ statuses: ['active', 'active', 'active', 'active', 'success'] });
+    let now = 0;
+    const realNow = Date.now; Date.now = () => (now += 400);
+    const logs = [];
+    try {
+      const dep = await flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v' }, { log: (...a) => logs.push(a.join(' ')), wait: (c, p, id, o) => flip.waitForDeployment(c, p, id, { ...o, timeoutMs: 1000, hardCeilingMs: 100000, pollMs: 1, sleep: async () => {} }) });
+      expect(dep.id).toBe('dep_new');
+    } finally { Date.now = realNow; }
+    expect(patches(calls)).toHaveLength(1);
+    expect(logs.some((l) => /following it to a terminal state/.test(l))).toBe(true);
+  });
+
+  test('soft timeout then failure → rolled back (never before the terminal state)', async () => {
+    const { cf, calls } = fakeCloudflare({ statuses: ['active', 'active', 'active', 'failure'] });
+    let now = 0;
+    const realNow = Date.now; Date.now = () => (now += 400);
+    try {
+      await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v' }, { ...quiet, wait: (c, p, id, o) => flip.waitForDeployment(c, p, id, { ...o, timeoutMs: 1000, hardCeilingMs: 100000, pollMs: 1, sleep: async () => {} }) })).rejects.toThrow(/failure/);
+    } finally { Date.now = realNow; }
+    expect(patches(calls)[1]).toEqual({ PUBLIC_NEW: null });
+  });
+
+  test('hard ceiling → deployment deleted best-effort, env rolled back, operator told to verify', async () => {
     const { cf, calls } = fakeCloudflare({ finalStatus: 'active' });
     let now = 0;
     const realNow = Date.now; Date.now = () => (now += 500);
     try {
-      await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v' }, { ...quiet, wait: (c, p, id) => flip.waitForDeployment(c, p, id, { timeoutMs: 1000, pollMs: 1, sleep: async () => {} }) })).rejects.toThrow(/after 0 min/);
+      await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v' }, { ...quiet, wait: (c, p, id, o) => flip.waitForDeployment(c, p, id, { ...o, timeoutMs: 500, hardCeilingMs: 2000, pollMs: 1, sleep: async () => {} }) })).rejects.toThrow(/VERIFY in the Cloudflare dashboard/);
     } finally { Date.now = realNow; }
+    expect(calls.some((c) => c.method === 'DELETE' && c.p.startsWith('/hub/deployments/dep_new'))).toBe(true);
+    expect(patches(calls)[1]).toEqual({ PUBLIC_NEW: null });
+  });
+
+  test('a newer production deployment still building → refused before any write', async () => {
+    const { cf, calls } = fakeCloudflare({ newerBuilding: true });
+    await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v' }, quiet)).rejects.toThrow(/newer production deployment \(dep_newer/);
+    expect(patches(calls)).toEqual([]);
+  });
+
+  test('transient poll errors are retried, three in a row give up with a verify message', async () => {
+    const { cf, calls } = fakeCloudflare();
+    let failing = 0;
+    const flaky = async (path, init) => { if (!init && path.includes('/deployments/dep_new')) { failing += 1; throw new Error('ETIMEDOUT'); } return cf(path, init); };
+    await expect(flip.applyAndDeploy(flaky, 'hub', { PUBLIC_NEW: 'v' }, { ...quiet, wait: (c, p, id, o) => flip.waitForDeployment(c, p, id, { ...o, pollMs: 1, sleep: async () => {} }) })).rejects.toThrow(/lost track of deployment dep_new \(3 poll failures/);
+    expect(failing).toBe(3);
     expect(patches(calls)[1]).toEqual({ PUBLIC_NEW: null });
   });
 

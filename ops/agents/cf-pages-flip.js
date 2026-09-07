@@ -9,12 +9,15 @@
 // the target project's current production env KEYS (values never printed —
 // KEY/TOKEN-named values show a prefix only), the live deploy, and exactly
 // which keys the vars file would add or overwrite.
-// --execute PATCHes the production env (other keys untouched), retries the
-// LIVE production deployment (the canonical one — never the branch head, so
-// an env flip can never ship unreleased code), waits for it to finish, and
-// ROLLS THE ENV BACK to the previous values if the deployment cannot be
-// created, lands on a different commit, fails, or times out — a pending env
-// change must not lie in wait for the next unrelated deploy.
+// --execute refuses while a newer production build is still in flight (it
+// would race the flip), PATCHes the production env (other keys untouched),
+// retries the LIVE production deployment (the canonical one — never the
+// branch head, so an env flip can never ship unreleased code), follows it to
+// a terminal state, and ROLLS THE ENV BACK to the previous values if the
+// deployment cannot be created, lands on a different commit, or fails — a
+// pending env change must not lie in wait for the next unrelated deploy. A
+// build that outlives the 60-minute hard ceiling is deleted best-effort
+// before the rollback and the operator is told to verify in the dashboard.
 //
 // Scope guard: only a { PUBLIC_*: string } map is accepted, and a target that
 // already exists as a non-plain_text variable is refused before anything is
@@ -36,8 +39,15 @@
 // — promoted here on its third use (README promotion rule).
 const fs = require('fs');
 
+// Soft timeout: after this we say so, but keep following the deployment —
+// it has already snapshotted the new env, so abandoning it would let it
+// activate the flip AFTER we reported a rollback. Hard ceiling: give up,
+// try to delete the deployment, roll the env back, and tell the operator to
+// verify in the dashboard.
 const DEPLOY_TIMEOUT_MS = 20 * 60 * 1000;
+const DEPLOY_HARD_CEILING_MS = 60 * 60 * 1000;
 const POLL_MS = 20 * 1000;
+const TERMINAL = new Set(['success', 'failure', 'canceled']);
 
 function makeClient({ token, account, fetchImpl = fetch }) {
   const base = `https://api.cloudflare.com/client/v4/accounts/${account}/pages/projects`;
@@ -75,15 +85,40 @@ function deployCommit(dep) {
   return dep && dep.deployment_trigger && dep.deployment_trigger.metadata && dep.deployment_trigger.metadata.commit_hash;
 }
 
-async function waitForDeployment(cf, project, id, { timeoutMs = DEPLOY_TIMEOUT_MS, pollMs = POLL_MS, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
-  const deadline = Date.now() + timeoutMs;
+function isInProgress(dep) {
+  const status = dep && dep.latest_stage && dep.latest_stage.status;
+  return Boolean(dep && dep.id) && !TERMINAL.has(status);
+}
+
+// Follows a deployment to a TERMINAL state. A transient poll error is retried
+// (three in a row is a failure); the soft timeout only logs. Past the hard
+// ceiling the deployment is deleted best-effort and the error says the
+// operator must verify in the dashboard, because it may still complete.
+async function waitForDeployment(cf, project, id, { timeoutMs = DEPLOY_TIMEOUT_MS, hardCeilingMs = DEPLOY_HARD_CEILING_MS, pollMs = POLL_MS, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), log = console.log } = {}) {
+  const start = Date.now();
+  let warned = false;
+  let pollErrors = 0;
   for (;;) {
-    const dep = await cf(`/${project}/deployments/${id}`);
+    let dep;
+    try {
+      dep = await cf(`/${project}/deployments/${id}`);
+      pollErrors = 0;
+    } catch (e) {
+      pollErrors += 1;
+      if (pollErrors >= 3) throw new Error(`lost track of deployment ${id} (3 poll failures: ${e.message}) — verify it in the Cloudflare dashboard`);
+      await sleep(pollMs);
+      continue;
+    }
     const status = dep.latest_stage && dep.latest_stage.status;
     const stage = dep.latest_stage && dep.latest_stage.name;
     if (stage === 'deploy' && status === 'success') return dep;
     if (status === 'failure' || status === 'canceled') throw new Error(`deployment ${id} ${status} at stage ${stage}`);
-    if (Date.now() > deadline) throw new Error(`deployment ${id} still ${stage}/${status} after ${Math.round(timeoutMs / 60000)} min`);
+    const elapsed = Date.now() - start;
+    if (elapsed > hardCeilingMs) {
+      try { await cf(`/${project}/deployments/${id}?force=true`, { method: 'DELETE' }); log(`deleted deployment ${id} (best effort)`); } catch (e) { log(`could not delete deployment ${id}: ${e.message}`); }
+      throw new Error(`deployment ${id} still ${stage}/${status} after ${Math.round(hardCeilingMs / 60000)} min — deleted best-effort; VERIFY in the Cloudflare dashboard that it did not go live with the flipped env`);
+    }
+    if (!warned && elapsed > timeoutMs) { warned = true; log(`deployment ${id} still ${stage}/${status} after ${Math.round(timeoutMs / 60000)} min — following it to a terminal state (hard ceiling ${Math.round(hardCeilingMs / 60000)} min)`); }
     await sleep(pollMs);
   }
 }
@@ -97,6 +132,13 @@ async function applyAndDeploy(cf, project, vars, { log = console.log, wait = wai
   if (refusal) throw new Error(`refused: ${refusal}`);
   const live = p.canonical_deployment;
   if (!live || !live.id) throw new Error('refused: project has no live production deployment to redeploy');
+  // A newer production build in flight would race the retry: it could end up
+  // replacing the flip with its older env snapshot, or the retry could roll
+  // production back under it. Refuse and let it finish first.
+  const newest = p.latest_deployment;
+  if (newest && newest.id !== live.id && (newest.environment || 'production') === 'production' && isInProgress(newest)) {
+    throw new Error(`refused: a newer production deployment (${newest.id}, commit ${deployCommit(newest) || '?'}, ${newest.latest_stage && newest.latest_stage.name}/${newest.latest_stage && newest.latest_stage.status}) is still building — wait for it, then re-run`);
+  }
   const liveCommit = deployCommit(live);
   const previous = rollbackFragment(vars, prodEnv);
   const env_vars = {};
@@ -115,7 +157,7 @@ async function applyAndDeploy(cf, project, vars, { log = console.log, wait = wai
       throw new Error(`new deployment ${dep.id} is on commit ${deployCommit(dep)}, not the live ${liveCommit}`);
     }
     log('deployment created:', dep.id, 'commit=', deployCommit(dep));
-    dep = await wait(cf, project, dep.id);
+    dep = await wait(cf, project, dep.id, { log });
   } catch (e) {
     await rollback(e.message);
     throw e;
@@ -151,7 +193,7 @@ async function main(argv, env) {
   await applyAndDeploy(cf, project, vars);
 }
 
-module.exports = { makeClient, refusalReason, rollbackFragment, waitForDeployment, applyAndDeploy, deployCommit };
+module.exports = { makeClient, refusalReason, rollbackFragment, waitForDeployment, applyAndDeploy, deployCommit, isInProgress };
 
 if (require.main === module) {
   main(process.argv.slice(2), process.env).catch((e) => { console.error('ERROR', e.message); process.exit(1); });
