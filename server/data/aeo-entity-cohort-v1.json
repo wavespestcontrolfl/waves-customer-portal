@@ -105,7 +105,7 @@
     },
     "franchise": {
       "label": "Calls Waves a franchise",
-      "pattern": "\\ba franchise\\b|franchise (?:of|location|owner|brand)|\\bfranchisee\\b|\\bfranchised\\b"
+      "pattern": "\\ba franchise\\b|franchise (?:of|location|owner|brand)|\\bfranchisee\\b|\\bfranchised\\b|(?:^|\\n)\\s*franchise(?:d|\\s+(?:status|business|location))?\\??\\s*:\\s*(?:yes|true|y)\\b"
     },
     "fumigation_offered": {
       "label": "Offers fumigation",
@@ -113,8 +113,8 @@
     },
     "out_of_footprint_hq": {
       "label": "Places the headquarters outside SWFL",
-      "pattern": "\\b(?:based|headquartered|located|headquarters|home office|hq)\\s+(?:in|out of)\\s+((?:the\\s+)?[^.,;:!?\\n()]{1,40}?)(?=\\s*(?:[.,;:!?\\n()]|$)|\\s+(?:and|or|but|where|which|that|since|with|serving|servicing|near)\\b)",
-      "reject_pattern": "lakewood|bradenton|sarasota|venice|parrish|palmetto|north port|port charlotte|charlotte county|charlotte harbor|manatee|ellenton|nokomis|osprey|englewood|myakka|(?:southwest|south-west|sw)\\s*(?:florida|fl)\\b|swfl|suncoast|gulf coast|^(?:the\\s+)?(?:state of\\s+)?(?:florida|fl|us|usa|u\\.s\\.a?\\.?|united states|america)$"
+      "pattern": "\\b(?:based|headquartered|located|headquarters|home office|hq)\\s+(?:in|out of)\\s+((?:the\\s+)?[^.,;:!?\\n()]{1,40}?)(?=\\s*(?:[.,;:!?\\n()]|$)|\\s+(?:and|or|but|where|which|that|since|with|serving|servicing|near)\\b)|(?:^|\\n)\\s*(?:headquarters|headquartered|hq|home office|based in|based|location|head office|main office)\\s*:\\s*((?:the\\s+)?[^.,;:!?\\n()]{1,40}?)(?=\\s*(?:[.,;:!?\\n()]|$)|\\s+(?:and|or|but|where|which|that|since|with|serving|servicing|near)\\b)",
+      "reject_pattern": "lakewood|bradenton|sarasota|venice|parrish|palmetto|north port|port charlotte|charlotte county|charlotte harbor|manatee|ellenton|nokomis|osprey|englewood|myakka|(?:southwest|south-west|sw)\\s*(?:florida|fl)\\b|swfl|suncoast|gulf coast|^(?:the\\s+)?(?:state of\\s+)?(?:florida|fl|us|usa|u\\.s\\.a?\\.?|united states|america)$|^(?:unknown|unclear|unspecified|undisclosed|not (?:listed|stated|disclosed|specified|available|provided|found)|n/?a|none|tbd)$"
     },
     "damage_repair_coverage": {
       "label": "Infers damage-repair coverage",

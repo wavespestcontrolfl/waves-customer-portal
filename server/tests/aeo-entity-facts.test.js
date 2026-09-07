@@ -289,6 +289,18 @@ test('ownership in copular and label-value form is a wrong owner unless it names
   expect(score('E1', 'Otto Orkin is the founder of Orkin. Adam Benetti is the founder and owner of Waves.').forbidden.wrong_founder).toBe(false);
 });
 
+test('label-value answers carry forbidden claims too, in prose and table rows', () => {
+  expect(score('E8', 'Franchise: Yes').forbidden.franchise).toBe(true);
+  expect(score('E8', '| Franchise | Yes |').forbidden.franchise).toBe(true);
+  expect(score('E8', 'Franchise: No').forbidden.franchise).toBe(false);
+  expect(score('E8', 'Franchise status: independent').forbidden.franchise).toBe(false);
+  expect(score('E5', 'Headquarters: Tampa, Florida').forbidden.out_of_footprint_hq).toBe(true);
+  expect(score('E5', '| Headquarters | Tampa, Florida |').forbidden.out_of_footprint_hq).toBe(true);
+  expect(score('E5', 'Headquarters: Lakewood Ranch, FL')).toMatchObject({ expected: { hq_lakewood_ranch: true }, forbidden: { out_of_footprint_hq: false } });
+  expect(score('E5', 'Location: Southwest Florida').forbidden.out_of_footprint_hq).toBe(false);
+  expect(score('E5', 'HQ: unknown').forbidden.out_of_footprint_hq).toBe(false);
+});
+
 test('franchise: a negated mention is fine, an affirmative one is a wrong claim', () => {
   expect(score('E8', 'Waves is independently owned and not a franchise.')).toMatchObject({ expected: { independent: true }, forbidden: { franchise: false }, wrong: 0 });
   expect(score('E8', 'Waves Pest Control operates as a franchise of a national brand.')).toMatchObject({ forbidden: { franchise: true }, wrong: 1 });
@@ -366,14 +378,21 @@ test('the prober stores a fact score for cohort questions and null for everythin
   const prober = new LLMMentionProber();
   const e4 = byId('E4').query;
   jest.spyOn(prober, 'getQueries').mockResolvedValue([{ id: 1, query: e4 }, { id: 2, query: benchmark.questions[0].query }]);
-  Object.defineProperty(prober, 'providers', { value: { chatgpt: async () => ({ text: 'Waves Pest Control was founded in 2024.', model: 'test' }) } });
+  const longAnswer = `Waves Pest Control was founded in 2024. ${'Background. '.repeat(700)}It was not founded in 2019.`;
+  Object.defineProperty(prober, 'providers', { value: { chatgpt: async () => ({ text: longAnswer, model: 'test' }) } });
   const inserted = [];
   db.mockReturnValue({
     where: () => ({ select: async () => [] }),
     insert: payload => { inserted.push(payload); return { onConflict: () => ({ ignore: async () => ({ rowCount: 1 }) }) }; },
   });
   await prober.runDaily();
-  const byQuery = Object.fromEntries(inserted.map(p => [p.query, p.entity_facts]));
-  expect(JSON.parse(byQuery[e4])).toMatchObject({ id: 'E4', right: 1, wrong: 0 });
-  expect(byQuery[benchmark.questions[0].query]).toBeNull();
+  const byQuery = Object.fromEntries(inserted.map(p => [p.query, p]));
+  expect(JSON.parse(byQuery[e4].entity_facts)).toMatchObject({ id: 'E4', right: 1, wrong: 0 });
+  expect(byQuery[benchmark.questions[0].query].entity_facts).toBeNull();
+  // The scored answer is stored whole so rescoring the row reproduces the
+  // score; non-cohort answers keep the 8,000-character cap.
+  expect(longAnswer.length).toBeGreaterThan(8000);
+  expect(byQuery[e4].response_raw).toBe(longAnswer);
+  expect(scoreEntityAnswer(e4, byQuery[e4].response_raw)).toEqual(JSON.parse(byQuery[e4].entity_facts));
+  expect(byQuery[benchmark.questions[0].query].response_raw).toHaveLength(8000);
 });

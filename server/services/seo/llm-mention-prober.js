@@ -462,7 +462,10 @@ class LLMMentionProber {
         ? await this.classifySentiment(parsed.mentionContext)
         : 'neutral';
       // Deterministic fact score for entity-cohort questions; null elsewhere.
+      // The scored text is persisted whole so the stored answer reproduces
+      // the score; other answers keep the storage cap.
       const entityFacts = parsed.answerAvailable ? scoreEntityAnswer(qrow.query, probe.text) : null;
+      const responseRaw = entityFacts ? (probe.text || '') : (probe.text || '').substring(0, 8000);
       if (parsed.wavesMentioned) wavesHits++;
 
       // onConflict ignore is the race backstop: two overlapping runs (e.g.
@@ -474,7 +477,7 @@ class LLMMentionProber {
         batch_id: batchId,
         llm_platform: platform,
         query: qrow.query,
-        response_raw: (probe.text || '').substring(0, 8000),
+        response_raw: responseRaw,
         mention_context: parsed.mentionContext,
         waves_mentioned: parsed.wavesMentioned,
         competitors_mentioned: JSON.stringify(parsed.competitors),
