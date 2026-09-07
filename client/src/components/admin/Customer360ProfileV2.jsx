@@ -18,7 +18,7 @@
  *   - alert-fg reserved for: overdue balance, expiring card, refund/failed
  *     payments, at_risk/churned stage, health score < 40
  *   - Tier collapses to neutral Badge (no purple/gold/teal)
- *   - HealthCircle/RadarChart recolored to zinc; alert tier only when low
+ *   - Operational summary uses recorded billing and communication facts
  *
  * Audit focus:
  * - Six tabs each fetch their own data on mount/switch — confirm we
@@ -75,6 +75,7 @@ import {
 import { CustomerActionBar, customerEstimateHref } from "./StickyActionBar";
 import Customer360Sections, { CUSTOMER_360_SECTIONS, CUSTOMER_WORKSPACE_SECTIONS } from "./Customer360Sections";
 import Customer360Activity from "./Customer360Activity";
+import Customer360Summary from "./Customer360Summary";
 import Customer360Estimates from "./Customer360Estimates";
 import useUnreadConversations from "../../hooks/useUnreadConversations";
 import { formatETDateOnly } from "../../lib/timezone";
@@ -90,6 +91,9 @@ import {
   Input,
   Select,
   Switch,
+  Sheet,
+  SheetHeader,
+  SheetBody,
   Table,
   THead,
   TBody,
@@ -181,7 +185,8 @@ function fmtDate(d) {
 }
 
 function fmtCurrency(v) {
-  return "$" + parseFloat(v || 0).toFixed(2);
+  if (v == null || !Number.isFinite(Number(v))) return "—";
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(Number(v));
 }
 function dateInputValue(value) {
   if (!value) return "";
@@ -545,82 +550,7 @@ function HealthCircle({ score }) {
   );
 }
 
-// ─── Radar Chart (monochrome) ────────────────────────────────────
-function RadarChart({ data }) {
-  if (!data || data.length < 3) return null;
-  const size = 160,
-    cx = size / 2,
-    cy = size / 2,
-    maxR = 60;
-  const n = data.length;
-  const angleStep = (2 * Math.PI) / n;
-  const pointAt = (i, pct) => {
-    const a = -Math.PI / 2 + i * angleStep;
-    return [
-      cx + maxR * (pct / 100) * Math.cos(a),
-      cy + maxR * (pct / 100) * Math.sin(a),
-    ];
-  };
-  const gridLevels = [25, 50, 75, 100];
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox={`0 0 ${size} ${size}`}
-      className="block mx-auto"
-      // Let axis labels (e.g. "Engagement") paint into the centered side
-      // margin instead of being clipped by the 160px SVG box.
-      style={{ overflow: "visible" }}
-    >
-      {gridLevels.map((lv) => (
-        <polygon
-          key={lv}
-          points={data.map((_, i) => pointAt(i, lv).join(",")).join(" ")}
-          fill="none"
-          stroke="#E4E4E7"
-          strokeWidth={0.5}
-        />
-      ))}
-      {data.map((_, i) => {
-        const [x, y] = pointAt(i, 100);
-        return (
-          <line
-            key={i}
-            x1={cx}
-            y1={cy}
-            x2={x}
-            y2={y}
-            stroke="#E4E4E7"
-            strokeWidth={0.5}
-          />
-        );
-      })}
-      <polygon
-        points={data.map((d, i) => pointAt(i, d.value).join(",")).join(" ")}
-        fill="rgba(24,24,27,0.10)"
-        stroke="#18181B"
-        strokeWidth={1.25}
-      />
-      {data.map((d, i) => {
-        const [x, y] = pointAt(i, 115);
-        return (
-          <text
-            key={i}
-            x={x}
-            y={y}
-            textAnchor="middle"
-            fill="#71717A"
-            fontSize={9}
-          >
-            {d.label}
-          </text>
-        );
-      })}
-    </svg>
-  );
-}
 
-// ─── Tier badge (color-coded per metal) ─────────────────────────
 const TIER_STYLES = {
   Platinum: { backgroundColor: "#E5E7EB", color: "#1F2937" },
   Gold: { backgroundColor: "#D4A017", color: "#FFFFFF" },
@@ -1222,20 +1152,20 @@ function ElectronicAuthorizationContractV2({
                     <div className="c360-contract-record-signed"><span className="c360-contract-field-label">Signed</span>
                       {contract.signedAt ? fmtDate(contract.signedAt) : "—"}
                     </div>
-                    <div className="c360-contract-record-delivery">
+                    <div className="c360-contract-record-delivery"><span className="c360-contract-field-label">Recorded events</span>
                       <div className="flex flex-wrap gap-1">
-                        {contractDeliverySteps(contract).map((step) => (
+                        {contractDeliverySteps(contract).filter((step) => step.done).map((step) => (
                           <span
                             key={step.key}
                             className={cn(
                               "h-5 px-1.5 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label",
                               step.done
-                                ? "bg-zinc-900 border-zinc-900 text-white"
+                                ? "bg-zinc-50 border-zinc-200 text-zinc-900"
                                 : "bg-zinc-50 border-zinc-200 text-ink-secondary",
                             )}
                             title={step.at ? fmtDate(step.at) : ""}
                           >
-                            {step.label}
+                            {step.label}{step.at ? ` · ${fmtDate(step.at)}` : " · Date not recorded"}
                           </span>
                         ))}
                       </div>
@@ -2767,6 +2697,7 @@ function PropertyZonesPanel({ customerId }) {
           {open ? "Hide" : "Mark treated areas"}
         </Button>
       </div>
+      {!open && <p className="text-14 text-ink-secondary mt-2">Open the map to review saved coverage or mark treated areas.</p>}
       {open && (
         <div className="mt-3">
           {loading && (
@@ -3687,7 +3618,7 @@ function AccountCreditPanelV2({ customerId, customerName, canEdit = false, onCha
   );
 }
 
-function AnnualPrepayPanelV2({ customer, activeTerm, onOpen, onSendInvoice }) {
+function AnnualPrepayPanelV2({ activeTerm, onOpen, onSendInvoice }) {
   return (
     <Card className="mb-5">
       <CardBody className="p-4">
@@ -3724,7 +3655,7 @@ function AnnualPrepayPanelV2({ customer, activeTerm, onOpen, onSendInvoice }) {
           </div>
         </div>
         <div className="text-11 text-ink-secondary mt-2">
-          Default amount: {fmtCurrency(customer?.annualValue || (Number(customer?.monthlyRate || 0) * 12))}
+          Send an invoice to request payment, or record a payment already collected.
         </div>
       </CardBody>
     </Card>
@@ -5137,7 +5068,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
-function CustomerWorkspaceHeader({ c, isAdmin, unreadConversations, onEdit, onTab, menuOpen, setMenuOpen, menuRef }) {
+function CustomerWorkspaceHeader({ c, isAdmin, unreadConversations, onEdit, onTab, onMessage, onSendLink, menuOpen, setMenuOpen, menuRef }) {
   const menuId = useId();
   const name = [c.firstName, c.lastName].filter(Boolean).join(" ").trim() || "Unnamed customer";
   const address = c.address ? formatAddress(c.address) : "";
@@ -5149,7 +5080,9 @@ function CustomerWorkspaceHeader({ c, isAdmin, unreadConversations, onEdit, onTa
   const actions = [
     { label: "Book appointment", href: `/admin/schedule?customer=${c.id}` },
     { label: "Invoices", href: `/admin/invoices?customer=${c.id}` },
-    { label: "Notes & interactions", onClick: () => onTab("comms") },
+    { label: "Activity & notes", onClick: () => onTab("comms") },
+    ...(c.phone && isAdmin ? [{ label: "Send link", onClick: onSendLink }] : []),
+    ...(isAdmin ? [{ label: "Edit customer", onClick: onEdit }] : []),
   ];
   return <header className="c360-workspace-header">
     <div className="c360-workspace-identity">
@@ -5159,9 +5092,8 @@ function CustomerWorkspaceHeader({ c, isAdmin, unreadConversations, onEdit, onTa
       </div>
     </div>
     <div className="c360-workspace-actions">
-      {c.phone && <Button variant="secondary" className="c360-message-action" onClick={() => onTab("comms")}><MessageSquare size={16} />Message{unreadConversations > 0 && <span className="c360-unread-count" aria-label={`${unreadConversations} unread conversations`}>{unreadConversations}</span>}</Button>}
+      {c.phone && <Button className="c360-message-action" onClick={onMessage}><MessageSquare size={16} />Message{unreadConversations > 0 && <span className="c360-unread-count" aria-label={`${unreadConversations} unread conversations`}>{unreadConversations}</span>}</Button>}
       <a className="u-focus-ring" href={customerEstimateHref({ ...c, address })}><FileText size={16} />Create estimate</a>
-      {isAdmin && <Button variant="secondary" aria-label="Edit customer" onClick={onEdit}><PenLine size={16} />Edit</Button>}
       <div className="c360-more-action" ref={menuRef} onKeyDown={(event) => { if (event.key === "Escape" && menuOpen) { event.stopPropagation(); setMenuOpen(false); menuRef.current?.querySelector("button")?.focus(); } }}>
         <Button variant="ghost" className="c360-icon-button" aria-label="More customer actions" aria-expanded={menuOpen} aria-controls={menuId} onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); setMenuOpen((open) => !open); }}><MoreHorizontal size={20} /></Button>
         {menuOpen && <div id={menuId} className="c360-workspace-action-menu">{actions.map((action) => action.href ? <a key={action.label} className="u-focus-ring" href={action.href}>{action.label}</a> : <button key={action.label} type="button" className="u-focus-ring" onClick={() => { menuRef.current?.querySelector("button")?.focus(); setMenuOpen(false); action.onClick(); }}>{action.label}</button>)}</div>}
@@ -5193,6 +5125,7 @@ export default function Customer360ProfileV2({
   const [timelineFilter, setTimelineFilter] = useState("all");
   const [timelineSearch, setTimelineSearch] = useState("");
   const [timeline, setTimeline] = useState([]);
+  const [timelineMissingSources, setTimelineMissingSources] = useState([]);
   const [timelineError, setTimelineError] = useState(false);
   const [timelineRetrying, setTimelineRetrying] = useState(false);
   const [comms, setComms] = useState([]);
@@ -5203,6 +5136,10 @@ export default function Customer360ProfileV2({
   const [smsReply, setSmsReply] = useState("");
   const [sendingSms, setSendingSms] = useState(false);
   const [smsErr, setSmsErr] = useState("");
+  const [messageOpen, setMessageOpen] = useState(false);
+  const [messageOpened, setMessageOpened] = useState(false);
+  const [linkRequest, setLinkRequest] = useState(0);
+  const openMessages = () => { if (commsErr) setCommsLoaded(false); setMessageOpened(true); setMessageOpen(true); };
   const [menuOpen, setMenuOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [annualPrepayOpen, setAnnualPrepayOpen] = useState(false);
@@ -5231,6 +5168,7 @@ export default function Customer360ProfileV2({
   const [newPayerError, setNewPayerError] = useState("");
   const [newPayerNotice, setNewPayerNotice] = useState("");
   const panelRef = useRef(null);
+  const [headerPast, setHeaderPast] = useState(false);
   const editModalRef = useModalFocus(editOpen, () => { if (!savingEdit) setEditOpen(false); });
   const tabsAnchorRef = useRef(null);
   const profileContentId = useId();
@@ -5428,6 +5366,9 @@ export default function Customer360ProfileV2({
   };
 
   useEffect(() => {
+    setMessageOpen(false);
+    setMessageOpened(false);
+    setLinkRequest(0);
     commsSeqRef.current += 1;
     if (commsAbortRef.current) commsAbortRef.current.abort();
     const seq = profileSeqRef.current + 1;
@@ -5465,6 +5406,7 @@ export default function Customer360ProfileV2({
         if (seq !== profileSeqRef.current) return;
         setData(detail);
         setTimeline(tl?.timeline || []);
+        setTimelineMissingSources(tl?.missingSources || []);
         setTimelineError(tl === null);
         setComms([]);
         setCommsLoaded(false);
@@ -5488,6 +5430,7 @@ export default function Customer360ProfileV2({
       const result = await adminFetch(`/admin/customers/${customerId}/timeline`, { signal });
       if (signal.aborted || seq !== profileSeqRef.current) return;
       setTimeline(result.timeline || []);
+      setTimelineMissingSources(result.missingSources || []);
       setTimelineError(false);
     } catch {
       // Keep the loaded profile and recovery action when history is still unavailable.
@@ -5497,7 +5440,7 @@ export default function Customer360ProfileV2({
   };
 
   useEffect(() => {
-    if (activeTab !== "comms" || commsLoaded || commsLoading) return;
+    if (!isAdmin || (!embedded && activeTab !== "comms") || commsLoaded || commsLoading) return;
     const seq = commsSeqRef.current + 1;
     commsSeqRef.current = seq;
     if (commsAbortRef.current) commsAbortRef.current.abort();
@@ -5521,7 +5464,7 @@ export default function Customer360ProfileV2({
       .finally(() => {
         if (seq === commsSeqRef.current) setCommsLoading(false);
       });
-  }, [activeTab, customerId, commsLoaded, commsLoading]);
+  }, [activeTab, customerId, commsLoaded, commsLoading, embedded, isAdmin]);
 
   useEffect(
     () => () => {
@@ -5573,8 +5516,25 @@ export default function Customer360ProfileV2({
     setActiveTab(next);
     requestAnimationFrame(() => {
       if (panelRef.current && tabsAnchorRef.current) {
-        panelRef.current.scrollTo({ top: tabsAnchorRef.current.offsetTop, behavior: "instant" });
+        panelRef.current.scrollTo({ top: tabsAnchorRef.current.offsetTop + 1, behavior: "instant" });
       }
+    });
+  };
+
+  useEffect(() => {
+    if (!embedded || loading || typeof IntersectionObserver === "undefined") return undefined;
+    const header = panelRef.current?.querySelector(".c360-workspace-header");
+    if (!header) return undefined;
+    const observer = new IntersectionObserver(([entry]) => setHeaderPast(entry.intersectionRatio === 0), { root: panelRef.current, threshold: 0 });
+    observer.observe(header);
+    return () => observer.disconnect();
+  }, [embedded, loading, data?.customer?.id]);
+
+  const viewServiceRecords = () => {
+    setActiveTab("comms");
+    requestAnimationFrame(() => {
+      const records = panelRef.current?.querySelector(".c360-service-records");
+      if (records) { records.open = true; records.scrollIntoView({ block: "start", behavior: "instant" }); }
     });
   };
 
@@ -5785,13 +5745,11 @@ export default function Customer360ProfileV2({
     setActiveTab("billing");
   };
 
-  const balanceOwed = invoices
-    .filter((i) => i.status !== "paid" && i.status !== "prepaid")
-    .reduce(
-      (s, i) =>
-        s + parseFloat(i.amount_due || 0) - parseFloat(i.amount_paid || 0),
-      0,
-    );
+  const balanceOwed = data.billingSummary?.complete ? data.billingSummary.openBalance : null;
+  const overdueBalance = data.billingSummary?.complete ? data.billingSummary.overdueBalance : null;
+  const hasLawnHistory = nutrientRows.length > 0 || compliance.some((row) => /fertiliz|herbicide/.test(row.category || "")) || [...services, ...scheduled].some((service) => /lawn|fertiliz|turf|shrub/i.test(service.service_type || ""));
+  const recipientRoutesDiffer = !!c.payerId || [c.serviceContactEmail, c.serviceContact2Email, c.serviceContact3Email, notificationPrefs.billing_email].filter(Boolean).some((email) => email.toLowerCase() !== (c.email || "").toLowerCase());
+  const recipientPrefsDirty = recipientPrefsDraft.billingContactName !== (notificationPrefs.billing_contact_name || "") || recipientPrefsDraft.billingEmail !== (notificationPrefs.billing_email || "");
   const today = todayDateInput();
   const inactiveNextServiceStatuses = new Set([
     "cancelled",
@@ -5847,7 +5805,7 @@ export default function Customer360ProfileV2({
     alerts.push({
       alert: true,
       label: "$",
-      text: `Overdue balance: ${fmtCurrency(balanceOwed)}`,
+      text: `Open balance: ${fmtCurrency(balanceOwed)}`,
     });
   if (expiringCard)
     alerts.push({
@@ -5882,40 +5840,6 @@ export default function Customer360ProfileV2({
             t.type === timelineFilter ||
             (timelineFilter === "notes" && t.type === "interaction"),
         );
-
-  const radarData = hs.risk_factors
-    ? [
-        { label: "Payment", value: 80 },
-        { label: "Engagement", value: 60 },
-        { label: "Service", value: 70 },
-        { label: "Satisfaction", value: 75 },
-        { label: "Tenure", value: 90 },
-        { label: "Revenue", value: 65 },
-      ]
-    : [
-        { label: "Payment", value: score ? Math.min(score + 10, 100) : 50 },
-        { label: "Engagement", value: score || 50 },
-        { label: "Service", value: score ? Math.min(score + 5, 100) : 50 },
-        { label: "Satisfaction", value: score ? Math.max(score - 5, 0) : 50 },
-        {
-          label: "Tenure",
-          value: c.memberSince
-            ? Math.min(
-                Math.floor(
-                  (Date.now() - new Date(c.memberSince)) / 86400000 / 3.65,
-                ),
-                100,
-              )
-            : 50,
-        },
-        {
-          label: "Revenue",
-          value:
-            c.lifetimeRevenue > 0
-              ? Math.min(Math.floor(c.lifetimeRevenue / 50), 100)
-              : 20,
-        },
-      ];
 
   const sendSms = async () => {
     if (sendingSms || !smsReply.trim() || !c.phone) return;
@@ -6018,7 +5942,7 @@ export default function Customer360ProfileV2({
                   <div className="grid grid-cols-2 gap-2 mb-3">
                     {" "}
                     <StatCardV2
-                      label="Balance Owed"
+                      label="Open balance"
                       value={fmtCurrency(balanceOwed)}
                       alert={balanceOwed > 0}
                     />{" "}
@@ -6114,13 +6038,13 @@ export default function Customer360ProfileV2({
                       )}
                     </div>
                   )}
-                  {isAdmin && (
+                  {isAdmin && !embedded && (
                     <Button
                       size="sm"
                       onClick={() => setAnnualPrepayOpen(true)}
                       className="mb-3"
                     >
-                      Record annual prepay
+                      Record prepay already collected
                     </Button>
                   )}
                   {Array.isArray(data.prepaidPlans) && data.prepaidPlans.length > 0 && (
@@ -6197,13 +6121,15 @@ export default function Customer360ProfileV2({
   const recipientDetails = (
     <div className="mt-4">
                 {" "}
-                <SectionTitle>Contacts &amp; Recipients</SectionTitle>{" "}
+                <SectionTitle>Contacts &amp; Recipients</SectionTitle>
+                <p className="text-14 text-ink-secondary">Account contact: {[c.firstName, c.lastName].filter(Boolean).join(" ")}{c.email ? ` · ${c.email}` : " · No email on file"}</p>
+                <details className="c360-recipient-overrides" open={recipientRoutesDiffer}><summary>View routing & override recipients</summary>
                 <div className="px-3 py-3 mb-3 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
                   <div className="text-10 uppercase tracking-label text-ink-tertiary mb-1">
                     Default Bill-To (third-party payer)
                   </div>
                   <div className="flex items-center gap-2 flex-wrap">
-                    <select
+                    <Select aria-label="Default bill-to"
                       value={c.payerId ? String(c.payerId) : ""}
                       disabled={payerSaving || !isAdmin}
                       onChange={(e) => handlePayerSelect(e.target.value)}
@@ -6219,7 +6145,7 @@ export default function Customer360ProfileV2({
                         </option>
                       ))}
                       {isAdmin && <option value="__new__">＋ New payer…</option>}
-                    </select>
+                    </Select>
                     {payerSaving && (
                       <span className="text-12 text-ink-tertiary">Saving…</span>
                     )}
@@ -6405,10 +6331,10 @@ export default function Customer360ProfileV2({
                   </div>
                   <Button
                     onClick={saveRecipientPrefs}
-                    disabled={recipientPrefsSaving || !isAdmin}
+                    disabled={recipientPrefsSaving || !isAdmin || !recipientPrefsDirty}
                     className="shrink-0"
                   >
-                    {recipientPrefsSaving ? "Saving..." : "Save Recipients"}
+                    {recipientPrefsSaving ? "Saving…" : recipientPrefsDirty ? "Save recipients" : "Recipients saved"}
                   </Button>
                 </div>
                 {recipientPrefsErr && (
@@ -6534,7 +6460,182 @@ export default function Customer360ProfileV2({
                   </div>{" "}
                 </label>{" "}
                 </>}
+                </details>
               </div>
+  );
+
+  const conversation = (
+            <div className="c360-conversation flex flex-col">
+              {" "}
+              <OwedCommitmentsSummary customerId={customerId} />
+              <SectionTitle>Thread ({comms.length})</SectionTitle>{" "}
+              <div className="flex flex-col gap-1.5 mb-3">
+                {commsLoading && (
+                  <div className="text-ink-secondary text-13 text-center py-5">
+                    Loading messages…
+                  </div>
+                )}
+                {commsErr && (
+                  <div className="text-alert-fg text-13 text-center py-5">
+                    {commsErr}
+                  </div>
+                )}
+                {[...comms].reverse().map((m, i) => {
+                  const inbound = m.direction === "inbound";
+                  if (m.channel === "sms") {
+                    return (
+                      <div
+                        key={m.id || i}
+                        className={cn(
+                          "max-w-[75%] px-3 py-2 text-13 leading-relaxed border-hairline",
+                          inbound
+                            ? "self-start bg-zinc-50 border-zinc-200 text-zinc-900 rounded-sm rounded-bl-xs"
+                            : "self-end bg-zinc-900 border-zinc-900 text-white rounded-sm rounded-br-xs",
+                        )}
+                      >
+                        {" "}
+                        <div>{m.body}</div>
+                        {embedded && m.media?.length > 0 && <Suspense fallback={<span>Loading attachments…</span>}><CustomerMessageMedia media={m.media} inverted={m.direction === "outbound"} /></Suspense>}{" "}
+                        <div
+                          className={cn(
+                            "text-10 mt-1 text-right",
+                            inbound ? "text-ink-secondary" : "text-zinc-300",
+                          )}
+                        >
+                          {timeAgo(m.createdAt)}
+                        </div>{" "}
+                      </div>
+                    );
+                  }
+                  // voice
+                  const rec = (m.media || []).find(
+                    (x) => x.type === "recording",
+                  );
+                  const duration = fmtDur(
+                    m.durationSeconds ?? rec?.duration_seconds,
+                  );
+                  const summary = m.aiSummary || m.body;
+                  return (
+                    <div
+                      key={m.id || i}
+                      className={cn(
+                        "max-w-[85%] px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm",
+                        inbound ? "self-start" : "self-end",
+                      )}
+                    >
+                      {" "}
+                      <div className="flex items-center gap-2 mb-1">
+                        {" "}
+                        <span className="text-10 font-medium tracking-label uppercase text-ink-secondary">
+                          {inbound ? "Call in" : "Call out"}
+                        </span>
+                        {duration && (
+                          <span className="text-11 u-nums text-zinc-900">
+                            {duration}
+                          </span>
+                        )}
+                        {m.answeredBy && (
+                          <span className="text-10 text-ink-secondary">
+                            · {m.answeredBy}
+                          </span>
+                        )}
+                      </div>
+                      {summary && (
+                        <div className="text-12 text-zinc-900 leading-relaxed">
+                          {summary}
+                        </div>
+                      )}
+                      {(rec?.available || m.recordingSid) && (rec?.sid || m.recordingSid) && (
+                        <AuthenticatedCallAudio
+                          recordingId={rec?.sid || m.recordingSid}
+                          className="mt-1.5 w-full h-8"
+                        />
+                      )}
+                      <div className="text-10 mt-1 text-right text-ink-secondary">
+                        {timeAgo(m.createdAt)}
+                      </div>{" "}
+                    </div>
+                  );
+                })}
+                {!commsLoading &&
+                  !commsErr &&
+                  commsLoaded &&
+                  comms.length === 0 && (
+                    <div className="text-ink-secondary text-13 text-center py-5">
+                      No messages
+                    </div>
+                  )}
+              </div>
+              {embedded && c.phone && (commsComposerReady || !isAdmin) && <Suspense fallback={<p className="py-3 text-14 text-ink-secondary">Loading message tools…</p>}>
+                <CustomerSmsComposer key={`${c.id}:${c.phone}`} active={embedded ? messageOpen : activeTab === "comms"} linkRequest={linkRequest} customer={c} customerMessages={comms} onSent={async () => {
+                  setCommsLoaded(false);
+                  await Promise.allSettled([reloadCustomer(), ...(isAdmin ? [retryTimeline()] : [])]);
+                }} />
+              </Suspense>}
+              {!embedded && c.phone && (
+                <div className="py-3 border-t border-hairline border-zinc-200">
+                  {" "}
+                  <div className="flex gap-2">
+                    {" "}
+                    <input
+                      id="c360-sms-reply"
+                      name="smsReply"
+                      value={smsReply}
+                      onChange={(e) => {
+                        setSmsReply(e.target.value);
+                        if (smsErr) setSmsErr("");
+                      }}
+                      placeholder="Type a message…"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          sendSms();
+                        }
+                      }}
+                      className="flex-1 h-10 px-3.5 bg-white border-hairline border-zinc-300 rounded-sm text-13 text-zinc-900 u-focus-ring"
+                    />{" "}
+                    <Button
+                      onClick={sendSms}
+                      disabled={sendingSms || !smsReply.trim()}
+                    >
+                      {sendingSms ? "…" : "Send"}
+                    </Button>{" "}
+                  </div>
+                  {smsErr && (
+                    <div className="mt-1.5 text-12 text-alert-fg">{smsErr}</div>
+                  )}
+                </div>
+              )}
+              {!embedded && recipientDetails}
+              {!embedded && <div className="mt-4">
+                {" "}
+                <SectionTitle>
+                  Notes &amp; Interactions ({(data.interactions || []).length})
+                </SectionTitle>
+                {(data.interactions || []).slice(0, 10).map((n, i) => (
+                  <div
+                    key={i}
+                    className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 text-12"
+                  >
+                    {" "}
+                    <div className="flex justify-between mb-1">
+                      {" "}
+                      <span className="font-medium text-zinc-900">
+                        {n.interaction_type}: {n.subject}
+                      </span>{" "}
+                      <span className="text-ink-secondary text-10">
+                        {timeAgo(n.created_at)}
+                      </span>{" "}
+                    </div>
+                    {n.body && (
+                      <div className="text-ink-secondary">
+                        {n.body.substring(0, 200)}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>}
+            </div>
   );
 
   return renderProfile(
@@ -6549,7 +6650,7 @@ export default function Customer360ProfileV2({
       <div
         ref={panelRef}
         onClick={(e) => e.stopPropagation()}
-        className="c360-panel bg-white w-full max-w-[900px] h-full flex flex-col overflow-y-auto text-zinc-900"
+        className={cn("c360-panel bg-white w-full max-w-[900px] h-full flex flex-col overflow-y-auto text-zinc-900", headerPast && "c360-header-past")}
       >
         {" "}
         <style>{`
@@ -6567,7 +6668,7 @@ export default function Customer360ProfileV2({
           .c360-mobile-actionbar { display: none; }
           .c360-mobile-footer-spacer { display: none; }
         `}</style>
-        {embedded ? <CustomerWorkspaceHeader c={c} isAdmin={isAdmin} unreadConversations={unreadConversations} onEdit={openEditModal} onTab={changeWorkspaceTab} menuOpen={menuOpen} setMenuOpen={setMenuOpen} menuRef={menuRef} /> : <>
+        {embedded ? <CustomerWorkspaceHeader c={c} isAdmin={isAdmin} unreadConversations={unreadConversations} onEdit={openEditModal} onTab={changeWorkspaceTab} onMessage={openMessages} onSendLink={() => { setLinkRequest((value) => value + 1); openMessages(); }} menuOpen={menuOpen} setMenuOpen={setMenuOpen} menuRef={menuRef} /> : <>
         {/* ZONE 1 — STICKY HEADER */}
         <div className="sticky top-0 z-10 bg-white border-b border-hairline border-zinc-200">
           {/* Desktop header (>= 768px) */}
@@ -6881,7 +6982,7 @@ export default function Customer360ProfileV2({
         </div>
         </>}
         {/* ZONE 2 — ALERT BANNERS */}
-        {alerts.length > 0 && (
+        {!embedded && alerts.length > 0 && (
           <div className="c360-alerts flex flex-wrap gap-2 px-6 py-3 bg-zinc-50 border-b border-hairline border-zinc-200">
             {alerts.map((a, i) => (
               <div
@@ -6902,7 +7003,7 @@ export default function Customer360ProfileV2({
             ))}
           </div>
         )}
-        {embedded ? <><div ref={tabsAnchorRef} className="c360-tabs-anchor" /><Customer360Sections active={activeTab} onChange={changeWorkspaceTab} contentId={profileContentId} /></> : <>
+        {embedded ? <><div ref={tabsAnchorRef} className="c360-tabs-anchor" /><div className="c360-sticky-identity">{c.firstName} {c.lastName}</div><Customer360Sections active={activeTab} onChange={changeWorkspaceTab} contentId={profileContentId} /></> : <>
         {/* ZONE 3 — TAB BAR */}
         {/* shrink-0: this is an overflow-x scroll container, so its flex
             auto-minimum-size is 0 — without it the column flex collapses the
@@ -6934,11 +7035,13 @@ export default function Customer360ProfileV2({
           {/* OVERVIEW */}
           {activeTab === "overview" && (
             <div className="c360-overview-content">
+              {embedded && <Customer360Summary customer={c} upcoming={upcomingFuture} services={services} comms={comms} commsLoading={commsLoading} commsError={isAdmin ? commsErr : "Message history requires admin access"} balance={data.billingSummary} unread={unreadConversations} preferences={prefs} alerts={alerts} onMessage={openMessages} onTab={changeWorkspaceTab} onViewServices={viewServiceRecords} discounts={discounts} referral={referral} />}
+
               <CustomerRequestsPanel customerId={customerId} />
               {/* both customer-scoped zone endpoints are requireAdmin — a
                   technician session would only 403 on expand */}
-              {isAdmin && <PropertyZonesPanel customerId={customerId} />}
-              {isAdmin && <TermiteStationsGate customerId={customerId} />}
+              {!embedded && isAdmin && <PropertyZonesPanel customerId={customerId} />}
+              {!embedded && isAdmin && <TermiteStationsGate customerId={customerId} />}
               {accountProperties.length > 0 && (
                 <div className="mb-4 pb-3 border-b border-hairline border-zinc-200">
                   {" "}
@@ -7117,6 +7220,7 @@ export default function Customer360ProfileV2({
                   }}
                 />{" "}
               </div>{" "}
+              {!embedded && <>
               <div className="c360-overview-grid grid grid-cols-3 gap-5">
                 {/* Col 1: Services */}
                 <div className="c360-overview-services">
@@ -7177,36 +7281,6 @@ export default function Customer360ProfileV2({
                 {!embedded && billingSummary}
                 {/* Col 3: Health + Referral + Discounts */}
                 <div className="c360-overview-health">
-                  {embedded && <div className="c360-health-heading"><HealthCircle score={score} /><div><strong>Customer health</strong><span>{score == null ? "No score available" : `${score} out of 100`}</span></div></div>}
-                  {" "}
-                  {embedded ? <div className="c360-health-factors" aria-label="Health factors">{radarData.map((factor) => <div key={factor.label}><span>{factor.label}</span><div role="meter" aria-label={factor.label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={factor.value}><span style={{ width: `${factor.value}%` }} /></div></div>)}</div> : <><SectionTitle>Health Radar</SectionTitle><RadarChart data={radarData} /></>}
-                  {score != null && (
-                    <div className="text-center text-12 text-ink-secondary mt-1">
-                      Score:{" "}
-                      <span
-                        className="font-medium"
-                        style={{
-                          color:
-                            score >= 70
-                              ? "#10B981"
-                              : score >= 40
-                                ? "#F59E0B"
-                                : "#C8312F",
-                        }}
-                      >
-                        {score}/100
-                      </span>
-                      {(hs.churn_risk_level || hs.churn_risk) && (
-                        <span>
-                          {" "}
-                          ·{" "}
-                          {String(hs.churn_risk_level || hs.churn_risk)
-                            .replace(/_/g, " ")
-                            .replace(/\b\w/g, (ch) => ch.toUpperCase())}
-                        </span>
-                      )}
-                    </div>
-                  )}
                   {referral && (
                     <div className="mt-4">
                       {" "}
@@ -7248,6 +7322,7 @@ export default function Customer360ProfileV2({
                   )}
                 </div>{" "}
               </div>{" "}
+              </>}
             </div>
           )}
 
@@ -7258,18 +7333,12 @@ export default function Customer360ProfileV2({
               <div className="c360-billing-grid grid grid-cols-4 gap-3 mb-5">
                 {" "}
                 <StatCardV2
-                  label="Balance Owed"
+                  label="Open balance"
                   value={fmtCurrency(balanceOwed)}
                   alert={balanceOwed > 0}
                 />{" "}
-                <StatCardV2
-                  label="Monthly Rate"
-                  value={fmtCurrency(c.monthlyRate)}
-                />{" "}
-                <StatCardV2
-                  label="Annual Value"
-                  value={fmtCurrency(c.annualValue)}
-                />{" "}
+                <StatCardV2 label="Overdue balance" value={fmtCurrency(overdueBalance)} alert={overdueBalance > 0} />
+                <StatCardV2 label={c.billingMode === "monthly_membership" ? "Monthly rate" : "Billing arrangement"} value={c.billingMode === "monthly_membership" ? fmtCurrency(c.monthlyRate) : ({ per_visit: "Per application", per_application: "Per application", annual_prepay: "Annual prepay", one_time: "One-time" }[c.billingMode] || "Not set")} />
                 <StatCardV2
                   label="Lifetime Revenue"
                   value={fmtCurrency(c.lifetimeRevenue)}
@@ -7278,9 +7347,9 @@ export default function Customer360ProfileV2({
               {embedded && <>
                 <div className="c360-billing-actions">
                   <a className="c360-outline-link u-focus-ring" href={`/admin/invoices?customer=${c.id}`}>Manage invoices<ArrowUpRight size={15} /></a>
-                  {isAdmin && <Button variant="secondary" onClick={() => setAnnualPrepayInvoiceOpen(true)}>Create prepay invoice</Button>}
+
                 </div>
-                {billingSummary}
+                {(c.servicePausedAt || displayedAnnualPrepayTerm || data.prepaidPlans?.length > 0) && billingSummary}
                 <Customer360Estimates estimates={data.estimates || []} />
               </>}
               <BillingLanePanelV2
@@ -7474,186 +7543,17 @@ export default function Customer360ProfileV2({
             </div>
           )}
 
-          {/* COMMS */}
-          {(activeTab === "comms" || (embedded && commsComposerReady)) && (
-            <div className={activeTab === "comms" ? "flex flex-col h-full" : "hidden"}>
-              {" "}
-              <OwedCommitmentsSummary customerId={customerId} />
-              <SectionTitle>Thread ({comms.length})</SectionTitle>{" "}
-              <div className="flex-1 overflow-y-auto flex flex-col gap-1.5 mb-3 max-h-[400px]">
-                {commsLoading && (
-                  <div className="text-ink-secondary text-13 text-center py-5">
-                    Loading messages…
-                  </div>
-                )}
-                {commsErr && (
-                  <div className="text-alert-fg text-13 text-center py-5">
-                    {commsErr}
-                  </div>
-                )}
-                {[...comms].reverse().map((m, i) => {
-                  const inbound = m.direction === "inbound";
-                  if (m.channel === "sms") {
-                    return (
-                      <div
-                        key={m.id || i}
-                        className={cn(
-                          "max-w-[75%] px-3 py-2 text-13 leading-relaxed border-hairline",
-                          inbound
-                            ? "self-start bg-zinc-50 border-zinc-200 text-zinc-900 rounded-sm rounded-bl-xs"
-                            : "self-end bg-zinc-900 border-zinc-900 text-white rounded-sm rounded-br-xs",
-                        )}
-                      >
-                        {" "}
-                        <div>{m.body}</div>
-                        {embedded && m.media?.length > 0 && <Suspense fallback={<span>Loading attachments…</span>}><CustomerMessageMedia media={m.media} inverted={m.direction === "outbound"} /></Suspense>}{" "}
-                        <div
-                          className={cn(
-                            "text-10 mt-1 text-right",
-                            inbound ? "text-ink-secondary" : "text-zinc-300",
-                          )}
-                        >
-                          {timeAgo(m.createdAt)}
-                        </div>{" "}
-                      </div>
-                    );
-                  }
-                  // voice
-                  const rec = (m.media || []).find(
-                    (x) => x.type === "recording",
-                  );
-                  const duration = fmtDur(
-                    m.durationSeconds ?? rec?.duration_seconds,
-                  );
-                  const summary = m.aiSummary || m.body;
-                  return (
-                    <div
-                      key={m.id || i}
-                      className={cn(
-                        "max-w-[85%] px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm",
-                        inbound ? "self-start" : "self-end",
-                      )}
-                    >
-                      {" "}
-                      <div className="flex items-center gap-2 mb-1">
-                        {" "}
-                        <span className="text-10 font-medium tracking-label uppercase text-ink-secondary">
-                          {inbound ? "Call in" : "Call out"}
-                        </span>
-                        {duration && (
-                          <span className="text-11 u-nums text-zinc-900">
-                            {duration}
-                          </span>
-                        )}
-                        {m.answeredBy && (
-                          <span className="text-10 text-ink-secondary">
-                            · {m.answeredBy}
-                          </span>
-                        )}
-                      </div>
-                      {summary && (
-                        <div className="text-12 text-zinc-900 leading-relaxed">
-                          {summary}
-                        </div>
-                      )}
-                      {(rec?.available || m.recordingSid) && (rec?.sid || m.recordingSid) && (
-                        <AuthenticatedCallAudio
-                          recordingId={rec?.sid || m.recordingSid}
-                          className="mt-1.5 w-full h-8"
-                        />
-                      )}
-                      <div className="text-10 mt-1 text-right text-ink-secondary">
-                        {timeAgo(m.createdAt)}
-                      </div>{" "}
-                    </div>
-                  );
-                })}
-                {!commsLoading &&
-                  !commsErr &&
-                  commsLoaded &&
-                  comms.length === 0 && (
-                    <div className="text-ink-secondary text-13 text-center py-5">
-                      No messages
-                    </div>
-                  )}
-              </div>
-              {embedded && c.phone && commsComposerReady && <Suspense fallback={<p className="py-3 text-14 text-ink-secondary">Loading message tools…</p>}>
-                <CustomerSmsComposer key={`${c.id}:${c.phone}`} active={activeTab === "comms"} customer={c} customerMessages={comms} onSent={async () => {
-                  setCommsLoaded(false);
-                  await Promise.allSettled([reloadCustomer(), ...(isAdmin ? [retryTimeline()] : [])]);
-                }} />
-              </Suspense>}
-              {!embedded && c.phone && (
-                <div className="py-3 border-t border-hairline border-zinc-200">
-                  {" "}
-                  <div className="flex gap-2">
-                    {" "}
-                    <input
-                      id="c360-sms-reply"
-                      name="smsReply"
-                      value={smsReply}
-                      onChange={(e) => {
-                        setSmsReply(e.target.value);
-                        if (smsErr) setSmsErr("");
-                      }}
-                      placeholder="Type a message…"
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.shiftKey) {
-                          e.preventDefault();
-                          sendSms();
-                        }
-                      }}
-                      className="flex-1 h-10 px-3.5 bg-white border-hairline border-zinc-300 rounded-sm text-13 text-zinc-900 u-focus-ring"
-                    />{" "}
-                    <Button
-                      onClick={sendSms}
-                      disabled={sendingSms || !smsReply.trim()}
-                    >
-                      {sendingSms ? "…" : "Send"}
-                    </Button>{" "}
-                  </div>
-                  {smsErr && (
-                    <div className="mt-1.5 text-12 text-alert-fg">{smsErr}</div>
-                  )}
-                </div>
-              )}
-              {!embedded && recipientDetails}
-              <div className="mt-4">
-                {" "}
-                <SectionTitle>
-                  Notes &amp; Interactions ({(data.interactions || []).length})
-                </SectionTitle>
-                {(data.interactions || []).slice(0, 10).map((n, i) => (
-                  <div
-                    key={i}
-                    className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 text-12"
-                  >
-                    {" "}
-                    <div className="flex justify-between mb-1">
-                      {" "}
-                      <span className="font-medium text-zinc-900">
-                        {n.interaction_type}: {n.subject}
-                      </span>{" "}
-                      <span className="text-ink-secondary text-10">
-                        {timeAgo(n.created_at)}
-                      </span>{" "}
-                    </div>
-                    {n.body && (
-                      <div className="text-ink-secondary">
-                        {n.body.substring(0, 200)}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>{" "}
-            </div>
-          )}
+          {embedded ? (messageOpened && <Sheet open={messageOpen} keepMounted onClose={() => setMessageOpen(false)} width="lg" className="admin-shell-v2 c360-message-sheet" ariaLabel={`Conversation with ${c.firstName} ${c.lastName}`}>
+            <SheetHeader><div><strong>{c.firstName} {c.lastName}</strong><p className="text-14 text-ink-secondary">{c.phone}</p></div><Button variant="secondary" onClick={() => setMessageOpen(false)}>Back to customer</Button></SheetHeader>
+            <SheetBody>{conversation}</SheetBody>
+          </Sheet>) : (activeTab === "comms" && conversation)}
 
-          {embedded && isAdmin && activeTab === "comms" && <Customer360Activity timeline={timeline} filter={timelineFilter} onFilter={setTimelineFilter} search={timelineSearch} onSearch={setTimelineSearch} error={timelineError} retrying={timelineRetrying} onRetry={retryTimeline} />}
+          {embedded && isAdmin && activeTab === "comms" && <Customer360Activity missingSources={timelineMissingSources} timeline={timeline} filter={timelineFilter} onFilter={setTimelineFilter} search={timelineSearch} onSearch={setTimelineSearch} error={timelineError} retrying={timelineRetrying} onRetry={retryTimeline} />}
 
           {/* SERVICES */}
           {(embedded ? activeTab === "comms" : activeTab === "services") && (
-            <div>
+            <details className="c360-service-records" open={embedded ? undefined : true}>
+              <summary>Service records, reports & photos</summary>
               {" "}
               <SectionTitle>Service History ({services.length})</SectionTitle>
               {services.length === 0 ? (
@@ -7733,13 +7633,14 @@ export default function Customer360ProfileV2({
                   </div>{" "}
                 </div>
               )}
-            </div>
+            </details>
           )}
 
           {/* PROPERTY */}
           {activeTab === "property" && (
             <div className="c360-details-content">
               {embedded && recipientDetails}
+              {embedded && isAdmin && <details className="c360-service-records"><summary>Property service tools & historical maps</summary><PropertyZonesPanel customerId={customerId} /><TermiteStationsGate customerId={customerId} /></details>}
               {/* Admin-only: GET /admin/customers/:id/properties is requireAdmin
                   (it lists every address on the account), so a technician
                   token would only ever see a 403 card here. */}
@@ -7747,6 +7648,7 @@ export default function Customer360ProfileV2({
                 <CustomerPropertiesPanelV2
                   key={customerId}
                   customerId={customerId}
+                  primaryAddress={c.address}
                   contactRole={c.contactRole}
                   // Every profile reload (any Edit save, address changed or
                   // not) re-syncs the primary customer_properties row server-side
@@ -7856,9 +7758,10 @@ export default function Customer360ProfileV2({
           )}
 
           {/* COMPLIANCE */}
-          {(embedded ? activeTab === "property" : activeTab === "compliance") && (
+          {(embedded ? activeTab === "property" && (hasLawnHistory || compliance.length > 0) : activeTab === "compliance") && (
             <div>
               {" "}
+              {(!embedded || hasLawnHistory) && <>
               <SectionTitle>Nutrient Ledger YTD</SectionTitle>{" "}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
                 {" "}
@@ -7955,6 +7858,7 @@ export default function Customer360ProfileV2({
                   </TBody>{" "}
                 </Table>
               )}
+              </>}
               <SectionTitle>
                 Application History ({compliance.length})
               </SectionTitle>
@@ -7996,15 +7900,15 @@ export default function Customer360ProfileV2({
                   No application records
                 </div>
               )}
-              <Card className="mt-5">
+              {(!embedded || hasLawnHistory) && <Card className="mt-5">
                 {" "}
                 <CardBody className="p-4">
                   {" "}
-                  <SectionTitle>Product Limits</SectionTitle>{" "}
+                  <SectionTitle>Product usage</SectionTitle>{" "}
                   <div className="text-12 text-ink-secondary space-y-1">
                     {" "}
                     <div>
-                      Celsius applications this year:{" "}
+                      Celsius entries in the history shown:{" "}
                       <span className="u-nums text-zinc-900">
                         {
                           compliance.filter((r) =>
@@ -8024,7 +7928,7 @@ export default function Customer360ProfileV2({
                     </div>{" "}
                   </div>{" "}
                 </CardBody>{" "}
-              </Card>{" "}
+              </Card>}
             </div>
           )}
           {/* CONTRACTS */}
@@ -8134,7 +8038,7 @@ export default function Customer360ProfileV2({
             )}
           </div>{" "}
         </div>}
-        {embedded ? <footer className="c360-workspace-profile-footer">Waves Pest Control</footer> : <>
+        {!embedded && <>
         {/* Mobile spacer for sticky action bar — tracks the same keyboard
             inset as the bar itself so content still scrolls clear of it. */}
         <div

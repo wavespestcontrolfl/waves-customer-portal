@@ -116,11 +116,19 @@ describe('Customer360ProfileV2 profile state', () => {
     }));
     const { container } = render(<MemoryRouter><Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded /></MemoryRouter>);
     await screen.findByLabelText('2 unread conversations');
+    expect(read).toBe(false);
     container.querySelector('.c360-panel').scrollTo = vi.fn();
     fireEvent.click(screen.getByRole('button', { name: /Message.*2 unread conversations/ }));
     await screen.findByRole('textbox', { name: 'Text message' }, { timeout: 5000 });
     await waitFor(() => expect(screen.queryByLabelText('2 unread conversations')).not.toBeInTheDocument());
     expect(read).toBe(true);
+    const draft = screen.getByRole('textbox', { name: 'Text message' });
+    fireEvent.change(draft, { target: { value: 'Keep this draft' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Back to customer' }));
+    expect(screen.queryByRole('dialog', { name: 'Conversation with Avery Customer' })).not.toBeInTheDocument();
+    expect(screen.getByRole('tabpanel', { name: 'Summary' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Message', exact: true }));
+    expect(screen.getByRole('textbox', { name: 'Text message' })).toHaveValue('Keep this draft');
     expect(screen.getByRole('heading', { name: 'Avery Customer' })).toBeInTheDocument();
   });
 
@@ -134,6 +142,32 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(screen.queryByText('Could not load customer history.')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Retry customer history' })).not.toBeInTheDocument();
     expect(screen.queryByText('Timeline (0)')).not.toBeInTheDocument();
+  });
+
+  it('uses complete server balances instead of summing recent invoices, and tracks recipient changes', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const detail = customerDetail('customer-a', 'Avery');
+    detail.customer.billingMode = 'per_application';
+    detail.customer.monthlyRate = 0;
+    detail.customer.annualValue = 1130;
+    detail.customer.email = 'account@example.invalid';
+    detail.invoices = [{ id: 'recent-invoice', status: 'sent', amount_due: 125 }];
+    detail.billingSummary = { complete: true, openBalance: 1125, overdueBalance: 0, overdueCount: 0, asOf: '2024-07-01' };
+    detail.notificationPrefs = { billing_contact_name: 'Accounts', billing_email: 'billing@example.invalid' };
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).endsWith('/customer-a') ? response(detail) : response({})));
+    const { container } = render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded />);
+    await screen.findByRole('heading', { name: 'Avery Customer' });
+    container.querySelector('.c360-panel').scrollTo = vi.fn();
+    expect(screen.queryByRole('meter')).not.toBeInTheDocument();
+    expect(screen.queryByText(/overdue invoice/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: 'Billing', exact: true }));
+    expect(screen.getByText('$1,125.00')).toBeInTheDocument();
+    expect(screen.getByText('Per application', { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText('Monthly Rate', { exact: true })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: 'Details', exact: true }));
+    expect(screen.getByRole('button', { name: 'Recipients saved' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Billing recipient email'), { target: { value: 'new-billing@example.invalid' } });
+    expect(screen.getByRole('button', { name: 'Save recipients' })).toBeEnabled();
   });
 
   it('renders the workspace in its parent and keeps older activity available', async () => {
@@ -158,6 +192,7 @@ describe('Customer360ProfileV2 profile state', () => {
     const estimateParams = new URL(estimateLink.href).searchParams;
     expect(estimateParams.get('customerName')).toBe('Avery Customer');
     expect(estimateParams.get('address')).toContain('Unit 4');
+    fireEvent.click(screen.getByRole('button', { name: 'More customer actions' }));
     fireEvent.click(screen.getByRole('button', { name: 'Edit customer' }));
     expect(screen.getByRole('dialog', { name: 'Edit customer' })).toBeInTheDocument();
     fireEvent.keyDown(document, { key: 'Escape' });

@@ -242,7 +242,7 @@ describe('CustomerPropertiesPanelV2 — review-round behaviours', () => {
     vi.stubGlobal('fetch', fetchMock);
     const onChanged = vi.fn(() => Promise.resolve());
     render(<CustomerPropertiesPanelV2 customerId="c1" contactRole="owner" canEdit onChanged={onChanged} />);
-    await screen.findByText('No properties on file.');
+    await screen.findByText('No service address on file.');
     fireEvent.click(screen.getByRole('button', { name: 'Add service address' }));
     expect(screen.getByLabelText('Street address')).toHaveAttribute('maxlength', '200');
     expect(screen.getByLabelText('Unit / line 2')).toHaveAttribute('maxlength', '100');

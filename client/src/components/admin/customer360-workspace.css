@@ -11,7 +11,7 @@
 .c360-embedded > .c360-panel > * { flex-shrink: 0; }
 .c360-embedded :is(.text-10, .text-11, .text-12, .text-13, .u-label) { font-size: 14px; line-height: 1.55; }
 .c360-embedded :is(input, textarea, select) { min-width: 0; font-size: 16px; }
-.c360-embedded button { min-height: 40px; }
+.c360-embedded button:not([role="switch"]) { min-height: 40px; }
 .c360-embedded .u-label { letter-spacing: 0; text-transform: none; }
 .c360-workspace-header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 18px 24px; padding: 24px 28px; }
 .c360-workspace-identity { display: flex; align-items: flex-start; gap: 14px; min-width: 0; }
@@ -20,7 +20,7 @@
 .c360-workspace-name-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .c360-workspace-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 9px; font-size: 14px; color: #71717a; }
 .c360-workspace-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.c360-workspace-actions > :is(a, button) { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 43px; padding: 0 16px; font-size: 14px; text-transform: none; letter-spacing: 0; text-decoration: none; border: 1px solid #d4d4d8; border-radius: 5px; background: #fff; color: #27272a; }
+.c360-workspace-actions > :is(a, button) { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 43px; padding: 0 16px; font-size: 14px; text-transform: none; letter-spacing: 0; text-decoration: none; border: 1px solid #d4d4d8; border-radius: 5px; }
 .c360-workspace-actions .c360-more-action { position: relative; }
 .c360-workspace-action-menu { position: absolute; z-index: 30; top: calc(100% + 5px); right: 0; width: 230px; padding: 5px; background: #fff; border: 1px solid #d4d4d8; border-radius: 6px; }
 .c360-workspace-action-menu :is(a, button) { display: flex; align-items: center; width: 100%; padding: 10px; min-height: 44px; border: 0; text-align: left; font-size: 14px; color: #27272a; background: #fff; text-decoration: none; }
@@ -48,30 +48,16 @@
 .c360-section-arrow + .c360-section-strip .c360-section-list { padding-left: 12px; padding-right: 12px; }
 .c360-embedded .c360-tab-content { padding: 26px 28px; flex: 1 0 auto; }
 .c360-embedded .c360-overview-content { display: flex; flex-direction: column; }
-.c360-embedded .c360-overview-grid { order: -1; display: flex; flex-direction: column; gap: 24px; margin-bottom: 28px; }
-.c360-embedded .c360-overview-grid > * { min-width: 0; width: 100%; }
 .c360-embedded .c360-overview-billing { padding: 20px; border: 1px solid #e4e4e7; border-radius: 6px; }
-.c360-embedded .c360-overview-health { padding: 24px 0; border-top: 1px solid #e4e4e7; border-bottom: 1px solid #e4e4e7; }
-.c360-embedded .c360-overview-services > .c360-upcoming-appointment { padding: 20px; margin-bottom: 12px; background: #fff; border-radius: 6px; }
-.c360-embedded .c360-overview-services > .c360-recent-service { padding: 17px 0; align-items: center; }
-.c360-health-heading { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
-.c360-health-heading > svg { width: 72px; height: 72px; }
-.c360-health-heading strong { font-size: 18px; font-weight: 500; }
-.c360-health-heading span { display: block; font-size: 14px; color: #71717a; margin-top: 5px; }
-.c360-health-factors { display: grid; gap: 14px; margin-bottom: 16px; }
-.c360-health-factors > div { display: grid; grid-template-columns: 92px minmax(0, 1fr); align-items: center; gap: 13px; font-size: 14px; color: #71717a; }
-.c360-health-factors [role="meter"] { height: 5px; border-radius: 5px; background: #f0f0f2; overflow: hidden; }
-.c360-health-factors [role="meter"] > span { display: block; height: 100%; border-radius: 5px; background: #a1a1aa; }
-.c360-embedded .c360-overview-health > svg { max-width: 100%; margin: auto; }
 .c360-embedded .c360-overview-billing .grid-cols-2 { grid-template-columns: 1fr; }
 .c360-embedded .c360-overview-billing .flex { flex-wrap: wrap; }
 .c360-embedded .c360-property-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.c360-embedded .c360-billing-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.c360-embedded .c360-billing-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .c360-embedded .c360-tab-content > div > .u-label { margin-top: 20px; margin-bottom: 13px; font-size: 18px; color: #27272a; }
 .c360-activity { min-width: 0; }
 .c360-activity-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #e4e4e7; }
 .c360-activity-toolbar > select { width: auto; max-width: 64%; height: 38px; padding: 0 5px; border: 0; background: #fff; color: #52525b; font-size: 14px; }
-.c360-activity-list { max-height: 510px; overflow-y: auto; overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; padding: 0 12px; }
+.c360-activity-list { padding: 0 12px; }
 .c360-activity-event { border-bottom: 1px solid #e4e4e7; }
 .c360-activity-event:last-child { border: 0; }
 .c360-activity-event > summary { display: flex; align-items: flex-start; gap: 11px; padding: 17px 0; list-style: none; cursor: pointer; }
@@ -83,7 +69,6 @@
 .c360-activity-date { max-width: 81px; text-align: right; font-size: 14px; line-height: 1.6; color: #71717a; flex-shrink: 0; }
 .c360-activity-description { padding: 0 3px 18px 41px; font-size: 14px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; color: #52525b; }
 .c360-activity-footer { padding: 12px; border-top: 1px solid #e4e4e7; font-size: 14px; color: #71717a; }
-.c360-workspace-profile-footer { padding: 22px 28px; border-top: 1px solid #e4e4e7; font-size: 14px; color: #71717a; }
 /* The Waves sidebar consumes part of tablet widths. Size contract forms by
    their available content width, so Safari's date inputs remain usable. */
 @container customer360 (max-width: 700px) {
@@ -123,7 +108,6 @@
   .c360-activity-list { padding: 0 9px; }
   .c360-activity-event > summary { gap: 8px; }
   .c360-activity-date { max-width: 66px; }
-  .c360-workspace-profile-footer { padding: 20px 17px; }
 }
 
 /* Quiet controls and clear search fields follow the existing Waves UI kit. */
@@ -134,8 +118,6 @@
 .c360-outline-link { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 40px; padding: 7px 12px; border: 1px solid #d4d4d8; border-radius: 5px; background: #fff; color: #27272a; font-size: 14px; text-decoration: none; }
 .c360-outline-link:hover { background: #fafafa; }
 .c360-invoice-reference { display: inline-block; padding: 7px 0; color: #27272a; font-weight: 500; text-decoration: underline; text-underline-offset: 3px; white-space: nowrap; }
-.c360-embedded .c360-billing-content button { background: #fff; color: #27272a; border: 1px solid #d4d4d8; }
-.c360-embedded .c360-billing-content button:hover { background: #fafafa; }
 .c360-embedded .c360-payment-method-default { flex-shrink: 0; min-height: 26px; height: auto; padding: 2px 8px; font-size: 14px; line-height: 1.5; letter-spacing: 0; text-transform: none; white-space: nowrap; background: #fff; color: #52525b; border: 1px solid #d4d4d8; border-radius: 4px; }
 .c360-estimate-card { padding: 20px; }
 .c360-estimate-reference { display: inline-flex; gap: 6px; align-items: center; font-size: 17px; font-weight: 500; color: #27272a; text-decoration: none; overflow-wrap: anywhere; }
@@ -149,9 +131,6 @@
 .c360-embedded #sms-compose-v2 select { min-height: 44px; padding: 8px 32px 8px 10px; border: 1px solid #d4d4d8; border-radius: 5px; }
 
 /* Default action style for this workspace and future additions. */
-.c360-workspace button.u-focus-ring:not([role="tab"]) { min-height: 44px; border-radius: 6px; background: #fff; color: #27272a; border: 1px solid #d4d4d8; font-size: 14px; text-transform: none; letter-spacing: 0; }
-.c360-workspace button.u-focus-ring:not([role="tab"]):hover { background: #fafafa; }
-.c360-workspace button.u-focus-ring:not([role="tab"])[aria-label="Stop dictation"] { color: #c8312f; border-color: #c8312f; }
 .c360-estimate-applications { margin: 0 0 20px; }
 .c360-estimate-applications dl { margin: 0; }
 .c360-estimate-applications dl > div { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 9px 0; border-bottom: 1px solid #f4f4f5; font-size: 14px; }
@@ -199,7 +178,6 @@
   .c360-contract-record { padding: 14px; gap: 12px; }
 }
 
-.c360-message-action { box-shadow: inset 0 0 0 1px #27272a; }
 .c360-unread-count { display: inline-grid; place-items: center; min-width: 22px; height: 22px; padding: 0 5px; border-radius: 11px; background: #27272a; color: #fff; font-size: 14px; }
 .c360-billing-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 24px; }
 .c360-billing-content .c360-overview-billing { margin-bottom: 24px; }
@@ -209,7 +187,6 @@
 .c360-contracts-content { margin-top: 28px; }
 .c360-directory-page { color: #18181b; }
 .c360-directory-page :is(.text-10, .text-11, .text-12, .text-13, .u-label) { font-size: 14px; }
-.c360-directory-page button.u-focus-ring { min-height: 44px; font-size: 14px; text-transform: none; letter-spacing: 0; background: #fff; color: #27272a; }
 .c360-directory-page :is(input, select) { min-height: 44px; font-size: 16px; }
 .customer-directory-table > .overflow-x-auto { overflow: visible; }
 .customer-directory-table table { table-layout: fixed; background: #fff; font-size: 14px; }
@@ -263,3 +240,70 @@
 .c360-directory-page nav[aria-label="Customers section"] button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 12px 2px; flex: 0 0 auto; background: transparent; }
 .c360-directory-page nav[aria-label="Customers section"] button[aria-current="page"] { border-bottom-color: #27272a; }
 .c360-directory-page nav[aria-label="Customers section"] button > svg { display: none; }
+
+/* Operational summary follows the office's next-action order. */
+.c360-operational-summary { order: -1; display: grid; grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr); gap: 0 32px; margin-bottom: 24px; }
+.c360-operational-summary > section { min-width: 0; padding: 22px 0; border-bottom: 1px solid #e4e4e7; font-size: 15px; line-height: 1.65; overflow-wrap: anywhere; }
+.c360-operational-summary h2 { font-size: 15px; font-weight: 500; color: #71717a; margin-bottom: 10px; }
+.c360-operational-summary h3 { font-size: 22px; font-weight: 500; line-height: 1.35; margin-bottom: 10px; letter-spacing: -.4px; }
+.c360-operational-summary p { margin: 8px 0; }
+.c360-operational-summary ul { list-style: disc; padding-left: 18px; }
+.c360-operational-summary details { margin-top: 14px; font-size: 14px; color: #71717a; }
+.c360-operational-summary summary { cursor: pointer; color: #27272a; }
+.c360-next-service { grid-column: 1; grid-row: 1; }
+.c360-latest-message { grid-column: 1; grid-row: 2; }
+.c360-latest-service { grid-column: 1; grid-row: 3; }
+.c360-attention-summary { grid-column: 2; grid-row: 1; }
+.c360-access-summary { grid-column: 2; grid-row: 2; }
+.c360-account-summary { grid-column: 2; grid-row: 3; }
+.c360-summary-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 16px; }
+.c360-summary-excerpt { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.c360-message-sheet .c360-conversation { font-size: 15px; }
+.c360-message-sheet :is(.text-10, .text-11, .text-12, .text-13) { font-size: 14px; }
+.c360-message-sheet #sms-compose-v2 { margin-top: 14px; }
+.c360-message-sheet #sms-compose-v2 select { font-size: 16px; }
+.c360-service-records { margin-top: 24px; padding: 16px 0; border-top: 1px solid #e4e4e7; }
+.c360-service-records > summary { font-size: 16px; font-weight: 500; cursor: pointer; margin-bottom: 16px; }
+.c360-unread-count { background: #fff; color: #18181b; }
+.c360-recipient-overrides > summary { cursor: pointer; font-size: 15px; padding: 14px 0; }
+.c360-sticky-identity { position: sticky; top: 0; z-index: 21; background: #fff; padding: 8px 28px; border-bottom: 1px solid #e4e4e7; font-size: 14px; font-weight: 500; }
+.c360-sticky-identity { display: none; }
+.c360-header-past .c360-sticky-identity { display: block; }
+.c360-header-past .c360-section-navigation { top: 38px; }
+@container customer360 (max-width: 800px) {
+  .c360-operational-summary { grid-template-columns: minmax(0, 1fr); }
+  .c360-operational-summary > section { grid-column: auto; grid-row: auto; }
+  .c360-embedded .c360-billing-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 767px) {
+  .c360-workspace-header { gap: 10px; padding: 14px 16px; }
+  .c360-workspace-name h1 { font-size: 23px; }
+  .c360-workspace-meta { font-size: 13px; margin-top: 4px; }
+  .c360-workspace-meta > span:not(:first-child) { display: none; }
+  .c360-workspace-actions { gap: 6px; }
+  .c360-workspace-contact { flex-direction: row; gap: 10px; }
+  .c360-workspace-contact > div { width: auto; }
+  .c360-workspace-contact > div > span { display: none; }
+  .c360-workspace-contact :is(a,button) { border: 0; padding: 4px; min-height: 38px; font-size: 14px; }
+  .c360-sticky-identity { padding: 8px 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .c360-operational-summary > section { padding: 18px 0; }
+  .c360-operational-summary h3 { font-size: 21px; }
+}
+
+.c360-workspace-actions > a { color: #27272a; background: #fff; }
+.c360-operational-summary a { color: #27272a; }
+.c360-embedded button:not([role="tab"]), .c360-message-sheet button { text-transform: none; letter-spacing: 0; }
+
+@media (max-width: 767px) {
+  .c360-workspace-header { position: relative; }
+  .c360-workspace-identity { padding-right: 32px; }
+  .c360-workspace-actions .c360-more-action { position: absolute; right: 10px; top: 10px; }
+}
+
+.c360-service-records { scroll-margin-top: 100px; }
+
+.c360-embedded > .c360-panel { overflow-anchor: none; }
+
+.c360-directory-page nav[aria-label="Customers section"] button { color: #71717a; transition: none; }
+.c360-directory-page nav[aria-label="Customers section"] button[aria-current="page"] { color: #18181b; }
+.c360-embedded .c360-section-tab { transition: none; }

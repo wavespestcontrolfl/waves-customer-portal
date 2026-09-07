@@ -28,6 +28,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { invoiceAmountDue } = require('./invoice-helpers');
+const { etDateString } = require('../utils/datetime-et');
 
 // Safety valve, not display pagination: high enough that every real
 // customer's full balance fits (prod max open invoices per customer is
@@ -70,6 +71,7 @@ function openInvoiceQuery(customerId, { excludeInvoiceId = null, database = db }
       'id', 'invoice_number', 'status', 'service_type', 'service_date',
       'due_date', 'created_at', 'subtotal', 'discount_amount', 'total',
       'credit_applied', 'scheduled_service_id', 'stripe_payment_intent_id',
+      database.raw("(status = 'overdue' OR due_date < ?) AS is_overdue", [etDateString()]),
     );
   if (excludeInvoiceId) query.whereNot('id', excludeInvoiceId);
   return query;
@@ -143,7 +145,7 @@ async function openBalanceInvoices(customerId, { excludeInvoiceId = null, databa
   const selfPay = [];
   for (const row of rows) {
 
-    if (await rowIsSelfPayDue(customerId, row, { onResolveFailure })) selfPay.push(row);
+    if (await rowIsSelfPayDue(customerId, row, { onResolveFailure, database })) selfPay.push(row);
   }
   return selfPay;
 }
@@ -221,13 +223,23 @@ async function openBalanceExists(customerId, { excludeInvoiceId = null, database
  * mint).
  */
 async function openBalanceSummary(customerId, { displayLimit = 5, ...opts } = {}) {
-  const invoices = await openBalanceInvoices(customerId, opts);
+  let complete = true;
+  const invoices = await openBalanceInvoices(customerId, {
+    ...opts,
+    onResolveFailure: (err) => { complete = false; opts.onResolveFailure?.(err); },
+    onTruncation: (count) => { complete = false; opts.onTruncation?.(count); },
+  });
+  const overdue = invoices.filter((invoice) => invoice.is_overdue === true);
   const totalCents = invoices.reduce(
     (sum, inv) => sum + Math.round(invoiceAmountDue(inv) * 100),
     0,
   );
   return {
     total: totalCents / 100,
+    overdueTotal: overdue.reduce((sum, inv) => sum + Math.round(invoiceAmountDue(inv) * 100), 0) / 100,
+    overdueCount: overdue.length,
+    complete,
+    asOf: etDateString(),
     count: invoices.length,
     moreCount: Math.max(0, invoices.length - displayLimit),
     invoices: invoices.slice(0, displayLimit),

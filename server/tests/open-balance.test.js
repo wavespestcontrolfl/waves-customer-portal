@@ -129,4 +129,24 @@ describe('open-balance selection', () => {
     expect(summary.moreCount).toBe(1);
     expect(summary.invoices.map((r) => r.id)).toEqual(['a', 'b']);
   });
+  test('separates overdue debt from delivered invoices still inside their terms', async () => {
+    tableResults.rows = [
+      { id: 'overdue', total: '125.00', credit_applied: '25.00', is_overdue: true },
+      { id: 'not-due', total: '1000.00', credit_applied: 0, is_overdue: false },
+    ];
+    const summary = await openBalanceSummary('cust-1', { displayLimit: 0 });
+    expect(summary).toMatchObject({ total: 1100, overdueTotal: 100, overdueCount: 1, count: 2, complete: true, invoices: [] });
+    expect(tableResults.lastCalls.find(([method]) => method === 'select')[1]).toContain("(status = 'overdue' OR due_date < ?) AS is_overdue");
+  });
+
+  test('marks survivor totals incomplete after payer lookup failures or truncation', async () => {
+    tableResults.rows = [{ id: 'a', total: 100 }];
+    const onResolveFailure = jest.fn();
+    mockResolveForInvoice.mockRejectedValueOnce(new Error('Unavailable'));
+    expect((await openBalanceSummary('cust-1', { onResolveFailure })).complete).toBe(false);
+    expect(onResolveFailure).toHaveBeenCalledTimes(1);
+    tableResults.rows = Array.from({ length: MAX_OPEN_INVOICES }, (_, id) => ({ id, total: 1 }));
+    expect((await openBalanceSummary('cust-1')).complete).toBe(false);
+  });
+
 });

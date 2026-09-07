@@ -5,7 +5,7 @@ import { cn } from './cn';
 
 // Right-side slide-in panel. Customer Detail in spec §5.6 lives here.
 // Same focus-trap strategy as Dialog — swap root for Radix if needed.
-export function Sheet({ open, onClose, children, width = 'md', className, ariaLabel = 'Details' }) {
+export function Sheet({ open, onClose, children, width = 'md', className, ariaLabel = 'Details', keepMounted = false }) {
   const panelRef = useModalFocus(open, onClose);
 
   useEffect(() => {
@@ -15,7 +15,7 @@ export function Sheet({ open, onClose, children, width = 'md', className, ariaLa
     return () => { document.body.style.overflow = previousOverflow; };
   }, [open]);
 
-  if (!open) return null;
+  if (!open && !keepMounted) return null;
 
   const widthClass =
     width === 'sm' ? 'max-w-md' : width === 'lg' ? 'max-w-2xl' : 'max-w-xl';
@@ -28,6 +28,7 @@ export function Sheet({ open, onClose, children, width = 'md', className, ariaLa
       // sidebar and only won by portal DOM order. Palette/notification
       // popovers (9998/9999) still deliberately beat modals.
       className="fixed inset-0 z-[120]"
+      style={{ display: open ? undefined : 'none' }}
       role="dialog"
       aria-modal="true"
       aria-label={ariaLabel}

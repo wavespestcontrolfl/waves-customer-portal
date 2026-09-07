@@ -1334,3 +1334,19 @@ describe('Customer 360 historical price references', () => {
     expect(monthly.perApplicationPrice).toBeUndefined();
   });
 });
+
+
+test('keeps definitive billing summary admin-only', () => {
+  const { techSafe360Payload, TECH_360_STRIPPED_KEYS } = adminCustomersRoute._private;
+  expect(TECH_360_STRIPPED_KEYS).toContain('billingSummary');
+  const result = techSafe360Payload({ customer: { id: 'test' }, billingSummary: { openBalance: 100, overdueBalance: 20 } });
+  expect(result).not.toHaveProperty('billingSummary');
+});
+
+
+test('maps invoice exceptions and strips them from technician directory rows', () => {
+  const { techSafeListRow } = adminCustomersRoute._private;
+  const row = mapCustomerListRow({ id: 'test', overdue_invoice_count: '2' });
+  expect(row.overdueInvoiceCount).toBe(2);
+  expect(techSafeListRow(row)).not.toHaveProperty('overdueInvoiceCount');
+});

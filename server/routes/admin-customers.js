@@ -9,6 +9,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const logger = require('../services/logger');
 const { stageLifecycleStamps } = require('../services/customer-stages');
 const { etDateString } = require('../utils/datetime-et');
+const { openBalanceSummary } = require('../services/open-balance');
 const { formatAddress, normalizeUnitLine } = require('../utils/address-normalizer');
 const { findCustomersAtAddress, rankByContact } = require('../services/customer-address-match');
 const { recordAuditEvent } = require('../services/audit-log');
@@ -71,7 +72,7 @@ async function technicianServicesCustomer(req, customerId) {
 // identity, contact, address, and service context — not account financials
 // or CRM/marketing state.
 const TECH_LIST_STRIPPED_FIELDS = [
-  'lifetimeRevenue', 'balanceOwed', 'cardsOnFile', 'healthScore',
+  'lifetimeRevenue', 'balanceOwed', 'overdueInvoiceCount', 'cardsOnFile', 'healthScore',
   'pipelineStage', 'leadScore', 'leadSource', 'leadSourceDetail',
   'landingPageUrl', 'lastContactDate', 'lastContactType', 'nextFollowUp',
   'lastRating', 'tags',
@@ -111,7 +112,7 @@ function techSafeSort(sort) {
 // /comms and /timeline are requireAdmin — the 360 endpoint must not
 // re-expose the same data to an assigned tech.
 const TECH_360_STRIPPED_KEYS = [
-  'interactions', 'smsLog', 'payments', 'invoices', 'cards',
+  'interactions', 'smsLog', 'payments', 'invoices', 'cards', 'billingSummary',
   'paymentMethodConsents', 'contracts', 'annualPrepayTerms', 'prepaidPlans',
   'annualPrepayEstimateSuggestion',
   'notificationPrefs', 'referralInfo', 'customerDiscounts', 'healthScore',
@@ -1115,6 +1116,7 @@ function mapCustomerListRow(c) {
     lastRating: c.last_rating != null ? parseInt(c.last_rating) : null,
     tags: (c.tags_str || '').split(',').filter(Boolean),
     balanceOwed: parseFloat(c.balance_owed || 0),
+    overdueInvoiceCount: Number(c.overdue_invoice_count || 0),
     healthScore: c.health_score != null ? parseInt(c.health_score) : null,
     cardsOnFile: parseInt(c.cards_on_file || 0),
   };
@@ -2286,13 +2288,16 @@ router.get('/', async (req, res, next) => {
       'customers.*',
       db.raw('(SELECT COUNT(*) FROM service_records WHERE service_records.customer_id = customers.id) as services_count'),
       db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) as last_service_date"),
-      db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','canceled','completed','rescheduled','skipped','no_show')) as next_service_date"),
+      db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= ? AND status NOT IN ('cancelled','canceled','completed','rescheduled','skipped','no_show')) as next_service_date", [etDateString()]),
       db.raw("(SELECT string_agg(tag, ',') FROM customer_tags WHERE customer_tags.customer_id = customers.id) as tags_str"),
       db.raw("(SELECT string_agg(DISTINCT service_type, ',') FROM service_records WHERE service_records.customer_id = customers.id) as service_types"),
       db.raw("(SELECT COUNT(DISTINCT service_type) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND status NOT IN ('cancelled')) as service_type_count"),
       // rating column may not exist — use satisfaction_rating from treatment_outcomes or skip
       db.raw("(SELECT NULL) as last_rating"),
       db.raw("(SELECT COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue')) as balance_owed"),
+      // Invoice exception only, including third-party bills on the record.
+      // This is not an assertion that the homeowner owes a self-pay balance.
+      db.raw("(SELECT COUNT(*) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue') AND GREATEST(total - COALESCE(credit_applied, 0), 0) > 0 AND (status = 'overdue' OR due_date < ?)) as overdue_invoice_count", [etDateString()]),
       healthScoreSelect,
       db.raw("(SELECT COUNT(*) FROM payment_methods WHERE payment_methods.customer_id = customers.id) as cards_on_file"),
       // Net of all paid payments minus refunds — the same definition the
@@ -2574,115 +2579,74 @@ router.get('/:id/timeline', requireAdmin, async (req, res, next) => {
     const customerId = req.params.id;
     const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
-
-    const timeline = [];
-
-    // customer_interactions
-    const interactions = await db('customer_interactions').where({ customer_id: customerId }).select('interaction_type', 'subject', 'body', 'created_at');
-    for (const i of interactions) {
-      timeline.push({
-        type: 'interaction', title: i.subject || `${i.interaction_type} interaction`,
-        description: i.body || '', date: i.created_at,
-        metadata: { interactionType: i.interaction_type },
-      });
-    }
-
-    // sms + voice via unified messages (since PR 2). Joined to conversations
-    // so we can attribute to this customer regardless of whether the
-    // historical row had customer_id set on sms_log/call_log directly.
-    try {
-      const comms = await db('messages')
+    const missingSources = [];
+    const [interactions, comms, calls, services, invoices, estimates, payments, scheduled, reviews, activities] = await Promise.all([
+      db('customer_interactions').where({ customer_id: customerId }).select('interaction_type', 'subject', 'body', 'created_at'),
+      db('messages')
         .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
         .where('conversations.customer_id', customerId)
         .whereIn('messages.channel', ['sms', 'voice'])
-        .select(
-          'messages.channel', 'messages.direction', 'messages.body',
-          'messages.ai_summary', 'messages.duration_seconds',
-          'messages.created_at',
-          'conversations.contact_phone', 'conversations.our_endpoint_id'
-        );
-      for (const m of comms) {
-        if (m.channel === 'sms') {
-          timeline.push({
-            type: 'sms',
-            title: `SMS ${m.direction === 'inbound' ? 'received' : 'sent'}`,
-            description: (m.body || '').slice(0, 200),
-            date: m.created_at,
-            metadata: { direction: m.direction },
-          });
-        } else {
-          const fromPhone = m.direction === 'inbound' ? m.contact_phone : m.our_endpoint_id;
-          timeline.push({
-            type: 'call',
-            title: 'Phone call',
-            description: m.ai_summary || (m.body ? m.body.slice(0, 200) : `Call from ${fromPhone || 'unknown'}`),
-            date: m.created_at,
-            metadata: { fromPhone, durationSeconds: m.duration_seconds },
-          });
-        }
-      }
-    } catch { /* unified comms tables may not exist in older snapshots */ }
-
-    // service_records
-    const services = await db('service_records')
-      .where({ 'service_records.customer_id': customerId })
-      .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-      .select('service_records.service_type', 'service_records.service_date', 'technicians.name as tech_name');
-    for (const s of services) {
-      timeline.push({
-        type: 'service', title: `Service: ${s.service_type}`,
-        description: s.tech_name ? `Performed by ${s.tech_name}` : 'Service completed',
-        date: s.service_date, metadata: { serviceType: s.service_type, techName: s.tech_name },
-      });
-    }
-
-    // payments
-    const payments = await db('payments').where({ customer_id: customerId }).select('amount', 'payment_date', 'description');
-    for (const p of payments) {
-      timeline.push({
-        type: 'payment', title: `Payment: $${parseFloat(p.amount || 0).toFixed(2)}`,
-        description: p.description || 'Payment received', date: p.payment_date,
-        metadata: { amount: parseFloat(p.amount || 0) },
-      });
-    }
-
-    // scheduled_services
-    const scheduled = await db('scheduled_services').where({ customer_id: customerId }).select('service_type', 'scheduled_date', 'status');
-    for (const s of scheduled) {
-      timeline.push({
-        type: 'scheduled_service', title: `Scheduled: ${s.service_type}`,
-        description: `Status: ${s.status}`, date: s.scheduled_date,
-        metadata: { serviceType: s.service_type, status: s.status },
-      });
-    }
-
-    // google_reviews
-    try {
-      const reviews = await db('google_reviews').where({ customer_id: customerId }).select('star_rating', 'review_text', 'review_created_at');
-      for (const r of reviews) {
-        timeline.push({
-          type: 'review', title: `Google Review: ${'★'.repeat(r.star_rating)}${'☆'.repeat(5 - r.star_rating)}`,
-          description: (r.review_text || '').slice(0, 200), date: r.review_created_at,
-          metadata: { starRating: r.star_rating },
-        });
-      }
-    } catch { /* google_reviews may not have customer_id */ }
-
-    // activity_log
-    try {
-      const activities = await db('activity_log').where({ customer_id: customerId }).select('action', 'description', 'created_at');
-      for (const a of activities) {
-        timeline.push({
-          type: 'activity', title: a.action, description: a.description || '',
-          date: a.created_at, metadata: { action: a.action },
-        });
-      }
-    } catch { /* ignore */ }
-
-    // Sort by date descending
+        .select('messages.channel', 'messages.direction', 'messages.body', 'messages.ai_summary', 'messages.duration_seconds', 'messages.created_at', 'messages.twilio_sid', 'messages.delivery_status'),
+      db('call_log').where({ customer_id: customerId })
+        .select('id', 'twilio_call_sid', 'call_summary', 'disposition', 'status', 'created_at'),
+      db('service_records').where('service_records.customer_id', customerId)
+        .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
+        .select('service_records.service_type', 'service_records.service_date', 'technicians.name as tech_name'),
+      db('invoices').where({ customer_id: customerId }).select('id', 'invoice_number', 'status', 'service_type', 'created_at', 'sent_at', 'viewed_at', 'paid_at'),
+      db('estimates').where({ customer_id: customerId }).select('id', 'status', 'created_at', 'sent_at', 'viewed_at', 'accepted_at', 'declined_at'),
+      db('payments').where({ customer_id: customerId }).select('id', 'amount', 'payment_date', 'description', 'status'),
+      db('scheduled_services').where({ customer_id: customerId }).select('id', 'service_type', 'scheduled_date', 'status'),
+      // These optional integrations have older snapshots without customer_id.
+      // Tell the UI about omissions instead of asserting complete history.
+      db('google_reviews').where({ customer_id: customerId }).select('star_rating', 'review_text', 'review_created_at')
+        .catch(() => { missingSources.push('Reviews'); return []; }),
+      db('activity_log').where({ customer_id: customerId }).select('action', 'description', 'created_at')
+        .catch(() => { missingSources.push('Account activity'); return []; }),
+    ]);
+    const callsBySid = new Map(calls.filter(call => call.twilio_call_sid).map(call => [call.twilio_call_sid, call]));
+    const voice = comms.filter(message => message.channel === 'voice');
+    const mirroredCallSids = new Set(voice.map(message => message.twilio_sid));
+    const timeline = [
+      ...interactions.map(row => ({ type: 'interaction', title: row.subject || `${row.interaction_type} interaction`, description: row.body || '', date: row.created_at, metadata: { interactionType: row.interaction_type } })),
+      ...comms.filter(message => message.channel === 'sms').map(message => ({
+        type: 'sms', title: message.direction === 'inbound' ? 'SMS received' : `SMS outbound · ${message.delivery_status || 'delivery not recorded'}`,
+        description: message.body || '', date: message.created_at, metadata: { direction: message.direction },
+      })),
+      ...voice.map(message => {
+        const call = callsBySid.get(message.twilio_sid);
+        return { type: 'call', title: 'Phone call', date: message.created_at,
+          description: [message.ai_summary || call?.call_summary || message.body, call?.disposition].filter(Boolean).join(' · '),
+          metadata: { durationSeconds: message.duration_seconds, callId: call?.id || null } };
+      }),
+      // Preserve older calls that were never mirrored. The existing Calls view
+      // owns transcripts and audio; the feed links to that exact record.
+      ...calls.filter(call => !call.twilio_call_sid || !mirroredCallSids.has(call.twilio_call_sid)).map(call => ({
+        type: 'call', title: 'Phone call', date: call.created_at,
+        description: [call.call_summary, call.disposition || call.status].filter(Boolean).join(' · '), metadata: { callId: call.id },
+      })),
+      ...services.map(service => ({ type: 'service', title: `Service: ${service.service_type}`, description: service.tech_name ? `Performed by ${service.tech_name}` : 'Service recorded', date: service.service_date, metadata: { serviceType: service.service_type, techName: service.tech_name } })),
+      // Lifecycle events require their own timestamp. A final status alone
+      // never invents sent/viewed/paid events. No bearer tokens enter the feed.
+      ...invoices.flatMap(invoice => ['created', 'sent', 'viewed', 'paid'].filter(event => invoice[`${event}_at`]).map(event => ({
+        type: 'invoice', title: `Invoice ${invoice.invoice_number} ${event}`,
+        description: [invoice.service_type, `Current status: ${invoice.status}`].filter(Boolean).join(' · '),
+        date: invoice[`${event}_at`], metadata: { invoiceId: invoice.id },
+      }))),
+      ...estimates.flatMap(estimate => ['created', 'sent', 'viewed', 'accepted', 'declined'].filter(event => estimate[`${event}_at`]).map(event => ({
+        type: 'estimate', title: `Estimate ${event}`, description: `Current status: ${estimate.status}`,
+        date: estimate[`${event}_at`], metadata: { estimateId: estimate.id },
+      }))),
+      ...payments.map(payment => ({
+        type: 'payment', title: `Payment · ${payment.status || 'status not recorded'}: ${Number(payment.amount || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' })}`,
+        description: payment.description || '', date: payment.payment_date,
+        metadata: { paymentId: payment.id, amount: Number(payment.amount || 0), status: payment.status },
+      })),
+      ...scheduled.map(service => ({ type: 'scheduled_service', title: `Scheduled: ${service.service_type}`, description: `Current status: ${service.status}`, date: service.scheduled_date, metadata: { scheduledServiceId: service.id, serviceType: service.service_type, status: service.status } })),
+      ...reviews.map(review => ({ type: 'review', title: `Google review: ${review.star_rating}/5`, description: review.review_text || '', date: review.review_created_at, metadata: { starRating: review.star_rating } })),
+      ...activities.map(activity => ({ type: 'activity', title: activity.action, description: activity.description || '', date: activity.created_at, metadata: { action: activity.action } })),
+    ];
     timeline.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
-
-    res.json({ timeline });
+    res.json({ timeline, missingSources });
   } catch (err) { next(err); }
 });
 
@@ -3117,7 +3081,7 @@ router.get('/:id', async (req, res, next) => {
         : [])
       .catch(e => { logger.warn(`[customers:${c.id}] annual_prepay_consumed_estimates: ${e.message}`); return null; });
 
-    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, upcomingScheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans, addressNeighborRows] = await Promise.all([
+    const [tags, interactions, prefs, services, estimates, payments, paymentsTotal, scheduled, upcomingScheduled, smsLog, healthScore, invoices, cards, paymentMethodConsents, contracts, photos, notificationPrefs, referralInfo, complianceRecords, customerDiscounts, nutrientLedgerRows, nutrientLedgerSummary, accountProperties, annualPrepayTerms, prepaidPlans, addressNeighborRows, balanceSummary] = await Promise.all([
       db('customer_tags').where({ customer_id: c.id }).select('tag'),
       db('customer_interactions').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(30),
       db('property_preferences').where({ customer_id: c.id }).first(),
@@ -3131,13 +3095,15 @@ router.get('/:id', async (req, res, next) => {
       db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', 'payment_methods.card_brand', 'payment_methods.last_four').orderBy('payment_date', 'desc').limit(20),
       db('payments').where({ customer_id: c.id, status: 'paid' }).first(db.raw('COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0)::float as net')).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
       customerScheduledHistory(db, c.id, { focusServiceId }),
-      // Upcoming, active-only — drives Customer 360's "next service" selection.
-      db('scheduled_services')
-        .where({ customer_id: c.id })
-        .where('scheduled_date', '>=', etDateString())
-        .whereNotIn('status', ['cancelled', 'canceled', 'completed', 'rescheduled', 'skipped', 'no_show'])
-        .orderBy('scheduled_date')
-        .orderBy('window_start')
+      // Upcoming, active-only — drives Customer 360's next appointment.
+      db('scheduled_services as ss')
+        .leftJoin('technicians as tech', 'ss.technician_id', 'tech.id')
+        .select('ss.*', 'tech.name as technician_name')
+        .where('ss.customer_id', c.id)
+        .where('ss.scheduled_date', '>=', etDateString())
+        .whereNotIn('ss.status', ['cancelled', 'canceled', 'completed', 'rescheduled', 'skipped', 'no_show'])
+        .orderBy('ss.scheduled_date')
+        .orderBy('ss.window_start')
         .limit(20),
       db('sms_log').where({ customer_id: c.id }).orderBy('created_at', 'desc').limit(20),
       latestHealthScoreForCustomer(c.id),
@@ -3229,6 +3195,8 @@ router.get('/:id', async (req, res, next) => {
       findCustomersAtAddress(db, [c.address_line1, c.address_line2, c.city, c.zip].filter(Boolean).join(', '), { excludeCustomerId: c.id })
         .then(rows => rows.filter(r => !(c.account_id && r.account_id === c.account_id)))
         .catch(e => { logger.warn(`[customers:${c.id}] address_neighbors: ${e.message}`); return []; }),
+      req.techRole === 'technician' ? null : openBalanceSummary(c.id, { displayLimit: 0 })
+        .catch(e => { logger.warn(`[customers:${c.id}] balance_summary: ${e.message}`); return null; }),
     ]);
 
     // The invoices table stores the billed amount as `total`; the frontend reads
@@ -3266,6 +3234,13 @@ router.get('/:id', async (req, res, next) => {
     }));
 
     const payload = {
+      billingSummary: balanceSummary ? {
+        openBalance: balanceSummary.complete ? balanceSummary.total : null,
+        overdueBalance: balanceSummary.complete ? balanceSummary.overdueTotal : null,
+        overdueCount: balanceSummary.complete ? balanceSummary.overdueCount : null,
+        complete: balanceSummary.complete,
+        asOf: balanceSummary.asOf,
+      } : null,
       customer: {
         id: c.id, firstName: c.first_name, lastName: c.last_name,
         accountId: c.account_id,

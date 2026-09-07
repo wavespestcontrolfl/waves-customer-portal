@@ -939,18 +939,23 @@ function SortHeader({
 // CUSTOMER INTELLIGENCE TAB
 // =============================================================================
 function CustomerIntelligenceTab() {
+  const [retryKey, setRetryKey] = useState(0);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
     adminFetch("/admin/customers/intelligence")
-      .then((d) => {
-        setData(d);
-        setLoading(false);
+      .then((result) => {
+        if (!result || !Number.isFinite(result.totalCustomers)) throw new Error("Incomplete intelligence summary");
+        if (!cancelled) setData(result);
       })
-      .catch(() => setLoading(false));
-  }, []);
+      .catch(() => { if (!cancelled) setData(null); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [retryKey]);
 
   const handleScan = async () => {
     setScanning(true);
@@ -1015,7 +1020,8 @@ function CustomerIntelligenceTab() {
   if (!data)
     return (
       <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Unable to load intelligence data
+        <p>Retention insights unavailable. The customer intelligence summary could not be loaded.</p>
+        <button type="button" onClick={() => setRetryKey((key) => key + 1)} style={{ padding: "10px 16px", marginTop: 12, border: `1px solid ${D.border}`, borderRadius: 4, background: "#fff" }}>Retry retention insights</button>
       </div>
     );
 
@@ -2116,11 +2122,10 @@ function CustomerMap({ customers: _ignored, onSelect }) {
             marginBottom: 4,
           }}
         >
-          Google Maps API Key Required
+          Map unavailable
         </div>{" "}
         <div style={{ fontSize: 13, color: D.muted }}>
-          Set VITE_GOOGLE_MAPS_API_KEY in your environment to enable the
-          customer map.
+          Customer addresses are still available in the Directory.
         </div>{" "}
       </div>
     );

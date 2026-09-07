@@ -3,8 +3,6 @@ import { ArrowDown, ArrowUp, MoreHorizontal, Phone, MessageSquare, PenLine, Tras
 import { Button, Table, THead, TBody, TR, TH, TD } from "../ui";
 import { formatETDateOnly } from "../../lib/timezone";
 
-const currency = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
-
 export default function CustomerDirectoryTable({ customers, onOpen, onEdit, onDelete, onCall, canEdit, sortBy, sortDir, onSort, editingId, editor }) {
   const root = useRef(null);
   useEffect(() => {
@@ -44,9 +42,8 @@ export default function CustomerDirectoryTable({ customers, onOpen, onEdit, onDe
             <TD data-label="Services on record">{serviceNames.length ? serviceNames.join(", ") : "No service history"}</TD>
             <TD data-label="Next service">{customer.nextServiceDate ? formatETDateOnly(customer.nextServiceDate, { month: "short", day: "numeric" }) : "Not scheduled"}</TD>
             <TD data-label="Attention" className="customer-directory-attention">
-              {customer.balanceOwed > 0 && <span className="text-alert-fg">{currency.format(customer.balanceOwed)} owed</span>}
-              {customer.healthScore != null && <span className="customer-directory-health"><i aria-hidden="true" style={{ background: customer.healthScore >= 70 ? "#10B981" : customer.healthScore >= 40 ? "#F59E0B" : "#C8312F" }} />Health {customer.healthScore}/100</span>}
-              {customer.balanceOwed <= 0 && customer.healthScore == null && <span>—</span>}
+              {customer.overdueInvoiceCount > 0 && <span className="text-alert-fg">{customer.overdueInvoiceCount} overdue invoice{customer.overdueInvoiceCount === 1 ? "" : "s"}</span>}
+              {!(customer.overdueInvoiceCount > 0) && <span>—</span>}
             </TD>
             <TD className="customer-directory-actions">
               <details onKeyDown={(event) => {

@@ -793,7 +793,7 @@ export function libraryLinkClause(link) {
 // With a customer, render the same composer used by Messages, locked to that
 // profile. The caller keys it by customer id/phone to discard another person's
 // draft, attachments, and minted links when the selected record changes.
-export function SmsTab({ active, customer = null, customerMessages = [], onSent }) {
+export function SmsTab({ active, customer = null, customerMessages = [], onSent, linkRequest = 0 }) {
   // Prep-guide sender lives with the composer's other outbound actions.
   const [prepSendOpen, setPrepSendOpen] = useState(false);
   // Server-verified role: draft APPROVAL is owner-only (PUT /approve and
@@ -864,6 +864,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], onSent 
   // Insert Link sheet — the searchable link library (customer links +
   // reviews + the whole website + app stores + socials).
   const [showLinkSheet, setShowLinkSheet] = useState(false);
+  useEffect(() => { if (linkRequest > 0) setShowLinkSheet(true); }, [linkRequest]);
   // Library rows from GET /admin/communications/link-library, fetched once
   // per page load on first open (search/filtering is client-side).
   const [libraryLinks, setLibraryLinks] = useState(null);
