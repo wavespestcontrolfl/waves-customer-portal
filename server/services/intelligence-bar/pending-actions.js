@@ -12,6 +12,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { executionOutcome } = require('./outcomes');
+const { phoneMatchDigits } = require('../../utils/phone');
 
 const TTL_MINUTES = 10;
 
@@ -46,7 +47,7 @@ function stepKey(toolName, params, preview = {}) {
   }
   if (toolName === 'send_sms') {
     canonical.message_type = canonical.message_type || 'manual';
-    if (canonical.phone) canonical.phone = String(canonical.phone).replace(/\D/g, '');
+    if (canonical.phone) canonical.phone = phoneMatchDigits(canonical.phone)[0] || String(canonical.phone).replace(/\D/g, '');
   }
   if (['adjust_stock', 'create_restock_request', 'update_restock_request'].includes(toolName)) {
     for (const key of ['unit', 'priority', 'vendor', 'needed_by', 'reason']) {
@@ -57,14 +58,15 @@ function stepKey(toolName, params, preview = {}) {
   return paramsHash(toolName, canonical);
 }
 
-async function createPendingAction({ toolName, params, summary, requestedBy, context, contract, contractHash, taskId, stepKey, runnerToken }) {
+async function createPendingAction({ toolName, params, summary, requestedBy, context, contract, contractHash, taskId, stepKey: actionStepKey, runnerToken }) {
   const persist = async trx => {
   if (taskId) {
     const task = await trx('ib_tasks').where({ id: taskId, actor_id: String(requestedBy), runner_token: runnerToken, state: 'running' })
       .where('lease_expires_at', '>', trx.fn.now()).forUpdate().first('id');
     if (!task) throw new Error('Task execution was superseded');
     const previous = await trx('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) });
-    const existing = previous.find(row => row.step_key === stepKey);
+    const existing = previous.find(row => row.step_key === actionStepKey
+      || (toolName === 'send_sms' && row.tool_name === toolName && stepKey(toolName, row.params) === actionStepKey));
     if (existing) return existing;
     if (previous.some(row => row.status !== 'confirmed'
       || !['completed', 'provider_accepted'].includes(executionOutcome(row.result)))) {
@@ -90,11 +92,11 @@ async function createPendingAction({ toolName, params, summary, requestedBy, con
     // its hash is what the operator's Confirm must echo.
     contract: contract ? JSON.stringify(contract) : null,
     contract_hash: contractHash || null,
-    ...(taskId ? { task_id: taskId, step_key: stepKey } : {}),
+    ...(taskId ? { task_id: taskId, step_key: actionStepKey } : {}),
   });
   if (taskId) insert = insert.onConflict(['task_id', 'step_key']).ignore();
   const [created] = await insert.returning('*');
-  const row = created || await trx('ib_pending_actions').where({ task_id: taskId, step_key: stepKey, requested_by: String(requestedBy) }).first();
+  const row = created || await trx('ib_pending_actions').where({ task_id: taskId, step_key: actionStepKey, requested_by: String(requestedBy) }).first();
   if (!row) throw new Error('Pending action could not be recorded');
 
   logger.info(`[intelligence-bar:pending] Proposed ${toolName} as pending action ${row.id}`);
