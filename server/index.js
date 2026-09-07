@@ -193,6 +193,14 @@ const embedHelmet = helmet({
   crossOriginOpenerPolicy,
 });
 
+// First-party PostHog ingest proxy (/ingest/* → PostHog Cloud). Mounted
+// ABOVE helmet, the CORS allowlist, and the body parsers on purpose: PostHog's
+// own CORS headers must pass through untouched (spoke origins are not on the
+// portal allowlist), helmet's same-origin CORP would refuse the hub's
+// cross-origin load of /ingest/static/array.js, and the route buffers its own
+// raw body. Dark until GATE_POSTHOG_INGEST_PROXY=true (404 otherwise).
+app.use('/ingest', require('./routes/posthog-ingest'));
+
 app.use((req, res, next) => {
   // Only the /book HTML document needs frame-ancestors loosened
   // (query string is not part of req.path; handle trailing slash too)

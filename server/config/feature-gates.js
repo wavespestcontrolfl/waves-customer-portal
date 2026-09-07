@@ -1425,6 +1425,16 @@ const gates = {
   // the office's manual match flow; already-made links keep their
   // link_source='click_auto' stamp for audit.
   reviewClickAutoLink: process.env.GATE_REVIEW_CLICK_AUTOLINK === 'true',
+
+  // First-party PostHog ingest proxy: /ingest/* on the portal origin forwards
+  // to PostHog Cloud so ad blockers stop dropping the hub's and /book's funnel
+  // events (10–25% by PostHog's figure). Inert until a caller points its SDK
+  // host at it (hub PUBLIC_POSTHOG_HOST / portal VITE_POSTHOG_HOST). Kill:
+  // unset → 404; revert the caller's host env too, or its SDK keeps posting
+  // into the 404. This entry is for logGateStatus; the route reads
+  // gateEnvValue('GATE_POSTHOG_INGEST_PROXY') at REQUEST time (the techTips
+  // idiom), so a flip needs no redeploy. See server/routes/posthog-ingest.js.
+  posthogIngestProxy: gateEnvValue('GATE_POSTHOG_INGEST_PROXY'),
   // The surname rung of that matcher (click_name: the ONE in-window clicker
   // whose complete last name is the reviewer's; see
   // findConfidentClickMatch). Ships DARK on its own switch because its

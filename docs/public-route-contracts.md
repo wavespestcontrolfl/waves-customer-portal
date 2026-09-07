@@ -602,6 +602,56 @@ AND server feature-cache warm — the client SDK fetches feature definitions
 only after it says enabled, which is what makes unsetting GATE_GROWTHBOOK a
 real rollback for client experiments too (and keeps clients dark while the
 server can't validate exposure keys)).
+`/ingest/*` (first-party PostHog ingest proxy — no auth, no token; the
+browser SDK on the hub and on `/book` posts here instead of `*.posthog.com`
+so ad blockers stop dropping funnel events. **Gated behind
+GATE_POSTHOG_INGEST_PROXY** (generic 404 when off, no upstream call; read at
+REQUEST time via `gateEnvValue` — `1`/`true`/`on` — so a Railway unset is a
+live kill, no redeploy).
+Mounted in `server/index.js` ABOVE helmet, the CORS allowlist and the body
+parsers → `routes/posthog-ingest.js`. Invariants: the upstream origins are
+FIXED constants (`https://us.i.posthog.com`; `/static/*` and `/array/*` →
+`https://us-assets.i.posthog.com`, PostHog's own proxy split) and the resolved URL's origin is asserted
+against them (400 otherwise) — leading `/` and `\` runs are collapsed to one
+`/` first, so a protocol-relative (`//evil.com/e/`) or backslash tail can
+never resolve off-host (SSRF, Codex r1 on #4027); GET/POST/OPTIONS only
+(405); a per-IP limiter (`POSTHOG_INGEST_RATE_MAX`/min, default 300; 429;
+keyed by the shared `unauthenticatedAuthLimitKey`, so IPv6 collapses to /64)
+sits AFTER the gate so gate-off probes stay an unobservable 404 and never
+spend budget; a process-wide in-flight cap (`POSTHOG_INGEST_MAX_IN_FLIGHT`,
+default 32; fast 503 + `Retry-After`) with a per-IP share of it
+(`POSTHOG_INGEST_MAX_IN_FLIGHT_PER_IP`, default 4, same /64 key as the
+limiter) is checked BEFORE the body is buffered so concurrent bytes are
+bounded (32 × 2 MB) and one caller cannot park on every slot —
+a client disconnect aborts the upstream call and the slot is held until
+that call settles, so upload-and-hang-up loops cannot exceed the cap, and an
+upload deadline (`POSTHOG_INGEST_UPLOAD_TIMEOUT_MS`, default 15 s) tears down
+a body that has not fully arrived so stalled uploads cannot sit on the slots;
+2 MB raw body cap (413); 10 s upstream timeout (502); the upstream response
+is STREAMED to the client with backpressure — never buffered — under a size
+cap (`POSTHOG_INGEST_MAX_RESPONSE_BYTES`, default 8 MB; over it the response
+is cut off and upstream cancelled) and a downstream write deadline
+(`POSTHOG_INGEST_RESPONSE_TIMEOUT_MS`, default 15 s), and the in-flight slot
+is held until the downstream write has finished or the connection closed.
+Inbound request headers are ALLOWLISTED — only `content-type`, `accept`,
+`accept-language`, `origin`, `user-agent` and the preflight
+`access-control-request-*` pair cross — so cookies, authorization, referer,
+content-encoding (the raw body parser has already inflated the bytes) and
+every proxy-chain / client-IP header of any spelling (RFC 7239 `Forwarded`,
+`X-Forwarded-*`, `X-Real-IP`, mesh / CDN variants) never reach PostHog;
+`X-Forwarded-For` is set to `req.ip` (trust-proxy aware) so PostHog GeoIP
+survives, and `origin` passing through lets PostHog's own CORS reflection
+answer the browser (spoke origins never touch the portal allowlist). Outbound `set-cookie`,
+`content-encoding`, `content-length` and HSTS are dropped and
+`Cross-Origin-Resource-Policy: cross-origin` is set so the hub can load
+`array.js` cross-origin. Nothing from the request is logged — not the body
+and not the path (caller-controlled free text; an upstream failure logs the
+method, a fixed `static`/`ingest` category and the error kind only). The
+global `/api/` limiter does not apply (different prefix, mounted above it),
+hence the route limiter; abuse is bounded to forwarding to PostHog's public
+ingest, which the public project key already permits directly. Kill = unset the gate AND
+revert the caller's host env (hub `PUBLIC_POSTHOG_HOST`, portal
+`VITE_POSTHOG_HOST`) — an SDK pointed at a 404 just drops events.)
 `/api/public/services/menu` (read-only catalog-derived product menu the
 website quote form renders from — no auth, no token, no params, no PII.
 Mounted at `server/index.js` → `routes/public-services-menu.js`; payload is
