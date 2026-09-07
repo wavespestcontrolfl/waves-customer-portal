@@ -48,6 +48,7 @@ beforeEach(() => {
   native.request.mockReset().mockResolvedValue('granted');
   native.connection.mockReset().mockResolvedValue('granted');
   global.fetch = vi.fn(async (url) => {
+    if (String(url).includes('/push/status')) return jsonResponse({ available: true });
     if (String(url).includes('/unread-count')) return jsonResponse({ count: 2 });
     return jsonResponse({ notifications: NOTIFICATIONS });
   });
@@ -76,6 +77,35 @@ describe('NotificationBell panel', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /notifications/i })); });
     expect(native.request).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('button', { name: 'Enable push' })).toBeNull();
+  });
+
+  it.each([false, undefined])('does not auto-prompt when server availability is %s', async (available) => {
+    native.enabled = true;
+    global.fetch.mockImplementation(async () => jsonResponse({ available }));
+    render(<NotificationBell type="customer" />);
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('/push/status'), expect.anything()));
+    await act(async () => {});
+    expect(native.request).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the server availability read fails', async () => {
+    native.enabled = true;
+    global.fetch.mockRejectedValue(new Error('offline'));
+    render(<NotificationBell type="customer" />);
+    await act(async () => {});
+    expect(native.request).not.toHaveBeenCalled();
+  });
+
+  it('ignores an availability response that arrives after biometric relock', async () => {
+    native.enabled = true;
+    let finish;
+    const pending = new Promise(resolve => { finish = resolve; });
+    global.fetch.mockImplementation(async url => String(url).includes('/push/status') ? pending : jsonResponse({ count: 0 }));
+    const { rerender } = render(<NotificationBell type="customer" />);
+    native.locked = true;
+    rerender(<NotificationBell type="customer" />);
+    await act(async () => { finish(jsonResponse({ available: true })); });
+    expect(native.request).not.toHaveBeenCalled();
   });
 
   it('keeps Settings guidance available after a saved denial', async () => {

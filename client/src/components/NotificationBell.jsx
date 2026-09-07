@@ -227,8 +227,13 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   // the system sheet causes lock/foreground changes during the same mount.
   useEffect(() => {
     if (type !== 'customer' || !isNativeApp() || biometricLocked || pushPromptRequested.current) return;
-    pushPromptRequested.current = true;
-    void handleEnablePush();
+    let current = true;
+    void api.getCustomerPushStatus().then((status) => {
+      if (!current || status?.available !== true) return;
+      pushPromptRequested.current = true;
+      void handleEnablePush();
+    }).catch(() => { /* Availability fails closed; the drawer keeps its retry action. */ });
+    return () => { current = false; };
   }, [type, biometricLocked]);
 
   // Load notifications when opened. A failed load is recorded — rendering
