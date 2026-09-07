@@ -352,6 +352,29 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect((await db('customers').where('id', customerA).first('address_line1')).address_line1).toBe('100 Example Grove');
   }, 30000);
 
+  test('completed reads cannot resume and interrupted attachment requests require their missing evidence', async () => {
+    const Tasks = require('../services/intelligence-bar/tasks');
+    mockModel.mockResolvedValueOnce(answer('The read is complete.'));
+    const completed = await api('/query', request('Show an inventory summary'));
+    const recovered = await api(`/tasks/${completed.body.taskId}?session_id=${sessionId}`);
+    expect(recovered.body).toMatchObject({ taskState: 'responded', canContinue: false });
+    const calls = mockModel.mock.calls.length;
+    const refused = await api(`/tasks/${completed.body.taskId}/resume`, { session_id: sessionId });
+    expect(refused).toMatchObject({ status: 409, body: { code: 'not_resumable' } });
+    expect(mockModel).toHaveBeenCalledTimes(calls);
+    const { task } = await Tasks.begin({ actorId: actor, sessionId, requestKey: crypto.randomUUID(),
+      request: request('Use the attached measurement to prepare an estimate', { images: ['synthetic-ephemeral-image'] }), pageContext: {} });
+    await db('ib_tasks').where({ id: task.id }).update({ lease_expires_at: new Date(Date.now() - 1000) });
+    const missing = await api(`/tasks/${task.id}?session_id=${sessionId}`);
+    expect(missing.body).toMatchObject({ canContinue: false, response: expect.stringContaining('Reattach') });
+    expect((await api(`/tasks/${task.id}/resume`, { session_id: sessionId })).body.code).toBe('attachments_required');
+    expect(mockModel).toHaveBeenCalledTimes(calls);
+    expect(await db('ib_pending_actions').where({ task_id: task.id })).toHaveLength(0);
+    const persisted = await db('ib_tasks').where({ id: task.id }).first();
+    expect(persisted.request.images).toBeUndefined();
+    expect(persisted.request.had_images).toBe(true);
+  }, 30000);
+
   test('resume includes committed receipts even when the worker died before its first checkpoint', async () => {
     proposeNote(customerA, 'Recovered pre-checkpoint note');
     const proposed = await api('/query', request(`Add a note for ${nameA}: Recovered pre-checkpoint note`));
