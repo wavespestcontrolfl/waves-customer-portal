@@ -10,7 +10,7 @@ const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/
 const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isEnabled, gateEnvValue } = require('../config/feature-gates');
-const { runExclusive } = require('../utils/cron-lock');
+const { runExclusive, recordMissedTick } = require('../utils/cron-lock');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
@@ -103,7 +103,7 @@ async function scheduledDepositReceiptAllowed(msg) {
       .where({ customer_id: msg.customer_id })
       .first('payment_receipt_channel');
     const channel = prefs?.payment_receipt_channel || 'sms';
-    return channel === 'sms' || channel === 'both';
+    return channel === 'sms' || channel === 'both' || channel === 'push';
   } catch {
     return true;
   }
@@ -554,6 +554,23 @@ async function runAutonomousOpportunityMining({
 function initScheduledJobs() {
   const { isEnabled, logGateStatus } = require('../config/feature-gates');
   logGateStatus();
+
+  // A process that died mid-job (deploy kill) left its job_health row at
+  // 'running'; settle every such row whose advisory lock nobody holds
+  // (cron-lock.settleDeadRunningJobs). Once at boot, then every 15 min: on
+  // a rolling deploy the OUTGOING instance still holds its locks while this
+  // one boots and is killed afterwards, so the boot pass alone would skip
+  // exactly the rows it exists for (pre-push codex P1). Registered ABOVE
+  // the cronJobs early return — it is maintenance of the health ledger,
+  // not a job — and unguarded by runExclusive: the pinned conditional
+  // update makes concurrent passes harmless. The sweep reads pg_locks and
+  // never takes a work lease, and runs at :03/:18/:33/:48 — off every
+  // quarter-hour and top-of-hour job boundary (codex P1 on #4103).
+  // Fire-and-forget, fail-soft.
+  const settleDeadRunning = () => require('../utils/cron-lock').settleDeadRunningJobs()
+    .catch((err) => logger.warn(`[scheduler] dead-running job_health settle failed: ${err.message}`));
+  settleDeadRunning();
+  cron.schedule('3,18,33,48 * * * *', settleDeadRunning, { timezone: 'America/New_York' });
 
   // Cancel-notice late-claim rollout boundary (codex #3233 r35): stamped
   // at BOOT when the hook gate is on, so the boundary necessarily
@@ -1392,9 +1409,17 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // Overdue promises to callers (call_commitments) — daily 7:20am ET, one
-  // exception bell per overdue promise per ET day. No-op while
-  // GATE_CALL_COMMITMENTS is off. See services/call-commitments-watchdog.js.
+  // Recover interrupted SMS profile capture every five minutes.
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;
+    try {
+      await runSmsRecoveryTick();
+    } catch {
+      logger.error('[sms-operations] profile capture did not complete');
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Keep the existing daily call watchdog independent of timer latency.
   cron.schedule('0 20 7 * * *', async () => {
     try {
       const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
@@ -3634,7 +3659,9 @@ function initScheduledJobs() {
             // in metadata and the replay forwards them, or the
             // require_input_ids validator would block a send the immediate
             // path already validated.
-            ...(claimMeta.invoice_id ? { invoiceId: claimMeta.invoice_id } : {}),
+            invoiceId: msg.message_type === 'service_complete_paid_receipt'
+              ? claimMeta.stamp_receipt_invoice_id
+              : claimMeta.invoice_id,
             ...(claimMeta.estimate_id ? { estimateId: claimMeta.estimate_id } : {}),
             // Inbound-reply provenance survives the retry rail: a transient
             // provider failure on an immediate AI reply (Twilio 429/5xx)
@@ -3667,6 +3694,9 @@ function initScheduledJobs() {
             metadata: {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
+              notificationEventKey: claimMeta.notificationEventKey,
+              useCustomerChannel: claimMeta.useCustomerChannel === true,
+              bundled_review_request_id: claimMeta.bundled_review_request_id,
               // Enqueue provenance survives the replay (codex #3607 r4): the
               // audit row is written under this worker's own entry point, so
               // the ORIGINAL one (e.g. autopay_completion_decline_deferred)
@@ -4182,8 +4212,15 @@ function initScheduledJobs() {
           // the attempts ran out; parked as send_failed with no due time it
           // is inert, as the sibling release leaves a held row (pre-push
           // codex P1 on #3750; codex r18 P2 on #3804).
-          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING'].includes(e.code));
-          await markScheduledEstimateSendFailure(est, e.message, { retry: !deterministicRefusal, now });
+          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING', 'ESTIMATE_REVIEW_STALE', 'SEND_OUTCOME_UNCERTAIN'].includes(e.code));
+          // A reviewed attempt cannot be retimed: its receipt and pinned
+          // offer belong to the original schedule. Even a bookkeeping throw
+          // can follow provider acceptance, so stop for explicit staff review.
+          let sendData = est.estimate_data;
+          try { if (typeof sendData === 'string') sendData = JSON.parse(sendData); } catch { sendData = null; }
+          const scheduledAt = est.scheduled_at ? new Date(est.scheduled_at).toISOString() : null;
+          const reviewedSchedule = scheduledAt && (sendData?.manualSendAttempts || []).some((entry) => entry.scheduleReview?.scheduledAt === scheduledAt);
+          await markScheduledEstimateSendFailure(est, e.message, { retry: !deterministicRefusal && !reviewedSchedule, now });
         }
       }
       logger.info(`Scheduled estimates processed: ${scheduled.length}`);
@@ -6554,11 +6591,12 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 6:40 AM ET — Schedule-integrity watchdog. Pages three silent-loss
+  // DAILY 6:40 AM ET — Schedule-integrity watchdog. Pages silent-loss
   // classes: past-dated visits stuck in on_site/en_route (performed but
   // never completed → no service record / invoice / report / SMS), upcoming
   // recurring series with no price on any row, and recurring-lawn customers
-  // invisible to the Monday irrigation email. 6:40, NOT later (Codex #3209
+  // invisible to the Monday irrigation email, and accepted-plan schedule
+  // gaps. 6:40, NOT later (Codex #3209
   // post-merge P2): the Monday irrigation send fires at 7:00 ET, so a
   // lawn-email gap alert after that is unactionable for the very send it
   // warns about — this tick must precede it. Still before the day's route
@@ -6570,8 +6608,8 @@ function initScheduledJobs() {
     try {
       const { runScheduleIntegrityWatchdog } = require('./schedule-integrity-watchdog');
       const result = await runScheduleIntegrityWatchdog();
-      if (!result.skipped && (result.stale > 0 || result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed)) {
-        logger.warn(`[schedule-integrity] stale=${result.stale} unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} alerted=${result.alerted}`);
+      if (!result.skipped && (result.stale > 0 || result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.acceptedScheduleGaps > 0 || result.acceptedScheduleCheckFailed || result.prepayCoverageGaps > 0)) {
+        logger.warn(`[schedule-integrity] stale=${result.stale} unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} acceptedScheduleGaps=${result.acceptedScheduleGaps}${result.acceptedScheduleCheckFailed ? ' ACCEPTED-SCHEDULE-CHECK-FAILED' : ''} prepayCoverageGaps=${result.prepayCoverageGaps} alerted=${result.alerted}`);
       }
     } catch (err) {
       logger.error(`Schedule-integrity watchdog tick failed: ${err.message}`);
@@ -6635,8 +6673,23 @@ function initBankingSync() {
   }, { timezone: 'America/New_York' });
 }
 
+// One SMS profile-capture recovery tick. runExclusive returns
+// { skipped: true, reason } WITHOUT running the sweep when it cannot acquire
+// a DB connection; lease_held is a normal overlap. A lost tick is ledgered
+// through the missed-tick path so job health never reads as quiet.
+async function runSmsRecoveryTick({ now = Date.now() } = {}) {
+  const { runSmsOperationalActions } = require('./sms-operational-actions');
+  const res = await runSmsOperationalActions();
+  if (res && res.skipped === true && res.reason !== 'lease_held') {
+    logger.error(`[sms-operations] profile capture tick skipped (${res.reason})`);
+    await recordMissedTick('sms-operational-actions', now, `tick skipped: ${res.reason}`);
+  }
+  return res;
+}
+
 module.exports = {
   initScheduledJobs,
+  runSmsRecoveryTick,
   initBankingSync,
   purposeForScheduledMessageType,
   resolveScheduledRecipient,

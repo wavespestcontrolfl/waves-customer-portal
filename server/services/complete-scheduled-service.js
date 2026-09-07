@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const db = require('../models/db');
+const { savepointRead, failSoftRead } = require('../utils/savepoint-read');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const logger = require('../services/logger');
 const StripeService = require('../services/stripe');
@@ -500,10 +501,11 @@ function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, in
     .filter(Boolean);
 }
 
+// Missing / ambiguous rig no longer blocks the plan (owner ruling
+// 2026-09-07), so only a calibration that exists but is stale or unverified
+// is worth an advisory line.
 function calibrationLockoutBlocks(plan) {
   const lockoutCodes = new Set([
-    'missing_calibration',
-    'equipment_selection_required',
     'expired_calibration',
     'calibration_not_field_verified',
   ]);
@@ -1132,10 +1134,7 @@ function frozenResumeCompletionState(frozenStructuredNotes, { requestBackfill = 
 async function loadSubmittedCatalogProducts(submittedProducts = [], database = db) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p?.productId).filter(Boolean))];
   if (!productIds.length) return [];
-  return database('products_catalog')
-    .whereIn('id', productIds)
-    .select('*')
-    .catch(() => []);
+  return failSoftRead(database, (k) => k('products_catalog').whereIn('id', productIds).select('*'), []);
 }
 
 function treeShrubPhotoUploadRequiredError(uploadResult, minimum = TREE_SHRUB_MIN_CLOSEOUT_PHOTOS) {
@@ -1149,6 +1148,13 @@ function treeShrubPhotoUploadRequiredError(uploadResult, minimum = TREE_SHRUB_MI
   return err;
 }
 
+function packetPhotoUploadRequiredError(uploadResult) {
+  const serverFailure = uploadResult.errors.some((error) => !error.statusCode || error.statusCode >= 500);
+  return Object.assign(new Error('Every submitted photo must upload before the visit can close.'), {
+    code: 'visit_completion_photos_upload_failed', statusCode: serverFailure ? 503 : 400, isOperational: true,
+  });
+}
+
 // formatRescheduleTemplateVars was removed with the inline single-reschedule
 // send — that path now routes through admin-schedule's
 // sendRescheduleNoticeForVisit (recipient routing + arrival-window copy).
@@ -1157,16 +1163,13 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = [], database
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
   if (!productIds.length) return [];
 
-  const [profile, catalogProducts] = await Promise.all([
-    database('customer_turf_profiles')
-      .where({ customer_id: svc.customer_id, active: true })
-      .first()
-      .catch(() => null),
-    database('products_catalog')
-      .whereIn('id', productIds)
-      .select('id', 'name', 'analysis_n', 'analysis_p')
-      .catch(() => []),
-  ]);
+  // Sequential: savepoints on one transaction connection cannot interleave.
+  const profile = await failSoftRead(database, (k) => k('customer_turf_profiles')
+    .where({ customer_id: svc.customer_id, active: true })
+    .first(), null);
+  const catalogProducts = await failSoftRead(database, (k) => k('products_catalog')
+    .whereIn('id', productIds)
+    .select('id', 'name', 'analysis_n', 'analysis_p'), []);
   if (!profile) return [];
 
   // Stamped visit address OUTRANKS the turf-profile municipality (matches
@@ -1191,16 +1194,16 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = [], database
   const city = stampedCity || profileCity || customerCity;
   if (!county && !city) return [];
 
-  let ordinanceQuery = database('municipality_ordinances').where({ active: true });
-  ordinanceQuery = ordinanceQuery.where(function () {
-    if (county) this.orWhere(function () {
-      this.where({ jurisdiction_type: 'county' }).whereILike('county', county);
-    });
-    if (city) this.orWhere(function () {
-      this.where({ jurisdiction_type: 'city' }).whereILike('city', city);
-    });
-  });
-  const ordinances = await ordinanceQuery.catch(() => []);
+  const ordinances = await failSoftRead(database, (k) => k('municipality_ordinances')
+    .where({ active: true })
+    .where(function () {
+      if (county) this.orWhere(function () {
+        this.where({ jurisdiction_type: 'county' }).whereILike('county', county);
+      });
+      if (city) this.orWhere(function () {
+        this.where({ jurisdiction_type: 'city' }).whereILike('city', city);
+      });
+    }), []);
   if (!ordinances.length) return [];
 
   const productById = new Map(catalogProducts.map((product) => [String(product.id), product]));
@@ -1307,10 +1310,9 @@ async function actualProductInventoryBlocks(submittedProducts = [], database = d
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
   if (!productIds.length) return [];
 
-  const catalogProducts = await database('products_catalog')
+  const catalogProducts = await failSoftRead(database, (k) => k('products_catalog')
     .whereIn('id', productIds)
-    .select('id', 'name', 'active', 'inventory_on_hand', 'inventory_unit')
-    .catch(() => []);
+    .select('id', 'name', 'active', 'inventory_on_hand', 'inventory_unit'), []);
   const productById = new Map(catalogProducts.map((product) => [String(product.id), product]));
   const blocks = [];
 
@@ -1913,18 +1915,10 @@ function completionSavedCardFallbackPolicy({
 // outranks the base row entirely, so an armed, successfully-rendered text can
 // reach a customer with an open invoice and no way to pay it. Checking the
 // rendered output (not the stored template) is what makes that unreachable.
-// The comparison MUST be scheme-normalised: getTemplate strips https:// from
-// owned portal hosts before returning the body (admin-sms-templates.js
-// stripPortalUrlScheme), so a raw `body.includes(payUrl)` never matches a
-// portal pay link and would send EVERY billed visit to the fallback — leaving
-// the gated lane permanently unreachable. Both sides go through the renderer's
-// own function so this cannot drift as SCHEMELESS_SMS_HOSTS changes.
+// Compare in SMS display form so a valid pay link survives scheme removal.
 function reportV1InvoiceBodyCarriesPayLink(body, payUrl, normalize) {
-  const strip = typeof normalize === 'function'
-    ? normalize
-    : (typeof smsTemplatesRouter.stripPortalUrlScheme === 'function'
-      ? smsTemplatesRouter.stripPortalUrlScheme
-      : (s) => s);
+  const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+  const strip = typeof normalize === 'function' ? normalize : stripSmsUrlScheme;
   const text = String(body || '');
   const url = String(payUrl || '').trim();
   if (!text) return false;
@@ -2458,6 +2452,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let completionPhotoUploadResult = { uploaded: 0, failed: 0, errors: [] };
     let completionPhotosUploadedBeforeCommit = false;
     let preCommitCompletionPhotoRows = [];
+    const promotedPhotoIds = new Set();
     let completionReviewDelayMinutes;
     try {
       completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(completionInput.body || {});
@@ -2470,9 +2465,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // failure here is must-be-in-the-future; 0 = "due now" preserves the
       // intent (the chosen time has arrived). Fresh completions keep the
       // strict gate.
-      const committed = await CompletionAttempts
-        .hasCommittedCompletionAttempt(completionInput.serviceId, db)
-        .catch(() => false);
+      const committed = await failSoftRead(db,
+        (k) => CompletionAttempts.hasCommittedCompletionAttempt(completionInput.serviceId, k), false);
       if (!committed) throw timingErr;
       completionReviewDelayMinutes = 0;
     }
@@ -2509,8 +2503,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // print "$0.00 billed" forever (codex r13 P1).
     let customerColumnsProbeFailed = false;
     try {
-      billingModeColumnsExist = await db.schema.hasColumn('customers', 'billing_mode');
-      customerTierSourceColumnExists = await db.schema.hasColumn('customers', 'waveguard_tier_source');
+      billingModeColumnsExist = await savepointRead(db, (k) => k.schema.hasColumn('customers', 'billing_mode'));
+      customerTierSourceColumnExists = await savepointRead(db, (k) => k.schema.hasColumn('customers', 'waveguard_tier_source'));
     } catch { customerColumnsProbeFailed = true; /* legacy select shape */ }
     const svc = await db('scheduled_services').where('scheduled_services.id', completionInput.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -2796,11 +2790,19 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // exists — the clean path costs nothing — and a lookup error skips
       // the prompt too (fail open).
       if (reconcileBlock
-        && !(await CompletionAttempts.hasCommittedCompletionAttempt(svc.id, db).catch(() => true))) {
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
         return ({ status: reconcileBlock.status, body: reconcileBlock.payload });
       }
     }
-    if (completionProfile?.requiresProject || completionProfile?.projectBacked) {
+    // A committed completion (a saved visit member, a lost-response retry)
+    // must reach the replay/resume claim: its record and shared invoice
+    // already exist under the frozen snapshot, and a profile cut over to a
+    // project flow after that commit cannot un-record them (codex #4058 r2
+    // P1). A lookup outage keeps a packet member retryable; the legacy path
+    // keeps refusing.
+    if ((completionProfile?.requiresProject || completionProfile?.projectBacked)
+      && !(await CompletionAttempts.hasCommittedCompletionAttempt(svc.id, db)
+        .catch((err) => { if (packetEffects) throw err; return false; }))) {
       return ({ status: 409, body: {
         error: 'This service must be completed through a project.',
         code: 'project_required_completion',
@@ -3186,12 +3188,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // keeps this strictly off pest / rodent / mosquito. The flag reads the SAME
     // DB-backed source the tech UI checks (useFeatureFlag). A provided height is
     // still range-validated (below), but its absence is fine.
-    const turfHeightFlagOn = await isUserFeatureEnabled(completionInput.actor.technicianId, 'turf-height-capture', false, db).catch(() => false);
+    const turfHeightFlagOn = await failSoftRead(db,
+      (k) => isUserFeatureEnabled(completionInput.actor.technicianId, 'turf-height-capture', false, k), false);
     // Exempt typed-findings lawn jobs (e.g. one_time_lawn_treatment): the client
     // hides TurfHeightCapture when isTypedFindings, so the server must not capture
     // a field the UI never renders (matches client isLawn = !isTypedFindings && lawn).
     const turfHeightApplicable = turfHeightFlagOn && reportServiceLine === 'lawn'
       && !isIncompleteVisit && !typedFindingsType;
+    // Packet snapshots omit image bytes, so a supplied gauge photo must not
+    // disappear when the capture flag or service applicability changes.
+    if (packetRecords && gaugePhoto && !turfHeightApplicable) {
+      return { status: 409, body: {
+        code: 'visit_gauge_photo_unavailable',
+        error: 'Lawn-length photo capture is unavailable. Refresh this service form before closing the visit.',
+      } };
+    }
 
     // Typed completions (e.g. palm_injection detects to the 'palm' line)
     // capture their structured findings instead of the Tree/Shrub closeout —
@@ -3363,17 +3374,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
           && reportProtocolActions.includes(entry.label)),
       ];
     }
-    const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable, activityScoresAvailable] = await Promise.all([
-      db('service_records').columnInfo().catch(() => ({})),
-      db('service_products').columnInfo().catch(() => ({})),
-      db.schema.hasTable('service_findings').catch(() => false),
-      db.schema.hasTable('service_activity_scores').catch(() => false),
-    ]);
+    const serviceRecordCols = await failSoftRead(db, (k) => k('service_records').columnInfo(), {});
+    const serviceProductCols = await failSoftRead(db, (k) => k('service_products').columnInfo(), {});
+    const serviceFindingsAvailable = await failSoftRead(db, (k) => k.schema.hasTable('service_findings'), false);
+    const activityScoresAvailable = await failSoftRead(db, (k) => k.schema.hasTable('service_activity_scores'), false);
     const useServiceReportV1 = true;
     let conditionsAtApplication = null;
 
     const canLinkLawnAssessmentRecord = !isIncompleteVisit
-      && await db.schema.hasColumn('lawn_assessments', 'service_record_id').catch(() => false);
+      && await failSoftRead(db, (k) => k.schema.hasColumn('lawn_assessments', 'service_record_id'), false);
+    const canStampLawnAssessmentProperty = canLinkLawnAssessmentRecord
+      && await failSoftRead(db, (k) => k.schema.hasColumn('lawn_assessments', 'property_id'), false);
+    const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
 
     const rawIdempotencyKey = completionInput.idempotencyKey || bodyIdempotencyKey
       || `legacy_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
@@ -3418,7 +3430,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const attemptClaim = await CompletionAttempts.claimCompletionAttempt({
             serviceId: svc.id,
             idempotencyKey,
-            requestHash: CompletionAttempts.hashCompletionRequest(completionInput.body),
+            // Both packet phases hash what the effects resume will present.
+            requestHash: CompletionAttempts.hashCompletionRequest(packetContext
+              ? CompletionAttempts.withoutPhotoBytes(completionInput.body) : completionInput.body),
           }, lockTrx);
           if (packetEffects && ['resume', 'replay'].includes(attemptClaim.action)
               && (attemptClaim.serviceRecordId || attemptClaim.payload?.serviceRecordId) !== ownedItem.service_record_id) {
@@ -3752,12 +3766,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let completionResolvedPayer = null;
     let completionTaxAuthorityError = null;
     try {
-      completionResolvedPayer = await require('../services/payer').resolveForInvoice({
-        database: db,
+      completionResolvedPayer = await savepointRead(db, (database) => require('../services/payer').resolveForInvoice({
+        database,
         customerId: svc.customer_id,
         scheduledServiceId: svc.id,
         throwOnError: true,
-      });
+      }));
     } catch (payerErr) {
       // First runs fail CLOSED (codex r10 P0): the payer identity feeds the
       // coverage suppressors and the money posture about to be FROZEN — a
@@ -3861,9 +3875,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (!customerAutopayActive && !visitIsPayerBilled && !perApplicationBilling && !annualPrepayBilling
       && (explicitMembershipLane || (!svc.cust_billing_mode && isMembershipTier(svc.cust_waveguard_tier)))) {
       try {
-        duesCollectedThisMonth = await monthlyDuesCollected(
-          db, svc.customer_id, new Date(`${serviceDateOnly(svc.scheduled_date)}T12:00:00Z`),
-        );
+        duesCollectedThisMonth = await savepointRead(db, (k) => monthlyDuesCollected(
+          k, svc.customer_id, new Date(`${serviceDateOnly(svc.scheduled_date)}T12:00:00Z`),
+        ));
       } catch (e) {
         logger.warn(`[dispatch] dues-collected lookup failed on completion for service ${svc.id}: ${e.message}`);
       }
@@ -4178,7 +4192,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (Array.isArray(products) && products.length) {
           const ids = [...new Set(products.map((p) => p.productId).filter(Boolean))];
           const catalogRows = ids.length
-            ? await db('products_catalog').whereIn('id', ids).select('id', 'name', 'analysis_n')
+            ? await savepointRead(db, (k) => k('products_catalog').whereIn('id', ids).select('id', 'name', 'analysis_n'))
             : [];
           const catalogById = new Map(catalogRows.map((row) => [String(row.id), row]));
           let actualVisitN = 0;
@@ -4328,9 +4342,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // (The closeout no longer submits equipmentSystemId at all, so keying
       // this off the raw request field would clear every resolved assignment
       // and null out scheduled_services' assignment downstream — Codex P1.)
+      // An assignment whose calibration is no longer active (the plan says
+      // `unresolved`) is cleared the same way: the math ran on the protocol
+      // carrier, so persisting the stale rig would fabricate equipment
+      // usage (Codex #4124 r3 P1).
       const selectedIsFieldVerified =
         selectedCalibration?.calibration_status === 'field_verified';
-      if (calibrationBypass && !selectedIsFieldVerified) {
+      if ((calibrationBypass && !selectedIsFieldVerified) || plan?.equipmentCalibration?.unresolved) {
         waveguardEquipmentSystemId = null;
         waveguardCalibrationId = null;
         waveguardCalibrationCleared = true;
@@ -4481,7 +4499,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         let dissolveVisitId = legacyVisitToDissolve;
         legacyVisitToDissolve = null;
         if (!dissolveVisitId) {
-          const nowRow = await db('scheduled_services').where({ id: svc.id }).first('visit_id').catch(() => null);
+          const nowRow = await failSoftRead(db, (k) => k('scheduled_services').where({ id: svc.id }).first('visit_id'), null);
           dissolveVisitId = nowRow && nowRow.visit_id;
         }
         if (dissolveVisitId) {
@@ -4519,11 +4537,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // r14): tech-selected products + visit context. Best-effort only.
           let completionVisitContext = '';
           try {
-            completionVisitContext = await buildRecapVisitContext({
-              knex: db,
+            completionVisitContext = await savepointRead(db, (k) => buildRecapVisitContext({
+              knex: k,
               serviceType: svc.service_type,
               customerId: svc.customer_id,
-            });
+            }));
           } catch { /* context is polish — never block completion */ }
           // The completion payload's products carry productId but no name —
           // hydrate catalog names or safeProducts drops every entry and the
@@ -4534,9 +4552,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
               .filter((p) => p && !p.name && !p.product_name && p.productId)
               .map((p) => p.productId);
             if (missingNameIds.length) {
-              const nameRows = await db('products_catalog')
+              const nameRows = await savepointRead(db, (k) => k('products_catalog')
                 .whereIn('id', missingNameIds)
-                .select('id', 'name');
+                .select('id', 'name'));
               const nameById = new Map(nameRows.map((r) => [String(r.id), r.name]));
               recapProducts = recapProducts.map((p) => (
                 p && !p.name && !p.product_name && p.productId
@@ -4664,6 +4682,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
         completionTimerEntriesSnapshot = null;
         const persistRecord = async (trx) => {
+          // Baseline -> customer -> visit matches confirmation. Take this before
+          // the existing row locks because linking can change the installed row.
+          if (propertyHistoryEnabled && canLinkLawnAssessmentRecord) {
+            await require('./lawn-assessment').lockCustomerBaseline(svc.customer_id, trx);
+          }
           // Estimate -> customer -> visit is also acceptance's lock order.
           // Packet entry prelocks all reviewed estimates before its customer.
           if (completionPricingPlan) {
@@ -5419,12 +5442,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // permanent report (codex r9 P1). Fallback = the entry read.
           let snapshotCustomer = null;
           try {
-            snapshotCustomer = await trx('customers').where({ id: svc.customer_id }).first(
+            snapshotCustomer = await savepointRead(trx, (k) => k('customers').where({ id: svc.customer_id }).first(
               'waveguard_tier',
               'monthly_rate',
               ...(customerTierSourceColumnExists ? ['waveguard_tier_source'] : []),
               ...(billingModeColumnsExist ? ['billing_mode'] : []),
-            );
+            ));
           } catch { snapshotCustomer = null; }
           Object.assign(recordInsert, completionTierSnapshotFields({
             serviceRecordCols,
@@ -5684,11 +5707,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // Before/progress photos captured from Tech Home predate the immutable
         // service_record. Attach them inside this transaction so a failed
         // completion leaves the staged rows intact for the technician's retry.
-        await promoteStagedServicePhotos({
+        const promotedPhotos = await promoteStagedServicePhotos({
           scheduledServiceId: svc.id,
           serviceRecordId: record.id,
           knex: trx,
         });
+        // Dedupe can return these existing objects for submitted image bytes.
+        // A rollback restores their staging rows, so cleanup must retain them.
+        for (const photo of promotedPhotos || []) promotedPhotoIds.add(photo.id);
 
         // Gauge reading. Both the height and the on-site lawn-length photo are
         // OPTIONAL — persist a row whenever EITHER is present (a photo-only visit
@@ -5696,7 +5722,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // a persistence failure aborts completion (the existing catch cleans up +
         // the tech retries). The photo upload runs in its own SAVEPOINT so a
         // photo/S3 failure can't block the reading row; its uploaded row is
-        // registered for cleanup if the outer txn later aborts.
+        // registered for cleanup if the outer txn later aborts. Packets must
+        // persist a supplied photo because their snapshots omit image bytes.
         if (turfHeightApplicable && (manualHeightIn != null || gaugePhoto)) {
           const turfRow = await trx('customer_turf_profiles')
             .where({ customer_id: svc.customer_id, active: true }).first();
@@ -5714,8 +5741,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 if (gaugeUpload?.photos?.length) {
                   preCommitCompletionPhotoRows = preCommitCompletionPhotoRows.concat(gaugeUpload.photos);
                 }
+                if (packetRecords && gaugeUpload.failed > 0) throw packetPhotoUploadRequiredError(gaugeUpload);
               });
             } catch (photoErr) {
+              if (packetRecords) throw photoErr;
               gaugePhotoId = null; // optional — never block the reading row
               logger.warn(`[turf-height] optional lawn-length photo skipped for service=${completionInput.serviceId}: ${photoErr.message}`);
             }
@@ -5859,6 +5888,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             service_id: svc.id,
             service_record_id: record.id,
             updated_at: trx.fn.now(),
+            ...(canStampLawnAssessmentProperty ? {
+              property_id: trx.raw('COALESCE(lawn_assessments.property_id, ?::uuid)', [svc.property_id || null]),
+            } : {}),
           };
           if (lawnAssessmentId) {
             const [linked] = await trx('lawn_assessments')
@@ -5896,6 +5928,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
             }
           }
           if (linkedLawnAssessmentId) {
+            if (propertyHistoryEnabled) {
+              const history = require('./lawn-assessment-history');
+              const linked = await history.assessmentQuery(svc.customer_id, trx).where('la.id', linkedLawnAssessmentId).first();
+              const scope = await history.scopeForAssessment(linked, trx);
+              await require('./lawn-assessment').refreshPropertyBaseline(svc.customer_id, scope, trx);
+            }
             record.structured_notes = {
               ...structuredNotes,
               lawnAssessmentId: linkedLawnAssessmentId,
@@ -5906,9 +5944,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           }
         }
 
-        const turfProfile = await trx('customer_turf_profiles')
+        const turfProfile = await savepointRead(trx, (k) => k('customer_turf_profiles')
           .where({ customer_id: svc.customer_id, active: true })
-          .first()
+          .first())
           .catch(() => null);
 
         // 2. service_products — children of the service_record.
@@ -6147,7 +6185,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             .update({ structured_notes: serializeJsonb(record.structured_notes) });
         }
 
-        if (treeShrubPhotoGateRequired) {
+        // Packets keep photo identities, not retryable image bytes. Every
+        // submitted photo must therefore be durable before the record phase
+        // returns; a failed upload rolls the packet back for a complete retry.
+        if (treeShrubPhotoGateRequired || (packetRecords && completionPhotos?.length)) {
           completionPhotoUploadResult = await uploadServicePhotoDataUrls({
             serviceRecordId: record.id,
             photos: completionPhotos,
@@ -6160,11 +6201,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
           preCommitCompletionPhotoRows = preCommitCompletionPhotoRows.concat(completionPhotoUploadResult.photos || []);
           const uniqueCompletionPhotosUploaded = completionPhotoUploadResult.uniqueUploaded
             ?? completionPhotoUploadResult.uploaded;
-          if (uniqueCompletionPhotosUploaded < TREE_SHRUB_MIN_CLOSEOUT_PHOTOS) {
+          if (treeShrubPhotoGateRequired && uniqueCompletionPhotosUploaded < TREE_SHRUB_MIN_CLOSEOUT_PHOTOS) {
             throw treeShrubPhotoUploadRequiredError(
               completionPhotoUploadResult,
               TREE_SHRUB_MIN_CLOSEOUT_PHOTOS,
             );
+          }
+          if (packetRecords && completionPhotoUploadResult.failed > 0) {
+            throw packetPhotoUploadRequiredError(completionPhotoUploadResult);
           }
           completionPhotosUploadedBeforeCommit = true;
           const photoNotes = {
@@ -6174,7 +6218,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               uniqueUploaded: uniqueCompletionPhotosUploaded,
               failed: completionPhotoUploadResult.failed,
               uploadedAt: new Date().toISOString(),
-              requiredMinimum: TREE_SHRUB_MIN_CLOSEOUT_PHOTOS,
+              ...(treeShrubPhotoGateRequired ? { requiredMinimum: TREE_SHRUB_MIN_CLOSEOUT_PHOTOS } : {}),
             },
           };
           record.structured_notes = photoNotes;
@@ -6307,7 +6351,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (packetRecords) await persistRecord(db);
         else await db.transaction(persistRecord);
         if (packetRecords) {
-          packetContext.uploadedPhotoRows.push(...preCommitCompletionPhotoRows);
+          packetContext.uploadedPhotoRows.push(...preCommitCompletionPhotoRows.filter((photo) => !promotedPhotoIds.has(photo.id)));
           return { status: 202, body: { serviceRecordId: record.id } };
         }
         durableCompletionCommitted = true;
@@ -6322,7 +6366,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         let dissolveVisitId = legacyVisitToDissolve;
         legacyVisitToDissolve = null;
         if (!dissolveVisitId) {
-          const nowRow = await db('scheduled_services').where({ id: svc.id }).first('visit_id').catch(() => null);
+          const nowRow = await failSoftRead(db, (k) => k('scheduled_services').where({ id: svc.id }).first('visit_id'), null);
           dissolveVisitId = nowRow && nowRow.visit_id;
         }
         if (dissolveVisitId) {
@@ -6331,7 +6375,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
       } catch (err) {
         if (preCommitCompletionPhotoRows.length) {
-          await cleanupUploadedServicePhotoObjects(preCommitCompletionPhotoRows);
+          await cleanupUploadedServicePhotoObjects(preCommitCompletionPhotoRows.filter((photo) => !promotedPhotoIds.has(photo.id)));
           preCommitCompletionPhotoRows = [];
         }
         if (err && err.message && err.message.includes('not in state')) {
@@ -6688,10 +6732,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // A setup failure BEFORE the backlink write leaves the assessment
           // unlinked and sanitation rejects it forever (codex P1 r40) —
           // restore the known link first (idempotent, only-if-null).
-          await db('lawn_assessments')
+          if (propertyHistoryEnabled) {
+            await require('./lawn-assessment').linkAssessmentServiceRecord({
+              assessment: { id: completedLawnAssessmentId, customer_id: svc.customer_id, service_id: svc.id },
+              serviceRecordId: record.id, onlyIfUnlinked: true,
+            }, { knex: db }).catch((linkErr) => logger.warn(`[dispatch] assessment backlink recovery failed for ${completedLawnAssessmentId}: ${linkErr.message}`));
+          } else await db('lawn_assessments')
             .where({ id: completedLawnAssessmentId })
             .whereNull('service_record_id')
-            .update({ service_record_id: record.id })
+            .update({
+              service_record_id: record.id,
+              ...(canStampLawnAssessmentProperty ? {
+                property_id: db.raw('COALESCE(lawn_assessments.property_id, ?::uuid)', [svc.property_id || null]),
+              } : {}),
+            })
             .catch((linkErr) => logger.warn(`[dispatch] assessment backlink recovery failed for ${completedLawnAssessmentId}: ${linkErr.message}`));
           const res = await KnowledgeBridgeGate.sanitizeStoredRecommendations(completedLawnAssessmentId)
             .catch((e) => ({ changed: false, error: e.message }));
@@ -6714,12 +6768,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
           throw new Error('Linked lawn assessment is not confirmed for this service');
         }
         if (canLinkLawnAssessmentRecord) {
-          await db('lawn_assessments')
+          if (propertyHistoryEnabled) {
+            await require('./lawn-assessment').linkAssessmentServiceRecord({
+              assessment: { id: completedAssessment.id, customer_id: svc.customer_id, service_id: svc.id },
+              serviceRecordId: record.id,
+            }, { knex: db });
+          } else await db('lawn_assessments')
             .where({ id: completedAssessment.id })
             .update({
               service_id: svc.id,
               service_record_id: record.id,
               updated_at: new Date(),
+              ...(canStampLawnAssessmentProperty ? {
+                property_id: db.raw('COALESCE(lawn_assessments.property_id, ?::uuid)', [svc.property_id || null]),
+              } : {}),
             });
         }
         const wiki = require('../services/agronomic-wiki');
@@ -11054,7 +11116,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           };
           const sendingNotes = { ...recordStructuredNotes, ...smsNotesDelta };
           await mergeRecordNotesKeys(record.id, smsNotesDelta);
-          const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id };
+          const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id, notificationEventKey: `scheduled-service:${svc.id}:completed`, useCustomerChannel: true };
+          if (bundledReviewRequestId) smsMetadata.bundled_review_request_id = bundledReviewRequestId;
           if (serviceReportV1Delivery || String(sentSmsType || '').startsWith('service_report_v1')) {
             smsMetadata.report_template_version = 'service_report_v1';
             smsMetadata.report_url = reportUrl;
@@ -11078,9 +11141,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             body: sentSmsBody,
             channel: 'sms',
             audience: 'customer',
-            purpose: 'appointment',
+            purpose: 'service_completion',
             customerId: svc.customer_id,
             appointmentId: svc.id,
+            ...(sentSmsType === 'service_complete_paid_receipt' && invoice?.id ? { invoiceId: invoice.id } : {}),
             identityTrustLevel: 'phone_matches_customer',
             metadata: smsMetadata,
           };
@@ -11101,6 +11165,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             invoiceLinkAllowed: allowCompletionInvoiceLink,
           };
           let smsResult = await sendCustomerMessage(sendInput);
+          if (smsResult.channel === 'push') {
+            sentSmsChannel = 'push';
+            completionSmsAcceptedSnapshot.channel = 'push';
+          }
           if (!smsResult.sent && !smsResult.blocked && attemptedMms) {
             logger.warn(`[dispatch] MMS service report send failed for ${record.id}; retrying SMS-only`);
             const fallbackMetadata = { ...smsMetadata };
@@ -11168,6 +11236,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 message_type: sentSmsType,
                 metadata: JSON.stringify({
                   entry_point: 'dispatch_completion_deferred',
+                  replay_purpose: 'service_completion',
+                  notificationEventKey: `scheduled-service:${svc.id}:completed`,
+                  useCustomerChannel: true,
                   service_record_id: record.id,
                   original_block_code: smsResult.code,
                   refresh_customer_phone: true,

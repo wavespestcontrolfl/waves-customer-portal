@@ -175,7 +175,14 @@ function isRowVisitBlocked(row, visit) {
   return String(visit.status) !== 'dissolved';
 }
 
-async function lockStop(trx, baseKey) {
+async function lockStop(trx, baseKey, { noWait = false } = {}) {
+  if (noWait) {
+    const result = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked', ['visit.stop', baseKey]);
+    if (!result.rows[0]?.locked) {
+      throw Object.assign(new Error('This visit is being edited. Retry in a moment.'), { code: 'visit_busy' });
+    }
+    return;
+  }
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', baseKey]);
 }
 
@@ -1541,13 +1548,17 @@ async function otherLiveMembers(t, visitId, rowId) {
  * step: a failure here leaves the row `claimed`, so the caller reports the
  * stop incomplete instead of advertising a status that was never written.
  */
-async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Date(), token = null, { dedupeKey = null } = {}) {
+async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Date(), token = null, { dedupeKey = null, lastError, providerId } = {}) {
   const effectType = effectTypeForKind(kind);
   if (!visitId || !NOTIFICATION_ATTEMPT_OUTCOMES.has(String(smsOutcome))) return { ok: true, skipped: true, effectType, status: null };
   const status = ['sent', 'unknown_delivery'].includes(smsOutcome) ? smsOutcome : smsOutcome === 'retry' ? 'failed' : 'suppressed';
   // Reminder kinds MUST pass the claim's key (it carries the visit date);
   // tracker call sites keep the historical default untouched.
   const key = dedupeKey || `${visitId}:${effectType}`;
+  // Payment classification and its provider reference must survive the same
+  // commit as the terminal state; a later metadata write can be interrupted.
+  const details = Object.fromEntries(Object.entries({ last_error: lastError, provider_id: providerId })
+    .filter(([, value]) => value !== undefined));
   try {
     return await db('visit_effects')
       .insert({
@@ -1558,6 +1569,7 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
         attempts: 1,
         last_error: status === 'unknown_delivery' ? 'provider_outcome_unknown' : null,
         sent_at: status === 'sent' ? at : null,
+        ...details,
       })
       .onConflict(['visit_id', 'effect_type', 'dedupe_key'])
       .merge({
@@ -1566,6 +1578,7 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
         sent_at: status === 'sent' ? at : null,
         updated_at: at,
         last_error: status === 'unknown_delivery' ? 'provider_outcome_unknown' : null,
+        ...details,
       })
       .where('visit_effects.status', '<>', 'sent')
       // Only the current claim owner finalizes (codex r10): a stale owner's

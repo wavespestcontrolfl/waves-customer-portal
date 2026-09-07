@@ -86,10 +86,21 @@ schedule inserts) and sometimes the bug (you expected a reminder to send).
 
 - Filename convention: `YYYYMMDD0000NN_short_name.js` in
   `server/models/migrations/`.
-- **Never edit an already-run migration.** Knex tracks by filename — an
-  edit is a silent no-op in every environment that already ran it. Ship a
-  NEW migration instead, and re-check the PR's live merge state before
-  pushing follow-up commits to it.
+- **Never edit an already-run migration — and a migration file that is
+  already on the PR's remote branch HAS run (the Railway preview deploys
+  every push).** Knex tracks by filename — an edit is a silent no-op in
+  every environment that already ran it, review-round fixes included. Ship
+  a NEW migration instead. Enforced: the pre-push hook's applied-migration
+  guard (`scripts/hooks/pre-push`) blocks a push that modifies, renames, or
+  deletes any file under `server/models/migrations/` that exists at the
+  remote branch's sha (or at the merge base with `origin/main` for a new
+  branch). Content that already equals `origin/main`'s passes: merging
+  main after main repaired a migration in place is not your edit. The
+  guard sees pushes, not deploys: `SKIP_MIGRATION_GUARD=1` is
+  for exactly two VERIFIED cases — the file never ran (its deploy failed
+  before migrating; no `knex_migrations` row on the preview/prod — a failed
+  first migration cannot be repaired by a second file, knex re-runs the
+  first) or the preview database was cleaned by hand (below).
 - **Never delete, rename, or re-stamp a migration file once ANY deploy ran
   it — Railway PR previews included.** Every push to an open PR deploys a
   preview environment with its own Postgres that runs the branch's

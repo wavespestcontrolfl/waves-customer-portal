@@ -1008,13 +1008,11 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
 
         // Second look right before the send: the badge fan-out above can take
         // up to ~1.5s and a thread opened in that window must not buzz (P2).
-        if (typeof beforePush === 'function') {
-          const stillWanted = await Promise.resolve(beforePush({ dispatching: true })).catch(() => true);
-          if (stillWanted === false) {
-            stats.push = { sent: 0, skipped: 'superseded_before_push' };
-            return stats;
-          }
-        }
+        // The push service runs it after its subscription lookup, so a
+        // durable claim taken here is only burned when a handoff follows.
+        const beforeDispatch = typeof beforePush === 'function'
+          ? () => Promise.resolve(beforePush({ dispatching: true })).catch(() => true)
+          : null;
         stats.push = await PushService.sendToAdminUsers(
           enabledUserIds,
           (adminUserId) => {
@@ -1031,11 +1029,16 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
               renotify: triggerKey === 'sms_reply',
               ...(badgeInfo ? { badge: badgeInfo.count, badgeAt: badgeInfo.at } : {}),
             };
-          }
+          },
+          { beforeDispatch },
         );
+        if (stats.push?.superseded) stats.push = { sent: 0, skipped: 'superseded_before_push' };
       }
     } catch (e) {
       logger.error(`[notification-triggers] push dispatch failed: ${e.message}`);
+      // A resumed event owns its retry: a failure before any handoff (the
+      // subscription lookup) must not read as a delivered push.
+      if (dedupeKey) { stats.push = null; stats.retryable = true; stats.error = e.message; }
     }
     return stats;
   } catch (err) {

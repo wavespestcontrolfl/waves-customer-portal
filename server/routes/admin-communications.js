@@ -9,13 +9,13 @@ const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { normalizePhone } = require('../utils/phone');
+const { normalizePhone, phoneMatchDigits } = require('../utils/phone');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
+const { placeBridgeCall } = require('../services/call-bridge');
 const { parseETDateTime, etDateString, etParts } = require('../utils/datetime-et');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { buildRescheduleLink } = require('../services/reschedule-link');
-const smsTemplatesRouter = require('./admin-sms-templates');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../services/messaging/compliance-contact-checks');
@@ -23,11 +23,11 @@ const { isEnabled } = require('../config/feature-gates');
 const {
   SUGGEST_WORKFLOW,
   HUMAN_REPLY_TYPES,
-  revertDraftsToShadow,
   markSuggestionScheduled,
   parkThreadSuggestions,
   reopenScheduledSuggestions,
   ignoreParkedSuggestions,
+  sweepStaleSuggestionsAfterReply,
   lockSuggestThread,
   suggestionAnchorIsStale,
   supersedeStaleDecision,
@@ -975,67 +975,15 @@ router.post('/sms', async (req, res, next) => {
       await ignoreParkedSuggestions({ decisionIds: parkedThreadIds, reviewedBy: req.technicianId || 'Admin' });
     }
 
-    // Belt-and-braces sweep for cards published BETWEEN the park commit and
-    // send completion (the thread lock releases when the park transaction
-    // commits, and a publish can land while Twilio runs). Phone-scoped
-    // through the suggestion's inbound sms_log row — the same ownership
-    // match the composer card fetch uses. Cutoff on the INBOUND's timestamp
-    // vs send start: a suggestion for a customer message that arrived while
-    // the send was in flight was never on the operator's screen and must
-    // keep its card.
-    const runStaleSweep = async () => {
-      const ignoredPhoneLast10 = normalizePhoneLast10(to);
-      if (!ignoredPhoneLast10) return;
-      await db.transaction(async (trx) => {
-        // Same thread lock the drafter's publish takes: a publish that
-        // hasn't committed yet will land AFTER this sweep and re-check
-        // the (now committed) outbound in its answered guard.
-        await lockSuggestThread(trx, ignoredPhoneLast10);
-
-        // s is always the suggestion's INBOUND row — from_phone is the
-        // customer; matching to_phone (the Waves line) would sweep every
-        // suggestion that arrived on that line.
-        const staleQuery = trx('agent_decisions as ad')
-          .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
-          .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
-          .where('s.created_at', '<', sendStartedAt)
-          .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ignoredPhoneLast10]);
-        if (verifiedAgentDecision?.id) staleQuery.whereNot('ad.id', verifiedAgentDecision.id);
-        const stale = await staleQuery.select('ad.id', 'ad.entity_id');
-        if (stale.length) {
-          // Revert only rows the guarded UPDATE actually changed: a parallel
-          // operator can send one of these suggestions between the SELECT
-          // and the UPDATE, and that draft must stay out of the judge pool.
-          const ignored = await trx('agent_decisions')
-            .whereIn('id', stale.map((r) => r.id))
-            .where('status', 'pending_review')
-            .update({
-              status: 'ignored',
-              human_verdict: 'ignored',
-              correction_note: 'Staff sent their own reply from the SMS inbox.',
-              reviewed_by: req.technicianId || 'Admin',
-              reviewed_at: new Date(),
-              updated_at: new Date(),
-            })
-            .returning(['id', 'entity_id']);
-          await revertDraftsToShadow(trx, ignored.map((r) => r.entity_id));
-        }
-      });
-    };
-    // Retried once: this sweep is the only path that resolves cards
-    // published between the park commit and send completion — cards it
-    // misses have no recovery linkage and stay actionable on an answered
-    // thread until the next staff send on the thread or the 48h expiry.
-    try {
-      await runStaleSweep();
-    } catch (sweepErr) {
-      logger.warn(`[sms-suggest] stale-card sweep failed, retrying once: ${sweepErr.message}`);
-      try {
-        await runStaleSweep();
-      } catch (retryErr) {
-        logger.error(`[sms-suggest] stale-card sweep failed twice — pending cards may linger on an answered thread until the next send or expiry: ${retryErr.message}`);
-      }
-    }
+    // Cards published BETWEEN the park commit and send completion — the
+    // shared post-reply sweep (sms-suggest-mode.js), retried once.
+    await sweepStaleSuggestionsAfterReply({
+      phoneLast10: normalizePhoneLast10(to),
+      sendStartedAt,
+      excludeDecisionId: verifiedAgentDecision?.id,
+      reviewedBy: req.technicianId || 'Admin',
+      note: 'Staff sent their own reply from the SMS inbox.',
+    });
 
     res.json(reviewEmailOutcome ? { ...result, reviewEmail: reviewEmailOutcome } : result);
   } catch (err) {
@@ -1150,10 +1098,18 @@ const PREP_REFUSAL_COPY = {
   prep_send_busy: () => 'Another prep send for this customer is in progress — try again in a moment.',
   unsupported_pest_type: () => 'That prep type is not available yet.',
   unsupported_channel: () => 'Choose Email, Text, or Both.',
+  // The sprinkler timer guide is a seasonal tip for recurring lawn customers, sent once.
+  not_recurring_lawn: () => 'The sprinkler timer guide is for recurring lawn customers who get the Monday watering plan — this customer is not one, so it was not sent.',
+  seasonal_tips_off: () => 'This customer turned off Seasonal Lawn Tips, and the sprinkler timer guide is one — it was not sent.',
+  email_opted_out: () => 'This customer turned off email — choose Text to send the sprinkler timer guide link instead.',
+  seasonal_tips_not_opted_in: () => 'A sprinkler timer guide text needs the customer\'s Seasonal Lawn Tips opt-in (a text is a marketing message) — this customer has not opted in, so choose Email.',
+  guide_already_sent: (r) => `This customer already received the sprinkler timer guide${r.sentAt ? ` on ${new Date(r.sentAt).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}` : ''} — it is sent once. The guide link is in the composer's link library if they need it again.`,
+  guide_check_failed: () => "Couldn't confirm this customer's preferences or send history — try again.",
 };
 // Both delivered the email but not the text: why the text did not go, by the
 // link's own reason (an unplanned text); anything else = the number.
 const PREP_TEXT_DOWN_COPY = {
+  seasonal_tips_not_opted_in: () => 'The text was not sent — a sprinkler timer guide text needs the customer\'s Seasonal Lawn Tips opt-in, and this customer has not opted in.',
   no_upcoming_visit: () => 'The text was not sent — this guide can only be texted as a link, and the customer has no upcoming visit of that type to attach it to.',
   prep_page_taken: (r) => `The text was not sent — the customer's next visit already carries the ${r.takenBy || 'other'} prep page.`,
   prep_link_failed: () => 'The text was not sent — the guide page link could not be built; try Text again later.',
@@ -1162,7 +1118,7 @@ const PREP_TEXT_DOWN_COPY = {
 };
 // SendGrid MAY have accepted the email (post-dispatch throw): the page claim
 // is kept and "try again" would double-send the guide (GH Codex #3856 r8 P2).
-// The text leg is never uncertain (sendPrepSms).
+// Standalone guide texts also retain uncertain provider outcomes for reconciliation.
 const PREP_EMAIL_UNCERTAIN_COPY = "The prep email may or may not have gone out — check the customer's email log before sending it again.";
 
 function manualPrepMessage(result) {
@@ -1176,10 +1132,15 @@ function manualPrepMessage(result) {
   if (result.smsSent) parts.push(`texted to ${result.phone}`);
   const sent = `${result.label} prep ${parts.join(' and ')}.`;
   if (result.reason !== 'partial') return sent;
+  if (result.pestType === 'sprinkler_timer') {
+    const missing = result.failedChannel === 'sms' ? 'Text' : 'Email';
+    return `${sent} ${missing} delivery was not confirmed. Check delivery history; this one-time guide cannot be retried with Send prep guide.`;
+  }
   if (result.failedChannel === 'sms') {
     const why = PREP_TEXT_DOWN_COPY[result.smsLinkReason];
     return `${sent} ${why ? why(result) : 'The text did not go out — send it again as Text once the number is confirmed.'}`;
   }
+  if (result.emailSkipReason === 'email_opted_out') return `${sent} The email was not sent — this customer turned off email.`;
   return result.emailUncertain
     ? `${sent} The email may or may not have gone out — check the customer's email log before sending it again.`
     : `${sent} The email did not go out — send it again as Email once the address is confirmed.`;
@@ -1222,19 +1183,15 @@ router.post('/call', async (req, res, next) => {
       return res.json({ success: false, error: 'Voice gate is disabled' });
     }
 
-    const twilio = require('twilio');
-    const config = require('../config');
-    if (!config.twilio.accountSid || !config.twilio.authToken) {
-      return res.status(500).json({ error: 'Twilio not configured' });
-    }
-    const client = twilio(config.twilio.accountSid, config.twilio.authToken);
+    // Credentials are checked by the bridge (TWILIO_NOT_CONFIGURED → 500
+    // below); it also owns the call_log row, the Twilio call, and the
+    // touchpoint. This handler keeps the admin-only validations.
 
     // All outbound calls present the main company line, regardless of which
     // endpoint the UI picker selected (fromNumber is still validated above so
     // garbage input fails loudly rather than silently dialing as main).
     const from = TWILIO_NUMBERS.mainLine.number;
     attemptedFrom = from;
-    const domain = process.env.SERVER_DOMAIN || 'portal.wavespestcontrol.com';
     const source = rawSource === 'call-log-callback' ? 'admin-callback' : 'admin-click';
     const metadata = relatedCallId ? { relatedCallId } : null;
 
@@ -1273,59 +1230,16 @@ router.post('/call', async (req, res, next) => {
       ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim()
       : '';
 
-    // Insert call_log FIRST so outbound-admin-prompt / outbound-connect can
-    // update the row reliably. Twilio typically fires those webhooks 2–5s
-    // after calls.create() returns, but racing the insert is cheap to avoid.
-    const [callLogRow] = await db('call_log')
-      .insert({
-        customer_id: customer?.id || null,
-        direction: 'outbound',
-        from_phone: from,
-        to_phone: to,
-        status: 'initiated',
-        source,
-        metadata: metadata ? JSON.stringify(metadata) : null,
-      })
-      .returning(['id']);
-    const callLogId = callLogRow?.id;
-
-    const promptParams = new URLSearchParams({
-      customerNumber: to,
-      callerIdNumber: from,
-    });
-    if (callLogId) promptParams.set('callLogId', callLogId);
-    if (leadName) promptParams.set('leadName', leadName);
-
-    // Step 1: Call the admin first. When admin picks up and presses 1, dial the customer.
-    const call = await client.calls.create({
-      to: adminPhone,
-      from,
-      url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?${promptParams.toString()}`,
-      statusCallback: `https://${domain}/api/webhooks/twilio/call-status`,
-      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+    // Step 1 (services/call-bridge.js — shared with the tech portal's
+    // "Call from my line"): call the admin first; on press-1, dial the
+    // customer with the main line as caller ID.
+    const bridged = await placeBridgeCall({
+      to, bridgePhone: adminPhone, from, customer, source, adminUserId: req.technicianId, metadata, leadName,
     });
 
-    // Backfill the Twilio CallSid now that we have it.
-    if (callLogId) {
-      await db('call_log').where({ id: callLogId }).update({
-        twilio_call_sid: call.sid,
-        updated_at: new Date(),
-      }).catch(() => {});
-    }
-    require('../services/conversations').recordTouchpoint({
-      customerId: customer?.id || null,
-      channel: 'voice',
-      ourEndpointId: from,
-      contactPhone: customer ? null : to,
-      direction: 'outbound',
-      authorType: 'admin',
-      adminUserId: req.technicianId,
-      twilioSid: call.sid,
-      deliveryStatus: 'initiated',
-    }).catch(() => {});
-
-    res.json({ success: true, callSid: call.sid, callLogId });
+    res.json({ success: true, callSid: bridged.callSid, callLogId: bridged.callLogId });
   } catch (err) {
+    if (err.code === 'TWILIO_NOT_CONFIGURED') return res.status(500).json({ error: 'Twilio not configured' });
     notifyTwilioFailure({
       channel: 'voice',
       direction: 'outbound',
@@ -1370,6 +1284,13 @@ router.get('/log', async (req, res, next) => {
           .orWhereNull('customers.phone'));
     }
 
+    // Exact contact match for a lead that has no customer record yet. Never
+    // use broad body/name search to choose the conversation or mark it read.
+    if (req.query.phone !== undefined) {
+      const phones = phoneMatchDigits(req.query.phone);
+      if (!phones.length) return res.status(400).json({ error: 'A valid contact phone is required' });
+      query = query.whereRaw("regexp_replace(COALESCE(conversations.contact_phone, ''), '[^0-9]', '', 'g') = ANY (?::text[])", [phones]);
+    }
     if (customerId) query = query.where('conversations.customer_id', customerId);
     if (direction) query = query.where('messages.direction', direction);
     if (messageType) query = query.where('messages.message_type', messageType);
@@ -1526,6 +1447,18 @@ router.post('/messages/read', async (req, res, next) => {
       messageIds: ids, conversationIds, readBefore, adminUserId: req.technicianId || null, role: req.techRole,
     });
     res.json({ success: true, updated, notificationsCleared });
+  } catch (err) { next(err); }
+});
+
+// Shared inbox count; Customer 360 may scope it to the selected customer.
+router.get('/unread-count', requireAdmin, async (req, res, next) => {
+  try {
+    const { customerId } = req.query;
+    if (customerId !== undefined && (typeof customerId !== 'string' || !UUID_RE.test(customerId))) {
+      return res.status(400).json({ error: 'Invalid customer id' });
+    }
+    const { countUnreadInboundSms } = require('../services/inbound-sms-read');
+    res.json(await countUnreadInboundSms({ excludePhones: ADMIN_PHONES, customerId }));
   } catch (err) { next(err); }
 });
 
@@ -1827,15 +1760,8 @@ async function firstNameForPhone(last10, customerIds) {
   return agreedFirstName(rows);
 }
 
-// Composer link inserts are SMS bodies the operator sends verbatim — they
-// never pass through getTemplate, so the owned-host scheme strip (owner
-// directive 2026-08-01: portal links go bare in SMS) has to happen here.
-// Same renderer function as the template path (admin-sms-templates
-// stripPortalUrlScheme) so the two paths can never disagree about which
-// hosts go bare; third-party hosts keep their scheme.
-const stripSmsLinkScheme = typeof smsTemplatesRouter.stripPortalUrlScheme === 'function'
-  ? smsTemplatesRouter.stripPortalUrlScheme
-  : (s) => s;
+// Composer inserts use the same SMS formatting as templates and sends.
+const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 
 // POST /api/admin/communications/reschedule-link  { phone, customerId? }
 // Composer helper: resolve the recipient's next upcoming reschedulable visit
@@ -1918,8 +1844,8 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     if (!url) return res.status(404).json({ error: 'This appointment has no reschedule link' });
 
     res.json({
-      url: stripSmsLinkScheme(url),
-      line: stripSmsLinkScheme(line),
+      url: stripSmsUrlScheme(url),
+      line: stripSmsUrlScheme(line),
       firstName: recipientFirstName,
       appointment: {
         id: svc.id,
@@ -2032,8 +1958,8 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
     if (!url) return res.status(404).json({ error: 'This customer has no re-service link' });
 
     res.json({
-      url: stripSmsLinkScheme(url),
-      line: stripSmsLinkScheme(line),
+      url: stripSmsUrlScheme(url),
+      line: stripSmsUrlScheme(line),
       customerId: eligible.id,
       lanes,
       firstName: recipientFirstName,
@@ -2186,7 +2112,7 @@ const EMAIL_SEND_CHANNELS = ['email', 'both'];
 // The Insert Link sheet's other per-customer links — kind ∈ review_request |
 // pay_balance | estimate | referral | autopay_setup | appointment |
 // card_request | prep_guide | service_report | contract | statement |
-// project_report. Same
+// receipt | project_report. Same
 // fail-closed recipient contract as
 // /reschedule-link (requireAdmin, POST body, full last-10 phone, customerId
 // cross-checked then expanded to the account, cross-account 409). Builders
@@ -2231,8 +2157,8 @@ async function statementLinkInsert(builders, last10, bodyCustomerId) {
     status: 200,
     body: {
       kind: 'statement',
-      url: stripSmsLinkScheme(result.url),
-      line: stripSmsLinkScheme(result.line),
+      url: stripSmsUrlScheme(result.url),
+      line: stripSmsUrlScheme(result.line),
       statement: result.statement || undefined,
       immediateOnly: result.immediateOnly || undefined,
       customerId: (selected || owners[0])?.id,
@@ -2321,7 +2247,11 @@ function composerLinkBuilders() {
     // Handled by statementLinkInsert before any customer resolution (the
     // key here only admits the kind).
     statement: null,
-    // A project report is the account's, like a service report.
+    // A receipt is the account's, like the pay link (a household shares
+    // its bills) — the resolved owner is the recipient whose receipt-text
+    // consent the builder checks; a project report the account's, like a
+    // service report.
+    receipt: (ids, primaryId) => builders.buildReceiptLink(ids, primaryId),
     project_report: (ids) => builders.buildProjectReportLink(ids),
   };
 }
@@ -2344,7 +2274,10 @@ const STRICT_OWNER_KINDS = ['autopay_setup', 'card_request', 'contract', 'prep_g
 // typed-in number sends as an unverified conversational lead, whose consent
 // read can miss the customer's notification_prefs entirely when the number
 // is formatted differently on file (GH Codex #3844 r4 P1).
-const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report', 'project_report'];
+// A receipt link is account-scoped like the pay link but its text is a
+// customer bearer too — the owner rides back so /sms applies the recipient's
+// own consent policy, never the unverified-lead one (GH Codex #3893 r3 P1).
+const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report', 'project_report', 'receipt'];
 
 // The row a /customer-link kind targets: the operator-selected row first,
 // else the account row whose phone matches the number, else the first
@@ -2381,7 +2314,7 @@ async function resolveLinkOwner(kind, customerIds, customerId, last10, { emailSe
 // the composer refuses to schedule or draft those kinds; /schedule-sms +
 // drafts re-fence. standalone: the line is a complete greeted message,
 // inserted as-is.
-const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'projectReport', 'expiresAt', 'immediateOnly', 'standalone'];
+const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'receipt', 'projectReport', 'expiresAt', 'immediateOnly', 'standalone'];
 
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {
@@ -2434,8 +2367,8 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     res.json({
       kind,
       channel,
-      url: stripSmsLinkScheme(result.url),
-      line: stripSmsLinkScheme(result.line),
+      url: stripSmsUrlScheme(result.url),
+      line: stripSmsUrlScheme(result.line),
       firstName: recipientFirstName,
       ...Object.fromEntries(LINK_RESULT_FIELDS.map((field) => [field, result[field] || undefined])),
       // Owner-bound kinds (and the account-scoped bearers above): the
@@ -2462,7 +2395,7 @@ router.get('/link-library', async (req, res) => {
       linkLibrary.listLinks(),
       linkLibrary.sitemapLastSyncedAt(),
     ]);
-    res.json({ links, lastSyncedAt });
+    res.json({ links, lastSyncedAt, receiptLinksEnabled: require('../config/feature-gates').isEnabled('composerReceiptLinks') });
   } catch (err) {
     logger.error(`link-library list failed: ${err.message}`);
     res.status(500).json({ error: err.message });

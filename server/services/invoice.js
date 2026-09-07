@@ -3606,7 +3606,15 @@ const InvoiceService = {
         "waveguard_tier",
         // Saved-card state rides along so a deep-linked invoice row keeps
         // its card badge and Charge-card action (Codex PR #3476 r20 P2).
-        "card_on_file",
+        // customers has NO card_on_file column — it is the default
+        // payment_methods row, computed exactly as the list query does
+        // (a bare column read 500'd every admin invoice detail in prod).
+        db.raw(`(
+          SELECT json_build_object('brand', card_brand, 'last_four', last_four)
+          FROM payment_methods
+          WHERE customer_id = customers.id AND is_default = true
+          LIMIT 1
+        ) AS card_on_file`),
         "address_line1",
         "city",
         "state",
@@ -5020,6 +5028,7 @@ const InvoiceService = {
       const validAmounts = [totalCents, creditCents].every((cents) => Number.isSafeInteger(cents) && cents >= 0);
       if (invoice.total == null || !validAmounts || creditCents > totalCents) return skip("invalid_balance");
       if (totalCents !== creditCents) return skip("balance_due");
+      await require("./stripe").assertNoInvoiceChargeReconciliationPending(id, trx);
       if ([invoice.payer_id, invoice.payer_statement_id, invoice.annual_prepay_term_id,
         invoice.stripe_payment_intent_id, invoice.payment_recorded_at, invoice.status === "sending"].some(Boolean)) {
         return skip("existing_payment_work");

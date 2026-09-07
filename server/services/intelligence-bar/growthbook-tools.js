@@ -150,6 +150,88 @@ async function getGrowthbookFeatures(input) {
   return { features, total: features.length, offset, has_more: Boolean(json.hasMore) };
 }
 
+// Running experiments with their latest analysis, shaped for the weekly BI
+// briefing: one row per experiment, one row per goal metric × variation with
+// users / numerator / mean / chance-to-beat-control, plus a readiness note
+// (the smallest arm across EVERY goal metric) so the briefing never dresses
+// up a 7-user split as a result. Field names are GrowthBook's own — numerator
+// is a conversion count only for a binomial metric; for revenue / count /
+// duration it is the aggregate value and mean the value per user — so the
+// metric type rides along. Shares gbGet (key, base, timeout) with the two IB
+// tools above. Results are whatever the last GrowthBook refresh computed
+// (dateUpdated says when) — this does not trigger an analysis.
+const MIN_USERS_PER_ARM = 100;
+
+function summariseAnalysis(a) {
+  if (!a) return null;
+  return {
+    numerator: a.numerator ?? null,
+    mean: typeof a.mean === 'number' ? Number(a.mean.toFixed(4)) : null,
+    percent_change: typeof a.percentChange === 'number' ? Number((a.percentChange * 100).toFixed(1)) : null,
+    ci: [a.ciLow, a.ciHigh].every((n) => typeof n === 'number') ? [Number((a.ciLow * 100).toFixed(1)), Number((a.ciHigh * 100).toFixed(1))] : null,
+    chance_to_beat_control: typeof a.chanceToBeatControl === 'number' ? Number(a.chanceToBeatControl.toFixed(3)) : null,
+    note: a.errorMessage || null,
+  };
+}
+
+async function listAll(path, key) {
+  const out = [];
+  for (let offset = 0; ; offset += 100) {
+    const json = await gbGet(`${path}?limit=100&offset=${offset}`);
+    out.push(...(json[key] || []));
+    if (!json.hasMore) return out;
+  }
+}
+
+function isNotFound(err) {
+  return /HTTP 404/.test(String(err && err.message));
+}
+
+async function getExperimentResultsSummary() {
+  const [experiments, metricRows] = await Promise.all([listAll('/api/v1/experiments', 'experiments'), listAll('/api/v1/metrics', 'metrics')]);
+  const metricType = new Map(metricRows.map((m) => [m.id, m.type || null]));
+  const running = experiments.filter((e) => e.status === 'running' && !e.archived);
+  const out = [];
+  for (const e of running) {
+    let r = null;
+    try {
+      const json = await gbGet(`/api/v1/experiments/${encodeURIComponent(e.id)}/results`);
+      r = json.result || null;
+    } catch (err) {
+      // Only a never-refreshed experiment ("No results found", a plain 404) is
+      // experiment state; an outage / auth / rate-limit failure must surface
+      // as the tool's error, not masquerade as "no analysis yet".
+      if (!isNotFound(err)) throw err;
+    }
+    const overall = r && Array.isArray(r.results) ? r.results.find((d) => !d.dimension) || r.results[0] : null;
+    const metrics = overall && Array.isArray(overall.metrics) ? overall.metrics.map((m) => ({
+      metric: m.metricName || m.metricId,
+      type: metricType.get(m.metricId) || (String(m.metricId).startsWith('fact__') ? 'fact' : null),
+      variations: (m.variations || []).map((v) => ({
+        name: v.variationName || v.variationId,
+        users: v.users ?? null,
+        ...summariseAnalysis((v.analyses || [])[0]),
+      })),
+    })) : [];
+    const armSizes = metrics.flatMap((m) => m.variations.map((v) => v.users || 0));
+    const minArm = armSizes.length ? Math.min(...armSizes) : 0;
+    const srm = overall && overall.checks && typeof overall.checks.srm === 'number' ? overall.checks.srm : null;
+    out.push({
+      id: e.id,
+      name: e.name,
+      tracking_key: e.trackingKey,
+      started: (e.phases && e.phases.length && e.phases[e.phases.length - 1].dateStarted) || null,
+      hypothesis: e.hypothesis || null,
+      results_updated: r ? r.dateUpdated : null,
+      total_users: overall ? overall.totalUsers ?? null : null,
+      srm_warning: srm !== null && srm < 0.001,
+      readiness: !r ? 'no analysis yet' : minArm < MIN_USERS_PER_ARM ? `too early — smallest arm has ${minArm} users (need ${MIN_USERS_PER_ARM}+)` : 'enough traffic to read',
+      metrics,
+    });
+  }
+  return { experiments: out, running: out.length };
+}
+
 async function executeGrowthbookTool(toolName, input = {}) {
   // "Not configured" is the expected DARK state, not a failure — an
   // { error } result would count against the shared admin circuit breaker
@@ -169,4 +251,4 @@ async function executeGrowthbookTool(toolName, input = {}) {
   }
 }
 
-module.exports = { GROWTHBOOK_TOOLS, executeGrowthbookTool };
+module.exports = { GROWTHBOOK_TOOLS, executeGrowthbookTool, getExperimentResultsSummary, MIN_USERS_PER_ARM };

@@ -55,6 +55,24 @@ test('bindingQuote = the latest identical single-item order on the account, vend
   expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl: fakeFetch({ 'GET /api/orders': { orders: [{ number: 'X', total: '100', lines: [] }] } }).fetchImpl })).toBeNull();
 });
 
+test('every call goes to www.stickermule.com/api — api.stickermule.com does not resolve (verified 2026-09-06)', async () => {
+  const { fetchImpl } = fakeFetch(happy());
+  await sm.place({ vendorSku: '4242', quantity: 500 }, { fetchImpl });
+  const hosts = new Set(fetchImpl.mock.calls.map(([url]) => new URL(url).host));
+  expect([...hosts]).toEqual(['www.stickermule.com']);
+  expect(fetchImpl.mock.calls.map(([url]) => new URL(url).pathname).every((p) => p.startsWith('/api/'))).toBe(true);
+  expect(sm._internals.BASE_URL).toBe('https://www.stickermule.com');
+});
+
+test('bindingQuote orders history by the live `placedAt` stamp', async () => {
+  const orders = { orders: [
+    { number: 'SM-NEW', total: '330.00', placedAt: '2026-09-01T00:00:00Z', items: [{ id: 4242, quantity: 500 }] },
+    { number: 'SM-OLD', total: '318.40', placedAt: '2026-07-01T00:00:00Z', items: [{ id: 4242, quantity: 500 }] },
+  ] };
+  const { fetchImpl } = fakeFetch({ 'GET /api/orders': orders });
+  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl })).toEqual({ cents: 33000, source: 'order SM-NEW' });
+});
+
 test('no API key → refused before any call', async () => {
   delete process.env.STICKERMULE_API_KEY;
   const { fetchImpl } = fakeFetch(happy());
@@ -167,6 +185,20 @@ describe('siteone internals', () => {
     const deps = { launchBrowser: async () => browser, resolveHostIps: async () => ['203.0.113.10'] };
     await expect(s1.place({ vendorSku: 'X', quantity: 1, credentials: { email: 'a', password: 'b', accountNumber: '1' }, approvedShipTo: '1 x' }, deps)).rejects.toMatchObject({ runLevel: true, message: expect.stringMatching(/browser setup failed: context boom/) });
     expect(browser.close).toHaveBeenCalledTimes(1);
+  });
+
+  test("the locked context identifies as the Chrome build it runs — SiteOne's edge resets HTTP/2 for a 'HeadlessChrome' user agent (2026-09-07 outage)", async () => {
+    const newContext = jest.fn(async () => { throw new Error('stop here'); });
+    const browser = { newContext, version: () => '141.0.7390.37', close: jest.fn(async () => {}) };
+    const deps = { launchBrowser: async () => browser, resolveHostIps: async () => ['203.0.113.10'] };
+    await expect(s1.place({ vendorSku: 'X', quantity: 1, credentials: { email: 'a', password: 'b', accountNumber: '1' }, approvedShipTo: '1 x' }, deps)).rejects.toMatchObject({ runLevel: true });
+    const { userAgent, serviceWorkers } = newContext.mock.calls[0][0];
+    expect(serviceWorkers).toBe('block');
+    expect(userAgent).toMatch(/^Mozilla\/5\.0 \(.+\) AppleWebKit\/537\.36 \(KHTML, like Gecko\) Chrome\/141\.0\.0\.0 Safari\/537\.36$/);
+    expect(userAgent).not.toMatch(/headless/i);
+    // A browser that cannot report its version still never says Headless.
+    expect(s1._internals.browserUserAgent({})).toMatch(/Chrome\/\d+\.0\.0\.0 Safari\/537\.36$/);
+    expect(s1._internals.browserUserAgent({})).not.toMatch(/headless/i);
   });
 
   test('egress permits https on a pinned host only — http to the pinned host is denied before credentials could travel (PR3 r1 P1)', () => {

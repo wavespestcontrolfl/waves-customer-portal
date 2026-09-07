@@ -89,71 +89,6 @@ function findShortenerHost(text) {
   return null;
 }
 
-// Bare-host detection for the SMS link-scheme rule. The ruling is
-// direction-specific: hosts on the canonical schemeless list (shared with
-// the SMS template renderer via sms-link-policy.js) plus own-domain hosts
-// go bare; every third-party link keeps https:// (a bare host won't
-// preview). Host validity is checked against the public-suffix list —
-// see the psl note below.
-const { SCHEMELESS_SMS_HOSTS, normalizeForLinkCheck } = require('./messaging/sms-link-policy');
-function isBareExemptHost(host) {
-  const h = String(host || '').toLowerCase();
-  return SCHEMELESS_SMS_HOSTS.includes(h) || h === 'wavespestcontrol.com' || h.endsWith('.wavespestcontrol.com');
-}
-// Scheme-carrying form of a must-go-bare host (the renderer strips these;
-// a draft carrying one renders inconsistently with the sent form). NOTE
-// the deliberate asymmetry with isBareExemptHost: the exemption set for
-// the bare-host rule (any owned host may appear bare) is WIDER than the
-// must-go-bare set (exactly the renderer's SCHEMELESS_SMS_HOSTS) — a
-// scheme'd https://wavespestcontrol.com marketing link is legitimate both
-// ways. The hostname boundary stops a lookalike third-party URL
-// (https://portal.wavespestcontrol.com.evil.com/...) from matching on its
-// owned-host prefix.
-const SCHEMED_PORTAL_RE = new RegExp(
-  `https?://(${SCHEMELESS_SMS_HOSTS.map((h) => h.replace(/\./g, '\\.')).join('|')})(?![-a-z0-9]|\\.[a-z0-9])`,
-  'i'
-);
-// Host validity comes from the public-suffix list (psl — the dependency
-// rain-out's link guard already uses), not a hand-curated TLD list: it
-// accepts every real TLD (.dev, .ai, ccTLDs) while still rejecting prose
-// tokens ("no.problem", "today.come", "e.g") whose tails are not suffixes.
-const psl = require('psl');
-// Generic maximal dotted-host run, no TLD filter and no left-boundary
-// class: prose punctuation glued to a link ("See:yelp.com", "[yelp.com]")
-// must not hide it, and the exemption below must see the COMPLETE hostname
-// — a TLD-anchored match stops at ".com" and would exempt
-// portal.wavespestcontrol.com.evil.xyz as ours. Public-suffix validation
-// happens after extraction.
-const BARE_HOST_RUN_RE = /(?:[a-z0-9][a-z0-9-]*\.)+[a-z0-9][a-z0-9-]*/g;
-
-/** First bare (scheme-less) third-party host in the text, or null. */
-function findBareThirdPartyHost(text) {
-  // Scheme-qualified URLs already satisfy the rule and email addresses are
-  // not links — remove both before scanning for what's left bare. The
-  // stripped span stops at delimiters (comma, semicolon, quotes, brackets):
-  // \S+ would swallow a comma-glued neighbor ("https://example.com,yelp.com")
-  // and hide the bare host riding behind it.
-  // Lowercased before scanning: the host-run regex is lowercase-only and
-  // WWW.EPA.GOV must not evade it.
-  const stripped = normalizeForLinkCheck(String(text || ''))
-    .toLowerCase()
-    .replace(/https?:\/\/[^\s,;'"<>()]+/g, ' ')
-    .replace(/[^\s,;'"<>()]+@[^\s,;'"<>()]+/g, ' ');
-  BARE_HOST_RUN_RE.lastIndex = 0;
-  let m;
-  while ((m = BARE_HOST_RUN_RE.exec(stripped)) !== null) {
-    const host = m[0].toLowerCase();
-    // A host that EXTENDS an owned host is a lookalike, never ours — flag
-    // it regardless of its final TLD.
-    if (SCHEMELESS_SMS_HOSTS.some((h) => host.startsWith(`${h}.`))
-      || host.startsWith('wavespestcontrol.com.')
-      || host.includes('.wavespestcontrol.com.')) return m[0];
-    if (isBareExemptHost(host)) continue;
-    if (psl.isValid(host)) return m[0];
-  }
-  return null;
-}
-
 function isGsm7(text) {
   return detectEncoding(String(text ?? '')).encoding === 'GSM_7';
 }
@@ -163,10 +98,8 @@ function smsSegmentCount(text) {
   return countSegments(String(text)).segmentCount;
 }
 
-// Typographic characters the house voice bans outright: they read as
-// machine-written AND silently flip SMS encoding to UCS-2. Classification
-// delegates to the canonical GSM-7 normalizer's replacement set \u2014 a local
-// character list here would drift from it.
+const { stripSmsUrlScheme, normalizeForLinkCheck } = require('./messaging/sms-link-policy');
+const psl = require('psl');
 const { findTypographicChar, normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
 
 // "Reply to this message" only counts as boilerplate in CLOSER position:
@@ -206,13 +139,9 @@ const RULES = [
     name: 'portal-link-scheme',
     applies: (ctx) => ctx.channel === 'sms',
     check: (text) => {
-      const schemed = normalizeForLinkCheck(text).match(SCHEMED_PORTAL_RE);
-      if (schemed) {
-        return `portal link carries a scheme — ${schemed[1]} goes bare in SMS`;
-      }
-      // Third-party links keep their scheme: a bare host won't preview.
-      const bare = findBareThirdPartyHost(text);
-      return bare ? `bare ${bare} link — third-party links keep https:// in SMS` : null;
+      return stripSmsUrlScheme(text) !== text
+        ? 'SMS link carries https:// - omit the leading scheme in SMS'
+        : null;
     },
   },
   {
@@ -290,7 +219,7 @@ const RULES = [
       // typographic punctuation before dispatch (send-customer-message), so
       // the segment verdict runs on the same normalized body — the
       // plain-punctuation rule separately flags the source characters.
-      const body = normalizeGsmPunctuation(text);
+      const body = normalizeGsmPunctuation(stripSmsUrlScheme(text));
       const segs = smsSegmentCount(body);
       return segs > SMS_SEGMENT_LIMIT
         ? `${segs} SMS segments (limit ${SMS_SEGMENT_LIMIT})${isGsm7(body) ? '' : ' — non-GSM characters forced UCS-2 encoding'}`
@@ -384,4 +313,4 @@ function lintFlags(text, context = {}) {
   return toFlags(lintComms(text, context));
 }
 
-module.exports = { lintComms, lintFlags, toFlags, smsSegmentCount, isGsm7, findBareThirdPartyHost, RULES, URL_SHORTENER_HOSTS };
+module.exports = { lintComms, lintFlags, toFlags, smsSegmentCount, isGsm7, RULES, URL_SHORTENER_HOSTS };

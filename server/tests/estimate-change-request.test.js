@@ -29,7 +29,7 @@ const {
   CHANGE_REQUEST_TOPICS,
   normalizeTopics,
   isSoftExitEligible,
-  createEstimateChangeRequest,
+  createEstimateOfficeRequest,
   recordEstimateStillDeciding,
 } = require('../services/estimate-change-request');
 
@@ -89,10 +89,10 @@ describe('isSoftExitEligible', () => {
   });
 });
 
-describe('createEstimateChangeRequest', () => {
+describe('createEstimateOfficeRequest', () => {
   test('empty note on a VALID estimate is a 400 and writes nothing', async () => {
     const database = mockDb();
-    await expect(createEstimateChangeRequest({ estimateToken: 'tok-1', topics: ['price'], note: '  ', database, viewabilityCheck: viewable }))
+    await expect(createEstimateOfficeRequest({ estimateToken: 'tok-1', topics: ['price'], note: '  ', database, viewabilityCheck: viewable }))
       .rejects.toMatchObject({ status: 400 });
     expect(database.inserts).toHaveLength(0);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
@@ -101,7 +101,7 @@ describe('createEstimateChangeRequest', () => {
   test('unknown token / unviewable / terminal rows all 404 before content validation', async () => {
     for (const [estimate, check] of [[null, viewable], [ESTIMATE_ROW, () => false], [{ ...ESTIMATE_ROW, status: 'declined' }, viewable]]) {
       const database = mockDb({ estimate });
-      await expect(createEstimateChangeRequest({ estimateToken: 'tok-1', note: '', database, viewabilityCheck: check }))
+      await expect(createEstimateOfficeRequest({ estimateToken: 'tok-1', note: '', database, viewabilityCheck: check }))
         .rejects.toMatchObject({ status: 404 });
       expect(database.inserts).toHaveLength(0);
     }
@@ -109,7 +109,7 @@ describe('createEstimateChangeRequest', () => {
 
   test('parks ONE request row with a dedicated key and rings the change-request bell', async () => {
     const database = mockDb();
-    const out = await createEstimateChangeRequest({
+    const out = await createEstimateOfficeRequest({
       estimateToken: 'tok-1', topics: ['price', 'bogus'], note: 'Can you drop the <script>mosquito</script> line?', database, viewabilityCheck: viewable,
     });
     expect(out).toEqual({ success: true, deduped: false });
@@ -136,9 +136,26 @@ describe('createEstimateChangeRequest', () => {
     expect(opts.metadata).toMatchObject({ estimateId: 'est-1', requestId: 'req-1' });
   });
 
+  test('a website callback records a call request with its own dedupe key, not a revision', async () => {
+    const database = mockDb();
+    await createEstimateOfficeRequest({
+      estimateToken: 'tok-1', kind: 'callback', note: 'Ignore this supplied text',
+      database, viewabilityCheck: viewable,
+    });
+    expect(database.inserts).toHaveLength(1);
+    expect(database.inserts[0]).toMatchObject({
+      requested_service: 'estimate_callback_request', category: 'contact_request',
+      subject: 'Call requested on estimate #EST-2026-0099',
+    });
+    expect(database.inserts[0].description).toContain('Customer requested a phone call');
+    expect(database.inserts[0].description).not.toContain('Send a revised');
+    expect(database.inserts[0].pricing_revision).not.toContain('Ignore this');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
   test('a second open request dedupes to the existing delivered row (no insert, no second bell)', async () => {
     const database = mockDb({ dupeRow: { id: 'req-0', pricing_revision: JSON.stringify({ notifiedAt: '2026-09-01T00:00:00Z' }) } });
-    const out = await createEstimateChangeRequest({ estimateToken: 'tok-1', note: 'again', database, viewabilityCheck: viewable });
+    const out = await createEstimateOfficeRequest({ estimateToken: 'tok-1', note: 'again', database, viewabilityCheck: viewable });
     expect(out).toEqual({ success: true, deduped: true });
     expect(database.inserts).toHaveLength(0);
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
@@ -146,7 +163,7 @@ describe('createEstimateChangeRequest', () => {
 
   test('the call-side verdict fails closed', async () => {
     const database = mockDb();
-    await expect(createEstimateChangeRequest({
+    await expect(createEstimateOfficeRequest({
       estimateToken: 'tok-1', note: 'x', database, viewabilityCheck: viewable, callSideBlockedFor: async () => true,
     })).rejects.toMatchObject({ status: 404 });
     expect(database.inserts).toHaveLength(0);

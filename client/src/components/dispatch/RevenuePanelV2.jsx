@@ -7,7 +7,7 @@
 // Colors collapse: alert-fg reserved for "<55" (at-risk) only. Score bar + score
 // text are zinc-900 (or alert when at-risk). No amber tier.
 import { useState, useEffect } from 'react';
-import { Card, CardBody, cn } from '../ui';
+import { Button, Card, CardBody, cn } from '../ui';
 
 const authHeader = () => ({ Authorization: `Bearer ${localStorage.getItem('waves_admin_token')}` });
 
@@ -20,15 +20,19 @@ function isAtRisk(score) {
 export default function RevenuePanelV2({ date }) {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(false);
 
   async function load() {
     setLoading(true);
+    setError(false);
     try {
       const res = await fetch(`/api/dispatch/jobs?date=${date}&status=scheduled`, { headers: authHeader() });
+      // A 401/500 body is not a job list — say so instead of rendering the empty state.
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const sorted = (Array.isArray(data) ? data : []).sort((a, b) => (b.job_score || 0) - (a.job_score || 0));
       setJobs(sorted);
-    } catch { setJobs([]); }
+    } catch { setJobs([]); setError(true); }
     setLoading(false);
   }
 
@@ -45,6 +49,15 @@ export default function RevenuePanelV2({ date }) {
     { label: 'Upsell opps', value: upsellFlags, sub: 'flagged today' },
     { label: 'Low priority', value: atRisk, sub: 'score < 55', alert: atRisk > 0 },
   ];
+
+  if (error && !loading) {
+    return (
+      <Card><CardBody className="p-4 text-center">
+        <div role="alert" className="text-14 text-alert-fg mb-3">Failed to load job scores</div>
+        <Button variant="secondary" onClick={load}>Retry</Button>
+      </CardBody></Card>
+    );
+  }
 
   return (
     <div>

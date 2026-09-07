@@ -329,9 +329,9 @@ describe('outbound-link gate (DISALLOWED_EXTERNAL_LINK)', () => {
   });
   test('CONTENT_ALLOWED_LINK_DOMAINS extends the allowlist without a deploy', () => {
     const prev = process.env.CONTENT_ALLOWED_LINK_DOMAINS;
-    process.env.CONTENT_ALLOWED_LINK_DOMAINS = 'entnemdept.ufl.edu, epa.gov';
+    process.env.CONTENT_ALLOWED_LINK_DOMAINS = 'approved-reference.example';
     try {
-      const r = guardrails.evaluate({ body: 'Per [UF/IFAS](https://entnemdept.ufl.edu/creatures/) research.' }, {});
+      const r = guardrails.evaluate({ body: 'Per [approved reference](https://approved-reference.example/research) research.' }, {});
       expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
       const r2 = guardrails.evaluate({ body: 'Per [somewhere](https://other.example/) instead.' }, {});
       expect(r2.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
@@ -1297,19 +1297,15 @@ describe('outbound-link gate: operator-intercept citation exceptions (Codex roun
   test('operatorCitations still blocks non-curated hosts and suffix-spoofed domains', () => {
     expect(guardrails.evaluate({ body: 'Buy [links](https://spam.example/x).' }, { operatorCitations: true })
       .findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
-    // Lookalikes on OPEN TLDs stay blocked — anyone can register these.
-    // (The former ".edu lookalike" case moved to the citation-grade-TLD
-    // suite below: owner ruling 2026-08-01 admits .gov/.edu wholesale for
-    // operator-directed drafts, and neither TLD is openly registrable —
-    // .edu needs accreditation, .gov a verified US government entity.)
+    // Trusted names embedded in attacker-controlled hostnames do not qualify.
     expect(guardrails.evaluate({ body: 'See https://evil-ufl.com/x now.' }, { operatorCitations: true })
       .findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
     expect(guardrails.evaluate({ body: 'See https://ufl.edu.example.net/x now.' }, { operatorCitations: true })
       .findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
   });
-  test('mined drafts (no operator flags) stay internal-only — UF/IFAS still blocks', () => {
+  test('curated citation sources also work without operator flags', () => {
     const r = guardrails.evaluate({ body: 'Per [UF/IFAS](https://entnemdept.ufl.edu/creatures/).' }, {});
-    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(false);
   });
 });
 
@@ -3560,11 +3556,10 @@ describe('blog meta contract applies to NON-refresh blog publishes (legacy lane)
   });
 });
 
-describe('third-party price citations + citation-grade TLDs (owner ruling 2026-08-01)', () => {
+describe('third-party price citations and trusted sources', () => {
   const { findHardcodedPrice } = guardrails;
-  // Operator provenance unlocks the exemption — the same boundary as the
-  // .gov/.edu citation allowance (Codex P1: mined drafts keep the full hard
-  // block, or an injected attribution publishes arbitrary prices).
+  // Operator provenance unlocks the PRICE exemption. Trusted-source links
+  // alone never permit prices in mined drafts.
   // A competitor-price draft is ALWAYS an operator draft, so the citation
   // allowlist is in scope — the source URL must be one the gate accepts.
   const OP = { thirdPartyCitations: true, operatorCitations: true };
@@ -4254,36 +4249,64 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice(SRC + 'The industry average is $145 per quarterly visit.', OP)).toBeNull();
   });
 
-  test('operator citations are the BRIEF\'S NAMED SOURCES, not a TLD class', () => {
-    // The broad .gov/.edu allowance is gone (owner ruling 2026-08-01): a
-    // host-wide rule had to be defended at every position a URL can appear,
-    // and each one was a bypass into executable .mdx. A named source is
-    // allowed WHEREVER it appears; an unnamed host never is.
+  test('unlisted non-government domains still require the exact brief source', () => {
     const named = { operatorCitations: true, requiredSourceUrls: ['https://research.example.edu/paper'] };
     const none = { operatorCitations: true, requiredSourceUrls: [] };
     expect(guardrails._internals.externalLinkFinding('Per https://research.example.edu/paper, chinch bugs peak.', named)).toBeNull();
     expect(guardrails._internals.externalLinkFinding('![x](https://research.example.edu/p.svg)', { operatorCitations: true, requiredSourceUrls: ['https://research.example.edu/p.svg'] })).toBeNull();
-    // Unnamed hosts block regardless of TLD or position.
+    // An unlisted academic host does not inherit trust from UF/IFAS.
     expect(guardrails._internals.externalLinkFinding('Per https://research.example.edu/paper, chinch bugs peak.', none)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
     expect(guardrails._internals.externalLinkFinding('<script src="https://student.example.edu/p.js"></script>', none)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
     // The CURATED host list still stands on its own.
     expect(guardrails._internals.externalLinkFinding('See https://www.epa.gov/pesticides for details.', none)).toBeNull();
-    // Mined drafts get nothing.
+    // Unlisted academic sources also require approval on mined drafts.
     expect(guardrails._internals.externalLinkFinding('Per https://research.example.edu/paper.', {})?.code).toBe('DISALLOWED_EXTERNAL_LINK');
   });
 
-  test('citation-grade TLDs do NOT leak to mined drafts (injection boundary holds)', () => {
-    const r = guardrails.evaluate(
-      { body: 'See [the statute](https://www.flsenate.gov/Laws/Statutes/2024/501.017).' },
-      {},
-    );
-    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+  test.each([
+    'https://www.northportfl.gov/City-Services-and-Safety/Public-Works/Stormwater-Management/Fertilizer-Ordinance',
+    'https://www.flsenate.gov/Laws/Statutes/2024/501.017',
+    'https://water.example.gov/rules',
+    'https://WWW.NORTHPORTFL.GOV./rules',
+    'https://edis.ifas.ufl.edu/topics',
+    'https://www.bbb.org/resources',
+    'https://www.myfloridalicense.com/license',
+  ])('trusted source %s is available to every draft', (url) => {
+    for (const opts of [{}, { operatorCitations: true }]) {
+      const r = guardrails.evaluate({ body: `See [official guidance](${url}).` }, opts);
+      expect(r.findings.filter((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toEqual([]);
+    }
   });
 
+  test.each([
+    'https://archive.org/download/untrusted-item/payload',
+    'https://archive.org/details/untrusted-item',
+    'https://uploads.archive.org/payload',
+    'https://web.archive.org/web/20260101/https://example.org/report',
+  ])('Archive.org sources require existing operator provenance or an exact brief URL: %s', (url) => {
+    const body = `See [reference](${url}).`;
+    expect(guardrails._internals.externalLinkFinding(body)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    expect(guardrails._internals.externalLinkFinding(body, { requiredSourceUrls: [url] })).toBeNull();
+    expect(guardrails._internals.externalLinkFinding(body, { operatorCitations: true })).toBeNull();
+  });
 
-  test('only the exact .gov/.edu suffix qualifies — lookalikes still block', () => {
+  test.each([
+    '<script src="https://www.northportfl.gov/script.js"></script>',
+    '<iframe src="https://www.northportfl.gov/rules"></iframe>',
+    '<form action="https://www.northportfl.gov/submit">Send</form>',
+    '<a href="https://www.northportfl.gov/rules" onClick={alert(1)}>Rules</a>',
+    '{fetch("https://www.northportfl.gov/rules")}',
+    '<SpiderIdBoard species={[{"source":{"label":"Rules","url":"https://www.northportfl.gov/rules"}}]} />',
+    'See [rules](javascript:fetch("https://www.northportfl.gov/rules")).',
+  ])('source trust does not authorize executable markup: %s', (body) => {
+    expect(guardrails._internals.externalLinkFinding(body)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+  });
+
+  test('only real government and trusted source hostnames qualify — lookalikes still block', () => {
     for (const body of [
       'See [this page](https://gov.example.com/statutes) for the rule.',
+      'See [this page](https://northportfl.gov@evil.example/rules) for the rule.',
+      'See [this page](https://northportfl.gov.evil.example/rules) for the rule.',
       'See [this page](https://flsenate.gov.example.net/statutes) for the rule.',
       'See [this page](https://ufl.edu.co/creatures) for the guide.',
     ]) {

@@ -1,3 +1,5 @@
+const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue, revertPropertyPreferenceCompanions, valuesEqual } = require('../services/data-hygiene/property-preferences');
+const { stalePendingExtractionProposals } = require('../services/data-hygiene/proposal-store');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -28,6 +30,7 @@ router.use(adminAuthenticate, requireAdmin);
 const ALLOWED_STATUSES = new Set(['pending', 'auto_applied', 'approved', 'rejected', 'superseded', 'stale', 'reverted', 'all']);
 const ALLOWED_PHASES = new Set(['normalization', 'extraction']);
 const PROPERTY_PREF_APPLY_FIELDS = new Set([
+  'contact_preference',
   'neighborhood_gate_code',
   'property_gate_code',
   'garage_code',
@@ -35,6 +38,11 @@ const PROPERTY_PREF_APPLY_FIELDS = new Set([
   'parking_notes',
   'access_notes',
   'pet_details',
+  // Free-form fields the SMS profile lane proposes for review.
+  'special_instructions',
+  'irrigation_controller_location',
+  'irrigation_schedule_notes',
+  'irrigation_issues',
 ]);
 
 router.get('/proposals', async (req, res, next) => {
@@ -216,6 +224,18 @@ router.post('/proposals/:id/reveal', requireAdmin, async (req, res, next) => {
 router.post('/proposals/:id/approve', async (req, res, next) => {
   try {
     const result = await db.transaction(async (trx) => {
+      // Preference writers (portal saves, merges, SMS capture) serialize on
+      // the customer advisory lock before any row lock. Resolve the scope
+      // first, take that lock, then revalidate the proposal under its own.
+      const scope = await trx('data_hygiene_proposals')
+        .where({ id: req.params.id })
+        .first('resource_type', 'scope_id');
+      if (scope?.resource_type === 'property_preferences') {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['property-preferences', String(scope.scope_id)],
+        );
+      }
       const proposal = await trx('data_hygiene_proposals')
         .where({ id: req.params.id })
         .forUpdate()
@@ -224,6 +244,11 @@ router.post('/proposals/:id/approve', async (req, res, next) => {
       if (!proposal || proposal.status !== 'pending') {
         const err = new Error('Pending proposal not found');
         err.status = 404;
+        throw err;
+      }
+      if (proposal.resource_type === 'property_preferences' && String(proposal.scope_id) !== String(scope.scope_id)) {
+        const err = new Error('Proposal scope changed; retry');
+        err.status = 409;
         throw err;
       }
       if (canApplyNormalization(proposal)) {
@@ -267,12 +292,13 @@ router.post('/proposals/:id/approve', async (req, res, next) => {
         currentRaw,
       });
 
-      await applyPropertyPreferenceValue({
+      const { companions } = await applyPropertyPreferenceValue({
         trx,
         proposal,
         target,
         proposedRaw,
       });
+      const companionsBefore = Object.keys(companions).length ? companions : null;
 
       const auditId = await auditHygieneProposalApply({
         trx,
@@ -293,6 +319,7 @@ router.post('/proposals/:id/approve', async (req, res, next) => {
         reviewer_id: req.technicianId,
         reviewed_via: 'ui',
         is_sensitive: true,
+        companions_before: companionsBefore,
       });
 
       await vaultAttachAuditLog({ trx, vault_id: vault.id, audit_log_id: auditId });
@@ -307,8 +334,14 @@ router.post('/proposals/:id/approve', async (req, res, next) => {
           applied_at: db.fn.now(),
           resource_id: target.id,
           updated_at: db.fn.now(),
+          // Revert reads the companion's before value from here.
+          ...(companionsBefore ? { evidence: JSON.stringify({ ...(proposal.evidence || {}), companions_before: companionsBefore }) } : {}),
         })
         .returning('*');
+      // A sibling proposal for the same field (the extraction phase and the
+      // SMS lane can each propose one message) would now fail its
+      // before-value check; retire it instead of leaving it pending.
+      await stalePendingExtractionProposals({ trx, scope_id: proposal.scope_id, field: proposal.field });
 
       return updatedProposal;
     });
@@ -396,6 +429,9 @@ router.post('/proposals/:id/revert', requireAdmin, async (req, res, next) => {
           [proposal.field]: beforeRaw,
           updated_at: db.fn.now(),
         });
+      const { reverted: companionsReverted } = await revertPropertyPreferenceCompanions({
+        trx, proposal, target, companions: proposal.evidence?.companions_before || {},
+      });
 
       const auditId = await auditHygieneProposalRevert({
         trx,
@@ -417,6 +453,7 @@ router.post('/proposals/:id/revert', requireAdmin, async (req, res, next) => {
         reverted_by: req.technicianId,
         is_sensitive: true,
         reviewed_via: 'ui',
+        companions_reverted: companionsReverted,
       });
       await vaultAttachAuditLog({ trx, vault_id: vault.id, audit_log_id: auditId });
 
@@ -541,57 +578,6 @@ async function revertNormalizationProposal({ trx, proposal, revertedBy }) {
     })
     .returning('*');
   return updatedProposal;
-}
-
-async function resolvePropertyPreferencesTarget({ trx, proposal, currentRaw }) {
-  const existing = proposal.resource_id
-    ? await trx('property_preferences')
-      .where({ id: proposal.resource_id, customer_id: proposal.scope_id })
-      .forUpdate()
-      .first()
-    : await trx('property_preferences')
-      .where({ customer_id: proposal.scope_id })
-      .forUpdate()
-      .first();
-
-  if (existing) {
-    const actual = existing[proposal.field] === undefined ? null : existing[proposal.field];
-    if (!valuesEqual(actual, currentRaw)) {
-      const err = new Error('Proposal is stale; current field value changed');
-      err.status = 409;
-      throw err;
-    }
-    return existing;
-  }
-
-  if (currentRaw !== null && currentRaw !== undefined) {
-    const err = new Error('Cannot create property preferences row for a non-empty before value');
-    err.status = 409;
-    throw err;
-  }
-
-  const [created] = await trx('property_preferences')
-    .insert({ customer_id: proposal.scope_id })
-    .returning('*');
-  return created;
-}
-
-async function applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw }) {
-  const updated = await trx('property_preferences')
-    .where({ id: target.id, customer_id: proposal.scope_id })
-    .update({
-      [proposal.field]: proposedRaw,
-      updated_at: db.fn.now(),
-    });
-  if (!updated) {
-    const err = new Error('Property preferences update failed');
-    err.status = 409;
-    throw err;
-  }
-}
-
-function valuesEqual(a, b) {
-  return JSON.stringify(a === undefined ? null : a) === JSON.stringify(b === undefined ? null : b);
 }
 
 function summarizeEvidence(evidence = {}) {

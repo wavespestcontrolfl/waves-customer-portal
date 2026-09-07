@@ -19,7 +19,7 @@ jest.mock('../services/messaging/providers/twilio-sms', () => ({
   sendViaTwilio: jest.fn(async () => ({ sent: true, providerMessageId: 'SM_test' })),
   mediaUrlsAllowed: jest.fn(() => false),
 }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
+jest.mock('../config/feature-gates', () => ({ ...jest.requireActual('../config/feature-gates'), isEnabled: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const { isEnabled } = require('../config/feature-gates');

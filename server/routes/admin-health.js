@@ -102,11 +102,12 @@ router.use(async (req, res, next) => {
 // =========================================================================
 router.get('/dashboard', async (req, res) => {
   try {
+    let complete = true;
     // Fleet health average
     const avgResult = await liveScoresOnly(db('customer_health_scores'))
       .avg('overall_score as avg')
-      .first().catch(() => null);
-    const fleetHealthAvg = Math.round(parseFloat(avgResult?.avg || 50));
+      .first().catch(() => { complete = false; return null; });
+    const fleetHealthAvg = avgResult?.avg == null ? null : Math.round(Number(avgResult.avg));
 
     // At-risk count. A single canonical engine (customer-health.js) now owns
     // churn_risk with one vocabulary: low / moderate / high / critical. The
@@ -124,14 +125,14 @@ router.get('/dashboard', async (req, res) => {
           .whereIn('churn_risk_level', ['high', 'critical'])
           .count('* as count').first();
         atRiskCount = parseInt(atRiskResult?.count || 0);
-      } catch { /* column doesn't exist */ }
+      } catch { complete = false; }
     }
 
     // Healthy count (score >= 65)
     const healthyResult = await liveScoresOnly(db('customer_health_scores'))
       .where('overall_score', '>=', 65)
       .count('* as count')
-      .first().catch(() => ({ count: 0 }));
+      .first().catch(() => { complete = false; return { count: 0 }; });
     const healthyCount = parseInt(healthyResult?.count || 0);
 
     // 30-day churn forecast
@@ -141,7 +142,7 @@ router.get('/dashboard', async (req, res) => {
         .whereNotNull('churn_probability')
         .sum('churn_probability as total').first();
       predictedChurns = Math.round(parseFloat(churnForecast?.total || 0));
-    } catch { /* column may not exist */ }
+    } catch { complete = false; }
 
     // Grade distribution — score_grade may not exist, derive from health_score
     let gradeDistribution = [];
@@ -158,7 +159,7 @@ router.get('/dashboard', async (req, res) => {
           if (s >= 80) grades.A++; else if (s >= 65) grades.B++; else if (s >= 50) grades.C++; else if (s >= 35) grades.D++; else grades.F++;
         });
         gradeDistribution = Object.entries(grades).map(([g, c]) => ({ score_grade: g, count: c }));
-      } catch { /* no data */ }
+      } catch { complete = false; }
     }
 
     // Churn risk breakdown
@@ -168,7 +169,7 @@ router.get('/dashboard', async (req, res) => {
     } catch {
       try {
         riskBreakdown = await liveScoresOnly(db('customer_health_scores')).select('churn_risk_level as churn_risk').count('* as count').groupBy('churn_risk_level');
-      } catch { /* neither column exists */ }
+      } catch { complete = false; }
     }
 
     // Top at-risk customers (top 10)
@@ -177,10 +178,11 @@ router.get('/dashboard', async (req, res) => {
       atRiskCustomers = await db('customer_health_scores')
         .join('customers', 'customer_health_scores.customer_id', 'customers.id')
         .whereNull('customers.deleted_at')
+        .whereIn('customer_health_scores.churn_risk', ['high', 'critical'])
         .select('customers.id', 'customers.first_name', 'customers.last_name', 'customers.waveguard_tier', 'customer_health_scores.overall_score', 'customer_health_scores.score_grade', 'customer_health_scores.churn_risk', 'customer_health_scores.days_until_predicted_churn')
         .orderBy('customer_health_scores.overall_score', 'asc')
         .limit(10);
-    } catch { /* non-critical */ }
+    } catch { complete = false; }
 
     // Recent alerts (last 10)
     let recentAlerts = [];
@@ -194,9 +196,10 @@ router.get('/dashboard', async (req, res) => {
       )
       .orderBy('customer_health_alerts.created_at', 'desc')
       .limit(10);
-    } catch { /* table may not exist */ }
+    } catch { complete = false; }
 
     res.json({
+      complete,
       fleetHealthAvg,
       atRiskCount,
       healthyCount,
