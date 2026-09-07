@@ -75,3 +75,24 @@ describe('Dialog keyboard accessibility', () => {
     expect(screen.getByRole('dialog')).not.toHaveAttribute('aria-labelledby');
   });
 });
+
+describe('Dialog layering', () => {
+  it('paints at layer 120 by default and honors a caller layer above a higher overlay', () => {
+    const { unmount } = render(
+      <Dialog open onClose={() => {}} aria-label="Default layer">
+        <div>Body</div>
+      </Dialog>,
+    );
+    expect(screen.getByRole('dialog', { name: 'Default layer' }).style.zIndex).toBe('120');
+    unmount();
+
+    // The Customer 360 profile is a z-[1000] overlay; a dialog opened from
+    // inside it must be able to sit above that layer.
+    render(
+      <Dialog open onClose={() => {}} aria-label="Raised layer" layer={1120}>
+        <div>Body</div>
+      </Dialog>,
+    );
+    expect(screen.getByRole('dialog', { name: 'Raised layer' }).style.zIndex).toBe('1120');
+  });
+});

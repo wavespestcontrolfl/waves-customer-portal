@@ -78,6 +78,14 @@ beforeEach(() => {
 });
 
 describe('CancelPlanDialog', () => {
+  it('forwards the layer so the dialog paints above the Customer 360 overlay that opens it', async () => {
+    stubFetch((path) => (path.endsWith('/cancel-plan/preview') ? response(previewBody()) : response({})));
+    render(<CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn()} layer={1120} />);
+
+    await screen.findByText('the whole plan');
+    expect(screen.getByRole('dialog', { name: 'Cancel plan' }).style.zIndex).toBe('1120');
+  });
+
   it('renders the server preview facts and commits the whole account with every choice in the body', async () => {
     stubFetch((path, body) => {
       if (path.endsWith('/cancel-plan/preview')) return response(previewBody({ note: body.note, reasonCode: body.reasonCode }));
