@@ -257,6 +257,50 @@ describe('the conversation side', () => {
     } finally { jest.useRealTimers(); }
   });
 
+  test.each([false, true])('a slow re-service repairs reporting even when it settles during finalization=%s', async (duringClose) => {
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    const { builder, updates } = primeDb();
+    let finish;
+    const tool = jest.spyOn(require('../services/voice-agent/relay-tools'), 'executeTool')
+      .mockImplementationOnce(async (_name, _input, ctx) => {
+        await new Promise((resolve) => { finish = resolve; });
+        ctx.markCaptured({ leadCreated: false });
+        ctx.markReserviceFiled();
+        return 'Recorded';
+      });
+    const append = jest.spyOn(segmentStore, 'appendSegment').mockResolvedValue(1);
+    const convo = convoWithTurns();
+    await convo._contextReady;
+    convo._callerVerified = true;
+    convo.leadCaptured = false;
+    convo._reconcileLateSegment = jest.fn(async () => {});
+    // Another wedged write must not hold this completed artifact's repair.
+    convo._inFlightWrites.set('request_booking', new Promise(() => {}));
+    if (duringClose) builder.update.mockImplementation(async (patch) => {
+      updates.push(patch);
+      if (patch.call_outcome) finish();
+      return 1;
+    });
+    jest.useFakeTimers();
+    try {
+      const writing = convo._executeToolBounded('request_reservice', {}, convo._buildToolCtx());
+      await jest.advanceTimersByTimeAsync(8010);
+      await writing;
+      const closing = convo.end('ws_close');
+      await jest.advanceTimersByTimeAsync(10010);
+      await closing;
+      expect(append.mock.calls[0][2].reservice_filed).toBe(false);
+      if (!duringClose) {
+        expect(convo._reconcileLateSegment).not.toHaveBeenCalled();
+        finish();
+        await jest.advanceTimersByTimeAsync(0);
+      }
+      expect(convo._inFlightWrites.has('request_reservice')).toBe(false);
+      expect(convo._reserviceFiled).toBe(true);
+      expect(convo._reconcileLateSegment).toHaveBeenCalledTimes(1);
+    } finally { append.mockRestore(); tool.mockRestore(); jest.useRealTimers(); }
+  });
+
   test('gate off ⇒ no segment append and no generation fence (today\'s statements)', async () => {
     const { builder, updates } = primeDb();
     const convo = convoWithTurns();

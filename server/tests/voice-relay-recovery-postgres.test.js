@@ -475,7 +475,7 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     try {
       expect(await claimOwnedElsewhere(trx, callSid, 'old')).toBe(false);
       await trx('artifacts').insert({ id: 'lead-1' });
-      await stampCallLeadLinkage(callSid, 'lead-1', { trx, floorSummary: 'Synthetic floor summary' });
+      await stampCallLeadLinkage(callSid, 'lead-1', { trx, sessionKey: 'old', floorSummary: 'Synthetic floor summary' });
       takeover = beginRelaySessionClaim(callSid, 'new', 2);
       await waitForBlockedClaim();
       if (commit) await trx.commit(); else await trx.rollback();
@@ -500,11 +500,20 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
       expect(await claimOwnedElsewhere(trx, callSid, 'old')).toBe(false);
       await trx('artifacts').insert({ id: 'lead-1' });
       await trx.schema.alterTable('call_log', (t) => t.renameColumn('metadata', 'unavailable_metadata'));
-      await stampCallLeadLinkage(callSid, 'lead-1', { trx });
+      await stampCallLeadLinkage(callSid, 'lead-1', { trx, sessionKey: 'old' });
     })).rejects.toThrow();
     expect(await mockPg('artifacts').select('id')).toEqual([]);
     expect(await beginRelaySessionClaim(callSid, 'new', 2)).toBe(true);
     expect((await mockPg('call_log').where('twilio_call_sid', callSid).first('metadata')).metadata.relay_lead_id).toBeUndefined();
+  });
+  test.each([null, 'another-session'])('an unverified transactional floor stamps only an unclaimed call (owner=%s)', async (owner) => {
+    await mockPg('call_log').where('id', 'call-1').update({ metadata: { relay_session_claim_owner: owner } });
+    expect(await mockPg.transaction((trx) => stampCallLeadLinkage(callSid, 'lead-1', {
+      trx, floorSummary: 'Synthetic unverified floor',
+    }))).toBe(owner === null);
+    const row = await mockPg('call_log').where('id', 'call-1').first();
+    expect(row.metadata.relay_floor_summary?.lead_id || null).toBe(owner === null ? 'lead-1' : null);
+    expect(row.metadata.relay_lead_id || null).toBe(owner === null ? 'lead-1' : null);
   });
   test('the production re-service writer commits its recovery evidence with the ticket', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
