@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import useIsMobile from "../../hooks/useIsMobile";
 import {
   BarChart3,
   Bot,
@@ -85,6 +86,7 @@ function Badge({ children, color, small, fontSize }) {
   );
 }
 function StatCard({ label, value, color, sub, onClick }) {
+  const isMobile = useIsMobile(640);
   return (
     <div
       onClick={onClick}
@@ -168,7 +170,6 @@ const daysUntil = (due) => {
   );
 };
 
-const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
 const PRIORITY_COLORS = { high: D.red, medium: D.amber, low: D.teal };
 const STATUS_COLORS = {
   upcoming: D.blue,
@@ -237,6 +238,7 @@ const TAX_LEAF_BY_KEY = Object.fromEntries(TAX_SECTIONS.map((s) => [s.key, s]));
 // TAX RATES TAB
 // ═══════════════════════════════════════════════════════════════
 function TaxRatesTab() {
+  const isMobile = useIsMobile(640);
   const [rates, setRates] = useState([]);
   useEffect(() => {
     adminFetch("/admin/tax/rates")
@@ -2270,6 +2272,7 @@ function ExemptionsTab() {
 // MILEAGE TAB
 // ═══════════════════════════════════════════════════════════════
 function MileageTab() {
+  const isMobile = useIsMobile(640);
   const [entries, setEntries] = useState([]);
   const [stats, setStats] = useState(null);
   const [statsError, setStatsError] = useState(null);
@@ -2814,6 +2817,7 @@ function MileageTab() {
 // REVENUE TAB (Sales Tax Reconciliation)
 // ═══════════════════════════════════════════════════════════════
 function RevenueTab() {
+  const isMobile = useIsMobile(640);
   const [month, setMonth] = useState(() => {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
@@ -3481,6 +3485,7 @@ function PnlTab() {
 // EXPORTS TAB
 // ═══════════════════════════════════════════════════════════════
 function ExportsTab() {
+  const isMobile = useIsMobile(640);
   const [year, setYear] = useState(String(new Date().getFullYear()));
   const [startDate, setStartDate] = useState(
     `${new Date().getFullYear()}-01-01`,
@@ -3750,6 +3755,7 @@ function ExportsTab() {
 // ACCOUNTS RECEIVABLE TAB
 // ═══════════════════════════════════════════════════════════════
 function AccountsReceivableTab() {
+  const isMobile = useIsMobile(640);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -4793,6 +4799,7 @@ function BankImportTab() {
 }
 
 export default function TaxPage() {
+  const isMobile = useIsMobile(640);
   const [activeTab, setActiveTab] = useState("overview");
   // GATE_BANK_IMPORT: the leaf only exists when the server says the gate is
   // on (status is the one bank-import endpoint that answers while dark).

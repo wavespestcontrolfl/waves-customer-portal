@@ -190,6 +190,24 @@ html.admin-app *,
 .admin-shell-v2 * {
   font-family: "Roboto", system-ui, sans-serif !important;
 }
+/* Skip link: off-screen until focused (the admin shell was the only portal without one). */
+.admin-shell-v2 .admin-skip-link {
+  position: fixed;
+  top: -100px;
+  left: 16px;
+  z-index: 2000;
+  padding: 10px 16px;
+  border-radius: 6px;
+  background: var(--text-primary, #09090b);
+  color: var(--surface-page, #fff);
+  font-size: 14px;
+  text-decoration: none;
+}
+.admin-shell-v2 .admin-skip-link:focus-visible {
+  top: 16px;
+  outline: 2px solid var(--surface-page, #fff);
+  outline-offset: 2px;
+}
 html.admin-app [class*="font-mono"],
 html.admin-app [class*="font-mono"] *,
 html.admin-app code,
