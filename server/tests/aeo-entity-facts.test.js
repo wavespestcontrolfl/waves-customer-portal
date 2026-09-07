@@ -121,6 +121,23 @@ test('the matched relation names its own party before the previous sentence is c
   expect(score('E1', 'Orkin is a national company. It was founded by John Smith.').forbidden.wrong_founder).toBe(false);
 });
 
+test('an exclusion preposition denies only the phrase it governs', () => {
+  expect(score('E6', 'Waves offers pest control without contracts, including lawn care, termite treatment, mosquito and rodent control.')).toMatchObject({ right: 5, missing: 0 });
+  expect(score('E6', 'Waves offers pest control without contracts, including lawn care and fumigation.')).toMatchObject({ expected: { pest_control: true, lawn_care: true }, forbidden: { fumigation_offered: true } });
+  expect(score('E6', 'Waves offers termite treatment without fumigation.')).toMatchObject({ expected: { termite: true }, forbidden: { fumigation_offered: false } });
+  expect(score('E6', 'Waves offers termite treatment without the use of tent fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves offers everything except fumigation.').forbidden.fumigation_offered).toBe(false);
+});
+
+test('a question or an expression of uncertainty asserts nothing', () => {
+  expect(score('E6', 'Whether Waves offers fumigation is unknown.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'It is unclear whether Waves offers fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Does Waves offer fumigation?').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Fumigation availability is unclear.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'It is unclear whether Waves is a franchise, but it offers fumigation.').forbidden).toMatchObject({ franchise: false, fumigation_offered: true });
+  expect(score('E5', 'It is unclear whether Waves serves Charlotte County. It serves Manatee County.')).toMatchObject({ expected: { charlotte: false, manatee: true } });
+});
+
 test('a denial in the same clause is not a wrong claim, whether it comes before or after the claim', () => {
   expect(score('E7', 'The bond does not cover termite damage repairs. Re-treatment is not free.').forbidden).toMatchObject({ damage_repair_coverage: false, free_retreat_guarantee: false });
   expect(score('E6', 'Fumigation is not offered by Waves Pest Control.').forbidden.fumigation_offered).toBe(false);

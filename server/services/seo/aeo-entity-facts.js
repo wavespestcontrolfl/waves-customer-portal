@@ -45,7 +45,16 @@ function compile(def) {
 // sentence punctuation or a contrastive conjunction, so "not a franchise, but
 // it offers fumigation" still flags fumigation. "no-contract" and "not only"
 // are not negations.
-const NEGATION_RE = /\b(?:not(?! only)|no(?!-)|never|none|nor|without|except|excluding|other than|aside from|outside of|rather than|instead of|doesn'?t|does not|do not|don'?t|isn'?t|is not|aren'?t|are not|wasn'?t|was not|cannot|can'?t|won'?t|will not|shouldn'?t|should not|neither)\b/i;
+const NEGATION_RE = /\b(?:not(?! only)|no(?!-)|never|none|nor|doesn'?t|does not|do not|don'?t|isn'?t|is not|aren'?t|are not|wasn'?t|was not|cannot|can'?t|won'?t|will not|shouldn'?t|should not|neither)\b/i;
+// An exclusion preposition denies only the phrase it governs: "except
+// fumigation" and "without fumigation" deny, but "pest control without
+// contracts, including lawn care" does not reach lawn care.
+const EXCLUSION_RE = /\b(?:without|except|excluding|other than|aside from|outside of|rather than|instead of)\b/i;
+const ADJACENT_EXCLUSION_RE = new RegExp(`${EXCLUSION_RE.source}\\s+(?:(?:a|an|the|any|their|its|for|of)\\s+)?(?:[\\w'-]+\\s+){0,3}$`, 'i');
+// A question or an expression of uncertainty asserts nothing: "Does Waves
+// offer fumigation?", "It is unclear whether Waves offers fumigation".
+const UNCERTAIN_RE = /\b(?:whether|unclear|unknown|uncertain|unsure|unconfirmed|unverified)\b/i;
+const QUESTION_AHEAD_RE = /^[^.!?;\n]*\?/;
 // Clause boundaries: sentence punctuation, a contrastive conjunction, or a
 // coordinating "and"/"or" that starts a new predicate ("is a franchise and
 // does not offer fumigation"). A bare "or" inside a noun list ("insulation or
@@ -83,7 +92,7 @@ function trailClause(text, matchIsLabel) {
 // A prepositional qualifier on the service name ("fumigation for drywood
 // termites is not offered") sits between the match and its predicate.
 const QUALIFIER = "(?:(?:for|of|in|on|to|against|with|under)\\s+(?:(?!(?:and|or|but|not|no|is|are|was|were|does|do|did)\\b)[\\w'-]+\\s+){1,4})?";
-const AFTER_NEGATION_RE = new RegExp(`^\\s*${QUALIFIER}(?:(?:(?!(?:and|or|but)\\b)[\\w']+\\s+){0,2}(?:not(?! only)|never|neither|nor|cannot)\\b|(?:(?!(?:and|or|but)\\b)[\\w']+\\s+){0,1}\\w+n't\\b|no\\b|(?:(?:is|are|was|were|remains?|stays?)\\s+)?(?:unavailable|excluded|off the (?:menu|table)|discontinued)\\b)`, 'i');
+const AFTER_NEGATION_RE = new RegExp(`^\\s*${QUALIFIER}(?:(?:(?!(?:and|or|but)\\b)[\\w']+\\s+){0,2}(?:not(?! only)|never|neither|nor|cannot)\\b|(?:(?!(?:and|or|but)\\b)[\\w']+\\s+){0,1}\\w+n't\\b|no\\b|(?:(?!(?:and|or|but)\\b)[\\w']+\\s+){0,2}(?:(?:is|are|was|were|remains?|stays?)\\s+)?(?:unavailable|excluded|off the (?:menu|table)|discontinued|unknown|unclear|uncertain|unconfirmed)\\b)`, 'i');
 
 // A numbered marker is 1–3 digits: "2024. Waves was …" is a year, not item 2024.
 const LIST_MARKER_RE = /^[ \t]*(?:[-*+\u2022]|\d{1,3}[.)])[ \t]+/;
@@ -222,18 +231,24 @@ function asserted(compiled, answer) {
     // referral ("… offers pest control, but for fumigation contact Orkin")
     // leaves this assertion alone.
     if (REFERRAL_RE.test(`${before}${match[0]}${after}`)) continue;
-    // A negation INSIDE the match ("bond is not optional") also denies it,
-    // unless the pattern deliberately matched a negated phrase from its first
-    // word ("not a franchise" as evidence of independence). Only the match's
-    // final clause counts: "bond is not optional but renews annually" still
-    // asserts annual renewal.
-    const innerClause = match[0].split(CLAUSE_BOUNDARY_RE).pop();
-    const inner = NEGATION_RE.exec(innerClause);
-    const innerAtStart = inner && inner.index === 0 && innerClause === match[0];
-    if ((inner && !innerAtStart) || NEGATION_RE.test(before) || AFTER_NEGATION_RE.test(after)) continue;
+    if (denied(match[0], before, after, answer.slice(end))) continue;
     return true;
   }
   return false;
+}
+
+// The clause around the match denies or doubts it. A negation INSIDE the
+// match ("bond is not optional") also denies it, unless the pattern
+// deliberately matched a negated phrase from its first word ("not a
+// franchise" as evidence of independence). Only the match's final clause
+// counts: "bond is not optional but renews annually" still asserts renewal.
+function denied(matched, before, after, rest) {
+  const innerClause = matched.split(CLAUSE_BOUNDARY_RE).pop();
+  const inner = NEGATION_RE.exec(innerClause) || EXCLUSION_RE.exec(innerClause);
+  const innerAtStart = inner && inner.index === 0 && innerClause === matched;
+  return (inner && !innerAtStart)
+    || NEGATION_RE.test(before) || ADJACENT_EXCLUSION_RE.test(before) || UNCERTAIN_RE.test(before)
+    || AFTER_NEGATION_RE.test(after) || QUESTION_AHEAD_RE.test(rest);
 }
 
 const FACTS = Object.fromEntries(Object.entries(cohort.facts).map(([key, def]) => [key, compile(def)]));
