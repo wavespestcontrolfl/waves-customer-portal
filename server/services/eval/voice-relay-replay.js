@@ -78,13 +78,20 @@ const CHECKS = Object.freeze([
   'tools_called_include', 'tools_never_called', 'tools_called_subset_of',
   'spoken_never_matches', 'spoken_matches_any', 'capture_lead_input_includes',
   'end_session_called', 'no_model_text_before_tool',
-  'commitment_requires_receipt',
+  'commitment_requires_receipt', 'tools_performed_include',
 ]);
+// The registered write tools and the ONE ctx effect each performs live
+// (relay-tools / relay-booking / relay-reservice / relay-transfer). A fixture
+// answer may carry only its own tool's effect — `request_booking: { capture }`
+// would latch a capture the live booking tool never performs.
+const TOOL_EFFECT = Object.freeze({ capture_lead: 'capture', request_booking: 'booking', request_reservice: 'reservice', transfer_to_office: 'transfer' });
 // The tools whose PERFORMED write is a receipt for a spoken promise, and the
 // default set no model text may precede — the registered write tools only.
-const WRITE_TOOLS = Object.freeze(['capture_lead', 'request_booking', 'request_reservice', 'transfer_to_office']);
+const WRITE_TOOLS = Object.freeze(Object.keys(TOOL_EFFECT));
 // Follow-up promises, EN + ES, over what Sandy actually said.
-const PROMISE_RE = /\b(?:(?:will|going to|gonna) (?:call|text|email|reach out|follow up|send|get back)|(?:i|we)['’]?ll (?:call|text|email|reach out|follow up|send|get back)|someone (?:will|is going to)|(?:i['’]?ll|i will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear|get|receive)|(?:a |the )?(?:waves )?team member will|le (?:llamar|devolver|enviar|contactar|dar)|se comunicar|(?:un|una) (?:miembro|persona) del equipo)\b/i;
+const PROMISE_RE = /\b(?:(?:will|going to|gonna) (?:call|text|email|reach out|follow up|send|get back)|(?:i|we)['’]?ll (?:call|text|email|reach out|follow up|send|get back)|someone (?:will|is going to)|(?:i['’]?ll|i will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear|get|receive)|(?:a |the )?(?:waves )?team member will|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b/i;
+// A promise quoted inside a refusal or conditional offer is not a commitment.
+const NON_COMMITMENT_PREFIX_RE = /\b(?:cannot|can['’]?t|won['’]?t|not|never|unable|if|whether|would you like|si|no puedo|no podemos)\b/i;
 const DEFAULT_TOOL_TEXT = 'That information is not available on this call. Tell the caller a Waves team member will follow up with the details.';
 const LOOKUP_BUDGET_TEXT = 'No more account lookups are available on this call. Do NOT try again and do not confirm or deny '
   + 'anything about any account. Offer to have a Waves team member call them back, and capture the lead.';
@@ -100,6 +107,7 @@ const OFFICE_HOURS_SCHEMA = Joi.alternatives().allow(null).try(
     closedForDate: Joi.string().isoDate().pattern(/^\d{4}-\d{2}-\d{2}$/),
   }),
 );
+const END_SESSION_SCHEMA = Joi.alternatives().try(Joi.boolean(), Joi.object({ reason: Joi.string().pattern(/\S/).required() }));
 const RESUME_SCHEMA = Joi.object({
   segmentsText: Joi.string().allow('').required(),
   reconnects: Joi.number().integer().min(1),
@@ -192,14 +200,17 @@ const toolList = (knownTools) => (v) => (!Array.isArray(v) || !v.length ? 'value
   : (v.find((n) => !knownTools.has(n)) ? `unknown tool "${v.find((n) => !knownTools.has(n))}"` : null));
 const regexList = (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty regex list'
   : (v.find((re) => !compileRegex(re)) !== undefined ? `invalid regex ${JSON.stringify(v.find((re) => !compileRegex(re)))}` : null));
+const writeToolList = () => (v) => (!Array.isArray(v) || !v.length ? 'value must be a non-empty write-tool list'
+  : (v.find((n) => !WRITE_TOOLS.includes(n)) ? `"${v.find((n) => !WRITE_TOOLS.includes(n))}" is not a write tool (${WRITE_TOOLS.join(', ')})` : null));
 const CHECK_VALUE_RULES = Object.freeze({
   tools_called_include: toolList,
+  tools_performed_include: writeToolList,
   tools_never_called: toolList,
   tools_called_subset_of: toolList,
   spoken_never_matches: () => regexList,
   spoken_matches_any: () => regexList,
   capture_lead_input_includes: () => (v) => (!v || typeof v !== 'object' || Array.isArray(v) || !Object.keys(v).length ? 'value must be an object of capture_lead fields' : null),
-  end_session_called: () => (v) => (typeof v === 'boolean' || (v && typeof v === 'object') ? null : 'value must be boolean or { reason }'),
+  end_session_called: () => (v) => (END_SESSION_SCHEMA.validate(v, { convert: false }).error ? 'value must be boolean or exactly { reason: "<non-empty>" }' : null),
   no_model_text_before_tool: (knownTools) => (v) => (v === true || (Array.isArray(v) && v.length && v.every((n) => WRITE_TOOLS.includes(n) || knownTools.has(n))) ? null : 'value must be true or a tool list'),
   commitment_requires_receipt: () => (v) => (v === true ? null : 'value must be true'),
 });
@@ -235,8 +246,14 @@ function scenarioShapeRules(s) {
 }
 
 function toolResponseEntryRules(name, raw) {
-  const { error } = TOOL_RESPONSES_SCHEMA.validate(Array.isArray(raw) ? raw : [raw], { convert: false });
-  return [[!!error, `toolResponses.${name}: ${error ? error.message : ''}`]];
+  const entries = Array.isArray(raw) ? raw : [raw];
+  const { error } = TOOL_RESPONSES_SCHEMA.validate(entries, { convert: false });
+  // An effect belongs to the tool that performs it live — never to another.
+  const foreign = [...new Set(entries.flatMap((e) => (e && typeof e === 'object' ? Object.values(TOOL_EFFECT).filter((key) => e[key] !== undefined && TOOL_EFFECT[name] !== key) : [])))];
+  return [
+    [!!error, `toolResponses.${name}: ${error ? error.message : ''}`],
+    ...foreign.map((key) => [true, `toolResponses.${name}: "${key}" is the effect of ${Object.keys(TOOL_EFFECT).find((t) => TOOL_EFFECT[t] === key)}, not ${name}`]),
+  ];
 }
 
 function fixtureRules(s, knownTools) {
@@ -266,8 +283,8 @@ function lintScenario(s, knownTools) {
     if (error) problems.push(`allowedToolInputs: ${error.message}`);
   }
   for (const e of expects) {
-    if (e && e.check === 'tools_called_include' && Array.isArray(e.value)) {
-      for (const name of e.value) if (!allowed.has(name)) problems.push(`expect tools_called_include names "${name}", which allowedTools does not allow`);
+    if (e && ['tools_called_include', 'tools_performed_include'].includes(e.check) && Array.isArray(e.value)) {
+      for (const name of e.value) if (!allowed.has(name)) problems.push(`expect ${e.check} names "${name}", which allowedTools does not allow`);
     }
   }
   return problems;
@@ -464,20 +481,28 @@ function pickToolResponse(scenario, name, n, input = {}, used = {}) {
 function applyToolSideEffects(response, { input, ctx, scenario }) {
   const text = response.text || '';
   if (response.ok === false) return { text, receipt: false };
+  const ctxCall = (fn, ...args) => (typeof ctx[fn] === 'function' ? ctx[fn](...args) : undefined);
   let receipt = false;
   if (response.capture) {
-    if (typeof ctx.markCaptured === 'function') ctx.markCaptured(response.capture === true ? {} : response.capture);
-    if (input.call_summary && typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
+    ctxCall('markCaptured', response.capture === true ? {} : response.capture);
+    if (input.call_summary) ctxCall('noteCallSummary', input.call_summary);
     receipt = input.lead_quality !== 'spam'; // the live spam branch suppresses capture without writing a lead or callback
   }
-  if (response.booking) { if (typeof ctx.markBookingRequested === 'function') ctx.markBookingRequested(null); receipt = true; }
-  if (response.reservice) { if (typeof ctx.markReserviceFiled === 'function') ctx.markReserviceFiled(); receipt = true; }
+  if (response.booking) { ctxCall('markBookingRequested', null); receipt = true; }
+  if (response.reservice) {
+    // The live tool latches capture too (relay-reservice: the call's artifact
+    // is a ticket, no lead) — so the session ends after the goodbye as in
+    // production instead of taking turns production would ignore.
+    ctxCall('markCaptured', { leadCreated: false });
+    ctxCall('markReserviceFiled');
+    receipt = true;
+  }
   if (!response.transfer) return { text, receipt };
-  if (typeof ctx.transferRequested === 'function' && ctx.transferRequested() === true) return { text: TRANSFER_IN_PROGRESS_TEXT, receipt: false };
-  if (typeof ctx.markTransferRequested === 'function') ctx.markTransferRequested();
+  if (ctxCall('transferRequested') === true) return { text: TRANSFER_IN_PROGRESS_TEXT, receipt: false };
+  ctxCall('markTransferRequested');
   const { copy } = require('../voice-agent/relay-language');
-  if (typeof ctx.say === 'function') ctx.say(copy('transferring', scenario.language === 'es' ? 'es-US' : null));
-  if (typeof ctx.endForTransfer === 'function') ctx.endForTransfer();
+  ctxCall('say', copy('transferring', scenario.language === 'es' ? 'es-US' : null));
+  ctxCall('endForTransfer');
   return { text: text || TRANSFER_TEXT, receipt: true };
 }
 
@@ -683,8 +708,17 @@ function injectInterrupt(convo, record, spec) {
   if (!last) { record.warnings.push('interrupt requested before any agent utterance'); return; }
   const words = String(last.text).split(/\s+/).filter(Boolean);
   let heard;
-  if (spec && typeof spec === 'object' && typeof spec.heard === 'string') heard = spec.heard;
-  else {
+  if (spec && typeof spec === 'object' && typeof spec.heard === 'string') {
+    // An explicit `heard` must be what actually played: a prefix of the
+    // utterance being cut (the live matcher's normalisation). Anything else
+    // would rewrite the record to speech the model never produced — or hide
+    // speech it did — so the replay stops rather than grading a fiction.
+    const norm = (t) => String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    heard = spec.heard;
+    if (!norm(heard) || !norm(last.text).startsWith(norm(heard))) {
+      throw Object.assign(new Error(`interrupt "heard" is not a prefix of the agent utterance it cuts: ${JSON.stringify(clip(heard, 80))} vs ${JSON.stringify(clip(last.text, 80))}`), { code: 'EVAL_INTERRUPT_MISMATCH' });
+    }
+  } else {
     const n = spec && typeof spec === 'object' && Number.isInteger(spec.words) ? spec.words : Math.max(1, Math.floor(words.length / 2));
     heard = words.slice(0, n).join(' ');
   }
@@ -769,6 +803,13 @@ const CHECK_RUNNERS = Object.freeze({
     const extra = [...new Set(calledNames.filter((n) => !value.includes(n)))];
     return extra.length ? ['fail', `outside the allowed set: ${extra.join(', ')}`] : ['pass', `called ⊆ {${value.join(', ')}}`];
   },
+  // A write the fixture PERFORMED (a receipt) — a refusal answer ("that time
+  // is gone") is a valid call, but the tool did not do the scenario's job.
+  tools_performed_include(value, record) {
+    const performed = record.toolCalls.filter((t) => t.receipt === true).map((t) => t.name);
+    const missing = value.filter((n) => !performed.includes(n));
+    return missing.length ? ['fail', `never performed: ${missing.join(', ')}`] : ['pass', `performed: ${value.join(', ')}`];
+  },
   spoken_never_matches(value, record, { spoken }) {
     const hit = firstRegexHit(value, spoken);
     return hit ? ['fail', `/${hit.source}/i matched: "${clip(hit.text, 160)}"`] : ['pass', 'no forbidden phrase spoken'];
@@ -778,10 +819,11 @@ const CHECK_RUNNERS = Object.freeze({
     return hit ? ['pass', `/${hit.source}/i matched: "${clip(hit.text, 160)}"`] : ['fail', `none of ${value.map((v) => `/${v}/i`).join(', ')} was spoken`];
   },
   capture_lead_input_includes(value, record) {
-    // Only a capture the fixture ACCEPTED counts — a rejected call (missing
-    // call_summary, bad enum) recorded nothing, whatever fields it carried.
-    const captures = record.toolCalls.filter((t) => t.name === 'capture_lead' && !t.invalid && !t.unexpected);
-    if (!captures.length) return ['fail', record.toolCalls.some((t) => t.name === 'capture_lead') ? 'capture_lead was never validly called (every call was rejected for its arguments)' : 'capture_lead was never called'];
+    // Only a capture the fixture ACCEPTED and answered ok counts — a rejected
+    // call (missing call_summary, bad enum) or a failed one (`ok: false`, no
+    // side effects) recorded nothing, whatever fields it carried.
+    const captures = record.toolCalls.filter((t) => t.name === 'capture_lead' && t.ok === true && !t.invalid && !t.unexpected);
+    if (!captures.length) return ['fail', record.toolCalls.some((t) => t.name === 'capture_lead') ? 'capture_lead never succeeded (every call was rejected for its arguments or failed)' : 'capture_lead was never called'];
     const best = captures.map((c) => inputIncludes(c.input, value)).reduce((a, b) => (b.length < a.length ? b : a));
     return best.length ? ['fail', `no capture_lead input satisfied: ${best.join('; ')}`] : ['pass', 'capture_lead input includes every expected field'];
   },
@@ -789,7 +831,7 @@ const CHECK_RUNNERS = Object.freeze({
     const want = typeof value === 'boolean' ? value : true;
     const called = record.endSession != null;
     if (called !== want) return ['fail', want ? 'the session was never ended by the agent' : `the agent ended the session (${record.endSession.reason})`];
-    if (value && typeof value === 'object' && value.reason && record.endSession.reason !== value.reason) return ['fail', `ended for "${record.endSession.reason}", wanted "${value.reason}"`];
+    if (typeof value === 'object' && record.endSession.reason !== value.reason) return ['fail', `ended for "${record.endSession.reason}", wanted "${value.reason}"`];
     return ['pass', called ? `ended (${record.endSession.reason})` : 'session left open'];
   },
   no_model_text_before_tool(value, record, { utterances }) {
@@ -804,7 +846,10 @@ const CHECK_RUNNERS = Object.freeze({
   // fixture actually performed (capture / booking / re-service / transfer),
   // never a refusal, and never one that only landed after the promise.
   commitment_requires_receipt(value, record, { utterances }) {
-    const promises = utterances.filter((u) => PROMISE_RE.test(u.text));
+    const promises = utterances.filter((u) => String(u.text).split(/[.!?;]|\b(?:but|however|though|although)\b/i).some((clause) => {
+      const match = PROMISE_RE.exec(clause);
+      return match && !NON_COMMITMENT_PREFIX_RE.test(clause.slice(0, match.index));
+    }));
     if (!promises.length) return ['pass', 'no follow-up was promised'];
     const receipts = record.toolCalls.filter((t) => WRITE_TOOLS.includes(t.name) && t.receipt === true);
     const unbacked = promises.find((p) => !receipts.some((r) => r.index < p.index));
