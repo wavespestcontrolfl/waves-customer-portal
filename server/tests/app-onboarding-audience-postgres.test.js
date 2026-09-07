@@ -82,6 +82,15 @@ const welcome = require('../services/new-recurring-welcome-sms');
     expect(mockSendEmail).toHaveBeenCalledTimes(1);
   });
 
+  test.each([false, true])('racing coordinator calls enqueue once (email only: %s)', async emailOnly => {
+    const input = { customer, scheduledServiceId: serviceId, emailOnly };
+    const outcomes = await Promise.all([welcome.sendNewRecurringWelcome(input), welcome.sendNewRecurringWelcome(input)]);
+    expect(outcomes.filter(result => result.queued)).toHaveLength(1);
+    const rows = await mockDatabase('sms_sequences');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].sequence_type).toBe(emailOnly ? welcome.EMAIL_SEQUENCE_TYPE : welcome.SEQUENCE_TYPE);
+  });
+
   test('the email queue tombstone does not consume the existing recurring SMS guard', async () => {
     await welcome.queueOneTimeWelcomeEmail(service);
     await mockDatabase('sms_sequences').update({ status: 'completed' });
