@@ -9,7 +9,7 @@ const { parseQuotedETDeadline } = require('../utils/datetime-et');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
 
 // The shared proposal rule_version column is varchar(16).
-const VERSION = 'sms-ops-v14';
+const VERSION = 'sms-ops-v15';
 const FACT_FIELDS = Object.freeze([
   'contact_preference', 'irrigation_controller_location', 'irrigation_schedule_notes',
   'irrigation_issues', 'parking_notes', 'pet_details', 'access_notes', 'special_instructions',

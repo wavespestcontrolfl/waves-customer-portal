@@ -89,14 +89,30 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   
 
-  test.each(['failed', 'pre-activation'])('thirty %s scheduled deliveries cannot starve new inbound capture', async (reason) => {
+  test('automated manual messages neither reach extraction nor starve a customer request', async () => {
+    const automated = Array.from({ length: 30 }, () => ({ ...message, id: randomUUID(),
+      direction: 'outbound', message_type: 'manual', admin_user_id: null,
+      message_body: "No problem. We'll give you a call shortly.",
+      from_phone: message.to_phone, to_phone: message.from_phone, status: 'sent',
+      created_at: new Date(message.created_at.getTime() - 500) }));
+    await mockPg('sms_log').insert(automated);
+    const extract = jest.fn(async () => ({ facts: [], obligations: [], dropped: 0 }));
+    expect(await runSmsOperationalActions({ conn: mockPg, extract })).toMatchObject({ processed: 1, failed: 0 });
+    expect(extract).toHaveBeenCalledTimes(1);
+    expect(extract.mock.calls[0][0].message.id).toBe(message.id);
+    expect(await mockPg('call_commitments')).toEqual([]);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test.each(['failed', 'pre-activation', 'automated'])('thirty %s scheduled deliveries cannot starve new inbound capture', async (reason) => {
     const queues = Array.from({ length: 30 }, () => ({ ...message, id: randomUUID(),
-      direction: 'outbound', message_type: 'manual', message_body: 'I will call with an update.',
+      direction: 'outbound', message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104', message_body: 'I will call with an update.',
       from_phone: message.to_phone, to_phone: message.from_phone, status: 'sent',
       created_at: new Date(message.created_at.getTime() - 500), scheduled_for: new Date(message.created_at.getTime() - 600) }));
     const deliveries = queues.map((queue) => ({ ...queue, id: randomUUID(), scheduled_for: null,
+      admin_user_id: reason === 'automated' ? null : queue.admin_user_id,
       status: reason === 'failed' ? 'undelivered' : 'sent', metadata: { scheduled_sms_log_id: queue.id },
-      created_at: new Date(message.created_at.getTime() - (reason === 'failed' ? 550 : 2000)) }));
+      created_at: new Date(message.created_at.getTime() - (reason === 'pre-activation' ? 2000 : 550)) }));
     await mockPg('sms_log').insert([...queues, ...deliveries]);
     const extract = jest.fn(async () => ({ facts: [], obligations: [], dropped: 0 }));
     expect(await runSmsOperationalActions({ conn: mockPg, extract, now: new Date(message.created_at.getTime() + 1000) }))
@@ -142,7 +158,7 @@ postgres('SMS commitments on PostgreSQL', () => {
   test('profile replay excludes outbound promises even while commitment capture is enabled', async () => {
     await mockPg('sms_log').where({ id: message.id }).update({
       direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone,
-      message_type: 'manual', status: 'sent', operational_analysis: { version: 'previous' },
+      message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'sent', operational_analysis: { version: 'previous' },
     });
     const extract = jest.fn();
     expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, extract }))
@@ -244,7 +260,7 @@ postgres('SMS commitments on PostgreSQL', () => {
   test.each(['provider-first', 'queue-first', 'missing-provider'])(
     'one scheduled promise creates one obligation and bell with %s', async (order) => {
       await mockPg('sms_log').where({ id: message.id }).update({ operational_analysis: { version: 'already-analyzed' } });
-      const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
+      const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104',
         message_body: 'I will call tomorrow at 10 AM.', from_phone: message.to_phone, to_phone: message.from_phone,
         created_at: new Date(message.created_at.getTime() - 600), scheduled_for: new Date(message.created_at.getTime() - 800),
         status: order === 'provider-first' ? 'sending' : 'sent' };
@@ -290,7 +306,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     await mockPg('sms_log').where({ id: message.id }).update({ operational_analysis: { version: 'already-analyzed' } });
     const sentAt = new Date(message.created_at.getTime() - 86400000);
     process.env.GATE_SMS_OPERATIONAL_ACTIONS_SINCE = new Date(sentAt.getTime() - 1000).toISOString();
-    const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
+    const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104',
       message_body: 'Queued template.', from_phone: numbers.locations.bradenton.number, to_phone: '+12025550199',
       scheduled_for: sentAt, status: 'sent' };
     const provider = { ...queue, id: randomUUID(), message_body: 'I will call tomorrow at 10 AM.',
@@ -316,7 +332,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('post-activation queue recovery never imports a message sent before activation', async () => {
     await mockPg('sms_log').where({ id: message.id }).update({ operational_analysis: { version: 'already-analyzed' } });
-    const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
+    const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104',
       from_phone: message.to_phone, to_phone: message.from_phone, scheduled_for: new Date(), status: 'sent' };
     const provider = { ...queue, id: randomUUID(), created_at: new Date(message.created_at.getTime() - 86400000),
       scheduled_for: null, metadata: { scheduled_sms_log_id: queue.id } };
@@ -331,7 +347,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test('separate scheduled sends with identical text keep separate obligations', async () => {
     await mockPg('sms_log').where({ id: message.id }).update({ operational_analysis: { version: 'already-analyzed' } });
-    const rows = [1, 2].map(() => ({ ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
+    const rows = [1, 2].map(() => ({ ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104',
       message_body: 'I will call.', from_phone: message.to_phone, to_phone: message.from_phone,
       created_at: new Date(message.created_at.getTime() - 600), scheduled_for: new Date(message.created_at.getTime() - 800), status: 'sent' }));
     await mockPg('sms_log').insert(rows);
@@ -342,7 +358,7 @@ postgres('SMS commitments on PostgreSQL', () => {
   });
 
   test.each(['failed', 'undelivered'])('a queued source cannot hide its %s provider delivery', async (status) => {
-    message = { ...message, direction: 'outbound', message_type: 'manual', status: 'sent',
+    message = { ...message, direction: 'outbound', message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'sent',
       from_phone: message.to_phone, to_phone: message.from_phone, scheduled_for: new Date() };
     await mockPg('sms_log').where({ id: message.id }).update(message);
     const provider = { ...message, id: randomUUID(), scheduled_for: null, status, metadata: { scheduled_sms_log_id: message.id } };
@@ -357,7 +373,7 @@ postgres('SMS commitments on PostgreSQL', () => {
   });
 
   test('a later provider failure preserves the one already captured scheduled promise', async () => {
-    message = { ...message, direction: 'outbound', message_type: 'manual', status: 'sent',
+    message = { ...message, direction: 'outbound', message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'sent',
       from_phone: message.to_phone, to_phone: message.from_phone, scheduled_for: new Date() };
     await mockPg('sms_log').where({ id: message.id }).update(message);
     const provider = { ...message, id: randomUUID(), scheduled_for: null, metadata: { scheduled_sms_log_id: message.id } };
@@ -376,7 +392,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     delete process.env.GATE_SMS_COMMITMENT_FOLLOWUP;
     await mockPg('sms_log').where({ id: message.id }).update({ direction: 'outbound',
       from_phone: numbers.locations.parrish.number, to_phone: '+12025550101',
-      message_type: 'manual', status: 'delivered' });
+      message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered' });
     const extract = jest.fn();
     await runSmsOperationalActions({ conn: mockPg, extract });
     expect(extract).not.toHaveBeenCalled();
@@ -513,7 +529,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, result, context);
     const [reply] = await mockPg('sms_log').insert({ ...message, id: randomUUID(), direction: 'outbound',
       from_phone: message.to_phone, to_phone: message.from_phone, message_body: 'Still checking',
-      message_type: 'manual', status: 'sent', created_at: new Date(message.created_at.getTime() + 1000) }).returning('id');
+      message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'sent', created_at: new Date(message.created_at.getTime() + 1000) }).returning('id');
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
     const now = new Date(message.created_at.getTime() + 2000);
     await refreshSmsCommitments({ conn: mockPg, now });
@@ -850,14 +866,14 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
   });
 
-  test.each(['failed', 'undelivered'])('outbound %s during extraction cannot create a promise', async (status) => {
+  test.each(['failed', 'undelivered', 'unattributed'])('outbound %s during extraction cannot create a promise', async (status) => {
     message = { ...message, direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone,
-      message_type: 'manual', status: 'sent', message_body: "I'll send the estimate" };
+      message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'sent', message_body: "I'll send the estimate" };
     await mockPg('sms_log').where({ id: message.id }).update(message);
     context = await loadMessageContext(mockPg, message);
     result.facts = [];
     result.obligations[0] = { ...result.obligations[0], quote: message.message_body, basis: 'promise' };
-    await mockPg('sms_log').where({ id: message.id }).update({ status });
+    await mockPg('sms_log').where({ id: message.id }).update(status === 'unattributed' ? { admin_user_id: null } : { status });
     expect(await recordMessageOperations(mockPg, message, result, context)).toEqual({ skipped: 'source_changed' });
     expect(await mockPg('call_commitments')).toEqual([]);
     expect((await mockPg('sms_log').first()).operational_analysis).toBeNull();
@@ -865,7 +881,7 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   test.each(['failed', 'undelivered'])('a captured outbound promise still follows up after %s', async (status) => {
     message = { ...message, direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone,
-      message_type: 'manual', status: 'sent', message_body: "I'll send the estimate" };
+      message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'sent', message_body: "I'll send the estimate" };
     await mockPg('sms_log').where({ id: message.id }).update(message);
     context = await loadMessageContext(mockPg, message);
     result.facts = [];

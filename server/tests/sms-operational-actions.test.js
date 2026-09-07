@@ -801,11 +801,20 @@ describe('activation and intake', () => {
       from_phone: numbers.locations.parrish.number, message_type: 'manual', status: 'delivered' })).toBe(false);
   });
 
+  test.each(['manual', 'ai_approved', 'ai_revised'])('outbound %s needs persisted staff attribution', (message_type) => {
+    process.env.GATE_SMS_OPERATIONAL_ACTIONS = 'true';
+    process.env.GATE_SMS_COMMITMENT_FOLLOWUP = 'true';
+    const message = { ...source("We'll give you a call shortly.", 'outbound'),
+      from_phone: numbers.locations.parrish.number, message_type, status: 'delivered' };
+    expect(eligibleMessage(message)).toBe(false);
+    expect(eligibleMessage({ ...message, admin_user_id: '00000000-0000-4000-8000-000000000104' })).toBe(true);
+  });
+
   test.each(['failed', 'undelivered'])('only captured promises retain eligibility after %s', (status) => {
     process.env.GATE_SMS_OPERATIONAL_ACTIONS = 'true';
     process.env.GATE_SMS_COMMITMENT_FOLLOWUP = 'true';
     const message = { ...source("I'll send the estimate", 'outbound'),
-      from_phone: numbers.locations.parrish.number, to_phone: '+12025550101', message_type: 'manual', status };
+      from_phone: numbers.locations.parrish.number, to_phone: '+12025550101', message_type: 'manual', status, admin_user_id: '00000000-0000-4000-8000-000000000104' };
     expect(eligibleMessage(message)).toBe(false);
     expect(eligibleMessage(message, { captured: true })).toBe(true);
     expect(eligibleMessage({ ...message, message_type: 'confirmation' }, { captured: true })).toBe(false);

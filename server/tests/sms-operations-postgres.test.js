@@ -94,7 +94,7 @@ postgres('SMS operations on PostgreSQL', () => {
 
   test.each(['provider-first', 'queue-first', 'missing-provider'])(
     'scheduled SMS keeps one source through %s capture order', async (order) => {
-      const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
+      const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104',
         twilio_sid: null, from_phone: message.to_phone, to_phone: message.from_phone,
         message_body: 'I will call with an update.', created_at: new Date(message.created_at.getTime() - 600),
         scheduled_for: new Date(message.created_at.getTime() - 800), status: order === 'provider-first' ? 'sending' : 'sent' };
@@ -128,7 +128,7 @@ postgres('SMS operations on PostgreSQL', () => {
   );
 
   test('conversation history keeps provider evidence when scheduled send endpoints refresh', async () => {
-    const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
+    const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104',
       twilio_sid: null, from_phone: numbers.locations.bradenton.number, to_phone: '+12025550199',
       created_at: new Date(message.created_at.getTime() - 600),
       scheduled_for: new Date(message.created_at.getTime() - 800), status: 'sent' };
@@ -142,7 +142,7 @@ postgres('SMS operations on PostgreSQL', () => {
   });
 
   test('identical separate sends and orphan or mismatched provider links stay distinct', async () => {
-    const base = { ...message, direction: 'outbound', message_type: 'manual',
+    const base = { ...message, direction: 'outbound', message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104',
       from_phone: message.to_phone, to_phone: message.from_phone, message_body: 'I will call with an update.',
       created_at: new Date(message.created_at.getTime() - 500), status: 'sent' };
     const rows = [
@@ -903,7 +903,7 @@ postgres('SMS operations on PostgreSQL', () => {
     delete process.env.GATE_SMS_COMMITMENT_FOLLOWUP;
     await mockPg('sms_log').where({ id: message.id }).update({ direction: 'outbound',
       from_phone: numbers.locations.parrish.number, to_phone: '+12025550101',
-      message_type: 'manual', status: 'delivered' });
+      message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'delivered' });
     const extract = jest.fn();
     await runSmsOperationalActions({ conn: mockPg, extract });
     expect(extract).not.toHaveBeenCalled();

@@ -26,7 +26,7 @@ const REPLAY_VERSION = `${VERSION}:replay`;
 const enabled = () => gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS');
 const smsCommitmentsEnabled = () => enabled() && gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP');
 const HUMAN_TYPES = ['manual', 'ai_approved', 'ai_revised'];
-const SOURCE_COLUMNS = ['id', 'customer_id', 'direction', 'message_body', 'message_type', 'created_at', 'from_phone', 'to_phone', 'status', 'twilio_sid'];
+const SOURCE_COLUMNS = ['id', 'customer_id', 'direction', 'message_body', 'message_type', 'created_at', 'from_phone', 'to_phone', 'status', 'twilio_sid', 'admin_user_id'];
 const EXCLUDED_TYPES = ['opt_out', 'opt_in', 'sms_reaction', 'help_request'];
 // Owner decision 2026-09-07: only bounded typed fields auto-apply, each behind
 // its strict validator. Free-form text becomes a pending proposal in the
@@ -54,7 +54,10 @@ function eligibleMessage(message = {}, { captured = false } = {}) {
     // detector keeps every reaction out of profile extraction.
     && !isSmsReaction(message.message_body)
     && (message.direction === 'inbound'
-      || (smsCommitmentsEnabled() && HUMAN_TYPES.includes(message.message_type) && statuses.includes(message.status)));
+      // Automated senders also use "manual"; persisted staff attribution
+      // must accompany a human message type before capturing a promise.
+      || (smsCommitmentsEnabled() && !!message.admin_user_id
+        && HUMAN_TYPES.includes(message.message_type) && statuses.includes(message.status)));
 }
 
 // Explicit time windows anywhere in the current SMS require staff review,
@@ -374,13 +377,17 @@ async function runSmsOperationalActions({ now = new Date(), conn = db, extract =
       // sends must not occupy the recovery page forever. A later successful
       // delivery becomes eligible without clearing a terminal receipt.
       .whereRaw(`COALESCE((SELECT CASE
-        WHEN delivery.status IN ('sent', 'delivered') AND delivery.created_at >= ? THEN TRUE ELSE FALSE END
+        WHEN delivery.status IN ('sent', 'delivered') AND delivery.created_at >= ?
+          AND delivery.admin_user_id IS NOT NULL THEN TRUE ELSE FALSE END
         FROM sms_log delivery
         WHERE s.direction = 'outbound' AND delivery.direction = 'outbound'
           AND delivery.customer_id = s.customer_id
           AND delivery.metadata->>'scheduled_sms_log_id' = s.id::text
         ORDER BY delivery.created_at DESC, delivery.id DESC LIMIT 1), TRUE)`, [since])
       .whereNull('s.operational_analysis').whereNotNull('s.customer_id')
+      .where(function staffOrCustomer() {
+        this.where('s.direction', 'inbound').orWhereNotNull('s.admin_user_id');
+      })
       .whereExists(function availableCustomer() {
         this.select(1).from('customers as c').whereRaw('c.id = s.customer_id').whereNull('c.deleted_at');
       })
