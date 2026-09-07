@@ -24,6 +24,8 @@
 // SUPPRESSED at render (reports recompose at view time), never deleted or
 // relabeled.
 
+const { savepointRead } = require('../../utils/savepoint-read');
+
 // Typed lanes first — findingsType is the most specific stable identity
 // (the typed pointer), and a typed lane's verdict must not depend on which
 // catalog key routed to it.
@@ -848,19 +850,19 @@ async function addonVerdictsFromLines(lines, knex, { renderSide = false } = {}) 
 // instead of falling back to live resolution. Throws propagate to the
 // caller's fail-soft catch (the completion is never blocked on this).
 async function frozenAddonLinesForCompletion(scheduledServiceId, trx) {
-  const rows = await trx('scheduled_service_addons')
+  const rows = await savepointRead(trx, (k) => k('scheduled_service_addons')
     .where({ scheduled_service_id: scheduledServiceId })
     // id tiebreaker: same-transaction lines share created_at (codex P2 r24)
     .orderBy('created_at', 'asc')
     .orderBy('id', 'asc')
-    .select('service_id', 'service_name', 'service_key_snapshot');
+    .select('service_id', 'service_name', 'service_key_snapshot'));
   const missingIds = [...new Set(rows
     .filter((r) => !r.service_key_snapshot && r.service_id)
     .map((r) => r.service_id))];
   let keyById = new Map();
   if (missingIds.length) {
     try {
-      const catalog = await trx('services').whereIn('id', missingIds).select('id', 'service_key');
+      const catalog = await savepointRead(trx, (k) => k('services').whereIn('id', missingIds).select('id', 'service_key'));
       keyById = new Map(catalog.map((r) => [r.id, r.service_key]));
     } catch { /* only the rows that NEEDED the catalog stay live */ }
   }
@@ -870,10 +872,10 @@ async function frozenAddonLinesForCompletion(scheduledServiceId, trx) {
   let pointerByKey = new Map();
   if (keys.length) {
     try {
-      const profiles = await trx('service_completion_profiles')
+      const profiles = await savepointRead(trx, (k) => k('service_completion_profiles')
         .whereIn('service_key', keys)
         .where({ active: true })
-        .select('service_key', 'project_type');
+        .select('service_key', 'project_type'));
       pointerByKey = new Map(profiles.map((r) => [r.service_key, r.project_type]));
     } catch { /* typed rows stay live; rules-covered keys freeze on their own */ }
   }
