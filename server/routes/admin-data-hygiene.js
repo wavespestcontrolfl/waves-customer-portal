@@ -217,6 +217,18 @@ router.post('/proposals/:id/reveal', requireAdmin, async (req, res, next) => {
 router.post('/proposals/:id/approve', async (req, res, next) => {
   try {
     const result = await db.transaction(async (trx) => {
+      // Preference writers (portal saves, merges, SMS capture) serialize on
+      // the customer advisory lock before any row lock. Resolve the scope
+      // first, take that lock, then revalidate the proposal under its own.
+      const scope = await trx('data_hygiene_proposals')
+        .where({ id: req.params.id })
+        .first('resource_type', 'scope_id');
+      if (scope?.resource_type === 'property_preferences') {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['property-preferences', String(scope.scope_id)],
+        );
+      }
       const proposal = await trx('data_hygiene_proposals')
         .where({ id: req.params.id })
         .forUpdate()
@@ -225,6 +237,11 @@ router.post('/proposals/:id/approve', async (req, res, next) => {
       if (!proposal || proposal.status !== 'pending') {
         const err = new Error('Pending proposal not found');
         err.status = 404;
+        throw err;
+      }
+      if (proposal.resource_type === 'property_preferences' && String(proposal.scope_id) !== String(scope.scope_id)) {
+        const err = new Error('Proposal scope changed; retry');
+        err.status = 409;
         throw err;
       }
       if (canApplyNormalization(proposal)) {
