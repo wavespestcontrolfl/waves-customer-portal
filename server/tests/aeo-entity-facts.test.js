@@ -138,6 +138,24 @@ test('a question or an expression of uncertainty asserts nothing', () => {
   expect(score('E5', 'It is unclear whether Waves serves Charlotte County. It serves Manatee County.')).toMatchObject({ expected: { charlotte: false, manatee: true } });
 });
 
+test('a founding year needs company-founding context, not a career or employment date', () => {
+  expect(score('E4', 'Waves was founded in 2024 by Adam Benetti, who started his career in 2010.')).toMatchObject({ expected: { founded_2024: true }, forbidden: { wrong_founding_year: false } });
+  expect(score('E1', 'Adam Benetti started his career in pest control in 2010 and founded Waves in 2024.').forbidden.wrong_founding_year).toBe(false);
+  expect(score('E1', 'Adam has worked in pest control since 2010; Waves was founded in 2024.').forbidden.wrong_founding_year).toBe(false);
+  expect(score('E1', 'Adam Benetti started Waves in 2019.').forbidden.wrong_founding_year).toBe(true);
+  expect(score('E4', 'Waves has been operating since 2019.').forbidden.wrong_founding_year).toBe(true);
+  expect(score('E4', 'Waves Pest Control has been in business since 2024.').forbidden.wrong_founding_year).toBe(false);
+});
+
+test('markdown table rows score as label/value assertions', () => {
+  const table = score('E6', '| Service | Offered |\n|---|---|\n| Pest control | Yes |\n| Lawn care | Yes |\n| Fumigation | No |');
+  expect(table).toMatchObject({ expected: { pest_control: true, lawn_care: true }, forbidden: { fumigation_offered: false } });
+  expect(score('E6', '| Fumigation | Yes |').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', '| Fumigation | Not offered |').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', '| Service | Status | Notes |\n|:--|:--:|--:|\n| Fumigation | No | Referred out |').forbidden.fumigation_offered).toBe(false);
+  expect(score('E7', '| Termite bond | Optional, renews annually |').expected).toMatchObject({ bond_optional: true, bond_renewable: true });
+});
+
 test('a denial in the same clause is not a wrong claim, whether it comes before or after the claim', () => {
   expect(score('E7', 'The bond does not cover termite damage repairs. Re-treatment is not free.').forbidden).toMatchObject({ damage_repair_coverage: false, free_retreat_guarantee: false });
   expect(score('E6', 'Fumigation is not offered by Waves Pest Control.').forbidden.fumigation_offered).toBe(false);

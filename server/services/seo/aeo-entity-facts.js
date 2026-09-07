@@ -106,6 +106,17 @@ const URL_RE = /https?:\/\/[^\s)<>\]"']+|\btel:\+?[\d-]+|\bmailto:[^\s)>]+/gi;
 // items stay on their own lines (each item is its own assertion) EXCEPT under
 // a negated list intro ("does not offer:"), whose items are joined into one
 // comma list so the intro governs every one of them.
+// A Markdown table row is a label/value assertion per line: "| Fumigation |
+// No |" reads as "Fumigation: No"; the separator row ("|---|---|") is dropped.
+const TABLE_ROW_RE = /^[ \t]*\|.*\|[ \t]*$/;
+const TABLE_SEPARATOR_RE = /^[ \t]*\|(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*$/;
+
+function tableRowToLabelValue(line) {
+  if (TABLE_SEPARATOR_RE.test(line)) return '';
+  const cells = line.split('|').map(cell => cell.trim()).filter(Boolean);
+  return cells.length > 1 ? `${cells[0]}: ${cells.slice(1).join(', ')}` : cells.join('');
+}
+
 function stripEmphasis(line) {
   return line
     .replace(/^[ \t]*#{1,6}[ \t]+/, '')
@@ -125,7 +136,7 @@ function normalizeAnswer(text) {
   for (const raw of flat.split('\n')) {
     // Detect the list marker BEFORE stripping emphasis: "* item" is a bullet.
     const isItem = LIST_MARKER_RE.test(raw);
-    const line = stripEmphasis(raw.replace(LIST_MARKER_RE, '')).trim();
+    const line = stripEmphasis(TABLE_ROW_RE.test(raw) ? tableRowToLabelValue(raw) : raw.replace(LIST_MARKER_RE, '')).trim();
     // A blank line between an intro and its items, or between items, does
     // not end the governed list; only a following non-item line does.
     if (!line) continue;
