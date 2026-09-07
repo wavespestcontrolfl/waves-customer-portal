@@ -7,6 +7,7 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn() }));
 const { isFirstServiceVisit } = require('../services/customer-visit-history');
 const { validationFor } = require('../services/email-template-library');
 const migration = require('../models/migrations/20260907000090_app_onboarding_email_versions');
+const preflight = require('../models/migrations/20260907000089_app_onboarding_tour_preflight');
 const { TEMPLATE: APP_V4 } = require('../models/migrations/20260708000011_app_intro_email_v4_track_reminders');
 
 (SKIP ? describe.skip : describe)('app onboarding PostgreSQL contracts', () => {
@@ -141,7 +142,15 @@ const { TEMPLATE: APP_V4 } = require('../models/migrations/20260708000011_app_in
     }
     // Equivalent to BEGIN / up / readback / ROLLBACK. No released data changes.
     await db.transaction(async trx => {
+      const appSource = before.find(row => row.template.template_key === 'app_intro').version;
+      const edited = structuredClone(appSource.blocks);
+      edited.find(block => block.type === 'paragraph' && APP_V4.blocks.some(seed => seed.content === block.content)).content += ' Staff edit.';
+      await trx('email_template_versions').where({ id: appSource.id }).update({ blocks: JSON.stringify(edited) });
+      await expect(preflight.up(trx)).rejects.toThrow('edited app tour block');
+      await trx('email_template_versions').where({ id: appSource.id }).update({ blocks: JSON.stringify(appSource.blocks) });
+      await preflight.up(trx);
       await migration.up(trx);
+      await preflight.up(trx);
       await migration.up(trx);
       await migration.down(trx);
       for (const { template, version } of before) {

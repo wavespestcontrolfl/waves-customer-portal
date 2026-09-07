@@ -75,7 +75,9 @@ describe('app education content contracts', () => {
     const blocks = structuredClone(APP_V4.blocks);
     const paragraph = blocks.find(b => b.type === 'paragraph');
     paragraph.content += ' Staff changed this existing paragraph.';
-    expect(() => buildVersion('app_intro', { blocks })).toThrow('edited app tour block');
+    const { assertOriginalTour } = require('../models/migrations/20260907000089_app_onboarding_tour_preflight');
+    expect(() => assertOriginalTour(blocks)).toThrow('edited app tour block');
+    expect(() => assertOriginalTour(APP_V4.blocks)).not.toThrow();
   });
 
   test('unrecognized active copy and custom plaintext require review instead of being overwritten', () => {
