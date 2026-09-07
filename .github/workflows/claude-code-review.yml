@@ -82,6 +82,10 @@ jobs:
           # claude-fable-5-1 for the strongest (and most expensive) pass; every
           # push re-reviews, so weigh cost per PR round. The literal fallback
           # is the documented Actions exception to the AGENTS.md model-ID rule.
+          # --effort max = deepest reasoning per turn; CLAUDE_REVIEW_MAX_USD
+          # (default 25) is the per-run spend ceiling — a run that hits it
+          # stops early and says so in its summary rather than posting a
+          # partial verdict as if complete.
           # --setting-sources user: never load this checkout's .claude/settings.json
           # (its allowlist approves npm commands, which a PR-controlled
           # package.json could weaponize) — the allow/deny lists below are the
@@ -90,7 +94,9 @@ jobs:
           claude_args: |
             --setting-sources user
             --model ${{ vars.CLAUDE_REVIEW_MODEL || 'claude-opus-5' }}
-            --max-turns 120
+            --effort max
+            --max-turns 200
+            --max-budget-usd ${{ vars.CLAUDE_REVIEW_MAX_USD || '25' }}
             --allowedTools "Agent,Task,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(git log:*),Bash(git blame:*),Bash(git show:*),Bash(git diff:*)"
             --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git checkout:*),Bash(git switch:*),Bash(git rm:*),Bash(git reset:*),Bash(git stash:*),Bash(git branch:*),Bash(git config:*),Bash(git fetch:*),Bash(git pull:*),Bash(git merge:*),Bash(git rebase:*),mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
           prompt: |
@@ -140,19 +146,48 @@ jobs:
                vars, exported names, migration CHECK constraints, and route
                mounts against the actual code. Never assume a name exists.
             4. Fan out with the Agent tool. Run these passes in parallel and
-               give each one the PR title, body, and diff:
-               - correctness / logic bugs in the introduced code
+               give each one the PR title, body, and diff. Each pass reads
+               the real code around the diff, not just the hunks:
+               - bug hunt A: assume the diff contains at least one defect
+                 and find it — off-by-one, inverted condition, wrong
+                 variable, null/undefined path, async ordering, unhandled
+                 rejection, error swallowed, wrong HTTP status, stale
+                 closure or effect dependency in React
+               - bug hunt B (independent, do not share A's notes): read the
+                 PR description first, then check whether the code actually
+                 does what it claims for every branch, and whether any
+                 stated verification could not have exercised the code path
+               - impact analysis: for every changed export, function
+                 signature, DB column, enum/status value, env var, route
+                 path, or response shape, grep the whole repo (server,
+                 client, tests, migrations, ops/, docs/public-route-contracts.md)
+                 for every reader and caller, and confirm each one still
+                 works — a call site the PR forgot is the most common bug
+                 that only shows in production
                - security: auth on every new route, parameterized SQL,
-                 token gates, PII and secrets in logs, forgeable client input
+                 token gates, PII and secrets in logs, forgeable client input,
+                 mass assignment from req.body, IDOR on ids
                - money and state integrity: Stripe amounts agreeing to the
                  cent, surcharge via computeChargeAmount, idempotency, atomic
                  conditional updates, scheduled_services status values,
                  customer-facing sends that a change could trigger
+               - concurrency and data: races between crons / webhooks /
+                 handlers on the same rows, missing FOR UPDATE or conditional
+                 UPDATE, non-transactional multi-row writes, migrations that
+                 are destructive, non-idempotent, or leave existing rows
+                 violating a new constraint, unbounded queries and N+1 in
+                 list endpoints
                - AGENTS.md rubric compliance, rule by rule against the diff
                - tests: do the new or changed tests actually exercise the
                  change, near-today date literals, virtual mocks, mocked
-                 behavior that diverges from the real module
+                 behavior that diverges from the real module, assertions
+                 that would still pass if the fix were reverted
                - Eastern-time handling and timezone-naive date math
+               Then check CI: `gh pr checks` and the CI tools available to
+               you. If the `tests` workflow failed on this head, read the
+               failing job log and tie the failure to the diff where it
+               belongs (a failure caused by this PR is a finding; a failure
+               inherited from main is noted in the summary, not flagged).
             5. Adversarial verification before posting anything: for each
                candidate finding launch a verifier subagent with the file,
                line, the claim, and the strongest counter-argument. It must
@@ -180,7 +215,8 @@ jobs:
               as a list of `P<x> path:line — title`, then one short
               paragraph naming what you checked. When nothing was found
               write "No issues found." and the checked list. No praise, no
-              padding.
+              padding. If you ran out of budget or turns before finishing,
+              say `Verdict: incomplete` and name what was not reviewed.
             - Never edit files, commit, push, approve, or request changes.
               Comments only.
             - Never put customer names, phone numbers, emails, street
