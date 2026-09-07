@@ -414,7 +414,6 @@ const CompliancePage = lazyWithRetry(() => import('./pages/admin/CompliancePage'
 const PricingHubPage = lazyWithRetry(() => import('./pages/admin/PricingHubPage'));
 const DesignSystemPage = lazyWithRetry(() => import('./pages/admin/_DesignSystemPage'));
 const DesignSystemFlagsPage = lazyWithRetry(() => import('./pages/admin/_DesignSystemFlagsPage'));
-const AdminEmailPage = lazyWithRetry(() => import('./pages/admin/EmailPage'));
 const AdminBankingPage = lazyWithRetry(() => import('./pages/admin/BankingPage'));
 const AdminMorePage = lazyWithRetry(() => import('./pages/admin/MorePage'));
 const PublicBookingPage = lazyWithRetry(() => import('./pages/PublicBookingPage'));
@@ -659,7 +658,7 @@ export default function App() {
             <Route path="newsletter" element={<Suspense fallback={<RouteFallback label="Loading newsletter..." />}><NewsletterPage /></Suspense>} />
             <Route path="call-recordings" element={<Navigate to="/admin/communications" replace />} />
             <Route path="phone-numbers" element={<Navigate to="/admin/communications" replace />} />
-            <Route path="email" element={<Suspense fallback={<RouteFallback label="Loading email..." />}><AdminEmailPage /></Suspense>} />
+            <Route path="email" element={<AdminTabRedirect to="/admin/communications" tab="email" tabInHash />} />
             <Route path="banking" element={<Suspense fallback={<RouteFallback label="Loading banking..." />}><AdminBankingPage /></Suspense>} />
             <Route path="pricing-logic" element={<Suspense fallback={<RouteFallback label="Loading pricing..." />}><PricingHubPage /></Suspense>} />
             <Route path="pricing-reality-check" element={<Navigate to="/admin/pricing-logic?section=reality" replace />} />

@@ -26,7 +26,7 @@ describe("admin navigation registry", () => {
       { section: "Overview", itemIds: ["dashboard"] },
       { section: "Service operations", itemIds: ["schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
       { section: "Customers & Sales", itemIds: ["customers", "pipeline", "agentEstimate", "priceMatch", "contracts"] },
-      { section: "Communications", itemIds: ["communications", "email"] },
+      { section: "Communications", itemIds: ["communications"] },
       { section: "Billing & Finance", itemIds: ["invoices", "recovery", "payers", "banking", "taxes"] },
       { section: "People", itemIds: ["staff", "recruiting"] },
       { section: "Marketing", itemIds: ["ppc", "seo", "social", "blog", "newsletter", "reviews", "referrals"] },

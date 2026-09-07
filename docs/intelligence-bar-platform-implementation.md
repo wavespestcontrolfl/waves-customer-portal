@@ -58,10 +58,15 @@ mocked provider response is not evidence of end-to-end capability.
   Only one unresolved write can exist in a task; subsequent writes require a
   completed or provider-accepted predecessor. Partial or unknown outcomes stop
   dependent continuation. No background agent/job framework was added.
-- `task-context.js` reads current page and mutation identifiers from a whitelist,
-  verifies parent-child relationships, and binds customer writes to the current
+- `task-context.js` reads current page and action identifiers from a whitelist,
+  verifies parent-child relationships, and binds customer reads and writes to the current
   request's resolved target. Message/replacement text and old history cannot
   select a customer. Duplicate names and unmatched surnames require clarification.
+- The existing IB retention tick removes expired task recovery data after the
+  30-day window, including while the platform gate is off. A live runner lease
+  postpones deletion; separate actor-bound action receipts remain available for
+  reconciliation. The existing workspace `uuid` library handles browsers without
+  native `crypto.randomUUID`; both composers share the same identity helper.
 - Navigation and Clear invalidate late UI updates. Saved tasks remain recoverable;
   closing or clearing a chat does not cancel already-confirmed operations.
   The phone sheet uses existing visual viewport variables and puts History/New
@@ -97,14 +102,21 @@ The booking submission also carries `propertyId` in its separately constructed
 body. Its unchanged request call is not flagged by the source fingerprint;
 selected-property stamping and quote compatibility remain explicit Phase 3 work.
 
-Current foundation census: 1,693 UI sites; ten transport exceptions; 1,683 domain
+The `5e81129e7` integration imports the upstream email consolidation and editor/
+mailbox extraction: 21 additional sites and one changed Communications site,
+verified against that source commit and retained as **unmapped**. Older moved
+sites and fingerprint history remain recorded. No email parity is implied.
+
+Current foundation census: 1,714 UI sites; ten transport exceptions; 1,704 domain
 sites still unsupported/unverified in the matrix. Registration of existing tools
 has deliberately not been relabeled as verified application parity.
+The dependent property branch adds two UI sites and verifies four property
+operations: 1,716 retained sites, ten transport exceptions, and 1,702 unverified.
 
 ## Verification evidence
 
 - Real Express route + bearer authentication + domain executor + isolated Railway
-  development Postgres, scripted model: fifteen tests pass in
+  development Postgres, scripted model: eighteen tests pass in
   `server/tests/intelligence-bar-platform-db.test.js`. Independent row reads verify
   A changes while viewed B remains unchanged. Cases include ID tampering, bulk
   targeting, message-body names, surname mismatch, request replay, stale runner,
@@ -117,6 +129,13 @@ has deliberately not been relabeled as verified application parity.
   not block unrelated or explicitly named requests. Task list/detail states are
   derived from actor-bound receipts: settled actions become ready to continue,
   failed/canceled/partial/unknown steps retain their actual status.
+  New cases prove a record read for A cannot return B's private details, broad
+  lookup still works, expired task records are deleted with the gate off, active
+  leases postpone deletion, and unknown action receipts survive under their actor.
+  Visit/call IDs, customer names/phones and Gmail threads are included. Name and
+  phone readers receive validated customer IDs; mixed-customer email threads
+  refuse before model egress, and shared-phone SMS excludes other linked accounts.
+  A scheduler regression proves both purges run in the one existing ET cron tick.
 - Client regression tests: eighteen pass across GlobalCommandPalette,
   PendingActionsCard, and useIntelligenceBar. They cover query-only navigation,
   non-URL appointment selection, double Enter, close/reopen, Clear races, failed results, restored warnings, and
@@ -148,6 +167,11 @@ has deliberately not been relabeled as verified application parity.
   disabled verified navigation, confirmation and reopened legacy receipts with
   zero JS exceptions. Screenshots are `.local/ib-legacy-*-navigation.png` and
   `.local/ib-legacy-*-persisted.png`; earlier unstyled screenshots are superseded.
+  A further desktop/mobile run removed `Crypto.prototype.randomUUID` before the
+  app loaded: valid UUIDs, query, confirmation and persisted A-only mutation all
+  passed with no JS errors or overflow. Artifacts: `.local/ib-uuid-*`. The latest
+  client run passes 20 tests (17 bar, two identity, one hook); all six scheduler
+  registration tests and the production build pass after current-main integration.
 - Local preview: `http://127.0.0.1:5292/admin/customers` while the QA harness runs;
   this is not a deployed preview. The synthetic session is local-only.
 - Live-model/provider evaluation has not run. No provider credentials are loaded

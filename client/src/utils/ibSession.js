@@ -1,5 +1,7 @@
 // Identity only: transcripts, customer data and confirmation credentials stay
 // server-side. A fresh request key isolates simultaneous requests and retries.
+import { v4 as uuid } from 'uuid';
+
 export function ibSessionId() {
   let actor = 'session';
   try { actor = JSON.parse(localStorage.getItem('waves_admin_user') || '{}').id || actor; } catch { /* unavailable */ }
@@ -7,12 +9,12 @@ export function ibSessionId() {
   try {
     const existing = sessionStorage.getItem(key);
     if (existing) return existing;
-    const id = crypto.randomUUID();
+    const id = uuid();
     sessionStorage.setItem(key, id);
     return id;
-  } catch { return crypto.randomUUID(); }
+  } catch { return uuid(); }
 }
 
-export function ibRequestIdentity() {
-  return { session_id: ibSessionId(), request_key: crypto.randomUUID() };
+export function ibRequestIdentity(sessionId = ibSessionId()) {
+  return { session_id: sessionId, request_key: uuid() };
 }

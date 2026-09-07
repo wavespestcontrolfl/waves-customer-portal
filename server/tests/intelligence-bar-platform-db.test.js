@@ -108,6 +108,107 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect((await db('customers').where('id', customerB).first('crm_notes')).crm_notes).toBeNull();
   }, 30000);
 
+  test('record reads honor the resolved customer while broad lookup remains available', async () => {
+    await db('customers').where('id', customerA).update({ crm_notes: 'Synthetic A read fact' });
+    await db('customers').where('id', customerB).update({ crm_notes: 'Synthetic wrong-record private fact' });
+    mockModel.mockResolvedValueOnce({ content: [
+      { type: 'tool_use', name: 'get_customer_detail', input: { customer_id: customerB }, id: 'wrong-read' },
+      { type: 'tool_use', name: 'get_customer_detail', input: { customer_id: customerA }, id: 'correct-read' },
+      { type: 'tool_use', name: 'query_customers', input: { search: nameA }, id: 'lookup' },
+    ], usage: {} }).mockResolvedValueOnce(answer('The selected customer details are loaded.'));
+    const result = await api('/query', request(`Get customer details for ${nameA}`));
+    expect(result.status).toBe(200);
+    expect(result.body.taskTarget.customer_id).toBe(customerA);
+    const round = mockModel.mock.calls[1][0].messages.at(-1).content;
+    expect(round.find(block => block.tool_use_id === 'wrong-read').content).toContain('target_clarification_required');
+    expect(round.find(block => block.tool_use_id === 'correct-read').content).toContain('Synthetic A read fact');
+    expect(round.find(block => block.tool_use_id === 'lookup').content).toContain(customerA);
+    expect(JSON.stringify(round)).not.toContain('Synthetic wrong-record private fact');
+    await db('customers').whereIn('id', [customerA, customerB]).update({ crm_notes: null });
+  }, 30000);
+
+  test('retention removes expired recovery data with gates off and preserves pending-action reconciliation', async () => {
+    const Tasks = require('../services/intelligence-bar/tasks');
+    const Pending = require('../services/intelligence-bar/pending-actions');
+    const makeTask = async () => (await Tasks.begin({ actorId: actor, sessionId, requestKey: crypto.randomUUID(),
+      request: { prompt: 'Synthetic retention request' }, pageContext: {} })).task;
+    const expired = await makeTask(), active = await makeTask(), fresh = await makeTask();
+    const card = await Pending.createPendingAction({ toolName: 'update_customer', params: { customer_id: customerA },
+      requestedBy: actor, taskId: expired.id, runnerToken: expired.runner_token, stepKey: 'retention-fixture' });
+    await Pending.claimForConfirm(card.id, actor);
+    await Pending.recordResult(card.id, { outcome_unknown: true, code: 'synthetic_interrupted' });
+    const past = new Date(Date.now() - 1000);
+    await db('ib_tasks').where('id', expired.id).update({ expires_at: past, lease_expires_at: past });
+    await db('ib_tasks').where('id', active.id).update({ expires_at: past });
+    process.env.GATE_IB_PLATFORM = 'false';
+    try {
+      expect(await Tasks.purgeExpiredTasks()).toBeGreaterThanOrEqual(1);
+      expect(await db('ib_tasks').where('id', expired.id).first()).toBeUndefined();
+      expect(await db('ib_tasks').where('id', active.id).first()).toBeTruthy();
+      expect(await db('ib_tasks').where('id', fresh.id).first()).toBeTruthy();
+      expect((await db('ib_pending_actions').where('id', card.id).first()).task_id).toBeNull();
+      expect((await Pending.getActionReceipt(card.id, actor)).outcome).toBe('outcome_unknown');
+      expect(await Pending.getActionReceipt(card.id, crypto.randomUUID())).toBeNull();
+      await db('ib_tasks').where('id', active.id).update({ lease_expires_at: past });
+      await Tasks.purgeExpiredTasks();
+      expect(await db('ib_tasks').where('id', active.id).first()).toBeUndefined();
+    } finally { process.env.GATE_IB_PLATFORM = 'true'; }
+  }, 30000);
+
+  test('visit, call, name, phone and Gmail selectors cannot substitute another customer', async () => {
+    const visitB = crypto.randomUUID(), callA = crypto.randomUUID(), callB = crypto.randomUUID();
+    const emailA = crypto.randomUUID(), emailB = crypto.randomUUID(), mixedA = crypto.randomUUID(), mixedB = crypto.randomUUID();
+    const a = await db('customers').where('id', customerA).first(), b = await db('customers').where('id', customerB).first();
+    await db('scheduled_services').insert({ id: visitB, customer_id: customerB, scheduled_date: require('../utils/datetime-et').etDateString(), service_type: 'Synthetic visit', status: 'pending' });
+    await db('call_log').insert([
+      { id: callA, customer_id: customerA, transcription: 'Correct task call evidence', status: 'completed' },
+      { id: callB, customer_id: customerB, transcription: 'Foreign private call evidence', status: 'completed' },
+    ]);
+    await db('sms_log').insert([
+      { customer_id: customerA, direction: 'inbound', from_phone: a.phone, to_phone: '+15555550199', message_body: 'Correct task SMS evidence' },
+      { customer_id: customerA, direction: 'inbound', from_phone: '+15555550198', to_phone: '+15555550199', message_body: 'Correct former-phone SMS evidence' },
+      { customer_id: null, direction: 'inbound', from_phone: a.phone, to_phone: '+15555550199', message_body: 'Correct unlinked SMS evidence' },
+      { customer_id: customerB, direction: 'inbound', from_phone: a.phone, to_phone: '+15555550199', message_body: 'Foreign private shared-phone evidence' },
+    ]);
+    await db('emails').insert([
+      { id: emailA, customer_id: customerA, gmail_id: emailA, gmail_thread_id: emailA, from_address: 'fixture-a@example.test', from_name: nameA, body_text: 'Correct task email evidence' },
+      { id: emailB, customer_id: customerB, gmail_id: emailB, gmail_thread_id: emailB, from_address: 'fixture-b@example.test', body_text: 'Foreign private email evidence' },
+      { id: mixedA, customer_id: customerA, gmail_id: mixedA, gmail_thread_id: mixedA, from_address: 'fixture-a@example.test', body_text: 'Mixed task email evidence' },
+      { id: mixedB, customer_id: customerB, gmail_id: mixedB, gmail_thread_id: mixedA, from_address: 'fixture-b@example.test', body_text: 'Foreign private mixed-thread evidence' },
+    ].map(email => ({ ...email, received_at: new Date(), subject: 'Synthetic read binding' })));
+    const selections = [
+      ['get_closeout_status', { service_id: visitB }, false],
+      ['get_call_log', { call_id: callB }, false],
+      ['get_conversation_thread', { customer_name: `${b.first_name} ${b.last_name}` }, false],
+      ['get_conversation_thread', { phone: b.phone }, false],
+      ['get_email_thread', { thread_id: emailB }, false],
+      ['get_email_thread', { thread_id: emailA }, 'Correct task email evidence'],
+      ['get_email_thread', { thread_id: mixedA }, false],
+      ['draft_email_reply', { thread_id: emailB }, false],
+      ['get_call_log', { customer_name: nameA }, 'Correct task call evidence'],
+      ['get_conversation_thread', { customer_name: nameA }, 'Correct task SMS evidence'],
+      ['search_messages', { phone: a.phone }, 'Correct unlinked SMS evidence'],
+      ['search_messages', { customer_name: nameA }, 'Correct former-phone SMS evidence'],
+      ['match_existing_customer', { phone: a.phone }, customerA],
+      ['get_partner_call_history', { phone: a.phone }, 'calls'],
+    ];
+    // Discover each actual schema, then execute the complete batch through the
+    // real dispatcher. Foreign email drafting must never call its nested model.
+    mockModel.mockResolvedValueOnce({ content: [...new Set(selections.map(([name]) => name))].map(name => ({
+      type: 'tool_use', name: 'discover_capabilities', input: { query: name.replaceAll('_', ' ') }, id: `discover-${name}`,
+    })), usage: {} }).mockResolvedValueOnce({ content: selections.map(([name, input], index) => ({ type: 'tool_use', name, input, id: `read-${index}` })), usage: {} })
+      .mockResolvedValueOnce(answer('The selected customer records are loaded.'));
+    const result = await api('/query', request(`Read records for ${nameA}`));
+    expect(result.status).toBe(200);
+    expect(mockModel).toHaveBeenCalledTimes(3);
+    const results = mockModel.mock.calls[2][0].messages.at(-1).content;
+    for (const [index, [, , expected]] of selections.entries()) {
+      const content = results.find(block => block.tool_use_id === `read-${index}`).content;
+      expect(content).toContain(expected || 'target_clarification_required');
+    }
+    expect(JSON.stringify(results)).not.toContain('Foreign private');
+  }, 60000);
+
   test('dependent writes cannot be proposed together or resumed after a failed prerequisite', async () => {
     const note = { type: 'tool_use', name: 'update_customer', input: { customer_id: customerA, updates: { notes: 'Frontier fixture' } }, id: 'first' };
     const sms = { type: 'tool_use', name: 'send_sms', input: { customer_id: customerA, message: 'Your note was updated.' }, id: 'second' };

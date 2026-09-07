@@ -109,8 +109,9 @@ After integrating the reviewed foundation and PR #4015, the combined foundation
 and property Postgres suites pass all 19 tests. The two legacy route/invoice
 suites pass 56 tests after updating their mocks to the shared service contract;
 13 bar tests and 24 profile-state tests also pass. Both browser viewports were
-rerun successfully. The current census retains 1,695 sites: four verified
-property operations, ten transport exceptions, and 1,681 unsupported/unverified
+rerun successfully. The current census retains 1,716 sites after integrating
+foundation read-scope and current-main email changes: four verified
+property operations, ten transport exceptions, and 1,702 unsupported/unverified
 domain sites.
 
 Review remediation adds four further real-Postgres cases (eight property tests

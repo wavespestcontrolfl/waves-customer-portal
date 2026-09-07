@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import AdminLayoutV2 from "./AdminLayoutV2";
 import { adminFetch } from "../utils/admin-fetch";
+import { loadEmailDrafts, updateEmailDrafts } from "../lib/emailDrafts";
 
 vi.mock("../hooks/useIsMobile", () => ({ default: () => false }));
 vi.mock("../hooks/useFeatureFlag", () => ({
@@ -73,7 +74,7 @@ describe("AdminLayoutV2", () => {
     expect(await screen.findByText("Admin child")).toBeInTheDocument();
   });
 
-  it.each(["content-engine", "content-registry", "data-hygiene", "agent-decisions", "drafts", "health", "documents", "document-requests", "discounts"])("blocks a technician at the %s alias before mounting its child", async (path) => {
+  it.each(["content-engine", "content-registry", "data-hygiene", "agent-decisions", "drafts", "health", "documents", "document-requests", "discounts", "email"])("blocks a technician at the %s alias before mounting its child", async (path) => {
     adminFetch.mockResolvedValue({ id: 2, name: "Fixture technician", role: "technician" });
     const ForbiddenChild = vi.fn(() => <div>Forbidden child</div>);
     render(<MemoryRouter initialEntries={[`/admin/${path}?id=fixture#context`]}>
@@ -85,6 +86,20 @@ describe("AdminLayoutV2", () => {
     expect(await screen.findByText("Authorized schedule")).toBeInTheDocument();
     expect(screen.queryByText("Forbidden child")).not.toBeInTheDocument();
     expect(ForbiddenChild).not.toHaveBeenCalled();
+  });
+
+  it("explicit sign-out clears local Email recovery and invalidates pending callbacks", async () => {
+    const session = loadEmailDrafts(1);
+    updateEmailDrafts(session, (drafts) => ({ ...drafts, replies: { fixture: "Private unsent edit" } }));
+    render(<MemoryRouter initialEntries={["/admin/dashboard"]}><Routes>
+      <Route element={<AdminLayoutV2 />}><Route path="/admin/dashboard" element={<div>Admin child</div>} /></Route>
+      <Route path="/admin/login" element={<div>Signed out</div>} />
+    </Routes></MemoryRouter>);
+    await screen.findByText("Admin child");
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    await screen.findByText("Signed out");
+    expect(loadEmailDrafts(1).drafts.replies).toEqual({});
+    expect(updateEmailDrafts(session, () => ({ replies: { fixture: "Late result" } }))).toBeNull();
   });
 
   it("sends an unauthenticated alias to login without mounting its child", async () => {
