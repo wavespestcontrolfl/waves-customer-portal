@@ -3,8 +3,8 @@
 `npm run eval:voice-relay` runs 34 synthetic-caller scenarios through the live
 `RelayConversation` loop: Sandy's prompt, model, registered tools and turn handling.
 It evaluates deterministic checks and prints the recorded conversation for review.
-This stage has no judge, scheduler or notification channel. A passing result means
-its deterministic checks passed; review conversational quality from the transcript.
+By default only deterministic checks run. Select `--judge` for the optional transcript
+judge. This stage has no scheduler or notification channel.
 
 ## Run it
 
@@ -13,6 +13,7 @@ Run the CLI in a dedicated process with `ANTHROPIC_API_KEY` for Sandy's model:
 ```sh
 npm run eval:voice-relay
 npm run eval:voice-relay -- --only=booking-happy-path,slot-gone
+npm run eval:voice-relay -- --judge
 npm run eval:voice-relay -- --fixture=path/to/scenarios.json
 ```
 
@@ -26,7 +27,7 @@ exits 2. Manual execution calls Sandy's model and incurs normal provider usage.
 
 `server/fixtures/voice-relay-eval/scenarios.json` supplies caller context, office
 hours, tool results, gates, interruptions, reconnect context and model failures.
-All callers are synthetic. The scenario `spec` contains notes for manual review.
+All callers are synthetic. The scenario `spec` contains the hand-authored grading contract and notes for review.
 
 The harness validates tool arguments against the live registered schemas without
 coercion. A fixture response can match inputs with `when`; strings are case-insensitive
@@ -75,4 +76,27 @@ Local tests use an SDK double and exercise the live conversation loop without mo
 or database calls. They cover fixture validation, privacy, receipt ordering, fresh-slot
 recovery, interrupts, reconnection, bounded tool results and provider failures.
 The historical calibration of the earlier combined PR predates these contracts and
-does not establish a baseline for this manual-only stage.
+does not establish a baseline for this split implementation.
+
+## Optional transcript judge
+
+`--judge` runs after every conversation finishes, with at most four verdicts in flight.
+It uses the registered `TEXT_POLICIES.voiceJudge` policy on the `voice_relay_judge`
+lane. `MODEL_VOICE_JUDGE` pins the primary independently of the moving quality tiers;
+the registered OpenAI fallback keeps results available but marks every check advisory.
+A fallback verdict cannot change pass/fail. Each verdict records the served provider,
+model, fallback status and a SHA of the complete prompt template and output schema.
+
+The judge receives the caller context Sandy saw, the exact per-turn clock blocks,
+earlier call segments and bounded tool results. Hidden grading notes cannot ground
+an agent claim. Only new agent speech is graded after a reconnect. The pinned judge's
+forbidden claims are critical failures; action/fact checks use the scenario's major
+severity and adjudication setting, while empathy, brevity and tone affect quality.
+
+If no scenario receives a verdict, the run is inconclusive (exit 2). If some verdicts
+are unavailable, the run fails verification (exit 1), even when deterministic checks
+pass. Running without `--judge` makes no judge calls. Judge calls use the ordinary
+LLM dispatcher and may write ledger/trace rows when those gates are enabled; the
+conversation still refuses database access. No live judge calibration was run for
+this split. Tests inject verdicts and exercise dispatch, fallback, grounding and
+aggregation without calling model providers or a database.
