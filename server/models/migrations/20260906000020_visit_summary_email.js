@@ -32,6 +32,6 @@ exports.up = async function up(knex) {
   });
 };
 
-exports.down = async function down(knex) {
-  await knex('email_templates').where({ template_key: KEY }).del();
-};
+// The parent seed or an administrator may already own this template.
+// Preserve its identity, versions and edits when rolling back application code.
+exports.down = async function down() {};
