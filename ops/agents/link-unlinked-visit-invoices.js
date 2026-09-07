@@ -12,7 +12,14 @@
 //
 // Pairing rule (every "no" leaves the invoice alone):
 //   - the invoice is live (not void/refunded/canceled), unlinked, not an
-//     annual-prepay or archived row, and has a service_date;
+//     annual-prepay or archived row, and has a service_date BEFORE today
+//     (ET). Past dates only: every scheduling writer refuses a past date
+//     (create, reschedule, self-booking), so nothing can add a second visit
+//     to that customer/date while the batch runs — the single-visit
+//     predicate below can only change through status changes on existing
+//     rows, which the locked visit row + the locked recheck cover (GitHub
+//     r3 P1). A same-day invoice is the runtime's job: the Invoices page
+//     links it to its open visit at creation.
 //   - the customer has exactly ONE live visit on that date, with NO add-on
 //     lines, no other non-void invoice (direct or through its service
 //     records), and not owned by a saved grouped closeout;
@@ -20,10 +27,18 @@
 //     visit's label or an active catalog service name in the visit's family
 //     (or a ≥8-char label contained in one); fee/charge and product words
 //     never qualify; a line naming another family refuses the pairing.
+//   - service_record_id is set only to the visit's CANONICAL completion
+//     record: its single record, or the one a succeeded
+//     service_completion_attempts row names; several records and no
+//     succeeded attempt → the visit link alone (GitHub r3 P1 — the payment
+//     path reads review timing / outcome from the record, so a sibling
+//     recap or project row must never be guessed).
 //
 // Two-step by design (the review IS the safeguard):
 //   1. Dry run prints the pairings and writes them to --plan-out=<file>
-//      (ids only). The operator reads the list.
+//      (ids only) — ALWAYS, an empty plan included, so a stale file from an
+//      earlier scan can never be the one --execute consumes (GitHub r3 P2).
+//      The operator reads the list.
 //   2. --execute --plan=<file> links ONLY the pairs in that reviewed file —
 //      never a recomputed list — in one transaction; per pair the visit's
 //      mint lock chain (advisory → customer key share → visit row FOR
@@ -55,6 +70,7 @@ const knex = require(path.join(ROOT, 'node_modules', 'knex'))({ client: 'pg', co
 const InvoiceService = require(path.join(ROOT, 'server', 'services', 'invoice'));
 const { serviceKeyFor } = require(path.join(ROOT, 'server', 'services', 'recurring-appointment-seeder'));
 const { acquireScheduledMintLockChain, assertScheduledInvoiceNotPacketOwned } = require(path.join(ROOT, 'server', 'services', 'scheduled-invoice-mint'));
+const { etDateString } = require(path.join(ROOT, 'server', 'utils', 'datetime-et'));
 
 const DEAD_VISIT_STATUSES = ['cancelled', 'rescheduled', 'skipped', 'no_show'];
 const KNOWN_FAMILIES = new Set(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'palm_injection', 'foam_recurring', 'rodent_bait', 'termite_bait']);
@@ -110,6 +126,7 @@ async function evaluate(conn, invoiceId, catalogNames, { lock = false } = {}) {
     .first();
   if (!inv) return { skip: 'invoiceChanged' };
   const day = dateOnly(inv.service_date);
+  if (!day || day >= etDateString()) return { skip: 'notPast' };
   const visits = await conn('scheduled_services').where({ customer_id: inv.customer_id })
     .whereRaw('scheduled_date::date = ?::date', [day]).whereNotIn('status', DEAD_VISIT_STATUSES).select('id');
   if (visits.length === 0) return { skip: 'noVisit' };
@@ -141,9 +158,24 @@ async function evaluate(conn, invoiceId, catalogNames, { lock = false } = {}) {
   if (invoiced) return { skip: 'visitAlreadyInvoiced' };
   try { await assertScheduledInvoiceNotPacketOwned(conn, svc.id); } catch { return { skip: 'packetOwned' }; }
   if (!invoiceBillsVisitApplication(inv, svc, catalogNames)) return { skip: 'noEvidence' };
-  const record = await conn('service_records').where({ scheduled_service_id: svc.id }).orderBy('created_at', 'desc').first('id');
+  const record = await canonicalCompletionRecordId(conn, svc.id);
   return { pairing: { invoiceId: inv.id, invoiceStatus: inv.status, serviceDate: day, visitId: svc.id, visitStatus: svc.status,
-    serviceRecordId: record ? record.id : null, technicianId: svc.technician_id || null } };
+    serviceRecordId: record, technicianId: svc.technician_id || null } };
+}
+
+// The visit's canonical completion record, or null when it cannot be told:
+// one record → that one; several (completion + project / recap rails) →
+// only the record a SUCCEEDED completion attempt names; otherwise null and
+// the invoice links to the visit alone.
+async function canonicalCompletionRecordId(conn, scheduledServiceId) {
+  const records = await conn('service_records').where({ scheduled_service_id: scheduledServiceId }).select('id');
+  if (records.length === 0) return null;
+  if (records.length === 1) return records[0].id;
+  const ids = new Set(records.map((r) => String(r.id)));
+  const attempt = await conn('service_completion_attempts')
+    .where({ service_id: scheduledServiceId, status: 'succeeded' }).whereNotNull('service_record_id')
+    .orderBy('updated_at', 'desc').first('service_record_id');
+  return attempt && ids.has(String(attempt.service_record_id)) ? attempt.service_record_id : null;
 }
 
 async function catalog(conn) {
@@ -186,9 +218,13 @@ function readPlan(file) {
       for (const p of pairings) {
         console.log(`  ${p.serviceDate}  invoice ${p.invoiceId} (${p.invoiceStatus}) -> visit ${p.visitId} (${p.visitStatus})${p.serviceRecordId ? ` + record ${p.serviceRecordId}` : ''}`);
       }
-      if (PLAN_OUT && pairings.length) {
+      if (PLAN_OUT) {
+        // Written on EVERY scan, an empty plan included — a stale file from
+        // an earlier scan must never be the list --execute consumes.
         fs.writeFileSync(PLAN_OUT, JSON.stringify({ plannedAt: new Date().toISOString(), days: DAYS, pairings }, null, 2));
-        console.log(`Plan written to ${PLAN_OUT} — review it, then: --execute --plan=${PLAN_OUT}`);
+        console.log(pairings.length
+          ? `Plan written to ${PLAN_OUT} — review it, then: --execute --plan=${PLAN_OUT}`
+          : `Empty plan written to ${PLAN_OUT} — nothing to execute.`);
       } else if (pairings.length) {
         console.log('Dry run — nothing written. Re-run with --plan-out=<file> to save the reviewed list for --execute.');
       }
