@@ -94,7 +94,8 @@ function frontendSourceCensus(source, relative) {
       if (![verbCall, requestCall, localExport, endpoint].some(Boolean)) return;
       // Dynamic admin request sites must remain in the denominator. A verb
       // such as Map.get alone is not an HTTP request; require a request wrapper.
-      const unresolved = !endpoint && (requestCall || verbRequest) && relative.includes('/admin/');
+      const adminWrapper = /^admin(?:\.|_)?(?:fetch|request|get|post|put|patch|delete)(?:Strict)?$/i.test(callee);
+      const unresolved = !endpoint && (adminWrapper || ((requestCall || verbRequest) && relative.includes('/admin/')));
       if (![endpoint, unresolved, localExport].some(Boolean)) return;
       const method = localExport ? 'LOCAL_EXPORT' : verbCall ? verbCall[1].toUpperCase()
         : (expressionText(property(node.arguments[1], 'method')) || 'GET').toUpperCase();
@@ -150,7 +151,8 @@ function checkCoverage(current, manifest, policy, baselineProof = new Set()) {
       && previous.evidence.every(value => typeof value === 'string' && value.trim())
       && ['permission', 'approval', 'inputsAndEffects'].every(key => typeof previous[key] === 'string'
         && previous[key].trim() && previous[key].trim() !== 'requires_action_review');
-    const exception = previous.status === 'reviewed_exception' && previous.exception?.review && previous.exception?.reason;
+    const exception = previous.status === 'reviewed_exception'
+      && ['review', 'reason'].every(key => typeof previous.exception?.[key] === 'string' && previous.exception[key].trim());
     if ((implemented || exception) && previous.reviewedFingerprint === action.fingerprint) continue;
     if (previous.status !== 'unmapped' || previous.baselineFingerprint !== action.fingerprint || !baselineProof.has(`${action.id}:${action.fingerprint}`)) {
       errors.push(`Changed action needs IB mapping or reviewed exception: ${action.ui.file}:${action.ui.line}`);

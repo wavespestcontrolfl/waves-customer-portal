@@ -222,6 +222,22 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(JSON.stringify(mockModel.mock.calls[2][0].messages.at(-1).content)).toContain('Foreign private');
   }, 60000);
 
+  test('a model-proposed alternate name cannot replace the resolved SMS customer before approval', async () => {
+    const b = await db('customers').where('id', customerB).first();
+    const a = await db('customers').where('id', customerA).first();
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'send sms' }, 'discover'))
+      .mockResolvedValueOnce(tools('send_sms', { customer_name: `${b.first_name} ${b.last_name}`, message: 'Synthetic preview only' }, 'sms'))
+      .mockResolvedValueOnce(answer('The send awaits confirmation.'));
+    const proposed = await api('/query', request('Text this customer: Synthetic preview only', { pageData: { customer_id: customerA } }));
+    expect(proposed.body.taskTarget.customer_id).toBe(customerA);
+    expect(proposed.body.pendingActions).toHaveLength(1);
+    const stored = await db('ib_pending_actions').where('id', proposed.body.pendingActions[0].id).first();
+    expect(stored.params).toMatchObject({ customer_id: customerA, customer_name: nameA, phone: a.phone });
+    expect(stored.status).toBe('pending');
+    expect(stored.consumed_at).toBeNull();
+    expect(stored.result).toBeNull();
+  }, 30000);
+
   test('a phone number inside message content cannot authorize an alternate recipient', async () => {
     const b = await db('customers').where('id', customerB).first();
     const propose = prompt => {
@@ -388,6 +404,9 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     mockModel.mockResolvedValueOnce(answer('The saved note is complete.'));
     const resumed = await api(`/tasks/${proposed.body.taskId}/resume`, { session_id: sessionId });
     expect(resumed.status).toBe(200);
+    expect(resumed.body.receipts).toEqual([expect.objectContaining({ id: card.id, outcome: 'completed' })]);
+    expect(resumed.body.pendingActions).toEqual([]);
+    expect(resumed.body.canContinue).toBe(false);
     const modelInput = JSON.stringify(mockModel.mock.calls[0][0].messages);
     expect(modelInput).toContain('server-verified step outcomes');
     expect(modelInput).toContain('Recovered pre-checkpoint note');

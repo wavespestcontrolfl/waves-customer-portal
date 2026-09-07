@@ -415,7 +415,16 @@ async function getConversationThread(input) {
 
 
 async function searchMessages(input) {
-  const { search, customer_name, phone, direction, message_type, days_back = 7, limit: rawLimit } = input;
+  const { search, customer_name, phone: requestedPhone, direction, message_type, days_back = 7, limit: rawLimit } = input;
+  let phone = requestedPhone;
+  if (input.customer_id) {
+    const customer = await db('customers').where('id', input.customer_id).whereNull('deleted_at').first('phone');
+    if (!customer) return { error: 'The requested customer is unavailable', code: 'record_unavailable' };
+    phone = customer.phone;
+    if (requestedPhone && String(requestedPhone).replace(/\D/g, '').slice(-10) !== String(phone || '').replace(/\D/g, '').slice(-10)) {
+      return { error: 'The phone no longer matches the requested customer', code: 'target_relationship_mismatch' };
+    }
+  }
   const limit = Math.min(rawLimit || 20, 100);
   const offset = Math.max(0, Math.trunc(input.offset || 0));
   const since = new Date(Date.now() - days_back * 86400000).toISOString();
@@ -429,12 +438,15 @@ async function searchMessages(input) {
     )
     .orderBy('sms_log.created_at', 'desc').orderBy('sms_log.id', 'desc');
 
+  const digits = String(phone || '').replace(/\D/g, '').slice(-10);
+  const atPhone = scope => scope.whereRaw("RIGHT(REPLACE(sms_log.from_phone, '+', ''), 10) = ?", [digits])
+    .orWhereRaw("RIGHT(REPLACE(sms_log.to_phone, '+', ''), 10) = ?", [digits]);
   if (search) query = query.whereILike('sms_log.message_body', `%${search}%`);
   if (input.customer_id) query = query.where(scope => {
     scope.where('sms_log.customer_id', input.customer_id);
-    // The phone predicate below still applies. Include pre-account history at
-    // that verified number, while excluding another account's linked messages.
-    if (phone && phone.replace(/\D/g, '').length >= 10) scope.orWhereNull('sms_log.customer_id');
+    // Linked history stays with its account after a number change. Only
+    // unlinked history needs the current saved phone as ownership evidence.
+    if (digits.length === 10) scope.orWhere(unlinked => unlinked.whereNull('sms_log.customer_id').where(atPhone));
   });
   if (direction) query = query.where('sms_log.direction', direction);
   if (message_type) query = query.where('sms_log.message_type', message_type);
@@ -446,13 +458,7 @@ async function searchMessages(input) {
         .orWhereRaw("TRIM(customers.first_name || ' ' || COALESCE(customers.last_name, '')) ILIKE ?", [`%${customer_name}%`]);
     });
   }
-  if (phone) {
-    const digits = phone.replace(/\D/g, '').slice(-10);
-    query = query.where(function () {
-      this.whereRaw("RIGHT(REPLACE(sms_log.from_phone, '+', ''), 10) = ?", [digits])
-        .orWhereRaw("RIGHT(REPLACE(sms_log.to_phone, '+', ''), 10) = ?", [digits]);
-    });
-  }
+  if (requestedPhone) query = query.where(atPhone);
 
   const fetched = await query.limit(limit + 1).offset(offset);
   const messages = fetched.slice(0, limit);

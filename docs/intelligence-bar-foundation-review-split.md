@@ -10,7 +10,8 @@ communications are outside the development/testing authorization.
 | Part | Branch | Scope |
 | --- | --- | --- |
 | A | `feat/ib-registry-coverage-foundation` / #4041 | Typed catalog and explicit action policy over existing executors; source census and CI drift check. No runtime route or UI integration. |
-| B | `feat/ib-target-context-foundation` / #4044 | Fresh target resolution, parent scope and version checks, shared outcome classification, and identity-bound review publishing. |
+| B1 | `feat/ib-target-validation-foundation` / #4062 | Current-request identity resolution, fresh parent/child validation and scoped reader input preparation. |
+| B2 | `feat/ib-target-context-foundation` / #4044 | Scoped domain readers, provider outcome classification and identity-bound review publishing. |
 | C | `feat/ib-task-recovery-foundation` / #4049 | Actor/session task ledger, confirmation receipts, safe resume and bounded sensitive-context retention. |
 | D | `feat/ib-platform-foundation` / #4019 | Route and UI integration, durable conversation continuation, desktop/mobile and real dev-database acceptance tests. |
 
@@ -152,10 +153,78 @@ dev database; no production migration or gate activation is authorized.
   one-use helpers would only move branches. Further simplification must keep
   every tested authorization path.
 
-Part D integration preserves private execution pins outside model schemas, the native owner/idempotency endpoint, and original persisted approval formats. Review cards disclose review identity; thread continuations retain their own cursor through early model outages and refuse unseen concurrent appends. The integrated database suite passes all 28 scenarios in one run; 251 affected unit tests pass, with one additional passing bulk-preview regression. Desktop/mobile Chrome verifies A-only note persistence, expired approval recovery, and review identity with cancellation and zero publishing. The bulk recheck uses the same private cohort field as execution, while stored approval formats stay unchanged.
+Part D preserves private execution pins outside model schemas, the native
+owner/idempotency endpoint and persisted approval formats. Its 29 PostgreSQL
+route scenarios pass, including durable receipts returned after Continue.
+The shared hook/shell and global bar pass 33 client tests. Desktop/mobile Chrome
+verifies target selection, confirmation, continuation, Clear/reload recovery,
+A-only persistence, expiry and review cancellation with zero publishing.
+The shared ProtocolPanel consumes the existing task card/endpoints and remounts
+by appointment ID. Trusted confirmation receipts survive failed status reads.
+The current census retains 1,746 sites, including seven reviewed task transport
+exceptions and 1,739 unsupported/unverified entries; no domain parity is inferred.
 
 Main integration at `db70ae441` adds the three new prep-guide/Quick Links
 request sites, retaining 1,739 cumulative sites as unsupported/unverified in A.
 Their baseline fingerprints are proved against that already-merged main
 revision. The former Communications handlers remain recorded as historical
 sites; moving the UI does not remove work from the capability denominator.
+
+
+## Target validation review split
+
+The broad B review ran on `f523688`, `f05c6ec`, `3dc3e90`, `9d72925`, and
+`cb4b81f`. Round five identified a new P1 (3947072372): the standalone
+validator accepted a name-only SMS input without establishing a customer ID.
+Its P2 (3947072379) found that email/call/lead page references did not establish
+the owning customer even though they constrained child record selection.
+The broad review stopped at `cb4b81f`; B1 now isolates target validation from
+the scoped reader and provider adapters in B2. B2 preserves its history and
+will be retargeted to B1 before receiving integration changes.
+
+B1 rejects name-only SMS proposals, including the unsupported camel-case alias,
+until the caller supplies a canonical resolved customer ID. Email, call and
+lead references establish a freshly read customer only in the request's target
+clause, never inside message or note content. Regression tests resolve the
+actual viewed child without manually injecting a customer target, reject a
+same-customer sibling and missing/deleted records, and reread phone data.
+
+B1 has no provider calls, migrations, live-route wiring or UI change. Its
+isolated PostgreSQL tests run in rollback transactions. Approval proof storage
+and resume belong to C; actual request/confirmation acceptance remains in D.
+Exact product/formulation request binding remains required in inventory #4029;
+this resolver does not claim inventory write verification or complete parity.
+
+B1 independent review also closed incidental page/note authority for unlinked
+leads and estimates and normalized UUID comparisons to PostgreSQL identity.
+The final scope passes 147 distinct unit/write-boundary cases and five isolated
+PostgreSQL cases. No provider adapter or live action ran in those checks.
+
+Shared-wrapper remediation in A detects known admin requests regardless of
+source directory. Five existing dispatch, equipment and Terminal request sites
+are proved against merged main and retained as unsupported, for 1,744 cumulative
+sites. Generic lookup verbs cannot turn an unsupported capability into a match.
+The final catalog/coverage suites pass 23 tests.
+
+B1 fresh name authority queries up to two normalized matches before accepting an
+unlinked lead or estimate. A duplicate inserted after resolution invalidates
+both model-proposed IDs; explicit viewed-record selection still distinguishes
+them. Linked and other-status duplicates count, while deleted leads do not.
+The final checks pass 148 unit/write-boundary tests and 13 real PostgreSQL tests.
+Generic action-object refusal hints (3947287736) remain deferred: recipient
+parsing must preserve earlier explicit targets across compound clauses.
+
+B2 message search rereads the resolved customer's saved phone before including
+unlinked historical messages. Foreign linked rows, stale supplied numbers and
+unavailable customers are excluded. The final parent-integrated checks pass
+20 isolated PostgreSQL tests and 143 targeting/reader/pinning/history unit tests;
+earlier unchanged provider/publisher checks remain recorded above.
+
+Customer-ID-only searches retain linked history after a phone-number change; only unlinked messages depend on the current saved phone. An explicit phone selector still narrows the results. The final seven adapter DB cases and 32 reader/pinning/history tests pass after this correction, and independent review closed it.
+
+The final D integration passes 29 route/database scenarios (84.38 seconds),
+262 server unit/contract cases and 43 client cases. Production build and
+coverage/domain/brand gates pass. Shared-shell desktop/mobile recovery is
+rerun against the final integrated parent code with independent A-only database
+read-back. Final GitHub Codex review is pending its shared usage-limit reset;
+all PRs remain drafts and no production or merge action is authorized.

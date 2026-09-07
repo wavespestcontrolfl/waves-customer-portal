@@ -2220,7 +2220,8 @@ async function runQuery(req, res, next) {
           : 'I could not match the named customer. Select the intended customer before changing a record.'),
         ...priorThread, taskId: activeTask.id, taskState: 'needs_information', candidates: taskContext.candidates || [], pendingActions: [] };
         await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, state: 'needs_information', target: taskContext, response: payload });
-        return res.json(payload);
+        const savedTask = await IbTasks.get(activeTask.id, getAdminActorId(req), activeTask.session_id);
+        return res.json(await IbTasks.snapshot(savedTask, getAdminActorId(req)));
       }
       await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, target: taskContext });
     }
@@ -2669,9 +2670,13 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         : toolResults.some(r => r.result?.code === 'target_clarification_required') ? 'needs_information' : 'responded',
         taskTarget: taskContext.target, candidates: taskContext.candidates } : {}),
     };
-    if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token,
-      state: payload.taskState, response: payload, messages: currentMessages,
-    });
+    if (activeTask) {
+      await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token,
+        state: payload.taskState, response: payload, messages: currentMessages,
+      });
+      const savedTask = await IbTasks.get(activeTask.id, getAdminActorId(req), activeTask.session_id);
+      return res.json(await IbTasks.snapshot(savedTask, getAdminActorId(req)));
+    }
     res.json(payload);
 
   } catch (err) {
