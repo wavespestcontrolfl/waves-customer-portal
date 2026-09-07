@@ -78,9 +78,13 @@ function matchesLawnCompletionProtocol(protocol, assigned, trackKey) {
 // quantity stays withheld when no target was given). A null rate anywhere
 // else, or a target the archived gate cannot verify, is drift.
 function targetRange(text) {
-  // Drop the per-area denominator ('/1000', 'per 1K') before reading the target numbers.
-  const numbers = String(text ?? '').replace(/(?:\/|per)\s*1(?:,?000|k)\b/gi, '').match(/\d+(?:\.\d+)?/g)?.map(Number).filter(Number.isFinite) || [];
-  return numbers.length ? [Math.min(...numbers), Math.max(...numbers)] : null;
+  // Only the value or range that precedes the 'lb' unit is the target
+  // ('0.35-0.50 lb N/1000'); analysis digits (K2O) and the per-area
+  // denominator are not.
+  const match = String(text ?? '').match(/(\d+(?:\.\d+)?)(?:\s*[-–]\s*(\d+(?:\.\d+)?))?\s*lbs?\b/i);
+  if (!match) return null;
+  const low = Number(match[1]); const high = match[2] != null ? Number(match[2]) : low;
+  return [Math.min(low, high), Math.max(low, high)];
 }
 
 function archivedRateMatches(product, mix) {

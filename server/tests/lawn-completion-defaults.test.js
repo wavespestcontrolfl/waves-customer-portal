@@ -122,6 +122,8 @@ test('an archived recipe accepts derived-rate defaults only inside the archived 
   const derivedK = { ratePer1000: null, rateUnit: 'lb_k2o', gates: { soilKGatePpmBelow: 80 } };
   expect(archivedLawnRecipeMatches(archived(derivedK), item({ ratePer1000: 2, rateUnit: 'lb', rateSource: 'target_k_analysis', targetKPer1000: 0.5 }))).toBe(false);
   expect(archivedLawnRecipeMatches(archived({ ...derivedK, gates: { targetK: '0.50 lb K2O/1000' } }), item({ ratePer1000: 2, rateUnit: 'lb', rateSource: 'target_k_analysis', targetKPer1000: 0.5 }))).toBe(true);
+  for (const target of [1, 2]) expect(archivedLawnRecipeMatches(archived({ ...derivedK, gates: { targetK: '0.50 lb K2O/1000' } }), item({ ratePer1000: 2, rateUnit: 'lb', rateSource: 'target_k_analysis', targetKPer1000: target }))).toBe(false);
+  expect(archivedLawnRecipeMatches(archived({ ...derivedK, gates: { targetK: 'per 1K, 2 apps' } }), item({ ratePer1000: 2, rateUnit: 'lb', rateSource: 'target_k_analysis', targetKPer1000: 2 }))).toBe(false);
   expect(archivedLawnRecipeMatches(archived(derivedK), item({ ratePer1000: null, rateUnit: 'lb_k2o', rateSource: 'missing_rate' }))).toBe(true);
   const stored = { ratePer1000: 3, rateUnit: 'fl oz', gates: {} };
   expect(archivedLawnRecipeMatches(archived(stored), item({ ratePer1000: 3, rateUnit: 'fl oz', rateSource: 'catalog_default_rate' }))).toBe(true);
