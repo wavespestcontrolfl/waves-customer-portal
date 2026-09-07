@@ -1,6 +1,6 @@
 import { useId } from "react";
-import { CalendarDays, CreditCard, History, MessageSquare, Phone, ShieldCheck, Star, StickyNote } from "lucide-react";
-import { Button, Card } from "../ui";
+import { CalendarDays, CreditCard, History, MessageSquare, Phone, Search, ShieldCheck, Star, StickyNote } from "lucide-react";
+import { Button, Card, Input } from "../ui";
 import { formatETDate, formatETDateOnly } from "../../lib/timezone";
 
 const ACTIVITY_TYPES = {
@@ -14,9 +14,10 @@ const ACTIVITY_TYPES = {
   activity: { label: "Account activity", Icon: History },
 };
 
-export default function Customer360Activity({ timeline, filter, onFilter, error, retrying, onRetry }) {
+export default function Customer360Activity({ timeline, filter, onFilter, search = "", onSearch, error, retrying, onRetry }) {
   const id = useId();
-  const entries = filter === "all" ? timeline : timeline.filter((item) => item.type === filter);
+  const terms = search.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const entries = timeline.filter((item) => (filter === "all" || item.type === filter) && terms.every((term) => `${item.title || ""} ${item.description || ""}`.toLowerCase().includes(term)));
   return <section className="c360-activity" aria-labelledby={`${id}-heading`}>
     <div className="mb-3 flex items-center justify-between gap-3">
       <h2 id={`${id}-heading`} className="text-18 font-medium tracking-tight">Activity</h2>
@@ -24,7 +25,10 @@ export default function Customer360Activity({ timeline, filter, onFilter, error,
     </div>
     <Card>
       <div className="c360-activity-toolbar">
-        <span className="flex items-center gap-2 text-14 text-ink-secondary"><History size={16} />All time</span>
+        <label className="c360-search-field c360-activity-search">
+          <Search size={17} aria-hidden="true" />
+          <Input type="search" value={search} onChange={(event) => onSearch(event.target.value)} disabled={error} aria-label="Search activity" placeholder="Search activity…" className="!pl-9 !text-16" />
+        </label>
         <select aria-label="Filter activity" value={filter} onChange={(event) => onFilter(event.target.value)} disabled={error}>
           <option value="all">All activity</option>
           {Object.entries(ACTIVITY_TYPES).map(([type, item]) => <option key={type} value={type}>{item.label}</option>)}
@@ -43,9 +47,9 @@ export default function Customer360Activity({ timeline, filter, onFilter, error,
             <div className="c360-activity-description">{item.description || "No additional details."}</div>
           </details>;
         })}
-        {!error && entries.length === 0 && <p className="p-5 text-14 text-ink-secondary">No activity in this category.</p>}
+        {!error && entries.length === 0 && <p className="p-5 text-14 text-ink-secondary">{terms.length ? "No matching activity." : "No activity in this category."}</p>}
       </div>
-      {!error && <div className="c360-activity-footer">{filter === "all" ? "All available history" : `${entries.length} matching events`}</div>}
+      {!error && <div className="c360-activity-footer">{filter === "all" && terms.length === 0 ? "All available history" : `${entries.length} matching events`}</div>}
     </Card>
   </section>;
 }

@@ -37,17 +37,14 @@
 .c360-workspace-name h1 { font-size: 29px; line-height: 1.25; font-weight: 500; letter-spacing: -1px; overflow-wrap: anywhere; }
 .c360-workspace-name-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .c360-workspace-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 9px; font-size: 14px; color: #71717a; }
-.c360-workspace-actions { display: flex; align-items: center; gap: 8px; margin-top: 21px; }
+.c360-workspace-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 21px; }
 .c360-workspace-actions > :is(a, button) { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 43px; padding: 0 16px; font-size: 14px; text-transform: none; letter-spacing: 0; text-decoration: none; border: 1px solid #d4d4d8; border-radius: 5px; background: #fff; color: #27272a; }
 .c360-workspace-actions > .c360-text-action { background: #18181b; border-color: #18181b; color: #fff; }
 .c360-workspace-actions .c360-more-action { margin-left: auto; position: relative; }
 .c360-workspace-action-menu { position: absolute; z-index: 30; top: calc(100% + 5px); right: 0; width: 230px; padding: 5px; background: #fff; border: 1px solid #d4d4d8; border-radius: 6px; }
 .c360-workspace-action-menu :is(a, button) { display: flex; align-items: center; width: 100%; padding: 10px; min-height: 44px; border: 0; text-align: left; font-size: 14px; color: #27272a; background: #fff; text-decoration: none; }
 .c360-workspace-action-menu :is(a, button):hover { background: #f4f4f5; }
-.c360-workspace-contact { display: flex; flex-wrap: wrap; align-items: center; gap: 11px 20px; margin: 20px 0 0; color: #71717a; font-size: 14px; }
-.c360-workspace-contact a { display: inline-flex; align-items: center; gap: 7px; color: #52525b; text-decoration: none; overflow-wrap: anywhere; }
-.c360-workspace-contact svg { flex-shrink: 0; }
-.c360-workspace-contact a:hover { text-decoration: underline; }
+.c360-workspace-contact { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; margin: 19px 0 0; color: #71717a; font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
 .c360-additional-contacts { margin-top: 13px; font-size: 14px; color: #71717a; }
 .c360-additional-contacts summary { cursor: pointer; padding: 4px 0; }
 .c360-additional-contacts > div { display: flex; gap: 8px; flex-wrap: wrap; padding: 6px 0; }
@@ -66,7 +63,7 @@
 .c360-section-navigation { position: sticky; top: 0; z-index: 20; display: flex; flex-shrink: 0; min-width: 0; padding-top: env(safe-area-inset-top, 0px); border-bottom: 1px solid #e4e4e7; background: #fff; }
 .c360-section-strip { min-width: 0; flex: 1; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
 .c360-section-list { gap: 26px; width: max-content; min-width: 100%; padding: 0 26px; border: 0; }
-.c360-section-tab { appearance: none; height: 50px; margin: 0; padding: 0 2px; border: 0; border-bottom: 2px solid transparent; background: transparent; font-size: 14px; text-transform: none; letter-spacing: 0; white-space: nowrap; }
+.c360-embedded .c360-section-tab { appearance: none; height: 54px; margin: 0; padding: 0 2px; border: 0; border-bottom: 2px solid transparent; background: transparent; font-size: 16px; text-transform: none; letter-spacing: 0; white-space: nowrap; }
 .c360-section-tab[aria-selected="true"] { border-bottom-color: #27272a; }
 .c360-section-arrow { padding: 0; width: 36px; height: auto; min-height: 50px; flex-shrink: 0; border-radius: 0; }
 .c360-section-arrow:first-child { border-right: 1px solid #e4e4e7; }
@@ -74,12 +71,10 @@
 .c360-section-arrow + .c360-section-strip .c360-section-list { padding-left: 12px; padding-right: 12px; }
 .c360-embedded .c360-tab-content { padding: 26px 28px; flex: 1 0 auto; }
 .c360-embedded .c360-overview-content { display: flex; flex-direction: column; }
-.c360-embedded .c360-overview-grid { order: -1; display: grid; grid-template-columns: minmax(0, 1fr) minmax(235px, .72fr); gap: 25px; margin-bottom: 28px; align-items: start; }
-.c360-embedded .c360-overview-grid > div { min-width: 0; }
-.c360-embedded .c360-overview-services { grid-column: 1; grid-row: 1; }
-.c360-embedded .c360-overview-billing { grid-column: 2; grid-row: 2 / span 2; padding: 20px; border: 1px solid #e4e4e7; border-radius: 6px; }
-.c360-embedded .c360-overview-health { grid-column: 2; grid-row: 1; padding: 20px; border: 1px solid #e4e4e7; border-radius: 6px; }
-.c360-overview-grid > .c360-activity { grid-column: 1; grid-row: 2 / span 2; }
+.c360-embedded .c360-overview-grid { order: -1; display: flex; flex-direction: column; gap: 25px; margin-bottom: 28px; }
+.c360-embedded .c360-overview-grid > * { min-width: 0; width: 100%; }
+.c360-embedded .c360-overview-billing { padding: 20px; border: 1px solid #e4e4e7; border-radius: 6px; }
+.c360-embedded .c360-overview-health { padding: 20px; border: 1px solid #e4e4e7; border-radius: 6px; }
 .c360-embedded .c360-overview-services > .c360-upcoming-appointment { padding: 20px; margin-bottom: 12px; background: #fff; border-radius: 6px; }
 .c360-embedded .c360-overview-services > .c360-recent-service { padding: 17px 0; align-items: center; }
 .c360-health-heading { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
@@ -97,7 +92,7 @@
 .c360-embedded .c360-billing-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .c360-embedded .c360-tab-content > div > .u-label { margin-top: 20px; margin-bottom: 13px; font-size: 18px; color: #27272a; }
 .c360-activity { min-width: 0; }
-.c360-activity-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #e4e4e7; }
+.c360-activity-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #e4e4e7; }
 .c360-activity-toolbar > select { width: auto; max-width: 64%; height: 38px; padding: 0 5px; border: 0; background: #fff; color: #52525b; font-size: 14px; }
 .c360-activity-list { max-height: 510px; overflow-y: auto; overscroll-behavior-y: contain; -webkit-overflow-scrolling: touch; padding: 0 12px; }
 .c360-activity-event { border-bottom: 1px solid #e4e4e7; }
@@ -126,11 +121,6 @@
   .c360-workspace-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .c360-workspace-stat:nth-child(2) { border-right: 0; }
   .c360-workspace-stat:nth-child(-n+2) { border-bottom: 1px solid #e4e4e7; }
-  .c360-embedded .c360-overview-grid { grid-template-columns: minmax(0, 1fr); }
-  .c360-embedded .c360-overview-grid > * { grid-column: auto; grid-row: auto; }
-  .c360-overview-grid > .c360-activity { order: 1; }
-  .c360-embedded .c360-overview-health { order: 2; }
-  .c360-embedded .c360-overview-billing { order: 3; }
 }
 @media (max-width: 1279px) {
   .c360-workspace { grid-template-columns: minmax(0, 1fr); }
@@ -139,11 +129,6 @@
   .c360-workspace-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .c360-workspace-stat:nth-child(2) { border-right: 0; }
   .c360-workspace-stat:nth-child(-n+2) { border-bottom: 1px solid #e4e4e7; }
-  .c360-embedded .c360-overview-grid { grid-template-columns: minmax(0, 1fr); }
-  .c360-embedded .c360-overview-grid > * { grid-column: auto; grid-row: auto; }
-  .c360-overview-grid > .c360-activity { order: 1; }
-  .c360-embedded .c360-overview-health { order: 2; }
-  .c360-embedded .c360-overview-billing { order: 3; }
 }
 @media (max-width: 767px) {
   .c360-workspace { border-radius: 6px; }
@@ -156,8 +141,11 @@
   .c360-workspace-name h1 { font-size: 25px; }
   .c360-workspace-name-row { gap: 7px; }
   .c360-workspace-meta { gap: 8px; line-height: 1.5; }
-  .c360-workspace-actions > :is(a, button) { flex: 1; min-height: 44px; }
-  .c360-workspace-contact { flex-direction: column; align-items: flex-start; gap: 11px; line-height: 1.5; }
+  .c360-workspace-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)) 32px; gap: 5px; }
+  .c360-workspace-actions > :is(a, button) { flex-direction: column; gap: 5px; padding: 7px 2px; min-height: 62px; font-size: 14px; }
+  .c360-workspace-actions .c360-more-action { margin-left: 0; }
+  .c360-workspace-actions .c360-more-action > button { width: 32px; min-width: 32px; }
+  .c360-workspace-contact { gap: 5px; }
   .c360-workspace-stats { margin: 22px 0 18px; }
   .c360-workspace-stat { padding: 14px 12px; }
   .c360-workspace-stat > strong { font-size: 22px; }
@@ -173,3 +161,25 @@
   .c360-activity-after-tab { padding: 0 16px 22px; }
   .c360-workspace-profile-footer { padding: 20px 17px; }
 }
+
+/* Quiet controls and clear search fields follow the existing Waves UI kit. */
+.c360-search-field { display: block; position: relative; min-width: 0; }
+.c360-search-field > svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: #71717a; pointer-events: none; }
+.c360-activity-search { flex: 1 1 180px; }
+.c360-invoices-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.c360-outline-link { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 40px; padding: 7px 12px; border: 1px solid #d4d4d8; border-radius: 5px; background: #fff; color: #27272a; font-size: 14px; text-decoration: none; }
+.c360-outline-link:hover { background: #fafafa; }
+.c360-invoice-reference { display: inline-block; padding: 7px 0; color: #27272a; font-weight: 500; text-decoration: underline; text-underline-offset: 3px; white-space: nowrap; }
+.c360-embedded .c360-billing-content button { background: #fff; color: #27272a; border: 1px solid #d4d4d8; }
+.c360-embedded .c360-billing-content button:hover { background: #fafafa; }
+.c360-embedded .c360-payment-method-default { flex-shrink: 0; min-height: 26px; height: auto; padding: 2px 8px; font-size: 14px; line-height: 1.5; letter-spacing: 0; text-transform: none; white-space: nowrap; background: #fff; color: #52525b; border: 1px solid #d4d4d8; border-radius: 4px; }
+.c360-estimate-card { padding: 20px; }
+.c360-estimate-reference { display: inline-flex; gap: 6px; align-items: center; font-size: 17px; font-weight: 500; color: #27272a; text-decoration: none; overflow-wrap: anywhere; }
+.c360-estimate-reference:hover { text-decoration: underline; }
+.c360-estimate-totals { display: flex; flex-wrap: wrap; gap: 20px 38px; margin: 20px 0; padding: 15px 0; border-top: 1px solid #e4e4e7; border-bottom: 1px solid #e4e4e7; }
+.c360-estimate-totals dt { font-size: 14px; color: #71717a; }
+.c360-estimate-totals dd { margin: 6px 0 0; font-size: 18px; font-weight: 500; color: #27272a; }
+
+/* Flat writing tools share the outline rhythm of the account actions. */
+.c360-embedded #sms-compose-v2 .sms-writing-tool { appearance: none; -webkit-appearance: none; border: 1px solid #d4d4d8; border-radius: 6px; box-shadow: none; }
+.c360-embedded #sms-compose-v2 select { min-height: 44px; padding: 8px 32px 8px 10px; border: 1px solid #d4d4d8; border-radius: 5px; }

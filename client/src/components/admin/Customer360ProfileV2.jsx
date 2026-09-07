@@ -46,7 +46,7 @@
  *   Switching filter should clear stale rows / not mix categories.
  */
 
-import { useState, useEffect, useRef, useId } from "react";
+import { useState, useEffect, useRef, useId, lazy, Suspense } from "react";
 import { createPortal } from "react-dom";
 import AddressAutocomplete, { sameAutocompleteAddress } from "../AddressAutocomplete";
 import {
@@ -72,6 +72,7 @@ import {
 import { CustomerActionBar, customerEstimateHref } from "./StickyActionBar";
 import Customer360Sections, { CUSTOMER_360_SECTIONS } from "./Customer360Sections";
 import Customer360Activity from "./Customer360Activity";
+import Customer360Estimates from "./Customer360Estimates";
 import { formatETDateOnly } from "../../lib/timezone";
 import useModalFocus from "../../hooks/useModalFocus";
 import AuthenticatedCallAudio from "./AuthenticatedCallAudio";
@@ -104,6 +105,11 @@ import {
   CONSENT_TEXT,
   CONSENT_VERSION,
 } from "../../lib/paymentMethodConsentText";
+
+// Reuse the Communications composer without loading the whole Messages page
+// until a profile opens Comms. Its send, attachment, and AI guards stay shared.
+const CustomerMessageMedia = lazy(() => import("../../pages/admin/CommunicationsPageV2").then((module) => ({ default: module.MessageMediaV2 })));
+const CustomerSmsComposer = lazy(() => import("../../pages/admin/CommunicationsPageV2").then((module) => ({ default: module.SmsTab })));
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -5171,16 +5177,16 @@ function CustomerWorkspaceHeader({ c, balanceOwed, nextService, isAdmin, onEdit,
       </div>
     </div>
     <div className="c360-workspace-actions">
-      {c.phone && <><Button variant="secondary" onClick={() => callViaBridge(c.phone, name)}><Phone size={16} />Call</Button><a className="c360-text-action u-focus-ring" href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}><MessageSquare size={16} />Text</a></>}
+      {c.phone && <><Button variant="secondary" onClick={() => callViaBridge(c.phone, name)}><Phone size={16} />Call</Button><Button className="c360-text-action" onClick={() => onTab("comms")}><MessageSquare size={16} />Text</Button></>}
+      {c.email && <a className="u-focus-ring" href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`} target="_blank" rel="noopener noreferrer"><Mail size={16} />Email</a>}
+      {address && <a className="u-focus-ring" href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`} target="_blank" rel="noopener noreferrer"><MapPin size={16} />Address</a>}
       <div className="c360-more-action" ref={menuRef} onKeyDown={(event) => { if (event.key === "Escape" && menuOpen) { event.stopPropagation(); setMenuOpen(false); menuRef.current?.querySelector("button")?.focus(); } }}>
         <Button variant="ghost" className="c360-icon-button" aria-label="More customer actions" aria-expanded={menuOpen} aria-controls={menuId} onClick={() => setMenuOpen((open) => !open)}><MoreHorizontal size={20} /></Button>
         {menuOpen && <div id={menuId} className="c360-workspace-action-menu">{actions.map((action) => action.href ? <a key={action.label} className="u-focus-ring" href={action.href}>{action.label}</a> : <button key={action.label} type="button" className="u-focus-ring" onClick={() => { menuRef.current?.querySelector("button")?.focus(); setMenuOpen(false); action.onClick(); }}>{action.label}</button>)}</div>}
       </div>
     </div>
-    <div className="c360-workspace-contact">
-      {c.phone && <CallBridgeLink phone={c.phone} customerName={name}><Phone size={15} />{c.phone}</CallBridgeLink>}
-      {c.email && <a href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`} target="_blank" rel="noopener noreferrer"><Mail size={15} />{c.email}</a>}
-      {address && <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`} target="_blank" rel="noopener noreferrer"><MapPin size={15} />{address}</a>}
+    <div className="c360-workspace-contact" aria-label="Contact details">
+      {[c.phone, c.email, address].filter(Boolean).map((detail, index) => <span key={index}>{detail}</span>)}
     </div>
     {contacts.length > 0 && <details className="c360-additional-contacts"><summary>Service contacts ({contacts.length})</summary>{contacts.map((contact, index) => <div key={index}><span>{contact.name || `Service contact ${index + 1}`}</span>{contact.phone && <CallBridgeLink phone={contact.phone} customerName={contact.name || name}>{contact.phone}</CallBridgeLink>}{contact.email && <a href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(contact.email)}`} target="_blank" rel="noopener noreferrer">{contact.email}</a>}</div>)}</details>}
     <div className="c360-workspace-stats">{stats.map((stat) => <div key={stat.label} className={cn("c360-workspace-stat", stat.alert && "is-alert")}><span>{stat.label}</span><strong>{stat.value}</strong></div>)}</div>
@@ -5202,11 +5208,13 @@ export default function Customer360ProfileV2({
   const [profileActionErr, setProfileActionErr] = useState("");
   const [activeTab, setActiveTab] = useState(initialTab);
   const [timelineFilter, setTimelineFilter] = useState("all");
+  const [timelineSearch, setTimelineSearch] = useState("");
   const [timeline, setTimeline] = useState([]);
   const [timelineError, setTimelineError] = useState(false);
   const [timelineRetrying, setTimelineRetrying] = useState(false);
   const [comms, setComms] = useState([]);
   const [commsLoaded, setCommsLoaded] = useState(false);
+  const [commsComposerReady, setCommsComposerReady] = useState(false);
   const [commsLoading, setCommsLoading] = useState(false);
   const [commsErr, setCommsErr] = useState("");
   const [smsReply, setSmsReply] = useState("");
@@ -5476,6 +5484,7 @@ export default function Customer360ProfileV2({
         setTimelineError(tl === null);
         setComms([]);
         setCommsLoaded(false);
+        setCommsComposerReady(false);
         setCommsErr("");
         setLoading(false);
       })
@@ -5517,11 +5526,13 @@ export default function Customer360ProfileV2({
         if (seq !== commsSeqRef.current) return;
         setComms(data.comms || []);
         setCommsLoaded(true);
+        setCommsComposerReady(true);
       })
       .catch((err) => {
         if (err.name === "AbortError" || seq !== commsSeqRef.current) return;
         setCommsErr(err.message || "Failed to load messages");
         setCommsLoaded(true);
+        setCommsComposerReady(true);
       })
       .finally(() => {
         if (seq === commsSeqRef.current) setCommsLoading(false);
@@ -6332,7 +6343,7 @@ export default function Customer360ProfileV2({
             auto-minimum-size is 0 — without it the column flex collapses the
             bar to ~0px on mobile (tall content), hiding every section tab. */}
         <div className="flex shrink-0 bg-white border-b border-hairline border-zinc-200 px-6 overflow-x-auto">
-          {CUSTOMER_360_SECTIONS.map((t) => (
+          {CUSTOMER_360_SECTIONS.filter((section) => section.key !== "estimates").map((t) => (
             <button
               key={t.key}
               onClick={() => setActiveTab(t.key)}
@@ -6901,7 +6912,7 @@ export default function Customer360ProfileV2({
                     </div>
                   )}
                 </div>{" "}
-                {embedded && isAdmin && <Customer360Activity timeline={timeline} filter={timelineFilter} onFilter={setTimelineFilter} error={timelineError} retrying={timelineRetrying} onRetry={retryTimeline} />}
+                {embedded && isAdmin && <Customer360Activity timeline={timeline} filter={timelineFilter} onFilter={setTimelineFilter} search={timelineSearch} onSearch={setTimelineSearch} error={timelineError} retrying={timelineRetrying} onRetry={retryTimeline} />}
               </div>{" "}
             </div>
           )}
@@ -6991,9 +7002,11 @@ export default function Customer360ProfileV2({
             </div>
           )}
 
+          {embedded && activeTab === "estimates" && <Customer360Estimates estimates={data.estimates || []} />}
+
           {/* BILLING */}
           {activeTab === "billing" && (
-            <div>
+            <div className="c360-billing-content">
               {" "}
               <div className="c360-billing-grid grid grid-cols-4 gap-3 mb-5">
                 {" "}
@@ -7041,7 +7054,10 @@ export default function Customer360ProfileV2({
                   onSendInvoice={() => setAnnualPrepayInvoiceOpen(true)}
                 />
               )}
-              <SectionTitle>Invoices ({invoices.length})</SectionTitle>
+              {embedded ? <div className="c360-invoices-heading">
+                <SectionTitle>Recent invoices ({invoices.length})</SectionTitle>
+                <a className="c360-outline-link u-focus-ring" href={`/admin/invoices?customerId=${encodeURIComponent(c.id)}`}>All invoices</a>
+              </div> : <SectionTitle>Invoices ({invoices.length})</SectionTitle>}
               {invoices.length > 0 ? (
                 <Table className="mb-5">
                   {" "}
@@ -7049,6 +7065,7 @@ export default function Customer360ProfileV2({
                     {" "}
                     <TR>
                       {" "}
+                      {embedded && <TH>Invoice</TH>}
                       <TH>Date</TH>
                       <TH align="right">Amount</TH>
                       <TH align="right">Paid</TH>
@@ -7058,6 +7075,7 @@ export default function Customer360ProfileV2({
                   <TBody>
                     {invoices.map((inv, i) => (
                       <TR key={i}>
+                        {embedded && <TD><a className="c360-invoice-reference u-focus-ring" href={`/admin/invoices?customerId=${encodeURIComponent(c.id)}&invoice=${encodeURIComponent(inv.id)}`}>#{inv.invoice_number || inv.id.slice(0, 8)}</a></TD>}
                         {" "}
                         <TD>
                           {fmtDate(inv.created_at || inv.invoice_date)}
@@ -7160,7 +7178,7 @@ export default function Customer360ProfileV2({
                           {cd.exp_month}/{cd.exp_year}
                         </span>
                       )}
-                      {cd.is_default && <Badge tone="strong">Default</Badge>}
+                      {cd.is_default && <Badge tone={embedded ? "neutral" : "strong"} className="c360-payment-method-default">Default</Badge>}
                     </div>
                   ))}
                 </div>
@@ -7213,8 +7231,8 @@ export default function Customer360ProfileV2({
           )}
 
           {/* COMMS */}
-          {activeTab === "comms" && (
-            <div className="flex flex-col h-full">
+          {(activeTab === "comms" || (embedded && commsComposerReady)) && (
+            <div className={activeTab === "comms" ? "flex flex-col h-full" : "hidden"}>
               {" "}
               <OwedCommitmentsSummary customerId={customerId} />
               <SectionTitle>Thread ({comms.length})</SectionTitle>{" "}
@@ -7243,7 +7261,8 @@ export default function Customer360ProfileV2({
                         )}
                       >
                         {" "}
-                        <div>{m.body}</div>{" "}
+                        <div>{m.body}</div>
+                        {embedded && m.media?.length > 0 && <Suspense fallback={<span>Loading attachments…</span>}><CustomerMessageMedia media={m.media} inverted={m.direction === "outbound"} /></Suspense>}{" "}
                         <div
                           className={cn(
                             "text-10 mt-1 text-right",
@@ -7314,7 +7333,13 @@ export default function Customer360ProfileV2({
                     </div>
                   )}
               </div>
-              {c.phone && (
+              {embedded && c.phone && commsComposerReady && <Suspense fallback={<p className="py-3 text-14 text-ink-secondary">Loading message tools…</p>}>
+                <CustomerSmsComposer key={`${c.id}:${c.phone}`} active={activeTab === "comms"} customer={c} customerMessages={comms} onSent={async () => {
+                  setCommsLoaded(false);
+                  await Promise.allSettled([reloadCustomer(), ...(isAdmin ? [retryTimeline()] : [])]);
+                }} />
+              </Suspense>}
+              {!embedded && c.phone && (
                 <div className="py-3 border-t border-hairline border-zinc-200">
                   {" "}
                   <div className="flex gap-2">
@@ -7571,6 +7596,7 @@ export default function Customer360ProfileV2({
                     {recipientPrefsErr}
                   </div>
                 )}
+                {!embedded && <>
                 <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
                   {" "}
                   <input
@@ -7687,6 +7713,7 @@ export default function Customer360ProfileV2({
                     </div>{" "}
                   </div>{" "}
                 </label>{" "}
+                </>}
               </div>{" "}
               <div className="mt-4">
                 {" "}
@@ -8011,7 +8038,7 @@ export default function Customer360ProfileV2({
           )}
         </div>
         {/* ZONE 4 — TIMELINE (admin-only endpoint) */}
-        {embedded && isAdmin && activeTab !== "overview" && <div className="c360-activity-after-tab"><Customer360Activity timeline={timeline} filter={timelineFilter} onFilter={setTimelineFilter} error={timelineError} retrying={timelineRetrying} onRetry={retryTimeline} /></div>}
+        {embedded && isAdmin && activeTab !== "overview" && <div className="c360-activity-after-tab"><Customer360Activity timeline={timeline} filter={timelineFilter} onFilter={setTimelineFilter} search={timelineSearch} onSearch={setTimelineSearch} error={timelineError} retrying={timelineRetrying} onRetry={retryTimeline} /></div>}
         {!embedded && isAdmin && <div className="border-t border-hairline border-zinc-200 px-6 py-4 bg-zinc-50">
           {" "}
           <div className="flex justify-between items-center mb-2.5 flex-wrap gap-2">

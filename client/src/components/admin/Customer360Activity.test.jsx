@@ -9,7 +9,8 @@ afterEach(cleanup);
 
 function History({ timeline }) {
   const [filter, onFilter] = useState("all");
-  return <Customer360Activity timeline={timeline} filter={filter} onFilter={onFilter} error={false} retrying={false} onRetry={() => {}} />;
+  const [search, onSearch] = useState("");
+  return <Customer360Activity search={search} onSearch={onSearch} timeline={timeline} filter={filter} onFilter={onFilter} error={false} retrying={false} onRetry={() => {}} />;
 }
 
 describe("Customer 360 activity", () => {
@@ -24,6 +25,25 @@ describe("Customer 360 activity", () => {
     expect(history.queryByText("Message 1")).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole("combobox", { name: "Filter activity" }), { target: { value: "all" } });
     expect(history.getByText("Message 45")).toBeInTheDocument();
+  });
+
+  it("combines full-description search with activity category and can clear both", () => {
+    render(<History timeline={[
+      { type: "sms", title: "Customer message", description: "Please close the side gate", date: "2024-07-02" },
+      { type: "interaction", title: "Internal note", description: "Side gate latch repaired", date: "2024-07-02" },
+      { type: "service", title: "Application completed", description: "Front lawn", date: "2024-07-02" },
+    ]} />);
+    const history = within(screen.getByRole("region", { name: "Customer activity history" }));
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search activity" }), { target: { value: "GATE side" } });
+    expect(history.getAllByRole("group")).toHaveLength(2);
+    fireEvent.change(screen.getByRole("combobox", { name: "Filter activity" }), { target: { value: "sms" } });
+    expect(history.getByText("Customer message")).toBeInTheDocument();
+    expect(history.queryByText("Internal note")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search activity" }), { target: { value: "missing" } });
+    expect(screen.getByText("No matching activity.")).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search activity" }), { target: { value: "" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Filter activity" }), { target: { value: "all" } });
+    expect(history.getByText("Application completed")).toBeInTheDocument();
   });
 
   it("uses Eastern dates for instants and preserves the calendar date of services", () => {

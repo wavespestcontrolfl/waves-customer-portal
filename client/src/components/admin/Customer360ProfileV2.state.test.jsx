@@ -3,6 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
 import Customer360ProfileV2, { CancelSignupModal, RefundPaymentModal } from './Customer360ProfileV2';
 
 vi.mock('./StickyActionBar', async (importOriginal) => ({
@@ -68,6 +69,32 @@ describe('Customer360ProfileV2 profile state', () => {
     localStorage.clear();
     localStorage.setItem('waves_admin_token', 'test-token');
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
+  });
+
+  it('preserves technician texting when admin-only conversation history is unavailable', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/customer-a')) {
+        const detail = customerDetail('customer-a', 'Avery');
+        detail.customer.phone = '+19415550100';
+        return response(detail);
+      }
+      if (path.endsWith('/comms')) return response({ error: 'Admin access required' }, 403);
+      if (path.endsWith('/communications/sms')) return response({ sent: true, providerMessageId: 'SM_qa_accepted' });
+      return response({});
+    }));
+    const { container } = render(<MemoryRouter><Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded /></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'Avery Customer' });
+    container.querySelector('.c360-panel').scrollTo = vi.fn();
+    fireEvent.click(screen.getByRole('button', { name: 'Text', exact: true }));
+    const field = await screen.findByRole('textbox', { name: 'Text message' });
+    fireEvent.change(field, { target: { value: 'Service update' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send', exact: true }));
+    await waitFor(() => expect(field).toHaveValue(''));
+    const sends = fetch.mock.calls.filter(([url]) => String(url).endsWith('/communications/sms'));
+    expect(sends).toHaveLength(1);
+    expect(JSON.parse(sends[0][1].body)).toMatchObject({ customerId: 'customer-a', to: '+19415550100', body: 'Service update' });
+    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/timeline'))).toBe(false);
   });
 
   it('does not request or offer admin-only history to a technician', async () => {

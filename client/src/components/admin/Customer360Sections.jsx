@@ -5,6 +5,7 @@ import { Button, Tabs, TabList, Tab } from "../ui";
 export const CUSTOMER_360_SECTIONS = [
   { key: "overview", label: "Overview" },
   { key: "services", label: "Services" },
+  { key: "estimates", label: "Estimates" },
   { key: "billing", label: "Billing" },
   { key: "contracts", label: "Contracts" },
   { key: "comms", label: "Comms" },
