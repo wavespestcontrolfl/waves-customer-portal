@@ -39,16 +39,19 @@ function explicitContactPreference(quote) {
 
 // Questions in SMS frequently omit punctuation. Check every clause, not only
 // the start of the message, and normalize compatibility question marks.
-const INTERROGATIVE = /(?:^|[.!;:\n]\s*)(?:(?:and|but|also|however)[, ]+)?(?:are|is|am|was|were|do(?!\s+not\b)|does|did|can|could|would|should|will|won't|have|has|had|what|where|when|why|who|whose|which|how)\b/i;
+const INTERROGATIVE = /(?:^|[.!;:\n]\s*)(?:(?:and|but|also|however|please)[, ]+)?(?:(?:are|is|am|was|were|do(?!\s+not\b)|does|did|can|could|would|should|will|won't|have|has|had|may|might|shall|what|where|when|why|who|whose|which|how)\b|ok(?:ay)? (?:to|if)\b|mind if\b)/i;
 function isQuestionSource(source) {
   const text = String(source || '').normalize('NFKC');
   return /[?¿؟]/u.test(text) || INTERROGATIVE.test(text);
 }
 
 function matchesExplicitAccessCode({ quote, field, value }) {
-  // Missing-code descriptions are not credentials, even if the model
-  // proposes them verbatim. Preserve the empty field for the real code.
-  if (/\b(?:unknown|none|null|undefined|unsure|uncertain|unavailable|pending|missing|not|no|never|forgot(?:ten)?|forget|maybe|perhaps)\b|n['’]t|^n[ /]?a$/i.test(String(value || '').trim())) return false;
+  // Missing-code descriptions and relational phrases are not credentials,
+  // even if the model proposes them verbatim. Preserve the empty field for
+  // the real code: a multi-word value needs at least one digit or key symbol.
+  const candidate = String(value || '').trim();
+  if (/\b(?:unknown|none|null|undefined|unsure|uncertain|unavailable|pending|missing|not|no|never|forgot(?:ten)?|forget|maybe|perhaps|same|usual|last|previous|prior|before|earlier|again|old|new|different|changed|later|soon|text|call|ask|check|see)\b|n['’]t|^n[ /]?a$/i.test(candidate)) return false;
+  if (/\s/.test(candidate) && !/[#*\d]/.test(candidate)) return false;
   const match = /^(?:(?:the|my|our) )?(neighborhood gate|community gate|property gate|lockbox|garage) code\s*(?:is\s+|:\s*)?([#*\dA-Za-z -]{1,100})[.!]?$/i.exec(String(quote || '').trim());
   if (!match) return false;
   const fields = { 'neighborhood gate': 'neighborhood_gate_code', 'community gate': 'neighborhood_gate_code',

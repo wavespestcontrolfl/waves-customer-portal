@@ -44,7 +44,8 @@ const MONTH = String.raw`(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may
 const ORDINAL_DAY = String.raw`(?:[12]?\d|3[01])(?:st|nd|rd|th)`;
 const COUNT = String.raw`(?:\d+|an?|one|two|three|four|five|six|seven|several|(?:a )?few|(?:a )?couple(?: of)?)`;
 const TEMPORARY_INSTRUCTION = new RegExp([
-  String.raw`\b(?:today|tomorrow|tonight|temporar(?:y|ily)|for now|currently|right now|at the moment|in the meantime|one[- ]time|during|until|till|vacation|holiday|snowbird|travel(?:l)?ing)\b`,
+  String.raw`\b(?:today|tomorrow|tonight|temporar(?:y|ily)|for now|currently|right now|at the moment|in the meantime|one[- ]time|upcoming|during|until|till|vacation|holiday|snowbird|travel(?:l)?ing)\b`,
+  String.raw`\b(?:for|before|at|after) (?:our|your|the|this|my) (?:next |upcoming |scheduled )?(?:visit|service|appointment|treatment)\b`,
   String.raw`\bfor the (?:time being|moment|rest of)\b`,
   String.raw`\b(?:just|only) (?:for|on|this|today|tomorrow|tonight|once)\b`,
   String.raw`\bthis (?:time|once|visit|appointment|service|round|week(?:end)?|month|morning|afternoon|evening|summer|winter|spring|fall)\b`,
@@ -194,7 +195,10 @@ async function runSmsOperationalActions({ now = new Date(), conn = db, extract =
         this.select(1).from('data_hygiene_source_extractions as x').whereRaw('x.source_id = s.id')
           .where({ 'x.source_type': 'message', 'x.extractor_version': VERSION })
           .whereIn('x.status', ['ok', 'no_fields', 'failed_max_retries']);
-      }).orderBy('s.created_at').orderBy('s.id').limit(30).select('s.*');
+      }).orderBy('s.created_at').orderBy('s.id').limit(30)
+      // The same projection as history: media metadata (provider URLs, object
+      // keys) is never part of the text the providers see.
+      .select(...SOURCE_COLUMNS.map((column) => `s.${column}`));
     let processed = 0;
     let failed = 0;
     let skipped = 0;
