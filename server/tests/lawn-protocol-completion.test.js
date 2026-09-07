@@ -283,11 +283,21 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
     await recordLawnProtocolCompletion(trx, {
       service: oneTimeVisit, serviceRecord: { id: 'record-5' }, serviceProducts: [],
       plan: {
-        protocol: { structured: { protocolKey: 'st_augustine', version: 1, window: { key: 'summer_insect', title: 'Summer', requiredTasks: [] } } },
-        mixCalculator: { lawnSqft: 5000, carrierGalPer1000: 1, items: [{ substitution: { originalProductId: 'orig-1', substituteProductId: 'sub-1', reason: 'out of stock' } }] },
+        protocol: { structured: {
+          protocolKey: 'st_augustine', version: 1, window: { key: 'summer_insect', title: 'Summer', requiredTasks: [] },
+          products: [{ productId: 'orig-1', defaultInPlan: true }, { productId: 'premium-1', defaultInPlan: false }, { productId: 'cond-1', defaultInPlan: true }],
+        } },
+        mixCalculator: { lawnSqft: 5000, carrierGalPer1000: 1, items: [
+          { selected: true, product: { id: 'sub-1' }, substitution: { originalProductId: 'orig-1', substituteProductId: 'sub-1', reason: 'out of stock' } },
+          { selected: true, product: { id: 'premium-1' } },
+          { selected: false, product: { id: 'cond-1' } },
+        ] },
       },
       completionInput: { skippedProducts: [
         { productId: 'sub-1', productName: 'Substitute iron' },
+        // On the window but never a default of this visit: premium opt-in, unselected conditional.
+        { productId: 'premium-1', productName: 'Premium add-on' },
+        { productId: 'cond-1', productName: 'Conditional not selected' },
         // Shown by the form from the protocol active at load time, replaced before submit.
         { productId: 'stale-1', productName: 'Yesterday\'s default' },
       ] },
@@ -295,7 +305,11 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
     expect(actualsOut).toHaveLength(1);
     expect(actualsOut[0]).toMatchObject({ status: 'skipped', product_id: 'sub-1', protocol_product_id: 'pp-1', role: 'micronutrient', planned_rate_per_1000: 3 });
     expect(JSON.parse(actualsOut[0].metadata)).toEqual({ source: 'tech_closeout', reasonSupplied: false, substitution: { originalProductId: 'orig-1', substituteProductId: 'sub-1', reason: 'out of stock' } });
-    expect(JSON.parse(completionOut.metadata).unlistedSkippedProducts).toEqual([{ productId: 'stale-1', productName: 'Yesterday\'s default' }]);
+    expect(JSON.parse(completionOut.metadata).unlistedSkippedProducts).toEqual([
+      { productId: 'premium-1', productName: 'Premium add-on' },
+      { productId: 'cond-1', productName: 'Conditional not selected' },
+      { productId: 'stale-1', productName: 'Yesterday\'s default' },
+    ]);
   });
 
   test('gate on: a missing visit area stays NULL instead of the planned turf area, and a plan-attributed visit keeps its protocol', async () => {

@@ -210,19 +210,22 @@ async function recordLawnProtocolCompletion(trx, {
   // Skipped rows are part of the all-lawn ledger: with the gate off the
   // legacy WaveGuard writer must stay byte-identical even though Complete
   // Service (defaults gates on) now submits removed defaults. A skipped row
-  // is only ever a default of the plan THIS completion attributed — a
-  // protocol product or its approved substitute. A default the form showed
-  // from a plan that changed before submit, or an id retired meanwhile, is
-  // not this protocol's skip: it stays on the completion's metadata and never
-  // becomes a `skipped` actual that Command Center would count.
-  const planProductIds = new Set([
-    ...substitutionBySubstituteProductId.keys(),
-    ...protocolProducts.map((row) => row.product_id).filter(Boolean).map(String),
-  ]);
+  // is only ever a default THIS visit's plan selected — the same rows the
+  // closeout prefilled (selected `defaultInPlan` items, an approved
+  // substitute standing in for one included) — never a premium, optional or
+  // unselected conditional product of the window. A default the form showed
+  // from a plan that changed before submit, an id retired meanwhile, or a
+  // crafted id stays on the completion's metadata and never becomes a
+  // `skipped` actual that Command Center would count.
+  const structuredProducts = structured?.products || [];
+  const visitDefaultIds = new Set((plan?.mixCalculator?.items || [])
+    .filter((item) => item?.selected === true
+      && structuredProducts.find((row) => row.productId === (item.substitution?.originalProductId || item.product?.id))?.defaultInPlan)
+    .map((item) => String(item.product?.id || '')).filter(Boolean));
   const submittedSkips = allLawn ? normalizeSkippedProducts(completionInput.skippedProducts) : [];
-  const skippedProducts = submittedSkips.filter((row) => planProductIds.has(String(row.productId)));
+  const skippedProducts = submittedSkips.filter((row) => visitDefaultIds.has(String(row.productId)));
   const unlistedSkippedProducts = submittedSkips
-    .filter((row) => !planProductIds.has(String(row.productId)))
+    .filter((row) => !visitDefaultIds.has(String(row.productId)))
     .map(({ productId, productName }) => ({ productId, productName }));
 
   const [completion] = await trx('lawn_protocol_service_completions')
