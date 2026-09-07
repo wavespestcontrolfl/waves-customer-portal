@@ -1201,6 +1201,28 @@ describe('sprinkler timer guide', () => {
     expect(interactionUpdates).toEqual([]);
   });
 
+  test.each(['claim', 'settle'])('a failed guide %s write does not log customer contacts', async (phase) => {
+    mockNotificationPrefsRow = { seasonal_tips: true };
+    const error = Object.assign(new Error(`SQL failed with ${customerRow.email} and ${customerRow.phone}`), { code: '08006' });
+    if (phase === 'claim') interactionsInsert.mockRejectedValueOnce(error);
+    else {
+      const baseDb = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        const q = baseDb(table);
+        if (table === 'customer_interactions') q.update = jest.fn(async () => { throw error; });
+        return q;
+      });
+    }
+    await sendPrepToCustomer({ customerId: 'cust-1', pestType: 'sprinkler_timer', channel: 'sms' });
+    const { warn } = require('../services/logger');
+    const logs = warn.mock.calls.flat().join(' ');
+    expect(logs).toContain('cust-1');
+    expect(logs).toContain('08006');
+    expect(logs).not.toContain(customerRow.email);
+    expect(logs).not.toContain(customerRow.phone);
+    expect(logs).not.toContain('SQL failed');
+  });
+
   test('the send is claimed BEFORE dispatch, settled into the tagger-compatible marker on delivery, and refused when the claim cannot be written', async () => {
     mockNotificationPrefsRow = { seasonal_tips: true };
     const order = [];

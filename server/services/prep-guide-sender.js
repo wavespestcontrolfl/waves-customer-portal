@@ -179,7 +179,7 @@ async function buildWateringBlock(customer, snapshot = {}) {
   try {
     inputs = await loadWateringInputs(customer, snapshot);
   } catch (err) {
-    logger.warn(`[prep-guide-sender] watering block inputs unavailable for customer ${customer.id}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] watering block inputs unavailable for customer ${customer.id}: ${err.name} (code=${err.code})`);
   }
   return renderWateringBlock(inputs);
 }
@@ -339,7 +339,7 @@ async function nextUpcomingVisit(customerIds, serviceKeyword) {
     const [row] = await upcomingFamilyVisits(customerIds, config, 1);
     return row || null;
   } catch (err) {
-    logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${[].concat(customerIds).filter(Boolean).join(',')}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${[].concat(customerIds).filter(Boolean).join(',')}: ${err.name} (code=${err.code})`);
     return null;
   }
 }
@@ -430,7 +430,7 @@ async function settleHeldEnrollment(customerId, templateKey) {
     const { advanceEnrollment } = require('./automation-runner');
     await advanceEnrollment(enrollment);
   } catch (err) {
-    logger.warn(`[prep-guide-sender] enrolment settle failed for customer ${customerId} (${sequenceKey}): ${err.message}`);
+    logger.warn(`[prep-guide-sender] enrolment settle failed for customer ${customerId} (${sequenceKey}): ${err.name} (code=${err.code})`);
   }
 }
 
@@ -476,7 +476,7 @@ async function releasePrepPage(serviceId, templateKey) {
       .whereRaw('COALESCE(prep_view_count, 0) = 0')
       .update({ prep_template_key: null });
   } catch (err) {
-    logger.warn(`[prep-guide-sender] prep page release failed for service ${serviceId}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] prep page release failed for service ${serviceId}: ${err.name} (code=${err.code})`);
   }
 }
 
@@ -504,7 +504,7 @@ async function resolvePrepVisit(customer, config) {
   try {
     visits = await nextUpcomingVisits(customer.id, config);
   } catch (err) {
-    logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${customer.id}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] next-visit lookup failed for customer ${customer.id}: ${err.name} (code=${err.code})`);
     return { visit: null, prepUrl: null, ownsPage: false, linkReason: 'prep_link_failed' };
   }
   if (!visits.length) return { visit: null, prepUrl: null, ownsPage: false, linkReason: 'no_upcoming_visit' };
@@ -512,7 +512,7 @@ async function resolvePrepVisit(customer, config) {
   try {
     loaded = await EmailTemplateLibrary.loadTemplateByKey(config.emailTemplateKey);
   } catch (err) {
-    logger.warn(`[prep-guide-sender] template lookup failed for ${config.emailTemplateKey}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] template lookup failed for ${config.emailTemplateKey}: ${err.name} (code=${err.code})`);
     return { visit: visits[0], prepUrl: null, ownsPage: false, linkReason: 'prep_link_failed' };
   }
   if (!loaded?.activeVersion) return { visit: visits[0], prepUrl: null, ownsPage: false, linkReason: 'prep_guide_inactive' };
@@ -536,7 +536,7 @@ async function resolvePrepVisit(customer, config) {
       try {
         inFlight = await automationLaneLive(candidate, config.emailTemplateKey, customer.id);
       } catch (err) {
-        logger.warn(`[prep-guide-sender] automation liveness check failed for service ${candidate.id}: ${err.message}`);
+        logger.warn(`[prep-guide-sender] automation liveness check failed for service ${candidate.id}: ${err.name} (code=${err.code})`);
       }
       if (inFlight) return { visit: candidate, prepUrl: null, ownsPage: false, linkReason: 'prep_send_pending' };
       visit = candidate;
@@ -646,7 +646,7 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
           } catch (err) {
             // The library treats a THROWING hook as "keep" — an unreadable
             // home check must abort explicitly (pre-push Codex P1 on 39222b221).
-            logger.warn(`[prep-guide-sender] guide email withheld for customer ${customer.id}: move-stamp re-read failed (${err.message})`);
+            logger.warn(`[prep-guide-sender] guide email withheld for customer ${customer.id}: move-stamp re-read failed (${err.name} (code=${err.code}))`);
             return false;
           }
           if (!verdict) {
@@ -831,7 +831,7 @@ async function pageStillOwned(page, config) {
       .first('id');
     return !!row;
   } catch (err) {
-    logger.warn(`[prep-guide-sender] prep page ownership re-check failed for service ${page.visit.id}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] prep page ownership re-check failed for service ${page.visit.id}: ${err.name} (code=${err.code})`);
     return false;
   }
 }
@@ -974,7 +974,7 @@ async function guideGate(customer, config, pestType, { wantEmail = true, wantSms
     if (wantEmail && prefs && prefs.email_enabled === false) return { refusal: { reason: 'email_opted_out' }, consentBasis };
     return { refusal: null, consentBasis };
   } catch (err) {
-    logger.warn(`[prep-guide-sender] guide preference / history read failed for customer ${customer.id}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] guide preference / history read failed for customer ${customer.id}: ${err.name} (code=${err.code})`);
     return { refusal: { reason: 'guide_check_failed' } };
   }
 }
@@ -1017,7 +1017,7 @@ async function openGuideSend({ customer, config, pestType, contacts, result, act
     }, ['id']);
     return { refusal: null, consentBasis, claimId: claimed?.id ?? claimed ?? null, skippedLeg };
   } catch (err) {
-    logger.warn(`[prep-guide-sender] guide send claim failed for customer ${customer.id}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] guide send claim failed for customer ${customer.id}: ${err.name} (code=${err.code})`);
     return { refusal: { reason: 'guide_check_failed' } };
   }
 }
@@ -1048,7 +1048,7 @@ async function settleGuideClaim({ claimId, customer, config, contacts, result, p
     // A delivered send whose settle failed still holds its claim (the fence
     // reads the subject, which the claim already carries); only a release
     // that failed costs an operator a "already sent" on the next click.
-    logger.warn(`[prep-guide-sender] guide claim settle failed for customer ${customer.id} (ok=${result.ok}): ${err.message}`);
+    logger.warn(`[prep-guide-sender] guide claim settle failed for customer ${customer.id} (ok=${result.ok}): ${err.name} (code=${err.code})`);
   }
 }
 
@@ -1070,7 +1070,7 @@ async function logPrepInteraction({ customer, config, contacts, result, pestType
       ].filter(Boolean).join(' + ')}.`,
     });
   } catch (err) {
-    logger.warn(`[prep-guide-sender] interaction log failed for customer ${customer.id}: ${err.message}`);
+    logger.warn(`[prep-guide-sender] interaction log failed for customer ${customer.id}: ${err.name} (code=${err.code})`);
   }
 }
 
