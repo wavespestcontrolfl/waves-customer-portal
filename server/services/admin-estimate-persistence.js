@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { isDeepStrictEqual } = require('node:util');
 const db = require('../models/db');
 const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, callReprocessInFlight } = require('../utils/estimate-claim-sql');
 const {
@@ -37,6 +38,12 @@ function normalizeLinkedLeadId(leadId) {
 
 function estimateViewUrl(token) {
   return `https://portal.wavespestcontrol.com/estimate/${token}`;
+}
+
+// A content witness also catches writers that do not stamp updated_at.
+// JSONB is read with stable key ordering by pg; only database rows feed this.
+function estimateEditVersion(row) {
+  return crypto.createHash('sha256').update(JSON.stringify(row)).digest('hex');
 }
 
 // Standard send-time expiry window. Also consumed by the expiration cron
@@ -1365,7 +1372,7 @@ async function resolveEstimatePropertyLinkage(database, body) {
       if (!UUID_RE.test(propertyId)) throw errorWithStatus('propertyId must be a UUID', 400);
       const property = await database('customer_properties').where({ id: propertyId }).first();
       if (!property || property.active === false) throw errorWithStatus('Property not found', 404);
-      if (body.customerId && String(property.customer_id) !== String(body.customerId)) {
+      if (!body.customerId || String(property.customer_id) !== String(body.customerId)) {
         throw errorWithStatus('Property belongs to a different customer', 400);
       }
       fields.property_id = propertyId;
@@ -1756,6 +1763,9 @@ async function resolveEstimateWritePayload({
     technicianId,
     now,
   });
+  // Delivery receipts are authored only under the send claim. A browser
+  // cannot forge a completed attempt or clear the retry guard on revision.
+  if (trustedEstimateData) delete trustedEstimateData.manualSendAttempts;
   // Before anything downstream derives from the payload (quoteRequired reads
   // proposal.enabled through buildPricingBundle): the browser's proposal is
   // discarded, the row's own is restored.
@@ -2017,6 +2027,10 @@ async function createOrReuseAdminEstimate({
   randomBytes = crypto.randomBytes,
   recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
 }) {
+  const clientDraftId = body.clientDraftId || null;
+  if (clientDraftId && !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(clientDraftId)) {
+    throw errorWithStatus('Invalid draft identifier.', 400);
+  }
   const linkedLeadId = normalizeLinkedLeadId(body.leadId);
   const pricingOut = {};
   const writeFields = await resolveEstimateWritePayload({
@@ -2032,6 +2046,22 @@ async function createOrReuseAdminEstimate({
   const memberLinkageWarning = await detectUnlinkedMemberAddress(database, body);
 
   return database.transaction(async (trx) => {
+    // Reuse the estimate's primary identity for a retried create. The lock
+    // serializes double submissions before the existing lead/group writers.
+    if (clientDraftId) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['estimate-draft', clientDraftId]);
+      const prior = await trx('estimates').where({ id: clientDraftId }).first();
+      if (prior) {
+        const priorData = parseStoredEstimateData(prior.estimate_data) || {};
+        if (String(prior.created_by_technician_id) !== String(technicianId)
+            || !isDeepStrictEqual(priorData.inputs, parseStoredEstimateData(writeFields.estimate_data)?.inputs)
+            || ['customer_id', 'address', 'customer_name', 'customer_phone', 'customer_email', 'notes', 'show_one_time_option', 'bill_by_invoice']
+              .some((key) => (prior[key] ?? null) !== (writeFields[key] ?? null))) {
+          throw errorWithStatus('This draft was already saved with different inputs. Reopen it before making changes.', 409);
+        }
+        return { estimate: prior, reused: true, memberLinkageWarning };
+      }
+    }
     let canReplaceLinkedEstimate = false;
 
     // "Add another property": the builder passes the FIRST estimate's id and
@@ -2114,6 +2144,12 @@ async function createOrReuseAdminEstimate({
             throw errorWithStatus('Estimate group changed; refresh and try again.', 409);
           }
           await assertNoFallbackRevisionInScheduledGroup(trx, existingEstimate, writeFields);
+          const existingAttempts = parseStoredEstimateData(existingEstimate.estimate_data)?.manualSendAttempts;
+          if (Array.isArray(existingAttempts)) {
+            writeFields.estimate_data = JSON.stringify({
+              ...parseStoredEstimateData(writeFields.estimate_data), manualSendAttempts: existingAttempts,
+            });
+          }
           const nextEstimate = { ...existingEstimate, ...writeFields, expires_at: expiresAt };
           assertLeadCanAttachEstimate({
             lead,
@@ -2161,6 +2197,7 @@ async function createOrReuseAdminEstimate({
     const token = randomBytes(16).toString('hex');
     const [created] = await trx('estimates').insert({
       ...writeFields,
+      ...(clientDraftId ? { id: clientDraftId } : {}),
       created_by_technician_id: technicianId,
       token,
       expires_at: expiresAt,
@@ -2259,10 +2296,10 @@ function liveGroupMoveDestinationIds(row, writeFields) {
   return [destination];
 }
 
-// Every group a revision must lock before its row lock: the fallback set
-// plus a live row's move destination. Sorted — one lock order everywhere.
+// Every offer revision locks its current and destination groups before
+// its row, so a reviewed group cannot change during provider handoff.
 function revisionGroupLockIds(row, writeFields) {
-  return [...new Set([...fallbackRevisionGroupIds(row, writeFields), ...liveGroupMoveDestinationIds(row, writeFields)])].sort();
+  return [...new Set([row?.estimate_group_id, writeFields?.estimate_group_id].filter(Boolean).map(String))].sort();
 }
 
 // The destination group's viewable siblings must each be engine-verified
@@ -2320,9 +2357,8 @@ async function lockScheduledGroupGuardGroups(trx, row, writeFields) {
 // auto-send) holds the group's viewable siblings for the customer's link
 // through the provider handoff, and the auto-send lane publishes only
 // engine-verified prices GATE OR NO GATE (AGENTS.md estimator-engine
-// authority). A fallback revision of any member — or a fallback move into
-// the group — during that window would hand over an unverified sibling
-// price (pre-push codex P0), so it is refused, gate-independent, under the
+// authority). Any revision during that window could change the confirmed
+// group document, so it is refused, gate-independent, under the
 // group lock: the send's claim (group lock, then anchor 'sending') either
 // committed first (refused here) or runs after this revision commits and
 // judges the new stamp in its own preflight.
@@ -2330,8 +2366,8 @@ async function lockScheduledGroupGuardGroups(trx, row, writeFields) {
 // claim (uncapped codex P0 r35): an anchor accepted or declined mid-handoff
 // leaves 'sending' while the automated group link is still being delivered
 // under its claim — the same verdict the proposal editor applies.
-async function assertNoFallbackRevisionDuringGroupSend(trx, row, writeFields) {
-  const groupIds = fallbackRevisionGroupIds(row, writeFields);
+async function assertNoRevisionDuringGroupSend(trx, row, writeFields) {
+  const groupIds = revisionGroupLockIds(row, writeFields);
   for (const groupId of groupIds) {
     const sendingMember = await trx('estimates')
       .where({ estimate_group_id: groupId })
@@ -2341,7 +2377,7 @@ async function assertNoFallbackRevisionDuringGroupSend(trx, row, writeFields) {
       .first('id');
     if (!sendingMember) continue;
     throw errorWithStatus(
-      'The pricing engine could not verify this revision and this multi-property group is being sent right now — nothing was saved. Wait a moment and try again.',
+      'This multi-property group is being sent right now — nothing was saved. Wait a moment and try again.',
       409,
     );
   }
@@ -2352,7 +2388,7 @@ async function assertNoFallbackRevisionDuringGroupSend(trx, row, writeFields) {
 // preflight reads unlocked, best-effort — the locked recheck in the write is
 // authoritative.
 async function assertNoFallbackRevisionInScheduledGroup(trx, row, writeFields) {
-  await assertNoFallbackRevisionDuringGroupSend(trx, row, writeFields);
+  await assertNoRevisionDuringGroupSend(trx, row, writeFields);
   const groupIds = scheduledGroupGuardGroupIds(row, writeFields);
   for (const groupId of groupIds) {
     const scheduledMember = await trx('estimates')
@@ -2449,7 +2485,7 @@ function estimateReviseBlock(estimate, estimateData, now = new Date()) {
 // whether an unlink may invalidate the draft — dropping it on revise made
 // a later stamp-clear skip invalidation and leave the former lead's draft
 // sendable to the wrong recipient.
-const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id'];
+const REVISE_PRESERVED_ESTIMATE_DATA_KEYS = ['lead_id', 'lead_linkage', 'scheduled_service_id', 'manualSendAttempts'];
 // Click-to-estimate mints (#3391 audit P0): both markers are
 // lifecycle-critical and PRIOR-WINS across a revise — the zero-comms
 // opt-out is the lane's owner-approved contract (a revise must never
@@ -2566,6 +2602,10 @@ async function reviseAdminEstimate({
     if (preEngine.reprice_pending_at) observedRepriceAttempt = String(preEngine.reprice_attempt || '');
   } catch { observedRepriceAttempt = null; }
   if (!estimate) throw errorWithStatus('Estimate not found', 404);
+  const observedVersion = estimateEditVersion(estimate);
+  if (body.expectedEditVersion && body.expectedEditVersion !== observedVersion) {
+    throw errorWithStatus('This estimate changed since you opened it. Your edits are still here; reopen the saved estimate in another tab to compare before retrying.', 409);
+  }
   const block = estimateReviseBlock(estimate, undefined, now());
   if (block) throw errorWithStatus(block.message, block.statusCode);
   // A revise is a full quote rewrite — without a payload it would null the
@@ -2882,6 +2922,9 @@ async function reviseAdminEstimate({
     // rewrite — the throw rolls back with nothing written.
     const lockedBlock = estimateReviseBlock(lockedPrior, undefined, now());
     if (lockedBlock) throw errorWithStatus(lockedBlock.message, lockedBlock.statusCode);
+    if (body.expectedEditVersion && estimateEditVersion(lockedPrior) !== observedVersion) {
+      throw errorWithStatus('This estimate changed while saving. Nothing was overwritten. Reopen the saved estimate to compare your changes.', 409);
+    }
     // Live-link guard re-asserted on the LOCKED row (pre-push codex P0): a
     // first send finishing between the pre-read and this lock turns the
     // row live, and the fallback revision must lose to it — the throw rolls
@@ -3015,6 +3058,7 @@ async function reviseAdminEstimate({
 }
 
 module.exports = {
+  estimateEditVersion,
   detectUnlinkedMemberAddress,
   assertLivePestBaseForClientPayload,
   assertLiveTermiteBondRates,
@@ -3055,7 +3099,7 @@ module.exports.stripClientProposal = stripClientProposal;
 module.exports.assertNoFallbackRevisionInScheduledGroup = assertNoFallbackRevisionInScheduledGroup;
 module.exports.lockScheduledGroupGuardGroups = lockScheduledGroupGuardGroups;
 module.exports.scheduledGroupGuardGroupIds = scheduledGroupGuardGroupIds;
-module.exports.assertNoFallbackRevisionDuringGroupSend = assertNoFallbackRevisionDuringGroupSend;
+module.exports.assertNoRevisionDuringGroupSend = assertNoRevisionDuringGroupSend;
 module.exports.fallbackRevisionGroupIds = fallbackRevisionGroupIds;
 module.exports.linkedDraftCarriesProposal = linkedDraftCarriesProposal;
 module.exports.writeStampsUnverifiedPricing = writeStampsUnverifiedPricing;

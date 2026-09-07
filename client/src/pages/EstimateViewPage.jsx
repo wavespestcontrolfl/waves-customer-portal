@@ -1170,7 +1170,7 @@ export function ReturnVisitStrip({ returnVisit, onAsk = scrollToAskSection, show
   );
 }
 
-export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode = 'recurring', chips }) {
+export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode = 'recurring', chips, preview = false }) {
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState('');
   const [asking, setAsking] = useState(false);
@@ -1186,7 +1186,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
 
   const ask = useCallback(async (prompt) => {
     const q = String(prompt ?? question).trim();
-    if (!q || asking) return;
+    if (preview || !q || asking) return;
     const controller = new AbortController();
     askAbortRef.current = controller;
     setAsking(true);
@@ -1218,7 +1218,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
     } finally {
       if (!controller.signal.aborted) setAsking(false);
     }
-  }, [asking, askToken, question, selectedFrequency, serviceMode, token]);
+  }, [asking, askToken, question, selectedFrequency, serviceMode, token, preview]);
 
   return (
     <section id={ASK_SECTION_ID} style={{ ...estimateCard(), display: 'grid', gap: 12 }}>
@@ -1263,6 +1263,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
           onChange={(event) => setQuestion(event.target.value)}
           placeholder="Ask about services, pricing, scheduling, or Waves"
           aria-label="Ask Waves about this estimate"
+          disabled={preview}
           maxLength={500}
           style={{
             width: '100%',
@@ -1278,7 +1279,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
         />
         <button
           type="submit"
-          disabled={asking || !question.trim()}
+          disabled={preview || asking || !question.trim()}
           style={{
             minHeight: 48,
             border: 0,
@@ -1312,7 +1313,7 @@ export function EstimateAskBar({ token, askToken, selectedFrequency, serviceMode
               setQuestion(prompt);
               ask(prompt);
             }}
-            disabled={asking}
+            disabled={preview || asking}
             style={{
               display: 'grid',
               gridTemplateColumns: 'minmax(0, 1fr) auto',
@@ -3804,23 +3805,25 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
   );
 }
 
-// Staff draft preview marker — rendered only when the /data payload carries
-// the JWT-verified adminDraftPreview flag. Customer-surface styling (matches
+// Staff preview marker. Draft wording uses the verified /data flag. Customer-surface styling (matches
 // SlotIssueBanner), not the admin monochrome spec: this banner lives on the
 // customer page even though only staff ever see it.
-export function DraftPreviewBanner() {
+export function DraftPreviewBanner({ draft = true, estimateId = null }) {
   return (
     <div style={{
       background: '#fff4e5', borderRadius: 12, padding: 16,
       border: '1px solid #f5bb5c', marginBottom: 16,
     }}>
       <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.navy }}>
-        Draft preview — not sent to the customer yet
+        {draft ? "Draft preview — not sent to the customer yet" : "Saved estimate preview"}
       </div>
       <div style={{ fontSize: 14, color: COLORS.navy, marginTop: 4 }}>
-        This is the exact page the customer will get. Booking, payment, and
-        requests stay disabled until the estimate is sent.
+        This shows the saved customer estimate. Booking, payment, and requests are disabled in preview.
       </div>
+      {estimateId && <nav aria-label="Edit saved estimate" style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginTop: 8 }}>
+        {Object.entries({ customer: 'Customer & property', services: 'Services', pricing: 'Pricing & terms', review: 'Review & send' }).map(([key, label]) =>
+          <a key={key} href={`/admin/pipeline?tab=new&editEstimateId=${encodeURIComponent(estimateId)}#estimate-${key}`} style={{ display: 'inline-flex', alignItems: 'center', minHeight: 44, fontSize: 14, color: COLORS.navy }}>Edit {label.toLowerCase()}</a>)}
+      </nav>}
     </div>
   );
 }
@@ -3831,7 +3834,7 @@ export function DraftPreviewBanner() {
 // lets the customer hop between them, and shows which are already accepted.
 // Plain anchors (not router navigation): /estimate/:token remounts per token
 // and the server-side handoff covers a full load.
-function PropertyGroupSwitcher({ group }) {
+function PropertyGroupSwitcher({ group, preview = false }) {
   if (!Array.isArray(group) || group.length < 2) return null;
   // Pricing-copy contract: estimate surfaces show per-application pricing,
   // never combined monthly/annual plan totals (codex #3244 r1). The switcher
@@ -3885,7 +3888,7 @@ function PropertyGroupSwitcher({ group }) {
               {inner}
             </div>
           ) : (
-            <a key={p.token} href={`/estimate/${p.token}`} style={{ ...rowBase, border: '1px solid rgba(4, 57, 94, 0.25)', background: COLORS.white }}>
+            <a key={p.token} href={`/estimate/${p.token}${preview ? "?adminPreview=1" : ""}`} style={{ ...rowBase, border: '1px solid rgba(4, 57, 94, 0.25)', background: COLORS.white }}>
               {inner}
             </a>
           );
@@ -5053,6 +5056,10 @@ function EstimateViewPageInner() {
       return false;
     }
   });
+  // Preview mode is verified by the server. A copied query marker or an
+  // expired staff token must not disable an ordinary customer view.
+  const adminDraftPreview = data?.adminDraftPreview === true;
+  const readOnlyPreview = data?.verifiedStaffPreview === true || adminDraftPreview;
   // Headless document capture (?mode=pdf — mirrors /report/:token?mode=pdf):
   // renders EstimateProposalDocument instead of the interactive page. The
   // /data fetch carries the mode (plus the optional signed valid-through pin)
@@ -5377,7 +5384,11 @@ function EstimateViewPageInner() {
   // render (owner ask 2026-07-09, live review screen) — the same shared bar
   // as the report/pay/receipt/contract pages. The PDF endpoint streams the
   // same proposal generator as the admin download and the emailed attachment.
-  const estimateActionBar = (
+  const estimateActionBar = readOnlyPreview ? (
+    <div style={{ marginBottom: 16 }}>
+      <button type="button" onClick={() => window.print()} style={{ minHeight: 44, padding: "10px 16px", fontSize: 16 }}>Print preview</button>
+    </div>
+  ) : (
     <DocumentActionBar
       pdfUrl={`${API_BASE}/estimates/${token}/pdf`}
       pdfFileName="Waves_Estimate.pdf"
@@ -5500,11 +5511,6 @@ function EstimateViewPageInner() {
     setSelectedAddOns(selectedAddOnsForServices(nextServices, nextSelected));
   }, [token, adminPreviewRequested, pdfDocumentMode, pdfDocPin]);
 
-  // Verified staff draft preview (server sets this only after checking the
-  // staff JWT): show the banner and keep every money/booking action inert —
-  // the server would 409 a draft accept anyway (isEstimateAcceptActive), but
-  // the preview shouldn't offer actions that can only fail.
-  const adminDraftPreview = data?.adminDraftPreview === true;
 
   // A different estimate token is a fresh session — let its first load count.
   useEffect(() => { initialViewCountedRef.current = false; }, [token]);
@@ -5568,7 +5574,7 @@ function EstimateViewPageInner() {
     // Draft preview: PUT /preferences persists into estimate_data, and the
     // server 400s a draft anyway (isEstimateAcceptActive) — but its "no
     // longer active" message reads like a broken draft. Explain instead.
-    if (adminDraftPreview) {
+    if (readOnlyPreview) {
       setError('Draft preview — add-on choices are the customer\'s to make once the estimate is sent.');
       return;
     }
@@ -5620,7 +5626,7 @@ function EstimateViewPageInner() {
     const chained = addOnMutationChainRef.current.then(run, run);
     addOnMutationChainRef.current = chained;
     await chained;
-  }, [adminDraftPreview, loadEstimate, selectedAddOns, token]);
+  }, [readOnlyPreview, loadEstimate, selectedAddOns, token]);
 
   // Termite bond term picker (owner 2026-07-20). Mirrors onToggleAddOn:
   // draft preview stays inert with an explanation, the PUT + reload sequence
@@ -5630,7 +5636,7 @@ function EstimateViewPageInner() {
   const [bondBusy, setBondBusy] = useState(false);
   const onSelectBondTerm = useCallback(async (term) => {
     if (ctaPhaseRef.current === 'submitting') return;
-    if (adminDraftPreview) {
+    if (readOnlyPreview) {
       setError('Draft preview — the bond choice is the customer\'s to make once the estimate is sent. Preset it with the estimator\'s Bond selector.');
       return;
     }
@@ -5669,7 +5675,7 @@ function EstimateViewPageInner() {
     const chained = addOnMutationChainRef.current.then(run, run);
     addOnMutationChainRef.current = chained;
     await chained;
-  }, [adminDraftPreview, loadEstimate, token, paymentPreference, setCtaPhase, scrollToPriceSection]);
+  }, [readOnlyPreview, loadEstimate, token, paymentPreference, setCtaPhase, scrollToPriceSection]);
 
   // Commercial interior-service toggle (owner 2026-08-17). Mirrors the bond
   // picker above: draft preview stays inert, the PUT + reload sequence rides
@@ -5677,7 +5683,7 @@ function EstimateViewPageInner() {
   const [interiorBusy, setInteriorBusy] = useState(false);
   const onToggleInteriorService = useCallback(async (included) => {
     if (ctaPhaseRef.current === 'submitting') return;
-    if (adminDraftPreview) {
+    if (readOnlyPreview) {
       setError('Draft preview — the interior-service choice is the customer\'s to make once the estimate is sent. Preset it with the estimator\'s Pest interior service selector.');
       return;
     }
@@ -5711,14 +5717,14 @@ function EstimateViewPageInner() {
     const chained = addOnMutationChainRef.current.then(run, run);
     addOnMutationChainRef.current = chained;
     await chained;
-  }, [adminDraftPreview, loadEstimate, token, paymentPreference, setCtaPhase, scrollToPriceSection]);
+  }, [readOnlyPreview, loadEstimate, token, paymentPreference, setCtaPhase, scrollToPriceSection]);
 
   const releaseHeldReservation = useCallback((scheduledServiceId) => {
-    if (!scheduledServiceId) return;
+    if (readOnlyPreview || !scheduledServiceId) return;
     fetch(`${API_BASE}/public/estimates/${token}/reserve/${encodeURIComponent(scheduledServiceId)}`, {
       method: 'DELETE',
     }).catch(() => {});
-  }, [token]);
+  }, [token, readOnlyPreview]);
 
   // ── Service opt-out (owner 2026-08-31) ────────────────────────────────
   // Same handler anatomy as onToggleInteriorService above — inert under draft
@@ -5768,7 +5774,7 @@ function EstimateViewPageInner() {
 
   const onPreviewRemoveService = useCallback(async (sectionKey) => {
     if (ctaPhaseRef.current === 'submitting') return;
-    if (adminDraftPreview) {
+    if (readOnlyPreview) {
       setError('Draft preview — removing a service is the customer\'s choice once the estimate is sent.');
       return;
     }
@@ -5780,7 +5786,7 @@ function EstimateViewPageInner() {
       setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });
       setError(err.message);
     }
-  }, [adminDraftPreview, submitOptOut]);
+  }, [readOnlyPreview, submitOptOut]);
 
   const cancelRemoveService = useCallback(() => {
     setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });
@@ -5792,7 +5798,7 @@ function EstimateViewPageInner() {
   // anything is written, and its commit is bound to the same previewBasis.
   const onPreviewRestoreService = useCallback(async (sectionKey) => {
     if (ctaPhaseRef.current === 'submitting') return;
-    if (adminDraftPreview) {
+    if (readOnlyPreview) {
       setError('Draft preview — restoring a service is the customer\'s choice once the estimate is sent.');
       return;
     }
@@ -5804,11 +5810,11 @@ function EstimateViewPageInner() {
       setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });
       setError(err.message);
     }
-  }, [adminDraftPreview, submitOptOut]);
+  }, [readOnlyPreview, submitOptOut]);
 
   const commitOptOut = useCallback(async (sectionKey, included, previewBasis = null) => {
     if (ctaPhaseRef.current === 'submitting') return;
-    if (adminDraftPreview) {
+    if (readOnlyPreview) {
       setError('Draft preview — removing a service is the customer\'s choice once the estimate is sent.');
       return;
     }
@@ -5850,12 +5856,12 @@ function EstimateViewPageInner() {
     const chained = addOnMutationChainRef.current.then(run, run);
     addOnMutationChainRef.current = chained;
     await chained;
-  }, [adminDraftPreview, submitOptOut, loadEstimate, scrollToPriceSection, releaseHeldReservation, reservation]);
+  }, [readOnlyPreview, submitOptOut, loadEstimate, scrollToPriceSection, releaseHeldReservation, reservation]);
 
   const handlePaymentChoice = useCallback(async (pref) => {
     // Staff draft preview: every booking path starts here — keep it inert
     // (no reservation, no deposit/card-hold intent) with an explaining error.
-    if (adminDraftPreview) {
+    if (readOnlyPreview) {
       setError('Draft preview — this estimate has not been sent yet. Send it to the customer to enable booking.');
       return;
     }
@@ -5945,7 +5951,7 @@ function EstimateViewPageInner() {
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [adminDraftPreview, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
+  }, [readOnlyPreview, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     reserveAttemptRef.current += 1;
@@ -5989,7 +5995,7 @@ function EstimateViewPageInner() {
   const performAccept = useCallback(async () => {
     // Defense in depth for the draft preview — handlePaymentChoice already
     // blocks the flow before review, and the server 409s a draft accept.
-    if (adminDraftPreview) {
+    if (readOnlyPreview) {
       setError('Draft preview — this estimate has not been sent yet. Send it to the customer to enable booking.');
       return;
     }
@@ -6190,7 +6196,7 @@ function EstimateViewPageInner() {
     } finally {
       acceptInFlightRef.current = false;
     }
-  }, [adminDraftPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences]);
+  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -6198,6 +6204,7 @@ function EstimateViewPageInner() {
   // Dark-safe: depositPolicy.required is false while ESTIMATE_DEPOSIT_REQUIRED
   // is off, so this falls straight through to performAccept.
   const handleConfirm = useCallback(async () => {
+    if (readOnlyPreview) return;
     // Live-ref submit lock (mirror of the onToggleAddOn/SlotPicker guards):
     // a double-tap on Confirm must not double-enter the flow — the second
     // entry would re-mint a deposit/card-hold intent and re-PUT /accept.
@@ -6398,7 +6405,7 @@ function EstimateViewPageInner() {
       }
     }
     await performAccept();
-  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept]);
+  }, [data, inlineCardIntent, paymentPreference, serviceMode, token, performAccept, readOnlyPreview]);
 
   const handleDepositSuccess = useCallback(async (paymentIntentId) => {
     depositPaymentIntentIdRef.current = paymentIntentId;
@@ -6506,7 +6513,7 @@ function EstimateViewPageInner() {
   // the existing modal branch, which re-mints or 409-falls-through.
   useEffect(() => {
     if (ctaPhase !== 'review' || !reservation) return;
-    if (!inlineAutoPayActive || inlineCardIntent) return;
+    if (readOnlyPreview || !inlineAutoPayActive || inlineCardIntent) return;
     if (recurringCardSetupIntentIdRef.current || recurringCardForceRef.current) return;
     if (inlineIntentMintRef.current) return;
     inlineIntentMintRef.current = true;
@@ -6533,7 +6540,7 @@ function EstimateViewPageInner() {
         }
       } catch { /* modal fallback at confirm */ }
     })();
-  }, [ctaPhase, reservation, inlineAutoPayActive, inlineCardIntent, token, serviceMode, paymentPreference, data]);
+  }, [ctaPhase, reservation, inlineAutoPayActive, inlineCardIntent, token, serviceMode, paymentPreference, data, readOnlyPreview]);
 
   // Funnel telemetry: one review_viewed per review entry (estimate.id only —
   // never the bearer token).
@@ -6567,17 +6574,17 @@ function EstimateViewPageInner() {
   useEffect(() => {
     if (!seamlessAutoPay || serviceMode === 'one_time') return;
     if (ctaPhase !== 'configure' || !selectedSlotId) return;
-    if (adminDraftPreview || existingAppointment || invoiceOnlyAccept || manualScheduleAccept) return;
+    if (readOnlyPreview || existingAppointment || invoiceOnlyAccept || manualScheduleAccept) return;
     if (data?.estimate?.billByInvoice || data?.estimate?.siteConfirmationHold) return;
     if (autoAdvancedSlotRef.current === selectedSlotId) return;
     autoAdvancedSlotRef.current = selectedSlotId;
     handlePaymentChoice('pay_at_visit');
-  }, [seamlessAutoPay, serviceMode, ctaPhase, selectedSlotId, adminDraftPreview, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, data, handlePaymentChoice]);
+  }, [seamlessAutoPay, serviceMode, ctaPhase, selectedSlotId, readOnlyPreview, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, data, handlePaymentChoice]);
 
   const handleAddServiceRequest = useCallback(async () => {
     // Draft preview: don't file a real bundle inquiry (it notifies the team)
     // from a staff preview click — show what the customer would get instead.
-    if (adminDraftPreview) {
+    if (readOnlyPreview) {
       setAddServiceRequestState({
         status: 'error',
         message: 'Draft preview — customer requests are disabled until the estimate is sent.',
@@ -6607,7 +6614,7 @@ function EstimateViewPageInner() {
         message: err.message || `Could not send the request. Call ${WAVES_PHONE_DISPLAY}.`,
       });
     }
-  }, [adminDraftPreview, addServiceOffer, addServiceRequestState.status, token]);
+  }, [readOnlyPreview, addServiceOffer, addServiceRequestState.status, token]);
 
   // Mirror of the bond-rider reset (codex #2915 r3): switching to a tier that
   // can't prepay (mosquito seasonal9) while annual prepay is chosen must send
@@ -6665,7 +6672,7 @@ function EstimateViewPageInner() {
       <Page>
         <NotFoundCard
           token={token}
-          extensionEligible={extensionEligible}
+          extensionEligible={extensionEligible && !readOnlyPreview}
           onExtended={() => {
             // Refresh semantics, NOT a first load: the initial 404 never
             // marked the view counted, so a bare loadEstimate() would flip
@@ -7038,7 +7045,7 @@ function EstimateViewPageInner() {
                 onToggleInteriorService={onToggleInteriorService}
                 interiorBusy={interiorBusy}
                 lawnCalendar={serviceMode === 'recurring' ? data?.lawnCalendar || null : null}
-                onMeasurementChallenge={data?.measurementReviewEnabled && !adminDraftPreview
+                onMeasurementChallenge={data?.measurementReviewEnabled && !readOnlyPreview
                   ? (basis) => setMeasurementReviewBasis(basis || {})
                   : null}
                 disabled={cardsDisabled || isLockedMirrorSection(section)}
@@ -7056,7 +7063,7 @@ function EstimateViewPageInner() {
                 // state (no real sends, no draft PDF); the read-only accepted
                 // recap still omits it entirely.
                 serviceDetailsRequest={renderFlags.showServiceDetailsRequest && section.isRecurring && !readOnly
-                  ? { token, customerEmail: estimate.customerEmail, customerPhone: estimate.customerPhone, disabled: cardsDisabled, preview: adminDraftPreview }
+                  ? { token, customerEmail: estimate.customerEmail, customerPhone: estimate.customerPhone, disabled: cardsDisabled, preview: readOnlyPreview }
                   : null}
                 // Buy-vs-rent options sheet link (GATE_TERMITE_COMPARISON_SHEET,
                 // dark). RAW key on purpose, like the details row above —
@@ -7067,7 +7074,7 @@ function EstimateViewPageInner() {
                 termiteComparison={renderFlags.showTermiteComparison && !readOnly
                   && (section.key === 'termite_bait'
                     || (Array.isArray(section.memberKeys) && section.memberKeys.includes('termite_bait')))
-                  ? { token, preview: adminDraftPreview }
+                  ? { token, preview: readOnlyPreview }
                   : null}
                 // Service opt-out. Server-stamped `removable` is the single
                 // source of eligibility — the same resolver the PUT uses, so
@@ -7385,7 +7392,7 @@ function EstimateViewPageInner() {
       // the action bar carries the what-did-I-agree-to reference.
       return (
         <Page>
-          {adminDraftPreview ? <DraftPreviewBanner /> : null}
+          {readOnlyPreview ? <DraftPreviewBanner draft={adminDraftPreview} estimateId={data?.estimate?.id} /> : null}
           {/* Doc tools ABOVE the hero on every estimate (owner 2026-07-09). */}
           {estimateActionBar}
           <Header
@@ -7394,7 +7401,7 @@ function EstimateViewPageInner() {
             headline={stateHero?.h1 || headline}
             eyebrowOverride={stateHero ? stateHero.eyebrow : null}
           />
-          {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
+          {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} preview={readOnlyPreview} /> : null}
           <TerminalStateCard
             state="accepted"
             customerFirstName={estimate.customerFirstName}
@@ -7404,7 +7411,7 @@ function EstimateViewPageInner() {
             appointmentServiceType={existingAppointment?.serviceType || null}
           />
           <AcceptanceRecordCard acceptance={data.acceptance} />
-          {data.referral ? <EstimateReferralCard referral={data.referral} token={token} staffView={adminPreviewRequested} /> : null}
+          {data.referral ? <EstimateReferralCard referral={data.referral} token={token} staffView={readOnlyPreview} /> : null}
           <AppShowcaseCard />
           <EstimateAddServiceRequestCard
             offer={addServiceOffer}
@@ -7416,7 +7423,7 @@ function EstimateViewPageInner() {
     }
     return (
       <Page>
-        {adminDraftPreview ? <DraftPreviewBanner /> : null}
+        {readOnlyPreview ? <DraftPreviewBanner draft={adminDraftPreview} estimateId={data?.estimate?.id} /> : null}
         {estimateActionBar}
         <Header
           {...headerContactProps}
@@ -7424,7 +7431,7 @@ function EstimateViewPageInner() {
           headline={stateHero?.h1 || headline}
           eyebrowOverride={stateHero ? stateHero.eyebrow : (glassPack?.eyebrow || null)}
         />
-        {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
+        {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} preview={readOnlyPreview} /> : null}
         {/* Returning-visitor strip: the server projects it for any accept-active
             row, which includes quote-required presentations that land here
             (GH codex P2 on #3708). The Ask action follows this branch's own
@@ -7462,6 +7469,7 @@ function EstimateViewPageInner() {
         <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
         {showAskBar && !isRegulatedCertificateSurface ? (
           <EstimateAskBar
+            preview={readOnlyPreview}
             token={token}
             askToken={estimate.askToken}
             selectedFrequency={selectedFrequency}
@@ -7496,7 +7504,7 @@ function EstimateViewPageInner() {
           headline={TERMINAL_HERO.accepted.h1}
           eyebrowOverride={TERMINAL_HERO.accepted.eyebrow}
         />
-        {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
+        {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} preview={readOnlyPreview} /> : null}
         <SuccessCard
           acceptResult={acceptResult}
           // First-visit line (owner ask 2026-07-12, re-confirmed): the slot
@@ -7511,7 +7519,7 @@ function EstimateViewPageInner() {
         />
         {/* The success screen renders from the accept response without a
             /data refetch, so the referral card rides acceptResult.referral. */}
-        {acceptResult?.referral ? <EstimateReferralCard referral={acceptResult.referral} token={token} staffView={adminPreviewRequested} /> : null}
+        {acceptResult?.referral ? <EstimateReferralCard referral={acceptResult.referral} token={token} staffView={readOnlyPreview} /> : null}
       </Page>
     );
   }
@@ -7536,6 +7544,7 @@ function EstimateViewPageInner() {
         <>
           <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
           <EstimateAskBar
+            preview={readOnlyPreview}
             token={token}
             askToken={estimate.askToken}
             selectedFrequency={selectedFrequency}
@@ -7562,7 +7571,7 @@ function EstimateViewPageInner() {
   if (reviewBeforeBooking) {
     return (
       <Page>
-        {adminDraftPreview ? <DraftPreviewBanner /> : null}
+        {readOnlyPreview ? <DraftPreviewBanner draft={adminDraftPreview} estimateId={data?.estimate?.id} /> : null}
         {estimateActionBar}
         <Header
           {...headerContactProps}
@@ -7571,7 +7580,7 @@ function EstimateViewPageInner() {
           eyebrowOverride={glassPack?.eyebrow || null}
           subline={fillGlassTokens(glassPack?.heroSub) || null}
         />
-        {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
+        {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} preview={readOnlyPreview} /> : null}
         {/* aiPanelBlock below renders the Ask bar on this branch (regulated
             certificate surfaces excepted), so the action follows that. */}
         {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
@@ -7586,7 +7595,7 @@ function EstimateViewPageInner() {
 
   return (
     <Page>
-      {adminDraftPreview ? <DraftPreviewBanner /> : null}
+      {readOnlyPreview ? <DraftPreviewBanner draft={adminDraftPreview} estimateId={data?.estimate?.id} /> : null}
       {estimateActionBar}
       <Header
         {...headerContactProps}
@@ -7598,7 +7607,7 @@ function EstimateViewPageInner() {
         subline={fillGlassTokens(glassPack?.heroSub) || null}
       />
 
-      {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} /> : null}
+      {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} preview={readOnlyPreview} /> : null}
 
       {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
 
@@ -7642,7 +7651,7 @@ function EstimateViewPageInner() {
                 // unmounts the inline Payment Element mid-confirmSetup and
                 // the in-flight handleConfirm closure would book the OLD
                 // choice the UI no longer shows.
-                disabled={adminDraftPreview || ctaPhase === 'submitting' || inlineConfirmBusy}
+                disabled={readOnlyPreview || ctaPhase === 'submitting' || inlineConfirmBusy}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 extraInvoiceRows={rodentSetupInvoiceRows}
@@ -7936,6 +7945,7 @@ function EstimateViewPageInner() {
                 style={ctaPhase === 'submitting' ? { pointerEvents: 'none', opacity: 0.65 } : undefined}
               >
                 <SlotPicker
+                  preview={readOnlyPreview}
                   token={token}
                   askToken={estimate.askToken}
                   selectedSlotId={selectedSlotId}
@@ -7992,7 +8002,7 @@ function EstimateViewPageInner() {
                 // payment options the customer will get. Forcing cta.canAccept
                 // false server-side would fall through to the null-terminal
                 // "expired" card and destroy the preview's purpose.
-                disabled={adminDraftPreview || ctaPhase === 'submitting'}
+                disabled={readOnlyPreview || ctaPhase === 'submitting'}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
                 extraInvoiceRows={rodentSetupInvoiceRows}
@@ -8036,6 +8046,7 @@ function EstimateViewPageInner() {
               <AppShowcaseCard onBookToday={canShowSlotPicker ? scrollToBookingSection : null} />
               {!isRegulatedCertificateSurface ? (
                 <EstimateAskBar
+            preview={readOnlyPreview}
                   token={token}
                   askToken={estimate.askToken}
                   selectedFrequency={selectedFrequency}
@@ -8043,7 +8054,7 @@ function EstimateViewPageInner() {
                   chips={askChips}
                 />
               ) : null}
-              {data?.softExit === true && !isRegulatedCertificateSurface && ctaPhase !== 'submitting'
+              {data?.softExit === true && !readOnlyPreview && !isRegulatedCertificateSurface && ctaPhase !== 'submitting'
                 ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null}
               <EstimateAddServiceRequestCard
                 offer={offerCardOffer}
@@ -8064,7 +8075,7 @@ function EstimateViewPageInner() {
         <>
           <AppShowcaseCard onBookToday={canShowSlotPicker && !(ctaPhase === 'review' && reservation) ? scrollToBookingSection : null} />
           <CustomerReviews />
-          {data?.softExit === true && !isRegulatedCertificateSurface && ctaPhase !== 'submitting' && !(ctaPhase === 'review' && reservation)
+          {data?.softExit === true && !readOnlyPreview && !isRegulatedCertificateSurface && ctaPhase !== 'submitting' && !(ctaPhase === 'review' && reservation)
             ? <SoftExitLink onOpen={() => setSoftExitOpen(true)} /> : null}
         </>
       )}

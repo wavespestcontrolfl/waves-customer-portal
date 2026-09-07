@@ -10,6 +10,7 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
 const {
   callOpenAI,
   callGemini,
+  geminiText,
   callAnthropic,
   dispatch,
   dispatchWithFallback,
@@ -592,5 +593,21 @@ describe('dispatchWithFallback', () => {
       fallback: { provider: PROVIDER.OPENAI, model: 'b' },
     }, { text: 'write' });
     expect(result).toEqual({ ok: false, reason: 'same_provider_fallback', failures: [] });
+  });
+});
+
+describe('geminiText — the one parser for callGemini and the direct-fetch photo services', () => {
+  test('joins every answer part and skips thought parts, so a thinking model still yields the JSON', () => {
+    const data = { candidates: [{ content: { parts: [
+      { text: 'Let me look at the lawn…', thought: true },
+      { text: '{"health":' },
+      { text: ' 7}' },
+    ] } }] };
+    expect(geminiText(data)).toBe('{"health": 7}');
+  });
+  test('is empty (falsy) on a missing candidate, content, or parts', () => {
+    expect(geminiText({})).toBe('');
+    expect(geminiText({ candidates: [{}] })).toBe('');
+    expect(geminiText(null)).toBe('');
   });
 });

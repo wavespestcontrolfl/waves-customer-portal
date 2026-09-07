@@ -18,7 +18,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { anthropicText } = require('./llm/call');
+const { anthropicText, geminiText } = require('./llm/call');
 
 // Order-independent content hash of a set of photo data URLs (each hashed, then
 // hashed together) so the review signature can be bound to the EXACT photos scored —
@@ -174,7 +174,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ parts: [{ inline_data: { mime_type: mimeType, data: base64Image } }, { text: VISION_PROMPT }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 500 },
+      generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
     }),
   });
   if (!response.ok) {
@@ -182,7 +182,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType) {
     return null;
   }
   const data = await response.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  const text = geminiText(data);
   if (!text) return null;
   return JSON.parse(text.replace(/```json|```/g, '').trim());
 }
