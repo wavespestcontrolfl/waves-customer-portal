@@ -6555,8 +6555,8 @@ function initScheduledJobs() {
     try {
       const { runScheduleIntegrityWatchdog } = require('./schedule-integrity-watchdog');
       const result = await runScheduleIntegrityWatchdog();
-      if (!result.skipped && (result.stale > 0 || result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed)) {
-        logger.warn(`[schedule-integrity] stale=${result.stale} unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} alerted=${result.alerted}`);
+      if (!result.skipped && (result.stale > 0 || result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.prepayCoverageGaps > 0)) {
+        logger.warn(`[schedule-integrity] stale=${result.stale} unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} prepayCoverageGaps=${result.prepayCoverageGaps} alerted=${result.alerted}`);
       }
     } catch (err) {
       logger.error(`Schedule-integrity watchdog tick failed: ${err.message}`);

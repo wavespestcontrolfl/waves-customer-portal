@@ -5812,7 +5812,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (totalAmount > 0) {
           await stampSeriesPrepaid(trx, {
             anchorServiceId: svc.id,
-            totalAmount: Number(totalAmount),
+            totalAmount,
             method: method || 'cash',
             note: note || null,
             useExistingTransaction: true,
@@ -11246,7 +11246,7 @@ router.post('/:id/prepaid', async (req, res, next) => {
     if (applyToSeries) {
       const result = await stampSeriesPrepaid(db, {
         anchorServiceId: req.params.id,
-        totalAmount: amt,
+        totalAmount: amount,
         method,
         note,
       });

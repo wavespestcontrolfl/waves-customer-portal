@@ -255,6 +255,27 @@ test('POST /admin/schedule/:id/prepaid still stamps a live visit', async () => {
   expect(db.__state.writes.some((w) => w.op === 'update' && Number(w.u.prepaid_amount) === 95)).toBe(true);
 });
 
+test.each([true, [100]])('series prepayment rejects malformed input %p before coercion', async (amount) => {
+  seed();
+  const res = await fetch(`${baseUrl}/api/admin/schedule/parent/prepaid`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amount, method: 'cash', applyToSeries: true }),
+  });
+  expect(res.status).toBe(400);
+  expect(db.__state.writes).toEqual([]);
+});
+
+test('series prepayment preserves numeric-string inputs and exact-cent allocations', async () => {
+  seed();
+  const res = await fetch(`${baseUrl}/api/admin/schedule/parent/prepaid`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amount: '100.00', method: 'cash', applyToSeries: true }),
+  });
+  expect(res.status).toBe(200);
+  const result = await res.json();
+  expect(result.updatedRows.map((row) => row.prepaid_amount)).toEqual([33.33, 33.33, 33.34]);
+});
+
 describe('term coverage is decided by the canonical reader, not a status list (pre-push P0 on #3878)', () => {
   test('the guard reads the linked terms through coveredTermsAsOf (aliased "annual_prepay_terms as t")', async () => {
     seed({ prepaidChild: { annual_prepay_term_id: 'term-1', prepaid_amount: null } });
