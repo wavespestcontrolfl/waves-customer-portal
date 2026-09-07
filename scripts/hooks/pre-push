@@ -31,9 +31,12 @@
 set -u
 
 # ── Escape hatch ─────────────────────────────────────────────────────────
+# Skips the LLM audit only; the deterministic applied-migration guard below
+# still runs (its own hatch is SKIP_MIGRATION_GUARD=1).
+SKIP_AUDIT=0
 if [ "${SKIP_CODEX_REVIEW:-0}" = "1" ]; then
   echo "[codex-review] SKIP_CODEX_REVIEW=1 set — skipping audit." >&2
-  exit 0
+  SKIP_AUDIT=1
 fi
 
 # ── Parse stdin ref tuples ───────────────────────────────────────────────
@@ -42,11 +45,14 @@ fi
 ZERO_SHA="0000000000000000000000000000000000000000"
 ANY_REFS=0
 HAS_NON_DELETE=0
-# Parallel arrays: REF_LABELS[i] is human-readable, REF_SHAS[i] is what we audit.
+# Parallel arrays: REF_LABELS[i] is human-readable, REF_SHAS[i] is what we
+# audit, REF_REMOTE_SHAS[i] is what the remote branch is at now (ZERO_SHA for
+# a new branch) — the applied-migration guard diffs against it.
 REF_LABELS=()
 REF_SHAS=()
+REF_REMOTE_SHAS=()
 SEEN_SHAS=" "
-while read -r local_ref local_sha _remote_ref _remote_sha; do
+while read -r local_ref local_sha _remote_ref remote_sha; do
   ANY_REFS=1
   if [ -z "${local_sha:-}" ] || [ "$local_sha" = "$ZERO_SHA" ]; then
     continue
@@ -59,6 +65,7 @@ while read -r local_ref local_sha _remote_ref _remote_sha; do
   SEEN_SHAS="$SEEN_SHAS$local_sha "
   REF_LABELS+=("${local_ref:-?}")
   REF_SHAS+=("$local_sha")
+  REF_REMOTE_SHAS+=("${remote_sha:-$ZERO_SHA}")
 done
 
 if [ "$ANY_REFS" = "1" ] && [ "$HAS_NON_DELETE" = "0" ]; then
@@ -72,6 +79,54 @@ if [ -z "$REPO_ROOT" ]; then
   exit 0
 fi
 cd "$REPO_ROOT"
+
+# ── Applied-migration guard (deterministic, no LLM) ──────────────────────
+# A migration file that already exists on the REMOTE branch has been run by
+# a deploy: every push to an open PR deploys a Railway preview whose
+# Postgres runs the branch's migrations pre-deploy (main → prod). knex
+# tracks migrations by filename, so modifying that file is a silent no-op
+# in every environment that ran it, and renaming/deleting it fails every
+# later deploy of that environment ("migration directory is corrupt").
+# Supersede with a NEW file instead — .claude/skills/waves-db/SKILL.md §4.
+# Blocks the push (exit 1); a ref whose remote sha is not fetched locally
+# is skipped with a warning (the guard cannot see what the remote holds).
+#
+# Escape hatch — ONLY after the preview database has been cleaned by hand
+# (its knex_migrations row deleted, DDL undone) so the edited file re-runs:
+#   SKIP_MIGRATION_GUARD=1 git push
+MIGRATIONS_DIR="server/models/migrations"
+if [ "${SKIP_MIGRATION_GUARD:-0}" = "1" ]; then
+  echo "[migration-guard] SKIP_MIGRATION_GUARD=1 set — skipping applied-migration guard." >&2
+else
+  GUARD_HITS=""
+  i=0
+  while [ "$i" -lt "${#REF_SHAS[@]}" ]; do
+    remote="${REF_REMOTE_SHAS[$i]:-$ZERO_SHA}"
+    if [ "$remote" != "$ZERO_SHA" ]; then
+      if git cat-file -e "$remote^{commit}" 2>/dev/null; then
+        changed="$(git diff --name-status --diff-filter=MDRT "$remote" "${REF_SHAS[$i]}" -- "$MIGRATIONS_DIR" 2>/dev/null || true)"
+        if [ -n "$changed" ]; then
+          GUARD_HITS="${GUARD_HITS}${REF_LABELS[$i]}:
+${changed}
+"
+        fi
+      else
+        echo "[migration-guard] remote sha ${remote:0:9} for ${REF_LABELS[$i]} is not fetched locally — guard skipped for this ref (git fetch origin to enable it)." >&2
+      fi
+    fi
+    i=$((i + 1))
+  done
+  if [ -n "$GUARD_HITS" ]; then
+    echo "[migration-guard] BLOCKED — these migration files already exist on the remote branch, so a deploy has run them; knex tracks by filename and the change is a silent no-op there (rename/delete breaks every later deploy of that environment):" >&2
+    printf '%s' "$GUARD_HITS" | sed 's/^/  /' >&2
+    echo "[migration-guard] Supersede with a NEW migration file (.claude/skills/waves-db/SKILL.md §4). If the preview database was already cleaned by hand, re-run with SKIP_MIGRATION_GUARD=1." >&2
+    exit 1
+  fi
+fi
+
+if [ "$SKIP_AUDIT" = "1" ]; then
+  exit 0
+fi
 
 # Fallback: nothing piped on stdin (some tooling invokes hooks this way).
 # Audit HEAD as a best-effort approximation.
