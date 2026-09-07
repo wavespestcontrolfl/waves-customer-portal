@@ -93,7 +93,11 @@ it('offers the server-authorized summary revoke action after completion', async 
     return { packetId: 'packet', state: 'done', canRevokeSummary: true };
   });
   fireEvent.click(screen.getByRole('button', { name: 'Complete visit' }));
-  fireEvent.click(await screen.findByRole('button', { name: 'Revoke shared summary link' }));
+  const revoke = await screen.findByRole('button', { name: 'Revoke shared summary link' });
+  // The successful submit still awaits IndexedDB cleanup. Real clicks wait
+  // for the control to become enabled; fireEvent does not do that for us.
+  await waitFor(() => expect(revoke).toBeEnabled());
+  fireEvent.click(revoke);
   expect(await screen.findByText('The shared summary link has been revoked.')).toBeInTheDocument();
   expect(adminFetch).toHaveBeenCalledWith('/admin/visit-closeouts/visit/revoke-summary', { method: 'POST', body: '{}' });
 });
