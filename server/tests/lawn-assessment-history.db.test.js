@@ -85,6 +85,44 @@ describeDb('property lawn history through PostgreSQL', () => {
     expect(ambiguous.previous).toBeNull();
   });
 
+  test.each([false, true])('a normally stamped legacy visit retains its current-only report when scope is ambiguous (pinned=%s)', async (pinned) => {
+    const f = await fixture(knex);
+    await f.assessment(await f.visit(-20));
+    const visit = await f.visit(-1, {
+      property_id: null, service_address_line1: f.property.address_line1,
+      service_address_city: f.property.city, service_address_zip: f.property.zip,
+    });
+    const record = await f.record(visit);
+    const installed = await f.assessment(visit, { service_record_id: record.id });
+    const retake = await f.assessment(visit);
+    await knex('customer_properties').insert({ customer_id: f.customerId });
+    const resolved = await history.historyForAssessment(retake, { knex, pinned });
+    expect(resolved.scope.propertyId).toBeNull();
+    expect(resolved.rows.map((row) => row.id)).toEqual([pinned ? retake.id : installed.id]);
+    expect(resolved.current.id).toBe(pinned ? retake.id : installed.id);
+    expect(resolved.previous).toBeNull();
+    expect(resolved.progress.previousDelta).toBeNull();
+    expect(resolved.eligibleVisitIds).toEqual([]);
+  });
+
+  test('confirmed fallback stamps survive an additional property without broadening unstamped visit history', async () => {
+    const f = await fixture(knex);
+    const visit = await f.visit(-1, {
+      property_id: null, service_address_line1: f.property.address_line1,
+      service_address_city: f.property.city, service_address_zip: f.property.zip,
+    });
+    const assessment = await f.assessment(visit, { property_id: f.property.id });
+    expect((await history.latestForCustomer(f.customerId, {}, knex)).map((row) => row.id)).toEqual([assessment.id]);
+    await knex('customer_properties').insert({ customer_id: f.customerId });
+    expect((await history.latestForCustomer(f.customerId, {}, knex)).map((row) => row.id)).toEqual([assessment.id]);
+    const resolved = await history.historyForAssessment(assessment, { knex });
+    expect(resolved.current.id).toBe(assessment.id);
+    expect(resolved.scope.propertyId).toBe(f.property.id);
+    expect(resolved.eligibleVisitIds).toEqual([]);
+    await knex('scheduled_services').where({ id: visit.id }).update({ service_address_line1: '999 Different Street' });
+    expect((await history.historyForAssessment(assessment, { knex })).current).toBeNull();
+  });
+
   test.each([false, true])('a property reassignment refuses the original assessment, including signed pins (pinned=%s)', async (pinned) => {
     const f = await fixture(knex);
     const visit = await f.visit();

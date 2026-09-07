@@ -81,6 +81,24 @@ describeDb('confirmed lawn baseline transactions', () => {
     expect((await knex('lawn_assessments').where({ id: old.id }).first()).is_baseline).toBe(false);
   });
 
+  test.each([true, false])('same-day empty reset clears the live baseline and preserves the earlier report (scoped=%s)', async (scoped) => {
+    const f = await fixture(knex);
+    const old = await f.assessment(await f.visit(0), { confirmed_by_tech: false });
+    await confirm(old);
+    const result = await resetBaseline(f.customerId, 'fixture', 'Fixture reset', {
+      knex, propertyId: scoped ? f.property.id : undefined, propertyHistoryEnabled: true,
+    });
+    expect(result).toEqual({ oldBaselineId: old.id, newBaselineId: undefined });
+    expect(await knex('lawn_assessments').where({ customer_id: f.customerId, is_baseline: true })).toEqual([]);
+    expect(await history.latestForCustomer(f.customerId, {}, knex)).toEqual([]);
+    expect((await history.historyForAssessment(old, { knex })).rows.map((row) => row.id)).toEqual([old.id]);
+    const next = await f.assessment(await f.visit(0), { confirmed_by_tech: false });
+    expect((await confirm(next)).is_baseline).toBe(true);
+    expect((await history.latestForCustomer(f.customerId, {}, knex)).map((row) => row.id)).toEqual([next.id]);
+    expect((await history.historyForAssessment(next, { knex })).rows.map((row) => row.id)).toEqual([next.id]);
+    expect((await history.historyForAssessment(old, { knex, pinned: true })).current.id).toBe(old.id);
+  });
+
   test.each([true, false])('empty-history reset records null baselines and permits the next confirm (scoped=%s)', async (scoped) => {
     const f = await fixture(knex);
     await expect(resetBaseline(f.customerId, 'fixture', 'Fixture reset', {

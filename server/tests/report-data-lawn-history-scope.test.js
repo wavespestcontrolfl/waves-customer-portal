@@ -61,6 +61,26 @@ describeDb('report property history projections', () => {
     expect(after.lawnHistory.identity).not.toBe(before.lawnHistory.identity);
   });
 
+  test.each([false, true])('a legacy visit report remains available after a second property is added (assessment stamped=%s)', async (stamped) => {
+    const f = await fixture(knex);
+    const visit = await f.visit(-1, {
+      property_id: null, service_address_line1: f.property.address_line1,
+      service_address_city: f.property.city, service_address_zip: f.property.zip,
+    });
+    const record = await f.record(visit);
+    const assessment = await f.assessment(visit, { service_record_id: record.id, property_id: stamped ? f.property.id : null });
+    await knex('customer_properties').insert({ customer_id: f.customerId });
+    const service = { ...record, service_line: 'lawn' };
+    const rendered = await resolveCanonicalLawnRender(service, knex, { propertyHistoryEnabled: true });
+    expect(rendered.pin).toBe(assessment.id);
+    for (const pinnedAssessmentId of [null, assessment.id]) {
+      const report = await buildLawnAssessmentReportData(service, 'lawn', knex, { propertyHistoryEnabled: true, pinnedAssessmentId });
+      expect(report.assessmentId).toBe(assessment.id);
+      expect(report.trend).toHaveLength(1);
+      expect(report.assessmentDate).toBe(etCalendarDayOf(visit.scheduled_date));
+    }
+  });
+
   test.each([false, true])('a reassigned visit cannot render the original property scores or photos (pinned=%s)', async (pinned) => {
     const f = await fixture(knex);
     const visit = await f.visit(-1);

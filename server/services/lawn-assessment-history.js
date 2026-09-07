@@ -9,7 +9,7 @@ const logger = require('./logger');
 const { etCalendarDayOf, etDateString } = require('../utils/datetime-et');
 const { calculateLawnOverallScore } = require('../../shared/lawn-scores.cjs');
 
-const RESOLVER_VERSION = 1;
+const RESOLVER_VERSION = 2;
 
 function assessmentQuery(customerId, knex = db, { confirmed = true } = {}) {
   const query = knex('lawn_assessments as la')
@@ -62,20 +62,25 @@ async function visitEligibility({ customerId, propertyId, allowPrimary = true },
   };
 }
 
-/** One evidence rule for assessment rows, visits, and ancillary trends. */
-function isEligible(row, scope) {
-  if (!scope?.propertyId || row.customer_id !== scope.customerId) return false;
+/** Unknown scope is distinct from evidence that contradicts a known property. */
+function hasConflictingEvidence(row, scope) {
   const visit = resolveVisit(row);
-  if (visit.conflict || visit.invalidLink) return false;
-  if (row.property_id && row.property_id !== scope.propertyId) return false;
-  if (row.history_visit_property_id) return row.history_visit_property_id === scope.propertyId;
-  if (!scope.includeUnlinked) return false;
-  if (!row.history_address_line1) return true;
+  if (row.customer_id !== scope.customerId || visit.conflict || visit.invalidLink) return true;
+  const propertyId = row.property_id || row.history_visit_property_id;
+  if (propertyId && propertyId !== scope.propertyId) return true;
+  if (!scope.propertyId || row.history_visit_property_id || !row.history_address_line1) return false;
   const { addressKey } = require('./customer-properties');
   return addressKey({
     address_line1: row.history_address_line1, address_line2: row.history_address_line2,
     city: row.history_city, zip: row.history_zip,
-  }) === scope.propertyAddressKey;
+  }) !== scope.propertyAddressKey;
+}
+
+/** Unstamped visits retain the live sole-property rule. A confirmed stamp is
+ * durable evidence; an unconfirmed draft must still pass confirmation's fence. */
+function isEligible(row, scope) {
+  if (!scope?.propertyId || hasConflictingEvidence(row, scope)) return false;
+  return !!(row.history_visit_property_id || (row.property_id && row.confirmed_by_tech) || scope.includeUnlinked);
 }
 
 async function scopeForAssessment(row, knex = db) {
@@ -84,7 +89,10 @@ async function scopeForAssessment(row, knex = db) {
     propertyId: row.property_id || row.history_visit_property_id || null,
     allowPrimary: false,
   }, knex);
-  return isEligible(row, scope) ? scope : { ...scope, propertyId: null, includeUnlinked: false };
+  return isEligible(row, scope) ? scope : {
+    ...scope, propertyId: null, includeUnlinked: false,
+    conflictingEvidence: hasConflictingEvidence(row, scope),
+  };
 }
 
 function visitEvidence(customerId, visit) {
@@ -174,22 +182,27 @@ function restrictVisitHistory(query, table, eligibleIds, knex = db) {
   });
 }
 
-async function applicableReset({ customerId, propertyId, throughVisitDate }, knex = db) {
+async function applicableReset({ customerId, propertyId, throughVisitDate, throughConfirmedOrder }, knex = db) {
   if (!propertyId) return null;
   const resets = await knex('lawn_baseline_resets').where({ customer_id: customerId })
     .where(function propertyOrLegacy() { this.where({ property_id: propertyId }).orWhereNull('property_id'); })
-    .orderBy('created_at', 'desc').orderBy('id', 'desc');
+    .orderBy('created_at', 'desc').orderBy('id', 'desc')
+    .select('*', knex.raw('to_char(created_at AT TIME ZONE \'UTC\', \'YYYY-MM-DD"T"HH24:MI:SS.US\') as history_reset_order'));
   for (const reset of resets) {
     // A later administrative action must not rewrite an earlier report window,
     // even if that action selected an older visit as its replacement baseline.
     const resetDay = etDateString(new Date(reset.created_at));
     if (throughVisitDate && resetDay > throughVisitDate) continue;
+    if (resetDay === throughVisitDate && throughConfirmedOrder && reset.history_reset_order > throughConfirmedOrder) continue;
     const baseline = reset.new_baseline_id
       ? await assessmentQuery(customerId, knex, { confirmed: false }).where('la.id', reset.new_baseline_id).first()
       : null;
     const visit = baseline ? resolveVisit(baseline) : null;
-    const boundary = visit && !visit.conflict && !visit.invalidLink ? visit.visitDate : resetDay;
-    if (!throughVisitDate || boundary <= throughVisitDate) return { ...reset, boundary };
+    const hasReplacement = visit && !visit.conflict && !visit.invalidLink;
+    const boundary = hasReplacement ? visit.visitDate : resetDay;
+    if (!throughVisitDate || boundary <= throughVisitDate) return {
+      ...reset, boundary, afterConfirmedOrder: hasReplacement ? null : reset.history_reset_order,
+    };
   }
   return null;
 }
@@ -200,7 +213,9 @@ async function propertyHistory({ customerId, scope, throughVisitDate, reset, cur
     const visit = resolveVisit(row);
     if (visit.conflict) logger.warn(`[lawn-history] conflicting assessment links: ${row.id}`);
     return isEligible(row, scope) && (!throughVisitDate || visit.visitDate <= throughVisitDate)
-      && (!reset?.boundary || visit.visitDate >= reset.boundary);
+      && (!reset?.boundary || visit.visitDate >= reset.boundary)
+      && (!reset?.afterConfirmedOrder || visit.visitDate > reset.boundary
+        || (row.history_confirmed_order || row.history_created_order || '') > reset.afterConfirmedOrder);
   });
   let history = installedRows(eligible, { current, pinned });
   if (current) {
@@ -239,12 +254,17 @@ async function historyForAssessment(row, { pinned = false, knex = db } = {}) {
   const joined = candidates.find((candidate) => candidate.id === row.id) || row;
   const scope = await scopeForAssessment(joined, knex);
   const visit = resolveVisit(joined);
-  const reset = await applicableReset({ customerId: row.customer_id, propertyId: scope.propertyId, throughVisitDate: visit.visitDate }, knex);
+  const reset = await applicableReset({
+    customerId: row.customer_id, propertyId: scope.propertyId, throughVisitDate: visit.visitDate,
+    throughConfirmedOrder: joined.history_confirmed_order || joined.history_created_order,
+  }, knex);
   let rows = await propertyHistory({ customerId: row.customer_id, scope, throughVisitDate: visit.visitDate, reset, current: joined, pinned, rows: candidates }, knex);
-  // An unstamped report may lack a provable property. Show only its own
-  // assessment; conflicting property/address evidence must never use this
-  // fallback, nor may it bypass a resolved property's reset window.
-  if (!scope.propertyId && !joined.property_id && !joined.history_visit_property_id && !joined.history_address_line1) rows = installedRows([joined]);
+  // A normal address stamp does not prove or contradict an unresolved scope.
+  // Retain this visit's installed row (or signed pin), with no other history.
+  if (!scope.propertyId && !scope.conflictingEvidence) {
+    rows = installedRows(candidates.filter((candidate) => resolveVisit(candidate).identity === visit.identity
+      && !candidate.property_id && !candidate.history_visit_property_id), { current: joined, pinned });
+  }
   const current = rows.find((candidate) => candidate.visit_identity === visit.identity) || null;
   const index = rows.indexOf(current);
   const eligibleIds = await eligibleVisitIds(scope, knex);
