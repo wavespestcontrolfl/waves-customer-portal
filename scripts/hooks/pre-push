@@ -22,6 +22,8 @@
 #                                         ONLY after verifying the file has
 #                                         not run anywhere (see the guard)
 #   CODEX_REVIEW_BASE=origin/foo       — review against a non-default base
+#                                         (LLM audit only — the migration
+#                                         guard's baseline is always origin/main)
 #   CODEX_REVIEW_TIMEOUT=300           — per-ref codex budget in seconds (default 180)
 #   CODEX_REVIEW_MAX_DIFF_BYTES=0      — disable the diff-size cap (default 500000)
 #
@@ -61,6 +63,7 @@ REF_SHAS=()
 GUARD_LABELS=()
 GUARD_SHAS=()
 GUARD_REMOTE_SHAS=()
+GUARD_REMOTE_REFS=()
 SEEN_SHAS=" "
 while read -r local_ref local_sha remote_ref remote_sha; do
   ANY_REFS=1
@@ -71,6 +74,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   GUARD_LABELS+=("${local_ref:-?} -> ${remote_ref:-?}")
   GUARD_SHAS+=("$local_sha")
   GUARD_REMOTE_SHAS+=("${remote_sha:-$ZERO_SHA}")
+  GUARD_REMOTE_REFS+=("${remote_ref:-}")
   case "$SEEN_SHAS" in
     *" $local_sha "*) continue ;;
   esac
@@ -93,28 +97,52 @@ cd "$REPO_ROOT"
 
 BASE="${CODEX_REVIEW_BASE:-origin/main}"
 
+# Fallback: nothing piped on stdin (some tooling invokes hooks this way).
+# Guard and audit HEAD as a best-effort approximation — the destination is
+# unknown (ZERO_SHA), so the guard's remote-tip check is skipped but its
+# origin/main checks still run.
+if [ "$ANY_REFS" = "0" ]; then
+  HEAD_SHA="$(git rev-parse HEAD 2>/dev/null || true)"
+  if [ -z "$HEAD_SHA" ]; then
+    echo "[codex-review] no refs on stdin and no HEAD — skipping." >&2
+    exit 0
+  fi
+  GUARD_LABELS+=("HEAD -> ?")
+  GUARD_SHAS+=("$HEAD_SHA")
+  GUARD_REMOTE_SHAS+=("$ZERO_SHA")
+  GUARD_REMOTE_REFS+=("")
+  REF_LABELS+=("HEAD")
+  REF_SHAS+=("$HEAD_SHA")
+fi
+
 # ── Applied-migration guard (deterministic, no LLM) ──────────────────────
 # A migration file that already exists on the destination's REMOTE ref, or
-# on the integration base (merge base with $BASE, default origin/main),
-# has almost certainly been run by a deploy: every push to an open PR
-# deploys a Railway preview whose Postgres runs the branch's migrations
-# pre-deploy, and main deploys to prod. knex tracks migrations by
-# filename, so modifying that file is a silent no-op in every environment
-# that ran it, and renaming/deleting it fails every later deploy of that
-# environment ("migration directory is corrupt"). Three baselines are
-# checked for every destination: the remote tip catches the branch's own
-# preview-run files; the merge base catches main's prod-run files the
-# branch inherited by merging (its old tip never had the file, so the
-# remote diff would read "added"); and the $BASE TIP itself — modified
-# files and byte-identical renames — catches a stale branch that
-# cherry-picked or squashed a main migration instead of merging (the
-# merge base predates the file, so both ancestry diffs read "added" too),
-# including a copy re-stamped under a new filename, which knex would run
-# a second time. $BASE is fetched from its remote first so the tip is
-# the deployed one, not whatever the last `git fetch` left behind.
-# Supersede with a NEW file instead — .claude/skills/waves-db/SKILL.md §4.
-# Blocks the push (exit 1). A baseline that is not fetched locally is
-# skipped with a warning (the guard cannot see what it cannot diff).
+# on origin/main, has almost certainly been run by a deploy: every push to
+# an open PR deploys a Railway preview whose Postgres runs the branch's
+# migrations pre-deploy, and main deploys to prod. knex tracks migrations
+# by filename, so modifying that file is a silent no-op in every
+# environment that ran it, renaming/deleting it fails every later deploy
+# of that environment ("migration directory is corrupt"), and a
+# byte-identical copy under a new filename runs the same DDL a second
+# time. Three baselines are checked for every destination: the remote
+# tip catches the branch's own preview-run files; the merge base with
+# origin/main catches main's prod-run files the branch inherited by
+# merging (its old tip never had the file, so the remote diff would read
+# "added"); and the origin/main TIP itself — modified files, byte-identical
+# renames and copies — catches a stale branch that cherry-picked or
+# squashed a main migration instead of merging (the merge base predates
+# the file, so both ancestry diffs read "added" too), including a copy
+# re-stamped under a new filename. Rename/copy detection is exact-match
+# only, so a newer main file a stale branch merely lacks (D at the tip,
+# not checked — that is not a deletion) is never paired with the branch's
+# own similar boilerplate. Both baselines are fetched from the push's
+# remote first (bounded, non-interactive): origin/main so the tip is the
+# deployed one, and a destination tip this clone has never fetched —
+# which is BLOCKED if it still cannot be inspected, because a force-push
+# over a tip the guard cannot diff is exactly the case it exists for.
+# The baseline is fixed to origin/main: CODEX_REVIEW_BASE only moves the
+# LLM audit, never what counts as deployed. Supersede with a NEW file
+# instead — .claude/skills/waves-db/SKILL.md §4. Blocks the push (exit 1).
 #
 # The guard sees pushes, not deploys: a pushed file whose deploy failed or
 # never ran its migrations is NOT applied and may be edited in place — a
@@ -124,76 +152,85 @@ BASE="${CODEX_REVIEW_BASE:-origin/main}"
 # hatch; verify first (preview/prod knex_migrations has no row for it):
 #   SKIP_MIGRATION_GUARD=1 git push
 MIGRATIONS_DIR="server/models/migrations"
+GUARD_BASE="origin/main"
+PUSH_REMOTE="${1:-}"
+bounded_fetch() {
+  # $1 = remote (name or url), $2 = refspec. Non-interactive and bounded
+  # (30 s, same process-group watchdog as the LLM audit below) so a dead
+  # network or a credential prompt cannot hang the push. Returns git's
+  # status; a timeout is a failure.
+  set -m
+  GIT_TERMINAL_PROMPT=0 git fetch --quiet "$1" "$2" >/dev/null 2>&1 &
+  local pid=$!
+  ( sleep 30; kill -TERM -"$pid" 2>/dev/null; sleep 5; kill -KILL -"$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  local wd=$!
+  set +m
+  local st=0
+  wait "$pid" || st=$?
+  kill -TERM -"$wd" 2>/dev/null
+  wait "$wd" 2>/dev/null
+  return "$st"
+}
 guard_diff() {
-  # $1 = baseline sha, $2 = pushed sha. Prints M/D/R/T lines under the
-  # migrations dir, prefixed with the baseline for the message.
-  git diff --name-status --diff-filter=MDRT "$1" "$2" -- "$MIGRATIONS_DIR" 2>/dev/null \
+  # $1 = baseline sha, $2 = pushed sha, $3 = diff-filter. Prints
+  # name-status lines under the migrations dir, prefixed with the
+  # baseline for the message. Exact-match rename AND copy detection
+  # (--find-copies-harder lets an unchanged file be a copy source).
+  git diff --name-status --find-copies-harder -C100% --diff-filter="$3" "$1" "$2" -- "$MIGRATIONS_DIR" 2>/dev/null \
     | sed "s|^|    vs ${1:0:9}: |"
 }
 if [ "${SKIP_MIGRATION_GUARD:-0}" = "1" ]; then
   echo "[migration-guard] SKIP_MIGRATION_GUARD=1 set — skipping applied-migration guard." >&2
 else
   GUARD_HITS=""
-  # Refresh $BASE from its remote (origin/main -> fetch origin main): the
-  # hook runs against whatever the last fetch left locally, and a main
-  # that advanced since then could have deployed a migration this push
-  # carries an edited copy of. Non-interactive and bounded (30 s, same
-  # process-group watchdog as the LLM audit below) so a dead network or
-  # a credential prompt cannot hang the push; a failed or timed-out fetch
-  # falls back to the local copy with a warning rather than blocking.
-  BASE_REMOTE="${BASE%%/*}"
-  BASE_BRANCH="${BASE#*/}"
-  if [ "$BASE_REMOTE" != "$BASE" ] && [ -n "$BASE_BRANCH" ] \
-    && git remote get-url "$BASE_REMOTE" >/dev/null 2>&1; then
-    set -m
-    GIT_TERMINAL_PROMPT=0 git fetch --quiet "$BASE_REMOTE" \
-      "+refs/heads/$BASE_BRANCH:refs/remotes/$BASE_REMOTE/$BASE_BRANCH" >/dev/null 2>&1 &
-    FETCH_PID=$!
-    ( sleep 30; kill -TERM -"$FETCH_PID" 2>/dev/null; sleep 5; kill -KILL -"$FETCH_PID" 2>/dev/null ) >/dev/null 2>&1 &
-    FETCH_WATCHDOG_PID=$!
-    set +m
-    FETCH_STATUS=0
-    wait "$FETCH_PID" || FETCH_STATUS=$?
-    kill -TERM -"$FETCH_WATCHDOG_PID" 2>/dev/null
-    wait "$FETCH_WATCHDOG_PID" 2>/dev/null
-    if [ "$FETCH_STATUS" -ne 0 ]; then
-      echo "[migration-guard] could not fetch $BASE_BRANCH from $BASE_REMOTE (offline, or it took over 30 s) — checking against the local $BASE, which may be stale." >&2
+  GUARD_UNSEEN=""
+  # Refresh origin/main: the hook otherwise runs against whatever the
+  # last fetch left locally, and a main that advanced since then could
+  # have deployed a migration this push carries an edited copy of. A
+  # failed or timed-out fetch falls back to the local copy with a warning.
+  if git remote get-url origin >/dev/null 2>&1; then
+    if ! bounded_fetch origin "+refs/heads/main:refs/remotes/origin/main"; then
+      echo "[migration-guard] could not fetch main from origin (offline, or it took over 30 s) — checking against the local $GUARD_BASE, which may be stale." >&2
     fi
   fi
   BASE_OK=0
-  if git rev-parse --verify "$BASE" >/dev/null 2>&1; then
+  if git rev-parse --verify "$GUARD_BASE" >/dev/null 2>&1; then
     BASE_OK=1
   else
-    echo "[migration-guard] base '$BASE' not found locally — the integration-base check is skipped for this push (git fetch origin to enable it)." >&2
+    echo "[migration-guard] $GUARD_BASE not found locally — the origin/main checks are skipped for this push (git fetch origin to enable them)." >&2
   fi
   i=0
   while [ "$i" -lt "${#GUARD_SHAS[@]}" ]; do
     pushed="${GUARD_SHAS[$i]}"
     remote="${GUARD_REMOTE_SHAS[$i]:-$ZERO_SHA}"
+    remote_ref="${GUARD_REMOTE_REFS[$i]:-}"
     hits=""
     if [ "$remote" != "$ZERO_SHA" ]; then
+      if ! git cat-file -e "$remote^{commit}" 2>/dev/null \
+        && [ -n "$PUSH_REMOTE" ] && [ -n "$remote_ref" ]; then
+        # The destination advanced from another clone: fetch its tip so
+        # the guard can diff it (objects land in FETCH_HEAD's reach).
+        bounded_fetch "$PUSH_REMOTE" "$remote_ref" || true
+      fi
       if git cat-file -e "$remote^{commit}" 2>/dev/null; then
-        hits="$(guard_diff "$remote" "$pushed")"
+        hits="$(guard_diff "$remote" "$pushed" MDRTC)"
       else
-        echo "[migration-guard] remote sha ${remote:0:9} for ${GUARD_LABELS[$i]} is not fetched locally — remote-tip check skipped for this ref (git fetch origin to enable it)." >&2
+        GUARD_UNSEEN="${GUARD_UNSEEN}  ${GUARD_LABELS[$i]} (destination tip ${remote:0:9})
+"
       fi
     fi
     if [ "$BASE_OK" = "1" ]; then
-      merge_base="$(git merge-base "$BASE" "$pushed" 2>/dev/null || true)"
+      merge_base="$(git merge-base "$GUARD_BASE" "$pushed" 2>/dev/null || true)"
       if [ -n "$merge_base" ] && [ "$merge_base" != "$remote" ]; then
-        base_hits="$(guard_diff "$merge_base" "$pushed")"
+        base_hits="$(guard_diff "$merge_base" "$pushed" MDRTC)"
         [ -n "$base_hits" ] && hits="${hits:+$hits
 }$base_hits"
       fi
-      # $BASE tip: a path that exists on the tip with different content
-      # (M) is a deployed file this push changes, whatever the ancestry;
-      # a byte-identical copy under a new name (R100) is a deployed file
-      # knex would run again. D is NOT checked here — a stale branch
-      # simply lacks main's newer files, that is not a deletion — and
-      # rename detection is exact-match only, so one of those missing
-      # files is never paired with the branch's own similar boilerplate.
-      tip_hits="$(git diff --name-status --find-renames=100% --diff-filter=MR "$BASE" "$pushed" -- "$MIGRATIONS_DIR" 2>/dev/null \
-        | sed "s|^|    vs $BASE tip: |")"
+      # origin/main tip: M = a deployed file this push changes, whatever
+      # the ancestry; R100/C100 = a deployed file knex would run again
+      # under a new name. D is not checked here (see above).
+      tip_hits="$(git diff --name-status --find-copies-harder -C100% --diff-filter=MRC "$GUARD_BASE" "$pushed" -- "$MIGRATIONS_DIR" 2>/dev/null \
+        | sed "s|^|    vs $GUARD_BASE tip: |")"
       [ -n "$tip_hits" ] && hits="${hits:+$hits
 }$tip_hits"
     fi
@@ -204,8 +241,14 @@ ${hits}
     fi
     i=$((i + 1))
   done
+  if [ -n "$GUARD_UNSEEN" ]; then
+    echo "[migration-guard] BLOCKED — the destination's current tip is not fetched locally and could not be fetched, so the guard cannot tell whether this push edits, renames, deletes, or copies a migration that ref has already run:" >&2
+    printf '%s' "$GUARD_UNSEEN" >&2
+    echo "[migration-guard] git fetch ${PUSH_REMOTE:-origin} <branch> and push again. Only if you have VERIFIED no migration on that tip is affected: SKIP_MIGRATION_GUARD=1 git push" >&2
+    exit 1
+  fi
   if [ -n "$GUARD_HITS" ]; then
-    echo "[migration-guard] BLOCKED — these migration files already exist on the destination branch or on $BASE, so a deploy has run them; knex tracks by filename and the change is a silent no-op there (rename/delete breaks every later deploy of that environment):" >&2
+    echo "[migration-guard] BLOCKED — these migration files already exist on the destination branch or on $GUARD_BASE, so a deploy has run them; knex tracks by filename: an edit is a silent no-op there, a rename/delete breaks every later deploy of that environment, and a byte-identical copy (R100/C100) runs the same migration again:" >&2
     printf '%s' "$GUARD_HITS" >&2
     echo "[migration-guard] Supersede with a NEW migration file (.claude/skills/waves-db/SKILL.md §4). Only if you have VERIFIED the file never ran (the deploy failed before migrating — no knex_migrations row) or the preview database was cleaned by hand: SKIP_MIGRATION_GUARD=1 git push" >&2
     exit 1
@@ -214,18 +257,6 @@ fi
 
 if [ "$SKIP_AUDIT" = "1" ]; then
   exit 0
-fi
-
-# Fallback: nothing piped on stdin (some tooling invokes hooks this way).
-# Audit HEAD as a best-effort approximation.
-if [ "${#REF_SHAS[@]}" -eq 0 ]; then
-  HEAD_SHA="$(git rev-parse HEAD 2>/dev/null || true)"
-  if [ -z "$HEAD_SHA" ]; then
-    echo "[codex-review] no refs on stdin and no HEAD — skipping." >&2
-    exit 0
-  fi
-  REF_LABELS+=("HEAD")
-  REF_SHAS+=("$HEAD_SHA")
 fi
 
 SCHEMA=".github/codex-review-schema.json"
