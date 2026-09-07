@@ -22,3 +22,11 @@ it('returns a valid in-memory identity when session storage is unavailable', asy
   const { ibSessionId } = await import('./ibSession');
   expect(ibSessionId()).toMatch(/^[0-9a-f-]{36}$/);
 });
+
+it('formats cryptographic fallback bytes with UUID v4 version and variant bits', async () => {
+  const getRandomValues = vi.fn(bytes => bytes.fill(255));
+  vi.stubGlobal('crypto', { getRandomValues });
+  const { ibRequestIdentity } = await import('./ibSession');
+  expect(ibRequestIdentity('existing-session').request_key).toBe('ffffffff-ffff-4fff-bfff-ffffffffffff');
+  expect(getRandomValues).toHaveBeenCalledOnce();
+});

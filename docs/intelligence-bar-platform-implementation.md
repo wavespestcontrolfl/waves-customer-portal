@@ -86,8 +86,8 @@ mocked provider response is not evidence of end-to-end capability.
 - The existing IB retention tick removes expired task recovery data after the
   30-day window, including while the platform gate is off. A live runner lease
   postpones deletion; separate actor-bound action receipts remain available for
-  reconciliation. The existing workspace `uuid` library handles browsers without
-  native `crypto.randomUUID`; both composers share the same identity helper.
+  reconciliation. The shared identity helper uses Web Crypto, including
+  `getRandomValues` for UUID v4 generation without native `crypto.randomUUID`.
 - Navigation and Clear invalidate late UI updates. Saved tasks remain recoverable;
   closing or clearing a chat does not cancel already-confirmed operations.
   The phone sheet uses existing visual viewport variables and puts History/New
@@ -254,8 +254,8 @@ delivery remain unverified. Earlier regression evidence is retained below.
   passed with no JS errors or overflow. Artifacts: `.local/ib-uuid-*`. The latest
   client run passes 20 tests (17 bar, two identity, one hook); all six scheduler
   registration tests and the production build pass after current-main integration.
-  Client-only native CI initially failed to resolve the server-owned UUID package;
-  the client now declares the same existing UUID dependency for isolated installs.
+  Client-only native CI initially failed to resolve the server-owned UUID package.
+  The identity helper now uses Web Crypto directly, with no client UUID dependency.
 - Local preview: `http://127.0.0.1:5292/admin/customers` while the QA harness runs;
   this is not a deployed preview. The synthetic session is local-only.
 - Live-model/provider evaluation has not run. No provider credentials are loaded
@@ -325,9 +325,9 @@ stale selected customer cannot replace an unmatched name, authorize an incomplet
 named cohort, or shrink a complete cohort. A duplicate normalized phone also
 refuses conversation access without granting write authority.
 
-Review status: #4019's unmatched-name finding is addressed in the local runtime
-and these acceptance tests; final-head remote review remains required. The UUID
-dependency objection is unresolved. `server/package.json` already declares UUID
-9, and the client declaration makes the existing package available to isolated
-native installs, as recorded above. This is evidence for review, not a claim of
-owner approval or an accepted rebuttal.
+Review status: #4019's unmatched-name finding is addressed by unconditional
+platform read validation and the route acceptance tests. The client UUID
+dependency is removed; the existing shared identity helper uses Web Crypto and
+retains its fallback for browsers without `crypto.randomUUID`. Fallback tests
+verify cryptographic randomness, UUID v4 formatting, distinct request keys,
+actor isolation and unavailable storage. Final-head remote review remains required.
