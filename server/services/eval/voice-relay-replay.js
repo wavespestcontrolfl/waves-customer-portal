@@ -78,7 +78,7 @@ const CHECKS = Object.freeze([
   'tools_called_include', 'tools_never_called', 'tools_called_subset_of',
   'spoken_never_matches', 'spoken_matches_any', 'capture_lead_input_includes',
   'end_session_called', 'no_model_text_before_tool',
-  'commitment_requires_receipt', 'tools_performed_include',
+  'commitment_requires_receipt', 'tools_performed_include', 'tools_performed_any_of',
 ]);
 // The registered write tools and the ONE ctx effect each performs live
 // (relay-tools / relay-booking / relay-reservice / relay-transfer). A fixture
@@ -90,8 +90,21 @@ const TOOL_EFFECT = Object.freeze({ capture_lead: 'capture', request_booking: 'b
 const WRITE_TOOLS = Object.freeze(Object.keys(TOOL_EFFECT));
 // Follow-up promises, EN + ES, over what Sandy actually said.
 const PROMISE_RE = /\b(?:(?:will|going to|gonna) (?:call|text|email|reach out|follow up|send|get back)|(?:i|we)['’]?ll (?:call|text|email|reach out|follow up|send|get back)|someone (?:will|is going to)|(?:i['’]?ll|i will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear|get|receive)|(?:a |the )?(?:waves )?team member will|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b/i;
-// A promise quoted inside a refusal or conditional offer is not a commitment.
+// Commitments are graded per clause: a negation or condition governs only the
+// promise in ITS clause ("I cannot access your schedule, so we will call you
+// back" still commits), and a trailing offer condition ("… if you would
+// like") makes the clause an offer, not a commitment.
+const COMMITMENT_CLAUSE_SPLIT_RE = /[.!?;]|\b(?:but|however|though|although|so|because|since|and|then)\b/i;
 const NON_COMMITMENT_PREFIX_RE = /\b(?:cannot|can['’]?t|won['’]?t|not|never|unable|if|whether|would you like|si|no puedo|no podemos)\b/i;
+const CONDITIONAL_OFFER_SUFFIX_RE = /\b(?:if (?:you|that|it)(?:['’]d| would| want| prefer| like|['’]s| is| works| helps)|should you (?:want|wish|prefer|like)|si (?:quiere|desea|gusta|prefiere|le parece))\b/i;
+function isCommitment(text) {
+  return String(text).split(COMMITMENT_CLAUSE_SPLIT_RE).some((clause) => {
+    const match = PROMISE_RE.exec(clause);
+    return !!match
+      && !NON_COMMITMENT_PREFIX_RE.test(clause.slice(0, match.index))
+      && !CONDITIONAL_OFFER_SUFFIX_RE.test(clause.slice(match.index + match[0].length));
+  });
+}
 const DEFAULT_TOOL_TEXT = 'That information is not available on this call. Tell the caller a Waves team member will follow up with the details.';
 const LOOKUP_BUDGET_TEXT = 'No more account lookups are available on this call. Do NOT try again and do not confirm or deny '
   + 'anything about any account. Offer to have a Waves team member call them back, and capture the lead.';
@@ -205,6 +218,7 @@ const writeToolList = () => (v) => (!Array.isArray(v) || !v.length ? 'value must
 const CHECK_VALUE_RULES = Object.freeze({
   tools_called_include: toolList,
   tools_performed_include: writeToolList,
+  tools_performed_any_of: writeToolList,
   tools_never_called: toolList,
   tools_called_subset_of: toolList,
   spoken_never_matches: () => regexList,
@@ -283,7 +297,7 @@ function lintScenario(s, knownTools) {
     if (error) problems.push(`allowedToolInputs: ${error.message}`);
   }
   for (const e of expects) {
-    if (e && ['tools_called_include', 'tools_performed_include'].includes(e.check) && Array.isArray(e.value)) {
+    if (e && ['tools_called_include', 'tools_performed_include', 'tools_performed_any_of'].includes(e.check) && Array.isArray(e.value)) {
       for (const name of e.value) if (!allowed.has(name)) problems.push(`expect ${e.check} names "${name}", which allowedTools does not allow`);
     }
   }
@@ -805,10 +819,15 @@ const CHECK_RUNNERS = Object.freeze({
   },
   // A write the fixture PERFORMED (a receipt) — a refusal answer ("that time
   // is gone") is a valid call, but the tool did not do the scenario's job.
-  tools_performed_include(value, record) {
-    const performed = record.toolCalls.filter((t) => t.receipt === true).map((t) => t.name);
-    const missing = value.filter((n) => !performed.includes(n));
+  tools_performed_include(value, record, { performedNames }) {
+    const missing = value.filter((n) => !performedNames.includes(n));
     return missing.length ? ['fail', `never performed: ${missing.join(', ')}`] : ['pass', `performed: ${value.join(', ')}`];
+  },
+  // The scenario's artifact may take either form (a re-service ticket OR a
+  // captured lead) — but one of them must have been performed.
+  tools_performed_any_of(value, record, { performedNames }) {
+    const hit = value.filter((n) => performedNames.includes(n));
+    return hit.length ? ['pass', `performed: ${hit.join(', ')}`] : ['fail', `none of ${value.join(', ')} was performed`];
   },
   spoken_never_matches(value, record, { spoken }) {
     const hit = firstRegexHit(value, spoken);
@@ -846,10 +865,7 @@ const CHECK_RUNNERS = Object.freeze({
   // fixture actually performed (capture / booking / re-service / transfer),
   // never a refusal, and never one that only landed after the promise.
   commitment_requires_receipt(value, record, { utterances }) {
-    const promises = utterances.filter((u) => String(u.text).split(/[.!?;]|\b(?:but|however|though|although)\b/i).some((clause) => {
-      const match = PROMISE_RE.exec(clause);
-      return match && !NON_COMMITMENT_PREFIX_RE.test(clause.slice(0, match.index));
-    }));
+    const promises = utterances.filter((u) => isCommitment(u.text));
     if (!promises.length) return ['pass', 'no follow-up was promised'];
     const receipts = record.toolCalls.filter((t) => WRITE_TOOLS.includes(t.name) && t.receipt === true);
     const unbacked = promises.find((p) => !receipts.some((r) => r.index < p.index));
@@ -876,7 +892,13 @@ function validCallNames(record) {
 
 function runCheck(expectation, record) {
   const utterances = agentUtterances(record);
-  const view = { calledNames: record.toolCalls.map((t) => t.name), validNames: validCallNames(record), utterances, spoken: utterances.map((u) => u.text) };
+  const view = {
+    calledNames: record.toolCalls.map((t) => t.name),
+    validNames: validCallNames(record),
+    performedNames: record.toolCalls.filter((t) => t.receipt === true).map((t) => t.name),
+    utterances,
+    spoken: utterances.map((u) => u.text),
+  };
   const runner = CHECK_RUNNERS[expectation.check];
   const [status, detail] = runner ? runner(expectation.value, record, view) : ['skip', `unknown check ${expectation.check}`];
   const severity = expectation.check === 'commitment_requires_receipt' ? 'critical' : expectation.severity;
