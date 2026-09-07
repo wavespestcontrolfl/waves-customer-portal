@@ -81,8 +81,10 @@ function isCurrentPick(slot, { currentStart, currentDate, currentTechnicianId, s
   return (sameDay || slot.date === currentDate) && sameStart(currentStart, slot.start) && techMatches;
 }
 
+// Three-part labels wrap inside a modal-width chip — read them as a line,
+// not a centered block.
 const chipStyle = {
-  padding: '3px 8px', borderRadius: 6, fontSize: 14,
+  padding: '3px 8px', borderRadius: 6, fontSize: 14, textAlign: 'left',
   border: '1px solid #D4D4D8', background: 'transparent', color: '#52525B',
 };
 const rowStyle = { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6 };
