@@ -12469,6 +12469,9 @@ export function CompletionPanel({
 
   useEffect(() => {
     if (!draftReadyRef.current || draftLoading || showDraftPrompt || success) return;
+    // Completion has returned, but its durable photo recovery may still be
+    // writing. Late form effects must not turn it back into an ordinary draft.
+    if (draftSnapshotRef.current?.pendingPhotoCompletion) return;
     const hasDraftContent =
       servicePhotos.length ||
       notes.trim() ||

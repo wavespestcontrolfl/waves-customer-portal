@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CompletionPanel, completionResumeOwed, restoreCompletionResumeBody } from './SchedulePage';
 import { getCompletionDraft, putCompletionDraft } from '../../lib/completion-resume-store';
+import * as completionStore from '../../lib/completion-resume-store';
 
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlagReady: () => ({ enabled: false, ready: true }) }));
 const service = { id: 'recovery-visit', customerId: 'recovery-customer', customerName: 'Synthetic Customer',
@@ -23,7 +24,7 @@ beforeEach(() => {
   localStorage.clear();
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ customer: {}, actions: [], available: false }) })));
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('completion photos in an unsubmitted draft', () => {
   async function seed() {
@@ -104,6 +105,30 @@ describe('completion photos in an unsubmitted draft', () => {
     expect(completionResumeOwed(service.id)).toBe(false);
     third.unmount();
     expect(await getCompletionDraft(service.id)).toBeNull();
+  });
+
+  it('a late field edit cannot replace the pending photo recovery while storage settles', async () => {
+    await seed();
+    const view = await mount(vi.fn().mockResolvedValue({ serviceRecordId: 'record-1', completionPhotoUpload: { failed: 1 } }));
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    const originalPut = completionStore.putCompletionDraft;
+    let releaseStorage;
+    const storageWait = new Promise((resolve) => { releaseStorage = resolve; });
+    let writingRecovery = false;
+    vi.spyOn(completionStore, 'putCompletionDraft').mockImplementation((id, draft) => {
+      if (draft.pendingPhotoCompletion && !writingRecovery) {
+        writingRecovery = true;
+        return storageWait.then(() => originalPut(id, draft));
+      }
+      return originalPut(id, draft);
+    });
+    fireEvent.click(submitButton());
+    await waitFor(() => expect(writingRecovery).toBe(true));
+    fireEvent.change(screen.getByPlaceholderText('Notes about this service...'), { target: { value: 'Late edit while closeout settles' } });
+    await act(async () => releaseStorage());
+    await screen.findByRole('button', { name: 'Retry photo uploads' });
+    view.unmount();
+    expect(await getCompletionDraft(service.id)).toMatchObject({ pendingPhotoCompletion: { serviceRecordId: 'record-1' } });
   });
 });
 
