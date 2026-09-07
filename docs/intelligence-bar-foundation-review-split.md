@@ -87,3 +87,10 @@ source directory. Five existing dispatch, equipment and Terminal request sites
 are proved against merged main and retained as unsupported, for 1,744 cumulative
 sites. Generic lookup verbs cannot turn an unsupported capability into a match.
 The final catalog/coverage suites pass 23 tests.
+
+Post-merge main integration at `a7c689301` records the nine request sites that
+reached main after Part A's final head: the Customer 360 workspace and unread
+conversation hooks from `481ad658f`, and the controlled staff documents from
+`f4b3490f5`. Each is proved against that already-merged revision and retained
+as unsupported/unverified, for 1,753 cumulative sites. Nothing gains coverage;
+this restores the drift gate on main without grandfathering any new action.
