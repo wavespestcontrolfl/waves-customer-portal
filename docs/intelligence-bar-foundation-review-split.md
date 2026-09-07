@@ -136,3 +136,17 @@ preloads its own authorized estimate tools. Broader payload/helper dependency
 fingerprinting remains deferred alongside backend drift enforcement. Current
 fingerprints describe call expressions; changes outside those expressions still
 require manual review until final capability reconciliation.
+
+Part C after parent integration passes 110 unit/contract/scheduler tests and
+eight isolated Postgres tests (six recovery, two targeting). Registry, coverage
+and domain-rule gates pass. The new task schema remains the unchanged
+`20260906000061_ib_task_receipts` migration already tested on the dedicated
+dev database; no production migration or gate activation is authorized.
+
+### Deferred P2s in C
+
+- `server/services/intelligence-bar/task-context.js:231`: compact approval
+  proof adds decisions to the already-complex shared target validator. The
+  ordered relationship, recipient and proof checks remain together; extracting
+  one-use helpers would only move branches. Further simplification must keep
+  every tested authorization path.
