@@ -56,6 +56,10 @@ function matchesExplicitAccessCode({ quote, field, value }) {
   const candidate = String(value || '').trim();
   if (/\b(?:unknown|none|null|undefined|unsure|uncertain|unavailable|pending|missing|not|no|never|forgot(?:ten)?|forget|maybe|perhaps|same|usual|last|previous|prior|before|earlier|again|old|new|different|changed|later|soon|text|call|ask|check|see)\b|n['’]t|^n[ /]?a$/i.test(candidate)) return false;
   if (/\s/.test(candidate) && !/[#*\d]/.test(candidate)) return false;
+  // A credential is a short token (lettered lockboxes exist) or a digit/symbol
+  // sequence, optionally followed by "then press N". Alternatives ("1234 or
+  // 5678") and hedges ("1234 I think") are not credentials.
+  if (!/^(?:[#*\dA-Za-z-]{1,12}|[#*\d][#*\d -]{0,15}[#*\d])(?: then press \d{1,4})?$/i.test(candidate)) return false;
   const match = /^(?:(?:the|my|our) )?(neighborhood gate|community gate|property gate|lockbox|garage) code\s*(?:is\s+|:\s*)?([#*\dA-Za-z -]{1,100})[.!]?$/i.exec(String(quote || '').trim());
   if (!match) return false;
   const fields = { 'neighborhood gate': 'neighborhood_gate_code', 'community gate': 'neighborhood_gate_code',

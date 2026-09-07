@@ -85,7 +85,7 @@ describe('SMS operational evidence and ownership', () => {
   });
 
   test.each(['unknown', 'none', 'not known', 'not available', 'unsure', 'N A', 'same as last time', 'the usual',
-    'on the fridge'])('missing or relational access code remains empty: %s', (value) => {
+    'on the fridge', '1234 or 5678', '1234 I think', '1234 probably', '1234 for the side gate'])('missing, relational or ambiguous access code remains empty: %s', (value) => {
     const quote = `Lockbox code is ${value}`;
     const item = fact({ field: 'lockbox_code', quote, value });
     expect(groundExtraction(extracted([], [item]), { message: source(quote), properties }))
@@ -100,10 +100,10 @@ describe('SMS operational evidence and ownership', () => {
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
-  test('a single alphabetic token is still a code', () => {
-    const message = source('Lockbox code is ABCD');
-    expect(groundExtraction(extracted([], [fact({ field: 'lockbox_code', quote: message.message_body, value: 'ABCD' })]),
-      { message, properties }).facts.map((f) => f.value)).toEqual(['ABCD']);
+  test.each(['ABCD', '1234 5678', '12-34', '#1234 then press 5', '*9'])('a bounded credential is still a code: %s', (value) => {
+    const message = source(`Lockbox code is ${value}`);
+    expect(groundExtraction(extracted([], [fact({ field: 'lockbox_code', quote: message.message_body, value })]),
+      { message, properties }).facts.map((f) => f.value)).toEqual([value]);
   });
 
   test('preserves access-code symbols and case exactly as supplied', () => {
