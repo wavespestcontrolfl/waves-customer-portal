@@ -48,14 +48,26 @@ async function placeBridgeCall({ to, bridgePhone, from, customer = null, source,
   if (callLogId) promptParams.set('callLogId', callLogId);
   if (leadName) promptParams.set('leadName', leadName);
 
-  // Step 1: ring the staff phone. On press-1 the customer is dialed.
-  const call = await client.calls.create({
-    to: bridgePhone,
-    from,
-    url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?${promptParams.toString()}`,
-    statusCallback: `https://${domain}/api/webhooks/twilio/call-status`,
-    statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-  });
+  // Step 1: ring the staff phone. On press-1 the customer is dialed. A
+  // rejected create never produces a status callback, so the row is closed
+  // here instead of staying 'initiated' forever; the caller raises the alert.
+  let call;
+  try {
+    call = await client.calls.create({
+      to: bridgePhone,
+      from,
+      url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?${promptParams.toString()}`,
+      statusCallback: `https://${domain}/api/webhooks/twilio/call-status`,
+      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+    });
+  } catch (err) {
+    if (callLogId) {
+      await db('call_log').where({ id: callLogId })
+        .update({ status: 'failed', updated_at: new Date() })
+        .catch((markErr) => logger.warn(`[call-bridge] failed-mark skipped for ${callLogId}: ${markErr.message}`));
+    }
+    throw err;
+  }
 
   // Backfill the Twilio CallSid now that we have it.
   if (callLogId) {

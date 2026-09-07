@@ -13,12 +13,19 @@ jest.mock('../services/tech-line', () => ({ techLineContext: jest.fn() }));
 jest.mock('../services/call-bridge', () => ({ placeBridgeCall: jest.fn(async () => ({ callSid: 'CA-1', callLogId: 'log-1' })) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true, providerMessageId: 'SM-real' })) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../services/sms-suggest-mode', () => ({
+  reserveHumanReply: jest.fn(async () => ({ parkedDecisionIds: ['dec-1'], reservationId: 'resv-1', autoSendInFlight: false })),
+  settleHumanReply: jest.fn(async () => undefined),
+}));
+jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest.fn(async () => undefined) }));
 
 const db = require('../models/db');
 const { techLineContext } = require('../services/tech-line');
 const { placeBridgeCall } = require('../services/call-bridge');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { isEnabled } = require('../config/feature-gates');
+const { reserveHumanReply, settleHumanReply } = require('../services/sms-suggest-mode');
+const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const router = require('../routes/tech-line');
 
 const VISIT = '11111111-1111-4111-8111-111111111111';
@@ -65,16 +72,43 @@ describe('GET /', () => {
 });
 
 describe('POST /sms', () => {
-  test('texts the visit customer from the line as an operator entry point', async () => {
+  test('texts the visit customer from the line as a HUMAN (manual) reply, parking and settling the thread', async () => {
     primeVisit();
     const r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: '  On my way.  ' } });
     expect(r.statusCode).toBe(200);
+    expect(reserveHumanReply).toHaveBeenCalledWith({ to: '+19415550100', customerId: 'c1', fromNumber: '+19413529161', body: 'On my way.', adminUserId: 'tech-1' });
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       to: '+19415550100', body: 'On my way.', channel: 'sms', audience: 'customer', purpose: 'conversational',
       customerId: 'c1', identityTrustLevel: 'phone_matches_customer', entryPoint: 'tech_line_text',
-      metadata: expect.objectContaining({ original_message_type: 'tech_line', scheduled_service_id: VISIT, adminUserId: 'tech-1', fromNumber: '+19413529161' }),
+      metadata: expect.objectContaining({ original_message_type: 'manual', tech_line: true, scheduled_service_id: VISIT, adminUserId: 'tech-1', fromNumber: '+19413529161', parkedDecisionIds: ['dec-1'] }),
     }));
+    expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ parkedDecisionIds: ['dec-1'], reservationId: 'resv-1', sent: true, reviewedBy: 'tech-1' }));
     expect(r.body).toEqual({ success: true, from: LINE });
+  });
+
+  test('an autonomous reply mid-send backs the tech off (409), nothing sent', async () => {
+    primeVisit();
+    reserveHumanReply.mockResolvedValueOnce({ parkedDecisionIds: [], reservationId: null, autoSendInFlight: true });
+    const r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'hi' } });
+    expect(r.statusCode).toBe(409);
+    expect(r.body.code).toBe('AUTO_REPLY_IN_FLIGHT');
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a customer row holding a Waves number is refused (never re-enter /voice)', async () => {
+    primeVisit({ customer: { id: 'c1', first_name: 'Pat', phone: '+19413187612' } });
+    const r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'hi' } });
+    expect(r.statusCode).toBe(409);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a provider/DB throw settles the thread as unanswered and reaches the error middleware sanitized', async () => {
+    primeVisit();
+    sendCustomerMessage.mockRejectedValueOnce(new Error('insert into sms_log (to_phone, message_body) values (+19415550100, gate code 4412) — pg down'));
+    await expect(call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'gate code 4412' } })).rejects.toMatchObject({
+      isOperational: true, statusCode: 500, message: 'Tech line text failed',
+    });
+    expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ sent: false }));
   });
 
   test('a visit on another tech\'s route is refused; an admin may text any visit', async () => {
@@ -106,12 +140,13 @@ describe('POST /sms', () => {
     expect(r.body.code).toBe('SMS_GATE_OFF');
   });
 
-  test('a guard refusal is a 409 carrying the reason, never a silent 200', async () => {
+  test('a guard refusal is a 409 carrying the reason, never a silent 200; parked suggestions reopen', async () => {
     primeVisit();
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'QUIET_HOURS_HOLD', reason: 'Quiet hours', deferred: true });
     const r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'hi' } });
     expect(r.statusCode).toBe(409);
     expect(r.body).toEqual({ error: 'Quiet hours', code: 'QUIET_HOURS_HOLD', deferred: true });
+    expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ sent: false }));
   });
 });
 
@@ -139,5 +174,27 @@ describe('POST /call', () => {
     primeVisit({ visit: { id: VISIT, customer_id: 'c1', technician_id: 'tech-2' } });
     expect((await call('post', '/call', { body: { scheduledServiceId: VISIT } })).statusCode).toBe(403);
     expect(placeBridgeCall).not.toHaveBeenCalled();
+  });
+
+  test('a rejected Twilio create raises the operator failure bell and surfaces sanitized', async () => {
+    primeVisit();
+    placeBridgeCall.mockRejectedValueOnce(Object.assign(new Error('Unable to create record: The number +19415550100 is unverified'), { code: 21219 }));
+    await expect(call('post', '/call', { body: { scheduledServiceId: VISIT } })).rejects.toMatchObject({ isOperational: true, statusCode: 500, message: 'Tech line call failed' });
+    expect(alertTwilioFailure).toHaveBeenCalledWith(expect.objectContaining({ channel: 'voice', direction: 'outbound', phase: 'send_api', status: 'failed', from: '+19413529161', to: '+19415550101' }));
+  });
+});
+
+describe('tech-click calls never auto-book (codex #4072 r1 P1)', () => {
+  // The predicate lives deep in the recording processor; pin the string the
+  // route sends to the one the processor excludes so a rename cannot
+  // silently re-enable outbound auto-booking for field follow-ups.
+  test('the processor excludes the exact bridge source this route sends', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const proc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    const predicate = proc.slice(proc.indexOf('const outboundAutoBooking ='), proc.indexOf(';', proc.indexOf('const outboundAutoBooking =')));
+    expect(predicate).toContain("call.source !== 'tech-click'");
+    const route = fs.readFileSync(path.join(__dirname, '../routes/tech-line.js'), 'utf8');
+    expect(route).toContain("source: 'tech-click'");
   });
 });

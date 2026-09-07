@@ -679,6 +679,63 @@ async function parkThreadSuggestions({ phoneLast10, excludeDecisionId }, dbh = d
   return parked.map((r) => r.id);
 }
 
+/**
+ * A human is about to reply to a thread from an operator surface that holds
+ * no suggestion card (the tech portal's own-line text). The lifecycle the
+ * admin composer runs inline, as one pair:
+ *   reserveHumanReply — under the thread lock: back off when an autonomous
+ *     reply (Phase E) is mid-send; leave the 'sending' marker its guard
+ *     (threadHasLiveAnswer) sees; park the thread's pending suggestions.
+ *   settleHumanReply — delete the marker; sent → parked suggestions are
+ *     ignored (the human answered), not sent → they reopen.
+ * The parked ids also ride the provider-created sms_log row (metadata
+ * parkedDecisionIds) so a crash between Twilio's accept and settle is
+ * recovered by the orphan sweep, exactly as the composer's send is.
+ */
+async function reserveHumanReply({ to, customerId = null, fromNumber, body, adminUserId = null }) {
+  const threadLast10 = String(to || '').replace(/\D/g, '').slice(-10) || null;
+  if (!threadLast10) return { parkedDecisionIds: [], reservationId: null, autoSendInFlight: false };
+  const autoSend = require('./sms-auto-send');
+  const { isEnabled } = require('../config/feature-gates');
+  return db.transaction(async (trx) => {
+    await lockSuggestThread(trx, threadLast10);
+    let reservationId = null;
+    if (isEnabled('smsAutoSend')) {
+      if (await autoSend.hasActiveAutoSendClaim(trx, { threadLast10, customerId })) {
+        return { parkedDecisionIds: [], reservationId: null, autoSendInFlight: true };
+      }
+      const [resv] = await trx('sms_log')
+        .insert({
+          customer_id: customerId,
+          direction: 'outbound',
+          from_phone: fromNumber,
+          to_phone: to,
+          message_body: body,
+          status: 'sending',
+          message_type: 'manual',
+          admin_user_id: adminUserId,
+          metadata: JSON.stringify({ manual_send_reservation: true }),
+        })
+        .returning('id');
+      reservationId = resv?.id || null;
+    }
+    const parkedDecisionIds = await parkThreadSuggestions({ phoneLast10: threadLast10 }, trx);
+    return { parkedDecisionIds, reservationId, autoSendInFlight: false };
+  });
+}
+
+async function settleHumanReply({ parkedDecisionIds = [], reservationId = null, sent, reviewedBy, reason }) {
+  if (reservationId) {
+    await db('sms_log').where({ id: reservationId }).del().catch((delErr) => {
+      // Bounded: reconcileAutoSendClaims sweeps stale 'sending' reservations.
+      logger.warn(`[sms-auto-send] manual reservation cleanup failed (${reservationId}): ${delErr.message}`);
+    });
+  }
+  if (!parkedDecisionIds.length) return;
+  if (sent) await ignoreParkedSuggestions({ decisionIds: parkedDecisionIds, reviewedBy });
+  else await reopenScheduledSuggestions({ decisionIds: parkedDecisionIds, reason: reason || 'The staff reply was not sent — suggestion reopened.' });
+}
+
 /** Cancel/failure path: the customer was never answered — the cards return. */
 async function reopenScheduledSuggestions({ decisionIds, reason, dbi = db }) {
   const ids = (Array.isArray(decisionIds) ? decisionIds : [decisionIds]).filter(Boolean);
@@ -907,6 +964,8 @@ module.exports = {
   revertDraftsToShadow,
   markSuggestionScheduled,
   parkThreadSuggestions,
+  reserveHumanReply,
+  settleHumanReply,
   reopenScheduledSuggestions,
   ignoreParkedSuggestions,
   resolveSuggestionAfterSend,

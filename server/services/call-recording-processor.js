@@ -12389,8 +12389,12 @@ const CallRecordingProcessor = {
     // so a call those gates would have vetoed books live — containment the
     // removed review hold used to provide (Codex #3361 r4 P1). Shadow/legacy
     // routing keeps the pre-gate behavior: outbound bookings stay manual.
+    // A technician's own-line call from the visit brief (source tech-click,
+    // routes/tech-line.js) is a field follow-up, not a return call to a lead:
+    // a date it mentions never auto-books (codex #4072 r1 P1).
     const outboundAutoBooking = isOutboundCall(call) && isEnabled('callOutboundBooking')
-      && CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED;
+      && CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED
+      && call.source !== 'tech-click';
     // The v2 TCPA verdict is only computed in ENFORCE routing mode — but
     // outbound consent is never implied, and the removed review hold used to
     // be the backstop that kept a shadow/legacy-mode outbound booking from

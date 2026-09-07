@@ -52,6 +52,17 @@ test('an unlinked number keeps the contact phone on the touchpoint', async () =>
   expect(recordTouchpoint).toHaveBeenCalledWith(expect.objectContaining({ customerId: null, contactPhone: '+19415550100' }));
 });
 
+test('a rejected Twilio create closes the pre-inserted row as failed and rethrows', async () => {
+  const { updates } = primeDb();
+  mockCallsCreate.mockRejectedValueOnce(new Error('Unable to create record'));
+  await expect(placeBridgeCall({ to: '+19415550100', bridgePhone: '+19415550101', from: '+19412975749', source: 'admin-click' }))
+    .rejects.toThrow('Unable to create record');
+  expect(updates[0]).toMatchObject({ status: 'failed' });
+  expect(recordTouchpoint).not.toHaveBeenCalled();
+});
+
+// Last on purpose: resets the module registry with an empty config, which
+// every later lazy require('../config') in the bridge would see.
 test('missing Twilio credentials fail before any row is written', async () => {
   jest.resetModules();
   jest.doMock('../config', () => ({ twilio: {} }));
