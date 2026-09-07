@@ -85,7 +85,8 @@ describe('SMS operational evidence and ownership', () => {
   });
 
   test.each(['unknown', 'none', 'not known', 'not available', 'unsure', 'N A', 'same as last time', 'the usual',
-    'on the fridge', '1234 or 5678', '1234 I think', '1234 probably', '1234 for the side gate'])('missing, relational or ambiguous access code remains empty: %s', (value) => {
+    'on the fridge', '1234 or 5678', '1234 I think', '1234 probably', '1234 for the side gate', '#', '*', '-',
+    '#-*'])('missing, relational or ambiguous access code remains empty: %s', (value) => {
     const quote = `Lockbox code is ${value}`;
     const item = fact({ field: 'lockbox_code', quote, value });
     expect(groundExtraction(extracted([], [item]), { message: source(quote), properties }))
