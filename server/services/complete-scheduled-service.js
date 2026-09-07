@@ -3184,7 +3184,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     // keeps this strictly off pest / rodent / mosquito. The flag reads the SAME
     // DB-backed source the tech UI checks (useFeatureFlag). A provided height is
     // still range-validated (below), but its absence is fine.
-    const turfHeightFlagOn = await isUserFeatureEnabled(completionInput.actor.technicianId, 'turf-height-capture', false).catch(() => false);
+    const turfHeightFlagOn = await isUserFeatureEnabled(completionInput.actor.technicianId, 'turf-height-capture', false, db).catch(() => false);
     // Exempt typed-findings lawn jobs (e.g. one_time_lawn_treatment): the client
     // hides TurfHeightCapture when isTypedFindings, so the server must not capture
     // a field the UI never renders (matches client isLawn = !isTypedFindings && lawn).
@@ -3598,6 +3598,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     if (claim.action === 'proceed') {
       if (canLinkLawnAssessmentRecord) {
         const lawnAssessmentCompletionBlock = await preflightLawnAssessmentCompletion({
+          knex: db,
           serviceId: svc.id,
           customerId: svc.customer_id,
           reportServiceLine,
@@ -3808,7 +3809,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             svc.customer_id,
             svc.service_type,
             Number(invoiceAmount) || 0,
-            visitIsPayerBilled ? { skipCustomerExemption: true } : {},
+            { database: db, skipCustomerExemption: visitIsPayerBilled },
           );
           const r = Number(taxResult?.rate);
           if (Number.isFinite(r) && r >= 0 && r < 1) return r;
@@ -3836,7 +3837,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
       autopay_paused_until: svc.cust_autopay_paused_until,
       autopay_payment_method_id: svc.cust_autopay_payment_method_id,
       ach_status: svc.cust_ach_status,
-    });
+    }, { db });
     // Dues already collected for the VISIT's month (ET, keyed on the row's
     // scheduled_date; noon-Z anchor keeps the ET month stable) cover a
     // membership visit even when autopay has since lapsed — the cron charged
@@ -4507,6 +4508,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           let completionVisitContext = '';
           try {
             completionVisitContext = await buildRecapVisitContext({
+              knex: db,
               serviceType: svc.service_type,
               customerId: svc.customer_id,
             });

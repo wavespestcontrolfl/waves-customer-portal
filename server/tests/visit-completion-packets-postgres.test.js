@@ -230,6 +230,41 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
   });
 
+  test.each(['pest', 'lawn'])('concurrent submissions need only their transaction connection for %s helpers', async (lane) => {
+    if (lane === 'lawn') {
+      await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ service_type: 'WaveGuard Lawn Care' });
+    }
+    await mockPg('customers').where({ id: fixture.customerId }).update({
+      property_type: 'commercial', autopay_enabled: true,
+    });
+    const normalPool = mockPg;
+    mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 1 }, acquireConnectionTimeout: 30000 });
+    const flags = require('../services/feature-flags').isUserFeatureEnabled;
+    const context = require('../services/recap-visit-context').buildRecapVisitContext;
+    flags.mockImplementation(jest.requireActual('../services/feature-flags').isUserFeatureEnabled);
+    context.mockImplementation(jest.requireActual('../services/recap-visit-context').buildRecapVisitContext);
+    const recap = jest.spyOn(require('../services/completion-recap'), 'generateRecap')
+      .mockResolvedValue({ recap: 'The service record is ready.', source: 'fixture' });
+    try {
+      const input = submission();
+      for (const item of input.items) delete item.body.customerRecap;
+      const results = await Promise.allSettled([saveVisitCompletionRecords(input), saveVisitCompletionRecords(input)]);
+      expect(results).toEqual([
+        expect.objectContaining({ status: 'fulfilled', value: expect.objectContaining({ status: 202 }) }),
+        expect.objectContaining({ status: 'fulfilled', value: expect.objectContaining({ status: 202 }) }),
+      ]);
+      expect(new Set(results.map((result) => result.value.body.packetId)).size).toBe(1);
+      expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
+      expect(context).toHaveBeenCalled();
+    } finally {
+      recap.mockRestore();
+      flags.mockImplementation(async () => false);
+      context.mockImplementation(async () => '');
+      await mockPg.destroy();
+      mockPg = normalPool;
+    }
+  });
+
   test('a second lawn member sees the first member’s uncommitted nitrogen and inventory use', async () => {
     await mockPg('customers').where({ id: fixture.customerId }).update({ waveguard_tier: 'Bronze' });
     await mockPg('services').where({ id: fixture.catalogId }).update({ name: 'Fixture Lawn Care' });
