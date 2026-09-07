@@ -84,8 +84,12 @@ default.
   `own_home` / `rental_owned` from occupancy and had already run on the PR's
   Railway preview when that was corrected, so the file stays at the revision
   those environments ran and `20260906000050` clears the occupancy-derived
-  values (untouched rows only, prior values in `audit_log`) and re-asserts
-  the manager-only backfill. Editable on the
+  values (untouched rows only, prior values in `audit_log`). The original
+  manager stamp stands and is never re-asserted — an office edit after it
+  wins; the correction only records which rows that stamp touched
+  (`original_backfill_manager_rows` on its audit row). A property-manager
+  profile's lazily created primary carries `managed_for_client` by default
+  (`defaultRelationshipForContactRole`). Editable on the
   Customer 360 Properties panel (row select + add form); `POST`/`PATCH
   /:id/properties` validate it; `recordCallProperty` accepts it but the call
   pipeline does not classify it yet.

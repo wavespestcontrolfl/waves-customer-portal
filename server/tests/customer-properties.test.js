@@ -1,4 +1,4 @@
-const { normStreet, addressKey, unitKey, streetEmbeddedUnitKey, streetKey, normalizeZip, normalizeOccupancy, isNewAddress, OCCUPANCY_TYPES, defaultOccupancyForContactRole } = require('../services/customer-properties');
+const { normStreet, addressKey, unitKey, streetEmbeddedUnitKey, streetKey, normalizeZip, normalizeOccupancy, isNewAddress, OCCUPANCY_TYPES, defaultOccupancyForContactRole, defaultRelationshipForContactRole } = require('../services/customer-properties');
 
 describe('address key normalization (suffix + ZIP)', () => {
   test('normalizeZip takes the 5-digit form (ZIP+4 insensitive)', () => {
@@ -143,6 +143,18 @@ describe('soleActivePropertyId (GH #3699 r3: property anchor for the visit-group
     expect(await soleActivePropertyId('c1', connWith([]))).toBeNull();
     expect(await soleActivePropertyId(null, connWith([{ id: 'p1' }]))).toBeNull();
     expect(await soleActivePropertyId('c1', () => { throw new Error('down'); })).toBeNull();
+  });
+});
+
+describe('defaultRelationshipForContactRole (lazy primary backfill default)', () => {
+  test('a property-manager profile\'s default address is a client\'s', () => {
+    expect(defaultRelationshipForContactRole('property_manager')).toBe('managed_for_client');
+    expect(defaultRelationshipForContactRole(' Property_Manager ')).toBe('managed_for_client');
+  });
+  test('no other role infers a relationship — the office records it', () => {
+    for (const r of ['owner', 'tenant', 'primary', null, undefined, '']) {
+      expect(defaultRelationshipForContactRole(r)).toBeNull();
+    }
   });
 });
 

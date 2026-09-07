@@ -32,6 +32,18 @@ function defaultOccupancyForContactRole(contactRole) {
   }
 }
 
+/**
+ * Relationship a lazily-backfilled PRIMARY should carry, from the same
+ * contact_role evidence migration 20260906000020 used for existing rows:
+ * a property-manager profile's default address is a client's
+ * (managed_for_client). Every other role → NULL: ownership is never
+ * inferred (occupancy is not evidence — see 20260906000050), the office
+ * records it on the Properties panel.
+ */
+function defaultRelationshipForContactRole(contactRole) {
+  return String(contactRole || '').trim().toLowerCase() === 'property_manager' ? 'managed_for_client' : null;
+}
+
 /** Case/space/punctuation-insensitive street key — "12338 Amber Creek" ≠ "12398 Amber Creek". */
 const normStreet = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
@@ -185,6 +197,7 @@ async function ensurePrimaryCore(customerOrId, { occupancyType, source } = {}, c
       occupancy_type: occupancyType
         ? normalizeOccupancy(occupancyType)
         : defaultOccupancyForContactRole(customer.contact_role),
+      relationship: defaultRelationshipForContactRole(customer.contact_role),
       is_primary: true,
       address_line1: customer.address_line1,
       address_line2: customer.address_line2 || null,
@@ -617,6 +630,7 @@ module.exports = {
   normalizeZip,
   normalizeOccupancy,
   defaultOccupancyForContactRole,
+  defaultRelationshipForContactRole,
   isNewAddress,
   completePrimaryFromCall,
   syncPrimaryAddress,

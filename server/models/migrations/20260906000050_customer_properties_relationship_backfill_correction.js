@@ -35,7 +35,6 @@ exports.up = async function up(knex) {
   const original = await knex('knex_migrations').where({ name: ORIGINAL_MIGRATION }).first('migration_time');
   const backfilledAt = original?.migration_time ? new Date(original.migration_time) : null;
 
-  const hasContactRole = await knex.schema.hasColumn('customers', 'contact_role');
   const untouchedSinceBackfill = (qb) => (backfilledAt
     ? qb.where(function untouched() {
       this.whereNull('updated_at').orWhere('updated_at', '<=', backfilledAt);
@@ -62,16 +61,14 @@ exports.up = async function up(knex) {
     // Retrospective snapshot (Codex r11): the original migration created the
     // column and stamped managed_for_client on every property_manager
     // profile's rows in the same migration, without an audit event — so
-    // those rows' prior value is NULL by construction. Recorded here, read
-    // only, limited to rows untouched since that stamp; nothing is written
-    // to them (a later office edit, if any, already won).
-    let originalManagerIds = [];
-    if (hasContactRole) {
-      originalManagerIds = (await untouchedSinceBackfill(trx('customer_properties'))
-        .where({ relationship: 'managed_for_client' })
-        .whereIn('customer_id', trx('customers').select('id').where('contact_role', 'property_manager'))
-        .select('id')).map((r) => r.id);
-    }
+    // those rows' prior value is NULL by construction. An untouched
+    // managed_for_client row (updated_at at or before that stamp) can only
+    // have come from it, whatever the profile's contact_role is today (Codex
+    // r12), so the snapshot is derived from the rows alone. Read only;
+    // nothing is written to them (a later office edit, if any, already won).
+    const originalManagerIds = (await untouchedSinceBackfill(trx('customer_properties'))
+      .where({ relationship: 'managed_for_client' })
+      .select('id')).map((r) => r.id);
 
     // Stamped after the locked snapshot, for the audit record only (`down`
     // does not use it — see the note there).
