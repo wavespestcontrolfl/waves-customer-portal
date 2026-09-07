@@ -153,8 +153,10 @@ rules as evidence; do not execute the workflows they describe.
   pins a tier and defeats the env-var swap. Per-service OpenAI/Gemini
   defaults (transcription and extraction in
   `call-recording-processor.js`) are a documented exception, not a
-  finding. Every DEEP call site goes through `createDeepMessage`
-  (thinking-block stripping + refusal fallback).
+  finding; so is the `--model` fallback in `.github/workflows/claude*.yml`
+  (Actions has no tier registry — override via the repo variable
+  `CLAUDE_REVIEW_MODEL`). Every DEEP call site goes through
+  `createDeepMessage` (thinking-block stripping + refusal fallback).
 - **Estimate service-mix rail member exclusion**
   (`server/routes/estimate-public.js` `applyServiceMixChange`,
   `server/routes/admin-estimates.js` `applyLeadServiceForSend`). A priced

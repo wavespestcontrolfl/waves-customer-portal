@@ -77,9 +77,11 @@ jobs:
           # Tracking comment = the review summary; the action's own
           # update_claude_comment tool is the only way it is written.
           track_progress: true
-          # Opus 5 is the review model. Swap to claude-fable-5-1 for the
-          # strongest (and most expensive) pass; every push re-reviews, so
-          # weigh cost per PR round before doing that.
+          # Review model: repo variable CLAUDE_REVIEW_MODEL (Settings ->
+          # Actions -> Variables) overrides the Opus 5 fallback — set it to
+          # claude-fable-5-1 for the strongest (and most expensive) pass; every
+          # push re-reviews, so weigh cost per PR round. The literal fallback
+          # is the documented Actions exception to the AGENTS.md model-ID rule.
           # --setting-sources user: never load this checkout's .claude/settings.json
           # (its allowlist approves npm commands, which a PR-controlled
           # package.json could weaponize) — the allow/deny lists below are the
@@ -87,7 +89,7 @@ jobs:
           # the prompt tells the reviewer to read it and AGENTS.md explicitly.
           claude_args: |
             --setting-sources user
-            --model claude-opus-5
+            --model ${{ vars.CLAUDE_REVIEW_MODEL || 'claude-opus-5' }}
             --max-turns 120
             --allowedTools "Agent,Task,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(git log:*),Bash(git blame:*),Bash(git show:*),Bash(git diff:*)"
             --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git checkout:*),Bash(git switch:*),Bash(git rm:*),Bash(git reset:*),Bash(git stash:*),Bash(git branch:*),Bash(git config:*),Bash(git fetch:*),Bash(git pull:*),Bash(git merge:*),Bash(git rebase:*),mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
