@@ -214,14 +214,17 @@ export default function TechHomePage() {
   const [schedule, setSchedule] = useState([]);
   // The tech's own Twilio line, if they hold one (GET /api/tech/line):
   // the brief panel's Call/Text then go through the line. Null = personal
-  // phone links as before; a failed read is the same as no line.
+  // phone links as before. Re-read with every schedule refresh (mount,
+  // dispatch broadcast, retry): a line cleared or reassigned — or the gate
+  // switched off — while the PWA stays open must bring the personal-phone
+  // links back instead of buttons that only 409 (codex #4072 r3 P2). A
+  // failed read keeps the last known answer.
   const [techLine, setTechLine] = useState(null);
-  useEffect(() => {
-    let alive = true;
-    techRequest('/tech/line')
-      .then((d) => { if (alive) setTechLine(d?.line ? d : null); })
-      .catch(() => {});
-    return () => { alive = false; };
+  const fetchTechLine = useCallback(async () => {
+    try {
+      const d = await techRequest('/tech/line');
+      setTechLine(d?.line ? d : null);
+    } catch { /* keep the last known line */ }
   }, []);
   const [loading, setLoading] = useState(true);
   const [scheduleError, setScheduleError] = useState('');
@@ -260,6 +263,7 @@ export default function TechHomePage() {
   const currentRole = getAdminUser()?.role || null;
 
   const fetchSchedule = useCallback(async () => {
+    fetchTechLine();
     try {
       setScheduleError('');
       const token = getAdminAuthToken();
@@ -277,7 +281,7 @@ export default function TechHomePage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [fetchTechLine]);
 
   useEffect(() => {
     fetchSchedule();

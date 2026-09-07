@@ -799,11 +799,12 @@ async function sweepStaleSuggestionsAfterReply({ phoneLast10, sendStartedAt, exc
   try {
     await runStaleSweep();
   } catch (sweepErr) {
-    logger.warn(`[sms-suggest] stale-card sweep failed, retrying once: ${sweepErr.message}`);
+    // Code only: a knex message binds the thread phone (AGENTS.md PII-in-logs).
+    logger.warn(`[sms-suggest] stale-card sweep failed, retrying once (${sweepErr.code || sweepErr.name || 'error'})`);
     try {
       await runStaleSweep();
     } catch (retryErr) {
-      logger.error(`[sms-suggest] stale-card sweep failed twice — pending cards may linger on an answered thread until the next send or expiry: ${retryErr.message}`);
+      logger.error(`[sms-suggest] stale-card sweep failed twice (${retryErr.code || retryErr.name || 'error'}) — pending cards may linger on an answered thread until the next send or expiry`);
     }
   }
 }
