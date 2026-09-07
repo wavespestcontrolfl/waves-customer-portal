@@ -497,7 +497,14 @@ function installHarness() {
           const finalMessage = stream.finalMessage.bind(stream);
           stream.finalMessage = () => finalMessage().then(
             (msg) => { record.modelRounds += 1; return msg; },
-            (err) => { record.modelErrors.push(err && err.message ? err.message : String(err)); throw err; },
+            (err) => {
+              // A barge-in aborts the stream on purpose; everything else is a
+              // real provider failure, wherever in the call it lands.
+              const message = err && err.message ? err.message : String(err);
+              if ((err && err.name === 'AbortError') || /abort/i.test(message)) record.modelAborts += 1;
+              else record.modelErrors.push(message);
+              throw err;
+            },
           );
         }
         return stream;
@@ -756,7 +763,7 @@ function newRecord(scenario, h) {
   return {
     id: scenario.id, language: scenario.language || 'en', turn: 0, events: [], spoken: [], toolCalls: [], toolUse: {},
     endSession: null, injected: [], dbAttempts: [], warnings: [], toolsAvailable: [], promptSha: null, model: h.MODEL,
-    modelRounds: 0, modelErrors: [], modelCalls: 0,
+    modelRounds: 0, modelErrors: [], modelCalls: 0, modelAborts: 0,
   };
 }
 
@@ -812,11 +819,11 @@ async function runScenario(scenario, { judge = true, judgeFn = null } = {}) {
     await driveTurns(convo, scenario, record);
     record.toolsAvailable = (convo._tools || []).map((t) => t.name);
     record.promptSha = convo._promptSha || null;
-    // No completed model round and a real provider error (an injected
-    // failure is expected and excluded): the conversation never happened, so
-    // the checks would grade the fallback copy. That is a replay error, not
-    // a pass.
-    if (record.modelRounds === 0 && record.modelErrors.length) {
+    // Any REAL provider error (an injected failure is expected and excluded,
+    // a barge-in abort is deliberate) means the conversation did not run as
+    // scripted — before the first round or after ten, the checks would be
+    // grading the relay's fallback copy. A replay error, never a pass.
+    if (record.modelErrors.length) {
       throw Object.assign(new Error(`model unavailable: ${record.modelErrors[0]}`), { code: 'EVAL_MODEL_UNAVAILABLE' });
     }
     // The relay never reached the model at all: with no SDK client (no

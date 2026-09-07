@@ -552,6 +552,20 @@ describe('voice relay eval — the harness', () => {
     expect(down.checks).toEqual([]);
 
     // The injected failure consumes no scripted reply: the model is never reached on that round.
+    // A real provider failure AFTER a completed round is still a replay error:
+    // the rest of the call ran on fallback copy, not the model.
+    script = [say('Hello, how can I help?'), new Error('503 overloaded')];
+    const partial = await replay.runScenario(scenario({ id: 'harness-partial', turns: [{ caller: 'hi' }, { caller: 'book me' }], expect: [] }), { judge: false });
+    expect(partial.modelRounds).toBe(1);
+    expect(partial.status).toBe('error');
+    expect(partial.error).toMatchObject({ code: 'EVAL_MODEL_UNAVAILABLE', message: expect.stringContaining('503 overloaded') });
+    // A deliberate abort (a barge-in) is not a provider failure.
+    script = [say('Hello, how can I help?'), Object.assign(new Error('Request was aborted.'), { name: 'AbortError' }), say('Sure.')];
+    const aborted = await replay.runScenario(scenario({ id: 'harness-abort', turns: [{ caller: 'hi' }, { caller: 'wait' }, { caller: 'ok' }], expect: [] }), { judge: false });
+    expect(aborted.modelAborts).toBe(1);
+    expect(aborted.modelErrors).toEqual([]);
+    expect(aborted.status).toBe('pass');
+
     script = [say('Got it — a team member will follow up.')];
     const injected = await replay.runScenario(scenario({ id: 'harness-injected', fixtures: { officeHours: 'unknown', modelFailures: 1, toolResponses: {} }, turns: [{ caller: 'hi' }, { caller: 'hello?' }], expect: [] }), { judge: false });
     expect(injected.status).toBe('pass');
