@@ -278,6 +278,38 @@ describe('annual prepay renewal helpers', () => {
     expect(selected.map((r) => r.id)).toEqual(['svc-stamped']);
   });
 
+  test('a callback / re-service never consumes a sold coverage slot', async () => {
+    // 4 quarterly visits sold. A completed re-service callback sits inside the
+    // window and its service_type collapses to the same coverage key as the
+    // quarterly service ("Pest Control Re-Service" → "pestcontrolre" contains
+    // "pestcontrol"). Text matching alone adopted it as visit 2 of 4 and pushed
+    // the real fourth quarterly visit out of coverage (prod, 2026-09-07). The
+    // callback is free by definition — it must be skipped before slicing.
+    const quarterly = (id, scheduled_date, status = 'pending') => ({
+      id, customer_id: 'c1', scheduled_date, status, service_type: 'Quarterly Pest Control Service',
+      is_callback: false, prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null,
+    });
+    const rows = [
+      quarterly('svc-jun', '2026-06-12', 'completed'),
+      { id: 'svc-callback', customer_id: 'c1', scheduled_date: '2026-08-30', status: 'completed', service_type: 'Pest Control Re-Service', is_callback: true, prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null },
+      quarterly('svc-sep', '2026-09-11'),
+      quarterly('svc-dec', '2026-12-11'),
+      quarterly('svc-mar', '2027-03-12'),
+    ];
+    setDbQueues({ scheduled_services: [query({ rows })] });
+
+    const selected = await _private.coverageRowsForTerm({
+      id: 'term-1',
+      customer_id: 'c1',
+      coverage_service_type: 'Quarterly Pest Control Service',
+      coverage_visit_count: 4,
+      term_start: '2026-06-12',
+      term_end: '2027-06-12',
+    });
+
+    expect(selected.map((r) => r.id)).toEqual(['svc-jun', 'svc-sep', 'svc-dec', 'svc-mar']);
+  });
+
   test('does not overwrite a manual cash/Zelle prepaid stamp when activating coverage', async () => {
     const rows = [
       // Independently prepaid (cash) and already linked to this term by
@@ -1039,6 +1071,37 @@ describe('annual prepay renewal helpers', () => {
       prepaid_at: null,
       prepaid_note: null,
     }));
+  });
+
+  test('a refresh clears the annual-prepay stamp and term link a callback picked up before the matcher excluded it', async () => {
+    // Legacy state: a callback adopted into coverage before is_callback was
+    // excluded still carries the term link and (if it was pending when the
+    // term activated) a positive annual-prepay stamp. Left alone, the term
+    // holds five allocations for four sold visits and the free callback
+    // reads as prepaid. Every status is in scope — a callback's annual stamp
+    // is never billing truth — but a cash/Zelle stamp is not ours to clear.
+    const columnQuery = query({
+      columnInfo: {
+        status: {}, is_callback: {}, prepaid_amount: {}, prepaid_method: {},
+        prepaid_at: {}, prepaid_note: {}, annual_prepay_term_id: {}, updated_at: {},
+      },
+    });
+    const stampClear = query({ rows: 1 });
+    const unlink = query({ rows: 1 });
+    setDbQueues({ scheduled_services: [columnQuery, stampClear, unlink] });
+
+    const detached = await _private.detachCallbacksFromTerm({ id: 'term-1' }, db);
+
+    expect(detached).toBe(1);
+    expect(stampClear.where).toHaveBeenCalledWith({
+      annual_prepay_term_id: 'term-1', is_callback: true, prepaid_method: 'annual_prepay_invoice',
+    });
+    expect(stampClear.whereNotIn).not.toHaveBeenCalled();
+    expect(stampClear.update).toHaveBeenCalledWith(expect.objectContaining({
+      prepaid_amount: null, prepaid_method: null, prepaid_at: null, prepaid_note: null,
+    }));
+    expect(unlink.where).toHaveBeenCalledWith({ annual_prepay_term_id: 'term-1', is_callback: true });
+    expect(unlink.update).toHaveBeenCalledWith(expect.objectContaining({ annual_prepay_term_id: null }));
   });
 
   test('seeds annual-prepay visits with a pre-tax billable price + invoice-on-complete', async () => {

@@ -483,9 +483,17 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
     .orderBy(['scheduled_date', 'window_start', 'id'])
     .select('*');
 
+  // A callback / re-service is never a SOLD visit: it is free by definition
+  // and completion never bills it, but its service_type reads as the covered
+  // family ("Pest Control Re-Service" → the same coverage key as "Quarterly
+  // Pest Control Service"), so text matching adopted one into the slice and
+  // pushed the customer's real fourth quarterly visit out of coverage
+  // (2026-09-07, prod). Excluded up front, in every mode — a callback must
+  // neither consume a sold slot nor count toward the seeder's existing rows.
+  const nonCallbackRows = rows.filter((row) => row.is_callback !== true);
   const filtered = includeTerminalStatuses
-    ? rows
-    : rows.filter((row) => !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase()));
+    ? nonCallbackRows
+    : nonCallbackRows.filter((row) => !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase()));
 
   const isCommittedToTerm = (row) => rowCommittedToTerm(term, row);
   let matching = filtered.filter((row) => serviceMatchesCoverage(row, coverageServiceType));
@@ -1092,7 +1100,12 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // must carry the recurring identity or already belong to this term,
   // or a genuine one-time palm appointment on the same day would be
   // swallowed into prepaid coverage.
-  const adoptableCoverageRow = (row) => serviceMatchesCoverage(row, coverageServiceType)
+  // A callback is excluded here exactly as in coverageRowsForTerm (GH Codex
+  // #4105 P1): a same-day callback adopted under the lock would skip the
+  // insert while every later attach/stamp pass filters it back out — the
+  // paid term would stay one visit short on every refresh.
+  const adoptableCoverageRow = (row) => row.is_callback !== true
+    && serviceMatchesCoverage(row, coverageServiceType)
     && !rowLinkedToAnotherTerm(term, row)
     && (!coverageIsPalm || (() => {
       // Same ID-FIRST classification as coverage matching (codex r27
@@ -2376,6 +2389,48 @@ async function finishDisputeRecoveryForTerm(term, conn = db) {
 // transaction (e.g. prepaid reversal) pass `{ throwOnError: true }` so a
 // transient DB failure rolls the whole unit of work back instead of silently
 // leaving future visits stamped prepaid.
+// A callback never belongs to a term (coverageRowsForTerm excludes it), but
+// before that exclusion a callback inside the window could be adopted into
+// the selection: linked to the term and — if still pending — stamped
+// prepaid. Dropping it from the selection alone leaves that legacy link and
+// stamp behind: five allocations on a four-visit term, inflated
+// prepaid-series totals, and resolveCallbackBilling reading a free callback
+// as prepaid (GH Codex #4105 r2 P1). Every refresh clears both, in EVERY
+// status — a callback's annual-prepay stamp is never billing truth, unlike a
+// sold visit's completed stamp. An out-of-band cash/Zelle stamp on a callback
+// is not ours to touch: keep the stamp, drop only the link. Best-effort,
+// like attachScheduledServices — a miss self-heals on the next refresh.
+async function detachCallbacksFromTerm(term, conn = db) {
+  if (!term?.id) return 0;
+  const cols = await scheduledServiceColumns();
+  if (!cols.annual_prepay_term_id || !cols.is_callback) return 0;
+  try {
+    const now = new Date();
+    if (cols.prepaid_amount && cols.prepaid_method) {
+      const stampClear = { prepaid_amount: null, prepaid_method: null };
+      if (cols.prepaid_at) stampClear.prepaid_at = null;
+      if (cols.prepaid_note) stampClear.prepaid_note = null;
+      if (cols.updated_at) stampClear.updated_at = now;
+      await conn('scheduled_services')
+        .where({ annual_prepay_term_id: term.id, is_callback: true, prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD })
+        .update(stampClear);
+    }
+    const unlink = { annual_prepay_term_id: null };
+    if (cols.updated_at) unlink.updated_at = now;
+    const unlinked = await conn('scheduled_services')
+      .where({ annual_prepay_term_id: term.id, is_callback: true })
+      .update(unlink);
+    const count = Array.isArray(unlinked) ? unlinked.length : Number(unlinked) || 0;
+    if (count > 0) {
+      logger.info(`[annual-prepay] term ${term.id}: detached ${count} callback visit(s) from coverage`);
+    }
+    return count;
+  } catch (err) {
+    logger.warn(`[annual-prepay] callback detach skipped for term ${term.id}: ${err.message}`);
+    return 0;
+  }
+}
+
 async function clearPrepaidStampsForTerm(termId, conn = db, { throwOnError = false } = {}) {
   if (!termId) return 0;
   const cols = await scheduledServiceColumns();
@@ -2590,6 +2645,7 @@ async function refreshTermSnapshot(termOrId, conn = db) {
     // quarantined by the deferral's durable coverage exception until the
     // next refresh restores the catalog identity and re-runs this
     // sequence idempotently.
+    await detachCallbacksFromTerm(term, conn);
     await attachScheduledServices({ ...term, term_start: termStart, term_end: windowEnd }, conn);
     await applyPrepaidCoverageForTerm({ ...term, term_start: termStart, term_end: windowEnd }, conn);
     // Callers sync customers.waveguard_renewal_date from the PRE-slide end
@@ -5555,6 +5611,7 @@ module.exports = {
     normalizeCoverageVisitCount,
     ensureCoverageRowsForTerm,
     coverageRowsForTerm,
+    detachCallbacksFromTerm,
     resetCachesForTests,
   },
 };
