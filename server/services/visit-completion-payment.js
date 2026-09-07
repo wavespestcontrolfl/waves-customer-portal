@@ -57,6 +57,10 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
     refuse('billed_members_changed');
   }
   for (const member of billed) {
+    if (String(member.technician_id || '') !== String(visit.technician_id || '')
+        || !VisitGroups.rowStillAtVisitStop(member, visit, members.filter((other) => other.id !== member.id))) {
+      refuse('member_stop_changed');
+    }
     const pricing = frozen.memberPricing?.find((entry) => entry.id === member.id);
     if (!pricing || pricing.price !== Number(member.estimated_price)
         || pricing.isCallback !== Boolean(member.is_callback)
@@ -88,6 +92,15 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
   const failedSubmission = await trx('stripe_invoice_charge_attempts')
     .where({ invoice_id: invoice.id, status: 'failed' }).whereNotNull('submitted_at').first('id');
   if (failedSubmission && invoiceAmountDue(invoice) > 0) refuse('previous_collection_failed');
+  // The reminder worker claims under this invoice lock before rendering or
+  // sending outside its transaction. A fresh claim must finish before money moves.
+  const sequence = await trx('invoice_followup_sequences').where({ invoice_id: invoice.id }).forUpdate()
+    .first('touch_claimed_at');
+  if (new Date(sequence?.touch_claimed_at).getTime() > Date.now() - 10 * 60 * 1000) {
+    throw Object.assign(new Error('Visit invoice reminder is still in flight. Retry closeout.'), {
+      code: 'VISIT_PAYMENT_FOLLOWUP_IN_FLIGHT',
+    });
+  }
 }
 
 /** One automatic collection decision for the saved visit, using the invoice rail. */
@@ -105,7 +118,7 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
     return { state: 'office_required', invoiceId: invoice.id };
   }
   if (!isInvoiceCollectibleStatus(invoice.status)) {
-    if (['paid', 'prepaid'].includes(invoice.status)) {
+    if (['paid', 'prepaid', 'processing'].includes(invoice.status)) {
       await VisitGroups.finalizeVisitNotification(visit.id, 'visit_payment', 'sent');
       await database('service_visits').where({ id: visit.id }).update({
         payment_intent_id: invoice.stripe_payment_intent_id || null, updated_at: database.fn.now(),
