@@ -78,7 +78,7 @@ const sTableWrap = {
   background: D.card,
   border: `1px solid ${D.border}`,
   borderRadius: 12,
-  overflow: "hidden",
+  overflow: "auto",
 };
 
 function useFetch(url, token, deps = []) {

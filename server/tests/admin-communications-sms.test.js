@@ -81,6 +81,7 @@ jest.mock('../services/sms-suggest-mode', () => ({
   parkThreadSuggestions: jest.fn(async () => []),
   reopenScheduledSuggestions: jest.fn(async () => 0),
   ignoreParkedSuggestions: jest.fn(async () => 0),
+  sweepStaleSuggestionsAfterReply: jest.fn(async () => undefined),
   lockSuggestThread: jest.fn(async () => {}),
 }));
 // Inert auto-send executor: the /sms route checks for an in-flight autonomous
@@ -1664,6 +1665,20 @@ describe('admin communications SMS route', () => {
       });
       expect(builder.calls.limit).toEqual([501]);
       expect(builder.calls.offset).toEqual([0]);
+    });
+  });
+
+  test.each([
+    ['+449415550103', ['449415550103']],
+    ['+19415550103', ['19415550103', '9415550103']],
+    ['(941) 555-0103', ['19415550103', '9415550103']],
+  ])('matches the full contact identity for %s', async (phone, expectedDigits) => {
+    const builder = makeQueryBuilder([]);
+    db.mockReturnValue(builder);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/log?phone=${encodeURIComponent(phone)}`, { headers: { Authorization: 'Bearer admin' } });
+      expect(res.status).toBe(200);
+      expect(builder.whereRaw).toHaveBeenCalledWith(expect.not.stringContaining('RIGHT('), [expectedDigits]);
     });
   });
 

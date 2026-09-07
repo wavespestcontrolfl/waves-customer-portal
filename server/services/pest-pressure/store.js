@@ -12,6 +12,7 @@
 
 const crypto = require('crypto');
 const db = require('../../models/db');
+const { savepointRead } = require('../../utils/savepoint-read');
 const { DEFAULT_CONFIG } = require('./config');
 
 // Fields whose values change what the customer sees on a Pest Pressure
@@ -103,12 +104,12 @@ function rowToConfig(row) {
  * exists yet — preserves "engine runs even without admin config" behavior.
  */
 async function loadActiveConfig(knex = db, { scope = 'global' } = {}) {
-  const hasTable = await knex.schema.hasTable('pest_pressure_configs').catch(() => false);
+  const hasTable = await savepointRead(knex, (k) => k.schema.hasTable('pest_pressure_configs')).catch(() => false);
   if (!hasTable) return { ...DEFAULT_CONFIG, _source: 'default_no_table' };
 
-  const row = await knex('pest_pressure_configs')
+  const row = await savepointRead(knex, (k) => k('pest_pressure_configs')
     .where({ scope })
-    .first(CONFIG_COLUMNS)
+    .first(CONFIG_COLUMNS))
     .catch(() => null);
   if (!row) return { ...DEFAULT_CONFIG, _source: 'default_no_row' };
 

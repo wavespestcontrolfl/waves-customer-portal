@@ -77,7 +77,7 @@ describe('report page metadata', () => {
     const html = '<html lang="en"><head><title>Old</title></head><body></body></html>';
 
     const updated = applyHtmlMetadata(html, {
-      title: 'Waves Admin',
+      title: 'Waves',
       htmlClass: 'admin-app',
     });
 

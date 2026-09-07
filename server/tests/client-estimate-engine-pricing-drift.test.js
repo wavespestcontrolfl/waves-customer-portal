@@ -82,22 +82,6 @@ function loadClientEstimator(source) {
   return module.exports;
 }
 
-function loadAdminPreviewOneTimeHelpers(source) {
-  const start = source.indexOf('const INITIAL_ROACH_PREVIEW_RE');
-  const end = source.indexOf('function firstVisitFeesForCustomerPreview');
-  expect(start).toBeGreaterThanOrEqual(0);
-  expect(end).toBeGreaterThan(start);
-  const helperSource = source.slice(start, end);
-   
-  return new Function('serviceDetailText', 'fmtInt', `
-    ${helperSource}
-    return { oneTimePestChoiceRowsForCustomerPreview };
-  `)(
-    (item = {}) => item.detail || item.det || item.note || '',
-    (value) => `$${Math.round(Number(value || 0)).toLocaleString('en-US')}`,
-  );
-}
-
 function buildClientTopDressingEstimate(calculateEstimate, { lawnSqFt, hasRecurringLawn }) {
   const estimate = calculateEstimate({
     homeSqFt: 2000,
@@ -568,9 +552,11 @@ describe('deprecated client estimator pricing drift guards', () => {
     expect(line.price).toBe(ONE_TIME.mosquito.SMALL + 2 * 75 + 1 * 15);
   });
 
-  test('admin customer preview adds preserved pest specialty rows to one-time pest choice', () => {
-    const { oneTimePestChoiceRowsForCustomerPreview } = loadAdminPreviewOneTimeHelpers(adminToolViewSource);
-    const rows = oneTimePestChoiceRowsForCustomerPreview({
+  test('the persisted customer preview keeps specialty rows on the one-time pest choice', () => {
+    const { acceptedOneTimeChoiceListForEstimate } = require('../routes/estimate-public');
+    const result = {
+      recurring: { services: [{ name: 'Quarterly Pest Control', mo: 30.67 }] },
+      results: { pestTiers: [{ label: 'Quarterly', apps: 4, pa: 92 }] },
       oneTime: {
         total: 468,
         membershipFee: 99,
@@ -586,7 +572,13 @@ describe('deprecated client estimator pricing drift guards', () => {
           { service: 'termite_bait_installation', name: 'Termite bait installation', price: 300 },
         ],
       },
-    }, 202);
+    };
+    // Unlike the retired mock preview, the actual customer presenter refuses
+    // a pest choice over an unrelated termite scope. Keep that stronger gate.
+    expect(acceptedOneTimeChoiceListForEstimate({ show_one_time_option: true }, { result })).toBeNull();
+    result.oneTime.items = result.oneTime.items.filter((item) => !['termite_bait_installation', 'one_time_adjustment'].includes(item.service));
+    const rows = acceptedOneTimeChoiceListForEstimate({ show_one_time_option: true }, { result })
+      .map(({ service, name, price, detail }) => ({ service, name, price, detail: detail || (service === 'one_time_pest' ? 'Single treatment' : '') }));
 
     expect(rows).toEqual([{
       service: 'one_time_pest',

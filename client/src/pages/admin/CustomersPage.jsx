@@ -34,7 +34,6 @@ import {
   PROPERTY_LABEL_OPTIONS,
   CUSTOMER_TAG_OPTIONS,
 } from "../../lib/customerFormOptions";
-import { CustomerHealthSection } from "./CustomerHealthTabs";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const D = {
@@ -939,18 +938,23 @@ function SortHeader({
 // CUSTOMER INTELLIGENCE TAB
 // =============================================================================
 function CustomerIntelligenceTab() {
+  const [retryKey, setRetryKey] = useState(0);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
     adminFetch("/admin/customers/intelligence")
-      .then((d) => {
-        setData(d);
-        setLoading(false);
+      .then((result) => {
+        if (!result || !Number.isFinite(result.totalCustomers)) throw new Error("Incomplete intelligence summary");
+        if (!cancelled) setData(result);
       })
-      .catch(() => setLoading(false));
-  }, []);
+      .catch(() => { if (!cancelled) setData(null); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [retryKey]);
 
   const handleScan = async () => {
     setScanning(true);
@@ -1015,20 +1019,12 @@ function CustomerIntelligenceTab() {
   if (!data)
     return (
       <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Unable to load intelligence data
+        <p>Retention insights unavailable. The customer intelligence summary could not be loaded.</p>
+        <button type="button" onClick={() => setRetryKey((key) => key + 1)} style={{ padding: "10px 16px", marginTop: 12, border: `1px solid ${D.border}`, borderRadius: 4, background: "#fff" }}>Retry retention insights</button>
       </div>
     );
 
-  const dist = data.distribution || {};
-  const total = data.totalCustomers || 0;
   const MONO = "'JetBrains Mono', monospace";
-  const riskColor = {
-    healthy: D.green,
-    watch: D.amber,
-    at_risk: "#f97316",
-    critical: D.red,
-  };
-  const riskEmoji = { healthy: "", watch: "", at_risk: "", critical: "" };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -1042,7 +1038,7 @@ function CustomerIntelligenceTab() {
       >
         {" "}
         <div style={{ fontSize: 14, color: D.muted }}>
-          {total} active customers scanned
+          Review prepared outreach and service opportunities.
         </div>{" "}
         <button
           onClick={handleScan}
@@ -1061,221 +1057,9 @@ function CustomerIntelligenceTab() {
           {scanning ? "Scanning..." : "Run Scan Now"}
         </button>{" "}
       </div>
-      {/* Health Distribution */}
-      <div
-        style={{
-          background: D.card,
-          border: `1px solid ${D.border}`,
-          borderRadius: 12,
-          padding: 24,
-        }}
-      >
-        {" "}
-        <div
-          style={{
-            fontSize: 16,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 16,
-          }}
-        >
-          Customer Health Overview
-        </div>{" "}
-        <div
-          className="intel-health-grid"
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(4, 1fr)",
-            gap: 12,
-            marginBottom: 16,
-          }}
-        >
-          {["healthy", "watch", "at_risk", "critical"].map((level) => (
-            <div
-              key={level}
-              style={{
-                padding: 14,
-                background: D.bg,
-                borderRadius: 10,
-                textAlign: "center",
-                borderTop: `3px solid ${riskColor[level]}`,
-              }}
-            >
-              {" "}
-              <div
-                style={{
-                  fontSize: 11,
-                  color: D.muted,
-                  textTransform: "capitalize",
-                  marginBottom: 4,
-                }}
-              >
-                {riskEmoji[level]} {level.replace("_", " ")}
-              </div>{" "}
-              <div
-                style={{
-                  fontSize: 24,
-                  fontWeight: 700,
-                  color: riskColor[level],
-                  fontFamily: MONO,
-                }}
-              >
-                {dist[level] || 0}
-              </div>{" "}
-              <div style={{ fontSize: 11, color: D.muted }}>
-                {total > 0 ? Math.round(((dist[level] || 0) / total) * 100) : 0}
-                %
-              </div>{" "}
-            </div>
-          ))}
-        </div>
-        {data.mrrAtRisk > 0 && (
-          <div
-            style={{
-              padding: "10px 14px",
-              background: D.bg,
-              borderRadius: 8,
-              borderLeft: `3px solid ${D.red}`,
-              fontSize: 13,
-            }}
-          >
-            {" "}
-            <span style={{ color: D.red, fontWeight: 500 }}>
-              MRR at risk: ${data.mrrAtRisk?.toLocaleString()}/mo
-            </span>{" "}
-            <span style={{ color: D.muted, marginLeft: 8 }}>
-              (${(data.mrrAtRisk * 12).toLocaleString()}/yr)
-            </span>{" "}
-          </div>
-        )}
-      </div>
-      {/* Critical + At Risk Customers */}
-      {(data.atRiskCustomers || []).length > 0 && (
-        <div
-          style={{
-            background: D.card,
-            border: `1px solid ${D.border}`,
-            borderRadius: 12,
-            padding: 24,
-          }}
-        >
-          {" "}
-          <div
-            style={{
-              fontSize: 16,
-              fontWeight: 500,
-              color: D.red,
-              marginBottom: 16,
-            }}
-          >
-            Action Required ({data.atRiskCustomers.length} customers)
-          </div>
-          {data.atRiskCustomers.slice(0, 10).map((c) => {
-            const factors = c.risk_factors || [];
-            return (
-              <div
-                key={c.id}
-                style={{
-                  padding: "14px 16px",
-                  background: D.bg,
-                  borderRadius: 10,
-                  marginBottom: 10,
-                  borderLeft: `3px solid ${riskColor[c.churn_risk_level]}`,
-                }}
-              >
-                {" "}
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "flex-start",
-                    marginBottom: 6,
-                  }}
-                >
-                  {" "}
-                  <div>
-                    {" "}
-                    <span
-                      style={{
-                        fontSize: 14,
-                        fontWeight: 500,
-                        color: D.heading,
-                      }}
-                    >
-                      {c.first_name} {c.last_name}
-                    </span>{" "}
-                    <span
-                      style={{ fontSize: 12, color: D.muted, marginLeft: 8 }}
-                    >
-                      {c.waveguard_tier} $
-                      {parseFloat(c.monthly_rate || 0).toFixed(0)}/mo
-                    </span>{" "}
-                  </div>{" "}
-                  <div
-                    style={{ display: "flex", alignItems: "center", gap: 6 }}
-                  >
-                    {" "}
-                    <span
-                      style={{
-                        fontSize: 11,
-                        color: riskColor[c.churn_risk_level],
-                        fontWeight: 700,
-                      }}
-                    >
-                      {c.health_score ?? 0}/100
-                    </span>{" "}
-                    <span>{riskEmoji[c.churn_risk_level]}</span>{" "}
-                  </div>{" "}
-                </div>
-                {factors.length > 0 && (
-                  <div
-                    style={{ fontSize: 12, color: D.muted, marginBottom: 6 }}
-                  >
-                    Signals: {factors.map((f) => f.value).join(" • ")}
-                  </div>
-                )}
-                {c.engagement_trend && c.engagement_trend !== "stable" && (
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color:
-                        c.engagement_trend === "declining" ||
-                        c.engagement_trend === "disengaging"
-                          ? D.red
-                          : D.green,
-                      marginBottom: 6,
-                    }}
-                  >
-                    Trend:{" "}
-                    {c.engagement_trend === "declining"
-                      ? ""
-                      : c.engagement_trend === "disengaging"
-                        ? ""
-                        : ""}{" "}
-                    {c.engagement_trend}
-                  </div>
-                )}
-                {c.next_best_action && (
-                  <div
-                    style={{
-                      fontSize: 13,
-                      color: D.teal,
-                      fontWeight: 500,
-                      marginBottom: 8,
-                      padding: "6px 10px",
-                      background: D.card,
-                      borderRadius: 6,
-                    }}
-                  >
-                    AI {c.next_best_action}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
+      {!(data.pendingOutreach || []).length && !(data.upsells || []).length && (
+        <p style={{ color: D.muted, fontSize: 14 }}>No pending outreach or upsell opportunities. Use Directory filters to find customers by health or past retention outcomes.</p>
       )}
-
       {/* Pending Outreach */}
       {(data.pendingOutreach || []).length > 0 && (
         <div
@@ -1591,137 +1375,7 @@ function CustomerIntelligenceTab() {
         </div>
       )}
 
-      {/* Retention Metrics */}
-      {data.metrics && (
-        <div
-          style={{
-            background: D.card,
-            border: `1px solid ${D.border}`,
-            borderRadius: 12,
-            padding: 24,
-          }}
-        >
-          {" "}
-          <div
-            style={{
-              fontSize: 16,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 16,
-            }}
-          >
-            Retention Metrics (Last 30 Days)
-          </div>{" "}
-          <div
-            className="intel-metrics-grid"
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(4, 1fr)",
-              gap: 12,
-            }}
-          >
-            {" "}
-            <div
-              style={{
-                padding: 12,
-                background: D.bg,
-                borderRadius: 8,
-                textAlign: "center",
-              }}
-            >
-              {" "}
-              <div style={{ fontSize: 11, color: D.muted }}>
-                Outreach Sent
-              </div>{" "}
-              <div
-                style={{
-                  fontSize: 20,
-                  fontWeight: 700,
-                  color: D.teal,
-                  fontFamily: MONO,
-                }}
-              >
-                {data.metrics.outreachSent}
-              </div>{" "}
-            </div>{" "}
-            <div
-              style={{
-                padding: 12,
-                background: D.bg,
-                borderRadius: 8,
-                textAlign: "center",
-              }}
-            >
-              {" "}
-              <div style={{ fontSize: 11, color: D.muted }}>
-                Customers Saved
-              </div>{" "}
-              <div
-                style={{
-                  fontSize: 20,
-                  fontWeight: 700,
-                  color: D.green,
-                  fontFamily: MONO,
-                }}
-              >
-                {data.metrics.customersSaved}
-              </div>{" "}
-              <div style={{ fontSize: 11, color: D.muted }}>
-                {data.metrics.saveRate}% save rate
-              </div>{" "}
-            </div>{" "}
-            <div
-              style={{
-                padding: 12,
-                background: D.bg,
-                borderRadius: 8,
-                textAlign: "center",
-              }}
-            >
-              {" "}
-              <div style={{ fontSize: 11, color: D.muted }}>
-                Revenue Saved
-              </div>{" "}
-              <div
-                style={{
-                  fontSize: 20,
-                  fontWeight: 700,
-                  color: D.green,
-                  fontFamily: MONO,
-                }}
-              >
-                ${data.metrics.revenueSaved}/mo
-              </div>{" "}
-            </div>{" "}
-            <div
-              style={{
-                padding: 12,
-                background: D.bg,
-                borderRadius: 8,
-                textAlign: "center",
-              }}
-            >
-              {" "}
-              <div style={{ fontSize: 11, color: D.muted }}>
-                Upsells Accepted
-              </div>{" "}
-              <div
-                style={{
-                  fontSize: 20,
-                  fontWeight: 700,
-                  color: D.teal,
-                  fontFamily: MONO,
-                }}
-              >
-                {data.metrics.upsellsAccepted}
-              </div>{" "}
-              <div style={{ fontSize: 11, color: D.green }}>
-                +${data.metrics.upsellRevenue}/mo
-              </div>{" "}
-            </div>{" "}
-          </div>{" "}
-        </div>
-      )}
+
     </div>
   );
 }
@@ -2116,11 +1770,10 @@ function CustomerMap({ customers: _ignored, onSelect }) {
             marginBottom: 4,
           }}
         >
-          Google Maps API Key Required
+          Map unavailable
         </div>{" "}
         <div style={{ fontSize: 13, color: D.muted }}>
-          Set VITE_GOOGLE_MAPS_API_KEY in your environment to enable the
-          customer map.
+          Customer addresses are still available in the Directory.
         </div>{" "}
       </div>
     );

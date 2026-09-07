@@ -97,27 +97,7 @@ function validateTemplateBody(body, variables, templateKey = null) {
   };
 }
 
-// Owner directive 2026-08-01: drop "https://" from OUR portal links in SMS.
-// It is 8 characters on every link and SMS clients autolink a bare domain.
-//
-// Deliberately scoped to hosts we own. Third-party links keep their scheme:
-// a Google review link (g.page) rendered scheme-less relies on the client
-// recognising an unfamiliar bare host, and those templates are single-segment
-// already, so there is nothing to win and a tappable link to lose.
-//
-// SMS ONLY — this runs inside the SMS renderer. Email and PDF surfaces build
-// their URLs elsewhere and keep the full scheme. The host list is shared
-// with comms-lint (services/messaging/sms-link-policy.js) so the renderer
-// and the lint never disagree about which hosts go bare.
-const { SCHEMELESS_SMS_HOSTS } = require('../services/messaging/sms-link-policy');
-const PORTAL_SCHEME_RE = new RegExp(
-  `https://(?=(?:${SCHEMELESS_SMS_HOSTS.map((h) => h.replace(/\./g, '\\.')).join('|')})[/\\s]|(?:${SCHEMELESS_SMS_HOSTS.map((h) => h.replace(/\./g, '\\.')).join('|')})$)`,
-  'g'
-);
-
-function stripPortalUrlScheme(body) {
-  return String(body).replace(PORTAL_SCHEME_RE, '');
-}
+const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 
 function auditSmsTemplateIssue(templateKey, eventType, reason, details = {}) {
   auditNotificationTemplateIssue({
@@ -413,14 +393,15 @@ router.isTemplateActive = async function(messageType) {
 
 // Get template body by key (returns null if disabled)
 router.getTemplate = async function(templateKey, vars = {}, context = {}, opts = {}) {
+  const audit = opts.audit === false ? () => {} : auditSmsTemplateIssue;
   try {
     if (!(await db.schema.hasTable('sms_templates'))) {
-      auditSmsTemplateIssue(templateKey, 'missing_table', 'sms_templates table missing', context);
+      audit(templateKey, 'missing_table', 'sms_templates table missing', context);
       return null;
     }
     const t = await db('sms_templates').where({ template_key: templateKey }).first();
     if (!t) {
-      auditSmsTemplateIssue(templateKey, 'missing_template', 'template row missing', context);
+      audit(templateKey, 'missing_template', 'template row missing', context);
       return null;
     }
     if (t.is_active === false) {
@@ -446,7 +427,7 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}, opts =
     // that will actually render.
     for (const name of opts.requiredVars || []) {
       if (!body.includes(`{${name}}`)) {
-        auditSmsTemplateIssue(templateKey, 'missing_required_placeholder', `template body lost required placeholder {${name}}`, context);
+        audit(templateKey, 'missing_required_placeholder', `template body lost required placeholder {${name}}`, context);
         return null;
       }
     }
@@ -461,7 +442,7 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}, opts =
     }
     const unresolved = extractTemplatePlaceholders(body);
     if (unresolved.length) {
-      auditSmsTemplateIssue(templateKey, 'unresolved_placeholders', 'template rendered with unresolved placeholders', {
+      audit(templateKey, 'unresolved_placeholders', 'template rendered with unresolved placeholders', {
         ...context,
         unresolved_placeholders: unresolved,
       });
@@ -474,19 +455,12 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}, opts =
     // that leaves the message ending in blank lines or containing a gap.
     // Twilio counts every one of those toward the segment budget, so this is
     // billable whitespace as well as sloppy output.
-    return stripPortalUrlScheme(body).replace(/\n{3,}/g, '\n\n').trim();
+    return stripSmsUrlScheme(body).replace(/\n{3,}/g, '\n\n').trim();
   } catch (err) {
-    auditSmsTemplateIssue(templateKey, 'render_error', err.message || 'template render failed', context);
+    audit(templateKey, 'render_error', err.message || 'template render failed', context);
     return null;
   }
 };
-
-// Exposed so callers can compare a RENDERED body against a URL they hold.
-// getTemplate strips https:// from owned portal hosts before returning, so a
-// caller checking `body.includes(fullUrl)` would never match — normalising both
-// sides through this same function is the only way that comparison stays true
-// as SCHEMELESS_SMS_HOSTS changes.
-router.stripPortalUrlScheme = stripPortalUrlScheme;
 
 // Single source for flow-required placeholders — the write validator above
 // and rain-out's render calls (getTemplate opts.requiredVars) read the SAME

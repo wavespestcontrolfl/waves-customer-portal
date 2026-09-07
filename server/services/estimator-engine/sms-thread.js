@@ -291,7 +291,7 @@ async function runThreadDraft({
  * (the lead-intake state machine, where the customer picked a service).
  */
 async function startSmsThreadDraft({
-  phone, triggerBody = '', skipIntentGate = false, skipCooldown = false, dryRun = false,
+  phone, triggerBody = '', triggerSmsLogId, skipIntentGate = false, skipCooldown = false, dryRun = false,
   scopeCheckOnly = false, precomputedTriage,
   // Clarify-reply re-draft: the unsent automated draft this thread draft
   // replaces (retired inside the dedupe transaction, only on a real insert).
@@ -370,7 +370,7 @@ async function startSmsThreadDraft({
     // prechecked call reuses the pre-check's triage (may be null — that IS
     // the pre-check's fail-open outcome, reused as-is).
     const triage = guarded
-      ? (prechecked ? precomputedTriage : await loadThreadTriageContext({ phone, triggerBody }))
+      ? (prechecked ? precomputedTriage : await loadThreadTriageContext({ phone, triggerBody, triggerSmsLogId }))
       : null;
     // Second deterministic pass over the CURRENT exchange only: "Do you
     // do power washing?" followed minutes later by "How much?" — the ask

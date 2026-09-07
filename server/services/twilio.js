@@ -5,6 +5,7 @@ const logger = require("./logger");
 const smsTemplatesRouter = require("../routes/admin-sms-templates");
 const { shortenOrPassthrough } = require("./short-url");
 const { normalizeGsmPunctuation } = require("./messaging/gsm-normalize");
+const { stripSmsUrlScheme } = require("./messaging/sms-link-policy");
 const { formatTechnicianForCustomer } = require("../utils/technician-name");
 const { publicPortalUrl } = require("../utils/portal-url");
 
@@ -547,7 +548,8 @@ const TwilioService = {
       const internalRedirect = await redirectInternalAdminSmsToNotification(to, body, options);
       if (internalRedirect) return internalRedirect;
 
-      // GSM-7 normalization at the true Twilio boundary: legacy callers
+      // SMS link formatting and GSM-7 normalization at the Twilio boundary:
+      // legacy callers
       // reach sendSMS directly without going through sendCustomerMessage,
       // and one typographic character (curly quote, em dash) flips the
       // whole body to UCS-2 — 67 chars/segment instead of 153. AFTER the
@@ -559,7 +561,7 @@ const TwilioService = {
       // unchanged.
       const sendIsMms = (Array.isArray(options.mediaUrls) && options.mediaUrls.length > 0)
         || !!options.mediaUrl;
-      if (!sendIsMms) body = normalizeGsmPunctuation(body);
+      if (!sendIsMms) body = normalizeGsmPunctuation(stripSmsUrlScheme(body));
 
       // Owner-SMS kill switch: when OWNER_SMS_DISABLED=true, suppress
       // every send addressed to one of the operator's known phones.
@@ -698,7 +700,7 @@ const TwilioService = {
       attemptedFrom = fromNumber;
 
       const c = getClient();
-      if (!c) {
+      if (!c && !options.explicitPushOnly) {
         logger.warn(
           `[twilio] Cannot send SMS — client not initialized. To: ${maskPhone(to)}`,
         );
@@ -779,8 +781,8 @@ const TwilioService = {
       // push_and_sms fires AFTER messages.create succeeds (below), so a
       // retried SMS failure can never duplicate the push leg.
       const PushRouting = require("./messaging/push-channel-routing");
-      const pushRoute = PushRouting.decidePushRoute({
-        gateOn: PushRouting.gatePushRoutingOn(),
+      const pushRoute = options.explicitPushOnly ? 'push_first' : PushRouting.decidePushRoute({
+        gateOn: !options.skipPushRouting && PushRouting.gatePushRoutingOn(),
         customerId: options.customerId || null,
         messageType: options.messageType,
         hasMedia: urls.length > 0 || Boolean(options.media),
@@ -800,6 +802,8 @@ const TwilioService = {
           // Proof-of-send linkage for the scheduled-SMS recovery sweep —
           // without it a crash window makes the sweep resend the message.
           scheduledSmsLogId: options.scheduledSmsLogId,
+          explicitPushOnly: options.explicitPushOnly,
+          notificationEventKey: options.notificationEventKey,
           // Per-leg send-window gate inside the fan-out (round-4 P1).
           preSendCheck: options.preSendCheck,
         });
@@ -808,6 +812,10 @@ const TwilioService = {
             `[push-routing] ${options.messageType} delivered as push to customer ${options.customerId} — SMS skipped`,
           );
           return { success: true, sid: pushed.sid, fromNumber, pushRouted: true };
+        }
+        if (options.explicitPushOnly) {
+          if (pushed.pending) return { success: false, appPending: true, error: pushed.reason };
+          return { success: false, appUnavailable: true, error: pushed.reason || 'push_unavailable' };
         }
         // The push attempt consumed real time (each leg is bounded at 8s but
         // a multi-device fan-out adds up) — the 20:00 ET boundary can pass
@@ -1039,7 +1047,7 @@ const TwilioService = {
    * Phase 1 callers always pass a token (minted by migration backfill);
    * legacy callers that pass nothing still get a sensible bodyless message.
    */
-  async sendTechEnRoute(customerId, techName, etaMinutes, trackToken = null, { operatorInitiated = false } = {}) {
+  async sendTechEnRoute(customerId, techName, etaMinutes, trackToken = null, { operatorInitiated = false, notificationEventKey = null } = {}) {
     const customer = await db("customers").where({ id: customerId }).first();
     const prefs = await db("notification_prefs")
       .where({ customer_id: customerId })
@@ -1122,7 +1130,7 @@ const TwilioService = {
     let landlineSkipped = false;
     const attemptSms = async () => {
       for (const contact of contacts) {
-        if (cachedPrimaryLandline && digitsOnly(contact.phone) === primaryDigits) {
+        if (channel !== 'push' && cachedPrimaryLandline && digitsOnly(contact.phone) === primaryDigits) {
           landlineSkipped = true;
           continue;
         }
@@ -1162,7 +1170,7 @@ const TwilioService = {
             // manual tech/admin taps only; geofence/system transitions
             // never set it (validators/send-window.js).
             ...(operatorInitiated ? { operatorInitiated: true } : {}),
-            metadata: { original_message_type: "tech_en_route" },
+            metadata: { original_message_type: "tech_en_route", useCustomerChannel: true, notificationEventKey },
           }),
         );
       }
@@ -1214,12 +1222,15 @@ const TwilioService = {
     // sms (default) — unchanged legacy behavior: SMS first, email only as the
     // undeliverable fallback.
     const delivered = await attemptSms();
+    if (channel === 'push' && results.some((result) => result?.deferred)) return { success: delivered, results };
 
     // None of the contacts could receive the en-route text (landline / no mobile /
     // blocked), or there were no phone contacts at all — send the en-route notice
     // by email instead so the customer still knows the tech is on the way.
+    let emailFallbackAccepted = false;
     if (!delivered && (attemptedSms || landlineSkipped || contacts.length === 0)) {
       const emailRes = await sendEnRouteEmail();
+      emailFallbackAccepted = emailRes?.ok === true;
       // Unlike confirmation/reminders, a locally-skipped en-route SMS (cached
       // landline / no phone contacts) produces no Twilio delivery callback, so
       // this is the only path that can flag an unreachable customer. If the email
@@ -1229,7 +1240,7 @@ const TwilioService = {
       }
     }
 
-    return { success: delivered, results };
+    return { success: delivered || (channel === 'push' && emailFallbackAccepted), results, emailSent: emailFallbackAccepted };
   },
 
   /**
@@ -1313,6 +1324,8 @@ const TwilioService = {
             metadata: {
               original_message_type: "tech_arrived",
               appointment_progress_event: "tech_arrived",
+              useCustomerChannel: true,
+              ...(scheduledServiceId ? { notificationEventKey: `scheduled-service:${arrivalOccurrenceKey({ scheduledServiceId, scheduledDate, scheduledWindowStart, arrivedAt, customerId })}:arrived` } : {}),
             },
           }),
         );
@@ -1331,7 +1344,7 @@ const TwilioService = {
       // The SMS leg exists when texting is enabled and there is someone to
       // text. For email/both this decides whether an SMS miss is retryable
       // ("the leg existed and transiently failed") or deterministic.
-      smsLegAvailable: smsAllowed && contacts.length > 0,
+      smsLegAvailable: (smsAllowed || channel === "push") && contacts.length > 0,
       // The opt-in hold emptied a NON-empty list: no SMS leg right now, but
       // the hold is TRANSIENT (the recipient may still reply YES). Only while
       // texting is enabled — a disabled SMS leg is permanent, and must not
@@ -1351,7 +1364,10 @@ const TwilioService = {
     const prefs = await db("notification_prefs")
       .where({ customer_id: customerId })
       .first();
-    if (!customer || !prefs?.service_completed || !prefs?.sms_enabled) return;
+    if (!customer || !prefs?.service_completed) return;
+    const channelRow = await require('./appointment-reminders').resolveChannelPrefsRow(customerId, prefs, customer);
+    const channel = require('./appointment-reminders').apptChannel(channelRow?.service_complete_channel);
+    if (!prefs?.sms_enabled && channel !== 'push') return;
 
     const service = await db("service_records")
       .where({ id: serviceRecordId })

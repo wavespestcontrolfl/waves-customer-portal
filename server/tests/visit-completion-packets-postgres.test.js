@@ -19,10 +19,15 @@ jest.mock('../services/service-report/application-conditions', () => ({ fetchApp
 jest.mock('../services/recap-visit-context', () => ({ buildRecapVisitContext: jest.fn(async () => '') }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn(),
-  savedCardChargeSuppressesAlternateCollection: jest.fn((err) => err?.code === 'STRIPE_AMBIGUOUS_OUTCOME') }));
+  savedCardChargeSuppressesAlternateCollection: jest.fn((...args) =>
+    jest.requireActual('../services/stripe').savedCardChargeSuppressesAlternateCollection(...args)),
+  assertNoInvoiceChargeReconciliationPending: (...args) =>
+    jest.requireActual('../services/stripe').assertNoInvoiceChargeReconciliationPending(...args),
+}));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ suppressed: true })) }));
-jest.mock('../services/push-notifications', () => ({ sendToAdminUsers: jest.fn(async () => ({ sent: 1 })) }));
+jest.mock('../services/push-notifications', () => ({ sendToAdminUsers: jest.fn(async (_ids, _build, { beforeDispatch } = {}) => (
+  beforeDispatch && (await beforeDispatch()) === false ? { subscriptions: 1, sent: 0, superseded: true } : { sent: 1 })) }));
 jest.mock('../services/admin-unread', () => ({ getUnreadCountForAdmin: jest.fn(async () => ({ count: 0, at: Date.now() })) }));
 jest.mock('../services/customer-card', () => ({ ensureCardForCompletion: jest.fn(async () => {}) }));
 jest.mock('../services/referral-engine', () => ({ creditReferralOnFirstService: jest.fn(async () => {}) }));
@@ -64,12 +69,46 @@ function submission(overrides = {}) {
   };
 }
 
+// Inject a real failed SQL statement; a JS rejection cannot prove transaction recovery.
+async function withReadFailure(matches, run) {
+  const shared = mockPg;
+  // Keep one root connection so the fault reaches the coordinator's OWN
+  // transaction, without wrapping the packet in a caller-owned savepoint.
+  mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 1 } });
+  const pgConnection = await mockPg.client.acquireConnection();
+  const execute = pgConnection.query;
+  let failed = false;
+  const querySpy = jest.spyOn(pgConnection, 'query').mockImplementation(function (query, callback) {
+    if (!failed && matches({ sql: query.text, bindings: query.values || [] })) {
+      failed = true;
+      return execute.call(this, { ...query, text: 'SELECT 1 / 0', values: [] }, callback);
+    }
+    return execute.call(this, query, callback);
+  });
+  await mockPg.client.releaseConnection(pgConnection);
+  try {
+    await run(mockPg);
+    expect(failed).toBe(true);
+    // The same connection remains usable after the real commit or rollback.
+    await mockPg('customers').where({ id: fixture.customerId }).update({ first_name: 'Recovered' });
+    expect(await mockPg('customers').where({ id: fixture.customerId }).first('first_name'))
+      .toEqual({ first_name: 'Recovered' });
+  } finally {
+    querySpy.mockRestore();
+    await mockPg.destroy();
+    mockPg = shared;
+  }
+}
+
 postgres('visit completion packet records on PostgreSQL', () => {
   beforeAll(async () => {
     process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
     process.env.GATE_VISIT_CLOSEOUT = 'true';
     const url = new URL(connection);
-    if (!/^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname)) throw new Error('Use a verified, task-private QA database');
+    const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
+    const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname)
+      && url.pathname === '/waves_test';
+    if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
     mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 8 } });
     if (!(await mockPg.schema.hasTable('visit_completion_packets'))) throw new Error('Run the repository migrations first');
   });
@@ -127,6 +166,8 @@ postgres('visit completion packet records on PostgreSQL', () => {
     else process.env.PEST_RECAP = originalPestRecap;
     // Only the synthetic fixture's rows; the private database's seeded catalog
     // and migration data remain intact for later billing/UI verification.
+    await mockPg('stripe_orphan_charges').where({ customer_id: fixture.customerId }).del();
+    await mockPg('payment_plans').where({ customer_id: fixture.customerId }).del();
     await mockPg('invoices').where({ customer_id: fixture.customerId }).del();
     if (fixture.emailMessageId) await mockPg('email_messages').where({ id: fixture.emailMessageId }).del();
     if (fixture.estimateIds.length) {
@@ -134,6 +175,9 @@ postgres('visit completion packet records on PostgreSQL', () => {
       await mockPg('estimate_deposits').whereIn('estimate_id', fixture.estimateIds).del();
       await mockPg('estimates').whereIn('id', fixture.estimateIds).del();
     }
+    // Clear movements before cascading customer/service-product deletion.
+    await mockPg('product_inventory_movements').where({ product_id: fixture.productId }).del();
+    await mockPg('turf_height_readings').where({ customer_id: fixture.customerId }).del();
     await mockPg('activity_log').where({ customer_id: fixture.customerId }).del();
     await mockPg('notifications').whereIn(mockPg.raw("metadata->'payload'->>'serviceId'"), fixture.serviceIds).del();
     await mockPg('product_limits').where({ product_id: fixture.productId }).del();
@@ -141,9 +185,11 @@ postgres('visit completion packet records on PostgreSQL', () => {
     if (fixture.formTemplateId) await mockPg('job_form_templates').where({ id: fixture.formTemplateId }).del();
     if (fixture.discountId) await mockPg('discounts').where({ id: fixture.discountId }).del();
     if (fixture.payerId) await mockPg('payers').where({ id: fixture.payerId }).del();
+    await mockPg('notification_preferences').where({ admin_user_id: fixture.techId }).del();
+    await mockPg('push_subscriptions').where({ admin_user_id: fixture.techId }).del();
     await mockPg('technicians').where({ id: fixture.techId }).del();
+    await mockPg('service_completion_profiles').where({ service_key: `fixture_${fixture.catalogId}` }).del();
     await mockPg('services').where({ id: fixture.catalogId }).del();
-    await mockPg('product_inventory_movements').where({ product_id: fixture.productId }).del();
     await mockPg('products_catalog').where({ id: fixture.productId }).del();
   });
 
@@ -414,8 +460,19 @@ postgres('visit completion packet records on PostgreSQL', () => {
 
   test('a newly rejected immutable photo caption creates one office exception and leaves the retry queue', async () => {
     const input = submission();
-    input.items[0].body.completionPhotos = [{ caption: 'Fixture observation' }];
-    const saved = await saveVisitCompletionPacket(input);
+    // Packet photos must upload at save time (main #4011); the caption is
+    // what the deferred effects-phase screen rejects.
+    const config = require('../config');
+    const priorBucket = config.s3.bucket;
+    config.s3.bucket = 'fixture-photo-bucket';
+    jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send').mockResolvedValue({});
+    input.items[0].body.completionPhotos = [{ data: 'data:image/png;base64,Zml4dHVyZQ==', name: 'fixture.png', caption: 'Fixture observation' }];
+    let saved;
+    try {
+      saved = await saveVisitCompletionPacket(input);
+    } finally {
+      config.s3.bucket = priorBucket;
+    }
     const indicators = require('../services/service-report/activity-indicators');
     const screen = indicators.findBannedCustomerCopy;
     jest.spyOn(indicators, 'findBannedCustomerCopy').mockImplementation((value) =>
@@ -437,6 +494,27 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect((await mockPg('service_visits').where({ id: fixture.visitId }).first()).billing_hold).toBe(true);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('a packet whose members carry photo bytes still resumes through effects', async () => {
+    const config = require('../config');
+    const priorBucket = config.s3.bucket;
+    config.s3.bucket = 'fixture-photo-bucket';
+    jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send').mockResolvedValue({});
+    const input = submission();
+    for (const item of input.items) item.body.completionPhotos = [{ data: 'data:image/png;base64,Zml4dHVyZQ==', name: 'fixture.png', caption: 'Work area' }];
+    let saved;
+    try {
+      saved = await saveVisitCompletionPacket(input);
+    } finally {
+      config.s3.bucket = priorBucket;
+    }
+    // The saved form no longer holds bytes; the member attempt hash must match it.
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
+      .every((item) => item.status === 'done')).toBe(true);
+    expect(await mockPg('service_photos').whereIn('service_record_id', saved.body.items.map((item) => item.serviceRecordId)))
+      .toHaveLength(2);
   });
 
   test('an interrupted first effects claim still writes its operational activity', async () => {
@@ -512,14 +590,70 @@ postgres('visit completion packet records on PostgreSQL', () => {
     jest.spyOn(require('../services/completion-attempts'), 'markCompletionAttemptSucceeded')
       .mockRejectedValueOnce(new Error('Synthetic interruption after notification'));
     await expect(runVisitCompletionPacketMemberEffects(saved.body.packetId)).rejects.toThrow('Synthetic interruption');
-    expect(require('../services/push-notifications').sendToAdminUsers).toHaveBeenCalledTimes(1);
+    const pushSends = async () => (await Promise.all(require('../services/push-notifications').sendToAdminUsers.mock.results
+      .map((call) => call.value))).map((result) => result.sent);
+    expect(await pushSends()).toEqual([1]);
     expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
-    expect(require('../services/push-notifications').sendToAdminUsers).toHaveBeenCalledTimes(2);
+    // The interrupted member's push was already claimed: the provider is
+    // consulted again but refuses at the post-lookup claim, so nothing
+    // buzzes twice.
+    expect(await pushSends()).toEqual([1, 0, 1]);
     expect(await mockPg('activity_log').where({ customer_id: fixture.customerId, action: 'service_completed' })).toHaveLength(2);
     expect(await mockPg('notifications').whereIn(mockPg.raw("metadata->'payload'->>'serviceId'"), fixture.serviceIds))
       .toHaveLength(bell ? 2 : 0);
     expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
       .every((item) => item.notification_push_started_at)).toBe(true);
+  });
+
+  test('a profile cut over to a project flow after the records commit still resumes the saved members', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('service_completion_profiles').insert({ service_key: `fixture_${fixture.catalogId}`,
+      service_name_snapshot: 'Fixture General Pest Control', completion_mode: 'project_required',
+      project_type: 'fixture_project', active: true });
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'processing' });
+    expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: false });
+    expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(0);
+    expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
+      .every((item) => item.status === 'done')).toBe(true);
+    // A fresh single-service completion of a project-backed profile is still refused.
+    const [serviceId] = fixture.serviceIds;
+    await mockPg('service_completion_attempts').where({ service_id: serviceId }).del();
+    await mockPg('service_records').where({ scheduled_service_id: serviceId }).del();
+    await mockPg('scheduled_services').where({ id: serviceId }).update({ visit_id: null, status: 'on_site' });
+    expect((await completeScheduledService({ serviceId, idempotencyKey: randomUUID(),
+      body: submission().items[0].body, actor: { techRole: 'technician', technicianId: fixture.techId } })).body.code)
+      .toBe('project_required_completion');
+  });
+
+  test('a push subscription lookup outage keeps the member retryable and the push unclaimed', async () => {
+    mockNotificationRecipientId = fixture.techId;
+    await mockPg('notification_preferences').insert({ admin_user_id: fixture.techId, trigger_key: 'job_complete',
+      bell_enabled: false, push_enabled: true, sound_enabled: false });
+    await mockPg('push_subscriptions').insert({ admin_user_id: fixture.techId, role: 'technician', platform: 'web',
+      subscription_data: JSON.stringify({ endpoint: 'https://push.invalid/fixture', keys: {} }), staff_token_version: 1, active: true });
+    jest.spyOn(require('../services/notification-bell-policy'), 'isBellPolicyEnabled').mockReturnValue(false);
+    require('../services/notification-triggers').triggerNotification.mockImplementation(
+      jest.requireActual('../services/notification-triggers').triggerNotification);
+    require('../services/push-notifications').sendToAdminUsers.mockImplementation((...args) => (
+      jest.requireActual('../services/push-notifications').sendToAdminUsers(...args)));
+    const saved = await saveVisitCompletionPacket(submission());
+    const execute = mockPg.client._query;
+    let interrupted = false;
+    jest.spyOn(mockPg.client, '_query').mockImplementation(function failSubscriptionLookup(connection, query) {
+      if (!interrupted && query.sql.includes('from "push_subscriptions"')) {
+        interrupted = true;
+        return Promise.reject(new Error('Synthetic subscription lookup outage'));
+      }
+      return execute.call(this, connection, query);
+    });
+    await expect(runVisitCompletionPacketMemberEffects(saved.body.packetId)).rejects.toThrow('remains pending');
+    expect(interrupted).toBe(true);
+    expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
+      .every((item) => item.status === 'processing' && !item.notification_push_started_at)).toBe(true);
+    expect((await runVisitCompletionPacketMemberEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
+      .every((item) => item.status === 'done' && item.notification_push_started_at)).toBe(true);
   });
 
   test('inspection-credit receipts and recovery recognize a non-anchor billed member', async () => {
@@ -638,7 +772,13 @@ postgres('visit completion packet records on PostgreSQL', () => {
     const attempts = await Promise.all([
       collectVisitCompletionInvoice(saved.body.packetId), collectVisitCompletionInvoice(saved.body.packetId),
     ]);
-    expect(attempts.some((result) => result.state === 'prepaid')).toBe(true);
+    // A competing claim can still hold the stop when the owner reaches its
+    // invoice lock. NOWAIT releases that attempt for the existing retry path.
+    expect(attempts.every((result) => ['prepaid', 'payment_pending'].includes(result.state))).toBe(true);
+    if (attempts.every((result) => result.state === 'payment_pending')) {
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+        .toMatchObject({ status: 'failed', last_error: 'payment_pending' });
+    }
     expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'prepaid', invoiceId });
     const invoice = await mockPg('invoices').where({ id: invoiceId }).first();
     expect(invoice).toMatchObject({ status: 'prepaid', prepaid_prev_status: 'draft', stripe_payment_intent_id: null, scheduled_send_at: null });
@@ -711,6 +851,30 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test.each([0, 240])('an active invoice send delays a %s balance until delivery finishes', async (total) => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sending', total, discount_amount: 240 - total });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'payment_pending', invoiceId });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' })).toHaveLength(0);
+    // The locked guard also protects an initial snapshot read before the send
+    // claim, including the canonical saved-card caller's second check.
+    await expect(mockPg.transaction(async (trx) => {
+      const locked = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+      await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+      await assertVisitCompletionCharge(trx, locked, saved.body.packetId);
+    })).rejects.toMatchObject({ code: 'VISIT_PAYMENT_SEND_IN_FLIGHT' });
+    expect(await mockPg('invoices').where({ id: invoiceId }).first('status')).toEqual({ status: 'sending' });
+    expect(await mockPg('service_visits').where({ id: fixture.visitId }).first('billing_hold')).toEqual({ billing_hold: false });
+
+    await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sent' });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({
+      state: total === 0 ? 'prepaid' : 'payment_needed', invoiceId,
+    });
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
   test('positive shared-invoice collection remains singular and replays its paid state', async () => {
     const methodId = randomUUID();
     await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,
@@ -737,7 +901,40 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(status.facts.invoice).toMatchObject({ state: 'done', invoiceId: saved.body.billing.invoiceId, status: 'paid' });
     await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).update({ status: 'refunded' });
     expect((await require('../services/closeout-status').getCloseoutStatus(fixture.serviceIds[1], { knex: mockPg })).facts.invoice)
-      .toMatchObject({ reason: 'parked_manual_refunded_invoice', refundedInvoiceId: saved.body.billing.invoiceId });
+      .toMatchObject({ reason: 'parked_manual_reversed_packet_invoice', invoiceId: saved.body.billing.invoiceId, status: 'refunded' });
+  });
+
+  test.each(['active', 'completed', 'cancelled'])('the %s installment plan is checked even without a reminder sequence', async (planStatus) => {
+    const methodId = randomUUID();
+    await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,
+      processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_fixture_plan',
+      is_default: true, autopay_enabled: true, exp_month: 12, exp_year: new Date().getUTCFullYear() + 1 });
+    await mockPg('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true, autopay_payment_method_id: methodId });
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    await mockPg('payment_plans').insert({ customer_id: fixture.customerId, invoice_id: invoiceId,
+      total_balance: 240, payment_amount: 60, payment_frequency: 'weekly',
+      plan_start_date: etDateString(), next_payment_date: etDateString(new Date(Date.now() + 7 * 86400000)),
+      status: planStatus });
+    expect(await mockPg('invoice_followup_sequences').where({ invoice_id: invoiceId })).toHaveLength(0);
+    let providerSubmissions = 0;
+    chargeInvoiceWithSavedCard.mockImplementation(async (id, _method, options) => {
+      await mockPg.transaction(async (trx) => {
+        const invoice = await trx('invoices').where({ id }).forUpdate().first();
+        await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+        await assertVisitCompletionCharge(trx, invoice, options.requireVisitCompletionPacketId);
+        providerSubmissions += 1;
+        await trx('invoices').where({ id }).update({ status: 'paid', stripe_payment_intent_id: 'pi_fixture_plan' });
+      });
+    });
+    const expectedState = planStatus === 'active' ? 'office_required' : 'paid';
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: expectedState });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: expectedState });
+    expect(providerSubmissions).toBe(planStatus === 'active' ? 0 : 1);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+      .toMatchObject({ status: planStatus === 'active' ? 'suppressed' : 'sent' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('an interrupted accepted ACH payment recovers without a second collection', async () => {
@@ -748,6 +945,9 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await groups.claimVisitNotification(member, 'visit_payment')).toMatchObject({ state: 'owner' });
     await mockPg('invoices').where({ id: saved.body.billing.invoiceId })
       .update({ status: 'processing', stripe_payment_intent_id: 'pi_fixture_ach_processing' });
+    await mockPg('payments').insert({ customer_id: fixture.customerId, amount: 240,
+      payment_date: etDateString(), status: 'processing', processor: 'stripe',
+      stripe_payment_intent_id: 'pi_fixture_ach_processing', metadata: { invoice_id: saved.body.billing.invoiceId } });
     for (let replay = 0; replay < 2; replay++) {
       expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'processing' });
       expect(await mockPg('service_visits').where({ id: fixture.visitId }).first())
@@ -756,6 +956,247 @@ postgres('visit completion packet records on PostgreSQL', () => {
         .toMatchObject({ status: 'sent' });
     }
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test.each(['paid', 'prepaid', 'processing'])('a recovered %s invoice waits for payment-effect finalization', async (status) => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    const groups = require('../services/visit-groups');
+    const member = await mockPg('scheduled_services').where({ visit_id: fixture.visitId }).orderBy('id').first();
+    expect(await groups.claimVisitNotification(member, 'visit_payment')).toMatchObject({ state: 'owner' });
+    const paymentIntentId = status === 'prepaid' ? null : `pi_fixture_recovered_${status}`;
+    await mockPg('invoices').where({ id: invoiceId }).update({ status, stripe_payment_intent_id: paymentIntentId });
+    if (status === 'processing') await mockPg('payments').insert({ customer_id: fixture.customerId, amount: 240,
+      payment_date: etDateString(), status: 'processing', processor: 'stripe',
+      stripe_payment_intent_id: paymentIntentId, metadata: { invoice_id: invoiceId } });
+    const finalizer = jest.spyOn(groups, 'finalizeVisitNotification').mockResolvedValueOnce({ ok: false });
+    try {
+      expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'payment_pending', invoiceId });
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+        .toMatchObject({ status: 'claimed' });
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first())
+        .toMatchObject({ payment_intent_id: null });
+      for (let replay = 0; replay < 2; replay++) {
+        expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: status, invoiceId });
+        expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+          .toMatchObject({ status: 'sent' });
+        expect(await mockPg('service_visits').where({ id: fixture.visitId }).first())
+          .toMatchObject({ payment_intent_id: paymentIntentId });
+      }
+    } finally {
+      finalizer.mockRestore();
+    }
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an office hold retries a lost payment-effect finalization before reporting reconciliation', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    await mockPg('invoices').where({ id: invoiceId }).update({ total: 0, stripe_payment_intent_id: 'pi_fixture_existing' });
+    const groups = require('../services/visit-groups');
+    const finalizer = jest.spyOn(groups, 'finalizeVisitNotification')
+      .mockResolvedValueOnce({ ok: false }).mockResolvedValueOnce({ ok: false });
+    try {
+      // First the guard persists the hold; then a recovery sees that hold.
+      // Both must remain retryable while their ledger finalization fails.
+      for (let retry = 0; retry < 2; retry++) {
+        expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'payment_pending', invoiceId });
+        expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true });
+        expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+          .toMatchObject({ status: 'claimed' });
+      }
+      for (let replay = 0; replay < 2; replay++) {
+        expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'office_required', invoiceId });
+        expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+          .toMatchObject({ status: 'suppressed' });
+      }
+    } finally {
+      finalizer.mockRestore();
+    }
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test.each([null, 'pi_fixture_ambiguous'])('processing with an ambiguous PI (%s) waits for matching payment evidence', async (paymentIntentId) => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    const groups = require('../services/visit-groups');
+    const member = await mockPg('scheduled_services').where({ visit_id: fixture.visitId }).orderBy('id').first();
+    expect(await groups.claimVisitNotification(member, 'visit_payment')).toMatchObject({ state: 'owner' });
+    await jest.requireActual('../services/stripe').parkInvoiceForSavedCardReconciliation({ invoiceId,
+      error: { code: 'STRIPE_AMBIGUOUS_OUTCOME', stripePaymentIntentId: paymentIntentId } });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'payment_pending' });
+    const [payment] = await mockPg('payments').insert({ customer_id: fixture.customerId, amount: 240,
+      payment_date: etDateString(), status: 'processing', processor: 'stripe',
+      stripe_payment_intent_id: 'pi_fixture_other_payment', metadata: { invoice_id: invoiceId } }).returning('*');
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'payment_pending' });
+    const resolvedIntentId = paymentIntentId || 'pi_fixture_late_reconciliation';
+    await mockPg('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: resolvedIntentId });
+    await mockPg('payments').where({ id: payment.id }).update({ stripe_payment_intent_id: resolvedIntentId, status: 'failed' });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'payment_pending' });
+    await mockPg('payments').where({ id: payment.id }).update({ status: 'processing', amount: 120 });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'payment_pending' });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+      .toMatchObject({ status: 'claimed' });
+    await mockPg('payments').where({ id: payment.id }).update({ amount: 240 });
+    for (let replay = 0; replay < 2; replay++) {
+      expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'processing' });
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+        .toMatchObject({ status: 'sent', provider_id: resolvedIntentId, last_error: null });
+    }
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test.each(['claimed', 'ambiguous', 'orphan', 'legacy_ambiguous'])('zero settlement respects the %s reconciliation fence', async (fence) => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    await mockPg('invoices').where({ id: invoiceId }).update({ total: 0 });
+    const metadata = { invoice_id: invoiceId, ambiguous_outcome: true };
+    if (fence === 'orphan') {
+      await mockPg('stripe_orphan_charges').insert({ customer_id: fixture.customerId, invoice_id: invoiceId,
+        stripe_payment_intent_id: `pi_fixture_orphan_${fixture.key}`, amount: 240, original_db_error: 'Synthetic write interruption' });
+    } else if (fence === 'legacy_ambiguous') {
+      await mockPg('payments').insert({ customer_id: fixture.customerId, amount: 240,
+        payment_date: etDateString(), status: 'failed', processor: 'stripe', metadata });
+    } else {
+      await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: invoiceId,
+        stripe_payment_method_id: 'pm_fixture_pending', idempotency_key: fixture.key,
+        status: fence, submitted_at: new Date() });
+    }
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'payment_pending', invoiceId });
+    expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft' });
+    expect(await mockPg('audit_log').where({ resource_id: invoiceId, action: 'invoice.zero_balance_settled' })).toHaveLength(0);
+    if (fence === 'orphan') {
+      await mockPg('stripe_orphan_charges').where({ invoice_id: invoiceId }).update({ resolved: true, resolved_at: new Date() });
+    } else if (fence === 'legacy_ambiguous') {
+      await mockPg('payments').where({ customer_id: fixture.customerId }).update({ metadata: { ...metadata, ambiguous_outcome: false } });
+    } else {
+      await mockPg('stripe_invoice_charge_attempts').where({ invoice_id: invoiceId }).update({ status: 'failed', resolved_at: new Date() });
+    }
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'prepaid', invoiceId });
+    expect(await mockPg('audit_log').where({ resource_id: invoiceId, action: 'invoice.zero_balance_settled' })).toHaveLength(1);
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a crash after decline finalization preserves its terminal reason without another charge', async () => {
+    const methodId = randomUUID();
+    await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,
+      processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_fixture_visit',
+      is_default: true, autopay_enabled: true, exp_month: 12, exp_year: new Date().getUTCFullYear() + 1 });
+    await mockPg('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true, autopay_payment_method_id: methodId });
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    chargeInvoiceWithSavedCard.mockImplementation(async () => {
+      await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: invoiceId, payment_method_id: methodId,
+        stripe_payment_method_id: 'pm_fixture_visit', idempotency_key: fixture.key, status: 'failed',
+        submitted_at: new Date(), resolved_at: new Date() });
+      throw Object.assign(new Error('Synthetic provider decline'), { wavesCardDecline: true });
+    });
+    const groups = require('../services/visit-groups');
+    const realFinalize = groups.finalizeVisitNotification;
+    const finalizer = jest.spyOn(groups, 'finalizeVisitNotification').mockImplementationOnce(async (...args) => {
+      expect(await realFinalize(...args)).toMatchObject({ ok: true, status: 'suppressed' });
+      throw new Error('Synthetic exit after terminal write');
+    });
+    try {
+      await expect(collectVisitCompletionInvoice(saved.body.packetId)).rejects.toThrow('Synthetic exit after terminal write');
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+        .toMatchObject({ status: 'suppressed', last_error: 'payment_failed' });
+      for (let replay = 0; replay < 2; replay++) {
+        expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'payment_failed', invoiceId });
+      }
+      expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+    } finally {
+      finalizer.mockRestore();
+    }
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test.each(['payment_needed', 'payment_failed'])('terminal %s can settle a later zero balance without reopening collection', async (reason) => {
+    const methodId = randomUUID();
+    await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,
+      processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_fixture_terminal',
+      is_default: true, autopay_enabled: true, exp_month: 12, exp_year: new Date().getUTCFullYear() + 1 });
+    if (reason === 'payment_failed') {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true, autopay_payment_method_id: methodId });
+    }
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    chargeInvoiceWithSavedCard.mockImplementation(async () => {
+      await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: invoiceId, payment_method_id: methodId,
+        stripe_payment_method_id: 'pm_fixture_terminal', idempotency_key: fixture.key, status: 'failed',
+        submitted_at: new Date(), resolved_at: new Date() });
+      throw Object.assign(new Error('Synthetic provider decline'), { wavesCardDecline: true });
+    });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: reason });
+    const providerCalls = chargeInvoiceWithSavedCard.mock.calls.length;
+    await mockPg('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true, autopay_payment_method_id: methodId });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: reason });
+    await mockPg('invoices').where({ id: invoiceId }).update({ total: 0 });
+    const [sequence] = await mockPg('invoice_followup_sequences').insert({
+      invoice_id: invoiceId, customer_id: fixture.customerId, status: 'active',
+      touch_claimed_at: new Date(), next_touch_at: new Date(),
+    }).returning('*');
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'payment_pending' });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+      .toMatchObject({ status: 'suppressed', last_error: reason });
+    await mockPg('invoices').where({ id: invoiceId }).update({ total: 240 });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: reason });
+    expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(providerCalls);
+    await mockPg('invoices').where({ id: invoiceId }).update({ total: 0 });
+    await mockPg('invoice_followup_sequences').where({ id: sequence.id }).update({ touch_claimed_at: new Date(0) });
+    const groups = require('../services/visit-groups');
+    const finalizer = jest.spyOn(groups, 'finalizeVisitNotification').mockResolvedValueOnce({ ok: false });
+    try {
+      expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'payment_pending' });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'prepaid' });
+      expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'prepaid' });
+    } finally { finalizer.mockRestore(); }
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+      .toMatchObject({ status: 'sent', last_error: null });
+    expect(await mockPg('audit_log').where({ resource_id: invoiceId, action: 'invoice.zero_balance_settled' })).toHaveLength(1);
+    expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(providerCalls);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test.each(['member', 'stop', 'visit', 'packet'])('collection never waits on a %s while an editor waits on its invoice', async (heldLock) => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    const collection = await mockPg.transaction();
+    const editor = await mockPg.transaction();
+    let editInvoice;
+    try {
+      const invoice = await collection('invoices').where({ id: invoiceId }).forUpdate().first();
+      await collection('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+      if (heldLock === 'member') await editor('scheduled_services').where({ id: fixture.serviceIds[1] }).forUpdate().first();
+      if (heldLock === 'stop') {
+        const visit = await editor('service_visits').where({ id: fixture.visitId }).first();
+        await require('../services/visit-groups').lockStop(editor, visit.stop_base_key);
+      }
+      if (heldLock === 'visit') await editor('service_visits').where({ id: fixture.visitId }).forUpdate().first();
+      if (heldLock === 'packet') await editor('visit_completion_packets').where({ id: saved.body.packetId }).forUpdate().first();
+      editInvoice = editor('invoices').where({ id: invoiceId }).forUpdate().first()
+        .then(() => ({ locked: true }), (error) => ({ error }));
+      await expect(assertVisitCompletionCharge(collection, invoice, saved.body.packetId))
+        .rejects.toMatchObject({ code: heldLock === 'stop' ? 'visit_busy' : '55P03' });
+      await collection.rollback();
+      expect(await editInvoice).toEqual({ locked: true });
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    } finally {
+      if (!collection.isCompleted()) await collection.rollback();
+      if (!editor.isCompleted()) await editor.rollback();
+      if (editInvoice) await editInvoice;
+    }
   });
 
   test('a moved non-anchor member prevents collection until its saved stop is restored', async () => {
@@ -798,7 +1239,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
-  test.each(['void', 'canceled', 'cancelled'])('a %s packet invoice remains an office exception for every member', async (status) => {
+  test.each(['void', 'canceled', 'cancelled', 'refunded'])('a %s packet invoice remains an office exception for every member', async (status) => {
     const saved = await saveVisitCompletionPacket(submission());
     await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).update({ status });
     await mockPg('service_completion_attempts').whereIn('service_id', fixture.serviceIds).update({ status: 'succeeded' });
@@ -812,6 +1253,9 @@ postgres('visit completion packet records on PostgreSQL', () => {
       })]));
       expect(JSON.stringify(issues)).not.toContain('never minted');
     }
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'office_required', invoiceId: saved.body.billing.invoiceId });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+      .toMatchObject({ status: 'suppressed' });
   });
 
   test.each(['charging', 'charge_review', 'released'])('a %s card hold is rechecked at collection', async (status) => {
@@ -1163,6 +1607,48 @@ postgres('visit completion packet records on PostgreSQL', () => {
     }
   });
 
+  test('grouped completion and lawn baseline confirmation keep the same lock order', async () => {
+    const originalGate = process.env.GATE_LAWN_PROPERTY_HISTORY;
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    const baseline = await mockPg.transaction();
+    const { lockCustomerBaseline } = require('../services/lawn-assessment');
+    let pending;
+    let observe;
+    try {
+      await lockCustomerBaseline(fixture.customerId, baseline);
+      let reachedBaseline;
+      const waiting = new Promise((resolve) => { reachedBaseline = resolve; });
+      observe = (query) => {
+        if (query.bindings?.includes('lawn-baseline')) reachedBaseline();
+      };
+      mockPg.on('query', observe);
+      pending = saveVisitCompletionPacket(submission()).then(
+        (value) => ({ value }), (error) => ({ error }),
+      );
+      await Promise.race([waiting, pending.then((result) => {
+        throw result.error || new Error('Completion returned before acquiring the baseline lock');
+      })]);
+      // Confirmation holds the baseline fence before it locks the customer.
+      // A packet waiting for that fence must not already own the customer row.
+      await baseline.raw("SET LOCAL lock_timeout = '2s'");
+      await baseline('customers').where({ id: fixture.customerId }).forNoKeyUpdate().first('id');
+      await baseline.commit();
+      const result = await pending;
+      expect(result.error).toBeUndefined();
+      expect(result.value).toMatchObject({ status: 202, body: { state: 'records_saved' } });
+      expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    } finally {
+      if (observe) mockPg.removeListener('query', observe);
+      if (!baseline.isCompleted()) await baseline.rollback();
+      if (pending) await pending;
+      if (originalGate === undefined) delete process.env.GATE_LAWN_PROPERTY_HISTORY;
+      else process.env.GATE_LAWN_PROPERTY_HISTORY = originalGate;
+    }
+  });
+
   test('commercial tax and an estimate deposit settle once on the same invoice', async () => {
     const estimateId = randomUUID();
     fixture.estimateIds.push(estimateId);
@@ -1371,5 +1857,347 @@ postgres('visit completion packet records on PostgreSQL', () => {
       expect(email).toHaveBeenCalledTimes(2);
       expect(email.mock.calls[1][0].idempotencyKey).toBe(email.mock.calls[0][0].idempotencyKey);
     } finally { dispatch.mockRestore(); }
+  });
+
+  test('a caller-owned transaction is rejected before any packet query or upload', async () => {
+    const outer = await mockPg.transaction();
+    const query = jest.fn();
+    outer.on('query', query);
+    const send = jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send').mockResolvedValue({});
+    const input = submission();
+    input.items[0].body.completionPhotos = [{ data: 'data:image/png;base64,Zml4dHVyZQ==', name: 'fixture.png' }];
+    try {
+      await expect(saveVisitCompletionPacket(input, outer))
+        .rejects.toThrow('Visit completion requires a root database connection');
+      expect(query).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      send.mockRestore();
+      await outer.rollback();
+    }
+    expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+  });
+
+  test.each(['cancelled', 'skipped', 'completed', 'no_show'])
+  ('a frozen visit retains its %s history while its last active service records and replays', async (status) => {
+    const retainedId = fixture.serviceIds[0];
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ summary_token_issued_at: mockPg.fn.now() });
+    await mockPg('scheduled_services').where({ id: retainedId }).update({ status });
+    const priorRecords = status === 'completed' ? await mockPg('service_records').insert({
+      customer_id: fixture.customerId, technician_id: fixture.techId, scheduled_service_id: retainedId,
+      service_date: etDateString(), service_type: 'Fixture General Pest Control', status: 'completed',
+    }).returning('*') : [];
+    expect(await require('../services/visit-groups').handleChildTerminal(retainedId)).toBe(false);
+    const input = submission();
+    input.items = input.items.filter((item) => item.serviceId !== retainedId);
+    const first = await saveVisitCompletionPacket(input);
+    expect(first).toMatchObject({ status: 202, body: { state: 'records_saved', replayed: false } });
+    expect(first.body.items).toHaveLength(1);
+    expect(first.body.billing).toMatchObject({ state: 'invoice_ready', total: 120 });
+    const invoice = await mockPg('invoices').where({ id: first.body.billing.invoiceId }).first();
+    expect(invoice.scheduled_service_id).toBe(input.items[0].serviceId);
+    expect(invoice.line_items.filter((line) => line.amount > 0)).toHaveLength(1);
+    expect(await mockPg('scheduled_services').where({ id: retainedId }).first('status', 'visit_id'))
+      .toEqual({ status, visit_id: fixture.visitId });
+    const packet = await mockPg('visit_completion_packets').where({ id: first.body.packetId }).first();
+    expect(packet.payload.retainedMembers).toEqual([{ serviceId: retainedId, status }]);
+    expect(await mockPg('service_completion_attempts').where({ service_id: retainedId })).toHaveLength(0);
+    expect(await mockPg('service_records').where({ scheduled_service_id: retainedId })).toEqual(priorRecords);
+    expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 202, body: { replayed: true, items: first.body.items } });
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(1 + priorRecords.length);
+    await mockPg('visit_completion_packet_items').where({ packet_id: first.body.packetId }).update({ status: 'done' });
+    // A later full discount settles only the newly billed service; retained
+    // terminal history does not require another completion record or charge.
+    await mockPg('invoices').where({ id: invoice.id }).update({ discount_amount: 120, total: 0 });
+    expect(await collectVisitCompletionInvoice(first.body.packetId)).toMatchObject({ state: 'prepaid', invoiceId: invoice.id });
+    expect(await mockPg('invoices').where({ id: invoice.id }).first()).toMatchObject({ status: 'prepaid' });
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('allowing one active form never permits omitting another active member', async () => {
+    const input = submission();
+    input.items.pop();
+    expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 409, body: { code: 'visit_members_changed' } });
+    expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
+  });
+
+  test('the unique key constraint refuses a key already owned by a different visit', async () => {
+    const otherVisitId = randomUUID();
+    await mockPg('service_visits').insert({ id: otherVisitId, customer_id: fixture.customerId,
+      technician_id: fixture.techId, scheduled_date: '2000-01-01', window_start: '09:00', window_end: '10:00',
+      stop_base_key: stopBaseKey({ customerId: fixture.customerId, scheduledDate: '2000-01-01' }), created_by: 'test' });
+    await mockPg('visit_completion_packets').insert({ visit_id: otherVisitId, idempotency_key: fixture.key,
+      request_hash: '0'.repeat(64), payload: JSON.stringify({ items: [] }), status: 'failed' });
+    expect(await saveVisitCompletionPacket(submission())).toMatchObject({ status: 409, body: { code: 'visit_closeout_key_reused' } });
+    expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+  });
+
+  test('packets saved before retained-member snapshots still replay completed records', async () => {
+    const input = submission();
+    const first = await saveVisitCompletionPacket(input);
+    const packet = await mockPg('visit_completion_packets').where({ id: first.body.packetId }).first();
+    delete packet.payload.retainedMembers;
+    await mockPg('visit_completion_packets').where({ id: packet.id }).update({ payload: JSON.stringify(packet.payload) });
+    expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 202, body: { replayed: true, items: first.body.items } });
+  });
+
+  test.each(['completionPhotos', 'gaugePhoto'])('%s bytes are uploaded once and hashed without remaining in the packet snapshot', async (field) => {
+    const config = require('../config');
+    const priorBucket = config.s3.bucket;
+    config.s3.bucket = 'fixture-photo-bucket';
+    const send = jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send').mockResolvedValue({});
+    const input = submission();
+    const data = `data:image/png;base64,${Buffer.from('synthetic photo bytes').toString('base64')}`;
+    const photo = { data, name: 'fixture.png', caption: 'Work area' };
+    const metadata = { name: 'fixture.png', caption: 'Work area' };
+    const flags = require('../services/feature-flags').isUserFeatureEnabled;
+    if (field === 'gaugePhoto') {
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ service_type: 'WaveGuard Lawn Care' });
+      flags.mockImplementation(async (_id, flag) => flag === 'turf-height-capture');
+    }
+    for (const item of input.items) item.body[field] = field === 'completionPhotos' ? [{ ...photo }] : { ...photo };
+    try {
+      const first = await saveVisitCompletionPacket(input);
+      expect(first.status).toBe(202);
+      const packet = await mockPg('visit_completion_packets').where({ id: first.body.packetId }).first();
+      for (const item of packet.payload.items) {
+        expect(item.body[field]).toEqual(field === 'completionPhotos' ? [metadata] : metadata);
+      }
+      expect(JSON.stringify(packet.payload)).not.toContain(data);
+      const submittedPhoto = field === 'completionPhotos' ? input.items[0].body[field][0] : input.items[0].body[field];
+      expect(submittedPhoto.data).toBe(data);
+      expect(await mockPg('service_photos').whereIn('service_record_id', first.body.items.map((item) => item.serviceRecordId)))
+        .toHaveLength(2);
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 202, body: { replayed: true } });
+      expect(send).toHaveBeenCalledTimes(2);
+      submittedPhoto.data = `data:image/png;base64,${Buffer.from('changed photo').toString('base64')}`;
+      expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 409, body: { code: 'visit_closeout_payload_mismatch' } });
+    } finally {
+      send.mockRestore();
+      config.s3.bucket = priorBucket;
+      flags.mockImplementation(async () => false);
+    }
+  });
+
+  test.each(['completionPhotos', 'gaugePhoto'])('deduplicated staged %s survive rollback and retry', async (field) => {
+    const config = require('../config');
+    const priorBucket = config.s3.bucket;
+    config.s3.bucket = 'fixture-photo-bucket';
+    const send = jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send').mockResolvedValue({});
+    const flags = require('../services/feature-flags').isUserFeatureEnabled;
+    const input = submission();
+    const bytes = Buffer.from('synthetic staged photo');
+    const photo = { data: `data:image/png;base64,${bytes.toString('base64')}`, name: 'fixture.png' };
+    const photoKey = `fixture/${fixture.serviceIds[0]}/staged.png`;
+    if (field === 'gaugePhoto') {
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ service_type: 'WaveGuard Lawn Care' });
+      flags.mockImplementation(async (_id, flag) => flag === 'turf-height-capture');
+    }
+    try {
+      await mockPg('scheduled_service_photo_staging').insert({
+        scheduled_service_id: fixture.serviceIds[0], technician_id: fixture.techId,
+        photo_type: 'progress', s3_key: photoKey,
+        image_sha256: require('crypto').createHash('sha256').update(bytes).digest('hex'),
+      });
+      input.items[0].body[field] = field === 'completionPhotos' ? [photo] : photo;
+      input.items[1].body.clientPestRating = 99;
+      expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 400, body: { code: 'client_pest_rating_invalid' } });
+      expect(await mockPg('scheduled_service_photo_staging').where({ s3_key: photoKey })).toHaveLength(1);
+      expect(await mockPg('service_photos').where({ s3_key: photoKey })).toHaveLength(0);
+      expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
+      expect(send).not.toHaveBeenCalled();
+
+      delete input.items[1].body.clientPestRating;
+      expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 202 });
+      expect(await mockPg('scheduled_service_photo_staging').where({ s3_key: photoKey })).toHaveLength(0);
+      expect(await mockPg('service_photos').where({ s3_key: photoKey })).toHaveLength(1);
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      send.mockRestore();
+      config.s3.bucket = priorBucket;
+      flags.mockImplementation(async () => false);
+    }
+  });
+
+  test.each(['completionPhotos', 'gaugePhoto'])('a later %s upload failure rolls back the packet and cleans up earlier objects', async (field) => {
+    const config = require('../config');
+    const priorBucket = config.s3.bucket;
+    config.s3.bucket = 'fixture-photo-bucket';
+    const send = jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send')
+      .mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('Fixture upload unavailable')).mockResolvedValue({});
+    const input = submission();
+    const flags = require('../services/feature-flags').isUserFeatureEnabled;
+    if (field === 'gaugePhoto') {
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ service_type: 'WaveGuard Lawn Care' });
+      flags.mockImplementation(async (_id, flag) => flag === 'turf-height-capture');
+    }
+    const photo = {
+      data: `data:image/png;base64,${Buffer.from('synthetic photo').toString('base64')}`, name: 'fixture.png',
+    };
+    for (const item of input.items) item.body[field] = field === 'completionPhotos' ? [{ ...photo }] : { ...photo };
+    try {
+      await expect(saveVisitCompletionPacket(input))
+        .rejects.toMatchObject({ code: 'visit_completion_photos_upload_failed', statusCode: 503 });
+      expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
+      expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      expect(await mockPg('turf_height_readings').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      expect(await mockPg('service_completion_attempts').whereIn('service_id', fixture.serviceIds)).toHaveLength(0);
+      const commands = send.mock.calls.map(([command]) => command);
+      expect(commands.map((command) => command.constructor.name)).toEqual(['PutObjectCommand', 'PutObjectCommand', 'DeleteObjectCommand']);
+      expect(commands[2].input.Key).toBe(commands[0].input.Key);
+      expect((await mockPg('scheduled_services').whereIn('id', fixture.serviceIds)).every((row) => row.status === 'on_site')).toBe(true);
+      const retried = await saveVisitCompletionPacket(input);
+      expect(retried).toMatchObject({ status: 202, body: { replayed: false } });
+      expect(await mockPg('service_photos').whereIn('service_record_id', retried.body.items.map((item) => item.serviceRecordId)))
+        .toHaveLength(2);
+    } finally {
+      send.mockRestore();
+      config.s3.bucket = priorBucket;
+      flags.mockImplementation(async () => false);
+    }
+  });
+
+  test.each(['disabled flag', 'SQL failure'])('a gauge capture %s rolls back earlier photos and permits a complete retry', async (mode) => {
+    const config = require('../config');
+    const priorBucket = config.s3.bucket;
+    config.s3.bucket = 'fixture-photo-bucket';
+    const send = jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send').mockResolvedValue({});
+    const flags = require('../services/feature-flags').isUserFeatureEnabled;
+    let checks = 0;
+    flags.mockImplementation(async (_id, flag, _fallback, database) => {
+      if (flag !== 'turf-height-capture') return false;
+      checks += 1;
+      if (checks !== 2) return true;
+      if (mode === 'SQL failure') await database.raw('SELECT 1 / 0');
+      return false;
+    });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ service_type: 'WaveGuard Lawn Care' });
+    const input = submission();
+    for (const item of input.items) item.body.gaugePhoto = {
+      data: `data:image/png;base64,${Buffer.from('synthetic gauge photo').toString('base64')}`, name: 'fixture.png',
+    };
+    try {
+      expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 409, body: {
+        code: 'visit_gauge_photo_unavailable', serviceId: fixture.serviceIds[1],
+      } });
+      expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
+      expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      expect(await mockPg('turf_height_readings').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      const commands = send.mock.calls.map(([command]) => command);
+      expect(commands.map((command) => command.constructor.name)).toEqual(['PutObjectCommand', 'DeleteObjectCommand']);
+      expect(commands[1].input.Key).toBe(commands[0].input.Key);
+
+      flags.mockImplementation(async (_id, flag) => flag === 'turf-height-capture');
+      const retried = await saveVisitCompletionPacket(input);
+      expect(retried).toMatchObject({ status: 202, body: { replayed: false } });
+      expect(await mockPg('service_photos').whereIn('service_record_id', retried.body.items.map((item) => item.serviceRecordId)))
+        .toHaveLength(2);
+      expect((await saveVisitCompletionPacket(input)).body.replayed).toBe(true);
+      expect(send.mock.calls.map(([command]) => command.constructor.name))
+        .toEqual(['PutObjectCommand', 'DeleteObjectCommand', 'PutObjectCommand', 'PutObjectCommand']);
+    } finally {
+      send.mockRestore();
+      config.s3.bucket = priorBucket;
+      flags.mockImplementation(async () => false);
+    }
+  });
+
+  test.each(['profile', 'Auto Pay', 'turf profile', 'Pest Pressure table', 'Pest Pressure config', 'customer snapshot'])
+  ('a packet records every member after a recoverable %s read failure', async (helper) => {
+    const matches = {
+      profile: (query) => query.sql.includes('information_schema.tables') && query.bindings.includes('service_completion_profiles'),
+      'Auto Pay': (query) => query.sql.includes('from "payment_methods"'),
+      'turf profile': (query) => query.sql.includes('from "customer_turf_profiles"'),
+      'Pest Pressure table': (query) => query.sql.includes('information_schema.tables') && query.bindings.includes('pest_pressure_configs'),
+      'Pest Pressure config': (query) => query.sql.includes('from "pest_pressure_configs"'),
+      'customer snapshot': (query) => query.sql.startsWith('select "waveguard_tier", "monthly_rate"'),
+    };
+    await withReadFailure(matches[helper], async (database) => {
+      await database('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true, waveguard_tier: 'Bronze' });
+      const input = submission();
+      for (const item of input.items) item.body.clientPestRating = 3;
+      const result = await saveVisitCompletionPacket(input, database);
+      expect(result).toMatchObject({ status: 202, body: { state: 'records_saved' } });
+      const records = await database('service_records').where({ customer_id: fixture.customerId });
+      expect(records).toHaveLength(2);
+      expect(records.every((record) => record.service_tier === 'Bronze')).toBe(true);
+      expect(result.body.billing).toMatchObject({ state: 'invoice_ready' });
+      expect(await database('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    });
+  });
+
+  test.each(['rows', 'catalog', 'profiles'])('add-on %s read failures preserve the packet and per-line snapshot fallback', async (read) => {
+    const key = `fixture_${fixture.catalogId}`;
+    await mockPg('service_completion_profiles').insert({ service_key: key, completion_mode: 'service_report', active: true });
+    await mockPg('scheduled_service_addons').insert([
+      { scheduled_service_id: fixture.serviceIds[0], service_id: fixture.catalogId,
+        service_name: 'Fixture Frozen Add-on', service_key_snapshot: key },
+      { scheduled_service_id: fixture.serviceIds[0], service_id: fixture.catalogId,
+        service_name: 'Fixture Live Add-on', service_key_snapshot: null },
+    ]);
+    const matches = {
+      rows: (query) => query.sql.startsWith('select "service_id", "service_name", "service_key_snapshot" from "scheduled_service_addons"'),
+      catalog: (query) => query.sql.startsWith('select "id", "service_key" from "services"'),
+      profiles: (query) => query.sql.startsWith('select "service_key", "project_type" from "service_completion_profiles"'),
+    };
+    await withReadFailure(matches[read], async (database) => {
+      expect(await saveVisitCompletionPacket(submission(), database)).toMatchObject({ status: 202 });
+      const records = await database('service_records').where({ customer_id: fixture.customerId }).orderBy('scheduled_service_id');
+      expect(records).toHaveLength(2);
+      const lines = records[0].service_data.completedAddonLines;
+      if (read === 'rows') expect(lines).toBeUndefined();
+      else {
+        expect(lines).toHaveLength(2);
+        expect(lines.find((line) => line.serviceName === 'Fixture Live Add-on')).not.toHaveProperty('serviceKey');
+        const frozen = lines.find((line) => line.serviceName === 'Fixture Frozen Add-on');
+        if (read === 'catalog') expect(frozen).toMatchObject({ serviceKey: key, findingsType: null });
+        else expect(frozen).not.toHaveProperty('serviceKey');
+      }
+    });
+  });
+
+  test.each(['recap only', 'not performed', 'unpriced', 'billable'])
+  ('payer SQL failure preserves the %s completion contract', async (shape) => {
+    const input = submission();
+    if (shape === 'recap only') input.items[0].body.oneTimeRecapOnly = true;
+    if (shape === 'not performed') input.items[0].body.visitOutcome = 'inspection_only';
+    if (shape === 'unpriced') await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ estimated_price: 0 });
+    await withReadFailure((query) => query.sql.includes('select "payer_id", "po_number"'), async (database) => {
+      const result = saveVisitCompletionPacket(input, database);
+      if (shape === 'billable') {
+        await expect(result).rejects.toMatchObject({ code: '22012' });
+        expect(await database('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+        expect(await database('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
+      } else {
+        expect(await result).toMatchObject({ status: 202, body: { state: 'records_saved' } });
+        expect(await database('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
+      }
+      const invoices = await database('invoices').where({ customer_id: fixture.customerId });
+      if (shape !== 'billable') {
+        expect(invoices).toHaveLength(1);
+        expect(Number(invoices[0].total)).toBe(120);
+        expect(invoices[0].scheduled_service_id).toBe(fixture.serviceIds[1]);
+      } else expect(invoices).toHaveLength(0);
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test('the termite station-cap fallback leaves its transaction usable after a failed read', async () => {
+    const { stationCapWouldOverflow } = require('../services/termite-stations');
+    await withReadFailure((query) => query.sql.includes('from "termite_stations"'), async (database) => {
+      await database.transaction(async (trx) => {
+        expect(await stationCapWouldOverflow(trx, fixture.customerId, [{ shape: { type: 'circle', cx: 0.5, cy: 0.5, r: 0.01 } }]))
+          .toBe(false);
+        await trx('customers').where({ id: fixture.customerId }).update({ first_name: 'Recovered' });
+        expect(await trx('customers').where({ id: fixture.customerId }).first('first_name')).toEqual({ first_name: 'Recovered' });
+      });
+    });
   });
 });

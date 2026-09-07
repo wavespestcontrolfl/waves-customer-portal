@@ -219,13 +219,14 @@ async function notifyAdam(customer, interest, estimate) {
 // patches the shell, stamps estimate_drafted, and alerts the owner.
 // The engine runs only its veto ladder (no bell, no draft) and reports
 // terminal refusals; anything else lets the legacy shell path proceed.
-async function engineDraftHandoff(customer, body, reason, { scopeCheckOnly = false, precomputedTriage } = {}) {
+async function engineDraftHandoff(customer, body, reason, { scopeCheckOnly = false, precomputedTriage, triggerSmsLogId } = {}) {
   try {
     const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('./estimator-engine/sms-thread');
     if (!smsThreadDraftsEnabled()) return { drafted: false, terminal: false };
     const started = await startSmsThreadDraft({
       phone: customer.phone,
       triggerBody: body,
+      triggerSmsLogId,
       skipIntentGate: true,
       ...(scopeCheckOnly ? { scopeCheckOnly: true } : {}),
       // Threads the pre-check's triage into the real run so the awaited
@@ -263,7 +264,7 @@ async function engineDraftHandoff(customer, body, reason, { scopeCheckOnly = fal
   }
 }
 
-async function handleIntakeReply(customer, body) {
+async function handleIntakeReply(customer, body, { triggerSmsLogId } = {}) {
   if (!customer || !body || typeof body !== 'string') return { handled: false };
   const status = customer.lead_intake_status;
   if (!status || status === 'estimate_drafted') return { handled: false };
@@ -285,7 +286,7 @@ async function handleIntakeReply(customer, body) {
     // Operational outcomes (gate off, engine trouble) proceed unchanged;
     // the downstream handoff keeps its own check as defense in depth.
     const scopePreCheck = await engineDraftHandoff(
-      customer, body, 'scope pre-check (awaiting_service)', { scopeCheckOnly: true },
+      customer, body, 'scope pre-check (awaiting_service)', { scopeCheckOnly: true, triggerSmsLogId },
     );
     // terminal:true = consumed for DRAFTING only. NOTHING was said to the
     // customer and no state advanced, so the webhook must NOT treat this as
@@ -357,7 +358,7 @@ async function handleIntakeReply(customer, body) {
         ? { drafted: false, terminal: false }
         : await engineDraftHandoff(
           customer, body, `service selected (${cls.interest})`,
-          { precomputedTriage: scopePreCheck.triage },
+          { precomputedTriage: scopePreCheck.triage, triggerSmsLogId },
         );
       if (handoff.drafted) return { handled: true, next: 'estimate_drafted' };
       // Scope-refused: handled, but nothing was drafted and nothing is
@@ -415,7 +416,7 @@ async function handleIntakeReply(customer, body) {
     // looking for power washing' must not write address_line1 and stamp
     // the clarify answered on its way to a refusal.
     const scopePreCheck = await engineDraftHandoff(
-      customer, body, 'scope pre-check (awaiting_address)', { scopeCheckOnly: true },
+      customer, body, 'scope pre-check (awaiting_address)', { scopeCheckOnly: true, triggerSmsLogId },
     );
     // terminal:true = consumed for DRAFTING only. NOTHING was said to the
     // customer and no state advanced, so the webhook must NOT treat this as
@@ -466,7 +467,7 @@ async function handleIntakeReply(customer, body) {
       ? { drafted: false, terminal: false }
       : await engineDraftHandoff(
         customer, body, `address captured (${interest})`,
-        { precomputedTriage: scopePreCheck.triage },
+        { precomputedTriage: scopePreCheck.triage, triggerSmsLogId },
       );
     if (handoff.drafted) return { handled: true, next: 'estimate_drafted' };
     // Scope-refused — same contract as the awaiting_service branch above:

@@ -130,6 +130,19 @@ describe('recordLawnProtocolCompletion checklist semantics', () => {
     expect(byId.get('sp-bare').actual_rate_unit).toBe('oz');
   });
 
+  test('an inferred rig is mix math only — never recorded as equipment used (Codex #4124 r2 P1)', async () => {
+    const rig = { mixCalculator: { lawnSqft: 5000, carrierGalPer1000: 2, equipmentSystemId: 'tank-1', items: [] }, equipmentCalibration: { selected: { id: 'cal-1' } } };
+    const run = async (plan) => {
+      const inserted = [];
+      await recordLawnProtocolCompletion(fakeTrx(inserted), { ...baseArgs, plan: { ...basePlan(), ...plan }, completionInput: { inventoryDeductions: [] } });
+      return inserted[0];
+    };
+    const inferred = await run({ ...rig, equipmentCalibration: { ...rig.equipmentCalibration, inferred: true } });
+    expect(inferred).toMatchObject({ equipment_system_id: null, calibration_id: null, carrier_gal_per_1000: 2 });
+    const named = await run({ ...rig, equipmentCalibration: { ...rig.equipmentCalibration, inferred: false } });
+    expect(named).toMatchObject({ equipment_system_id: 'tank-1', calibration_id: 'cal-1', carrier_gal_per_1000: 2 });
+  });
+
   test('no submitted checklist records empty checklist with zero missing tasks', async () => {
     const inserted = [];
     const completion = await recordLawnProtocolCompletion(fakeTrx(inserted), {

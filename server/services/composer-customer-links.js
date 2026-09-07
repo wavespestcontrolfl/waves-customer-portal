@@ -419,8 +419,8 @@ async function buildAutopaySetupLink(customerId) {
     // link (GH Codex #3812 r4 P2). The minted URL must be in the body —
     // compared scheme-stripped, because getTemplate strips https:// from
     // owned portal hosts before returning (r5 P1).
-    const { stripPortalUrlScheme } = require('../routes/admin-sms-templates');
-    if (!String(body).includes(stripPortalUrlScheme(result.secureUrl))) {
+    const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+    if (!String(body).includes(stripSmsUrlScheme(result.secureUrl))) {
       return { url: null, line: '', reason: AUTOPAY_SKIP_REASONS.template_missing_link };
     }
     return {
@@ -437,7 +437,7 @@ async function buildAutopaySetupLink(customerId) {
 // The /secure/:token bearer the composer inserts (autopay-setup-link mints
 // 16 random bytes base64url = 22 chars; the visit lane's card requests share
 // the page and the table). Bodies carry the link scheme-stripped
-// (stripSmsLinkScheme), so the match is host + path, scheme optional.
+// (stripSmsUrlScheme), so the match is host + path, scheme optional.
 // Percent-escapes decode before detection: React Router decodes the
 // pathname, so "/secur%65/<token>" still opens the page and must still be
 // judged (GH Codex #3812 r5 P1). Malformed escapes are left as typed.
@@ -638,6 +638,24 @@ const IMMEDIATE_ONLY_LINK_KINDS = [
     applies: async () => true,
   },
   {
+    // A receipt page shows the payment, card brand / last four and billing
+    // address; /sms binds it to the recipient's account and re-runs the
+    // recipient's receipt-text consent — a queued message or a draft would
+    // dispatch past a later email-only preference (pre-push Codex P1 on r9).
+    label: 'Receipt',
+    fragment: /\/receipt\//i,
+    token: (run, host) => canonicalPortalToken(run, host, RECEIPT_TOKEN_PATH_RE, ANY_SCHEME),
+    applies: async () => true,
+  },
+  {
+    // The receipt SMS falls back to this URL if shortening fails. Invoice
+    // links also become receipt links when the payment page redirects.
+    label: 'Receipt',
+    fragment: /\/pay\//i,
+    token: (run, host) => canonicalPortalToken(run, host, RECEIPT_PAY_TARGET_RE, ANY_SCHEME),
+    applies: payLinkOpensReceipt,
+  },
+  {
     label: 'Contract signing',
     fragment: /\/contract\//i,
     token: (run, host) => canonicalPortalToken(run, host, /^\/contract\/([A-Za-z0-9_-]{16,})$/i, ANY_SCHEME),
@@ -691,7 +709,7 @@ async function shortCodeRows(runs, scheme = {}) {
     const code = canonicalPortalToken(run, hosts, /^\/l\/([A-Za-z0-9_-]+)$/i, scheme);
     if (!code) continue;
     const row = await db('short_codes').where({ code: code.toLowerCase() }).first('code', 'kind', 'target_url', 'expires_at');
-    const dest = row && shortRowDestination(row, hosts);
+    const dest = row && await shortRowDestination(row, hosts);
     // The seam refuses a plaintext run outright; the fence only needs presence.
     if (dest) rows.push({ code: row.code, expires_at: row.expires_at, plaintext: /^http:\/\//i.test(run), ...dest });
   }
@@ -704,13 +722,27 @@ async function shortCodeRows(runs, scheme = {}) {
 // protected kind the target does not confirm fails closed: present to the
 // fence, unverifiable (refused) at the send. The stored target is our own
 // redirect, judged under ANY_SCHEME like the fence.
-function shortRowDestination(row, hosts) {
+async function shortRowDestination(row, hosts) {
   const target = String(row.target_url || '');
   const appointment = canonicalPortalToken(target, hosts, APPOINTMENT_TOKEN_RE, ANY_SCHEME);
   if (appointment) return { kind: 'appointment', token: appointment };
   const report = canonicalPortalToken(target, hosts, REPORT_TOKEN_RE, ANY_SCHEME);
   if (report) return { kind: 'service_report', token: report };
-  if (['appointment', 'service_report'].includes(row.kind)) return { kind: row.kind, token: null };
+  // A receipt short code pasted from message history is judged by its
+  // target like the long form (pre-push Codex P1 on r9). The receipt SMS
+  // itself shortens /pay/<invoice token> (InvoiceService.receiptSmsFacts).
+  // Any code targeting a payment page that now redirects to a receipt
+  // needs the same checks, regardless of its original analytics kind.
+  const receipt = canonicalPortalToken(target, hosts, RECEIPT_TOKEN_PATH_RE, ANY_SCHEME);
+  if (receipt) return { kind: 'receipt', token: receipt };
+  // payTarget: the pay page only redirects a paid / processing invoice to
+  // its receipt — a refunded one stays on the payment page (PayPageV2), so
+  // the seam refuses that form for a refunded row (r11 P2).
+  const payTarget = canonicalPortalToken(target, hosts, RECEIPT_PAY_TARGET_RE, ANY_SCHEME);
+  if (payTarget && (row.kind === 'receipt' || await payLinkOpensReceipt(payTarget))) {
+    return { kind: 'receipt', token: payTarget, payTarget: true };
+  }
+  if (['appointment', 'service_report', 'receipt'].includes(row.kind)) return { kind: row.kind, token: null };
   return null;
 }
 // /l/:code answers 410 past expires_at (public-shortlinks) — the same
@@ -731,6 +763,17 @@ const REPORT_TOKEN_RE = /^\/report\/([A-Za-z0-9_-]{16,})$/i;
 // #3893 r5 P1). Judged before the service-report seam, which skips these runs.
 const PROJECT_REPORT_PATH_RE = /^\/report\/project\/([^/]+)$/i;
 const PROJECT_REPORT_RUN_RE = /\/report\/project\//i;
+// /receipt/<invoices.token> — the permanent receipt URL; receipt delivery
+// (invoice-email.js) also shortens it to /l/<code> of kind 'receipt'.
+const RECEIPT_TOKEN_PATH_RE = /^\/receipt\/([A-Za-z0-9_-]{16,})$/i;
+// /pay/<invoices.token> — receipt delivery's short-link target and raw fallback.
+const RECEIPT_PAY_TARGET_RE = /^\/pay\/([A-Za-z0-9_-]{16,})$/i;
+
+async function payLinkOpensReceipt(token) {
+  const invoice = await db('invoices').where({ token }).first('status');
+  // Mirrors PayPageV2's automatic receipt redirect, including pending ACH.
+  return ['paid', 'processing'].includes(invoice?.status);
+}
 
 // Appointment page links (GH Codex #3844 r2 P1): every /appointment route
 // 404s the moment GATE_APPOINTMENT_PAGE is off, and a queued message has no
@@ -758,6 +801,7 @@ async function immediateOnlyLinkSendCheck(body) {
   const shortRows = await shortCodeRows(runs, ANY_SCHEME);
   if (appointmentLinkPresent(runs, hosts, shortRows, ANY_SCHEME)) return { present: true, label: 'Appointment page' };
   if (reportLinkPresent(runs, hosts, shortRows, ANY_SCHEME)) return { present: true, label: 'Service report' };
+  if (shortRows.some((row) => row.kind === 'receipt')) return { present: true, label: 'Receipt' };
   return { present: false };
 }
 
@@ -1115,7 +1159,77 @@ async function checkAccountBoundLinks(ctx, projectReports) {
   const onRecipientAccount = recipientAccountBinder(ctx);
   return (await checkAppointmentLinks(ctx, shortRows, onRecipientAccount))
     || (await checkReportLinks(ctx, shortRows, onRecipientAccount))
-    || checkProjectReportLinks(ctx, onRecipientAccount, projectReports);
+    || (await checkProjectReportLinks(ctx, onRecipientAccount, projectReports))
+    || checkReceiptLinks(ctx, shortRows, onRecipientAccount);
+}
+
+// Receipt links (permanent invoice token): the builder's own predicate
+// re-run — a settled self-pay invoice whose receipt the receipt lifecycle
+// already TEXTED — bound to the recipient's account, and the RECIPIENT's
+// receipt-text consent re-checked at the send (a scheduled message or a
+// draft dispatches long after the insert; the composer's /sms is
+// 'conversational' and never runs the payment_receipt policy itself) —
+// pre-push Codex P1 on r9. The recipient is the trusted customer, else the
+// one live row on the number; an ambiguous number refuses, like the insert.
+async function checkReceiptLinks(ctx, shortRows, onRecipientAccount) {
+  const vet = async (token, { payTarget = false } = {}) => {
+    if (!require('../config/feature-gates').isEnabled('composerReceiptLinks')) {
+      return refuseSend('Receipt Quick Links are switched off (GATE_COMPOSER_RECEIPT_LINKS) — remove the receipt link before sending.');
+    }
+    const invoice = await db('invoices').where({ token }).first('id', 'customer_id', 'status', 'payer_id', 'receipt_sms_sent_at', 'stripe_payment_intent_id', 'stripe_charge_id', 'invoice_number');
+    if (!invoice || !RECEIPT_INVOICE_STATUSES.includes(String(invoice.status || '')) || invoice.payer_id || !invoice.receipt_sms_sent_at) {
+      return refuseSend('This receipt is not available to text — remove the link and insert a fresh one.');
+    }
+    // The receipt SMS's own /pay short link opens the payment page, which
+    // redirects only a paid / processing invoice to its receipt — once the
+    // invoice is refunded that page is no receipt (r11 P2); the permanent
+    // /receipt form still is.
+    if (payTarget && invoice.status === 'refunded') {
+      return refuseSend('This receipt short link no longer opens the receipt (the invoice was refunded) — remove it and insert a fresh one.');
+    }
+    // A refunded invoice without its payment record cannot render its PDF.
+    if (invoice.status === 'refunded') {
+      const { loadPaymentForInvoice } = require('./receipt-payment');
+      const payment = await loadPaymentForInvoice(invoice.id, invoice.customer_id, {
+        stripePaymentIntentId: invoice.stripe_payment_intent_id,
+        stripeChargeId: invoice.stripe_charge_id,
+        invoiceNumber: invoice.invoice_number,
+      });
+      if (!payment) return refuseSend('This receipt is not available to text — remove the link and insert a fresh one.');
+    }
+    const bad = await onRecipientAccount(invoice.customer_id, 'receipt link');
+    if (bad) return bad;
+    const recipients = ctx.trustedCustomerId ? [{ id: ctx.trustedCustomerId }] : await liveCustomersOnNumber(ctx.toLast10);
+    if (recipients.length !== 1) return refuseSend('That number is not on file for exactly one customer — pick the customer from the search dropdown before sending a receipt link.');
+    const blocked = await receiptTextBlockedReason(recipients[0].id);
+    if (blocked) return refuseSend(`${blocked} — remove the receipt link before sending.`);
+    ctx.bearers += 1;
+    return null;
+  };
+  for (const run of linkRuns(ctx.runs, /\/receipt\//i)) {
+    const token = canonicalPortalToken(run, ctx.hosts, RECEIPT_TOKEN_PATH_RE);
+    if (!token) return refuseSend('A receipt link in this message is not on the Waves portal — remove it before sending.');
+    const bad = await vet(token);
+    if (bad) return bad;
+  }
+  for (const run of linkRuns(ctx.runs, /\/pay\//i)) {
+    const token = canonicalPortalToken(run, ctx.hosts, RECEIPT_PAY_TARGET_RE, ANY_SCHEME);
+    if (!token || !await payLinkOpensReceipt(token)) continue;
+    if (!canonicalPortalToken(run, ctx.hosts, RECEIPT_PAY_TARGET_RE)) {
+      return refuseSend('A receipt payment link in this message uses http:// — remove it and insert a fresh one.');
+    }
+    const bad = await vet(token, { payTarget: true });
+    if (bad) return bad;
+  }
+  // The shortened form receipt delivery texts (kind 'receipt', or any code
+  // whose target is a receipt page), judged by its target.
+  for (const row of shortRows.filter((r) => r.kind === 'receipt')) {
+    if (expiredShortRow(row)) return refuseSend('This receipt link has expired — remove it and insert a fresh one.');
+    if (!row.token) return refuseSend('This receipt short link does not open a receipt — remove it and insert a fresh one.');
+    const bad = await vet(row.token, { payTarget: Boolean(row.payTarget) });
+    if (bad) return bad;
+  }
+  return null;
 }
 
 // Contract signing links: a stored hash (a link the customer may hold —
@@ -1591,8 +1705,8 @@ async function buildCardRequestLink(visit) {
     .where({ token: result.secureUrl.slice(result.secureUrl.lastIndexOf('/') + 1) })
     .first('id', 'status', 'token', 'selected_plan', 'annual_prepay_term_id');
   const body = (await cardRequestPlanVariant(visit.id, request, templateVars)) || base;
-  const { stripPortalUrlScheme } = require('../routes/admin-sms-templates');
-  if (!String(body).includes(stripPortalUrlScheme(result.secureUrl))) {
+  const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+  if (!String(body).includes(stripSmsUrlScheme(result.secureUrl))) {
     return { url: null, line: '', reason: 'The card request text in Templates has no {secure_link} placeholder — add it before texting a card link' };
   }
   return {
@@ -1635,6 +1749,9 @@ async function buildPrepGuideLink(customerIds) {
   const sortKey = (v) => `${dateOnly(v.scheduled_date)} ${v.window_start ? String(v.window_start).padStart(8, '0') : '~'} ${v.id}`;
   let pick = null;
   for (const [pestType, config] of Object.entries(PREP_CONFIG)) {
+    // A standalone guide (sprinkler_timer) hangs on no visit and carries no
+    // service family — nothing for this scan to find (GH Codex #3953 r1 P1).
+    if (config.guide) continue;
     const visit = await nextUpcomingVisit(customerIds, config.serviceKeywords[0]);
     if (!visit) continue;
     if (!pick || sortKey(visit) < sortKey(pick.visit)) pick = { visit, config, pestType };
@@ -1853,6 +1970,118 @@ async function buildContractSigningLink(customerIds) {
     // (immediateOnlyLinkSendCheck is the server fence).
     immediateOnly: true,
     contract: { id: row.id, title, requiresSignature: needsSignature },
+  };
+}
+
+// Receipts are records, not actions: /receipt/:token reuses the permanent
+// invoice token with no TTL (receipt-v2.js). The viewer renders a receipt
+// for exactly two invoice statuses — 'paid', and 'refunded' (the PDF route's
+// own allow-list; a partial refund is a derived state of a 'paid' row). A
+// 'prepaid' close-out renders as "Payment not completed" and its PDF 409s
+// (pre-push Codex P1), an in-flight ACH ('processing') has no receipt yet,
+// and an open invoice is the pay link's business (buildPayBalanceLink).
+const RECEIPT_INVOICE_STATUSES = ['paid', 'refunded'];
+
+/**
+ * Receipt link — the account's most recently settled SELF-PAY invoice (a
+ * household shares its bills, like the pay link). A third-party payer-billed
+ * invoice (payer_id) is the payer's AP inbox's alone: its receipt shows the
+ * payer's billing address, AP email and payment method, and receipt delivery
+ * already suppresses the homeowner text for it (pre-push Codex P0) — never
+ * selected here. Receipts the lifecycle already texted only. Raw permanent
+ * URL, nothing minted.
+ */
+// When the invoice settled — the PAYMENT event, from the linked payment the
+// receipt viewer renders: the refund webhook NULLs paid_at on a full refund,
+// so the row's own stamps alone misorder a refunded invoice against a
+// later-created one paid earlier (GH Codex #3893 r7 P2). Nothing durable
+// records the refund itself (payments.refunded_at is never written —
+// pnl-report.js — and updated_at moves on unrelated edits), and a receipt
+// documents the payment that occurred, so a refund does not make it newer
+// (r9 P2).
+function receiptSettledAt(invoice, payment) {
+  return new Date(invoice.paid_at || payment.created_at || invoice.created_at || 0).getTime();
+}
+
+// Receipt texts carry their own consent — the payment_receipt /
+// payment_confirmation_sms toggles, the payment_receipt_channel email-only
+// preference, STOP and the suppression list — which InvoiceService.sendReceipt
+// runs through the messaging policy, while the composer's /sms dispatches
+// as 'conversational'. receipt_sent_at is stamped after an email-only
+// delivery too, so it proves nothing about texts. Same validators, same
+// policy, same input shape (hasEmailLeg: the receipt path pairs an email),
+// evaluated before the link is offered (GH Codex #3893 r9 P1).
+const RECEIPT_TEXT_BLOCKED_COPY = {
+  CHANNEL_EMAIL_ONLY: 'This customer receives receipts by email only',
+  PURPOSE_OPTED_OUT: 'This customer has opted out of receipt texts',
+};
+async function receiptTextBlockedReason(customerId) {
+  const { PURPOSE_POLICY } = require('./messaging/policy');
+  const { loadContactState, checkConsentForPurpose } = require('./messaging/validators/consent');
+  const { loadSuppressionState, checkSuppression } = require('./messaging/validators/suppression');
+  let contactState = await loadContactState({ customerId });
+  const input = { customerId, to: contactState.customer?.phone || null, channel: 'sms', audience: 'customer', purpose: 'payment_receipt', hasEmailLeg: true };
+  contactState = await loadSuppressionState(input, contactState);
+  for (const check of [checkSuppression, checkConsentForPurpose]) {
+    const result = await check(input, PURPOSE_POLICY.payment_receipt, contactState);
+    if (!result.ok) return RECEIPT_TEXT_BLOCKED_COPY[result.code] || 'This customer cannot receive receipt texts';
+  }
+  return null;
+}
+
+async function buildReceiptLink(customerIds, recipientId = null) {
+  if (!require('../config/feature-gates').isEnabled('composerReceiptLinks')) {
+    return { url: null, line: '', reason: 'Receipt Quick Links are not enabled' };
+  }
+  const rows = await db('invoices')
+    .whereIn('customer_id', customerIds)
+    .whereIn('status', RECEIPT_INVOICE_STATUSES)
+    .whereNull('payer_id')
+    .whereNotNull('token')
+    // A re-share only — first receipt delivery is InvoiceService.sendReceipt's.
+    .whereNotNull('receipt_sms_sent_at')
+    // Every texted receipt on the account, not a window: a fully refunded
+    // invoice's paid_at is cleared, so the row alone under-orders it and a
+    // cap here could drop the true newest settlement before the pick below
+    // can see its payment (r10 P2). Paid rows carry their own event.
+    .orderByRaw('COALESCE(paid_at, created_at) DESC, id DESC')
+    .select('id', 'customer_id', 'token', 'invoice_number', 'status', 'total', 'paid_at', 'created_at', 'stripe_payment_intent_id', 'stripe_charge_id');
+  // The receipt route's own payment resolution (metadata, PI / charge id,
+  // manual-payment description) where the row cannot date itself: a
+  // refunded invoice whose refund record cannot be resolved has no receipt
+  // — its PDF answers 409 rather than render a 'paid' receipt for a
+  // refunded invoice — so it is skipped, not sent, and cannot shadow an
+  // older valid one (r7 P2).
+  const { loadPaymentForInvoice } = require('./receipt-payment');
+  let invoice = null;
+  let settledAt = -Infinity;
+  for (const row of rows) {
+    const payment = row.status === 'refunded' || !row.paid_at
+      ? await loadPaymentForInvoice(row.id, row.customer_id, {
+        stripePaymentIntentId: row.stripe_payment_intent_id,
+        stripeChargeId: row.stripe_charge_id,
+        invoiceNumber: row.invoice_number,
+      })
+      : null;
+    if (row.status === 'refunded' && !payment) continue;
+    const at = receiptSettledAt(row, payment || {});
+    if (at > settledAt) { invoice = row; settledAt = at; }
+  }
+  if (!invoice) return { url: null, line: '', reason: 'No previously texted receipt is available on this account' };
+  // The RECIPIENT's consent, not the invoice owner's — a household shares
+  // its bills, and the text goes to the phone's resolved owner (pre-push
+  // Codex P1 on r9); a direct call without one falls to the owner.
+  const blocked = await receiptTextBlockedReason(recipientId || invoice.customer_id);
+  if (blocked) return { url: null, line: '', reason: blocked };
+  const url = `${publicPortalUrl()}/receipt/${invoice.token}`;
+  const number = invoice.invoice_number ? `invoice ${invoice.invoice_number}` : 'your payment';
+  return {
+    url,
+    line: `Here is your receipt for ${number}: ${url}\n\n`,
+    // Immediate sends only — the send seam re-checks the recipient's
+    // receipt-text consent, and scheduled / draft dispatch does not run it.
+    immediateOnly: true,
+    receipt: { id: invoice.id, invoiceNumber: invoice.invoice_number || null, status: invoice.status, total: Number(invoice.total) || 0, paidAt: dateOnly(invoice.paid_at) },
   };
 }
 
@@ -2091,5 +2320,6 @@ module.exports = {
   buildServiceReportLink,
   buildContractSigningLink,
   buildStatementLink,
+  buildReceiptLink,
   buildProjectReportLink,
 };

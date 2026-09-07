@@ -10717,6 +10717,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             estimate: acceptedEstimateForScheduling,
             serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
             selectedFrequency: acceptedSchedulingFrequencyKey,
+            serviceCadences,
             // Rung 1 was pre-acquired on this key at the top of this txn —
             // commitReservation re-checks the hold still sits on it.
             preLockedDate: acceptPreLockedDate,
@@ -10773,6 +10774,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               estimate: acceptedEstimateForScheduling,
               serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
               selectedFrequency: acceptedSchedulingFrequencyKey,
+              serviceCadences,
               // Rung 1 was pre-acquired on this key at the top of this txn —
               // commitReservation re-checks the hold still sits on it.
               preLockedDate: acceptPreLockedDate,
@@ -15526,7 +15528,7 @@ const softExitLimiter = rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: () => !featureGates.isEnabled('estimateSoftExit'),
+  skip: req => !featureGates.isEnabled(req.body?.kind === 'callback' ? 'websiteQuoteBooking' : 'estimateSoftExit'),
   keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
   message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
 });
@@ -15609,7 +15611,8 @@ router.post('/:token/referral-link', referralLinkLimiter, async (req, res) => {
 // call-side verdict re-checked on the locked row for the request write.
 router.post('/:token/change-request', softExitLimiter, async (req, res, next) => {
   try {
-    if (!featureGates.isEnabled('estimateSoftExit')) {
+    const kind = String(req.body?.kind || 'change');
+    if (!featureGates.isEnabled(kind === 'callback' ? 'websiteQuoteBooking' : 'estimateSoftExit')) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
     if (!req.params.token || !EXTENSION_REQUEST_TOKEN_RE.test(req.params.token)) {
@@ -15619,12 +15622,13 @@ router.post('/:token/change-request', softExitLimiter, async (req, res, next) =>
     if (estimateRow && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimateRow))) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
-    const { createEstimateChangeRequest, recordEstimateStillDeciding } = require('../services/estimate-change-request');
+    const { createEstimateOfficeRequest, recordEstimateStillDeciding } = require('../services/estimate-change-request');
     // Same locked-row linkage re-check the measurement review runs: lead
     // locked before call_log, verdict HELD through customer resolution and
     // the insert.
     const callSideBlockedFor = async (trx, lockedRow) => {
       const linkData = parseEstimateDataSafe(lockedRow);
+      if (kind === 'callback' && !linkData?.websiteSelfService) return true;
       const eng = linkData?.estimatorEngine;
       if (eng && (eng.linkage_invalidated_at || eng.invalidation_pending_at)) return true;
       if (await callSideBlockForEstimateData(trx, linkData)) return true;
@@ -15634,21 +15638,21 @@ router.post('/:token/change-request', softExitLimiter, async (req, res, next) =>
       }
       return !!(linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true }));
     };
-    const kind = String(req.body?.kind || 'change');
     // Unknown kinds are a validation error, never a silent change request
     // (pre-push codex P1) — but only once the token has cleared the public
     // eligibility gates, so a probe cannot tell gate state from a 400.
-    if (!['change', 'still_deciding'].includes(kind)) {
+    if (!['change', 'still_deciding', 'callback'].includes(kind)) {
       const { isSoftExitEligible } = require('../services/estimate-change-request');
       if (estimateRow && isEstimateCustomerViewable(estimateRow) && isSoftExitEligible(estimateRow)) {
-        return res.status(400).json({ error: 'kind must be change or still_deciding' });
+        return res.status(400).json({ error: 'kind must be change, still_deciding, or callback' });
       }
       return res.status(404).json({ error: 'Estimate not found' });
     }
     const result = kind === 'still_deciding'
       ? await recordEstimateStillDeciding({ estimateToken: req.params.token, callSideBlockedFor })
-      : await createEstimateChangeRequest({
+      : await createEstimateOfficeRequest({
         estimateToken: req.params.token,
+        kind,
         topics: req.body?.topics,
         note: req.body?.note,
         callSideBlockedFor,
@@ -25510,6 +25514,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // its "draft preview, not sent" banner + accept guards off this. Absent
       // (not false) otherwise so customer responses stay byte-identical.
       ...(adminDraftPreview ? { adminDraftPreview: true } : {}),
+      ...(verifiedStaffPreview ? { verifiedStaffPreview: true } : {}),
       // Soft-exit sheet (GATE_ESTIMATE_SOFT_EXIT). Include-when-TRUE only:
       // gate on, a live accept-active row, never a staff draft preview (the
       // write 404s a draft). Absent otherwise so gate-off responses stay

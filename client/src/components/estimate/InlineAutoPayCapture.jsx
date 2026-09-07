@@ -29,7 +29,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
   // Auto Pay copy's "nothing charged today" would contradict the charge).
   // The exact surcharged total is quoted in a separate confirm step before
   // any charge (PREPAY_CHARGE_QUOTE).
-  { intent, loadStripeSdk, glassActive = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, prepay = false },
+  { intent, loadStripeSdk, glassActive = false, website = false, bodyColor = '#3E5B73', borderColor = 'rgba(4,57,94,0.18)', busy = false, onStateChange, prepay = false },
   ref,
 ) {
   const mountRef = useRef(null);
@@ -107,7 +107,9 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       const stripe = StripeCtor(publishableKey);
       const elements = stripe.elements({
         clientSecret,
-        appearance: glassActive
+        appearance: website
+          ? { theme: 'stripe', variables: { borderRadius: '10px', colorPrimary: '#009cde', colorText: '#1b2c5b', colorBackground: '#ffffff', fontFamily: 'Inter, system-ui, sans-serif' } }
+          : glassActive
           ? { theme: 'stripe', variables: { borderRadius: '12px', colorPrimary: '#0A7EC2', colorText: NAVY, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' } }
           : { theme: 'stripe', variables: { borderRadius: '8px' } },
       });
@@ -133,7 +135,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       }
     });
     return () => { cancelled = true; };
-  }, [clientSecret, publishableKey, loadStripeSdk, glassActive]);
+  }, [clientSecret, publishableKey, loadStripeSdk, glassActive, website]);
 
   useImperativeHandle(ref, () => ({
     isReady: () => ready && agreed,
@@ -241,6 +243,8 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       </label>
       <button
         type="button"
+        data-website-terms=""
+        aria-expanded={termsOpen}
         onClick={() => setTermsOpen((v) => !v)}
         style={{ background: 'none', border: 'none', padding: 0, marginTop: 8, marginLeft: 26, fontSize: 14, color: NAVY, textDecoration: 'underline', cursor: 'pointer' }}
       >{termsOpen ? 'Hide full terms' : 'View full terms'}</button>

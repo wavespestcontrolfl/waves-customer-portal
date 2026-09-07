@@ -20,7 +20,7 @@
       "mount": "/",
       "reason": "Pre-router middleware inventoried as USE surface: the global helmet CSP selector (embed vs strict headers, always next()s), embed-CORS + privacy header stamps (pest-forecast, secure-card), and unobservable-when-dark 404 gates (payer statements, lawn assessment, careers, pest identifier, AI content report, public MCP/A2A) — each either sets headers and next()s or 404s while its GATE_* is off",
       "routes": [
-        "USE / (inline function#3396049a)",
+        "USE / (inline function#1fe36153)",
         "USE /api/ai/chat/report (inline function#6b8b71c2)",
         "USE /api/pay/statement (inline function#cf970c43)",
         "USE /api/public/a2a (inline function#c621253a)",
@@ -354,6 +354,18 @@
       "routes": [
         "GET /api/public/experiments/status",
         "POST /api/public/experiments/exposure"
+      ]
+    },
+    {
+      "router": "server/routes/posthog-ingest.js",
+      "mount": "/ingest",
+      "reason": "First-party PostHog ingest proxy (docs/public-route-contracts.md `/ingest/*`): dark behind GATE_POSTHOG_INGEST_PROXY (404, read per request), fixed upstream hosts with origin assertion, GET/POST/OPTIONS only, per-IP limiter after the gate, in-flight cap (process-wide + per-IP share) + upload deadline before buffering, 2 MB / 10 s caps, streamed size-capped response with write deadline, request headers allowlisted (cookies/auth/referer/proxy-chain never cross), nothing from the request logged. Anonymous by design — the browser SDK on the hub and /book posts here instead of *.posthog.com.",
+      "routes": [
+        "ALL /ingest/*",
+        "USE /ingest (express-rate-limit({ handler#8c637dbe }))",
+        "USE /ingest (inline function#2cc18b4d)",
+        "USE /ingest (inline function#3e44b7bf)",
+        "USE /ingest (inline function#3e8e0800)"
       ]
     },
     {

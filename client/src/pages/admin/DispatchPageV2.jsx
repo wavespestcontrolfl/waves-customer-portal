@@ -1226,13 +1226,13 @@ export default function DispatchPageV2({
             <span>
               <span className="u-nums font-medium text-zinc-900">
                 {totalCount}
-              </span>
+              </span>{" "}
               services
             </span>{" "}
             <span>
               <span className="u-nums font-medium text-zinc-900">
                 {completedCount}
-              </span>
+              </span>{" "}
               done
             </span>{" "}
             <span>
@@ -1243,7 +1243,7 @@ export default function DispatchPageV2({
                 )}
               >
                 {remainingCount}
-              </span>
+              </span>{" "}
               left
             </span>{" "}
             <span className="pl-3 border-l-hairline border-zinc-200">
@@ -1260,10 +1260,9 @@ export default function DispatchPageV2({
               </span>
             )}
             <span className="pl-3 border-l-hairline border-zinc-200">
-              {" "}
               <span className="u-nums font-medium text-zinc-900">
                 ${estRevenue.toLocaleString()}
-              </span>
+              </span>{" "}
               revenue
             </span>{" "}
           </div>{" "}

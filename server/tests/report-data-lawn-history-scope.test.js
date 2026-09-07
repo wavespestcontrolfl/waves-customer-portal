@@ -1,0 +1,148 @@
+const SKIP = !process.env.DATABASE_URL;
+const describeDb = SKIP ? describe.skip : describe;
+jest.mock('../config/feature-gates', () => ({ ...jest.requireActual('../config/feature-gates'), isEnabled: () => false }));
+jest.mock('../services/service-report/application-conditions', () => ({
+  ...jest.requireActual('../services/service-report/application-conditions'),
+  fetchServiceWeekWeather: jest.fn(() => { throw new Error('No weather calls in this test'); }),
+}));
+const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
+const { buildLawnAssessmentReportData, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+const history = require('../services/lawn-assessment-history');
+const { etCalendarDayOf } = require('../utils/datetime-et');
+const { getLatestTurfHeight, getTurfHeightTrend } = require('../services/turf-height-service');
+
+describeDb('report property history projections', () => {
+  let owned;
+  let knex;
+  beforeAll(async () => { owned = await createLawnHistoryDb(); knex = owned.knex; });
+  afterAll(async () => { if (owned) await owned.dispose(); });
+
+  test('gate-on report excludes another property and retains the complete payload shape', async () => {
+    const f = await fixture(knex);
+    const oldVisit = await f.visit(-20);
+    const old = await f.assessment(oldVisit);
+    const [otherProperty] = await knex('customer_properties').insert({ customer_id: f.customerId }).returning('*');
+    await f.assessment(await f.visit(-10, { property_id: otherProperty.id }));
+    const currentVisit = await f.visit(-1);
+    const currentRecord = await f.record(currentVisit);
+    const current = await f.assessment(currentVisit, { service_record_id: currentRecord.id });
+    const service = { ...currentRecord, service_line: 'lawn' };
+    const weatherFetch = require('../services/service-report/application-conditions').fetchServiceWeekWeather;
+    weatherFetch.mockClear();
+    const enabled = await buildLawnAssessmentReportData(service, 'lawn', knex, { propertyHistoryEnabled: true });
+    expect(weatherFetch).toHaveBeenCalledWith(expect.objectContaining({ serviceDate: current.service_date }));
+    const disabled = await buildLawnAssessmentReportData(service, 'lawn', knex, { propertyHistoryEnabled: false });
+    expect(Object.keys(enabled).sort()).toEqual(Object.keys(disabled).sort());
+    expect(Object.keys(enabled.scores).sort()).toEqual(Object.keys(disabled.scores).sort());
+    expect(enabled.trend).toHaveLength(2);
+    expect(disabled.trend).toHaveLength(3);
+    expect(enabled.initialScores.assessmentId).toBe(old.id);
+    expect(enabled.assessmentId).toBe(current.id);
+    expect(enabled.assessmentDate).toBe(etCalendarDayOf(currentVisit.scheduled_date));
+    expect(enabled.assessmentDate).toBe(enabled.trend[enabled.trend.length - 1].date);
+    expect(disabled.assessmentDate).toEqual(current.service_date);
+    expect(enabled.trend[0].date).not.toEqual(old.service_date);
+  });
+
+  test('a history-only reconfirm changes the canonical PDF identity; unchanged reads stay stable', async () => {
+    const f = await fixture(knex);
+    const earlier = await f.assessment(await f.visit(-20));
+    const visit = await f.visit(-1);
+    const record = await f.record(visit);
+    await f.assessment(visit, { service_record_id: record.id });
+    const service = { ...record, service_line: 'lawn' };
+    const options = { propertyHistoryEnabled: true };
+    const before = await resolveCanonicalLawnRender(service, knex, options);
+    expect((await resolveCanonicalLawnRender(service, knex, options)).signature).toBe(before.signature);
+    await knex('lawn_assessments').where({ id: earlier.id }).update({ confirmed_at: knex.raw('clock_timestamp()') });
+    const after = await resolveCanonicalLawnRender(service, knex, options);
+    expect(after.pin).toBe(before.pin);
+    expect(after.signature).not.toBe(before.signature);
+    expect(after.lawnHistory.identity).not.toBe(before.lawnHistory.identity);
+  });
+
+  test.each([false, true])('a legacy visit report remains available after a second property is added (assessment stamped=%s)', async (stamped) => {
+    const f = await fixture(knex);
+    const visit = await f.visit(-1, {
+      property_id: null, service_address_line1: f.property.address_line1,
+      service_address_city: f.property.city, service_address_zip: f.property.zip,
+    });
+    const record = await f.record(visit);
+    const assessment = await f.assessment(visit, { service_record_id: record.id, property_id: stamped ? f.property.id : null });
+    await knex('customer_properties').insert({ customer_id: f.customerId });
+    const service = { ...record, service_line: 'lawn' };
+    const rendered = await resolveCanonicalLawnRender(service, knex, { propertyHistoryEnabled: true });
+    expect(rendered.pin).toBe(assessment.id);
+    for (const pinnedAssessmentId of [null, assessment.id]) {
+      const report = await buildLawnAssessmentReportData(service, 'lawn', knex, { propertyHistoryEnabled: true, pinnedAssessmentId });
+      expect(report.assessmentId).toBe(assessment.id);
+      expect(report.trend).toHaveLength(1);
+      expect(report.assessmentDate).toBe(etCalendarDayOf(visit.scheduled_date));
+    }
+  });
+
+  test.each([false, true])('a reassigned visit cannot render the original property scores or photos (pinned=%s)', async (pinned) => {
+    const f = await fixture(knex);
+    const visit = await f.visit(-1);
+    const record = await f.record(visit);
+    const assessment = await f.assessment(visit, { service_record_id: record.id });
+    const [otherProperty] = await knex('customer_properties').insert({ customer_id: f.customerId }).returning('*');
+    await knex('scheduled_services').where({ id: visit.id }).update({ property_id: otherProperty.id });
+    const result = buildLawnAssessmentReportData({ ...record, service_line: 'lawn' }, 'lawn', knex, {
+      propertyHistoryEnabled: true, pinnedAssessmentId: pinned ? assessment.id : null,
+    });
+    if (pinned) await expect(result).rejects.toMatchObject({ code: 'pinned_assessment_unavailable' });
+    else await expect(result).resolves.toBeNull();
+  });
+
+  test.each([true, false])('ancillary-only visit reassignment invalidates the PDF identity (current assessment=%s)', async (withAssessment) => {
+    const f = await fixture(knex);
+    const earlierVisit = await f.visit(-20);
+    const earlierRecord = await f.record(earlierVisit);
+    await knex('lawn_water_intake_snapshots').insert({ customer_id: f.customerId, service_id: earlierVisit.id, service_record_id: earlierRecord.id, service_date: earlierVisit.scheduled_date, water_gap_inches: 0.5 });
+    await knex('turf_height_readings').insert({ customer_id: f.customerId, service_record_id: earlierRecord.id, grass_type: 'st_augustine', manual_height_in: 3, target_min_in: 3, target_max_in: 4, range_status: 'in_range', measured_at: new Date(), created_by: require('crypto').randomUUID() });
+    const [otherProperty] = await knex('customer_properties').insert({ customer_id: f.customerId }).returning('*');
+    const visit = await f.visit(-1);
+    const record = await f.record(visit);
+    if (withAssessment) await f.assessment(visit, { service_record_id: record.id });
+    const service = { ...record, service_line: 'lawn' };
+    const options = { propertyHistoryEnabled: true };
+    const before = await resolveCanonicalLawnRender(service, knex, options);
+    expect(before.lawnHistory.eligibleVisitIds).toContain(earlierVisit.id);
+    expect((await resolveCanonicalLawnRender(service, knex, options)).signature).toBe(before.signature);
+    await knex('scheduled_services').where({ id: earlierVisit.id }).update({ property_id: otherProperty.id });
+    const after = await resolveCanonicalLawnRender(service, knex, options);
+    expect(after.pin).toBe(before.pin);
+    expect(after.lawnHistory.rows.map((row) => row.id)).toEqual(before.lawnHistory.rows.map((row) => row.id));
+    expect(after.lawnHistory.eligibleVisitIds).not.toContain(earlierVisit.id);
+    expect(after.signature).not.toBe(before.signature);
+  });
+
+  test('mowing and water histories use the same visit inclusion, including conflicting record rejection', async () => {
+    const f = await fixture(knex);
+    const ownVisit = await f.visit(-5);
+    const ownRecord = await f.record(ownVisit);
+    const [otherProperty] = await knex('customer_properties').insert({ customer_id: f.customerId }).returning('*');
+    const otherVisit = await f.visit(-1, { property_id: otherProperty.id });
+    const otherRecord = await f.record(otherVisit);
+    for (const [record, height] of [[ownRecord, 3], [otherRecord, 5]]) {
+      await knex('turf_height_readings').insert({ customer_id: f.customerId, service_record_id: record.id, grass_type: 'st_augustine', manual_height_in: height, target_min_in: 3, target_max_in: 4, range_status: 'in_range', measured_at: new Date(), created_by: require('crypto').randomUUID() });
+    }
+    const scope = await history.visitEligibility({ customerId: f.customerId, propertyId: f.property.id }, knex);
+    const eligibleVisitIds = await history.eligibleVisitIds(scope, knex);
+    expect(Number((await getLatestTurfHeight(f.customerId, knex, { eligibleVisitIds })).manual_height_in)).toBe(3);
+    expect(await getTurfHeightTrend(f.customerId, 12, knex, null, { eligibleVisitIds })).toHaveLength(1);
+    // Read a real table query through the exact restriction the report uses.
+    const query = history.restrictVisitHistory(knex('lawn_water_intake_snapshots').where({ customer_id: f.customerId }), 'lawn_water_intake_snapshots', eligibleVisitIds, knex);
+    const base = { customer_id: f.customerId, service_date: '2026-01-01', water_gap_inches: 0.5 };
+    await knex('lawn_water_intake_snapshots').insert([
+      { ...base, service_id: ownVisit.id, service_record_id: ownRecord.id },
+      { ...base, service_id: otherVisit.id, service_record_id: otherRecord.id },
+      { ...base, service_id: ownVisit.id, service_record_id: null, service_date: '2026-01-02' },
+    ]);
+    expect(await query.clone()).toHaveLength(2);
+    // Retarget a record: the snapshot's direct id alone no longer proves it.
+    await knex('service_records').where({ id: ownRecord.id }).update({ scheduled_service_id: otherVisit.id });
+    expect(await query.clone()).toHaveLength(1);
+  });
+});
