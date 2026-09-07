@@ -2014,6 +2014,7 @@ describe('validateAutonomousRunGates revalidates REWRITTEN frontmatter (Codex r1
         draft_payload: JSON.stringify({
           type: 'draft',
           body: 'OLD',
+          title: 'Stale title',
           meta_description: 'Truncated ending with and',
           frontmatter: { canonical: 'https://x/a/', meta_description: 'Truncated ending with and', hero_image: { src: '/images/blog/x/hero.webp', alt: 'Old alt' } },
         }),
@@ -2054,6 +2055,9 @@ describe('validateAutonomousRunGates revalidates REWRITTEN frontmatter (Codex r1
     expect(res.ok).toBe(true);
     // Every gate sees the REWRITTEN metadata.
     for (const d of [seen.guardrails, seen.uniq, seen.quality, seen.seo]) {
+      expect(d.title).toBe('T');
+      expect(d.frontmatter.title).toBe('T');
+      expect(d.frontmatter.canonical).toBeUndefined();
       expect(d.meta_description).toMatch(/^A no-panic Southwest Florida guide/);
       expect(d.frontmatter.meta_description).toMatch(/^A no-panic Southwest Florida guide/);
       expect(d.frontmatter.hero_image.alt).toBe('Accurate new alt');
