@@ -87,6 +87,16 @@ jobs:
             | grep -v products-catalog-label-fields \
             | tee /dev/stderr \
             | xargs npx jest --ci --silent --runInBand
+      - name: Shared reservation arrival transaction tests
+        working-directory: server
+        env:
+          RESERVATION_ARRIVAL_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/reservation-arrival-postgres.test.js
+      - name: Staff arrival-window transaction tests
+        working-directory: server
+        env:
+          ARRIVAL_ROUTE_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/arrival-window-placement-db.test.js tests/admin-arrival-window-save-db.test.js
       - name: Protocol publication transaction tests
         working-directory: server
         env:

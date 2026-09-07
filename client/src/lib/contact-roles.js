@@ -38,3 +38,22 @@ export const OCCUPANCY_OPTIONS = [
   { value: "vacant", label: "Vacant" },
   { value: "commercial", label: "Commercial" },
 ];
+
+// One-word chip copy for the New Appointment service-address picker. Reads
+// customer_properties.relationship when the row carries it (own_home /
+// rental_owned / family_home / managed_for_client — see
+// server/constants/property-relationships.js) and falls back to the occupancy
+// so an unclassified row still says something useful.
+const RELATIONSHIP_SHORT_LABELS = {
+  own_home: "Home",
+  rental_owned: "Rental",
+  family_home: "Family",
+  managed_for_client: "Managed",
+};
+
+export function propertyRelationshipChip(property) {
+  if (!property) return "";
+  if (RELATIONSHIP_SHORT_LABELS[property.relationship]) return RELATIONSHIP_SHORT_LABELS[property.relationship];
+  const occ = OCCUPANCY_OPTIONS.find((o) => o.value === property.occupancy_type && o.value !== "unknown");
+  return occ ? occ.label : "";
+}

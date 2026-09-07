@@ -954,7 +954,7 @@ const VIEWS = [
   { key: "directory", label: "Directory", Icon: Users },
   { key: "map", label: "Map", Icon: MapPinned },
   { key: "health", label: "Health", Icon: HeartPulse },
-  { key: "intelligence", label: "AI Advisor", Icon: Sparkles },
+  { key: "intelligence", label: "Retention & Upsells", Icon: Sparkles },
 ];
 
 function CustomersCommandHeader({ view, onViewChange, onAddCustomer, canAdd }) {

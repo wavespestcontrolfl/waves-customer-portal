@@ -440,3 +440,34 @@ test('GATE_ADMIN_COLLECTIVE_MOVE on: a selection of only recurring stops errors 
     delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
   }
 });
+
+
+test.each([null, '09:00:00'])('legacy batch move maintains the dispatch due marker with window %s', async (windowStart) => {
+  const priorGate = process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+  process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'false';
+  try {
+    const list = chain({ select: jest.fn().mockResolvedValue([stop('svc-1', 'pending', {
+      is_recurring: true,
+      window_start: windowStart,
+      recurring_dispatch_due_date: '2026-05-20',
+    })]) });
+    const write = chain();
+    const queries = windowStart ? [chain(), write] : [write];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return list.select.mock.calls.length ? queries.shift() : list;
+      if (table === 'reschedule_log') return chain();
+      throw new Error(`Unexpected db('${table}') call`);
+    });
+    const result = await executeScheduleTool('move_stops_to_day', {
+      service_ids: ['svc-1'], new_date: '2099-01-15', confirmed: true,
+    });
+    expect(result).toMatchObject({ success: true, moved_count: 1 });
+    expect(write.update).toHaveBeenCalledWith(expect.objectContaining({
+      scheduled_date: '2099-01-15',
+      recurring_dispatch_due_date: windowStart ? null : '2099-01-15',
+    }));
+  } finally {
+    if (priorGate === undefined) delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+    else process.env.GATE_ADMIN_COLLECTIVE_MOVE = priorGate;
+  }
+});

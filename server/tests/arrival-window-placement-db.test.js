@@ -8,6 +8,10 @@ jest.mock('../models/db', () => {
   return proxy;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/geocoder', () => ({
+  ...jest.requireActual('../services/geocoder'),
+  geocodeAddress: jest.fn(),
+}));
 
 const knex = require('knex');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
@@ -15,6 +19,7 @@ const { findConflictingVisits, acquireOccupancyLock } = require('../services/sch
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { checkSlots } = require('../services/rain-out');
 const { checkArrivalPlacement } = require('../services/scheduling/arrival-route');
+const { geocodeAddress } = require('../services/geocoder');
 
 const connection = process.env.ARRIVAL_ROUTE_TEST_DATABASE_URL;
 const describeDb = connection ? describe : describe.skip;
@@ -42,13 +47,14 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
   const saved = Object.fromEntries(gates.map(k => [k, process.env[k]]));
   beforeAll(() => {
     gates.forEach(k => { process.env[k] = 'true'; });
-    database = knex({ client: 'pg', connection: { connectionString: connection, ssl: { rejectUnauthorized: false } }, pool: { min: 0, max: 1 } });
+    database = knex({ client: 'pg', connection, pool: { min: 0, max: 1 } });
   });
   afterAll(async () => {
     await database.destroy();
     gates.forEach(k => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; });
   });
   beforeEach(async () => {
+    geocodeAddress.mockReset().mockResolvedValue(null);
     mockConn = await database.transaction();
     // No production URL, permanent tables, migration execution, or triggers.
     for (const table of ['scheduled_services', 'customers', 'technicians']) {
@@ -151,5 +157,48 @@ describeDb('arrival-window offer/save agreement on real PostgreSQL', () => {
       expect(offers.slots.every(s => s.route_mode === undefined)).toBe(true);
       expect(await probe()).toEqual([]); // adjacent work blocks remain advisory, as before
     } finally { process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true'; }
+  });
+
+  test('a divergent stamp without stored pins uses the same trusted geocode in hints, live checks and saves', async () => {
+    await mockConn('customers').where({ id: CUSTOMER }).update({
+      address_line1: '200 Fixture Primary Street', city: 'Bradenton', state: 'FL', zip: '34201',
+      latitude: 27.1, longitude: -82.7,
+    });
+    await mockConn('scheduled_services').where({ id: TARGET }).update({
+      lat: null, lng: null, service_address_line1: '100 Fixture Rental Street',
+      service_address_city: 'Parrish', service_address_state: 'FL', service_address_zip: '34219',
+    });
+    geocodeAddress.mockResolvedValue({ lat: 27.545, lng: -82.4 });
+    const offers = await findAvailableSlots({ ...OPTIONS, lat: 27.1, lng: -82.7 });
+    expect(offers.slots[0].start_time).toBe('09:00');
+    expect(await probe()).toEqual([]);
+    const check = await checkSlots({ targets: [{
+      serviceId: TARGET, technicianId: TECH, date: DAY,
+      window: { start: '09:00', end: '10:00' }, excludeServiceIds: [TARGET],
+    }] });
+    expect(check.results[0].conflicts).toEqual([]);
+    expect(geocodeAddress.mock.calls).toHaveLength(3);
+    for (const [address] of geocodeAddress.mock.calls) {
+      expect(address).toBe('100 Fixture Rental Street, Parrish, FL, 34219');
+    }
+    expect(await mockConn('scheduled_services').where({ id: TARGET }).first('lat', 'lng'))
+      .toEqual({ lat: null, lng: null });
+  });
+
+  test('an unavailable geocode stays unverified and never borrows a divergent primary pin', async () => {
+    await mockConn('customers').where({ id: CUSTOMER }).update({
+      address_line1: '200 Fixture Primary Street', city: 'Bradenton', state: 'FL', zip: '34201',
+      latitude: 27.545, longitude: -82.4,
+    });
+    await mockConn('scheduled_services').where({ id: TARGET }).update({
+      lat: null, lng: null, service_address_line1: '100 Fixture Rental Street',
+      service_address_city: 'Parrish', service_address_state: 'FL', service_address_zip: '34219',
+    });
+    expect((await findAvailableSlots(OPTIONS)).slots).toEqual([]);
+    expect((await probe())[0].conflict_reason).toBe('route_unverified');
+    // A failed advisory lookup leaves the writing transaction usable.
+    await mockConn('scheduled_services').where({ id: TARGET }).update({ internal_notes: 'Fixture edit' });
+    expect(await mockConn('scheduled_services').where({ id: TARGET }).first('lat', 'lng'))
+      .toEqual({ lat: null, lng: null });
   });
 });

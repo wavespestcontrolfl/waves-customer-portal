@@ -612,6 +612,9 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
   // contradicts the page's own water data; reword to the coverage differential.
   const rainTarget = lawnPass ? toNum(reportV2.water && reportV2.water.targetInches) : null;
   const rainWellAboveTarget = canonicalRain != null && rainTarget != null && canonicalRain >= rainTarget + 1;
+  // Prose can only refine an established drought finding; high rain cannot
+  // turn an absent/unknown structured finding into a sprinkler diagnosis.
+  const reconcileDrought = rainWellAboveTarget && reportV2.water?.droughtSignal === true;
   let insights = rawInsights;
   let photoSummary = null;
   let snapshot = null;
@@ -620,7 +623,7 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
     code: 'drought_hypothesis_contradicts_rainfall',
     message: `${where} attributed stress to drought/dry conditions while measured weekly rain (${formatInches(canonicalRain)}") is well above the ${formatInches(rainTarget)}" target.`,
   });
-  if (rainWellAboveTarget) {
+  if (reconcileDrought) {
     const summaryDrought = replaceDroughtHypothesis(liveSummary);
     if (summaryDrought) { summary = summaryDrought; droughtWarn('Visit summary'); }
     const patched = insights.map((i) => {
@@ -680,7 +683,7 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
     // The reason rides through the same drought reconciliation as the cards —
     // "inspect edge areas for drought stress" must not survive on a
     // rain-above-target report when every other surface was corrected.
-    const focus = (rainWellAboveTarget && replaceDroughtHypothesis(nextVisitFocus)) || nextVisitFocus;
+    const focus = (reconcileDrought && replaceDroughtHypothesis(nextVisitFocus)) || nextVisitFocus;
     followUp = {
       scheduled: true,
       headline: 'Follow-up already planned',
@@ -750,7 +753,7 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
       const t0 = String(text);
       let out = t0;
       if (canonicalRain != null) out = reconcileRainFigure(out, canonicalRain) || out;
-      if (rainWellAboveTarget) {
+      if (reconcileDrought) {
         const d = replaceDroughtHypothesis(out);
         if (d) { out = d; droughtTouched = true; }
       }

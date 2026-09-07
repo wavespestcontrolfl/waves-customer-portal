@@ -100,7 +100,12 @@ function installDb({ rows, visitIdByService = {}, holdUntil = null, prefsRow = {
       // read per check, so a test can raise the hold mid-flight (after
       // the SMS handoff, before the email fallback's own recheck).
       const hold = typeof holdUntil === 'function' ? holdUntil() : holdUntil;
-      return genericChain(hold ? { move_hold_until: hold } : null);
+      const c = genericChain(hold ? { move_hold_until: hold } : null);
+      const holdRead = c.first.getMockImplementation();
+      c.first.mockImplementation((...cols) => cols.length === 1 && cols[0] === 'id'
+        ? rows.find((row) => row.id === c._where[0]?.[0]?.id) || null
+        : holdRead(...cols));
+      return c;
     }
     if (table === 'appointment_reminders as ar') {
       // Reminder-row-sourced scans (closeVisitTierRows' member close; the

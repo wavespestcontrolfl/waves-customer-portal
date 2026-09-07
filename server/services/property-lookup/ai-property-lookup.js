@@ -153,6 +153,7 @@ const HILLSBOROUGH_ZIPS = new Set([
   '33578', '33579', '33598',
 ]);
 const DIRECT_PROPERTY_RECORD_PROVIDERS = new Set(['manatee_pao', 'sarasota_pao', 'charlotte_pao', 'hillsborough_pao']);
+const AI_PROPERTY_PROVIDERS = new Set(['ai', 'claude', 'openai', 'gemini']);
 const PROPERTY_EVIDENCE_FIELDS = [
   'propertyType', 'squareFootage', 'lotSize', 'yearBuilt', 'bedrooms', 'bathrooms',
   'stories', 'constructionMaterial', 'foundationType', 'roofType',
@@ -182,6 +183,7 @@ const SOURCE_TYPE_WEIGHTS = {
   aggregator: 55,
   generic: 25,
   unknown: 20,
+  model_inference: 10,
 };
 
 const SOURCE_TYPE_LABELS = {
@@ -194,6 +196,7 @@ const SOURCE_TYPE_LABELS = {
   aggregator: 'aggregator',
   generic: 'generic web source',
   unknown: 'unknown source',
+  model_inference: 'AI-reported record — needs confirmation',
 };
 
 function positiveInt(value, fallback) {
@@ -209,6 +212,7 @@ function positiveInt(value, fallback) {
 function canonicalLookupAddress(address, geoContext = null) {
   if (!geoContext?.formattedAddress || geoContext.partialMatch) return address;
   const cleaned = geoContext.formattedAddress.replace(/,?\s*(?:USA|United States)\s*$/i, '').trim();
+  if (situsHouseNumberMismatch(address, cleaned)) return address;
   return cleaned || address;
 }
 
@@ -2046,13 +2050,9 @@ function aiRecordHouseNumberMismatch(record, typedAddress) {
     ...(Array.isArray(record._aiSources) ? record._aiSources.map((s) => s?.url) : []),
     record._aiSourceUrl,
   ].filter(Boolean))];
-  // A trusted source ANYWHERE in the citation set (county/permit/builder
-  // page — primary or secondary; providers don't reliably put the fact
-  // source first) means the facts are not listing-borrowed, and a
-  // comp/neighbor listing cited beside it must not veto the record
-  // (codex P2 ×2). The veto below exists for listing-sourced records.
-  if (urls.some((url) => ['county', 'cadastral', 'permit', 'builder']
-    .includes(classifyPropertySource(url).type))) return false;
+  // An unrelated county/builder URL does not establish property identity.
+  // Only a citation matching the requested street can outweigh a neighbor
+  // citation. Direct county records are resolved outside this AI filter.
   let confirmed = false;
   let sawDisagreement = false;
   for (const url of urls) {
@@ -2076,13 +2076,16 @@ function aiRecordHouseNumberMismatch(record, typedAddress) {
 // timeout is the only externally observable signal. Purely observational
 // (feeds the property_lookups attempt-status segmentation); never alters
 // the returned record.
-async function lookupPropertyFromAITrio(address, geoContext = null, diag = null) {
+async function lookupPropertyFromAITrio(address, geoContext = null, diag = null, options = {}) {
   // County street-string matching and AI search prompts both get the
   // geocoder's canonical address (typo/postal-city fixes); falls back to the
   // typed address on geocode miss or partial match.
   const searchAddress = canonicalLookupAddress(address, geoContext);
   const countyTimeoutMs = positiveInt(process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
   const t0 = Date.now();
+  // Interactive estimating gives each county retrieval its own attempt.
+  // A slow GIS request must not consume the address-search fallback window.
+  const remainingCountyMs = () => options.prioritizeAccuracy ? countyTimeoutMs : remainingCountyLookupMs(t0, countyTimeoutMs);
 
   // GIS parcel match: rooftop point → parcel polygon + FDOR roll facts. Runs
   // inside the shared county budget with its own (shorter) timeout; every
@@ -2105,7 +2108,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null)
     });
   };
   if (gisPrecision) {
-    const gisTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyLookupMs(t0, countyTimeoutMs));
+    const gisTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyMs());
     // County roll layer first: fresher than the annual FDOR statewide roll (new
     // plats appear sooner) and it carries the land-use description that splits
     // paired villas / condos from detached homes. FDOR statewide is the
@@ -2115,7 +2118,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null)
       timeoutMs: gisTimeoutMs,
     }).catch(() => null));
     if (!parcel) {
-      const fdorTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyLookupMs(t0, countyTimeoutMs));
+      const fdorTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyMs());
       if (fdorTimeoutMs >= COUNTY_LOOKUP_MIN_REMAINING_MS) {
         parcel = await diagTimedLeg('fdor_gis', fdorTimeoutMs, lookupParcelByPoint(geoContext.lat, geoContext.lng, { timeoutMs: fdorTimeoutMs })
           .catch(() => null));
@@ -2186,8 +2189,8 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null)
     // minimum fallback window out of what actually remains (a slow GIS hit
     // already consumed budget): a stale parcel or stalled PAO detail fetch
     // must leave the typed-address fallback below enough time to run.
-    const remainingMs = remainingCountyLookupMs(t0, countyTimeoutMs);
-    const byParcelTimeoutMs = Math.min(
+    const remainingMs = remainingCountyMs();
+    const byParcelTimeoutMs = options.prioritizeAccuracy ? countyTimeoutMs : Math.min(
       Math.ceil(countyTimeoutMs / 2),
       remainingMs - COUNTY_LOOKUP_MIN_REMAINING_MS,
     );
@@ -2200,7 +2203,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null)
     }
   }
   if (!countyRecord) {
-    const remainingMs = remainingCountyLookupMs(t0, countyTimeoutMs);
+    const remainingMs = remainingCountyMs();
     if (remainingMs >= COUNTY_LOOKUP_MIN_REMAINING_MS) {
       countyRecord = await diagTimedLeg('county_pao_address', remainingMs,
         lookupPropertyFromCountyRecords(searchAddress, {
@@ -2217,8 +2220,10 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null)
 
   const cadastralRecord = parcel ? buildCadastralRecord(parcel, searchAddress) : null;
 
-  if (countyRecord && hasCountyPricingCore(countyRecord)) {
-    const merged = mergePropertyRecords([countyRecord, cadastralRecord].filter(Boolean), searchAddress);
+  const countyRecords = [countyRecord, cadastralRecord].filter(Boolean);
+  const countyMerged = countyRecords.length ? mergePropertyRecords(countyRecords, searchAddress) : null;
+  if (hasCountyPricingCore(countyMerged)) {
+    const merged = countyMerged;
     preserveCountyGisLandUse(merged, cadastralRecord);
     preserveCountyGisImpervious(merged, cadastralRecord);
     preserveMultiSitusParcelSignal(merged, countyRecord);
@@ -2996,7 +3001,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
                 streetLabel,
                 streetExists: true,
                 hasExactMatch: true,
-                parcelCount: result.situs.length,
+                parcelCount: targeted.situs.length,
                 nearestNumbers: [],
               };
             }
@@ -3006,7 +3011,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
               streetLabel,
               streetExists: true,
               hasExactMatch: false,
-              parcelCount: result.situs.length,
+              parcelCount: targeted.situs.length,
               nearestNumbers: [],
               typedZip,
               numberInOtherZips: otherZipsFor(tNumbers, houseNumber),
@@ -3096,6 +3101,7 @@ async function auditAddressHouseNumber(address, geoContext = null, options = {})
         // prevent. No ZIP typed → scoped IS the county-wide set (codex P2
         // #2718).
         nearestNumbers: scoped.size ? nearestHouseNumbers(scoped, houseNumber) : [],
+        typedZip,
       };
       missingVerdict = missingVerdict || verdict;
     }
@@ -4734,7 +4740,7 @@ function hasAnyPropertyFact(parsed) {
 // have as the existing default (0 / null / '') so the orchestrator behaves the
 // same as it would with a sparse public-record response.
 function shapeAsPropertyRecord(p, address, provider = 'ai') {
-  const sourceMeta = classifyPropertySource(p.source);
+  const sourceMeta = propertySourceEvidence(p.source, provider);
   const evidence = buildRecordEvidence(p, provider, sourceMeta);
   const sourceKind = DIRECT_PROPERTY_RECORD_PROVIDERS.has(provider) ? 'county' : 'ai';
   return {
@@ -4993,7 +4999,7 @@ function buildRecordEvidence(parsed, provider, sourceMeta) {
 
 function refreshRecordSourceEvidence(record) {
   if (!record?._aiSourceUrl) return record;
-  const meta = classifyPropertySource(record._aiSourceUrl);
+  const meta = propertySourceEvidence(record._aiSourceUrl, record._provider);
   if (meta.weight > (record._aiSourceQuality || 0)) {
     record._aiSourceType = meta.type;
     record._aiSourceQuality = meta.weight;
@@ -5027,6 +5033,24 @@ function hostMatchesAny(host, domains) {
   return domains.some((domain) => hostMatchesDomain(host, domain));
 }
 
+// County authority comes from the address/parcel adapters that actually
+// retrieved the record. A model's URL claim alone cannot verify its facts.
+function propertySourceEvidence(url, provider) {
+  const source = classifyPropertySource(url);
+  if (AI_PROPERTY_PROVIDERS.has(provider) && ['county', 'cadastral'].includes(source.type)) {
+    return { type: 'model_inference', weight: SOURCE_TYPE_WEIGHTS.model_inference };
+  }
+  return source;
+}
+
+function hasUnconfirmedCountyEvidence(record) {
+  return Object.values(record?._fieldEvidence || {}).some((entry) => {
+    const candidates = Array.isArray(entry) ? entry : entry?.evidence || [entry];
+    return candidates.some((item) => AI_PROPERTY_PROVIDERS.has(item?.provider || item?.winningProvider)
+      && ['county', 'cadastral'].includes(item?.sourceType));
+  });
+}
+
 function classifyPropertySource(url) {
   if (!url || typeof url !== 'string') return { type: 'unknown', weight: SOURCE_TYPE_WEIGHTS.unknown };
   let parsed;
@@ -5041,6 +5065,9 @@ function classifyPropertySource(url) {
   // County appraiser sites AND each county's own parcel GIS map service
   // (county-parcel-gis.js) — all county-grade authoritative rolls.
   if (hostMatchesAny(host, ['manateepao.gov', 'sc-pa.com', 'ccappraiser.com', 'scgov.net', 'charlottecountyfl.gov', 'hcpafl.org'])) {
+    if (/^\/(?:search\/?|propertysearch\/?)?$/.test(path) && !/^#\/parcel\/basic\/[^/]+/i.test(parsed.hash)) {
+      return { type: 'generic', weight: SOURCE_TYPE_WEIGHTS.generic };
+    }
     return { type: 'county', weight: SOURCE_TYPE_WEIGHTS.county };
   }
   if (hostMatchesDomain(host, 'arcgis.com') && path.includes('florida_statewide_cadastral')) {
@@ -5215,6 +5242,8 @@ module.exports = {
   COUNTY_LOT_SQFT_MAX: LOT_SQFT_MAX,
   auditAddressHouseNumber,
   hasCountyEvidence,
+  hasCountyPricingCore,
+  hasUnconfirmedCountyEvidence,
   buildPropertyDataQuality,
   detectUnassessedVacantParcel,
   detectStaleImageryTurfConflict,

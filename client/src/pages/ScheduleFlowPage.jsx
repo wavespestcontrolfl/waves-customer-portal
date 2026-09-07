@@ -362,6 +362,12 @@ function slotReanchors(data, slotDate) {
 // 2026-07-30): every date move shifts the series, so one steady sentence
 // replaces the legacy conditional pull-forward warning.
 function recurringNoteCopy(data, selectedSlot) {
+  const changesSeries = data?.collectiveAnchor
+    ? !selectedSlot || String(selectedSlot.date) !== String(data?.current?.date || '')
+    : selectedSlot && slotReanchors(data, selectedSlot.date);
+  if (data?.futurePlacementDays === 3 && changesSeries) {
+    return 'Your selected appointment will be confirmed. Later visits will follow the new schedule, with each day and time arranged within 3 days of its due date. Existing appointment commitments will be reviewed separately.';
+  }
   if (data?.collectiveAnchor) {
     // A same-date selection is a time-only move — the server's
     // shouldReanchor never shifts the series for it, so the note must not
@@ -380,14 +386,15 @@ function recurringNoteCopy(data, selectedSlot) {
     : 'Only this visit will move — the rest of your regular service schedule stays the same.';
 }
 
-function ReanchorNote() {
+function ReanchorNote({ futurePlacementDays }) {
   return (
     <div data-glass="soft" style={{
       background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 10,
       padding: '10px 12px', fontSize: 14, color: '#9A3412', lineHeight: 1.5,
     }}>
-      Heads up — moving this far up shifts your whole plan: your following
-      visits will move to match the new date, keeping your regular schedule.
+      {futurePlacementDays === 3
+        ? 'Your selected appointment will be confirmed. We’ll arrange later visits within 3 days of their new due dates.'
+        : 'Heads up — moving this far up shifts your whole plan: your following visits will move to match the new date, keeping your regular schedule.'}
     </div>
   );
 }
@@ -657,7 +664,9 @@ function RescheduleSuccessCard({ result, service }) {
         Your {service?.type || 'service'} visit is now scheduled for{' '}
         <strong style={{ color: S.text }}>{formatDateLabel(result.newDate)}</strong>, arrival window{' '}
         <strong style={{ color: S.text }}>{arrivalWindowLabel(result.window?.start) || result.startLabel}</strong>.
-        {result.seriesShifted ? ' We also shifted your upcoming visits to follow the new date — your regular schedule now runs from this one.' : ''}
+        {result.seriesShifted ? (result.futurePlacementDays === 3
+          ? ' We’ll arrange later visits within 3 days of their new due dates. Existing appointment commitments stay unchanged until our team reviews them with you.'
+          : ' We also shifted your upcoming visits to follow the new date — your regular schedule now runs from this one.') : ''}
         {' '}We&apos;ll text you a confirmation shortly.
       </div>
     </Card>
@@ -834,6 +843,7 @@ const FLOWS = {
       // race between render and commit 409s (SCOPE_CHANGED) instead of
       // silently doing something the customer wasn't told.
       disclosed_collective: !!data?.collectiveAnchor,
+      disclosed_future_placement_days: data?.futurePlacementDays ?? null,
       disclosed_current_date: data?.current?.date || null,
     }),
     // SCOPE_CHANGED: gate flip / dispatch race on the disclosed series scope.
@@ -842,7 +852,7 @@ const FLOWS = {
     // Inside the picked row so the heads-up sits directly under the Confirm
     // it applies to — never below the fold.
     pickedNote: (data, slot) => (!data.collectiveAnchor && slotReanchors(data, slot.date)
-      ? <div className="wpk-picked-note"><ReanchorNote /></div>
+      ? <div className="wpk-picked-note"><ReanchorNote futurePlacementDays={data.futurePlacementDays} /></div>
       : null),
   },
   reservice: {
