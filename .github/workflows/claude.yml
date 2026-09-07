@@ -3,11 +3,13 @@
 # claude-code-review.yml, which reviews every PR automatically.
 #
 # Only users with write access to the repo can trigger it (the action's
-# default; the repo is public). The token is `contents: read`, so Claude
-# can read code and post comments but cannot commit or push from here.
+# default; the repo is public). Comments only, enforced the same three ways
+# as claude-code-review.yml: the workflow's own GITHUB_TOKEN scoped by
+# `permissions:` (contents:read), every edit / git-mutation tool in
+# --disallowedTools, and a read-only gh allowlist.
 #
-# Needs the Claude GitHub App installed and the ANTHROPIC_API_KEY secret —
-# see the header of claude-code-review.yml.
+# Needs the ANTHROPIC_API_KEY secret — see the header of
+# claude-code-review.yml. Inert (green, with a notice) until it exists.
 name: claude
 
 on:
@@ -33,7 +35,6 @@ jobs:
       contents: read
       pull-requests: write
       issues: write
-      id-token: write
       actions: read
     steps:
       # Inert until the secret exists: skip (green, with a notice) rather
@@ -57,8 +58,10 @@ jobs:
         if: steps.creds.outputs.present == 'true'
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           claude_args: |
             --model claude-opus-5
             --max-turns 120
-            --allowedTools "Agent,Task,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh pr comment:*),Bash(gh issue view:*),Bash(git log:*),Bash(git blame:*),Bash(git show:*),Bash(git diff:*)"
-            --append-system-prompt "You are reviewing or answering questions about code in the Waves customer portal. Before reviewing any diff read AGENTS.md (the P0/P1/P2 rubric) and CLAUDE.md in full. When asked to review, apply the same standard as the automated claude-review workflow: verify every finding by reading the code, post inline comments with confirmed: true, and finish with one summary comment headed '## Claude review' and a 'Verdict:' line. Comments only: never edit, commit, or push. Never put customer names, phone numbers, emails, addresses, or invoice numbers in a comment."
+            --allowedTools "Agent,Task,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh issue view:*),Bash(git log:*),Bash(git blame:*),Bash(git show:*),Bash(git diff:*)"
+            --disallowedTools "Edit,MultiEdit,Write,NotebookEdit,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git checkout:*),Bash(git switch:*),Bash(git rm:*),Bash(git reset:*),Bash(git stash:*),Bash(git branch:*),Bash(git config:*),Bash(git fetch:*),Bash(git pull:*),Bash(git merge:*),Bash(git rebase:*),mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
+            --append-system-prompt "You are reviewing or answering questions about code in the Waves customer portal. Before reviewing any diff read AGENTS.md (the P0/P1/P2 rubric) and CLAUDE.md in full. When asked to review, apply the same standard as the automated claude-review workflow: verify every finding by reading the code, post inline comments with confirmed true, and finish your tracking comment with a heading of ## Claude review and a Verdict line. Comments only: never edit, commit, or push. Never put customer names, phone numbers, emails, addresses, or invoice numbers in a comment."
