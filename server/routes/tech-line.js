@@ -47,24 +47,6 @@ const DUPLICATE_TEXT_WINDOW = '1 minute';
 function sentBodyHash(body) {
   return crypto.createHash('sha256').update(normalizeGsmPunctuation(body), 'utf8').digest('hex');
 }
-// A text that never left must not stay claimed for the window, or the
-// tech's real retry silently 409s.
-function releaseTextClaim(claimKey) {
-  return db('sms_send_claims').where({ claim_key: claimKey }).del()
-    .catch((err) => logger.warn(`[tech-line] text claim release failed (${String(err?.code || err?.name || 'error')})`));
-}
-// A tech's real text is a first response to any open lead on this phone —
-// the same Speed-to-Lead stamp the admin composer makes after a real
-// provider send; no watcher stamps manual rows later (codex #4072 r8 P2).
-// Fail-soft: SLA bookkeeping never breaks a send that already left.
-async function stampTechFirstResponse({ to, technicianId }) {
-  try {
-    const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
-    await stampFirstResponseByContact({ phone: to, performedBy: `tech:${technicianId}` });
-  } catch (stampErr) {
-    logger.warn(`[tech-line] first-response stamp failed: ${stampErr.message}`);
-  }
-}
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function publicLine(ctx) {
@@ -117,8 +99,52 @@ router.get('/', async (req, res) => {
   }
 });
 
+// The atomic cross-process gate both send routes use: sms_send_claims (the
+// table the public estimate route claims through) — a fresh insert, or a
+// takeover of a claim older than the window, in ONE statement on the pool.
+// No advisory-lock transaction: holding a pooled connection while the send
+// or the bridge takes a second one from the same pool wedges every slot
+// under a burst (codex #4072 r15 P2); the unique key is the serialization.
+async function claimSend(claimKey, window) {
+  const claim = await db.raw(
+    `INSERT INTO sms_send_claims (claim_key) VALUES (?)
+     ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
+     WHERE sms_send_claims.created_at < NOW() - interval '${window}'
+     RETURNING id`,
+    [claimKey],
+  );
+  return (claim?.rows || []).length > 0;
+}
+// A send that never left must not stay claimed for the window, or the
+// tech's real retry silently 409s.
+function releaseClaim(claimKey) {
+  return db('sms_send_claims').where({ claim_key: claimKey }).del()
+    .catch((err) => logger.warn(`[tech-line] claim release failed (${String(err?.code || err?.name || 'error')})`));
+}
+// AMBIGUOUS provider outcome — the admin composer's rule (GH Codex #3851 r4
+// P1): a retryable / deferred result that was neither accepted nor a
+// validator block (Twilio timeout, 5xx, 429) is NOT a definitive no-send;
+// the provider may hold the text. Claims stay held and parked suggestions
+// stay parked for such an outcome (codex #4072 r15 P2).
+function isAmbiguousOutcome(o) {
+  return Boolean(o) && o.sent !== true && !o.blocked && Boolean(o.retryable || o.deferred);
+}
+// A tech's real text is a first response to any open lead on this phone —
+// the same Speed-to-Lead stamp the admin composer makes after a real
+// provider send; no watcher stamps manual rows later (codex #4072 r8 P2).
+// Fail-soft: SLA bookkeeping never breaks a send that already left.
+async function stampTechFirstResponse({ to, technicianId }) {
+  try {
+    const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
+    await stampFirstResponseByContact({ phone: to, performedBy: `tech:${technicianId}` });
+  } catch (stampErr) {
+    logger.warn(`[tech-line] first-response stamp failed: ${stampErr.message}`);
+  }
+}
+
 // The reserve → send → settle → stamp sequence for one text, as the
-// { status, json } the handler answers with. Throws for the sanitized 500.
+// { status, json, ambiguous } the handler answers with. Throws for the
+// sanitized 500 (an ambiguous throw carries err.providerOutcome).
 async function textFromLine({ req, ctx, target, body }) {
   // The same human-reply lifecycle the admin composer runs: park the
   // thread's pending suggestions (and back off an autonomous reply mid-
@@ -130,6 +156,10 @@ async function textFromLine({ req, ctx, target, body }) {
   if (reply.autoSendInFlight) {
     return { status: 409, json: { error: 'An automatic reply to this customer is being sent right now — try again in a moment', code: 'AUTO_REPLY_IN_FLIGHT' } };
   }
+  // Ambiguous: clear the reservation row only — the parked suggestions are
+  // neither reopened (an autonomous reply on top of a text the customer may
+  // already hold) nor ignored (the thread is not known to be answered).
+  const settleAmbiguous = () => settleHumanReply({ ...reply, parkedDecisionIds: [], sent: false, reviewedBy: req.technicianId }).catch(() => {});
   let result;
   try {
     result = await sendCustomerMessage({
@@ -156,7 +186,8 @@ async function textFromLine({ req, ctx, target, body }) {
     // customer HAS the text: it is answered, and the tech must not be
     // invited to send it again (codex #4072 r2 P1).
     const accepted = err?.providerOutcome?.sent === true && isRealProviderSend(err.providerOutcome);
-    await settleHumanReply({ ...reply, sent: accepted, reviewedBy: req.technicianId }).catch(() => {});
+    if (!accepted && isAmbiguousOutcome(err?.providerOutcome)) await settleAmbiguous();
+    else await settleHumanReply({ ...reply, sent: accepted, reviewedBy: req.technicianId }).catch(() => {});
     if (!accepted) throw err;
     logger.error(`[tech-line] text accepted but its audit write failed (${String(err.code || err.name || 'error')}) for visit ${target.visit.id}`);
     // The customer has the text: it is a first response too (codex r13 P2).
@@ -166,19 +197,26 @@ async function textFromLine({ req, ctx, target, body }) {
   // A suppression / gate-off sentinel comes back sent:true with no real
   // provider id — the tech must not see "Sent." for a text that never left.
   const delivered = result.sent && isRealProviderSend(result);
-  await settleHumanReply({ ...reply, sent: delivered, reviewedBy: req.technicianId }).catch(() => {});
   if (!delivered) {
+    const ambiguous = isAmbiguousOutcome(result);
+    if (ambiguous) await settleAmbiguous();
+    else await settleHumanReply({ ...reply, sent: false, reviewedBy: req.technicianId }).catch(() => {});
     const code = result.code || (result.sent ? 'SMS_GATE_OFF' : 'NOT_SENT');
-    logger.info(`[tech-line] text from ${ctx.line.number} not sent for visit ${target.visit.id}: ${code}`);
+    logger.info(`[tech-line] text from ${ctx.line.number} not sent for visit ${target.visit.id}: ${code}${ambiguous ? ' (ambiguous)' : ''}`);
     return {
       status: 409,
+      ambiguous,
       json: {
-        error: result.reason || (result.sent ? 'Texting is switched off right now' : 'Message was not sent'),
+        error: ambiguous
+          ? 'The carrier did not confirm this text — it may still go out. Check the thread before sending it again.'
+          : (result.reason || (result.sent ? 'Texting is switched off right now' : 'Message was not sent')),
         code,
         deferred: Boolean(result.deferred),
+        ...(ambiguous ? { mayHaveSent: true } : {}),
       },
     };
   }
+  await settleHumanReply({ ...reply, sent: true, reviewedBy: req.technicianId }).catch(() => {});
   await stampTechFirstResponse({ to: target.to, technicianId: req.technicianId });
   return { status: 200, json: { success: true, from: publicLine(ctx) } };
 }
@@ -194,41 +232,26 @@ router.post('/sms', async (req, res, next) => {
     if (target.error) return res.status(target.status).json({ error: target.error });
 
     // Two PWA instances submitting the same text near-simultaneously must
-    // not both reach Twilio: the send runs under a per-customer transaction
-    // advisory lock (the second waits for the first to finish) and holds a
-    // DURABLE claim on (customer, body) in sms_send_claims — the cross-
-    // process gate the public estimate route uses: a fresh insert, or a
-    // takeover of one older than the window (codex #4072 r10 + r11 P2).
-    // The audit row is best-effort by design, so it is never the proof.
-    // The claim is COMMITTED before the send — its own statement, not the
-    // lock's transaction: once Twilio has accepted the text the evidence
-    // must survive whatever happens to this connection afterwards (r13
-    // P2). A send that never left (a refusal, a throw before acceptance)
-    // releases it explicitly so a real retry can send. Same shape as the
-    // bridge interlock; the send's own writes commit as before.
+    // not both reach Twilio: a DURABLE claim on (customer, sent-body hash)
+    // is taken BEFORE the send and committed on its own — the loser 409s at
+    // once, and once Twilio has accepted the text the evidence survives
+    // whatever happens afterwards (codex #4072 r10 / r11 / r13 P2). The
+    // audit row is best-effort by design, so it is never the proof. A send
+    // that definitively never left (a refusal, a validator block, a throw
+    // before acceptance) releases the claim so a real retry can send; an
+    // ambiguous outcome keeps it.
     const claimKey = `tech-line-text:${target.customer.id}:${sentBodyHash(body)}`;
-    const out = await db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`tech-text:${target.customer.id}`]);
-      const claim = await db.raw(
-        `INSERT INTO sms_send_claims (claim_key) VALUES (?)
-         ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
-         WHERE sms_send_claims.created_at < NOW() - interval '${DUPLICATE_TEXT_WINDOW}'
-         RETURNING id`,
-        [claimKey],
-      );
-      if (!(claim?.rows || []).length) {
-        return { status: 409, json: { error: 'This text just went out to the customer', code: 'DUPLICATE_TEXT' } };
-      }
-      let outcome;
-      try {
-        outcome = await textFromLine({ req, ctx, target, body });
-      } catch (err) {
-        await releaseTextClaim(claimKey);
-        throw err;
-      }
-      if (outcome.status !== 200) await releaseTextClaim(claimKey);
-      return outcome;
-    });
+    if (!(await claimSend(claimKey, DUPLICATE_TEXT_WINDOW))) {
+      return res.status(409).json({ error: 'This text just went out to the customer', code: 'DUPLICATE_TEXT' });
+    }
+    let out;
+    try {
+      out = await textFromLine({ req, ctx, target, body });
+    } catch (err) {
+      if (!isAmbiguousOutcome(err?.providerOutcome)) await releaseClaim(claimKey);
+      throw err;
+    }
+    if (out.status !== 200 && !out.ambiguous) await releaseClaim(claimKey);
     if (out.status === 200) {
       // One row per delivered text — a daily horizon keeps the table trivial.
       void db('sms_send_claims').where('created_at', '<', db.raw("NOW() - interval '1 day'")).del().catch(() => {});
@@ -236,6 +259,11 @@ router.post('/sms', async (req, res, next) => {
     res.status(out.status).json(out.json);
   } catch (err) { next(sanitized(err, 'text')); }
 });
+
+// A bridge whose call_log row is not yet inserted is invisible to
+// activeBridgeCall, so the row check alone is a race between two taps; the
+// claim closes it for the insert's window.
+const BRIDGE_CLAIM_WINDOW = '1 minute';
 
 router.post('/call', async (req, res, next) => {
   try {
@@ -245,34 +273,36 @@ router.post('/call', async (req, res, next) => {
     if (!ctx.cell) return res.status(409).json({ error: 'Your staff profile needs your cell number before calls can bridge to you', code: 'NO_CELL' });
     const target = await visitCustomer(req, req.body?.scheduledServiceId);
     if (target.error) return res.status(target.status).json({ error: target.error });
+
     // One bridge at a time to this customer: the panel's Call lock is a
     // timer, not call state, so a tap after it lapses (or from a reloaded
     // page) must not ring the tech and dial the customer again while the
-    // first bridge is still ringing or connected (codex #4072 r8 P2). The
-    // check and the bridge (whose first act is the call_log insert) run
-    // under a per-customer transaction advisory lock, so two concurrent
-    // taps — two open PWAs — cannot both pass the check before either row
-    // exists (r9 P2): the second waits for the first to commit its row, then
-    // sees it. The transaction carries only the lock; the row itself
-    // commits with placeBridgeCall.
-    let bridged = null;
+    // first bridge is still ringing or connected (codex #4072 r8 P2) — the
+    // row check covers a live call; the claim covers two taps racing the
+    // first row's insert (r9 P2), without pinning a pool connection (r15).
+    if (await activeBridgeCall({ source: 'tech-click', customerId: target.customer.id })) {
+      return res.status(409).json({ error: 'A call to this customer from your line is still ringing or connected', code: 'CALL_IN_FLIGHT' });
+    }
+    const claimKey = `tech-bridge:${target.customer.id}`;
+    if (!(await claimSend(claimKey, BRIDGE_CLAIM_WINDOW))) {
+      return res.status(409).json({ error: 'A call to this customer was just started from your line — try again in a minute', code: 'CALL_IN_FLIGHT' });
+    }
+
+    let bridged;
     try {
-      bridged = await db.transaction(async (trx) => {
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`tech-bridge:${target.customer.id}`]);
-        const active = await activeBridgeCall({ source: 'tech-click', customerId: target.customer.id, database: trx });
-        if (active) return null;
-        return placeBridgeCall({
-          to: target.to,
-          bridgePhone: ctx.cell,
-          from: ctx.line.number,
-          customer: target.customer,
-          source: 'tech-click',
-          adminUserId: req.technicianId,
-          metadata: { scheduledServiceId: target.visit.id },
-          leadName: [target.customer.first_name, target.customer.last_name].filter(Boolean).join(' ').trim(),
-        });
+      bridged = await placeBridgeCall({
+        to: target.to,
+        bridgePhone: ctx.cell,
+        from: ctx.line.number,
+        customer: target.customer,
+        source: 'tech-click',
+        adminUserId: req.technicianId,
+        metadata: { scheduledServiceId: target.visit.id },
+        leadName: [target.customer.first_name, target.customer.last_name].filter(Boolean).join(' ').trim(),
       });
     } catch (err) {
+      // No call was placed: the claim goes back so the tech can retry now.
+      await releaseClaim(claimKey);
       if (err.code === 'TWILIO_NOT_CONFIGURED') return res.status(500).json({ error: 'Twilio not configured' });
       // Same deduplicated operator bell the admin bridge raises: a rejected
       // create never produces a status callback, so this is the only signal.
@@ -281,9 +311,6 @@ router.post('/call', async (req, res, next) => {
         errorMessage: err.message, from: ctx.line.number, to: ctx.cell, link: '/admin/communications',
       }).catch((alertErr) => logger.error(`[twilio-alerts] async notification failed: ${alertErr.message}`));
       return next(sanitized(err, 'call'));
-    }
-    if (!bridged) {
-      return res.status(409).json({ error: 'A call to this customer from your line is still ringing or connected', code: 'CALL_IN_FLIGHT' });
     }
     res.json({ success: true, callSid: bridged.callSid, callLogId: bridged.callLogId, from: publicLine(ctx) });
   } catch (err) { next(sanitized(err, 'call')); }

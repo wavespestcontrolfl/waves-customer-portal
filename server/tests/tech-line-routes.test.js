@@ -56,6 +56,7 @@ async function call(method, path, req) {
 const chains = {};
 const CLAIM_SQL = /INSERT INTO sms_send_claims/;
 function primeVisit({ visit = { id: VISIT, customer_id: 'c1', technician_id: 'tech-1' }, customer = { id: 'c1', first_name: 'Pat', last_name: 'Sample', phone: '(941) 555-0100' } } = {}) {
+  for (const k of Object.keys(chains)) delete chains[k];
   db.mockImplementation((table) => {
     const chain = {};
     chain.where = jest.fn(() => chain);
@@ -70,15 +71,13 @@ function primeVisit({ visit = { id: VISIT, customer_id: 'c1', technician_id: 'te
   db.raw = jest.fn((sql) => (CLAIM_SQL.test(String(sql)) ? Promise.resolve({ rows: [{ id: 1 }] }) : sql));
 }
 
-// The text and bridge interlocks run under a per-customer transaction
-// advisory lock; the text's durable claim insert answers through trx.raw
-// (a row = claim acquired) and its release goes through the same db mock.
-const trx = Object.assign(jest.fn((table) => db(table)), { raw: jest.fn(async () => ({})) });
+// Both send routes gate on a durable sms_send_claims claim taken on the
+// pool (db.raw; a row = claim acquired) — never an advisory-lock
+// transaction (codex #4072 r15 P2).
 beforeEach(() => {
   jest.clearAllMocks();
   techLineContext.mockResolvedValue(CTX);
   isEnabled.mockReturnValue(true);
-  db.transaction = jest.fn(async (fn) => fn(trx));
 });
 
 describe('GET /', () => {
@@ -121,21 +120,21 @@ describe('POST /sms', () => {
     const r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way' } });
     expect(r.statusCode).toBe(409);
     expect(r.body.code).toBe('DUPLICATE_TEXT');
-    expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['tech-text:c1']);
     const [claimSql, claimBindings] = db.raw.mock.calls.find((c) => CLAIM_SQL.test(String(c[0])));
     expect(claimSql).toContain("interval '1 minute'");
     expect(claimBindings[0]).toMatch(/^tech-line-text:c1:[0-9a-f]{64}$/);
     expect(reserveHumanReply).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
-    // Claim acquired — COMMITTED on its own (db.raw, not the lock's trx) so
-    // it survives an accepted send whatever the connection does afterwards
-    // (codex r13 P2) — then the send runs inside the lock; the claim is kept.
+    expect(chains.sms_send_claims).toBeUndefined(); // a claim we never held is never released
+    // Claim acquired — committed on its own statement BEFORE the send, so it
+    // survives an accepted send whatever happens afterwards (codex r13 P2)
+    // — and no transaction pins a pool connection meanwhile (r15 P2).
     primeVisit();
     const ok = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way' } });
     expect(ok.statusCode).toBe(200);
     const claimCall = db.raw.mock.calls.findIndex((c) => CLAIM_SQL.test(String(c[0])));
-    expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(db.raw.mock.invocationCallOrder[claimCall]);
     expect(db.raw.mock.invocationCallOrder[claimCall]).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+    expect(db.transaction).toBeUndefined();
     // Kept: the only claims write after a delivered text is the daily prune, never a release by key.
     expect(chains.sms_send_claims.where).not.toHaveBeenCalledWith({ claim_key: expect.any(String) });
   });
@@ -148,6 +147,31 @@ describe('POST /sms', () => {
     expect(db).toHaveBeenCalledWith('sms_send_claims');
     expect(chains.sms_send_claims.where).toHaveBeenCalledWith({ claim_key: expect.stringMatching(/^tech-line-text:c1:/) });
     expect(chains.sms_send_claims.del).toHaveBeenCalled();
+  });
+
+  test('an ambiguous provider outcome (retryable / deferred, not accepted, not blocked) keeps the claim AND the parked suggestions — the carrier may hold the text (codex #4072 r15 P2)', async () => {
+    primeVisit();
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, retryable: true, code: 'PROVIDER_TIMEOUT', reason: 'Twilio timed out' });
+    let r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way' } });
+    expect(r.statusCode).toBe(409);
+    expect(r.body).toMatchObject({ code: 'PROVIDER_TIMEOUT', mayHaveSent: true });
+    expect(chains.sms_send_claims).toBeUndefined(); // claim kept
+    // Reservation row cleared, parked suggestions neither reopened nor ignored.
+    expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ reservationId: 'resv-1', parkedDecisionIds: [], sent: false }));
+    // A validator block is definitive even when flagged retryable: released + reopened.
+    primeVisit(); settleHumanReply.mockClear();
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, retryable: true, code: 'QUIET_HOURS', reason: 'Quiet hours' });
+    r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way' } });
+    expect(r.statusCode).toBe(409);
+    expect(r.body.mayHaveSent).toBeUndefined();
+    expect(chains.sms_send_claims.del).toHaveBeenCalled();
+    expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ parkedDecisionIds: ['dec-1'], sent: false }));
+    // An ambiguous THROW (audit failed after a timeout) keeps the claim too.
+    primeVisit(); settleHumanReply.mockClear();
+    sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit failed'), { providerOutcome: { sent: false, retryable: true } }));
+    await expect(call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way' } })).rejects.toMatchObject({ statusCode: 500 });
+    expect(chains.sms_send_claims).toBeUndefined();
+    expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ parkedDecisionIds: [], sent: false }));
   });
 
   test('a delivered text stamps the first response on any open lead with this phone — a suppressed send does not (codex #4072 r8 P2)', async () => {
@@ -263,20 +287,30 @@ describe('POST /call', () => {
       metadata: { scheduledServiceId: VISIT }, leadName: 'Pat Sample',
     });
     expect(r.body).toEqual({ success: true, callSid: 'CA-1', callLogId: 'log-1', from: LINE });
-    // Check + bridge ran inside the lock's transaction (codex #4072 r9 P2).
-    expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['tech-bridge:c1']);
-    expect(activeBridgeCall).toHaveBeenCalledWith({ source: 'tech-click', customerId: 'c1', database: trx });
-    expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(activeBridgeCall.mock.invocationCallOrder[0]);
-    expect(activeBridgeCall.mock.invocationCallOrder[0]).toBeLessThan(placeBridgeCall.mock.invocationCallOrder[0]);
+    // Row check → durable claim → bridge; no transaction pins a pool
+    // connection across the Twilio call (codex #4072 r8 / r9 / r15 P2).
+    expect(activeBridgeCall).toHaveBeenCalledWith({ source: 'tech-click', customerId: 'c1' });
+    const claimIdx = db.raw.mock.calls.findIndex((c) => CLAIM_SQL.test(String(c[0])));
+    expect(db.raw.mock.calls[claimIdx][1]).toEqual(['tech-bridge:c1']);
+    expect(activeBridgeCall.mock.invocationCallOrder[0]).toBeLessThan(db.raw.mock.invocationCallOrder[claimIdx]);
+    expect(db.raw.mock.invocationCallOrder[claimIdx]).toBeLessThan(placeBridgeCall.mock.invocationCallOrder[0]);
+    expect(db.transaction).toBeUndefined();
+    expect(chains.sms_send_claims).toBeUndefined(); // kept
   });
 
   test('a bridge still ringing or connected → 409 CALL_IN_FLIGHT, no second Twilio call (codex #4072 r8 P2)', async () => {
     primeVisit();
     activeBridgeCall.mockResolvedValueOnce({ id: 'log-0', status: 'ringing' });
-    const r = await call('post', '/call', { body: { scheduledServiceId: VISIT } });
+    let r = await call('post', '/call', { body: { scheduledServiceId: VISIT } });
     expect(r.statusCode).toBe(409);
     expect(r.body.code).toBe('CALL_IN_FLIGHT');
-    expect(activeBridgeCall).toHaveBeenCalledWith({ source: 'tech-click', customerId: 'c1', database: trx });
+    expect(placeBridgeCall).not.toHaveBeenCalled();
+    // Two taps racing the first row's insert: the claim decides (r9 P2).
+    primeVisit();
+    db.raw.mockImplementationOnce(async () => ({ rows: [] }));
+    r = await call('post', '/call', { body: { scheduledServiceId: VISIT } });
+    expect(r.statusCode).toBe(409);
+    expect(r.body.code).toBe('CALL_IN_FLIGHT');
     expect(placeBridgeCall).not.toHaveBeenCalled();
   });
 
@@ -298,6 +332,8 @@ describe('POST /call', () => {
     placeBridgeCall.mockRejectedValueOnce(Object.assign(new Error('Unable to create record: The number +19415550100 is unverified'), { code: 21219 }));
     await expect(call('post', '/call', { body: { scheduledServiceId: VISIT } })).rejects.toMatchObject({ isOperational: true, statusCode: 500, message: 'Tech line call failed' });
     expect(alertTwilioFailure).toHaveBeenCalledWith(expect.objectContaining({ channel: 'voice', direction: 'outbound', phase: 'send_api', status: 'failed', from: '+19413529161', to: '+19415550101' }));
+    // No call was placed: the bridge claim goes back so the tech can retry now.
+    expect(chains.sms_send_claims.del).toHaveBeenCalled();
   });
 });
 
