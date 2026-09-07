@@ -27,7 +27,9 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const { techLineContext } = require('../services/tech-line');
 const { placeBridgeCall, activeBridgeCall } = require('../services/call-bridge');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-const { isRealProviderSend } = require('../services/sms-auto-send');
+const crypto = require('crypto');
+const { isRealProviderSend, SUPPRESSION_SENTINELS } = require('../services/sms-auto-send');
+const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
 const { reserveHumanReply, settleHumanReply } = require('../services/sms-suggest-mode');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { isEnabled } = require('../config/feature-gates');
@@ -37,6 +39,15 @@ const { toE164, isLikelyE164 } = require('../utils/phone');
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 const MAX_TEXT_CHARS = 600;
+// An identical tech-line text that already went out to the customer inside
+// this window is a double submit (two open PWAs), not a second message.
+const DUPLICATE_TEXT_WINDOW_MS = 60 * 1000;
+// The messaging audit row hashes the body AS SENT — sendCustomerMessage
+// GSM-normalizes a plain customer SMS before hashing — so the duplicate
+// check hashes the same way.
+function sentBodyHash(body) {
+  return crypto.createHash('sha256').update(normalizeGsmPunctuation(body), 'utf8').digest('hex');
+}
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function publicLine(ctx) {
@@ -89,6 +100,79 @@ router.get('/', async (req, res) => {
   }
 });
 
+// The reserve → send → settle → stamp sequence for one text, as the
+// { status, json } the handler answers with. Throws for the sanitized 500.
+async function textFromLine({ req, ctx, target, body }) {
+  // The same human-reply lifecycle the admin composer runs: park the
+  // thread's pending suggestions (and back off an autonomous reply mid-
+  // send) before Twilio, settle after — so the tech's text counts as the
+  // human answer every guard looks for (message_type manual).
+  const reply = await reserveHumanReply({
+    to: target.to, customerId: target.customer.id, fromNumber: ctx.line.number, body, adminUserId: req.technicianId,
+  });
+  if (reply.autoSendInFlight) {
+    return { status: 409, json: { error: 'An automatic reply to this customer is being sent right now — try again in a moment', code: 'AUTO_REPLY_IN_FLIGHT' } };
+  }
+  let result;
+  try {
+    result = await sendCustomerMessage({
+      to: target.to,
+      body,
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'conversational',
+      customerId: target.customer.id,
+      identityTrustLevel: 'phone_matches_customer',
+      entryPoint: 'tech_line_text',
+      metadata: {
+        original_message_type: 'manual',
+        tech_line: true,
+        scheduled_service_id: target.visit.id,
+        adminUserId: req.technicianId,
+        fromNumber: ctx.line.number,
+        parkedDecisionIds: reply.parkedDecisionIds.length ? reply.parkedDecisionIds : undefined,
+      },
+    });
+  } catch (err) {
+    // A throw AFTER Twilio accepted (the audit write failed — the error
+    // carries the provider outcome, the composer's convention) means the
+    // customer HAS the text: it is answered, and the tech must not be
+    // invited to send it again (codex #4072 r2 P1).
+    const accepted = err?.providerOutcome?.sent === true && isRealProviderSend(err.providerOutcome);
+    await settleHumanReply({ ...reply, sent: accepted, reviewedBy: req.technicianId }).catch(() => {});
+    if (!accepted) throw err;
+    logger.error(`[tech-line] text accepted but its audit write failed (${String(err.code || err.name || 'error')}) for visit ${target.visit.id}`);
+    return { status: 200, json: { success: true, from: publicLine(ctx) } };
+  }
+  // A suppression / gate-off sentinel comes back sent:true with no real
+  // provider id — the tech must not see "Sent." for a text that never left.
+  const delivered = result.sent && isRealProviderSend(result);
+  await settleHumanReply({ ...reply, sent: delivered, reviewedBy: req.technicianId }).catch(() => {});
+  if (!delivered) {
+    const code = result.code || (result.sent ? 'SMS_GATE_OFF' : 'NOT_SENT');
+    logger.info(`[tech-line] text from ${ctx.line.number} not sent for visit ${target.visit.id}: ${code}`);
+    return {
+      status: 409,
+      json: {
+        error: result.reason || (result.sent ? 'Texting is switched off right now' : 'Message was not sent'),
+        code,
+        deferred: Boolean(result.deferred),
+      },
+    };
+  }
+  // A tech's real text is a first response to any open lead on this phone —
+  // the same Speed-to-Lead stamp the admin composer makes after a real
+  // provider send; no watcher stamps manual rows later (codex #4072 r8 P2).
+  // Fail-soft: SLA bookkeeping never breaks a send that already left.
+  try {
+    const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
+    await stampFirstResponseByContact({ phone: target.to, performedBy: `tech:${req.technicianId}` });
+  } catch (stampErr) {
+    logger.warn(`[tech-line] first-response stamp failed: ${stampErr.message}`);
+  }
+  return { status: 200, json: { success: true, from: publicLine(ctx) } };
+}
+
 router.post('/sms', async (req, res, next) => {
   try {
     const body = String(req.body?.body || '').trim();
@@ -99,71 +183,25 @@ router.post('/sms', async (req, res, next) => {
     const target = await visitCustomer(req, req.body?.scheduledServiceId);
     if (target.error) return res.status(target.status).json({ error: target.error });
 
-    // The same human-reply lifecycle the admin composer runs: park the
-    // thread's pending suggestions (and back off an autonomous reply mid-
-    // send) before Twilio, settle after — so the tech's text counts as the
-    // human answer every guard looks for (message_type manual).
-    const reply = await reserveHumanReply({
-      to: target.to, customerId: target.customer.id, fromNumber: ctx.line.number, body, adminUserId: req.technicianId,
+    // Two PWA instances submitting the same text near-simultaneously must
+    // not both reach Twilio: the send runs under a per-customer transaction
+    // advisory lock (the second waits for the first to finish), and an
+    // identical tech-line text that went out to this customer inside the
+    // last minute is refused (codex #4072 r10 P2). Same shape as the bridge
+    // interlock; the transaction carries only the lock — the send's own
+    // writes commit as before.
+    const out = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`tech-text:${target.customer.id}`]);
+      const dup = await trx('messaging_audit_log')
+        .where({ customer_id: target.customer.id, entry_point: 'tech_line_text', body_hash: sentBodyHash(body) })
+        .whereNotNull('provider_message_id')
+        .whereNotIn('provider_message_id', [...SUPPRESSION_SENTINELS])
+        .where('sent_at', '>', new Date(Date.now() - DUPLICATE_TEXT_WINDOW_MS))
+        .first('id');
+      if (dup) return { status: 409, json: { error: 'This text just went out to the customer', code: 'DUPLICATE_TEXT' } };
+      return textFromLine({ req, ctx, target, body });
     });
-    if (reply.autoSendInFlight) {
-      return res.status(409).json({ error: 'An automatic reply to this customer is being sent right now — try again in a moment', code: 'AUTO_REPLY_IN_FLIGHT' });
-    }
-    let result;
-    try {
-      result = await sendCustomerMessage({
-        to: target.to,
-        body,
-        channel: 'sms',
-        audience: 'customer',
-        purpose: 'conversational',
-        customerId: target.customer.id,
-        identityTrustLevel: 'phone_matches_customer',
-        entryPoint: 'tech_line_text',
-        metadata: {
-          original_message_type: 'manual',
-          tech_line: true,
-          scheduled_service_id: target.visit.id,
-          adminUserId: req.technicianId,
-          fromNumber: ctx.line.number,
-          parkedDecisionIds: reply.parkedDecisionIds.length ? reply.parkedDecisionIds : undefined,
-        },
-      });
-    } catch (err) {
-      // A throw AFTER Twilio accepted (the audit write failed — the error
-      // carries the provider outcome, the composer's convention) means the
-      // customer HAS the text: it is answered, and the tech must not be
-      // invited to send it again (codex #4072 r2 P1).
-      const accepted = err?.providerOutcome?.sent === true && isRealProviderSend(err.providerOutcome);
-      await settleHumanReply({ ...reply, sent: accepted, reviewedBy: req.technicianId }).catch(() => {});
-      if (!accepted) return next(sanitized(err, 'text'));
-      logger.error(`[tech-line] text accepted but its audit write failed (${String(err.code || err.name || 'error')}) for visit ${target.visit.id}`);
-      return res.json({ success: true, from: publicLine(ctx) });
-    }
-    // A suppression / gate-off sentinel comes back sent:true with no real
-    // provider id — the tech must not see "Sent." for a text that never left.
-    const delivered = result.sent && isRealProviderSend(result);
-    await settleHumanReply({ ...reply, sent: delivered, reviewedBy: req.technicianId }).catch(() => {});
-    if (!delivered) {
-      const code = result.code || (result.sent ? 'SMS_GATE_OFF' : 'NOT_SENT');
-      logger.info(`[tech-line] text from ${ctx.line.number} not sent for visit ${target.visit.id}: ${code}`);
-      return res.status(409).json({
-        error: result.reason || (result.sent ? 'Texting is switched off right now' : 'Message was not sent'),
-        code,
-        deferred: Boolean(result.deferred),
-      });
-    }
-    // A tech's real text is a first response to any open lead on this phone —
-    // the same Speed-to-Lead stamp the admin composer makes after a real
-    // provider send; no watcher stamps manual rows later (codex #4072 r8 P2).
-    // Fail-soft: SLA bookkeeping never breaks a send that already left.
-    try {
-      const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
-      await stampFirstResponseByContact({ phone: target.to, performedBy: `tech:${req.technicianId}` });
-    } catch (stampErr) {
-      logger.warn(`[tech-line] first-response stamp failed: ${stampErr.message}`);
-    }
-    res.json({ success: true, from: publicLine(ctx) });
+    res.status(out.status).json(out.json);
   } catch (err) { next(sanitized(err, 'text')); }
 });
 
