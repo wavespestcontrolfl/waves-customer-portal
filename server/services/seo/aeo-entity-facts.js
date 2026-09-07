@@ -21,8 +21,25 @@ function compile(def) {
   return {
     label: def.label,
     re: new RegExp(def.pattern, flags),
-    unlessRe: def.unless ? new RegExp(def.unless, flags) : null,
+    scanRe: new RegExp(def.pattern, flags.includes('g') ? flags : `${flags}g`),
+    rejectValue: typeof def.reject_value === 'string' ? def.reject_value : undefined,
   };
+}
+
+// A correct denial ("does not cover termite damage", "except fumigation") is
+// not a wrong claim. Only the same-sentence text before a match is checked, so
+// a negation in an earlier sentence cannot launder a later assertion.
+const NEGATION_RE = /\b(?:not|no|never|none|nor|without|except|excluding|other than|aside from|outside of|rather than|instead of|doesn'?t|does not|do not|don'?t|isn'?t|is not|aren'?t|are not|wasn'?t|was not|cannot|can'?t|won'?t|will not|shouldn'?t|should not|neither)\b/i;
+const NEGATION_WINDOW = 60;
+
+function claimAsserted(claim, answer) {
+  for (const match of answer.matchAll(claim.scanRe)) {
+    if (claim.rejectValue !== undefined && match[1] === claim.rejectValue) continue;
+    const lead = answer.slice(Math.max(0, match.index - NEGATION_WINDOW), match.index).split(/[.!?;:\n]/).pop();
+    if (NEGATION_RE.test(lead)) continue;
+    return true;
+  }
+  return false;
 }
 
 const FACTS = Object.fromEntries(Object.entries(cohort.facts).map(([key, def]) => [key, compile(def)]));
@@ -55,8 +72,7 @@ function scoreEntityAnswer(query, text) {
   for (const key of question.expect) expected[key] = FACTS[key].re.test(answer);
   const forbidden = {};
   for (const key of new Set([...cohort.global_forbid, ...question.forbid])) {
-    const claim = CLAIMS[key];
-    forbidden[key] = claim.re.test(answer) && !(claim.unlessRe && claim.unlessRe.test(answer));
+    forbidden[key] = claimAsserted(CLAIMS[key], answer);
   }
   const right = Object.values(expected).filter(Boolean).length;
   return {

@@ -30,9 +30,25 @@ test('every cohort question names only defined facts and claims, and no prompt c
   expect(scoreEntityAnswer('custom prospect question', 'Waves Pest Control')).toBeNull();
 });
 
-test('founding year: 2024 is right, an earlier year is a wrong claim, and both can appear', () => {
+test('every approved answer scores its own facts as right and carries zero wrong claims', () => {
+  for (const question of ENTITY_COHORT.questions) {
+    const result = scoreEntityAnswer(question.query, question.approved_answer);
+    expect([question.id, result.wrong]).toEqual([question.id, 0]);
+    if (question.kind === 'question') expect([question.id, result.missing]).toEqual([question.id, 0]);
+  }
+});
+
+test('founding year: 2024 is right; any other asserted year, earlier or later, is a wrong claim', () => {
   expect(score('E4', 'Waves Pest Control was founded in 2024 by Adam Benetti.')).toMatchObject({ expected: { founded_2024: true }, forbidden: { wrong_founding_year: false }, right: 1, missing: 0, wrong: 0 });
   expect(score('E4', 'The company has been serving since 2014.')).toMatchObject({ expected: { founded_2024: false }, forbidden: { wrong_founding_year: true }, right: 0, missing: 1, wrong: 1 });
+  expect(score('E4', 'Waves was founded in 2025.').forbidden.wrong_founding_year).toBe(true);
+  expect(score('E4', 'It was not founded in 2019; it was founded in 2024.').forbidden.wrong_founding_year).toBe(false);
+});
+
+test('a same-sentence denial is not a wrong claim, but a negation in an earlier sentence does not launder one', () => {
+  expect(score('E7', 'The bond does not cover termite damage repairs. Re-treatment is not free.').forbidden).toMatchObject({ damage_repair_coverage: false, free_retreat_guarantee: false });
+  expect(score('E7', 'Waves is not a national chain. The bond covers termite damage repairs.').forbidden.damage_repair_coverage).toBe(true);
+  expect(score('E8', 'Waves is not an Orkin location, rather than a franchise of anyone.').forbidden.franchise).toBe(false);
 });
 
 test('ownership: another capitalized name is a wrong founder; Adam is not', () => {

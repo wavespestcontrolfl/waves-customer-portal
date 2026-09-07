@@ -1,40 +1,132 @@
 {
   "version": "entity-2026-09-v1",
   "frozen_on": "2026-09-07",
-  "notes": "Owner-approved entity-accuracy cohort (decision 6, 2026-09-07). E1–E10 are customer-phrased questions; E11–E12 are search-query tests. Each question records the approved answer, its supporting source, the facts an answer must state, and the claims it must not make. Append a new version when changing a prompt; approved answers and patterns may be repaired without changing a prompt. Patterns are case-insensitive JavaScript regular expressions unless `flags` says otherwise.",
+  "notes": "Owner-approved entity-accuracy cohort (decision 6, 2026-09-07). E1–E10 are customer-phrased questions; E11–E12 are search-query tests. Each question records the approved answer, its supporting source, the facts an answer must state, and the claims it must not make. Append a new version when changing a prompt; approved answers and patterns may be repaired without changing a prompt. Patterns are case-insensitive JavaScript regular expressions unless `flags` says otherwise. A claim match counts only when the same-sentence text before it carries no negation (not / never / except / does not / rather than …), so a correct denial is never a wrong claim; a claim with `reject_value` captures a value in group 1 and counts only when the captured value differs from it.",
   "facts": {
-    "founder": { "label": "Names Adam Benetti", "pattern": "\\badam\\s+benetti\\b" },
-    "founded_2024": { "label": "Founded 2024", "pattern": "\\b2024\\b" },
-    "fdacs_license": { "label": "License JB351547", "pattern": "\\bJB\\s?351547\\b" },
-    "fdacs": { "label": "Names FDACS as the licensing agency", "pattern": "\\bFDACS\\b|florida department of agriculture" },
-    "license_verifiable": { "label": "Says how to verify the license", "pattern": "(verify|look ?up|check|search|confirm)[^.]{0,80}licen[cs]e|licen[cs]e[^.]{0,80}(verify|look ?up|check|search|confirm)" },
-    "hq_lakewood_ranch": { "label": "Based in Lakewood Ranch", "pattern": "lakewood ranch" },
-    "manatee": { "label": "Serves Manatee County", "pattern": "\\bmanatee\\b" },
-    "sarasota": { "label": "Serves Sarasota", "pattern": "\\bsarasota\\b" },
-    "charlotte": { "label": "Serves Charlotte County", "pattern": "\\bcharlotte\\b" },
-    "pest_control": { "label": "Pest control", "pattern": "pest control" },
-    "lawn_care": { "label": "Lawn care", "pattern": "lawn (care|service|treatment|pest)" },
-    "termite": { "label": "Termite", "pattern": "\\btermite" },
-    "mosquito": { "label": "Mosquito", "pattern": "\\bmosquito" },
-    "rodent": { "label": "Rodent", "pattern": "\\brodent|\\brats?\\b|\\bmice\\b" },
-    "bond_optional_renewable": { "label": "Bond is optional and renewed annually", "pattern": "(optional|annual|renewable|yearly|renew)[^.]{0,60}(bond|warranty)|(bond|warranty)[^.]{0,60}(optional|annual|renewable|yearly|renew)" },
-    "independent": { "label": "Independently or family owned", "pattern": "independent|family[- ]owned|locally[- ]owned|owner[- ]operated|not a franchise" },
-    "alias_same": { "label": "Same business under the longer name", "pattern": "same (business|company|brand|entity|operator)|one (business|company)|also (known as|operates as|goes by|branded as|called)|d/?b/?a\\b|trade name|(full|longer|expanded|extended) name" },
-    "phone": { "label": "Main line (941) 297-5749", "pattern": "\\(?941\\)?[\\s.-]*297[\\s.-]*5749" },
-    "website": { "label": "wavespestcontrol.com", "pattern": "wavespestcontrol\\.com" }
+    "founder": {
+      "label": "Names Adam Benetti",
+      "pattern": "\\badam\\s+benetti\\b"
+    },
+    "founded_2024": {
+      "label": "Founded 2024",
+      "pattern": "\\b2024\\b"
+    },
+    "fdacs_license": {
+      "label": "License JB351547",
+      "pattern": "\\bJB\\s?351547\\b"
+    },
+    "fdacs": {
+      "label": "Names FDACS as the licensing agency",
+      "pattern": "\\bFDACS\\b|florida department of agriculture"
+    },
+    "license_verifiable": {
+      "label": "Says how to verify the license",
+      "pattern": "(verify|look ?up|check|search|confirm)[^.]{0,80}licen[cs]e|licen[cs]e[^.]{0,80}(verify|look ?up|check|search|confirm)"
+    },
+    "hq_lakewood_ranch": {
+      "label": "Based in Lakewood Ranch",
+      "pattern": "lakewood ranch"
+    },
+    "manatee": {
+      "label": "Serves Manatee County",
+      "pattern": "\\bmanatee\\b"
+    },
+    "sarasota": {
+      "label": "Serves Sarasota",
+      "pattern": "\\bsarasota\\b"
+    },
+    "charlotte": {
+      "label": "Serves Charlotte County",
+      "pattern": "\\bcharlotte\\b"
+    },
+    "pest_control": {
+      "label": "Pest control",
+      "pattern": "pest control"
+    },
+    "lawn_care": {
+      "label": "Lawn care",
+      "pattern": "lawn (care|service|treatment|pest)"
+    },
+    "termite": {
+      "label": "Termite",
+      "pattern": "\\btermite"
+    },
+    "mosquito": {
+      "label": "Mosquito",
+      "pattern": "\\bmosquito"
+    },
+    "rodent": {
+      "label": "Rodent",
+      "pattern": "\\brodent|\\brats?\\b|\\bmice\\b"
+    },
+    "bond_optional_renewable": {
+      "label": "Bond is optional and renewed annually",
+      "pattern": "(optional|annual|renewable|yearly|renew)[^.]{0,60}(bond|warranty)|(bond|warranty)[^.]{0,60}(optional|annual|renewable|yearly|renew)"
+    },
+    "independent": {
+      "label": "Independently or family owned",
+      "pattern": "independent|family[- ]owned|locally[- ]owned|owner[- ]operated|not a franchise"
+    },
+    "alias_same": {
+      "label": "Same business under the longer name",
+      "pattern": "same (business|company|brand|entity|operator)|one (business|company)|also (known as|operates as|goes by|branded as|called)|d/?b/?a\\b|trade name|(full|longer|expanded|extended) name"
+    },
+    "phone": {
+      "label": "Main line (941) 297-5749",
+      "pattern": "\\(?941\\)?[\\s.-]*297[\\s.-]*5749"
+    },
+    "website": {
+      "label": "wavespestcontrol.com",
+      "pattern": "wavespestcontrol\\.com"
+    }
   },
   "claims": {
-    "wrong_founding_year": { "label": "Founding year other than 2024", "pattern": "(founded|established|started|opened|operating|in business|serving)\\s+(in|since)\\s+(19\\d\\d|20(?:0\\d|1\\d|2[0-3]))" },
-    "wrong_founder": { "label": "Attributes ownership to someone else", "pattern": "([Ff]ounded|[Oo]wned|[Ss]tarted|[Ee]stablished|[Rr]un|[Oo]perated) by (?!Adam\\b|the Benetti|a family|a local|its founder|the owner)[A-Z][a-z]+(?: [A-Z][a-z]+)+", "flags": "" },
-    "franchise": { "label": "Calls Waves a franchise", "pattern": "(?<!not )(?<!n't )(?<!no )\\b(is|as) a franchise\\b|franchise (of|location|owner)|\\bfranchisee\\b" },
-    "fumigation_offered": { "label": "Offers fumigation", "pattern": "fumigat", "unless": "(except|excluding|not|no|doesn't|does not|do not|other than|aside from|outside of)\\W+(?:\\w+\\W+){0,3}fumigat" },
-    "out_of_footprint_hq": { "label": "Places the headquarters outside SWFL", "pattern": "(based|headquartered|located|headquarters|home office) in (tampa|fort myers|ft\\.? myers|naples|orlando|miami|cape coral|st\\.? petersburg|clearwater|jacksonville)" },
-    "damage_repair_coverage": { "label": "Infers damage-repair coverage", "pattern": "(repair|damage) (coverage|warranty|guarantee|protection)|covers? (termite |any |future )?damage|damage[- ]repair|pays? for (any |the )?(repairs?|damage)" },
-    "free_retreat_guarantee": { "label": "Infers a free re-treatment or blanket guarantee", "pattern": "free re-?treat|re-?treat(ment)?s? (are|is) (free|included|guaranteed)|guarantee[sd]? (free )?re-?treat|lifetime (warranty|guarantee)|money[- ]back" },
-    "bond_included_first_year": { "label": "Says the bond is included in the first year", "pattern": "(included|free) (in|with|for) (the )?first year|first[- ]year (bond|warranty) (is )?(included|free)|comes with a (free )?(bond|warranty)" },
-    "alias_different": { "label": "Calls the two names different businesses", "pattern": "(different|separate|unrelated|two|distinct) (companies|businesses|entities|operators)|not the same (company|business|entity)" }
+    "wrong_founding_year": {
+      "label": "Founding year other than 2024",
+      "pattern": "(?:founded|established|started|opened|operating|in business|serving)\\s+(?:in|since)\\s+((?:19|20)\\d\\d)",
+      "reject_value": "2024"
+    },
+    "wrong_founder": {
+      "label": "Attributes ownership to someone else",
+      "pattern": "([Ff]ounded|[Oo]wned|[Ss]tarted|[Ee]stablished|[Rr]un|[Oo]perated) by (?!Adam\\b|the Benetti|a family|a local|its founder|the owner)[A-Z][a-z]+(?: [A-Z][a-z]+)+",
+      "flags": ""
+    },
+    "franchise": {
+      "label": "Calls Waves a franchise",
+      "pattern": "\\b(?:is|as|be|being|became) a franchise\\b|franchise (?:of|location|owner|brand)|\\bfranchisee\\b|\\bfranchised\\b"
+    },
+    "fumigation_offered": {
+      "label": "Offers fumigation",
+      "pattern": "fumigat"
+    },
+    "out_of_footprint_hq": {
+      "label": "Places the headquarters outside SWFL",
+      "pattern": "(based|headquartered|located|headquarters|home office) in (tampa|fort myers|ft\\.? myers|naples|orlando|miami|cape coral|st\\.? petersburg|clearwater|jacksonville)"
+    },
+    "damage_repair_coverage": {
+      "label": "Infers damage-repair coverage",
+      "pattern": "(repair|damage) (coverage|warranty|guarantee|protection)|covers? (termite |any |future )?damage|damage[- ]repair|pays? for (any |the )?(repairs?|damage)"
+    },
+    "free_retreat_guarantee": {
+      "label": "Infers a free re-treatment or blanket guarantee",
+      "pattern": "free re-?treat|re-?treat(ment)?s? (are|is) (free|included|guaranteed)|guarantee[sd]? (free )?re-?treat|lifetime (warranty|guarantee)|money[- ]back"
+    },
+    "bond_included_first_year": {
+      "label": "Says the bond is included in the first year",
+      "pattern": "(included|free) (in|with|for) (the )?first year|first[- ]year (bond|warranty) (is )?(included|free)|comes with a (free )?(bond|warranty)"
+    },
+    "alias_different": {
+      "label": "Calls the two names different businesses",
+      "pattern": "(different|separate|unrelated|two|distinct) (companies|businesses|entities|operators)|not the same (company|business|entity)"
+    }
   },
-  "global_forbid": ["wrong_founding_year", "wrong_founder", "franchise", "fumigation_offered", "out_of_footprint_hq"],
+  "global_forbid": [
+    "wrong_founding_year",
+    "wrong_founder",
+    "franchise",
+    "fumigation_offered",
+    "out_of_footprint_hq"
+  ],
   "questions": [
     {
       "id": "E1",
@@ -42,7 +134,9 @@
       "kind": "question",
       "approved_answer": "Adam Benetti, founder and owner. The company is Waves Pest Control, LLC, an independently owned Florida business.",
       "source": "Sunbiz document L24000068475 (filed and effective February 6, 2024, active); /about/authors/adam-benetti/",
-      "expect": ["founder"],
+      "expect": [
+        "founder"
+      ],
       "forbid": []
     },
     {
@@ -51,7 +145,9 @@
       "kind": "question",
       "approved_answer": "Adam Benetti is the founder and lead technician of Waves Pest Control, based in Lakewood Ranch, Florida. The company holds FDACS pest control license JB351547.",
       "source": "/about/authors/adam-benetti/; the business license number is not proof of an individual operator certification (owner ruling 2026-09-07)",
-      "expect": ["founder"],
+      "expect": [
+        "founder"
+      ],
       "forbid": []
     },
     {
@@ -60,7 +156,10 @@
       "kind": "question",
       "approved_answer": "Yes. Waves Pest Control holds Florida Department of Agriculture and Consumer Services (FDACS) pest control license JB351547. Verify it in the FDACS pest control business license lookup by searching JB351547.",
       "source": "FDACS Pest Control Business Licenses lookup (aeslicensing.fdacs.gov); /business-profile/",
-      "expect": ["fdacs_license", "fdacs"],
+      "expect": [
+        "fdacs_license",
+        "fdacs"
+      ],
       "forbid": []
     },
     {
@@ -69,7 +168,9 @@
       "kind": "question",
       "approved_answer": "2024. Waves Pest Control, LLC was filed with the Florida Division of Corporations on February 6, 2024. The filing date is not necessarily the first day of service.",
       "source": "Sunbiz document L24000068475; /about-us/",
-      "expect": ["founded_2024"],
+      "expect": [
+        "founded_2024"
+      ],
       "forbid": []
     },
     {
@@ -78,7 +179,12 @@
       "kind": "question",
       "approved_answer": "Based in Lakewood Ranch, Florida. Serves Manatee, Sarasota, and Charlotte counties, with staffed offices in Bradenton, Lakewood Ranch, Sarasota, Venice, and Parrish, and service-area coverage of North Port, Port Charlotte, and Palmetto. Places served are not the same as office locations.",
       "source": "server/config/locations.js (WAVES_LOCATIONS); /business-profile/",
-      "expect": ["hq_lakewood_ranch", "manatee", "sarasota", "charlotte"],
+      "expect": [
+        "hq_lakewood_ranch",
+        "manatee",
+        "sarasota",
+        "charlotte"
+      ],
       "forbid": []
     },
     {
@@ -87,7 +193,13 @@
       "kind": "question",
       "approved_answer": "Residential pest control, lawn care and lawn pest control, tree and shrub care, termite treatment and WDO inspections, mosquito control (WaveGuard tiers), rodent control, and specialty treatments. Waves does not offer fumigation, insulation, or wildlife trapping.",
       "source": "Pricing engine service catalog; waves-content prohibitions registry",
-      "expect": ["pest_control", "lawn_care", "termite", "mosquito", "rodent"],
+      "expect": [
+        "pest_control",
+        "lawn_care",
+        "termite",
+        "mosquito",
+        "rodent"
+      ],
       "forbid": []
     },
     {
@@ -96,8 +208,15 @@
       "kind": "question",
       "approved_answer": "Waves offers termite treatment. The termite warranty is an optional, annually renewable bond purchased separately from treatment; re-treatment is provided under an active paid bond. Coverage is defined by the current approved agreement only. Do not infer damage-repair coverage, a free re-treatment, or a blanket guarantee from monitoring, the word bond, or any earlier proposed program.",
       "source": "Termite copy rulings (waves-content skill); owner ruling 2026-09-07",
-      "expect": ["termite", "bond_optional_renewable"],
-      "forbid": ["damage_repair_coverage", "free_retreat_guarantee", "bond_included_first_year"]
+      "expect": [
+        "termite",
+        "bond_optional_renewable"
+      ],
+      "forbid": [
+        "damage_repair_coverage",
+        "free_retreat_guarantee",
+        "bond_included_first_year"
+      ]
     },
     {
       "id": "E8",
@@ -105,7 +224,9 @@
       "kind": "question",
       "approved_answer": "Independently owned. Waves Pest Control is a family-owned Florida LLC founded by Adam Benetti. It is not a franchise.",
       "source": "Sunbiz document L24000068475; /about-us/",
-      "expect": ["independent"],
+      "expect": [
+        "independent"
+      ],
       "forbid": []
     },
     {
@@ -114,8 +235,12 @@
       "kind": "question",
       "approved_answer": "Yes. Waves Pest Control & Lawn Care is the longer public name of the same business; the legal name is Waves Pest Control, LLC.",
       "source": "Google Play app listing (public use of the longer name); Sunbiz document L24000068475",
-      "expect": ["alias_same"],
-      "forbid": ["alias_different"]
+      "expect": [
+        "alias_same"
+      ],
+      "forbid": [
+        "alias_different"
+      ]
     },
     {
       "id": "E10",
@@ -123,7 +248,10 @@
       "kind": "question",
       "approved_answer": "Main line (941) 297-5749, email contact@wavespestcontrol.com, or wavespestcontrol.com. Phone support is available 24/7.",
       "source": "/business-profile/; domains.json hub entry",
-      "expect": ["phone", "website"],
+      "expect": [
+        "phone",
+        "website"
+      ],
       "forbid": []
     },
     {
@@ -141,7 +269,9 @@
       "kind": "search",
       "approved_answer": "Search-query test. A correct result identifies JB351547 as the FDACS pest control license held by Waves Pest Control.",
       "source": "Owner decision 6 (2026-09-07)",
-      "expect": ["fdacs"],
+      "expect": [
+        "fdacs"
+      ],
       "forbid": []
     }
   ]
