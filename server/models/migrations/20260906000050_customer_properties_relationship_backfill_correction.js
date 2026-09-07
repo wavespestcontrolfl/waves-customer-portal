@@ -16,10 +16,13 @@
  * Nulls the occupancy-derived values ONLY on rows nobody has edited since
  * the original backfill (customer_properties.updated_at at or before that
  * migration's knex_migrations.migration_time — the app restamps updated_at
- * on every property PATCH, the raw backfill did not), then re-asserts
- * managed_for_client for property-manager profiles. Prior values land in
- * audit_log; `down` leaves the data as corrected and appends a rollback
- * event (see the note on it). No customer communications: pure SQL.
+ * on every property PATCH, the raw backfill did not). The original
+ * migration's own managed_for_client stamp on property-manager rows stands
+ * (it was and is correct) and is NOT re-asserted: an office edit made after
+ * it wins. Prior values, plus a retrospective snapshot of the manager rows
+ * the original stamped without an audit event, land in audit_log; `down`
+ * leaves the data as corrected and appends a rollback event (see the note on
+ * it). No customer communications: pure SQL.
  */
 const ORIGINAL_MIGRATION = '20260906000020_customer_properties_relationship.js';
 const AUDIT_ACTION = 'migration.customer_properties_relationship_backfill_correction';
@@ -33,76 +36,49 @@ exports.up = async function up(knex) {
   const backfilledAt = original?.migration_time ? new Date(original.migration_time) : null;
 
   const hasContactRole = await knex.schema.hasColumn('customers', 'contact_role');
-  const occupancyDerived = (qb) => qb.where(function occupancyDerivedValue() {
-    this.where({ relationship: 'own_home', occupancy_type: 'owner_occupied' })
-      .orWhere({ relationship: 'rental_owned', occupancy_type: 'rental_investment' });
-  });
   const untouchedSinceBackfill = (qb) => (backfilledAt
     ? qb.where(function untouched() {
       this.whereNull('updated_at').orWhere('updated_at', '<=', backfilledAt);
     })
     : qb);
-  const inferredPredicate = (qb) => untouchedSinceBackfill(occupancyDerived(qb));
 
   await knex.transaction(async (trx) => {
-    // Lock order = the admin address save's (customers first, then their
-    // customer_properties rows — admin-customers.js locks the customer row,
-    // customer-properties.js then updates the primary): every customer whose
-    // rows this migration may touch is locked BEFORE any property row, so an
-    // overlapping save waits instead of deadlocking (Codex r10 P1). The
-    // locked customers rows also pin contact_role for the rest of the
-    // transaction, which is what makes the manager set below safe to derive
-    // from them without a joined `FOR UPDATE OF c`.
-    const customers = trx('customers')
-      .select('id', ...(hasContactRole ? ['contact_role'] : []))
-      .whereIn('id', inferredPredicate(trx('customer_properties').select('customer_id')));
-    if (hasContactRole) customers.orWhere('contact_role', 'property_manager');
-    const lockedCustomers = await customers.forUpdate();
-    const managerCustomerIds = hasContactRole
-      ? lockedCustomers.filter((c) => c.contact_role === 'property_manager').map((c) => c.id)
-      : [];
-
-    // Snapshot BOTH property sets before any write, locked, so `down` can
-    // restore each row's real prior value and a concurrent property PATCH
-    // cannot land between the SELECT and the UPDATE and be recorded with a
-    // stale prior.
-    const inferredRows = await inferredPredicate(trx('customer_properties'))
-      .select('id', 'customer_id', 'relationship')
-      .forUpdate();
+    // Only customer_properties rows are locked, and only the ones this
+    // migration writes; no customers row is ever locked or waited on. The
+    // admin address save locks the customers row first and then updates the
+    // primary property (admin-customers.js → customer-properties.js), so an
+    // overlapping save can only wait on this transaction, never form a cycle
+    // with it (Codex r10 P1). The snapshot is taken before the write so a
+    // concurrent PATCH cannot land between SELECT and UPDATE and be recorded
+    // with a stale prior.
+    const inferredRows = await untouchedSinceBackfill(
+      trx('customer_properties').where(function occupancyDerived() {
+        this.where({ relationship: 'own_home', occupancy_type: 'owner_occupied' })
+          .orWhere({ relationship: 'rental_owned', occupancy_type: 'rental_investment' });
+      }),
+    ).select('id', 'relationship').forUpdate();
     const inferredIds = inferredRows.map((r) => r.id);
 
-    // Manager-profile rows: those not already managed_for_client are
-    // snapshotted with their prior value; an inferred row on a manager profile
-    // goes straight to managed_for_client, its prior value recorded once above.
-    // A profile that becomes a manager after the customer lock above is
-    // outside a point-in-time backfill by design; the office sets it on the
-    // panel.
-    let managerRows = [];
-    let managerIds = [];
-    let inferredOnManager = [];
-    if (managerCustomerIds.length) {
-      const managers = trx('customer_properties')
-        .whereIn('customer_id', managerCustomerIds)
-        .whereRaw("relationship IS DISTINCT FROM 'managed_for_client'");
-      if (inferredIds.length) managers.whereNotIn('id', inferredIds);
-      managerRows = await managers.select('id', 'relationship').forUpdate();
-      inferredOnManager = inferredRows
-        .filter((r) => managerCustomerIds.includes(r.customer_id))
-        .map((r) => r.id);
-      managerIds = managerRows.map((r) => r.id).concat(inferredOnManager);
+    // Retrospective snapshot (Codex r11): the original migration created the
+    // column and stamped managed_for_client on every property_manager
+    // profile's rows in the same migration, without an audit event — so
+    // those rows' prior value is NULL by construction. Recorded here, read
+    // only, limited to rows untouched since that stamp; nothing is written
+    // to them (a later office edit, if any, already won).
+    let originalManagerIds = [];
+    if (hasContactRole) {
+      originalManagerIds = (await untouchedSinceBackfill(trx('customer_properties'))
+        .where({ relationship: 'managed_for_client' })
+        .whereIn('customer_id', trx('customers').select('id').where('contact_role', 'property_manager'))
+        .select('id')).map((r) => r.id);
     }
 
-    // Stamped after the locked snapshots, for the audit record only (`down`
+    // Stamped after the locked snapshot, for the audit record only (`down`
     // does not use it — see the note there).
     const correctedAt = new Date();
-    const clearIds = inferredIds.filter((id) => !inferredOnManager.includes(id));
     let cleared = 0;
-    if (clearIds.length) {
-      cleared = await trx('customer_properties').whereIn('id', clearIds).update({ relationship: null });
-    }
-    let managed = 0;
-    if (managerIds.length) {
-      managed = await trx('customer_properties').whereIn('id', managerIds).update({ relationship: 'managed_for_client' });
+    if (inferredIds.length) {
+      cleared = await trx('customer_properties').whereIn('id', inferredIds).update({ relationship: null });
     }
 
     if (await trx.schema.hasTable('audit_log')) {
@@ -114,17 +90,18 @@ exports.up = async function up(knex) {
         critical: true,
         trx,
         metadata: {
-          reason: 'occupancy_type is not ownership evidence (Codex r4 on #3998); occupancy-derived relationship values cleared, manager-only backfill re-asserted',
+          reason: 'occupancy_type is not ownership evidence (Codex r4 on #3998); occupancy-derived relationship values cleared; the original manager stamp stands and is snapshotted below',
           original_migration: ORIGINAL_MIGRATION,
           original_backfilled_at: backfilledAt ? backfilledAt.toISOString() : null,
           corrected_at: correctedAt.toISOString(),
           cleared_count: cleared,
-          managed_for_client_set_count: managed,
-          prior_values: inferredRows.map(({ id, relationship }) => ({ id, relationship })).concat(managerRows),
+          prior_values: inferredRows,
+          original_backfill_manager_rows: originalManagerIds.map((id) => ({ id, relationship: null, now: 'managed_for_client' })),
+          original_backfill_manager_count: originalManagerIds.length,
         },
       });
     }
-    console.log(`[20260906000050] cleared ${cleared} occupancy-derived relationship value(s); set managed_for_client on ${managed} row(s)`);
+    console.log(`[20260906000050] cleared ${cleared} occupancy-derived relationship value(s); snapshotted ${originalManagerIds.length} manager row(s) stamped by the original backfill`);
   });
 };
 
@@ -148,6 +125,7 @@ exports.down = async function down(knex) {
     action: AUDIT_ROLLBACK_ACTION,
     resource_type: 'customer_properties',
     critical: true,
+    trx: knex,
     metadata: {
       reverted_count: 0,
       from_audit_id: record.id,
