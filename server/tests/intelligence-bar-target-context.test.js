@@ -16,11 +16,11 @@ beforeEach(() => {
     customers: [{ id: A, first_name: 'Synthetic', last_name: 'Person', version: '2026-09-01 12:00:00.123456+00' }, { id: B }],
   };
   db.mockReset().mockImplementation(table => {
-    let id, ids;
+    let id, ids, nameMatch = false;
     const q = { where: (key, value) => { id = typeof key === 'object' ? key.id : value; return q; },
       first: async () => rows[table]?.find(row => row.id === id),
-      whereNull: () => q, whereIn: (key, values) => { if (key === 'id') ids = values; return q; }, limit: () => q,
-      select: async () => ids ? (rows[table] || []).filter(row => ids.includes(row.id)) : lookupRows };
+      whereRaw: () => { nameMatch = true; return q; }, whereNull: () => q, whereIn: (key, values) => { if (key === 'id') ids = values; return q; }, limit: () => q,
+      select: () => q, then: resolve => Promise.resolve(ids ? (rows[table] || []).filter(row => ids.includes(row.id)) : nameMatch ? rows[table] || [] : lookupRows).then(resolve) };
     return q;
   });
   db.raw = text => ({ text });
@@ -235,4 +235,12 @@ test('bulk references use one query per table while preserving absent-record rej
   expect(db.mock.calls.filter(([table]) => table === 'customers')).toHaveLength(1);
   rows.leads.pop();
   expect((await Context.validateRecordTarget({ lead_ids: leads.map(row => row.id) }, context())).code).toBe('record_unavailable');
+});
+
+
+test('an earlier explicit target survives a later communication clause referencing the viewed customer', async () => {
+  lookupRows = [rows.customers[0]];
+  const task = await Context.resolve({ prompt: 'Update Synthetic Person and send a reminder to this customer', pageData: { customer_id: B } });
+  expect(task.target.customer_id).toBe(A);
+  expect((await Context.validateRecordTarget({ customer_id: B }, task)).code).toBe('target_clarification_required');
 });
