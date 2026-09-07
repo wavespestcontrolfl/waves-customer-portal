@@ -83,6 +83,8 @@ function frontendSourceCensus(source, relative) {
   const ast = parser.parse(source, { sourceType: 'unambiguous', plugins: ['jsx', 'typescript'] });
     walk(ast, (node, parents) => {
       if (node.type !== 'CallExpression' && node.type !== 'OptionalCallExpression') return;
+      // `import('../pages/admin/X')` loads a module; it is not a request.
+      if (node.callee.type === 'Import') return;
       const callee = named(node.callee);
       const verbRequest = callee.match(/^(?:admin|api)(?:\.|_)?(get|post|put|patch|delete)(?:Strict)?$/i);
       const verbCall = verbRequest || callee.match(/(?:^|\.)(?:admin|api)?(get|post|put|patch|delete)(?:Strict)?$/i);

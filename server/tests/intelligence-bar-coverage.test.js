@@ -107,13 +107,14 @@ test('shared admin wrappers with variable endpoints stay covered outside admin d
   expect(checkCoverage(shared, { actions: [] }, {})).toHaveLength(3);
 });
 
-test('React state setters that end in Request or Fetch are not requests', () => {
+test('React state setters and lazy module imports are not requests', () => {
   const rows = frontendSourceCensus(`
     function Panel() {
       const [linkRequest, setLinkRequest] = useState(0);
       const load = async () => {
         setLinkRequest(0);
         setLinkRequest((value) => value + 1);
+        const Page = lazy(() => import('../../pages/admin/CommunicationsPageV2'));
         await adminFetch(dynamic);
       };
     }

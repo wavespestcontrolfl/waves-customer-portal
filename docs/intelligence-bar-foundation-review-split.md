@@ -97,8 +97,8 @@ this restores the drift gate on main without grandfathering any new action.
 
 Codex review of that integration tightened one matcher: React state setters
 that merely end in `Request` (`setLinkRequest`, `setNewLeadRequest`,
-`setRequest`) perform no request and no longer produce rows, for 1,747
-cumulative sites. Dynamic and glued-suffix endpoints stay recorded as
+`setRequest`) perform no request and no longer produce rows, and neither do lazy
+`import()` module loads, for 1,744 cumulative sites. Dynamic and glued-suffix endpoints stay recorded as
 unresolved / `:param` routes pending hand mapping; the scanner is per-file and
 cannot resolve a shared helper's callers or tell a query suffix from a path
 segment, so nothing else left the denominator.
