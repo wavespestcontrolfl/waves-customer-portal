@@ -211,14 +211,17 @@ function asserted(compiled, answer) {
     const after = trailClause(answer.slice(end), before.trim() === '');
     // Facts and claims alike must be about Waves: "Orkin serves Manatee"
     // earns no footprint credit and "Orkin is a franchise" is no wrong claim.
-    if (aboutAnotherEntity(before, answer.slice(0, start))) continue;
+    // The match itself is read too: "Orkin owns Waves" names Waves as the
+    // party the relation is about, whatever the previous sentence said.
+    if (aboutAnotherEntity(before, answer.slice(0, end))) continue;
     // Passive attribution after the match: "fumigation is offered by Orkin".
     const agent = after.match(/^\s*(?:is|are|was|were|gets?|comes)?\s*\w*\s*(?:by|from|through)\s+([A-Z][\w'&-]+(?:\s+[A-Z][\w'&-]+){0,2})/);
     if (agent && lastIndexOfMatch(OTHER_ENTITY_RE, agent[1]) >= 0 && lastIndexOfMatch(WAVES_NAMED_RE, agent[1]) < 0) continue;
-    // A referral in the same sentence ("For fumigation services, contact
-    // Orkin") is about the competitor, not a Waves service.
-    const sentence = answer.slice(0, start).split(/[.!?;\n]/).pop() + answer.slice(start).split(/[.!?;\n]/)[0];
-    if (REFERRAL_RE.test(sentence)) continue;
+    // A referral in the same clause ("For fumigation services, contact
+    // Orkin") is about the competitor, not a Waves service. Another clause's
+    // referral ("… offers pest control, but for fumigation contact Orkin")
+    // leaves this assertion alone.
+    if (REFERRAL_RE.test(`${before}${match[0]}${after}`)) continue;
     // A negation INSIDE the match ("bond is not optional") also denies it,
     // unless the pattern deliberately matched a negated phrase from its first
     // word ("not a franchise" as evidence of independence). Only the match's

@@ -108,6 +108,19 @@ test('a competitor named as an object does not become the subject a later pronou
   expect(score('E6', 'Orkin, unlike Waves, offers fumigation.').forbidden.fumigation_offered).toBe(false);
 });
 
+test('a referral to a competitor excludes only the assertion in its own clause', () => {
+  expect(score('E6', 'Waves offers pest control and lawn care, but for fumigation contact Orkin.')).toMatchObject({ expected: { pest_control: true, lawn_care: true }, forbidden: { fumigation_offered: false } });
+  expect(score('E6', 'Waves offers fumigation; contact Orkin for wildlife trapping.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves offers fumigation. Contact Orkin for wildlife trapping.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves does not offer fumigation. For fumigation services, contact Orkin.').forbidden.fumigation_offered).toBe(false);
+});
+
+test('the matched relation names its own party before the previous sentence is consulted', () => {
+  expect(score('E1', 'Orkin is a national company. Orkin owns Waves Pest Control.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'Orkin is a national company. Waves is owned by Adam Benetti.')).toMatchObject({ expected: { founder: true }, forbidden: { wrong_founder: false } });
+  expect(score('E1', 'Orkin is a national company. It was founded by John Smith.').forbidden.wrong_founder).toBe(false);
+});
+
 test('a denial in the same clause is not a wrong claim, whether it comes before or after the claim', () => {
   expect(score('E7', 'The bond does not cover termite damage repairs. Re-treatment is not free.').forbidden).toMatchObject({ damage_repair_coverage: false, free_retreat_guarantee: false });
   expect(score('E6', 'Fumigation is not offered by Waves Pest Control.').forbidden.fumigation_offered).toBe(false);
