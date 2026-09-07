@@ -361,12 +361,22 @@ async function replaySmsProfile({ smsLogId, execute = false, conn = db, extract 
   return runExclusive('sms-operational-actions', async () => {
     try {
       if (!enabled()) return { skipped: 'gate_off' };
+      const lockedReceipt = await shouldSkipExtraction(receipt);
+      if (lockedReceipt.skip) return { skipped: 'replay_receipt_terminal', receipt_status: lockedReceipt.existing.status };
       const context = await loadMessageContext(conn, message);
       const extracted = await extract(context);
       return await recordMessageOperations(conn, message, extracted, { ...context, replay: true });
     } catch {
-      if (enabled()) await recordExtractionAttempt({ ...receipt, status: 'failed', error_message: 'sms_profile_replay_failed' });
-      return { failed: true };
+      return conn.transaction(async (trx) => {
+        // Success locks this same source before recording its receipt. A
+        // delayed failure must not downgrade an already committed replay.
+        const live = await trx('sms_log').where({ id: smsLogId }).forUpdate().first('id');
+        if (!live || !enabled()) return { failed: true };
+        const completed = await shouldSkipExtraction({ ...receipt, trx });
+        if (completed.skip) return { skipped: 'replay_receipt_terminal', receipt_status: completed.existing.status };
+        await recordExtractionAttempt({ ...receipt, trx, status: 'failed', error_message: 'sms_profile_replay_failed' });
+        return { failed: true };
+      });
     }
   }, { recordHealth: false });
 }

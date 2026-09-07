@@ -268,6 +268,35 @@ postgres('SMS operations on PostgreSQL', () => {
       .toMatchObject({ status: 'failed', attempt_count: 1 });
   });
 
+  test('a replay completed while another waits for its lease skips the later provider call', async () => {
+    await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const { runExclusive } = require('../utils/cron-lock');
+    runExclusive.mockImplementationOnce(async (_name, work) => {
+      await recordMessageOperations(mockPg, message, result, { ...context, replay: true });
+      return work();
+    });
+    const extract = jest.fn().mockRejectedValue(new Error('provider unavailable'));
+    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, extract }))
+      .toEqual({ skipped: 'replay_receipt_terminal', receipt_status: 'ok' });
+    expect(extract).not.toHaveBeenCalled();
+    const receipt = await mockPg('data_hygiene_source_extractions').where('extractor_version', 'like', '%:replay').first();
+    expect(receipt).toMatchObject({ status: 'ok', attempt_count: 1 });
+  });
+
+  test('a delayed replay failure cannot downgrade a committed receipt or erase its proposals', async () => {
+    await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const extract = async () => {
+      await recordMessageOperations(mockPg, message, result, { ...context, replay: true });
+      throw new Error('delayed provider failure');
+    };
+    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, extract }))
+      .toEqual({ skipped: 'replay_receipt_terminal', receipt_status: 'ok' });
+    const receipt = await mockPg('data_hygiene_source_extractions').where('extractor_version', 'like', '%:replay').first();
+    expect(receipt).toMatchObject({ status: 'ok', attempt_count: 1 });
+    expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
+    expect(await mockPg('audit_log').where({ action: 'sms.profile.replayed' })).toHaveLength(1);
+  });
+
   test('a model/body change alone never opts an analyzed message into the intake sweep', async () => {
     await recordMessageOperations(mockPg, message, result, context);
     const original = await mockPg('sms_log').first();
