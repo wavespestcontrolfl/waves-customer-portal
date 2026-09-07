@@ -302,6 +302,26 @@ postgres('prepaid series integrity against migrated PostgreSQL', () => {
     expect(Number((await trx('scheduled_services').where({ id: root.id }).first()).prepaid_amount)).toBe(100);
   });
 
+  test('editing a fully stamped series retires its prior allocation evidence', async () => {
+    const root = await visit({ estimated_price: 100, is_recurring: false });
+    await visit({ recurring_parent_id: root.id, estimated_price: 100, scheduled_date: '2040-07-15' });
+    await stampSeriesPrepaid(trx, { anchorServiceId: root.id, totalAmount: 200, method: 'cash', useExistingTransaction: true });
+    await stampSeriesPrepaid(trx, { anchorServiceId: root.id, totalAmount: 220, method: 'cash', useExistingTransaction: true });
+    const { runInner } = require('../services/schedule-integrity-watchdog');
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
+    const active = await trx('audit_log as allocation')
+      .where({ 'allocation.action': 'prepaid_series.allocated' })
+      .whereRaw("allocation.metadata->>'customer_id' = ?", [customerId])
+      .whereNotExists(function retired() {
+        this.select(trx.raw('1')).from('audit_log as cleared')
+          .where({ 'cleared.action': 'prepaid_series.cleared' })
+          .whereRaw('cleared.resource_id = allocation.id');
+      });
+    expect(active).toHaveLength(2);
+    await trx('scheduled_services').where({ id: root.id }).update({ prepaid_amount: null, prepaid_method: null, prepaid_at: null });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
+  });
+
   test('an annual stamp on a later sibling prevents every manual write', async () => {
     const root = await visit();
     const child = await visit({ recurring_parent_id: root.id, scheduled_date: '2040-02-15',

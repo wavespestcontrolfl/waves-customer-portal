@@ -59,6 +59,33 @@ function splitTotalAcrossVisits(totalDollars, visitCount) {
   return slices;
 }
 
+async function retireActiveAllocationAudits(trx, { customerId, parentId, ids }) {
+  const audits = await trx('audit_log as allocation')
+    .where({
+      'allocation.action': 'prepaid_series.allocated',
+      'allocation.resource_type': 'scheduled_service',
+    })
+    .whereIn('allocation.resource_id', ids)
+    .whereRaw("allocation.metadata->>'customer_id' = ?", [customerId])
+    .whereNotExists(function activeClear() {
+      this.select(trx.raw('1')).from('audit_log as cleared')
+        .where({
+          'cleared.action': 'prepaid_series.cleared',
+          'cleared.resource_type': 'prepaid_series_allocation',
+        })
+        .whereRaw('cleared.resource_id = allocation.id');
+    })
+    .select('allocation.id');
+  for (const allocation of audits) {
+    await recordAuditEvent({
+      actor_type: 'system', action: 'prepaid_series.cleared',
+      resource_type: 'prepaid_series_allocation', resource_id: allocation.id,
+      metadata: { customer_id: customerId, series_parent_id: parentId, reason: 'superseded' },
+      critical: true, trx,
+    });
+  }
+}
+
 // Stamp every eligible row in a recurring series with its share of a single
 // prepayment. Eligible = not in a terminal status (completed / cancelled /
 // no_show). Returns the stamped rows so the caller can echo them back to the
@@ -145,6 +172,17 @@ async function stampSeriesPrepaid(db, {
       err.isOperational = true;
       throw err;
     }
+    // An edit of a healthy series is a new allocation. Retire its previous
+    // audit evidence only when every eligible visit still has a live stamp;
+    // a partially cleared family must retain the old evidence so the
+    // watchdog can reconcile the missing slice.
+    if (eligible.every((row) => Number(row.prepaid_amount) > 0)) {
+      await retireActiveAllocationAudits(trx, {
+        customerId: anchor.customer_id,
+        parentId,
+        ids: eligible.map((row) => row.id),
+      });
+    }
     slices = splitTotalAcrossVisits(amount, eligible.length);
     for (let i = 0; i < eligible.length; i++) {
       const row = eligible[i];
@@ -194,22 +232,9 @@ async function clearSeriesPrepaid(db, anchor) {
       .whereNotNull('prepaid_amount')
       .update({ prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null })
       .returning(['id']);
-    const allocations = await trx('audit_log as allocation')
-      .where({ 'allocation.action': 'prepaid_series.allocated', 'allocation.resource_type': 'scheduled_service' })
-      .whereIn('allocation.resource_id', ids)
-      .whereRaw("allocation.metadata->>'customer_id' = ?", [anchor.customer_id])
-      .whereNotExists(function retired() {
-        this.select(trx.raw('1')).from('audit_log as cleared')
-          .where({ 'cleared.action': 'prepaid_series.cleared', 'cleared.resource_type': 'prepaid_series_allocation' })
-          .whereRaw('cleared.resource_id = allocation.id');
-      }).select('allocation.id');
-    for (const allocation of allocations) {
-      await recordAuditEvent({
-        actor_type: 'system', action: 'prepaid_series.cleared',
-        resource_type: 'prepaid_series_allocation', resource_id: allocation.id,
-        metadata: { customer_id: anchor.customer_id, series_parent_id: parentId }, critical: true, trx,
-      });
-    }
+    await retireActiveAllocationAudits(trx, {
+      customerId: anchor.customer_id, parentId, ids,
+    });
     return { success: true, clearedCount: cleared.length, seriesParentId: parentId };
   });
 }
