@@ -2868,7 +2868,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
     fontSize: 14,
     position: 'relative',
   };
-  if (nextRead.saved || lastRead.saved || nextRead.offline) {
+  if (nextRead.offline) {
     return <>
       <SavedPortalRead title="Saved next visit" titleAs="h1" read={nextRead}>
         {nextService ? <SavedVisitDetails visits={[nextService]} /> : <p style={{ fontSize: 16 }}>{nextRead.data ? 'No upcoming visit was listed when last checked.' : 'Open Home while connected to load your next visit.'}</p>}
@@ -3109,7 +3109,11 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
       )}
 
       <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'minmax(0, 1.35fr) minmax(280px, .65fr)', gap: 16, alignItems: 'start' }}>
-        <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
+        {nextRead.saved ? (
+          <SavedPortalRead title="Saved next visit" read={nextRead}>
+            <SavedVisitDetails visits={nextService ? [nextService] : []} />
+          </SavedPortalRead>
+        ) : <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: 20, borderBottom: '1px solid #E7E2D7', display: 'flex', justifyContent: 'space-between', gap: 16 }}>
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
               <div style={{ minWidth: 0 }}>
@@ -3204,7 +3208,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                 : 'We could not load your schedule right now.'}
             </div>
           )}
-        </section>
+        </section>}
 
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={dashboardLabel}><Icon name="chart" size={14} strokeWidth={2} />At a glance</div>
@@ -3249,7 +3253,11 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
         </section>
       </div>
 
-      {lastServiceStatus === 'loading' ? (
+      {lastRead.saved ? (
+        <SavedPortalRead title="Saved completed visit" read={lastRead}>
+          <SavedVisitDetails visits={lastService ? [lastService] : []} />
+        </SavedPortalRead>
+      ) : lastServiceStatus === 'loading' ? (
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <PortalInlineState
             icon="clipboard"

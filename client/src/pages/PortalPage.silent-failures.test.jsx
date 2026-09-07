@@ -121,6 +121,33 @@ describe('open service reports', () => {
 });
 
 describe('dashboard appointment confirmation', () => {
+  it('keeps billing available and the next visit read-only when its refresh fails', async () => {
+    api.getBalance.mockResolvedValue({ currentBalance: 123 });
+    api.getNextService.mockResolvedValueOnce({ next: { id: 'visit-next', date: futureDate, serviceType: 'Next fixture treatment', customerConfirmed: false } })
+      .mockRejectedValueOnce(new Error('Next visit unavailable'));
+    render(<PortalReadProvider enabled><PortalRefreshArea><DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} /></PortalRefreshArea></PortalReadProvider>);
+    await screen.findByRole('button', { name: 'Confirm Visit', exact: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    await screen.findByText('Couldn’t refresh these details. Showing the last loaded information.', { exact: true });
+    expect(screen.getByRole('heading', { name: 'Saved next visit' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm Visit', exact: true })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Pay now/ })).toBeEnabled();
+  });
+
+  it('keeps the rest of Home available when refreshing the latest completed visit fails', async () => {
+    api.getBalance.mockResolvedValue({ currentBalance: 123 });
+    api.getNextService.mockResolvedValue({ next: { id: 'visit-next', date: futureDate, serviceType: 'Next fixture treatment', customerConfirmed: false } });
+    api.getServices.mockResolvedValueOnce({ services: [{ id: 'visit-last', date: '2024-01-01', type: 'Completed fixture treatment' }] })
+      .mockRejectedValueOnce(new Error('Latest visit unavailable'));
+    render(<PortalReadProvider enabled><PortalRefreshArea><DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} /></PortalRefreshArea></PortalReadProvider>);
+    await screen.findByText('Completed fixture treatment');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm Visit', exact: true })).toBeEnabled());
+    expect(screen.getByRole('heading', { name: 'Saved completed visit' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Pay now/ })).toBeEnabled();
+    expect(screen.getByText('Completed fixture treatment', { exact: true })).toBeInTheDocument();
+  });
+
   it('does not confirm a replacement appointment when an earlier confirmation finishes', async () => {
     let finishConfirmation;
     api.confirmAppointment.mockImplementationOnce(() => new Promise(resolve => { finishConfirmation = resolve; }));
