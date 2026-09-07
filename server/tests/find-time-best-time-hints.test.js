@@ -373,6 +373,19 @@ test('pickedEnd past start + duration scores the whole window against the gap ce
   expect((await post({ ...BASE, hint: true, pickedStart: '11:00', pickedEnd: 'noon' })).status).toBe(400);
 });
 
+test('a slot with an unknown leg answers detour_minutes null — hint chips, the picked verdict, and the ungated list alike', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  findAvailableSlots.mockImplementation(async () => ({
+    slots: [gapSlot({ drive_in_minutes: null, detour_minutes: 0, latest_start_min: 12 * 60 })],
+    evaluated: 1,
+  }));
+  const hint = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '10:00' })).json();
+  expect(hint.slots[0].detour_minutes).toBeNull();
+  expect(hint.picked).toMatchObject({ fits: true, detour_minutes: null, drive_in_minutes: null });
+  const plain = await (await post({ ...BASE })).json();
+  expect(plain.slots[0].detour_minutes).toBeNull();
+});
+
 test('pickedStart in the first gap reports the home base as the origin', async () => {
   process.env.GATE_BEST_TIME_HINTS = 'true';
   findAvailableSlots.mockResolvedValue({ slots: [gapSlot()], evaluated: 1 });

@@ -23,14 +23,13 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
-const { findAvailableSlots, DAY_START_HOUR, DAY_END_HOUR } = require('../services/scheduling/find-time');
-const { ADMIN_DAY_END_MINUTES } = require('../services/scheduling/window-rules');
-const { loadOccupancy, conflictsForTarget } = require('../services/rain-out');
+const { findAvailableSlots } = require('../services/scheduling/find-time');
+const { validateHintParams, markUnknownDetours, guardHintSlots, scorePickedHour } = require('../services/scheduling/find-time-hints');
 const { gateEnvValue } = require('../config/feature-gates');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
-const { etDateString, addETDays, parseETDateTime, etParts } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { serviceLocationSelects, resolveServiceLocation } = require('../services/scheduling/day-stops');
-const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('../services/scheduling/arrival-route');
+const { arrivalWindowRoutingEnabled } = require('../services/scheduling/arrival-route');
 
 const MAX_FIND_TIME_DAYS = 90;
 
@@ -195,27 +194,10 @@ router.post('/', async (req, res) => {
         throw httpError(400, 'slotStepMinutes must be an integer between 1 and 120');
       }
     }
-    // Hint pickers send the hour currently in their time field so the answer
-    // can say what THAT hour costs, not only which hours rank best.
-    if (pickedStart !== undefined && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(pickedStart))) {
-      throw httpError(400, 'pickedStart must be HH:MM');
-    }
-    // The edit form's window end is set independently of the service
-    // duration; when it runs past start + duration the picked hour is
-    // scored over the WHOLE window, matching the live conflict check and
-    // the save probe (pre-push P1).
-    if (pickedEnd !== undefined && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(pickedEnd))) {
-      throw httpError(400, 'pickedEnd must be HH:MM');
-    }
-    // A picker's own same-day floor (next top of the hour, or the
-    // running-late target) in minutes from midnight — applied INSIDE the
-    // candidate walk below, so a topN:1 range answer is the best hour that
-    // clears it rather than a discarded early one (pre-push P1). The
-    // engine's now+30 lead still applies underneath.
-    if (sameDayFloorMin !== undefined && !(Number.isInteger(sameDayFloorMin) && sameDayFloorMin >= 0 && sameDayFloorMin <= 24 * 60)) {
-      throw httpError(400, 'sameDayFloorMin must be an integer number of minutes within the day');
-    }
-    const floorFor = (date) => (date === today && Number.isInteger(sameDayFloorMin) ? sameDayFloorMin : 0);
+    // Picker-hint params (the hour in the picker, its window end, the
+    // picker's same-day floor) — shapes and meaning in find-time-hints.js.
+    const hintParamError = validateHintParams({ pickedStart, pickedEnd, sameDayFloorMin });
+    if (hintParamError) throw httpError(400, hintParamError);
 
     const today = etDateString();
     const from = dateFrom || today;
@@ -264,169 +246,26 @@ router.post('/', async (req, res) => {
       includeWeekends: true,
     });
 
+    // The picker hints' policy (occupancy guard, same-day floor, dedupe +
+    // slice, the picked-hour verdict) lives in scheduling/find-time-hints.js;
+    // the ungated Find-a-Time search only gets unknown detours marked.
     const excluded = (excludeServiceIds || []).map(String);
-    const toMin = (hhmm) => {
-      const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})/);
-      return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
-    };
-    const toHHMM = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
     const step = slotStepMinutes !== undefined ? Number(slotStepMinutes) : 1;
     const spanMin = Math.max(15, parseInt(durationMinutes, 10) || 60);
-    // The engine's answer before the guard slides earliest starts — the
-    // picked-hour lookup below needs each gap's ORIGINAL bounds.
-    const rawSlots = Array.isArray(result?.slots) ? result.slots.slice() : [];
-
-    if (hint && Array.isArray(result?.slots) && result.slots.length) {
-      // The engine walks per-technician routes, so a scheduled row with NO
-      // assigned tech occupies no route and is invisible to it — an hour it
-      // recommends can sit on an unassigned visit the commit will still
-      // reject. Mirror the dispatch slot-check occupancy guard (tech-blind,
-      // same overlap predicate, excludeServiceIds honored) and veto those
-      // hours. The engine emits only the EARLIEST start per route gap, so a
-      // vetoed candidate must not discard its whole gap — walk the gap
-      // through latest_start_min at the request's step and keep the first
-      // clear start (detour is position-independent within a gap). Fail-open
-      // like checkSlots: a snapshot failure keeps the engine's answer —
-      // this whole path is advisory.
-      try {
-        const occupancyByDate = new Map();
-        await Promise.all([...new Set(result.slots.map((s) => s.date))].map(async (d) => {
-          occupancyByDate.set(d, await loadOccupancy({ dateFrom: d, dateTo: d }));
-        }));
-        result.slots = result.slots.flatMap((s) => {
-          const floorMin = floorFor(s.date);
-          // The full arrival simulation already checked every actual work
-          // span against unassigned/other-tech work and live holds. Comparing
-          // its promise to nominal work blocks here would recreate the bug.
-          if (s.route_mode === 'arrival_windows') return toMin(s.start_time) >= floorMin ? [s] : [];
-          const baseMin = toMin(s.start_time);
-          if (baseMin == null) return [];
-          const latest = Number.isFinite(s.latest_start_min) ? s.latest_start_min : baseMin;
-          // Start the walk at the picker's floor (aligned up to the step)
-          // when the gap opens before it.
-          for (let m = Math.max(baseMin, Math.ceil(floorMin / step) * step); m <= latest; m += step) {
-            const window = { start: toHHMM(m), end: toHHMM(m + spanMin) };
-            const clear = conflictsForTarget(
-              occupancyByDate.get(s.date), null, s.date, window,
-              { excludeServiceIds: excluded },
-            ).length === 0;
-            if (clear) {
-              return [m === baseMin ? s : { ...s, start_time: window.start, end_time: window.end }];
-            }
-          }
-          return [];
-        });
-      } catch (guardErr) {
-        logger.warn('[find-time] hint occupancy guard failed (fail-open):', guardErr.message);
-        // Fail-open keeps the engine's answer, but never an hour the picker
-        // itself would refuse.
-        result.slots = result.slots.filter((s) => (toMin(s.start_time) ?? 0) >= floorFor(s.date));
-      }
-      // Unscoped searches rank technician/time PAIRS, so the top of the
-      // list can be one hour three times over — dedupe by day+start (list
-      // is already rank-sorted, first wins) BEFORE slicing, or the chips
-      // row collapses below the requested count.
-      const seenStarts = new Set();
-      result.slots = result.slots.filter((s) => {
-        const key = `${s.date}|${s.start_time}`;
-        if (seenStarts.has(key)) return false;
-        seenStarts.add(key);
-        return true;
-      }).slice(0, requestedTopN);
-    }
-
-    // What the hour already in the picker costs. Each engine slot is a route
-    // gap (earliest aligned start .. latest_start_min, detour constant across
-    // it), so the picked hour's gap is the first ranked slot whose bounds
-    // contain it. No gap = the hour doesn't fit that day's route; a gap the
-    // tech-blind occupancy snapshot vetoes = same answer (fail-open on a
-    // snapshot error, like the chips guard). Arrival-window mode asks the
-    // route checker directly instead (see below).
-    let picked;
-    // The engine floors a same-day search at ET now + 30 min (a slot is
-    // never offered seconds before it starts), so on today an hour before
-    // that floor is absent from rawSlots whether or not the route fits it.
-    // Such an hour is not scored at all — no `picked` key, the line stays
-    // blank — rather than reported as "doesn't fit" (pre-push P1).
-    const nowEt = etParts();
-    const pickedTooSoon = from === today && toMin(pickedStart) < nowEt.hour * 60 + nowEt.minute + 30;
-    // Likewise an hour the engine never enumerates — before its day open,
-    // or ending after its day close (the arrival simulation runs later
-    // than the gap walk) — is absent from rawSlots for bounds reasons, not
-    // route reasons: the edit picker allows 07:00, so it stays unscored.
-    const dayEndMin = useArrivalWindows ? ADMIN_DAY_END_MINUTES : DAY_END_HOUR * 60;
-    const pickedMin = pickedStart !== undefined ? toMin(pickedStart) : null;
-    const pickedEndMin = pickedMin == null ? null
-      : Math.max(pickedMin + spanMin, pickedEnd !== undefined ? toMin(pickedEnd) : 0);
-    const pickedOutOfBounds = pickedMin != null && (pickedMin < DAY_START_HOUR * 60 || pickedEndMin > dayEndMin);
-    if (hint && pickedStart && !pickedTooSoon && !pickedOutOfBounds) {
-      const pickedWindow = { start: pickedStart, end: toHHMM(pickedEndMin) };
-      if (useArrivalWindows) {
-        // The arrival simulation answers "unverified" for grouped visits,
-        // coordless stops, and in-progress routes, and the recommendation
-        // list simply omits those — so an empty list proves nothing. Ask
-        // the shared checker (the edit save-probe's) about THIS hour and
-        // reserve fits:false for a verified miss (pre-push P1). It scores
-        // the whole route, so there is no single insertion leg to name.
-        // With no technician selected (visit set to Unassigned) the checker
-        // would fall back to the SAVED technician while the recommendations
-        // rank every technician — a verdict on a different pool than the
-        // chips. No technician, no verdict (pre-push P1).
-        try {
-          if (!technicianId) throw Object.assign(new Error('no technician selected'), { silent: true });
-          const fit = await checkArrivalPlacement({
-            serviceId, date: from, technicianId: technicianId || undefined, excludeServiceIds,
-            windowStart: pickedWindow.start, windowEnd: pickedWindow.end, durationMinutes: spanMin,
-          });
-          if (fit.feasible) {
-            picked = {
-              start: pickedStart, fits: true, detour_minutes: fit.detourMinutes ?? null,
-              drive_in_minutes: null, from_home_base: null, from_name: null, technician: null,
-            };
-          } else if (fit.reason !== 'route_unverified') {
-            picked = { start: pickedStart, fits: false };
-          }
-        } catch (checkErr) {
-          if (!checkErr.silent) logger.warn('[find-time] picked-hour arrival check failed (no verdict):', checkErr.message);
-        }
-      } else {
-        const gap = rawSlots.find((s) => {
-          if (s.date !== from) return false;
-          const lo = toMin(s.start_time);
-          const hi = Number.isFinite(s.latest_start_min) ? s.latest_start_min : lo;
-          // latest_start_min is the last start whose END (start + the
-          // searched duration) still clears the drive out — compare the
-          // picked window's end against that same ceiling.
-          return lo != null && lo <= pickedMin && pickedEndMin <= hi + spanMin;
-        });
-        picked = { start: pickedStart, fits: false };
-        if (gap) {
-          let clear = true;
-          try {
-            clear = conflictsForTarget(
-              await loadOccupancy({ dateFrom: from, dateTo: from }), null, from, pickedWindow,
-              { excludeServiceIds: excluded },
-            ).length === 0;
-          } catch (guardErr) {
-            logger.warn('[find-time] picked-hour occupancy guard failed (fail-open):', guardErr.message);
-          }
-          if (clear) {
-            picked = {
-              start: pickedStart,
-              fits: true,
-              detour_minutes: gap.detour_minutes ?? null,
-              drive_in_minutes: gap.drive_in_minutes ?? null,
-              from_home_base: !gap.insertion?.after_stop_id,
-              from_name: gap.insertion?.after_name || null,
-              technician: gap.technician || null,
-            };
-          }
-        }
-      }
-    }
+    const rawSlots = markUnknownDetours(Array.isArray(result?.slots) ? result.slots : []);
+    const slots = hint
+      ? await guardHintSlots(rawSlots, { today, sameDayFloorMin, step, spanMin, excluded, topN: requestedTopN })
+      : rawSlots;
+    const picked = hint && pickedStart
+      ? await scorePickedHour({
+        rawSlots, from, today, useArrivalWindows, pickedStart, pickedEnd, spanMin,
+        serviceId, technicianId: technicianId || undefined, excludeServiceIds, excluded,
+      })
+      : undefined;
 
     res.json({
       ...result,
+      slots,
       ...(picked ? { picked } : {}),
       target,
       range: { dateFrom: from, dateTo: clampedTo },

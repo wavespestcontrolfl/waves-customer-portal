@@ -17,9 +17,16 @@ describe('bestTimeLabel', () => {
       .toBe('1:00 PM · 6 min drive from Stop D · no added drive');
   });
 
-  it('omits the drive-in leg when the slot has none (arrival-window mode) and treats a missing detour as none', () => {
-    expect(bestTimeLabel({ start: '12:00', driveInMinutes: null, detourMinutes: null }))
+  it('omits the drive-in leg when the slot has none (arrival-window mode)', () => {
+    expect(bestTimeLabel({ start: '12:00', driveInMinutes: null, detourMinutes: 0 }))
       .toBe('12:00 PM · no added drive');
+  });
+
+  it('says the route cost is unknown when the engine could not price it (coordless anchor)', () => {
+    expect(bestTimeLabel({ start: '12:00', driveInMinutes: null, detourMinutes: null }))
+      .toBe('12:00 PM · route cost unknown');
+    expect(pickedLabel({ start: '12:00', fits: true, driveInMinutes: null, detourMinutes: null }))
+      .toBe('12:00 PM: route cost unknown');
   });
 
   it('appends the technician on an unscoped search', () => {
@@ -61,5 +68,7 @@ describe('findTimeSlotDetail (Find-a-Time results list)', () => {
     expect(findTimeSlotDetail({ detour_minutes: 0, drive_in_minutes: 6, insertion: { after_stop_id: 's-c', after_name: 'Stop C', before: 'HQ (end of day)' } }))
       .toBe('6 min drive from Stop C · no added drive · before HQ (end of day)');
     expect(findTimeSlotDetail({ detour_minutes: 9, route_mode: 'arrival_windows' })).toBe('+9 min added to route');
+    expect(findTimeSlotDetail({ detour_minutes: null, drive_in_minutes: null, insertion: { after_stop_id: 's-x', after_name: 'Stop X', before: 'HQ (end of day)' } }))
+      .toBe('route cost unknown');
   });
 });

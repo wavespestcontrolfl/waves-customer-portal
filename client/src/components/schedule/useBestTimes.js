@@ -58,6 +58,33 @@ function mapSlot(s, scopedToTech) {
   };
 }
 
+function normalizePicked(p, scopedToTech) {
+  if (!p) return null;
+  return {
+    start: p.start,
+    fits: !!p.fits,
+    detourMinutes: p.detour_minutes ?? null,
+    driveInMinutes: p.drive_in_minutes ?? null,
+    fromHomeBase: p.from_home_base ?? null,
+    fromName: p.from_name || null,
+    technicianId: p.technician?.id || null,
+    technicianName: scopedToTech ? null : (p.technician?.name || null),
+  };
+}
+
+// Unscoped searches rank technician/time PAIRS, so two techs can surface
+// the same hour — keep only the best-ranked slot per start (the engine
+// sorts ascending) and carry whose route the detour belongs to so the chip
+// can say so. Scoped searches have one tech; no name needed.
+function normalizeDay(day, scopedToTech) {
+  if (!day) return { bestTimes: [], picked: null };
+  const seen = new Set();
+  const bestTimes = day.slots
+    .filter((s) => { if (seen.has(s.start_time)) return false; seen.add(s.start_time); return true; })
+    .map((s) => mapSlot(s, scopedToTech));
+  return { bestTimes, picked: normalizePicked(day.picked, scopedToTech) };
+}
+
 // `address` / `lat` / `lng` pin the search to a specific service address (the
 // create modal's property picker); the server prefers coords, then geocodes
 // the address, and only falls back to the customer's primary when both are
@@ -132,32 +159,12 @@ export function useBestTimes({
           search({ dateFrom: date, dateTo: date, topN: 3, pickedStart: pickedKey || undefined, pickedEnd: (pickedKey && pickedEndKey) || undefined }),
           rangeKey ? search({ dateFrom: rangeKey, dateTo: addDays(rangeKey, RANGE_DAYS), topN: 1 }) : Promise.resolve(null),
         ]);
-        if (!controller.signal.aborted) {
-          if (day) {
-            // Unscoped searches rank technician/time PAIRS, so two techs can
-            // surface the same hour — keep only the best-ranked slot per
-            // start (the engine sorts ascending) and carry whose route the
-            // detour belongs to so the chip can say so. Scoped searches have
-            // one tech; no name needed.
-            const seen = new Set();
-            setBestTimes(day.slots
-              .filter((s) => { if (seen.has(s.start_time)) return false; seen.add(s.start_time); return true; })
-              .map((s) => mapSlot(s, !!technicianId)));
-            if (day.picked) {
-              setPicked({
-                start: day.picked.start,
-                fits: !!day.picked.fits,
-                detourMinutes: day.picked.detour_minutes ?? null,
-                driveInMinutes: day.picked.drive_in_minutes ?? null,
-                fromHomeBase: day.picked.from_home_base ?? null,
-                fromName: day.picked.from_name || null,
-                technicianId: day.picked.technician?.id || null,
-                technicianName: technicianId ? null : (day.picked.technician?.name || null),
-              });
-            }
-          }
-          if (range?.slots?.length) setBestInRange(mapSlot(range.slots[0], !!technicianId));
-        }
+        if (controller.signal.aborted) return;
+        const scoped = !!technicianId;
+        const normalized = normalizeDay(day, scoped);
+        setBestTimes(normalized.bestTimes);
+        setPicked(normalized.picked);
+        setBestInRange(range?.slots?.length ? mapSlot(range.slots[0], scoped) : null);
       } catch { /* advisory only — a failed search just shows no hint */ }
       if (!controller.signal.aborted) setChecking(false);
     }, 300);

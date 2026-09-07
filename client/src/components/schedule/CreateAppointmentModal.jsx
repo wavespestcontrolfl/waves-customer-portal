@@ -34,7 +34,7 @@ import EstimateProvenanceCard from './EstimateProvenanceCard';
 import useModalFocus from '../../hooks/useModalFocus';
 import SlotConflictNotice from './SlotConflictNotice';
 import { useSlotConflicts } from './useSlotConflicts';
-import BestTimeHint from './BestTimeHint';
+import BestTimeHint, { detourPhrase } from './BestTimeHint';
 import { useBestTimes } from './useBestTimes';
 import { etDateString } from '../../lib/timezone';
 import { propertyRelationshipChip } from '../../lib/contact-roles';
@@ -143,8 +143,7 @@ const ROBOTO_STACK = "'Roboto', Arial, sans-serif";
 // "+57 min" never reads as a drive time. A result without a single
 // insertion leg (arrival-window mode) keeps the detour-only form.
 export function findTimeSlotDetail(slot) {
-  const detour = Math.round(Number(slot.detour_minutes) || 0);
-  const added = detour > 0 ? `+${detour} min added to route` : 'no added drive';
+  const added = detourPhrase({ detourMinutes: slot.detour_minutes });
   const driveIn = Math.round(Number(slot.drive_in_minutes));
   if (slot.drive_in_minutes == null || !Number.isFinite(driveIn) || !slot.insertion) return added;
   const from = slot.insertion.after_stop_id ? (slot.insertion.after_name || 'the previous stop') : 'home base';
