@@ -70,7 +70,7 @@ async function getVisitCompletionSummary(token, database = db) {
       || item.scheduled_service_id !== item.member_id)) return null;
   const visible = items.filter((item) => {
     const notes = typeof item.structured_notes === 'string' ? JSON.parse(item.structured_notes) : item.structured_notes;
-    return !notes?.typedReportDelivery || notes.typedReportDelivery === 'auto_send';
+    return !notes?.backfill && (!notes?.typedReportDelivery || notes.typedReportDelivery === 'auto_send');
   });
   if (!visible.length) return null;
   return {

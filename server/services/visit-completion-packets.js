@@ -198,6 +198,7 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
     .join('service_records as r', 'r.id', 'i.service_record_id')
     .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
     .where('i.packet_id', packet.id).where('r.status', 'completed')
+    .whereRaw("COALESCE(r.structured_notes->>'backfill', 'false') = 'false'")
     .whereRaw("COALESCE(r.structured_notes->>'visitOutcome', 'completed') NOT IN ('inspection_only', 'customer_declined', 'incomplete')")
     .whereRaw("COALESCE(r.structured_notes->>'typedReportDelivery', 'auto_send') = 'auto_send'")
     .orderBy('s.window_start').orderBy('s.id')

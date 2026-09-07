@@ -41,11 +41,13 @@ const COMPLETION_TERMINAL_INVOICE_STATUSES = ['refunded'];
 
 // The refunded invoice on THIS visit (its own service_record_id /
 // scheduled_service_id — never the sibling first-application lookup), or
-// null. Newest wins across both identifiers in one ordered query.
-async function completionTerminalInvoiceLookup(conn, { serviceRecordId = null, scheduledServiceId = null }) {
-  if (!serviceRecordId && !scheduledServiceId) return null;
+// null. A verified packet item may also supply its shared invoiceId.
+// Newest wins across those identities in one ordered query.
+async function completionTerminalInvoiceLookup(conn, { serviceRecordId = null, scheduledServiceId = null, invoiceId = null }) {
+  if (!serviceRecordId && !scheduledServiceId && !invoiceId) return null;
   return (await conn('invoices')
     .where((qb) => {
+      if (invoiceId) qb.orWhere({ id: invoiceId });
       if (serviceRecordId) qb.orWhere({ service_record_id: serviceRecordId });
       if (scheduledServiceId) qb.orWhere({ scheduled_service_id: scheduledServiceId });
     })
@@ -60,11 +62,12 @@ async function completionTerminalInvoiceLookup(conn, { serviceRecordId = null, s
 // refunded reconciliation below. The suppressor chain itself checks
 // service_record_id first and scheduled_service_id only as a fallback, so
 // the row it hands back is not necessarily the newest live row.
-async function completionNewestLiveInvoiceLookup(conn, { serviceRecordId = null, scheduledServiceId = null }) {
-  if (!serviceRecordId && !scheduledServiceId) return null;
+async function completionNewestLiveInvoiceLookup(conn, { serviceRecordId = null, scheduledServiceId = null, invoiceId = null }) {
+  if (!serviceRecordId && !scheduledServiceId && !invoiceId) return null;
   const InvoiceService = require('./invoice');
   return (await conn('invoices')
     .where((qb) => {
+      if (invoiceId) qb.orWhere({ id: invoiceId });
       if (serviceRecordId) qb.orWhere({ service_record_id: serviceRecordId });
       if (scheduledServiceId) qb.orWhere({ scheduled_service_id: scheduledServiceId });
     })

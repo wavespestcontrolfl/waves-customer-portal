@@ -169,6 +169,28 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(require('../services/referral-engine').creditReferralOnFirstService).not.toHaveBeenCalled();
   });
 
+  test('a backfilled packet stays quiet and never issues customer rewards', async () => {
+    const date = etDateString(new Date(Date.now() - 86400000));
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ scheduled_date: date,
+      stop_base_key: stopBaseKey({ customerId: fixture.customerId, scheduledDate: date }) });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ scheduled_date: date,
+      is_recurring: true, recurring_ongoing: true, recurring_pattern: 'quarterly' });
+    const input = submission({ actor: { techRole: 'admin', technicianId: fixture.techId } });
+    for (const item of input.items) Object.assign(item.body, { backfill: true, timeOnSite: 45 });
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved.status).toBe(202);
+    const result = await runVisitCompletionPacketEffects(saved.body.packetId);
+    expect(result.status).toBe(200);
+    expect((await mockPg('service_records').where({ customer_id: fixture.customerId }))
+      .every((record) => record.structured_notes.backfill === true)).toBe(true);
+    expect(await require('../services/visit-completion-summary').getVisitCompletionSummary(result.body.summaryUrl.split('/').at(-1))).toBeNull();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(require('../services/email-template-library').sendTemplate).not.toHaveBeenCalled();
+    expect(require('../services/customer-card').ensureCardForCompletion).not.toHaveBeenCalled();
+    expect(require('../services/referral-engine').creditReferralOnFirstService).not.toHaveBeenCalled();
+    expect(require('../services/review-request').enrollPostService).not.toHaveBeenCalled();
+  });
+
   test('concurrent effects and replay keep one automatic charge and one summary per channel', async () => {
     const methodId = randomUUID();
     await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,
@@ -204,6 +226,13 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(JSON.stringify(summary)).not.toMatch(/technician_notes|invoice|cust_email|Fixture Technician/);
     expect(await getVisitCompletionSummary('invalid')).toBeNull();
     expect(await getVisitCompletionSummary('f'.repeat(64))).toBeNull();
+    const { getCloseoutStatus } = require('../services/closeout-status');
+    const status = await getCloseoutStatus(fixture.serviceIds[1], { knex: mockPg });
+    expect(status.facts.invoice).toMatchObject({ state: 'done', invoiceId: replay.body.payment.invoiceId, status: 'paid' });
+    await mockPg('invoices').where({ id: replay.body.payment.invoiceId }).update({ status: 'refunded' });
+    expect((await getCloseoutStatus(fixture.serviceIds[1], { knex: mockPg })).facts.invoice)
+      .toMatchObject({ state: 'pending', reason: 'parked_manual_refunded_invoice', refundedInvoiceId: replay.body.payment.invoiceId });
+    await mockPg('invoices').where({ id: replay.body.payment.invoiceId }).update({ status: 'paid' });
     const reviews = require('../services/review-request').enrollPostService;
     expect(reviews).toHaveBeenCalledWith(expect.objectContaining({ serviceRecordId: summary.services[0].id }));
     const reviewCount = reviews.mock.calls.length;

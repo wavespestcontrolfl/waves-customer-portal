@@ -318,7 +318,17 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   const record = inputs.record;
   const recordId = record?.id || null;
   const recordIds = (inputs.records || []).map((r) => r.id).filter(Boolean);
+  let packetInvoiceId = null;
   if (visit.visit_id && recordId) {
+    const linked = await probe('visit packet invoice identity', unavailable, () => knex('visit_completion_packet_items as i')
+      .join('visit_completion_packets as p', 'p.id', 'i.packet_id')
+      .join('invoices as invoice', 'invoice.id', 'i.invoice_id')
+      .where({ 'i.scheduled_service_id': serviceId, 'i.service_record_id': recordId,
+        'p.visit_id': visit.visit_id, 'invoice.customer_id': visit.customer_id })
+      .whereRaw('invoice.visit_completion_packet_id = p.id')
+      .first('i.invoice_id'));
+    packetInvoiceId = linked.value?.invoice_id || null;
+    inputs.packetInvoiceLookupFailed = Boolean(linked.error);
     const summary = await probe('visit summary delivery', unavailable, () => knex('visit_completion_packet_items as i')
       .join('visit_completion_packets as p', 'p.id', 'i.packet_id')
       .join('service_visits as v', 'v.id', 'p.visit_id')
@@ -394,10 +404,10 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
       return Array.isArray(rows) ? rows : [];
     }),
     probe('invoices (live)', unavailable, () => completionNewestLiveInvoiceLookup(knex, {
-      serviceRecordId: recordId, scheduledServiceId: serviceId,
+      serviceRecordId: recordId, scheduledServiceId: serviceId, invoiceId: packetInvoiceId,
     })),
     probe('invoices (refunded)', unavailable, () => completionTerminalInvoiceLookup(knex, {
-      serviceRecordId: recordId, scheduledServiceId: serviceId,
+      serviceRecordId: recordId, scheduledServiceId: serviceId, invoiceId: packetInvoiceId,
     })),
     // failClosed makes a payment_methods lookup failure THROW (default
     // swallows it as "not on autopay") so the probe can record an outage.
@@ -426,9 +436,9 @@ async function loadCloseoutInputs(serviceId, { knex = db, now = new Date(), _res
   inputs.deliveries = deliveryProbe.error ? null : (deliveryProbe.value || []);
   inputs.deliveryLookupFailed = Boolean(deliveryProbe.error);
   inputs.liveInvoice = liveInvoiceProbe.value || null;
-  inputs.liveInvoiceLookupFailed = Boolean(liveInvoiceProbe.error);
+  inputs.liveInvoiceLookupFailed = Boolean(liveInvoiceProbe.error || inputs.packetInvoiceLookupFailed);
   inputs.terminalInvoice = terminalInvoiceProbe.value || null;
-  inputs.terminalInvoiceLookupFailed = Boolean(terminalInvoiceProbe.error);
+  inputs.terminalInvoiceLookupFailed = Boolean(terminalInvoiceProbe.error || inputs.packetInvoiceLookupFailed);
   // Same fallback /complete uses when the visit carries no invoice of its
   // own: the accepted estimate's first-application invoice may hang off a
   // SIBLING visit (same estimate + date).
