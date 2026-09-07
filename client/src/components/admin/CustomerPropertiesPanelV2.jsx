@@ -396,7 +396,7 @@ export default function CustomerPropertiesPanelV2({
               </label>
               <select
                 id="cp-rel"
-                className={inputCls}
+                className={`${inputCls} text-14`}
                 value={form.relationship}
                 onChange={(e) => setForm((f) => ({ ...f, relationship: e.target.value }))}
               >
@@ -413,7 +413,7 @@ export default function CustomerPropertiesPanelV2({
               </label>
               <select
                 id="cp-occ"
-                className={inputCls}
+                className={`${inputCls} text-14`}
                 value={form.occupancy_type}
                 onChange={(e) => setForm((f) => ({ ...f, occupancy_type: e.target.value }))}
               >
