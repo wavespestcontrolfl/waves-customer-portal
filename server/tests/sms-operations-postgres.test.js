@@ -243,6 +243,28 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await replaySmsProfile({ ...args, previewHash })).toMatchObject({ proposed: 1 });
   });
 
+  test('a pending sibling added after preview cannot be retired without a new preview', async () => {
+    await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const args = { conn: mockPg, smsLogId: message.id, extract: async () => result };
+    const before = await replaySmsProfile(args);
+    const [sibling] = await mockPg('data_hygiene_proposals').insert({
+      rule_id: 'extract.irrigation_controller_location', rule_version: '1',
+      resource_type: 'property_preferences', scope_type: 'customer', scope_id: message.customer_id,
+      field: 'irrigation_controller_location', source: 'message-extraction', confidence: 0.9, tier: 'medium',
+      status: 'pending', idempotency_key: randomUUID(),
+      evidence: JSON.stringify({ source_at: new Date(message.created_at.getTime() - 1000).toISOString() }),
+    }).returning('id');
+    expect(await replaySmsProfile({ ...args, execute: true, previewHash: before.preview_hash }))
+      .toEqual({ skipped: 'preview_changed' });
+    expect(await mockPg('data_hygiene_proposals').where({ id: sibling.id }).first()).toMatchObject({ status: 'pending' });
+    expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
+    expect(await mockPg('data_hygiene_source_extractions')).toHaveLength(1);
+    const refreshed = await replaySmsProfile(args);
+    expect(refreshed.outcomes[0]).toMatchObject({ retired_proposal_ids: [sibling.id] });
+    expect(await replaySmsProfile({ ...args, execute: true, previewHash: refreshed.preview_hash })).toMatchObject({ proposed: 1 });
+    expect(await mockPg('data_hygiene_proposals').where({ id: sibling.id }).first()).toMatchObject({ status: 'stale' });
+  });
+
   test('a changed staff disposition invalidates execution even when extracted facts stay identical', async () => {
     await recordMessageOperations(mockPg, message, result, context);
     const previewHash = await replayPreviewHash();

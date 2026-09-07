@@ -229,8 +229,9 @@ async function stalePendingExtractionProposals({ trx = null, scope_id, field, so
       if (sameMessageSid) candidate.orWhereRaw(`${EXTRACTION_MESSAGE_SID} = ?`, [sameMessageSid]);
     });
   }
-  const updated = await query.update({ status: 'stale', updated_at: client.fn.now() });
-  return Number(updated) || 0;
+  // Return affected identities so replay can bind every retired sibling to
+  // the operator's preview. Other writers do not need the returned rows.
+  return query.update({ status: 'stale', updated_at: client.fn.now() }, ['id']);
 }
 
 // The pending sibling an extraction writer must not stack a second entry on.

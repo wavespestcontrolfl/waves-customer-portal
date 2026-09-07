@@ -136,10 +136,10 @@ async function proposeFact(trx, message, fact, current) {
   const existing = sameFact.find((proposal) => proposal.status !== 'pending') || sameFact[0]
     || await trx('data_hygiene_proposals').where({ idempotency_key: buildIdempotencyKey(input) }).first('id', 'status');
   if (existing) return { id: existing.status === 'pending' ? existing.id : null, created: false };
-  await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field,
+  const retired = await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field,
     notNewerThan: message.created_at, sameMessageSid: message.twilio_sid });
   const proposal = await upsertSensitiveProposal(input, { trx });
-  return { id: proposal.id, created: proposal.inserted };
+  return { id: proposal.id, created: proposal.inserted, retired_proposal_ids: retired.map((row) => row.id).sort() };
 }
 
 async function applyFacts(trx, message, facts, context) {
@@ -165,7 +165,8 @@ async function applyFacts(trx, message, facts, context) {
       const proposal = await proposeFact(trx, message, fact, persistedCurrent);
       const proposalId = proposal.id;
       outcomes.push({ ...fact, outcome: proposalId ? 'proposed' : 'superseded', proposal_id: proposalId,
-        proposal_created: proposal.created });
+        proposal_created: proposal.created,
+        ...(proposal.retired_proposal_ids?.length ? { retired_proposal_ids: proposal.retired_proposal_ids } : {}) });
       continue;
     }
     // A newer distinct pending proposal for this typed field (the extraction
@@ -273,7 +274,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     if (replay) {
       // Bind the actual locked decisions, including private values, to the
       // operator's preview without exposing them. Fresh proposal UUIDs vary
-      // across rollback; preserved proposal identities must still match.
+      // across rollback; preserved and retired proposal identities must still match.
       analysis.preview_hash = hashSensitiveValue({ purpose: 'sms-profile-replay', version: VERSION,
         source: SOURCE_COLUMNS.map((column) => [column, live[column] ?? null]),
         facts: facts.map(({ proposal_id, ...fact }) => ({ ...fact,
@@ -398,6 +399,7 @@ async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn =
         const outcomes = simulated.operational_analysis.replay.facts.map((fact) => ({
           field: fact.field, action: fact.outcome === 'proposed'
             ? (fact.proposal_created ? 'create_proposal' : 'preserve_pending') : fact.outcome,
+          ...(fact.retired_proposal_ids?.length ? { retired_proposal_ids: fact.retired_proposal_ids } : {}),
         }));
         return { dry_run: true, sms_log_id: smsLogId, preview_hash: simulated.operational_analysis.replay.preview_hash, ...outcome,
           unverified_count: simulated.operational_analysis.replay.dropped, outcomes };
