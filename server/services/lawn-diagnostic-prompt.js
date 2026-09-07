@@ -43,7 +43,7 @@ const MAX_PROMPT_IMAGES = 5;
 // Writer = GPT-5.5 (OpenAI Responses API). Each is reached by direct REST / SDK,
 // mirroring the existing property-lookup / lawn-assessment integrations.
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
-const LAWN_VISION_MODEL = process.env.LAWN_VISION_MODEL || 'gemini-3.5-flash';
+const LAWN_VISION_MODEL = process.env.LAWN_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
 const geminiUrl = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
 // Anthropic challenge model comes from the central registry (server/config/models.js),
 // never a hardcoded ID here — shares the app-wide model swap/check workflow.

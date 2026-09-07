@@ -24,11 +24,10 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 
-// Gemini vision scorer model — live default is the registry's best
-// (gemini-3.5-flash); override via GEMINI_VISION_MODEL / MODEL_GEMINI_VISION.
-// On any miss (HTTP/parse/empty) callGeminiVision retries the registry's
-// GEMINI_VISION_FALLBACK so a live-model entitlement/availability issue never
-// costs us the Gemini scorer. Fan-out/averaging logic is unchanged.
+// Gemini vision scorer model — live default is the registry's best; override
+// via GEMINI_VISION_MODEL / MODEL_GEMINI_VISION. On any miss (HTTP/parse/empty)
+// callGeminiVision retries the registry's GEMINI_VISION_FALLBACK when it names
+// a different model (by default it does not). Fan-out/averaging is unchanged.
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
 const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 

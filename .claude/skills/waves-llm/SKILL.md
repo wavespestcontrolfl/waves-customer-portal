@@ -78,16 +78,21 @@ Currently live:
 - **GPT-5.5** (`MODEL_OPENAI_BEST`): lead-triage classification
   (`lead-triage.js`), knowledge-base Q&A (`knowledge-bridge.js`), estimate
   assistant (`estimate-assistant.js`).
-- **Gemini 3.5 Flash** (`MODEL_GEMINI_VISION`; per-service override
-  `GEMINI_VISION_MODEL`): vision scoring in `lawn-assessment.js` +
-  `satellite-analyzer.js`.
+- **Gemini 3.8 Flash** (`MODEL_GEMINI_VISION`; per-service override
+  `GEMINI_VISION_MODEL`): every Gemini image-analysis leg — the photo lanes
+  (`lawn-assessment.js`, `pest-identification.js`, `tree-shrub-assessment.js`,
+  `treatment-zone-suggest.js`, `tech-social-caption.js`, `satellite-analyzer.js`,
+  `property-lookup-v2.js`) plus the per-service-env lanes that default to the
+  same registry selector (`GEMINI_TURF_OCR_MODEL`, `LAWN_VISION_MODEL`,
+  `GEMINI_PROPERTY_MODEL`). Owner ruling 2026-09-06: one model for all of them.
 
 **Every cross-provider call site keeps an automatic fallback to Claude** so
 a provider issue never causes a gap:
 - OpenAI features → Claude (the estimate assistant then falls to a
   deterministic template).
-- Gemini vision → retry `GEMINI_VISION_FALLBACK_MODEL` (default
-  `gemini-2.5-flash`), and the parallel Claude-vision fan-out still runs.
+- Gemini vision → retry `GEMINI_VISION_FALLBACK_MODEL` only when it names a
+  different model (the default equals BEST, so the retry rung is skipped), and
+  the parallel Claude-vision fan-out still runs.
 
 Gemini parsing trap (twin of the DEEP thinking-block rule): Gemini 3.x
 Flash is a thinking model — always JOIN ALL text parts of the response,
