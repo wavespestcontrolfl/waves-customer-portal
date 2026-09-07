@@ -2,9 +2,10 @@
 
 Code-review rubric for the automated reviewers that audit diffs in the
 **waves-customer-portal** monorepo: the Codex pre-push hook, the `@codex`
-GitHub bot, and ultrareview. Every rule names the failure it prevents and
-the file it protects. Automated review invocations return JSON matching
-`.github/codex-review-schema.json` and cite `file:line` for every finding.
+GitHub bot, the `claude-review` GitHub Action, and ultrareview. Every rule
+names the failure it prevents and the file it protects. Codex invocations
+return JSON matching `.github/codex-review-schema.json`; every reviewer
+cites `file:line` for every finding.
 Other tasks use the user's requested response format. Coding agents follow
 the applicable invariants and Implementation defaults below.
 The pre-push hook (`scripts/hooks/pre-push`, wired via `core.hooksPath` by

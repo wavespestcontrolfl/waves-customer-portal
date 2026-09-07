@@ -1,0 +1,171 @@
+# Claude automated PR review — the Claude counterpart of the @codex bot.
+#
+# Runs on every non-draft PR from this repo (opened / new push / reopened /
+# marked ready). Claude checks out the PR with full history, reads AGENTS.md
+# (the P0/P1/P2 rubric) and CLAUDE.md, fans out specialist subagents, then
+# adversarially verifies every candidate finding before posting. Findings
+# land as inline comments on the changed lines plus ONE summary comment
+# headed `## Claude review` with a `Verdict:` line, so a clean round is
+# grep-able the same way a Codex round is.
+#
+# Comments only: the token is `contents: read`, so the reviewer cannot
+# commit, push, approve, or request changes. Re-review a PR by hand with
+# `@claude review` (handled by claude.yml).
+#
+# Requirements (one-time, repo settings):
+#   - The Claude GitHub App installed on the repo (https://github.com/apps/claude)
+#     so the action can mint its own token and post as claude[bot].
+#   - Secret ANTHROPIC_API_KEY (Console key). To bill a Claude subscription
+#     instead, set CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token` and swap
+#     the `anthropic_api_key` line for
+#     `claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}`.
+#
+# Fork PRs are skipped (secrets are not exposed to forks on a public repo);
+# drafts wait for ready_for_review. A new push cancels the in-flight review
+# of the same PR.
+name: claude-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+      actions: read
+    steps:
+      # Inert until the secret exists: skip (green, with a notice) rather
+      # than fail every PR check while the one-time setup is pending.
+      - name: Check credentials
+        id: creds
+        env:
+          HAS_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+        run: |
+          echo "present=$HAS_KEY" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_KEY" != "true" ]; then
+            echo "::notice::ANTHROPIC_API_KEY secret is not set — Claude review skipped"
+          fi
+
+      - uses: actions/checkout@v6
+        if: steps.creds.outputs.present == 'true'
+        with:
+          # Full history so the reviewer can `git log` / `git blame` the
+          # code around a change instead of judging hunks in isolation.
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        if: steps.creds.outputs.present == 'true'
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Opus 5 is the review model. Swap to claude-fable-5-1 for the
+          # strongest (and most expensive) pass; every push re-reviews, so
+          # weigh cost per PR round before doing that.
+          claude_args: |
+            --model claude-opus-5
+            --max-turns 120
+            --allowedTools "Agent,Task,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(gh pr comment:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}:*),Bash(git log:*),Bash(git blame:*),Bash(git show:*),Bash(git diff:*)"
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+            HEAD SHA: ${{ github.event.pull_request.head.sha }}
+            BASE BRANCH: ${{ github.event.pull_request.base.ref }}
+
+            You are the automated code reviewer for this pull request, in the
+            same role as the @codex bot. Your job is to find REAL defects
+            before merge: bugs, security holes, money and data-integrity
+            errors, broken contracts, and violations of the repository rubric.
+            The PR branch is checked out in the working directory with full
+            git history.
+
+            ## Rubric
+
+            1. Read `AGENTS.md` at the repo root IN FULL before reading the
+               diff. It is the review rubric: every P0 / P1 / P2 rule names
+               the failure it prevents and the file it protects. Then read
+               `CLAUDE.md`. `docs/public-route-contracts.md` is authoritative
+               for any unauthenticated or `/:token` route the diff touches.
+            2. Severity: P0 = security, money, data loss, or an external
+               contract break (must fix before merge). P1 = a correctness bug
+               or footgun that will bite in production. P2 = a real but minor
+               defect. Cite the AGENTS.md rule by its bold title when one
+               applies. Respect the AGENTS.md "Out of scope" and settled
+               owner rulings sections: never flag those.
+
+            ## How to review
+
+            1. Read the PR with `gh pr view` (title, body, comments) and
+               `gh pr diff`. The PR body may record an owner ruling, name the
+               existing mechanism a new one replaces, or state what was NOT
+               verified — take that into account.
+            2. Check earlier review rounds: `gh pr view --comments` and
+               `gh api repos/<repo>/pulls/<n>/comments`. If a previous
+               `## Claude review` comment exists, this round is INCREMENTAL:
+               confirm each earlier finding is fixed or answered, review the
+               new commits in depth, and do not re-post a finding that
+               already stands as an open comment on the same line.
+            3. For every changed file, read the surrounding code and its
+               callers, not just the hunks. Trace each change end to end
+               (UI -> route -> service -> DB -> response -> UI state) plus
+               side effects: webhooks, crons, SMS/email sends, Stripe and
+               Twilio calls, caches, analytics. Verify column names, env
+               vars, exported names, migration CHECK constraints, and route
+               mounts against the actual code. Never assume a name exists.
+            4. Fan out with the Agent tool. Run these passes in parallel and
+               give each one the PR title, body, and diff:
+               - correctness / logic bugs in the introduced code
+               - security: auth on every new route, parameterized SQL,
+                 token gates, PII and secrets in logs, forgeable client input
+               - money and state integrity: Stripe amounts agreeing to the
+                 cent, surcharge via computeChargeAmount, idempotency, atomic
+                 conditional updates, scheduled_services status values,
+                 customer-facing sends that a change could trigger
+               - AGENTS.md rubric compliance, rule by rule against the diff
+               - tests: do the new or changed tests actually exercise the
+                 change, near-today date literals, virtual mocks, mocked
+                 behavior that diverges from the real module
+               - Eastern-time handling and timezone-naive date math
+            5. Adversarial verification before posting anything: for each
+               candidate finding launch a verifier subagent with the file,
+               line, the claim, and the strongest counter-argument. It must
+               confirm, by reading the code, that the failure scenario is
+               reachable in the code this PR introduces or changes. Drop
+               anything that is not confirmed, that is pre-existing and
+               untouched by the diff, or that is a style, naming, coverage-
+               percentage, or speculative-refactor comment. A false positive
+               costs more than a missed nit.
+
+            ## Posting
+
+            - One inline comment per confirmed finding via
+              `mcp__github_inline_comment__create_inline_comment` with
+              `confirmed: true`, anchored on the changed line. Format:
+              `**P0 — <title>**` (or P1 / P2), then what is wrong, the
+              concrete failure scenario (inputs or state -> wrong result),
+              and the fix. Include a committable suggestion block only when
+              committing it fixes the issue entirely. One comment per unique
+              issue.
+            - Then post exactly ONE summary comment with `gh pr comment`.
+              It starts with `## Claude review`, then a single line
+              `Verdict: P0 found` / `Verdict: no P0, <n> P1` /
+              `Verdict: clean`, then the findings as a list of
+              `P<x> path:line — title`, then one short paragraph naming what
+              you checked. When nothing was found write
+              "No issues found." and the checked list. No praise, no padding.
+            - Never edit files, commit, push, approve, or request changes.
+              Comments only.
+            - Never put customer names, phone numbers, emails, street
+              addresses, or invoice numbers in a comment. Refer to records
+              by id.
