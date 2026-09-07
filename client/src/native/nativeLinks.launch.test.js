@@ -264,6 +264,28 @@ describe('launch URL replay (redirecting short links)', () => {
     },
   );
 
+  it('consumes a superseded Android startup lookup so the next document stays on the newer link', async () => {
+    capMocks.state.platform = 'android';
+    capMocks.state.launchUrl = SHORT_LINK;
+    let resolveLaunch;
+    capMocks.App.getLaunchUrl.mockImplementationOnce(() => new Promise((resolve) => { resolveLaunch = resolve; }));
+    const boot = initNativeLinks();
+    await vi.waitFor(() => expect(resolveLaunch).toBeTypeOf('function'));
+    const newerLink = `${ORIGIN}/l/newer-test-link`;
+    capMocks.state.listeners.appUrlOpen({ url: newerLink });
+    resolveLaunch({ url: SHORT_LINK });
+    await boot;
+    expect(assignSpy).toHaveBeenCalledTimes(1);
+    expect(assignSpy).toHaveBeenCalledWith(newerLink);
+    expect(sessionStorage.getItem(LAUNCH_URL_CONSUMED_KEY)).toBe(SHORT_LINK);
+
+    assignSpy.mockClear();
+    window.location.pathname = '/estimate/newer-test-token';
+    await initNativeLinks();
+    expect(assignSpy).not.toHaveBeenCalled();
+    expect(reported('replay-skipped').at(-1)).toMatchObject({ platform: 'android', route: 'estimate' });
+  });
+
   it('reports a stalled bridge but still honors a delayed launch result', async () => {
     vi.useFakeTimers();
     let resolveLaunch;

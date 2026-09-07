@@ -185,6 +185,17 @@ export async function initNativeLinks() {
   const lookupTimer = setTimeout(() => traceLink('launch', 'lookup-timeout'), 5000);
   try {
     const launch = await App.getLaunchUrl();
+    // Android keeps its original launch URL even after a newer event. Consume
+    // the superseded lookup so the event's destination survives the next boot.
+    const supersededAndroidUrl = handledEvent && nativePlatform() === 'android'
+      ? customerAppUrl(launch?.url) : null;
+    if (supersededAndroidUrl) {
+      try {
+        sessionStorage.setItem(LAUNCH_URL_CONSUMED_KEY, supersededAndroidUrl.href);
+      } catch {
+        traceLink('launch', 'storage-unavailable', supersededAndroidUrl);
+      }
+    }
     if (handledEvent) traceLink('launch', 'superseded');
     else if (launch?.url) navigateTo(launch.url, 'launch');
     else traceLink('launch', 'empty');

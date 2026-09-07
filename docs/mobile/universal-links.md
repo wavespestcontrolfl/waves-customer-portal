@@ -111,7 +111,9 @@ prevents a short link from looping `assign -> 302 -> boot -> assign`. Explicit
 events bypass the marker. On iOS, an event-delivered URL stamps it before
 navigation so the next document does not replay that tap. Android's launch
 lookup retains the original launch URL, so its events preserve that original
-marker instead. A synchronous navigation failure restores the previous marker.
+marker instead. When an Android event wins a startup race, the superseded
+lookup is consumed without navigating so it cannot replay on the next boot.
+A synchronous navigation failure restores the previous marker.
 Unit tests with cleared storage do not establish how WKWebView behaves across
 a native cold start.
 
