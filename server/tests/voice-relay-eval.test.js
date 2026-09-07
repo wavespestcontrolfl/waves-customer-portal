@@ -36,10 +36,10 @@ function record({ agent = [], tools = [], endSession = null, order = null } = {}
   // utterances first, then tool calls, all on turn 1.
   const events = [];
   const push = (e) => { events.push({ ...e, index: events.length }); return events[events.length - 1]; };
-  if (order) for (const e of order) push({ turn: 1, ...e });
+  if (order) for (const e of order) push({ turn: 1, ok: e.kind === 'tool' ? e.ok !== false : undefined, receipt: e.kind === 'tool' ? e.receipt === true : undefined, ...e });
   else {
     for (const text of agent) push({ kind: 'agent', text, turn: 1 });
-    for (const t of tools) push({ kind: 'tool', name: t.name, input: t.input || {}, text: t.text || 'ok', ok: t.ok !== false, turn: 1 });
+    for (const t of tools) push({ kind: 'tool', name: t.name, input: t.input || {}, text: t.text || 'ok', ok: t.ok !== false, receipt: t.receipt === true, turn: 1 });
   }
   return { events, toolCalls: events.filter((e) => e.kind === 'tool'), spoken: events.filter((e) => e.kind === 'agent').map((e) => e.text), endSession, language: 'en' };
 }
@@ -181,14 +181,18 @@ describe('voice relay eval — each expect key', () => {
     expect(runCheck(exp('preamble_category', { tool: 'get_account_overview', category: 'lookup' }), r)).toMatchObject({ status: 'skip', detail: expect.stringContaining('PR 5') });
   });
 
-  test('commitment_requires_receipt: a promise needs a successful write behind it, EN and ES', () => {
+  test('commitment_requires_receipt: every promise needs a performed write BEFORE it — never a refusal, never a later write, EN and ES', () => {
     expect(runCheck(exp('commitment_requires_receipt', true), record({ agent: ['Quarterly is $129 per application.'] })).status).toBe('pass');
-    const backed = record({ agent: ['A Waves team member will follow up shortly.'], tools: [{ name: 'capture_lead', ok: true }] });
-    expect(runCheck(exp('commitment_requires_receipt', true), backed).status).toBe('pass');
-    const unbacked = record({ agent: ['Someone will call you back this afternoon.'], tools: [{ name: 'get_pricing', ok: true }] });
-    expect(runCheck(exp('commitment_requires_receipt', true), unbacked)).toMatchObject({ status: 'fail', detail: expect.stringContaining('Someone will call you back') });
-    const hung = record({ agent: ['A team member will reach out.'], tools: [{ name: 'capture_lead', ok: false }] });
-    expect(runCheck(exp('commitment_requires_receipt', true), hung).status).toBe('fail');
+    const backed = record({ order: [{ kind: 'tool', name: 'capture_lead', receipt: true }, { kind: 'agent', text: 'A Waves team member will follow up shortly.' }] });
+    expect(runCheck(exp('commitment_requires_receipt', true), backed)).toMatchObject({ status: 'pass', detail: expect.stringContaining('capture_lead') });
+    // The write landed AFTER the promise: the promise was unbacked when spoken.
+    const late = record({ order: [{ kind: 'agent', text: 'A Waves team member will follow up shortly.' }, { kind: 'tool', name: 'capture_lead', receipt: true }] });
+    expect(runCheck(exp('commitment_requires_receipt', true), late)).toMatchObject({ status: 'fail', detail: expect.stringContaining('no write receipt before it') });
+    // A refusal is an answer, not a receipt.
+    const refused = record({ order: [{ kind: 'tool', name: 'request_booking', receipt: false, ok: true }, { kind: 'agent', text: 'Someone will call you back this afternoon.' }] });
+    expect(runCheck(exp('commitment_requires_receipt', true), refused).status).toBe('fail');
+    const readOnly = record({ order: [{ kind: 'tool', name: 'get_pricing', receipt: false }, { kind: 'agent', text: 'Someone will call you back this afternoon.' }] });
+    expect(runCheck(exp('commitment_requires_receipt', true), readOnly).status).toBe('fail');
     const spanish = record({ agent: ['Un miembro del equipo le llamará mañana.'] });
     expect(runCheck(exp('commitment_requires_receipt', true), spanish).status).toBe('fail');
   });
@@ -252,7 +256,14 @@ describe('voice relay eval — the judge', () => {
     expect(text).toMatch(/response_range: 1-2 sentences/);
     expect(text).toMatch(/Spanish/);
     expect(text).toMatch(/Caller: hi\nAgent: hello$/);
+    expect(text).toMatch(/\(none — unknown caller\)/);
     expect(judge.judgePromptSha()).toMatch(/^[0-9a-f]{64}$/);
+    // The context the agent was given rides along as fixture facts: the clock
+    // state and the KNOWN CALLER block — otherwise the judge would flag a
+    // date the agent read from its own block as invented.
+    const ctx = judge.buildJudgePrompt({}, 'x', { officeHours: 'closed', callerBlock: '<<<KNOWN CALLER DATA\nNext appointment: 2026-09-11\nEND KNOWN CALLER DATA>>>' }).text;
+    expect(ctx).toMatch(/CLOSED today/);
+    expect(ctx).toMatch(/Next appointment: 2026-09-11/);
   });
 
   test('judgeTranscript dispatches the voiceJudge policy on its lane and stamps model, provider, fallback and prompt sha', async () => {
@@ -361,7 +372,9 @@ describe('voice relay eval — the harness', () => {
       toolUse('capture_lead', { first_name: 'Sam', last_name: 'Okafor', call_summary: 'ants in kitchen' }),
       say('Thanks, Sam — a Waves team member will follow up as soon as possible.'),
     );
-    const judgeFn = jest.fn(async ({ transcript, toolsAvailable }) => {
+    const judgeFn = jest.fn(async ({ transcript, toolsAvailable, officeHours, callerBlock }) => {
+      expect(officeHours).toBe('unknown');
+      expect(callerBlock).toBeNull();
       expect(transcript).toMatch(/^Caller: Hi, ants/);
       expect(transcript).toMatch(/\[tool\] capture_lead\(.*"first_name":"Sam"/);
       expect(transcript).toMatch(/Agent: Thanks, Sam/);
@@ -376,7 +389,7 @@ describe('voice relay eval — the harness', () => {
     expect(result.status).toBe('pass');
     expect(result.modelRounds).toBe(2);
     expect(result.toolCalls.map((t) => t.name)).toEqual(['capture_lead']);
-    expect(result.toolCalls[0].ok).toBe(true);
+    expect(result.toolCalls[0]).toMatchObject({ ok: true, receipt: true });
     expect(result.endSession).toMatchObject({ reason: 'agent_complete', captured: true });
     // The second caller turn arrived after the agent ended the session: heard by nobody.
     expect(result.events.filter((e) => e.kind === 'caller')[1].ignored).toBe(true);
@@ -422,7 +435,7 @@ describe('voice relay eval — the harness', () => {
     replay.installHarness();
     script.push(toolUse('find_slots', { when: 'next week' }), say('A team member will call to find a time.'));
     const result = await replay.runScenario(scenario({ id: 'harness-unexpected', fixtures: { officeHours: 'unknown', toolResponses: {} }, turns: [{ caller: 'When can you come?' }], expect: [] }), { judge: false });
-    expect(result.toolCalls[0]).toMatchObject({ name: 'find_slots', unexpected: true, ok: false });
+    expect(result.toolCalls[0]).toMatchObject({ name: 'find_slots', unexpected: true, ok: false, receipt: false });
     expect(result.warnings).toEqual([expect.stringContaining('find_slots')]);
     jest.useRealTimers();
   });

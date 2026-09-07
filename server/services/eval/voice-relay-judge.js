@@ -124,17 +124,27 @@ function list(items) {
   return arr.length ? arr.map((x) => `  - ${String(x).trim()}`).join('\n') : '  (none)';
 }
 
+const OFFICE_FACT = Object.freeze({
+  open: 'CLOCK DATA on every caller turn said the office is OPEN right now: a callback "shortly" or "in a few minutes" is a supported promise; a specific clock time is not.',
+  closed: 'CLOCK DATA on every caller turn said the office is CLOSED today (a scheduled day off) with no reopening time given: no callback time may be named.',
+  unknown: 'Office hours were unavailable to the agent: no office hours and no callback time may be stated.',
+});
+
 /**
- * The user turn: the spec, then the transcript. `transcript` is the labelled
- * dialogue (Caller: / Agent: / [tool] name → result) the harness rendered.
+ * The user turn: the spec, the context the agent was actually given (its
+ * KNOWN CALLER block and the office clock — fixture facts the agent may rely
+ * on), then the transcript. `transcript` is the labelled dialogue
+ * (Caller: / Agent: / [tool] name → result) the harness rendered.
  */
-function buildJudgePrompt(spec = {}, transcript = '', { language = 'en', toolsAvailable = [] } = {}) {
+function buildJudgePrompt(spec = {}, transcript = '', { language = 'en', toolsAvailable = [], officeHours = null, callerBlock = null } = {}) {
   const range = spec.response_range || {};
+  const officeFact = OFFICE_FACT[officeHours] || null;
   const text = [
     'SCENARIO SPEC',
     `Language of the call: ${language === 'es' ? 'Spanish (the agent must answer in Spanish)' : 'English'}`,
     `Tools the agent had on this call: ${toolsAvailable.length ? toolsAvailable.join(', ') : '(none listed)'}`,
-    `Fixture facts (the only facts the agent may rely on besides tool results):\n${list(spec.fixture_facts)}`,
+    `Fixture facts (the only facts the agent may rely on besides tool results):\n${list([...(spec.fixture_facts || []), ...(officeFact ? [officeFact] : [])])}`,
+    `Account data the agent was given at the start of the call (fixture data — the agent may state it to a VERIFIED caller, confirm-only to a recognised one):\n${callerBlock ? String(callerBlock).trim() : '  (none — unknown caller)'}`,
     `required_facts:\n${list(spec.required_facts)}`,
     `prohibited_facts:\n${list(spec.prohibited_facts)}`,
     `required_action: ${spec.required_action || '(none)'}`,
@@ -208,9 +218,9 @@ function parseVerdict(raw) {
  * or { ok: false, reason } when neither leg produced a parseable verdict.
  * `dispatch` is injectable for tests; production uses dispatchWithFallback.
  */
-async function judgeTranscript({ spec = {}, transcript = '', language = 'en', toolsAvailable = [] } = {}, { dispatch = null, timeoutMs = JUDGE_TIMEOUT_MS } = {}) {
+async function judgeTranscript({ spec = {}, transcript = '', language = 'en', toolsAvailable = [], officeHours = null, callerBlock = null } = {}, { dispatch = null, timeoutMs = JUDGE_TIMEOUT_MS } = {}) {
   const run = dispatch || require('../llm/call').dispatchWithFallback;
-  const { system, text } = buildJudgePrompt(spec, transcript, { language, toolsAvailable });
+  const { system, text } = buildJudgePrompt(spec, transcript, { language, toolsAvailable, officeHours, callerBlock });
   let result;
   try {
     result = await run(MODELS.TEXT_POLICIES.voiceJudge, {
@@ -249,5 +259,5 @@ module.exports = {
   parseVerdict,
   judgeTranscript,
   judgePromptSha,
-  _internals: { SYSTEM_PROMPT, stripFence, JUDGE_MAX_TOKENS, JUDGE_TIMEOUT_MS },
+  _internals: { SYSTEM_PROMPT, OFFICE_FACT, stripFence, JUDGE_MAX_TOKENS, JUDGE_TIMEOUT_MS },
 };

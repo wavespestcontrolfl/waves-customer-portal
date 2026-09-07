@@ -660,8 +660,8 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "\\b(we|waves) (do|offer|handle|can (do|handle|remove|take care of)) (bee|hive|the hive)",
-            "(remove|relocate) the (hive|bees)"
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\b(we|waves) (do|offer|handle|can (do|handle|remove|take care of)) (bee|hive|the hive)",
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\b(remove|relocate) the (hive|bees)\\b"
           ],
           "severity": "major"
         },
@@ -2690,7 +2690,7 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\b(saved|booked|filed|in the system|all set|got you down|you'?re (all )?(set|in))\\b",
+            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\b(saved|booked|filed|in the system|all set|got you down|you'?re (all )?(set|in)|got (all )?(of )?your (details|info|information) (down|noted|in))\\b",
             "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\b(went|gone) through\\b"
           ],
           "severity": "critical"
@@ -3051,7 +3051,10 @@
           "caller": "Sorry — 1230, not 1220. Twelve thirty Gulf Drive North."
         },
         {
-          "caller": "Yes. ben carter at example dot com. Thanks."
+          "caller": "Yes. ben carter at example dot com."
+        },
+        {
+          "caller": "No, that's everything. Thanks."
         }
       ],
       "spec": {
@@ -3348,7 +3351,7 @@
           "The model failed on two consecutive turns; the recovery policy then transfers (office open)"
         ],
         "required_facts": [
-          "Sandy had trouble and is connecting the caller to a team member"
+          "The caller is being connected to a Waves team member"
         ],
         "prohibited_facts": [
           "Any arrival time or window (no tool ever ran)"

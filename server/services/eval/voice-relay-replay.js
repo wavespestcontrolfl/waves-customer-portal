@@ -78,8 +78,8 @@ const CHECKS = Object.freeze([
   'end_session_called', 'no_model_text_before_tool', 'preamble_category',
   'commitment_requires_receipt',
 ]);
-// The tools whose successful result is a RECEIPT for a spoken promise, and
-// the default set no model text may precede. commit_follow_up is the PR 6
+// The tools whose PERFORMED write is a receipt for a spoken promise, and the
+// default set no model text may precede. commit_follow_up is the PR 6
 // commitments tool — listed so the check is ready for it, never registered
 // as a known tool until it ships.
 const WRITE_TOOLS = Object.freeze(['capture_lead', 'request_booking', 'request_reservice', 'transfer_to_office', 'commit_follow_up']);
@@ -302,21 +302,29 @@ function pickToolResponse(scenario, name, n) {
   return normalizeToolResponse(raw);
 }
 
-/** The ctx side effects the real write tools perform — capture latch, booking / re-service / transfer marks. Never a write. */
+/**
+ * The ctx side effects the real write tools perform — capture latch, booking /
+ * re-service / transfer marks. Never a write. Returns the answer text and
+ * whether a RECEIPT was produced: only a fixture answer that performed one of
+ * these effects is a receipt — a refusal ("that time is gone", "already on
+ * file", "transfer not available") is an answer, never a receipt.
+ */
 function applyToolSideEffects(response, { input, ctx, scenario }) {
+  let receipt = false;
   if (response.capture) {
     if (typeof ctx.markCaptured === 'function') ctx.markCaptured(response.capture === true ? {} : response.capture);
     if (input && input.call_summary && typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
+    receipt = true;
   }
-  if (response.booking && typeof ctx.markBookingRequested === 'function') ctx.markBookingRequested(null);
-  if (response.reservice && typeof ctx.markReserviceFiled === 'function') ctx.markReserviceFiled();
-  if (!response.transfer) return response.text || '';
-  if (typeof ctx.transferRequested === 'function' && ctx.transferRequested() === true) return TRANSFER_IN_PROGRESS_TEXT;
+  if (response.booking) { if (typeof ctx.markBookingRequested === 'function') ctx.markBookingRequested(null); receipt = true; }
+  if (response.reservice) { if (typeof ctx.markReserviceFiled === 'function') ctx.markReserviceFiled(); receipt = true; }
+  if (!response.transfer) return { text: response.text || '', receipt };
+  if (typeof ctx.transferRequested === 'function' && ctx.transferRequested() === true) return { text: TRANSFER_IN_PROGRESS_TEXT, receipt: false };
   if (typeof ctx.markTransferRequested === 'function') ctx.markTransferRequested();
   const { copy } = require('../voice-agent/relay-language');
   if (typeof ctx.say === 'function') ctx.say(copy('transferring', scenario.language === 'es' ? 'es-US' : null));
   if (typeof ctx.endForTransfer === 'function') ctx.endForTransfer();
-  return response.text || TRANSFER_TEXT;
+  return { text: response.text || TRANSFER_TEXT, receipt: true };
 }
 
 /**
@@ -328,7 +336,7 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
   const { scenario, record } = state;
   if (!scenario || !record) throw new Error('voice-relay eval: tool called outside a scenario');
   record.toolUse[name] = (record.toolUse[name] || 0) + 1;
-  const event = { kind: 'tool', name, input: safeInput(input), text: '', turn: record.turn, ok: null, unexpected: false, index: record.events.length };
+  const event = { kind: 'tool', name, input: safeInput(input), text: '', turn: record.turn, ok: null, receipt: false, unexpected: false, index: record.events.length };
   record.events.push(event);
   record.toolCalls.push(event);
   const response = pickToolResponse(scenario, name, record.toolUse[name]);
@@ -343,7 +351,9 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
     return new Promise(() => {}); // the live bound (_executeToolBounded) degrades it
   }
   if (name === 'lookup_customer' && typeof ctx.consumeLookup === 'function' && ctx.consumeLookup() !== true) return answer(LOOKUP_BUDGET_TEXT, false);
-  return answer(String(applyToolSideEffects(response, { input, ctx, scenario })), response.ok !== false);
+  const { text, receipt } = applyToolSideEffects(response, { input, ctx, scenario });
+  event.receipt = receipt === true;
+  return answer(String(text), response.ok !== false);
 }
 
 function safeInput(input) {
@@ -593,11 +603,16 @@ const CHECK_RUNNERS = Object.freeze({
     const allowed = (table[record.language] || table.en || {})[value.category] || [];
     return allowed.includes(before.text) ? ['pass', `preamble "${clip(before.text, 80)}" is a ${value.category} preamble`] : ['fail', `"${clip(before.text, 120)}" is not a ${value.category} preamble`];
   },
+  // Every spoken promise needs a receipt that PRECEDES it: a write the
+  // fixture actually performed (capture / booking / re-service / transfer),
+  // never a refusal, and never one that only landed after the promise.
   commitment_requires_receipt(value, record, { utterances }) {
     const promises = utterances.filter((u) => PROMISE_RE.test(u.text));
     if (!promises.length) return ['pass', 'no follow-up was promised'];
-    const receipt = record.toolCalls.find((t) => WRITE_TOOLS.includes(t.name) && t.ok === true);
-    return receipt ? ['pass', `promise backed by ${receipt.name}`] : ['fail', `promised "${clip(promises[0].text, 120)}" with no successful write behind it`];
+    const receipts = record.toolCalls.filter((t) => WRITE_TOOLS.includes(t.name) && t.receipt === true);
+    const unbacked = promises.find((p) => !receipts.some((r) => r.index < p.index));
+    if (unbacked) return ['fail', `promised "${clip(unbacked.text, 120)}" with no write receipt before it`];
+    return ['pass', `every promise followed a receipt (${[...new Set(receipts.map((r) => r.name))].join(', ')})`];
   },
 });
 
@@ -743,7 +758,9 @@ async function runScenario(scenario, { judge = true, judgeFn = null } = {}) {
   record.judge = null;
   if (!record.error && judge) {
     const run = judgeFn || require('./voice-relay-judge').judgeTranscript;
-    record.judge = await run({ spec: scenario.spec || {}, transcript: record.transcript, language: record.language, toolsAvailable: record.toolsAvailable })
+    const officeHours = scenario.fixtures && typeof scenario.fixtures.officeHours === 'string' ? scenario.fixtures.officeHours : (scenario.fixtures && scenario.fixtures.officeHours ? 'open' : 'unknown');
+    const callerBlock = scenario.caller && scenario.caller.context ? scenario.caller.context.block : null;
+    record.judge = await run({ spec: scenario.spec || {}, transcript: record.transcript, language: record.language, toolsAvailable: record.toolsAvailable, officeHours, callerBlock })
       .catch((err) => ({ ok: false, reason: `judge_error:${err && err.message ? err.message : err}` }));
     record.checks.push(...judgeChecks(scenario, record.judge));
   }

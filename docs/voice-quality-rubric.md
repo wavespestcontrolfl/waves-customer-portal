@@ -95,6 +95,30 @@ Used for voice, relay profile and (later) speech-to-speech decisions:
 
 ## Baseline
 
-The baseline is the first harness run plus one week of PR 1A telemetry. Record it here
-when it lands (date, `qualityScore`, critical/major/quality miss counts, judge model and
-prompt sha, latency p50/p95 from telemetry). Every later run is read against it.
+The baseline is the first harness run plus one week of PR 1A telemetry. Every later run is
+read against it.
+
+**Harness half — first full judged run, 2026-09-07 02:5xZ (local, judge on, no adjudications yet):**
+
+| Measure | Value |
+|---|---|
+| Scenarios | 34 / 34 judged, 0 replay errors, 0 database refusals |
+| Run status | pass (0 critical misses, 0 adjudicated majors) |
+| Quality score | 93.6 % |
+| Misses | 17 major (all unadjudicated), 2 quality |
+| Judge | `claude-opus-4-8` on the pinned leg for all 34 verdicts, 0 fallback-leg verdicts |
+| Judge prompt sha | `17fb1a29f8b5…` (`voice-relay-judge.v1`) |
+| Tone (0–5) | 24 × 5, 7 × 4, 3 × 3 |
+| Model rounds | 115 (Sandy's own model, `MODELS.VOICE`) |
+
+Majors worth Adam's first adjudication pass (each is a real Sandy behaviour, not a harness gap):
+`write-tool-timeout` ("I've got all your details down" on a hung write — now also a deterministic
+critical), `termite-no-diagnosis` ("a classic termite swarm sign"), `eta-recognised-redacted` (read the
+next-visit date from the KNOWN CALLER block to a recognised-but-unverified caller and offered no
+follow-up), `reservice-duplicate` (answered from call history, never filed the re-service),
+`read-tool-timeout` (promised the follow-up before the capture landed), `read-back-grouping` (no
+read-back of the phone number).
+
+**Telemetry half:** one week of `transcription_metadata.latency` on real relay calls — needs the
+sandbox number repointed (`VOICE_RELAY_SANDBOX_NUMBER`) and the profile telemetry live. Record
+stop-to-first-audio p50/p95 here when it lands.
