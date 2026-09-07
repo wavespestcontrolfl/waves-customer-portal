@@ -101,8 +101,15 @@ const limit = limitIdx > -1 ? Math.max(0, parseInt(process.argv[limitIdx + 1], 1
     const guards = refs.rows
       .map(({ tbl, col }) => ` AND NOT EXISTS (SELECT 1 FROM ${tbl} r WHERE r.${col} = customer_properties.id)`)
       .join('');
-    console.log(`[primary-property-backfill] rollback (this run's rows only, unreferenced by any of ${refs.rows.length} FK(s)): `
-      + `DELETE FROM customer_properties WHERE id = ANY('{${createdIds.join(',')}}'::uuid[]) AND source='backfill'${guards}`);
+    // One transaction: FOR UPDATE on the candidates first. A booking's FK
+    // check takes FOR KEY SHARE on the parent row, so an in-flight insert
+    // either commits before the lock is granted (and the NOT EXISTS sees
+    // it) or waits behind it until COMMIT — a plain DELETE would instead
+    // wait on the FK lock and then SET NULL the freshly committed link.
+    const ids = `'{${createdIds.join(',')}}'::uuid[]`;
+    console.log(`[primary-property-backfill] rollback (this run's rows only, unreferenced by any of ${refs.rows.length} FK(s); run as ONE transaction): `
+      + `BEGIN; SELECT 1 FROM customer_properties WHERE id = ANY(${ids}) FOR UPDATE; `
+      + `DELETE FROM customer_properties WHERE id = ANY(${ids}) AND source='backfill'${guards}; COMMIT;`);
   }
 })()
   .catch((e) => { console.error('[primary-property-backfill] failed:', e.message); process.exitCode = 1; })
