@@ -106,3 +106,28 @@ test('shared admin wrappers with variable endpoints stay covered outside admin d
   expect(shared.every(row => row.operation.resolution === 'unresolved')).toBe(true);
   expect(checkCoverage(shared, { actions: [] }, {})).toHaveLength(3);
 });
+
+test('state setters, out-of-scope literal routes and glued query suffixes do not inflate the census', () => {
+  const rows = frontendSourceCensus(`
+    function Panel() {
+      const [linkRequest, setLinkRequest] = useState(0);
+      const load = async () => {
+        setLinkRequest(0);
+        setLinkRequest((value) => value + 1);
+        await adminFetch('/tech/staff-documents/availability');
+        await adminFetch(\`/tech/staff-documents\${path}\`, { method: 'POST' });
+        await adminFetch(\`/admin/communications/unread-count\${scope}\`);
+        await adminFetch(\`/admin/customers/\${id}\`);
+        await adminFetch(dynamic);
+        await fetch(\`/api\${path}\`);
+      };
+    }
+  `, 'client/src/components/admin/Fixture.jsx');
+  expect(rows.map(row => [row.operation.method, row.operation.endpoint, row.operation.resolution]).sort()).toEqual([
+    ['GET', '/admin/communications/unread-count', 'literal_or_template'],
+    ['GET', '/admin/customers/:param', 'literal_or_template'],
+    ['GET', null, 'unresolved'],
+    ['GET', null, 'unresolved'],
+  ].sort());
+});
+

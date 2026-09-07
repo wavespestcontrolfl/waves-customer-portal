@@ -74,7 +74,16 @@ function parseFile(file, ref) {
 
 function normalizedEndpoint(text) {
   if (!text || !text.includes('/admin/')) return null;
-  return text.slice(text.indexOf('/admin/')).split('?')[0].replace(/:[a-zA-Z_$][\w$]*/g, ':param');
+  // A trailing interpolation glued to a segment (`/unread-count${scope}`) is a
+  // query or suffix on the base route, not a path parameter.
+  return text.slice(text.indexOf('/admin/')).split('?')[0].replace(/:[a-zA-Z_$][\w$]*/g, ':param').replace(/(?<!\/):param$/, '');
+}
+
+// A literal path outside `/admin/` (the tech router, public routes) is resolved
+// and out of this manifest's scope. A bare `/api` mount followed by a dynamic
+// segment still names no router, so it stays an unresolved request.
+function outOfScopeLiteral(text) {
+  return typeof text === 'string' && text.startsWith('/') && !text.includes('/admin/') && !/^\/api\/?(?::param)?$/.test(text);
 }
 
 function frontendSourceCensus(source, relative) {
@@ -86,9 +95,12 @@ function frontendSourceCensus(source, relative) {
       const callee = named(node.callee);
       const verbRequest = callee.match(/^(?:admin|api)(?:\.|_)?(get|post|put|patch|delete)(?:Strict)?$/i);
       const verbCall = verbRequest || callee.match(/(?:^|\.)(?:admin|api)?(get|post|put|patch|delete)(?:Strict)?$/i);
-      const requestCall = /(?:fetch|request|(?:^|\.)api)$/i.test(callee);
+      // React state setters (`setLinkRequest`) share the suffix but perform no request.
+      const requestCall = /(?:fetch|request|(?:^|\.)api)$/i.test(callee) && !/(?:^|\.)set[A-Z]\w*$/.test(callee);
       const localExport = callee === 'URL.createObjectURL' && relative.includes('/admin/');
-      const endpoint = normalizedEndpoint(expressionText(node.arguments[0]));
+      const argumentText = expressionText(node.arguments[0]);
+      if (outOfScopeLiteral(argumentText)) return;
+      const endpoint = normalizedEndpoint(argumentText);
       // Literal admin paths stay visible even through an unfamiliar wrapper.
       // Review distinguishes API adapters from navigation-only affordances.
       if (![verbCall, requestCall, localExport, endpoint].some(Boolean)) return;
