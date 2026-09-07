@@ -89,6 +89,24 @@ describe('Customer360ProfileV2 sub-modals', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('returns focus to the More button after a modal launched from the mobile menu closes', async () => {
+    // The More (⋯) menu lives in the mobile top bar — render as a phone.
+    window.matchMedia.mockImplementation((q) => ({ matches: true, media: q, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }));
+    await openProfile();
+    // The mobile bar is display:none under the component's own media-query
+    // style block, which jsdom cannot evaluate — query hidden elements.
+    const more = screen.getByRole('button', { name: 'More', hidden: true });
+    fireEvent.click(more);
+    const item = await screen.findByRole('menuitem', { name: 'Edit customer', hidden: true });
+    item.focus();
+    fireEvent.click(item);
+    await screen.findByRole('dialog', { name: 'Edit customer' });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit customer' })).not.toBeInTheDocument());
+    // The menu item unmounted with the menu; the stable More button is the opener.
+    expect(more).toHaveFocus();
+  });
+
   it('a click on a sub-modal backdrop closes that modal only, never the profile behind it', async () => {
     const onClose = await openProfile();
     fireEvent.click(screen.getAllByRole('button', { name: 'Edit' })[0]);

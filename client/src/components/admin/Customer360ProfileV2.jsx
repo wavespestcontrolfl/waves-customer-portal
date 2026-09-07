@@ -5242,6 +5242,10 @@ export default function Customer360ProfileV2({
   const [newPayerNotice, setNewPayerNotice] = useState("");
   const panelRef = useRef(null);
   const menuRef = useRef(null);
+  // The More (⋯) button outlives its menu items; modals launched from the
+  // menu focus it first so useModalFocus can return focus somewhere that
+  // still exists when the modal closes (the menu item unmounts on click).
+  const menuButtonRef = useRef(null);
   const commsSeqRef = useRef(0);
   const commsAbortRef = useRef(null);
   const profileSeqRef = useRef(0);
@@ -8191,6 +8195,7 @@ export default function Customer360ProfileV2({
           <div ref={menuRef} className="relative">
             {" "}
             <button
+              ref={menuButtonRef}
               onClick={() => setMenuOpen((v) => !v)}
               aria-label="More"
               aria-expanded={menuOpen}
@@ -8208,6 +8213,7 @@ export default function Customer360ProfileV2({
                   <button
                     role="menuitem"
                     onClick={() => {
+                      menuButtonRef.current?.focus();
                       openEditModal();
                       setMenuOpen(false);
                     }}
@@ -8220,6 +8226,7 @@ export default function Customer360ProfileV2({
                   <button
                     role="menuitem"
                     onClick={() => {
+                      menuButtonRef.current?.focus();
                       setAnnualPrepayInvoiceOpen(true);
                       setMenuOpen(false);
                     }}
@@ -8232,6 +8239,7 @@ export default function Customer360ProfileV2({
                   <button
                     role="menuitem"
                     onClick={() => {
+                      menuButtonRef.current?.focus();
                       setAnnualPrepayOpen(true);
                       setMenuOpen(false);
                     }}
