@@ -128,9 +128,9 @@ test('hint with the gate on runs a single-day search with the new params passed 
   expect(opts.dateTo).toBe('2026-09-01');
   expect(opts.excludeServiceIds).toEqual(['svc-1']);
   expect(opts.slotStepMinutes).toBe(60);
-  // Hint mode over-fetches (3×) so the occupancy guard can drop hours
-  // without leaving the chips row short; the response is sliced back.
-  expect(opts.topN).toBe(9);
+  // Hint mode takes the engine's whole bounded list (the occupancy guard
+  // can veto entire gaps); the response is sliced back to topN.
+  expect(opts.topN).toBe(100);
 });
 
 test('garbage excludeServiceIds / slotStepMinutes 400 before the engine runs', async () => {
@@ -382,7 +382,29 @@ test('garbage pickedStart 400s before the engine runs; no pickedStart means no p
   expect(findAvailableSlots).not.toHaveBeenCalled();
   const body = await (await post({ ...BASE, hint: true })).json();
   expect(body.picked).toBeUndefined();
-  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(30);
+  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(100);
+});
+
+test('a topN:1 range hint survives three fully occupied gaps and answers the fourth (pre-push P1)', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  // Three single-hour gaps on 09-01, all sitting on tech-null rows; one
+  // free gap the next day. With a 3× over-fetch the free gap was never
+  // fetched and the range hint vanished.
+  findAvailableSlots.mockResolvedValue({
+    slots: [
+      gapSlot({ rank: 1, start_time: '09:00', end_time: '10:00', latest_start_min: 9 * 60, detour_minutes: 1 }),
+      gapSlot({ rank: 2, start_time: '11:00', end_time: '12:00', latest_start_min: 11 * 60, detour_minutes: 2 }),
+      gapSlot({ rank: 3, start_time: '13:00', end_time: '14:00', latest_start_min: 13 * 60, detour_minutes: 3 }),
+      gapSlot({ rank: 4, date: '2026-09-02', start_time: '10:00', end_time: '11:00', latest_start_min: 10 * 60, detour_minutes: 4 }),
+    ],
+    evaluated: 4,
+  });
+  loadOccupancy.mockImplementation(async ({ dateFrom }) => (dateFrom === '2026-09-01'
+    ? { ...emptyOccupancy(), rows: [9, 11, 13].map((h) => occupiedRow({ id: `u-${h}`, startMin: h * 60, endMin: (h + 1) * 60 })) }
+    : emptyOccupancy()));
+  const body = await (await post({ ...BASE, dateTo: '2026-09-04', hint: true, slotStepMinutes: 60, topN: 1 })).json();
+  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(100);
+  expect(body.slots.map((s) => [s.date, s.start_time])).toEqual([['2026-09-02', '10:00']]);
 });
 
 test('a same-day picked hour before the engine\'s now+30 floor is not scored (no picked key), later hours are', async () => {
