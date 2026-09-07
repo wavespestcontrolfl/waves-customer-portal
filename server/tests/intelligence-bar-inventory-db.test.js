@@ -127,6 +127,31 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     for (const id of [uiId, barId]) expect(await db('product_restock_requests').where({ id }).first()).toMatchObject({ status: 'received', closed_by: actor });
   }, 40000);
 
+  test.each(['mark_ordered', 'cancel'])('%s from Estimates matches the portal without submitting an order or changing stock', async action => {
+    const ui = await product(), bar = await product();
+    const uiRequest = await requestFor(ui), barRequest = await requestFor(bar);
+    const uiResult = await api(`/api/admin/inventory/restock-requests/${uiRequest.id}/action`, { action, note: 'Recorded by staff' });
+    expect(uiResult.status).toBe(200);
+    const proposed = await propose('update_restock_request', { request_id: barRequest.id, action, note: 'Recorded by staff' },
+      action === 'mark_ordered' ? `Mark restock request ${barRequest.id} as ordered; the supplier order was already placed by staff` : `Cancel restock request ${barRequest.id}`);
+    expect((await db('product_restock_requests').where({ id: barRequest.id }).first()).status).toBe('open');
+    const result = await confirm(proposed);
+    const expectedStatus = action === 'mark_ordered' ? 'ordered' : 'cancelled';
+    expect(result.body).toMatchObject({ success: true, outcome: 'completed', result: { status: expectedStatus, verification: { persisted: true } } });
+    const uiSaved = await db('product_restock_requests').where({ id: uiRequest.id }).first();
+    const barSaved = await db('product_restock_requests').where({ id: barRequest.id }).first();
+    for (const key of ['status', 'closed_by']) expect(barSaved[key]).toEqual(uiSaved[key]);
+    expect(barSaved.metadata.lastManualAction).toMatchObject({ action, note: 'Recorded by staff', actorId: actor });
+    for (const row of [ui, bar]) {
+      expect(await onHand(row.id)).toBe(10);
+      expect(await db('product_inventory_movements').where({ product_id: row.id })).toHaveLength(0);
+    }
+    expect(await db('vendor_orders').whereIn('restock_request_id', [uiRequest.id, barRequest.id])).toHaveLength(0);
+    expect((await confirm(proposed)).status).toBe(409);
+    const receipt = await api(`/api/admin/intelligence-bar/actions/${proposed.body.pendingActions[0].id}`);
+    expect(receipt.body).toMatchObject({ outcome: 'completed', result: { status: expectedStatus } });
+  }, 40000);
+
   test('an inventory confirmation rechecks a revoked admin role before any stock mutation', async () => {
     const row = await product();
     const proposed = await propose('adjust_stock', { product_id: row.id, movement_type: 'restock', quantity: 2, unit: 'lb' },

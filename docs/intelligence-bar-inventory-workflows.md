@@ -20,8 +20,8 @@ isolation. These four census entries are **partially_verified**, with admin
 evidence and an explicit remaining technician scope. They remain in the
 unsupported/unverified denominator. No role parity is claimed.
 
-The census retains 1,718 UI sites: four verified property sites, four partially
-verified inventory sites, ten transport exceptions and 1,704 sites still counted
+The census retains 1,735 UI sites: four verified property sites, four partially
+verified inventory sites, ten transport exceptions and 1,721 sites still counted
 as unsupported/unverified (including those four inventory sites). One additional
 stats site records the exact unchanged request moved into `useCallback`; its
 original unsupported entry is retained. The check accepts partial entries only
@@ -58,27 +58,33 @@ remaining gaps. It never counts them as complete parity.
 
 ## Verification
 
-- Ten real Express/auth/registry/shared-domain/Postgres cases pass in
+- Twelve real Express/auth/registry/shared-domain/Postgres cases pass in
   `server/tests/intelligence-bar-inventory-db.test.js`. The model adapter is
   scripted. Independent row reads verify request IDs, quantities, unit/actor
   parity, untouched viewed customers, zero order submission, stock changes,
-  stale approvals, replay, revoked roles, concurrent request/receive behavior, invalid amounts,
+  stale approvals, replay, revoked roles, staff-recorded orders and cancellations,
+  concurrent request/receive behavior, invalid amounts,
   impossible deadlines, preserved notes, packaged quantities and late orders.
 - Stock/write-gate suites pass 58 tests. The coverage suite passes four tests.
-  The initial combined run passed all 71 tests; the expanded database suite then passed all ten cases. CI explicitly runs the inventory database
+  The initial combined run passed all 71 tests; the integrated database suite passes all twelve cases. CI explicitly runs the inventory database
   suite against its disposable migrated Postgres service.
 - Client suites pass 27 tests: 17 global bar, eight receipt-card and two inventory
   refresh cases. The refresh cases resolve responses out of order and verify
   product filters, movements, pinned request links and clearing the queue filter.
+- The 48-case legacy inventory costing suite passes. Its fixture now retains
+  product UPDATE values for the shared service’s persisted-state verification;
+  the production read-back check remains intact. Independent review found no
+  actionable issues in this repair or the two additional operation cases.
 - Production build, portal-brand and coverage checks pass. New shared domain
   functions and the coverage check have no structural warnings. Legacy route,
   inventory page and receipt-card functions retain warnings.
 - Chrome/Playwright at 1440×1050 and 390×844 uses the actual Estimates/Pipeline,
   inventory queue and expanded-product pages. Each viewport saves a request from
-  Estimates, opens its persisted record, receives stock, changes the physical
-  count, and verifies automatic refresh plus independent database state. Stock
+  Estimates, opens its persisted record, records a staff-placed order, receives
+  stock, changes the physical count, cancels a second request, and verifies automatic refresh plus independent database state. Stock
   moves 10 → 12 → 15 with two movement rows and no supplier order. No JS exceptions
-  or page-width overflow. Only disabled thread reads return expected 404s.
+  or page-width overflow. Disabled thread reads and the unmounted communications unread-count route
+  return 404s in the isolated harness.
   Artifacts are `.local/ib-inventory-*-saved.png`, `*-queue.png`,
   `*-received-refresh.png`, `*-stock-refresh.png` and browser evidence JSON.
 - The checked local preview is `http://127.0.0.1:5292/admin/estimates` while the

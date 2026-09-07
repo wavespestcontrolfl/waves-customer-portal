@@ -88,6 +88,7 @@ beforeEach(() => {
 
 describe('POST /restock-requests/:id/action', () => {
   function wireRestock(requestRow) {
+    const productRow = { id: 'prod-1', inventory_on_hand: 10, inventory_unit: 'gal' };
     const movements = [];
     const stockUpdates = [];
     const statusUpdates = [];
@@ -105,9 +106,10 @@ describe('POST /restock-requests/:id/action', () => {
       if (q._table === 'products_catalog') {
         if (q.called('update')) {
           stockUpdates.push(q.args('update')[0]);
+          Object.assign(productRow, q.args('update')[0]);
           return 1;
         }
-        return { id: 'prod-1', inventory_on_hand: 10, inventory_unit: 'gal' };
+        return { ...productRow };
       }
       if (q._table === 'vendor_orders') {
         if (q.called('update')) { orderUpdates.push(q.args('update')[0]); return 1; } // settleLandedAfterReceive

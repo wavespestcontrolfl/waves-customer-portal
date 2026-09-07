@@ -139,7 +139,9 @@ Current foundation census: 1,732 UI sites; ten transport exceptions; 1,722 domai
 sites still unsupported/unverified in the matrix. Registration of existing tools
 has deliberately not been relabeled as verified application parity.
 The dependent property branch adds two UI sites and verifies four property
-operations: 1,717 retained sites, ten transport exceptions, and 1,703 unverified.
+operations: the property branch retains 1,734 sites, ten transport exceptions,
+and 1,720 unverified. The inventory branch retains 1,735 sites and 1,721
+unsupported/unverified sites, including four partially verified inventory sites.
 
 ## Verification evidence
 
