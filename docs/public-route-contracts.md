@@ -74,8 +74,23 @@ Generated or saved tier selections replace the listed service cadences and
 retain omitted companion programs; choosing a tier is not a service removal.
 The existing pest-only recurring choice on eligible one-time-toggle estimates
 retains its intentional companion exclusion, using the acceptance predicate.
-Existing request fields, token/signature guards, rate limits, privacy headers,
-and booking duration policy apply), `/api/reports/:token/*` (the
+Existing request fields, token/signature guards, rate limits and privacy headers
+apply. With strict opt-in `GATE_VISIT_COMBINED_CAPACITY` and prerequisite
+`GATE_SEPARATE_COMBO_VISITS`, multi-service recurring selections reserve 60 minutes
+per physical service program. Termite rental and bond billing riders fold into
+bait service; legacy supplements use the converter's physical-program rules.
+Unsupported families/cadences, recurring foam and commercial programs return
+409 `COMBINED_VISIT_UNAVAILABLE` before offering or holding combined work.
+`durationMinutes` and `windowEnd` describe the whole work block; arrival copy
+remains start plus 120 minutes. One assignable technician must have no selected
+service capability explicitly disabled. The allocation stamp is server-owned
+and excluded from public slot metadata. `/api/estimates/:token/accept` rechecks
+the selection, technician and full occupancy under existing locks, then converts
+the hold into separate sequential 60-minute service windows with independent
+cadences. Missing or unmatched members abort the transaction. A stamped hold
+retains its capacity policy when the creation gate turns off. Shared-arrival
+reminder consumers use the persisted allocation, including with grouping off
+or Auto Pay enabled; invoice and Auto Pay policies remain unchanged), `/api/reports/:token/*` (the
 service-report V1 payload — `/data`, the PDF at `/:token`, `/map.svg`, and
 the queued PDF / report-email renders that share `buildReportV1Data` —
 renders the report's IDENTITY facts from the completion-time snapshot on

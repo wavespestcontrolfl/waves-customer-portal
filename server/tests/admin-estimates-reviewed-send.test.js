@@ -186,6 +186,24 @@ beforeEach(() => {
 });
 
 describe('reviewed send attempt receipts', () => {
+  test('a repeat customer open between preview and scheduling preserves the reviewed version', async () => {
+    row.status = 'viewed';
+    row.view_count = 1;
+    row.last_viewed_at = '2026-01-01T12:00:00Z';
+    const preview = await invoke('/:id/send-preview', 'get');
+    row.view_count = 2;
+    row.last_viewed_at = '2026-01-02T12:00:00Z';
+    const response = await invoke('/:id/send', 'post', {
+      ...scheduledAttempt().body,
+      expectedEditVersion: preview.body.editVersion,
+      messageVersion: preview.body.messageVersion,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.body.scheduled).toBe(true);
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('a terminal pre-dispatch schedule failure replays failure instead of the queued receipt', async () => {
     const { entry, body } = scheduledAttempt();
     row.status = 'send_failed';
