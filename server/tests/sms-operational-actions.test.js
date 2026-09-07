@@ -176,6 +176,16 @@ describe('SMS operational evidence and ownership', () => {
     expect(prompt).toContain('Please send the estimate');
   });
 
+  test('the prompt carries text, direction, time and opaque property ids only', () => {
+    const prompt = buildPrompt({ message: source('The controller is beside the garage.'), history: [source('Hi there', 'outbound')],
+      properties: [{ id: PROPERTY_ID, address_line1: '100 Example Lane', city: 'Sarasota', zip: '34236' }] });
+    expect(prompt).toContain(PROPERTY_ID);
+    expect(prompt).toContain('"direction":"outbound"');
+    for (const leak of [CUSTOMER_ID, '+12025550101', numbers.locations.parrish.number, '100 Example Lane', 'Sarasota', '34236', '"id":"00000000-0000-4000-8000-000000000103"']) {
+      expect(prompt).not.toContain(leak);
+    }
+  });
+
   test('a split readback spanning the current SMS becomes an explicit review exception', async () => {
     dispatchWithFallback.mockClear();
     const result = await extractSmsOperations({
