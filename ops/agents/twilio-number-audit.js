@@ -46,14 +46,27 @@ const TOLL_FREE = /^\+1(800|833|844|855|866|877|888)\d{7}$/;
 // carries phone numbers by design (the brand registration hangs off it); a
 // toll-free verification bundle covers exactly its one toll-free number. Neither
 // is a fleet-wide product, so neither counts toward — or against — coverage.
-const A2P_MESSAGING_PROFILE_POLICY = 'RNb0d4771c2c98518d916a3d4cd70a8f8b';
-const TOLLFREE_VERIFICATION_POLICY = 'RNa282dd7f3dbef8586501ca2e045e764c';
-// CNAM: Twilio only self-serves local numbers (toll-free CNAM goes through
-// Support), so a toll-free line is exempt from the CNAM coverage requirement.
+const NON_FLEET_POLICIES = new Set([
+  'RNb0d4771c2c98518d916a3d4cd70a8f8b', // A2P Messaging Profile
+  'RNa282dd7f3dbef8586501ca2e045e764c', // Toll-free verification
+]);
+// The fleet-wide products every Waves number must sit on, by Twilio's fixed
+// policy SID. A product that is rejected, expired, or emptied is a defect in its
+// own right — otherwise it would simply drop out of the coverage loop. CNAM:
+// Twilio only self-serves local numbers (toll-free CNAM goes through Support),
+// so a toll-free line is exempt from that one.
 const CNAM_POLICY = 'RNf3db3cd1fe25fcfd3c3ded065c8fea53';
+const EXPECTED_PRODUCTS = Object.freeze({
+  'SHAKEN/STIR': 'RN7a97559effdf62d00f4298208492a5ea',
+  CNAM: CNAM_POLICY,
+  'Voice Integrity': 'RN5b3660f9598883b1df4e77f77acefba0',
+  'Branded Calling': 'RNa0b74679be7511921f4d2e3094fa6d23',
+});
 
 const last10 = (v) => String(v == null ? '' : v).replace(/\D/g, '').slice(-10);
-const short = (u) => (u ? String(u).replace(/^https?:\/\//, '') : '(none)');
+const day = (d) => new Date(d).toISOString().slice(0, 10);
+// Display only: drops the https:// everyone shares; any other scheme stays visible.
+const short = (u) => (u ? String(u).replace(/^https:\/\//, '') : '(none)');
 
 // ── 1 + 2. Registry membership and routing, per owned number ─────────────
 function auditRouting(numbers, sandbox, ownedNumbers) {
@@ -98,27 +111,33 @@ async function auditTrustHub(client, fleet, numberBySid) {
     ...(await client.trusthub.v1.trustProducts.list({ limit: 50 })).map(p => ({ kind: 'product', ...p })),
   ];
   console.log('\n=== TRUST HUB ===');
-  const livePerPolicy = new Map(); // policySid → { bundle, endpoints } — the approved bundle carrying the most numbers
+  // policySid → { bundle, endpoints }: coverage per policy is the UNION of every
+  // approved, unexpired bundle of that policy that carries numbers (duplicates
+  // sometimes both carry a few); `bundle` names the first one seen.
+  const livePerPolicy = new Map();
   for (const b of bundles) {
     const endpoints = await listEndpoints(b);
     // `status` has no expired value; an approved bundle past validUntil is still
     // reported approved, so the timestamp is checked on its own.
-    const validUntil = b.validUntil ? new Date(b.validUntil).toISOString().slice(0, 10) : null;
-    const expired = Boolean(validUntil) && validUntil < new Date().toISOString().slice(0, 10);
-    console.log(`  ${b.kind} ${b.sid}  "${b.friendlyName}"  status=${b.status}${expired ? ` EXPIRED ${validUntil}` : ''}  numbers=${endpoints.size}`);
-    if (expired && endpoints.size) defects.push(`${b.kind} ${b.sid}  "${b.friendlyName}" expired ${validUntil} while still carrying ${endpoints.size} number(s)`);
-    const fleetWide = b.status === 'twilio-approved' && !expired && endpoints.size > 0
-      && b.policySid !== TOLLFREE_VERIFICATION_POLICY && b.policySid !== A2P_MESSAGING_PROFILE_POLICY;
-    if (fleetWide && endpoints.size > (livePerPolicy.get(b.policySid)?.endpoints.size || 0)) livePerPolicy.set(b.policySid, { bundle: b, endpoints });
+    const expired = Boolean(b.validUntil) && new Date(b.validUntil) < new Date();
+    console.log(`  ${b.kind} ${b.sid}  "${b.friendlyName}"  status=${b.status}${expired ? ` EXPIRED ${day(b.validUntil)}` : ''}  numbers=${endpoints.size}`);
+    if (expired && endpoints.size) defects.push(`${b.kind} ${b.sid}  "${b.friendlyName}" expired ${day(b.validUntil)} while still carrying ${endpoints.size} number(s)`);
+    if (b.status !== 'twilio-approved' || expired || !endpoints.size || NON_FLEET_POLICIES.has(b.policySid)) continue;
+    const live = livePerPolicy.get(b.policySid);
+    if (live) endpoints.forEach(e => live.endpoints.add(e));
+    else livePerPolicy.set(b.policySid, { bundle: b, endpoints });
   }
+  for (const [name, policy] of Object.entries(EXPECTED_PRODUCTS)) {
+    if (!livePerPolicy.has(policy)) defects.push(`trust hub  no approved, unexpired ${name} product carrying numbers (policy ${policy})`);
+  }
+  if (![...livePerPolicy.values()].some(l => l.bundle.kind === 'profile')) defects.push('trust hub  no approved, unexpired customer profile carrying numbers');
   for (const { bundle, endpoints } of livePerPolicy.values()) {
     const required = bundle.policySid === CNAM_POLICY ? fleet.filter(p => !TOLL_FREE.test(p)) : fleet;
     const missing = required.filter(p => !endpoints.has(p));
     if (missing.length) console.log(`  MISSING from "${bundle.friendlyName}" (${bundle.sid}): ${missing.join(', ')}`);
     for (const m of missing) defects.push(`${m}  not assigned to live ${bundle.kind} "${bundle.friendlyName}" (${bundle.sid})`);
   }
-  const leftovers = bundles.filter(b => b.status === 'twilio-approved'
-    && b.policySid !== A2P_MESSAGING_PROFILE_POLICY && b.policySid !== TOLLFREE_VERIFICATION_POLICY
+  const leftovers = bundles.filter(b => b.status === 'twilio-approved' && !NON_FLEET_POLICIES.has(b.policySid)
     && livePerPolicy.get(b.policySid)?.bundle.sid !== b.sid);
   if (leftovers.length) console.log(`  info: ${leftovers.length} approved bundle(s) carry no numbers (duplicates / leftovers, not coverage): ${leftovers.map(b => `${b.sid} "${b.friendlyName}"`).join(', ')}`);
   return defects;
@@ -154,7 +173,10 @@ async function auditMessaging(client, fleet, numberBySid) {
     }
     // A service without a VERIFIED campaign registers nothing: its fleet numbers
     // surface individually in the per-number verdict below.
-    if (verified) pool.forEach(p => { registeredSenders.add(p.phoneNumber); poolAge.set(p.phoneNumber, Date.now() - new Date(p.dateCreated).getTime()); });
+    // Carrier registration starts at the LATER of the sender joining the pool and
+    // the campaign becoming VERIFIED (a pool can predate its campaign by days).
+    const verifiedAt = Math.max(0, ...campaigns.filter(c => c.campaignStatus === 'VERIFIED').map(c => new Date(c.dateUpdated).getTime()));
+    if (verified) pool.forEach(p => { registeredSenders.add(p.phoneNumber); poolAge.set(p.phoneNumber, Date.now() - Math.max(verifiedAt, new Date(p.dateCreated).getTime())); });
   }
   const verifications = await client.messaging.v1.tollfreeVerifications.list({ limit: 20 });
   const approvedTollFree = new Set(verifications.filter(v => v.status === 'TWILIO_APPROVED').map(v => numberBySid.get(v.tollfreePhoneNumberSid)).filter(Boolean));
@@ -204,11 +226,15 @@ async function main() {
   const numbers = owned.filter(n => n !== sandbox);
   const fleet = numbers.map(n => n.phoneNumber);
 
-  const defects = [
+  const defects = [];
+  // A configured sandbox number that matches no owned line means the documented
+  // test path points at a released or mistyped number — distinct from unset.
+  if (sandboxKey && !sandbox) defects.push(`sandbox  VOICE_RELAY_SANDBOX_NUMBER (…${sandboxKey.slice(-4)}) matches no owned number`);
+  defects.push(
     ...auditRouting(numbers, sandbox, new Set(owned.map(n => n.phoneNumber))),
     ...(await auditTrustHub(client, fleet, numberBySid)),
     ...(await auditMessaging(client, fleet, numberBySid)),
-  ];
+  );
   console.log(`\n=== DEFECTS (${defects.length}) ===`);
   for (const d of defects) console.log(`  ${d}`);
   if (!defects.length) console.log('  none — every owned number is registered, on the routing contract, on every live Trust Hub product, and A2P/toll-free covered.');

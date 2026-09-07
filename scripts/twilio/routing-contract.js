@@ -72,6 +72,8 @@ const SMS_ROUTING = Object.freeze({
 const SANDBOX_ROUTING = Object.freeze({
   voiceUrl: `${PORTAL_ORIGIN}/api/webhooks/twilio/relay-sandbox`,
   voiceMethod: 'POST',
+  voiceApplicationSid: '',
+  trunkSid: '',
 });
 
 // Names of the contract's fields whose value on `resource` differs — exact
