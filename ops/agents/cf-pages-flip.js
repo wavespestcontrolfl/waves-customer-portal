@@ -47,7 +47,7 @@ const fs = require('fs');
 const DEPLOY_TIMEOUT_MS = 20 * 60 * 1000;
 const DEPLOY_HARD_CEILING_MS = 60 * 60 * 1000;
 const POLL_MS = 20 * 1000;
-const TERMINAL = new Set(['success', 'failure', 'canceled']);
+const TERMINAL = new Set(['success', 'failure', 'canceled', 'skipped']);
 
 function makeClient({ token, account, fetchImpl = fetch }) {
   const base = `https://api.cloudflare.com/client/v4/accounts/${account}/pages/projects`;
@@ -85,6 +85,18 @@ function deployCommit(dep) {
   return dep && dep.deployment_trigger && dep.deployment_trigger.metadata && dep.deployment_trigger.metadata.commit_hash;
 }
 
+// Best-effort stop of a deployment that already snapshotted the flipped env.
+// Cloudflare has no cancel call; a forced delete is the closest thing, and the
+// operator is always told to verify.
+async function stopDeployment(cf, project, id, log) {
+  try {
+    await cf(`/${project}/deployments/${id}?force=true`, { method: 'DELETE' });
+    log(`deleted deployment ${id} (best effort)`);
+  } catch (e) {
+    log(`could not delete deployment ${id}: ${e.message}`);
+  }
+}
+
 function isInProgress(dep) {
   const status = dep && dep.latest_stage && dep.latest_stage.status;
   return Boolean(dep && dep.id) && !TERMINAL.has(status);
@@ -105,18 +117,31 @@ async function waitForDeployment(cf, project, id, { timeoutMs = DEPLOY_TIMEOUT_M
       pollErrors = 0;
     } catch (e) {
       pollErrors += 1;
-      if (pollErrors >= 3) throw new Error(`lost track of deployment ${id} (3 poll failures: ${e.message}) — verify it in the Cloudflare dashboard`);
+      if (pollErrors >= 3) {
+        // The deployment is still out there with the flipped env snapshotted:
+        // stop it before the caller rolls the env back.
+        await stopDeployment(cf, project, id, log);
+        const err = new Error(`lost track of deployment ${id} (3 poll failures: ${e.message}) — deleted best-effort; VERIFY in the Cloudflare dashboard`);
+        err.stopped = true;
+        throw err;
+      }
       await sleep(pollMs);
       continue;
     }
     const status = dep.latest_stage && dep.latest_stage.status;
     const stage = dep.latest_stage && dep.latest_stage.name;
     if (stage === 'deploy' && status === 'success') return dep;
-    if (status === 'failure' || status === 'canceled') throw new Error(`deployment ${id} ${status} at stage ${stage}`);
+    if (status === 'failure' || status === 'canceled' || status === 'skipped') {
+      const err = new Error(`deployment ${id} ${status} at stage ${stage}`);
+      err.terminal = true;
+      throw err;
+    }
     const elapsed = Date.now() - start;
     if (elapsed > hardCeilingMs) {
-      try { await cf(`/${project}/deployments/${id}?force=true`, { method: 'DELETE' }); log(`deleted deployment ${id} (best effort)`); } catch (e) { log(`could not delete deployment ${id}: ${e.message}`); }
-      throw new Error(`deployment ${id} still ${stage}/${status} after ${Math.round(hardCeilingMs / 60000)} min — deleted best-effort; VERIFY in the Cloudflare dashboard that it did not go live with the flipped env`);
+      await stopDeployment(cf, project, id, log);
+      const err = new Error(`deployment ${id} still ${stage}/${status} after ${Math.round(hardCeilingMs / 60000)} min — deleted best-effort; VERIFY in the Cloudflare dashboard that it did not go live with the flipped env`);
+      err.stopped = true;
+      throw err;
     }
     if (!warned && elapsed > timeoutMs) { warned = true; log(`deployment ${id} still ${stage}/${status} after ${Math.round(timeoutMs / 60000)} min — following it to a terminal state (hard ceiling ${Math.round(hardCeilingMs / 60000)} min)`); }
     await sleep(pollMs);
@@ -151,14 +176,21 @@ async function applyAndDeploy(cf, project, vars, { log = console.log, wait = wai
     log('env restored to previous values');
   };
   let dep;
+  let created = null;
   try {
     dep = await cf(`/${project}/deployments/${live.id}/retry`, { method: 'POST' });
+    created = dep && dep.id ? dep.id : null;
     if (liveCommit && deployCommit(dep) && deployCommit(dep) !== liveCommit) {
       throw new Error(`new deployment ${dep.id} is on commit ${deployCommit(dep)}, not the live ${liveCommit}`);
     }
     log('deployment created:', dep.id, 'commit=', deployCommit(dep));
     dep = await wait(cf, project, dep.id, { log });
   } catch (e) {
+    // Never restore the env while a created deployment could still finish
+    // with the flipped values snapshotted: a terminal one is already done,
+    // the wait loop already stopped a lost/over-ceiling one, anything else
+    // (commit mismatch, retry answered but wait never started) is stopped here.
+    if (created && !e.terminal && !e.stopped) await stopDeployment(cf, project, created, log);
     await rollback(e.message);
     throw e;
   }
@@ -193,7 +225,7 @@ async function main(argv, env) {
   await applyAndDeploy(cf, project, vars);
 }
 
-module.exports = { makeClient, refusalReason, rollbackFragment, waitForDeployment, applyAndDeploy, deployCommit, isInProgress };
+module.exports = { makeClient, refusalReason, rollbackFragment, waitForDeployment, applyAndDeploy, deployCommit, isInProgress, stopDeployment };
 
 if (require.main === module) {
   main(process.argv.slice(2), process.env).catch((e) => { console.error('ERROR', e.message); process.exit(1); });

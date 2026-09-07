@@ -11,7 +11,7 @@
 const path = require('path');
 const flip = require(path.resolve(__dirname, '../../ops/agents/cf-pages-flip.js'));
 
-function fakeCloudflare({ liveCommit = 'abc123', retryCommit = 'abc123', retryFails = false, finalStatus = 'success', statuses = null, newerBuilding = false } = {}) {
+function fakeCloudflare({ liveCommit = 'abc123', retryCommit = 'abc123', retryFails = false, finalStatus = 'success', statuses = null, newerBuilding = false, newerSkipped = false } = {}) {
   const calls = [];
   const project = {
     name: 'hub', production_branch: 'main',
@@ -19,7 +19,9 @@ function fakeCloudflare({ liveCommit = 'abc123', retryCommit = 'abc123', retryFa
     canonical_deployment: { id: 'dep_live', latest_stage: { name: 'deploy', status: 'success' }, deployment_trigger: { metadata: { commit_hash: liveCommit } } },
     latest_deployment: newerBuilding
       ? { id: 'dep_newer', environment: 'production', latest_stage: { name: 'build', status: 'active' }, deployment_trigger: { metadata: { commit_hash: 'fff999' } } }
-      : { id: 'dep_live', environment: 'production', latest_stage: { name: 'deploy', status: 'success' }, deployment_trigger: { metadata: { commit_hash: liveCommit } } },
+      : newerSkipped
+        ? { id: 'dep_skipped', environment: 'production', latest_stage: { name: 'build', status: 'skipped' }, deployment_trigger: { metadata: { commit_hash: 'eee888' } } }
+        : { id: 'dep_live', environment: 'production', latest_stage: { name: 'deploy', status: 'success' }, deployment_trigger: { metadata: { commit_hash: liveCommit } } },
   };
   let polls = 0;
   const fetchImpl = async (url, init = {}) => {
@@ -73,10 +75,25 @@ describe('applyAndDeploy', () => {
     expect(patches(calls)[1]).toEqual({ PUBLIC_NEW: null, PUBLIC_EXISTING: { type: 'plain_text', value: 'old' } });
   });
 
-  test('deployment on a different commit than live → rolled back', async () => {
+  test('deployment on a different commit than live → that deployment is stopped BEFORE the env rolls back', async () => {
     const { cf, calls } = fakeCloudflare({ retryCommit: 'def456' });
     await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v' }, quiet)).rejects.toThrow(/not the live abc123/);
+    const del = calls.findIndex((c) => c.method === 'DELETE' && c.p.startsWith('/hub/deployments/dep_new'));
+    const rb = calls.findIndex((c, i) => c.method === 'PATCH' && i > calls.findIndex((x) => x.method === 'PATCH'));
+    expect(del).toBeGreaterThan(-1);
+    expect(del).toBeLessThan(rb);
     expect(patches(calls)[1]).toEqual({ PUBLIC_NEW: null });
+  });
+
+  test('a skipped deployment is terminal: prompt rollback, no ceiling wait; a skipped latest deployment does not block a flip', async () => {
+    const { cf, calls } = fakeCloudflare({ finalStatus: 'skipped' });
+    await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v' }, { ...quiet, wait: (c, p, id, o) => flip.waitForDeployment(c, p, id, { ...o, pollMs: 1, sleep: async () => {} }) })).rejects.toThrow(/skipped/);
+    expect(calls.filter((c) => c.method === 'GET' && c.p === '/hub/deployments/dep_new')).toHaveLength(1);
+    expect(calls.some((c) => c.method === 'DELETE')).toBe(false);
+    expect(patches(calls)[1]).toEqual({ PUBLIC_NEW: null });
+    const ok = fakeCloudflare({ newerSkipped: true });
+    const dep = await flip.applyAndDeploy(ok.cf, 'hub', { PUBLIC_NEW: 'v' }, { ...quiet, wait: (c, p, id) => c(`/${p}/deployments/${id}`) });
+    expect(dep.id).toBe('dep_new');
   });
 
   test('deployment fails → rolled back', async () => {
@@ -116,7 +133,7 @@ describe('applyAndDeploy', () => {
     try {
       await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v' }, { ...quiet, wait: (c, p, id, o) => flip.waitForDeployment(c, p, id, { ...o, timeoutMs: 500, hardCeilingMs: 2000, pollMs: 1, sleep: async () => {} }) })).rejects.toThrow(/VERIFY in the Cloudflare dashboard/);
     } finally { Date.now = realNow; }
-    expect(calls.some((c) => c.method === 'DELETE' && c.p.startsWith('/hub/deployments/dep_new'))).toBe(true);
+    expect(calls.filter((c) => c.method === 'DELETE' && c.p.startsWith('/hub/deployments/dep_new'))).toHaveLength(1);
     expect(patches(calls)[1]).toEqual({ PUBLIC_NEW: null });
   });
 
@@ -132,6 +149,10 @@ describe('applyAndDeploy', () => {
     const flaky = async (path, init) => { if (!init && path.includes('/deployments/dep_new')) { failing += 1; throw new Error('ETIMEDOUT'); } return cf(path, init); };
     await expect(flip.applyAndDeploy(flaky, 'hub', { PUBLIC_NEW: 'v' }, { ...quiet, wait: (c, p, id, o) => flip.waitForDeployment(c, p, id, { ...o, pollMs: 1, sleep: async () => {} }) })).rejects.toThrow(/lost track of deployment dep_new \(3 poll failures/);
     expect(failing).toBe(3);
+    // Stopped (DELETE) before the env was restored — exactly once.
+    const dels = calls.filter((c) => c.method === 'DELETE' && c.p.startsWith('/hub/deployments/dep_new'));
+    expect(dels).toHaveLength(1);
+    expect(calls.indexOf(dels[0])).toBeLessThan(calls.findIndex((c, i) => c.method === 'PATCH' && i > calls.findIndex((x) => x.method === 'PATCH')));
     expect(patches(calls)[1]).toEqual({ PUBLIC_NEW: null });
   });
 
