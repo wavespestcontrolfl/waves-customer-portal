@@ -1,10 +1,12 @@
 import { useState, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { apiErrorMessage } from './seriesMove';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 export default function InlineTechPicker({ serviceId, currentTechId, technicians = [], onAssigned, onClose, anchorRect }) {
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
   const ref = useRef(null);
 
   useEffect(() => {
@@ -17,6 +19,7 @@ export default function InlineTechPicker({ serviceId, currentTechId, technicians
 
   const assign = async (techId) => {
     setBusy(true);
+    setError('');
     try {
       const token = localStorage.getItem('waves_admin_token');
       const res = await fetch(`${API_BASE}/admin/schedule/${serviceId}/assign`, {
@@ -26,11 +29,13 @@ export default function InlineTechPicker({ serviceId, currentTechId, technicians
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       onAssigned?.(techId);
+      onClose();
     } catch (e) {
-      console.error('Assign failed:', e);
+      // Stay open and say why — closing as if it had worked left the
+      // dispatcher believing the reassignment happened.
+      setError(apiErrorMessage(e, "Couldn't assign — try again"));
     }
     setBusy(false);
-    onClose();
   };
 
   const style = anchorRect ? {
@@ -73,6 +78,11 @@ export default function InlineTechPicker({ serviceId, currentTechId, technicians
       ))}
       {technicians.length === 0 && (
         <div className="px-3 py-2 text-12 text-zinc-400">No technicians available</div>
+      )}
+      {error && (
+        <div role="alert" className="px-3 py-2 text-13 text-alert-fg border-t border-hairline border-zinc-100">
+          {error}
+        </div>
       )}
     </div>
   );

@@ -14135,7 +14135,8 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
           background: 'rgba(255,255,255,0.96)',
           backdropFilter: 'blur(12px)',
           borderBottom: `1px solid ${PORTAL_SHELL.border}`,
-          padding: compact ? '12px 14px' : '14px 18px',
+          // Full-screen overlay: keep the header below the iOS status bar / notch.
+          padding: compact ? 'calc(12px + env(safe-area-inset-top, 0px)) 14px 12px' : '14px 18px',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',

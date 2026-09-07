@@ -951,6 +951,7 @@ function ExpensesTab() {
     String(new Date().getFullYear()),
   );
   const [categorizing, setCategorizing] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   // YEAR-wide uncategorized count from the summary (grouped by category, so
   // the null-category bucket is the whole year's backlog) — NOT just the 50
@@ -1005,6 +1006,9 @@ function ExpensesTab() {
 
   const handleAdd = async () => {
     if (!form.description || !form.amount || !form.expenseDate) return;
+    // Money-recording write — single-flight so a double click records one row.
+    if (saving) return;
+    setSaving(true);
     try {
       await adminFetch("/admin/tax/expenses", {
         method: "POST",
@@ -1022,6 +1026,8 @@ function ExpensesTab() {
       load();
     } catch (e) {
       alert("Failed: " + e.message);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -1198,6 +1204,7 @@ function ExpensesTab() {
           </div>{" "}
           <button
             onClick={handleAdd}
+            disabled={saving}
             style={{
               background: D.green,
               border: "none",
@@ -1206,10 +1213,11 @@ function ExpensesTab() {
               color: "#fff",
               fontSize: 12,
               fontWeight: 500,
-              cursor: "pointer",
+              cursor: saving ? "default" : "pointer",
+              opacity: saving ? 0.5 : 1,
             }}
           >
-            Save
+            {saving ? "Saving…" : "Save"}
           </button>{" "}
           <button
             onClick={() => setShowAdd(false)}
@@ -3852,7 +3860,7 @@ function AccountsReceivableTab() {
         <StatCard
           label="Total Outstanding"
           value={fmtM(s.total)}
-          color={s.total > 500 ? D.red : D.white}
+          color={s.total > 500 ? D.red : D.heading}
           sub={`${s.count} invoices`}
         />{" "}
         <StatCard label="Current" value={fmtM(s.current)} color={D.green} />{" "}
@@ -4800,20 +4808,28 @@ export default function TaxPage() {
   const [quickPnl, setQuickPnl] = useState(null);
   const [arSummary, setArSummary] = useState(null);
 
+  const [dashboardError, setDashboardError] = useState(false);
+  // The overview used to render nothing while /admin/tax/dashboard loaded
+  // and stay blank forever when it failed; it now says which, with a retry.
+  const loadDashboard = useCallback(() => {
+    setDashboardError(false);
+    adminFetch("/admin/tax/dashboard")
+      .then(setDashboard)
+      .catch(() => setDashboardError(true));
+  }, []);
+
   useEffect(() => {
     adminFetch("/admin/tax/bank-import/status")
       .then((s) => setBankImportOn(!!s?.enabled))
       .catch(() => {});
-    adminFetch("/admin/tax/dashboard")
-      .then(setDashboard)
-      .catch(() => {});
+    loadDashboard();
     adminFetch("/admin/tax/pnl?period=mtd")
       .then(setQuickPnl)
       .catch(() => {});
     adminFetch("/admin/tax/accounts-receivable")
       .then((d) => setArSummary(d?.summary))
       .catch(() => {});
-  }, []);
+  }, [loadDashboard]);
 
   const d = dashboard;
 
@@ -4875,6 +4891,40 @@ export default function TaxPage() {
               </button>
             );
           })}
+        </div>
+      )}
+      {!d && activeTab === "overview" && (
+        <div
+          style={{
+            padding: 48,
+            textAlign: "center",
+            color: dashboardError ? D.red : D.muted,
+            fontSize: 14,
+          }}
+        >
+          {dashboardError ? (
+            <>
+              <div role="alert">Could not load the tax overview</div>
+              <button
+                type="button"
+                onClick={loadDashboard}
+                style={{
+                  marginTop: 12,
+                  background: D.card,
+                  border: `1px solid ${D.border}`,
+                  borderRadius: 6,
+                  padding: "6px 14px",
+                  color: D.heading,
+                  fontSize: 13,
+                  cursor: "pointer",
+                }}
+              >
+                Retry
+              </button>
+            </>
+          ) : (
+            "Loading overview…"
+          )}
         </div>
       )}
       {/* Dashboard stats */}

@@ -954,10 +954,11 @@ describe('buildPlanForService strict mode (job-card hook P1)', () => {
     const aliasesDown = (table) => {
       const chain = {};
       for (const m of ['leftJoin', 'where', 'whereIn', 'select', 'orderBy']) chain[m] = () => chain;
-      chain.first = () => (table === 'scheduled_services as ss' ? Promise.resolve(service) : { catch: () => Promise.resolve(null) });
-      chain.catch = (fn) => (table === 'product_aliases'
-        ? Promise.resolve().then(() => fn(new Error('aliases down')))
-        : Promise.resolve(table === 'products_catalog' ? [{ id: 'p', name: 'Celsius WG' }] : []));
+      chain.first = () => Promise.resolve(table === 'scheduled_services as ss' ? service : null);
+      chain.then = (resolve, reject) => (table === 'product_aliases'
+        ? Promise.reject(new Error('aliases down'))
+        : Promise.resolve(table === 'products_catalog' ? [{ id: 'p', name: 'Celsius WG' }] : [])).then(resolve, reject);
+      chain.catch = (reject) => chain.then(undefined, reject);
       return chain;
     };
     aliasesDown.schema = { hasTable: async () => false };
