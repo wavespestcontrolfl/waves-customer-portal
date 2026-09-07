@@ -28,7 +28,7 @@ async function inRollback(work) {
 
 postgres('SMS copy migration on PostgreSQL', () => {
   beforeAll(() => {
-    if (!/^\/waves_qa_[a-f0-9]+$/.test(new URL(connection).pathname)) {
+    if (!/^\/(waves_test|waves_qa_[a-f0-9]+)$/.test(new URL(connection).pathname)) {
       throw new Error('Select a synthetic Waves QA database in a verified dev/preview environment');
     }
     db = knex({ client: 'pg', connection, pool: { min: 0, max: 1 } });
