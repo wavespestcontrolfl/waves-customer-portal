@@ -266,7 +266,12 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
   // is then a re-lock of a row the caller already holds (no-op), and the
   // 23505 retry savepoints nest under the caller's transaction as before.
   const run = async (trx) => {
-  await trx('customers').where({ id: customerId }).forUpdate().first('id');
+  // contact_role rides on the locked row: the FIRST primary this path creates
+  // carries the same role-derived relationship default as a lazily created
+  // one (defaultRelationshipForContactRole) so a manager profile's first
+  // address never reads "Not recorded" where the migration and the lazy
+  // path would have said managed_for_client.
+  const customer = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'contact_role');
   // Optional processing-claim fence (#3418 r16): a call-pipeline caller
   // passes { callLogId, procToken } so THIS durable insert is conditioned
   // on the live claim ATOMICALLY — FOR UPDATE on the call_log row holds
@@ -291,7 +296,8 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
     customer_id: customerId,
     label: label || null,
     occupancy_type: normalizeOccupancy(occupancyType),
-    // Only written when the caller classified it — a NULL relationship reads
+    // Written when the caller classified it; otherwise only the first
+    // primary gets the role default (insertRow) — a secondary's NULL reads
     // as "not recorded" in the admin panel, never as a default.
     ...(relationship ? { relationship } : {}),
     address_line1: street,
@@ -312,7 +318,12 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
     // Nested trx = SAVEPOINT: the 23505 retry below must not poison the
     // outer customer-lock transaction.
     const [r] = await sp('customer_properties')
-      .insert({ ...baseRow, is_primary: isPrimary, label: baseRow.label || (isPrimary ? 'Primary' : null) })
+      .insert({
+        ...baseRow,
+        is_primary: isPrimary,
+        label: baseRow.label || (isPrimary ? 'Primary' : null),
+        ...(isPrimary && !relationship ? { relationship: defaultRelationshipForContactRole(customer?.contact_role) } : {}),
+      })
       .returning('id');
     return r && (r.id || r);
   });
