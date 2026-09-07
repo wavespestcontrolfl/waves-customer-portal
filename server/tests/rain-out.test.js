@@ -2992,6 +2992,22 @@ describe('rain-out service', () => {
       expect(preview).toEqual({ ok: false, reason: 'note_cap_unavailable' });
     });
 
+    test('gate on: a same-day move is measured at the LONGEST part-of-day lead, whatever the clock says', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+      const { etDateString: today } = require('../utils/datetime-et');
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, target: { date: today(), window: { start: '18:00', end: '19:00' } }, customerNote: 'See you soon!' });
+
+      expect(result.ok).toBe(true);
+      const [preCheck, send] = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_v3').map((c) => c[1]);
+      // The send reads the hour AFTER the move; a move spanning noon grows
+      // "morning" into "afternoon" by two slots (pre-push P1).
+      expect(preCheck.weather_lead).toBe('rain is moving through your area this afternoon');
+      expect(preCheck.weather_lead.length).toBeGreaterThanOrEqual(send.weather_lead.length);
+    });
+
     test('gate on: a disabled v3 row is uncapped here — the send path owns that kill switch', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
