@@ -107,3 +107,11 @@ affected row. Message-only, warning-only and unnormalized legacy output stays
 unknown. Legacy payout, SEO enqueue and SEO approval results still need
 individual lifecycle adapters before those capabilities can be verified; no
 platform coverage is claimed for them by this split.
+
+Part A integrates merged main `e7c4e9eb4` and records its changed property-editor
+request as unsupported. Optional request calls now join the census; registry
+tests detect omitted tool modules, and the dedicated agent-estimate workflow
+preloads its own authorized estimate tools. Broader payload/helper dependency
+fingerprinting remains deferred alongside backend drift enforcement. Current
+fingerprints describe call expressions; changes outside those expressions still
+require manual review until final capability reconciliation.

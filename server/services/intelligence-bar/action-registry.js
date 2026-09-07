@@ -144,7 +144,7 @@ function discover(input, scope) {
 }
 
 function initialTools(context, scope) {
-  const domain = { estimates: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
+  const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
   const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_products', 'query_leads']);
   const discovery = scope.role === 'admin' && context !== 'tech' ? [DISCOVERY_TOOL] : [];
   return [...discovery, ...[...actions.values()]
