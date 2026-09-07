@@ -3179,6 +3179,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     const isInternalOnlyCompletion = deliveryPosture.isInternalOnly;
 
     const reportServiceLine = detectServiceLine(svc.service_type);
+    const lawnPlanCompletion = isWaveGuardLawnCompletion(svc) || (lawnDefaultsEnabled && reportServiceLine === 'lawn');
     const reportConfig = getServiceLineConfig(reportServiceLine);
 
     // Gauge-reading capture (flag-gated; UAT → rollout). On a LAWN visit the tech
@@ -4100,7 +4101,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
       treeShrubCloseoutWarnings = typedCompliance.warnings || [];
     }
 
-    if (claim.action === 'proceed' && !isIncompleteVisit && isWaveGuardLawnCompletion(svc)) {
+    if (claim.action === 'proceed' && !isIncompleteVisit && lawnPlanCompletion) {
       const plan = await buildPlanForService(svc.id, {
         db,
         equipmentSystemId: waveguardEquipmentSystemId || null,
@@ -6031,7 +6032,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
 
             await recordServiceProductNutrients(trx, {
               customerId: svc.customer_id,
-              turfProfile: lawnDefaultsEnabled ? {
+              turfProfile: lawnDefaultsEnabled && reportServiceLine === 'lawn' ? {
                 ...turfProfile,
                 lawn_sqft: nutrientTreatedSqft(p.areaValue, areaUnit, waveguardPlan?.propertyGate?.lawnSqft || null),
               } : turfProfile,
@@ -6071,7 +6072,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           await ComplianceService.createComplianceRecords(record.id, { trx });
         }
 
-        if (!isIncompleteVisit && isWaveGuardLawnCompletion(svc) && waveguardPlan?.protocol?.structured) {
+        if (!isIncompleteVisit && lawnPlanCompletion && waveguardPlan?.protocol?.structured) {
           const protocolCompletion = await recordLawnProtocolCompletion(trx, {
             service: svc,
             serviceRecord: record,
@@ -6219,7 +6220,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
         // owns status + updated_at; we own the service timing columns
         // on the same row.
         const scheduledServiceUpdate = { ...lifecycleUpdates };
-        if (!isIncompleteVisit && isWaveGuardLawnCompletion(svc) && waveguardPlan?.protocol?.structured) {
+        if (!isIncompleteVisit && lawnPlanCompletion && waveguardPlan?.protocol?.structured) {
           const structured = waveguardPlan.protocol.structured;
           const window = structured.window || {};
           scheduledServiceUpdate.lawn_protocol_key = structured.protocolKey || null;

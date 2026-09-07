@@ -262,4 +262,30 @@ describeDb('appointment completion defaults through PostgreSQL', () => {
     expect(Number(profile.lawn_sqft)).toBe(4000);
   });
 
+
+  test.each([null, 'Silver'])('a secondary-property area is explicit and retained for tier %p', async tier => {
+    const { f, visit } = await plannedVisit();
+    const [second] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Fixture Street' }).returning('*');
+    await knex('customers').where({ id: f.customerId }).update({ waveguard_tier: tier });
+    await knex('scheduled_services').where({ id: visit.id }).update({ property_id: second.id });
+    const options = { db: knex, completionDefaultsEnabled: true, includeCompletionDefaults: true };
+    const unmeasured = await buildPlanForService(visit.id, options);
+    expect(unmeasured.completionDefaults.lawnSqft).toBeNull();
+    const plan = await buildPlanForService(visit.id, { ...options, lawnSqft: 2500 });
+    expect(plan.completionDefaults).toMatchObject({ lawnSqft: 2500, propertyMatchesProfile: false });
+    expect(plan.propertyGate.lawnSqft).toBe(2500);
+    const record = await f.record(visit);
+    const completion = await recordLawnProtocolCompletion(knex, { service: visit, serviceRecord: record, plan, completionInput: { treatedSqft: 2500 } });
+    expect(completion.treated_sqft).toBe(2500);
+    const [product] = await knex('products_catalog').insert({ name: 'Fixture measured nutrient', category: 'fertilizer', analysis_n: 20 }).returning('*');
+    const [actual] = await knex('service_products').insert({ service_record_id: record.id, product_id: product.id, product_name: product.name, total_amount: 5, amount_unit: 'lb' }).returning('*');
+    const nutrient = await recordServiceProductNutrients(knex, {
+      customerId: f.customerId, turfProfile: { lawn_sqft: nutrientTreatedSqft(null, null, plan.propertyGate.lawnSqft) },
+      serviceRecord: record, serviceProduct: actual, product,
+    });
+    expect(Number(nutrient.lawn_sqft)).toBe(2500);
+    expect(Number(nutrient.n_applied_per_1000)).toBe(0.4);
+    expect(Number((await knex('customer_turf_profiles').where({ customer_id: f.customerId }).first()).lawn_sqft)).toBe(4000);
+  });
+
 });

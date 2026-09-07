@@ -131,7 +131,9 @@ function buildLawnCompletionDefaults(plan, context) {
   }).map((item) => completionItem(item, products.find((row) => row.productId === (item.substitution?.originalProductId || item.product?.id)), amountsAllowed)) : [];
   return {
     enabled: true, serviceId: plan.serviceId, propertyId: context.propertyId,
-    lawnSqft: context.propertyMatchesProfile ? plan.mixCalculator.lawnSqft : null,
+    // The planner already excludes an unproven saved profile. Its area can
+    // still be the technician's explicit measurement for a secondary lawn.
+    lawnSqft: plan.mixCalculator.lawnSqft,
     propertyMatchesProfile: context.propertyMatchesProfile,
     items, history: context.history,
     options: eligible ? [...plan.mixCalculator.items, ...plan.mixCalculator.conditionalOptions]
