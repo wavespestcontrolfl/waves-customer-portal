@@ -21,7 +21,7 @@ const EmailTemplateLibrary = require('./email-template-library');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { shortenOrPassthrough } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
-const { gsmSafeName } = require('./messaging/gsm-normalize');
+const { gsmSafeName, normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
 const { countSegments } = require('./messaging/segment-counter');
 const { isEnabled } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
@@ -273,6 +273,10 @@ async function bookingUrlFor(intent) {
 // past a single segment the only variable part worth dropping is the name,
 // so it is re-rendered with the generic greeting. Beyond that the body is
 // what /admin holds — it goes out as rendered and the count is logged.
+// Counts are taken on the body as it will leave (sendCustomerMessage
+// normalizes typographic punctuation first), so a curly quote in an /admin
+// edit does not make every candidate look like three UCS-2 segments.
+const segmentsOf = (body) => countSegments(normalizeGsmPunctuation(body)).segmentCount;
 async function renderOneSegmentSms(intent) {
   const vars = {
     first_name: gsmSafeName(firstNameOf(intent)),
@@ -281,15 +285,15 @@ async function renderOneSegmentSms(intent) {
   };
   let body = await renderSms(vars);
   if (!body) return body;
-  let segments = countSegments(body).segmentCount;
+  let segments = segmentsOf(body);
   if (segments > 1 && vars.first_name !== 'there') {
     const generic = await renderSms({ ...vars, first_name: 'there' });
-    if (generic && countSegments(generic).segmentCount < segments) {
+    if (generic && segmentsOf(generic) < segments) {
       body = generic;
-      segments = countSegments(body).segmentCount;
+      segments = segmentsOf(body);
     }
   }
-  if (segments > 1) logger.warn(`[booking-recovery] SMS for intent ${intent.id} renders as ${segments} segments (${countSegments(body).encoding}) — check the template in /admin`);
+  if (segments > 1) logger.warn(`[booking-recovery] SMS for intent ${intent.id} renders as ${segments} segments (${countSegments(normalizeGsmPunctuation(body)).encoding}) — check the template in /admin`);
   return body;
 }
 

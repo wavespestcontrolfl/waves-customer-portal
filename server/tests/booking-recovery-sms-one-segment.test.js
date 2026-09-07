@@ -75,6 +75,19 @@ describe('booking recovery SMS — one segment', () => {
     expect(smsTemplates.getTemplate).toHaveBeenCalledTimes(2);
   });
 
+  test('an /admin body with curly apostrophes is counted as it will leave (normalized), so the one-segment fallback is still found', async () => {
+    const curly = STOCK_BODY.replace(/'/g, '\u2019');
+    smsTemplates.getTemplate = jest.fn(async (key, vars) => {
+      let body = curly;
+      for (const [k, v] of Object.entries(vars)) body = body.replace(new RegExp(`\\{${k}\\}`, 'g'), () => v);
+      return stripPortalUrlScheme(body).trim();
+    });
+    const body = await _internals.renderOneSegmentSms(intent({ first_name: 'Mary-Catherine', service_id: 'termite' }));
+    expect(body).toMatch(/^Hello there!/);
+    const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
+    expect(countSegments(normalizeGsmPunctuation(body))).toMatchObject({ encoding: 'GSM_7', segmentCount: 1 });
+  });
+
   test('a missing template still short-circuits (no claim), and a body that cannot be brought under one segment is sent as rendered', async () => {
     smsTemplates.getTemplate = jest.fn(async () => null);
     expect(await _internals.renderOneSegmentSms(intent())).toBeNull();
