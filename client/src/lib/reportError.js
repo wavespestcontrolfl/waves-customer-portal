@@ -13,11 +13,28 @@
 export function reportError(error, context) {
   try {
     const meta = typeof context === 'string' ? { context } : context || {};
-    const payload = JSON.stringify({
+    sendReport({
       name: error?.name,
       context: meta.context,
       route: typeof window !== 'undefined' ? window.location?.pathname : undefined,
     });
+  } catch {
+    /* telemetry must never break the app */
+  }
+}
+
+// Native link diagnostics share the error reporter's transport and server-side
+// limits. These are fixed labels, never URLs, tokens, error messages or stacks.
+export function reportNativeLink({ platform, source, outcome, route, target } = {}) {
+  sendReport({
+    context: 'native-links',
+    nativeLink: { platform, source, outcome, route, target },
+  });
+}
+
+function sendReport(report) {
+  try {
+    const payload = JSON.stringify(report);
 
     // sendBeacon survives page unload (the typical case for a crash) but returns
     // false when it can't queue the payload — fall back to keepalive fetch then.

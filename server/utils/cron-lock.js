@@ -551,4 +551,4 @@ function getHeldConnection() {
   return lockSlotContext.getStore()?.conn;
 }
 
-module.exports = { runExclusive, isLocked, recordJobStart, recordJobEnd, wasLockSkipped, sanitizeJobError, getHeldConnection };
+module.exports = { runExclusive, isLocked, recordJobStart, recordJobEnd, recordMissedTick, wasLockSkipped, sanitizeJobError, getHeldConnection };
