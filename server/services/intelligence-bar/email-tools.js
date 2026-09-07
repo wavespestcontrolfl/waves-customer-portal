@@ -420,12 +420,15 @@ async function sendEmailReply({ email_id, body, _pinned_email }) {
       body.replace(/\n/g, '<br>'),
       email.gmail_thread_id
     );
+    if (!result?.id) return { outcome_unknown: true, warning: 'Gmail returned no message identifier. Check the sent thread before retrying.' };
 
     // Log internal ids, not the recipient address (PII stays out of logs).
     logger.info(`[intelligence-bar:email] Sent reply to email ${email.id}: ${result.id}`);
 
     return {
       success: true,
+      state: 'provider_accepted',
+      providerMessageId: result.id,
       sent_to: email.from_address,
       message_id: result.id,
       subject: email.subject,
@@ -437,6 +440,7 @@ async function sendEmailReply({ email_id, body, _pinned_email }) {
 }
 
 async function replyViaSms({ email_id, customer_name, message, customer_id, _pinned_phone, _pinned_email }) {
+  let providerOutcome = null;
   try {
     let phone = null;
     let custName = customer_name;
@@ -521,6 +525,7 @@ async function replyViaSms({ email_id, customer_name, message, customer_id, _pin
     if (!smsResult.sent) {
       return { error: smsResult.reason || smsResult.code || 'SMS send blocked/failed' };
     }
+    providerOutcome = smsResult;
 
     // Mark the email as responded via SMS. The card disclosed this inbox
     // update — a zero-row update (email deleted while the card was pending)
@@ -552,14 +557,25 @@ async function replyViaSms({ email_id, customer_name, message, customer_id, _pin
 
     return {
       success: true,
+      state: 'provider_accepted',
+      providerMessageId: smsResult.providerMessageId || null,
+      auditLogId: smsResult.auditLogId || null,
       sent_to: phone,
       customer: custName,
       message,
-      note: `SMS sent to ${custName} at ${phone} instead of email reply.`,
-      ...(inboxWarning ? { warning: inboxWarning } : {}),
+      note: 'The SMS provider accepted the reply; delivery is not yet confirmed.',
+      ...(inboxWarning ? { warning: inboxWarning, partial: true } : {}),
     };
   } catch (err) {
-    logger.error('[intelligence-bar:email] reply_via_sms failed:', err);
+    const accepted = providerOutcome || err.providerOutcome;
+    if (accepted?.sent === true) return {
+      success: true, state: 'provider_accepted',
+      providerMessageId: accepted.providerMessageId || null,
+      auditLogId: accepted.auditLogId || null,
+      partial: !!email_id,
+      warning: 'The provider accepted the SMS, but the local inbox or audit update failed. Check its status before retrying.',
+    };
+    logger.error(`[intelligence-bar:email] reply_via_sms failed (code=${err.code || 'unknown'})`);
     return { error: err.message };
   }
 }

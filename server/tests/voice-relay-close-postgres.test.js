@@ -44,6 +44,35 @@ postgres('atomic relay segment append and composition', () => {
   });
   beforeEach(async () => { await db('call_commitments').delete(); await db('call_log').delete(); });
 
+  test.each(['conversation_relay', 'recorded_fixture'])('late close metrics cover both sockets without replacing %s provenance', async (provider) => {
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    const makeLeg = (key, generation, firstSendAt) => buildSegment({ sessionKey: key, generation,
+      text: `Caller: segment ${generation}`, startedAt: Date.now() - 10000,
+      turnCounts: { caller_turns: 1, agent_turns: 2, tool_calls: 3 },
+      turnStats: [{ promptAt: 0, firstSendAt, toolMs: 40, modelMs: 100 }],
+    });
+    const later = makeLeg('second', 2, 900);
+    const prior = { relay_segment_owners: ['first', 'second'], relay_segments: [later] };
+    const complete = { ...prior, relay_segments: [later, makeLeg('first', 1, 100)] };
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', metadata: complete,
+      transcription_provider: provider, call_summary: 'Owner-authored summary',
+      transcription_metadata: { source: 'existing', model: 'fixture-model', caller_turns: 99, summary_source: 'model' },
+    });
+    const convo = Object.assign(Object.create(RelayConversation.prototype), { callSid: 'CA-fixture' });
+    await convo._refreshCallSummary(complete);
+    let row = await db('call_log').first();
+    const metrics = provider === 'conversation_relay' ? row.transcription_metadata : row.transcription_metadata.relay;
+    expect(metrics).toMatchObject({ caller_turns: 2, agent_turns: 4, tool_calls: 6,
+      latency: { turns: 2, prompt_to_first_send_p95: 900, tool_ms_total: 80 },
+      segments: { count: 2, complete: true, telemetry_complete: true } });
+    expect(row.transcription_metadata).toMatchObject({ source: 'existing', model: 'fixture-model' });
+    expect(row.call_summary).toBe('Owner-authored summary');
+    if (provider !== 'conversation_relay') expect(row.transcription_metadata.caller_turns).toBe(99);
+    await convo._refreshCallSummary(prior, false); // a stale in-flight repair cannot regress the aggregate
+    row = await db('call_log').first();
+    expect((provider === 'conversation_relay' ? row.transcription_metadata : row.transcription_metadata.relay).caller_turns).toBe(2);
+  });
+
   test('a commitment pass waiting on the call lock uses the latest same-owner promise', async () => {
     const { recordRelayCommitments } = require('../services/call-commitments');
     const at = new Date();

@@ -87,14 +87,24 @@ an implicit exception. Wrapper/dynamic endpoints and local exports remain in
 scope. Server-generated action variants need separate semantic review even when
 one UI request site dispatches them.
 
-Current foundation census: 1,692 UI sites; ten transport exceptions; 1,682 domain
+The subsequent `625dc2c38` main integration records PR #4015's property lookup
+and two address-aware slot-search changes with upstream provenance and prior
+fingerprints. These three scheduling sites remain **unmapped**. Phase 3 must
+verify selected-property ownership and completeness, address-specific availability,
+and quote/property compatibility through the shared scheduling path; no scheduling
+parity is claimed by importing already-merged portal code into this foundation.
+The booking submission also carries `propertyId` in its separately constructed
+body. Its unchanged request call is not flagged by the source fingerprint;
+selected-property stamping and quote compatibility remain explicit Phase 3 work.
+
+Current foundation census: 1,693 UI sites; ten transport exceptions; 1,683 domain
 sites still unsupported/unverified in the matrix. Registration of existing tools
 has deliberately not been relabeled as verified application parity.
 
 ## Verification evidence
 
 - Real Express route + bearer authentication + domain executor + isolated Railway
-  development Postgres, scripted model: thirteen tests pass in
+  development Postgres, scripted model: fifteen tests pass in
   `server/tests/intelligence-bar-platform-db.test.js`. Independent row reads verify
   A changes while viewed B remains unchanged. Cases include ID tampering, bulk
   targeting, message-body names, surname mismatch, request replay, stale runner,
@@ -102,10 +112,21 @@ has deliberately not been relabeled as verified application parity.
   full-precision customer-version comparison under the domain row lock. Integrated
   regressions also cover saved-property destination changes, exact unlinked-email
   sender selection, cancellation receipts, and recovery before the first checkpoint.
+  Ambiguous reads now stop before invoking the model; target selection retains
+  the validated, bounded text history and original draft. Stale page hints do
+  not block unrelated or explicitly named requests. Task list/detail states are
+  derived from actor-bound receipts: settled actions become ready to continue,
+  failed/canceled/partial/unknown steps retain their actual status.
 - Client regression tests: eighteen pass across GlobalCommandPalette,
   PendingActionsCard, and useIntelligenceBar. They cover query-only navigation,
   non-URL appointment selection, double Enter, close/reopen, Clear races, failed results, restored warnings, and
   timeout-after-commit recovery without a second POST.
+  The latest bar suite passes thirteen tests, including legacy threaded cards
+  retained across navigation with task recovery disabled and confirmation
+  settlement that survives a later close/reopen. Sixty-seven focused server
+  tests cover confirmation, pending receipts, and controlled Gmail/SMS outcomes.
+  A provider-accepted SMS with an incomplete inbox update stays partial and
+  blocks dependent writes; the accepted send ID is retained to prevent retries.
 - Integrated IB regression run: 51 suites / 539 tests passed with one search SQL
   assertion failing; preserving the upstream query corrected it, and the two
   affected suites then passed all 15 tests. Four optional context tests and the
@@ -123,6 +144,10 @@ has deliberately not been relabeled as verified application parity.
   No JS exceptions or horizontal sheet overflow occurred. Payers/requests were
   not mounted in the isolated harness; disabled thread reads returned their
   expected 404. Screenshot files are private artifacts under `.local/`.
+  A subsequent desktop/mobile run with threads enabled and platform tasks
+  disabled verified navigation, confirmation and reopened legacy receipts with
+  zero JS exceptions. Screenshots are `.local/ib-legacy-*-navigation.png` and
+  `.local/ib-legacy-*-persisted.png`; earlier unstyled screenshots are superseded.
 - Local preview: `http://127.0.0.1:5292/admin/customers` while the QA harness runs;
   this is not a deployed preview. The synthetic session is local-only.
 - Live-model/provider evaluation has not run. No provider credentials are loaded

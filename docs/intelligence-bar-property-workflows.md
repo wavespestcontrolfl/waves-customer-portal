@@ -97,6 +97,14 @@ production build, portal-brand check and capability coverage check pass.
 Independent review findings on label-clearing disclosure, invoice-lock
 contention and profile-refresh races were fixed and covered by regression tests.
 
+After integrating the reviewed foundation and PR #4015, the combined foundation
+and property Postgres suites pass all 19 tests. The two legacy route/invoice
+suites pass 56 tests after updating their mocks to the shared service contract;
+13 bar tests and 24 profile-state tests also pass. Both browser viewports were
+rerun successfully. The current census retains 1,695 sites: four verified
+property operations, ten transport exceptions, and 1,681 unsupported/unverified
+domain sites.
+
 The local preview is `http://127.0.0.1:5292/admin/customers` while the isolated
 harness runs. Vite must run from `client/`, with its explicit proxy pointing to
 the isolated API; starting it from the repository root omits Tailwind classes.

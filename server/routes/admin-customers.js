@@ -2708,7 +2708,7 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         .select(
           'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
           'estimate_slug', 'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
-          'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at',
+          'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at', 'property_id',
         ),
       db('services')
         // mosquito_seasonal is active as of 20260805000010, making the
@@ -2797,6 +2797,10 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         // Human-facing estimate number (EST-YYYY-NNNN) — same reference the
         // customer sees on the public quote page, cited by the provenance card.
         estimateSlug: estimate.estimate_slug || null,
+        // The quoted property (estimates.property_id, nullable) — the New
+        // Appointment modal narrows the estimate list to the address being
+        // booked; an unlinked quote stays offered at every property.
+        propertyId: estimate.property_id || null,
         status: estimate.status,
         serviceInterest: estimate.service_interest,
         acceptedAt: estimate.accepted_at,
