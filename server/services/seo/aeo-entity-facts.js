@@ -33,7 +33,8 @@ function compile(def) {
     // an approved value, not a wrong claim: "based in Lakewood Ranch".
     rejectRe: typeof def.reject_pattern === 'string' ? new RegExp(def.reject_pattern, 'i') : undefined,
     // 'prose' (default) matches the answer text with URLs removed; 'any' also
-    // matches the collected URLs (a site or tel: link satisfies website/phone).
+    // reads the prose with link destinations kept inline (a site or tel: link
+    // satisfies website/phone), under the same negation and subject checks.
     scope: def.scope === 'any' ? 'any' : 'prose',
   };
 }
@@ -98,11 +99,17 @@ const AFTER_NEGATION_RE = new RegExp(`^\\s*${QUALIFIER}(?:(?:(?!(?:and|or|but)\\
 const LIST_MARKER_RE = /^[ \t]*(?:[-*+\u2022]|\d{1,3}[.)])[ \t]+/;
 
 const URL_RE = /https?:\/\/[^\s)<>\]"']+|\btel:\+?[\d-]+|\bmailto:[^\s)>]+/gi;
+// A URL kept in the prose (scope:'any' facts) loses its scheme so "tel:" and
+// "https://" never read as a label/value colon in the clause around it.
+const URL_SCHEME_RE = /^(?:https?:\/\/|tel:|mailto:)/i;
 
 // Engines answer in Markdown with typographic quotes. Scoring reads plain
 // prose: emphasis and headings are stripped, and every URL (link destination
 // or bare link) is lifted out so a path like /fumigation/ can never become an
-// assertion; the URLs are returned separately for scope:'any' facts. List
+// assertion. With `keepUrls` the link destinations stay inline (scheme removed)
+// so a scope:'any' fact reads a phone or site link inside its own clause —
+// "Do not call tel:…" is a denial, "Orkin lists wavespestcontrol.com" is about
+// Orkin — instead of crediting any URL found anywhere in the answer. List
 // items stay on their own lines (each item is its own assertion) EXCEPT under
 // a negated list intro ("does not offer:"), whose items are joined into one
 // comma list so the intro governs every one of them.
@@ -131,15 +138,15 @@ function stripEmphasis(line) {
 const BRAND_NAME_AND_RE = /\bWaves\s+Pest\s+Control\s+and\s+Lawn\s+Care\b/g;
 const BRAND_NAME_RE = /\bWaves\s+Pest\s+Control(?:\s*[&+]\s*Lawn\s+Care)?\b/gi;
 
-function normalizeAnswer(text) {
-  const urls = [];
+function normalizeAnswer(text, keepUrls = false) {
+  const inline = url => (keepUrls ? ` ${url.replace(URL_SCHEME_RE, '')} ` : ' ');
   const flat = String(text || '')
     .replace(/[\u2018\u2019\u02BC\u2032]/g, "'")
     .replace(/[\u201C\u201D]/g, '"')
     .replace(BRAND_NAME_AND_RE, 'Waves')
     .replace(BRAND_NAME_RE, 'Waves')
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, label, href) => { urls.push(href); return label; })
-    .replace(URL_RE, url => { urls.push(url); return ' '; });
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, label, href) => `${label}${inline(href)}`)
+    .replace(URL_RE, inline);
   const lines = [];
   let governed = false;
   for (const raw of flat.split('\n')) {
@@ -160,7 +167,7 @@ function normalizeAnswer(text) {
     }
     lines.push(line);
   }
-  return { prose: lines.join('\n').replace(/:\n/g, ': ').replace(/:,\s*/g, ': '), urls: urls.join('\n') };
+  return lines.join('\n').replace(/:\n/g, ': ').replace(/:,\s*/g, ': ');
 }
 
 // An assertion only counts for or against Waves when Waves is its subject.
@@ -191,12 +198,20 @@ function lastIndexOfMatch(re, text) {
 // A competitor named as an OBJECT ("not affiliated with Orkin", "owned by
 // Orkin", "rather than Orkin") is not the subject a later pronoun inherits;
 // only a competitor in subject position is.
-const OBJECT_INTRO_RE = /\b(?:with|by|to|from|of|than|against|as|not|nor|or|and|including|includes?|versus|vs\.?)\s+(?:the\s+|a\s+|an\s+)?$/i;
+const OBJECT_INTRO_RE = /\b(?:with|by|to|from|of|than|against|as|under|not|nor|or|and|including|includes?|versus|vs\.?)\s+(?:the\s+|a\s+|an\s+)?$/i;
+// A passive agent that describes the clause's own subject ("Services offered
+// by Orkin include …") IS that clause's party: the head noun has no verb of
+// its own before the participle. "Waves is owned by Orkin" keeps Orkin as
+// the relation's object because the copula precedes the participle.
+const PASSIVE_AGENT_HEAD_RE = /(?:^|[.;!?\n]|\b(?:but|however)\b)\s*(?:(?:the|these|those|all|its|their|any)\s+)?(?:(?!\b(?:is|are|was|were|be|been|being)\b)[\w'-]+\s+){0,4}(?:offered|provided|performed|delivered|run|operated|sold|handled|listed|advertised|marketed)\s+by\s+(?:the\s+)?$/i;
 
 function lastSubjectIndex(re, text) {
   let last = -1;
   re.lastIndex = 0;
-  for (const m of text.matchAll(re)) if (!OBJECT_INTRO_RE.test(text.slice(0, m.index))) last = m.index;
+  for (const m of text.matchAll(re)) {
+    const prefix = text.slice(0, m.index);
+    if (!OBJECT_INTRO_RE.test(prefix) || PASSIVE_AGENT_HEAD_RE.test(prefix)) last = m.index;
+  }
   return last;
 }
 
@@ -204,13 +219,6 @@ function aboutAnotherEntity(beforeClause, answerPrefix) {
   if (COMPARISON_INTRO_RE.test(beforeClause)) return true;
   const named = answerPrefix.replace(COMPARISON_PHRASE_RE, ' ');
   return lastSubjectIndex(OTHER_ENTITY_RE, named) > lastIndexOfMatch(WAVES_NAMED_RE, named);
-}
-
-function matchesAnywhere(compiled, text) {
-  compiled.scanRe.lastIndex = 0;
-  const hit = compiled.scanRe.test(text);
-  compiled.scanRe.lastIndex = 0;
-  return hit;
 }
 
 // A claim that captures a value ("founded in 2019", "based in Tampa") is
@@ -299,11 +307,12 @@ function isEntityQuestion(query) {
 function scoreEntityAnswer(query, text) {
   const question = entityQuestion(query);
   if (!question) return null;
-  const { prose, urls } = normalizeAnswer(text);
+  const prose = normalizeAnswer(text);
+  const linked = question.expect.some(key => FACTS[key].scope === 'any') ? normalizeAnswer(text, true) : null;
   const expected = {};
   for (const key of question.expect) {
     const fact = FACTS[key];
-    expected[key] = asserted(fact, prose) || (fact.scope === 'any' && matchesAnywhere(fact, urls));
+    expected[key] = asserted(fact, prose) || (fact.scope === 'any' && asserted(fact, linked));
   }
   const forbidden = {};
   for (const key of new Set([...cohort.global_forbid, ...question.forbid])) {
@@ -330,9 +339,14 @@ function asEntityFacts(value) {
   } catch { return null; }
 }
 
-/** A fact score needs an answer; it does not need resolved citations. */
+/**
+ * A fact score needs an answer; it does not need resolved citations. It must
+ * also have been scored under the active cohort version — a row scored under
+ * an earlier definition is not comparable and stays out of the dashboard.
+ */
 function isScorableAnswer(row) {
-  return row.measurement_version === MEASUREMENT_VERSION && row.answer_available === true && !!asEntityFacts(row.entity_facts);
+  return row.measurement_version === MEASUREMENT_VERSION && row.answer_available === true
+    && asEntityFacts(row.entity_facts)?.cohort === cohort.version;
 }
 
 function topLabels(counts, dictionary, limit = 3) {

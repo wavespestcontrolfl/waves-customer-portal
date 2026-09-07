@@ -264,6 +264,56 @@ test('a fumigation mention is a wrong claim only in an offer context', () => {
   expect(score('E6', 'Waves offers pest control; it does not offer fumigation.').forbidden.fumigation_offered).toBe(false);
 });
 
+test('facts need their relation or context; forbidden claims cover equivalent wording (GitHub review r2)', () => {
+  expect(score('E6', 'The company is called Waves Pest Control.').expected.pest_control).toBe(false);
+  expect(score('E5', 'Waves has an office in Sarasota, but does not serve Sarasota County.').expected.sarasota).toBe(false);
+  expect(score('E5', 'Service area: Manatee, Sarasota and Charlotte counties.')).toMatchObject({ expected: { manatee: true, sarasota: true, charlotte: true } });
+  expect(score('E5', 'Adam grew up in Sarasota.').expected.sarasota).toBe(false);
+  expect(score('E1', 'Waves started offering lawn care in 2022.').forbidden.wrong_founding_year).toBe(false);
+  expect(score('E1', 'Waves opened a Sarasota office in 2025.').forbidden.wrong_founding_year).toBe(false);
+  expect(score('E1', 'Waves began serving Charlotte County in 2025.').forbidden.wrong_founding_year).toBe(false);
+  expect(score('E4', 'Waves started offering lawn care in 2024.').expected.founded_2024).toBe(false);
+  expect(score('E1', 'Waves started in 2019.').forbidden.wrong_founding_year).toBe(true);
+  expect(byId('E12').expect).toEqual(['fdacs', 'fdacs_license']);
+  expect(score('E12', 'FDACS license JB000000 belongs to another company.')).toMatchObject({ expected: { fdacs: true, fdacs_license: false } });
+  expect(score('E6', 'Services offered by Orkin include termite treatment and fumigation.')).toMatchObject({ expected: { termite: false }, forbidden: { fumigation_offered: false } });
+  expect(score('E6', 'Services offered by Waves include termite treatment.').expected.termite).toBe(true);
+  expect(score('E1', 'Waves is owned by Rentokil.').forbidden.wrong_founder).toBe(true);
+  expect(score('E10', 'Do not call tel:+19412975749; that is not Waves.').expected.phone).toBe(false);
+  expect(score('E10', 'Orkin lists https://wavespestcontrol.com as a competitor.').expected.website).toBe(false);
+  expect(score('E10', 'Call [(941) 297-5749](tel:+19412975749) or [visit the site](https://www.wavespestcontrol.com/).')).toMatchObject({ right: 2 });
+  expect(score('E7', 'The annual inspection is separate from the warranty.').expected.bond_renewable).toBe(false);
+  expect(score('E7', 'The warranty is an optional, annually renewable bond.').expected).toMatchObject({ bond_optional: true, bond_renewable: true });
+  expect(score('E7', 'The bond is valid for one year.').expected.bond_renewable).toBe(true);
+  expect(score('E7', 'The bond repairs termite damage.').forbidden.damage_repair_coverage).toBe(true);
+  expect(score('E7', 'Waves will repair any termite damage under the bond.').forbidden.damage_repair_coverage).toBe(true);
+  expect(score('E7', 'Damage caused by termites will be repaired.').forbidden.damage_repair_coverage).toBe(true);
+  expect(score('E7', 'Waves will not repair termite damage.').forbidden.damage_repair_coverage).toBe(false);
+  expect(score('E8', "Waves is part of Orkin's franchise network.").forbidden.franchise).toBe(true);
+  expect(score('E8', 'Waves operates under the Orkin franchise.').forbidden.franchise).toBe(true);
+  expect(score('E7', 'The bond provides re-treatment at no cost.').forbidden.free_retreat_guarantee).toBe(true);
+  expect(score('E7', 'Retreatment is complimentary under the bond.').forbidden.free_retreat_guarantee).toBe(true);
+  expect(score('E7', 'The bond includes no-cost re-treatment.').forbidden.free_retreat_guarantee).toBe(true);
+  expect(score('E7', 'Re-treatment is provided under an active paid bond.').forbidden.free_retreat_guarantee).toBe(false);
+  expect(score('E1', 'Adam Benetti is a customer of Waves Pest Control.').expected.founder).toBe(false);
+  expect(score('E2', 'The article merely mentions Adam Benetti.').expected.founder).toBe(false);
+  expect(score('E2', 'Adam Benetti is the founder and lead technician of Waves.').expected.founder).toBe(true);
+  expect(score('E1', "Waves is Adam Benetti's company.").expected.founder).toBe(true);
+  expect(score('E7', 'The bond is included during year one.').forbidden.bond_included_first_year).toBe(true);
+  expect(score('E7', 'Year one includes the termite bond.').forbidden.bond_included_first_year).toBe(true);
+  expect(score('E7', 'The initial year comes with bond coverage.').forbidden.bond_included_first_year).toBe(true);
+  expect(score('E9', 'The two companies are not affiliated.').forbidden.alias_different).toBe(true);
+  expect(score('E9', 'There is no connection between the two businesses.').forbidden.alias_different).toBe(true);
+  expect(score('E9', 'They are unrelated brands.').forbidden.alias_different).toBe(true);
+  expect(score('E9', 'Waves is not affiliated with Orkin; the two names are the same business.')).toMatchObject({ expected: { alias_same: true }, forbidden: { alias_different: false } });
+});
+
+test('a row scored under another cohort version stays out of the dashboard', () => {
+  const current = row(byId('E1').query, { text: 'Founded by Adam Benetti.' });
+  const stale = { ...current, entity_facts: { ...current.entity_facts, cohort: 'entity-2026-01-v0' } };
+  expect(summarizeEntityObservations([current, stale])).toMatchObject({ total: 2, observed: 1 });
+});
+
 test('the founding-year fact needs founding context, but a bare year answer still counts', () => {
   expect(score('E4', 'Waves was founded in 2014, and its license was renewed in 2024.')).toMatchObject({ expected: { founded_2024: false }, forbidden: { wrong_founding_year: true } });
   expect(score('E4', '2024.').expected.founded_2024).toBe(true);
