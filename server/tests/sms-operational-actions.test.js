@@ -597,7 +597,11 @@ describe('fulfillment proof', () => {
 });
 
 describe('activation and intake', () => {
-  afterEach(() => { delete process.env.GATE_SMS_OPERATIONAL_ACTIONS; delete process.env.GATE_SMS_OPERATIONAL_ACTIONS_SINCE; });
+  afterEach(() => {
+    delete process.env.GATE_SMS_OPERATIONAL_ACTIONS;
+    delete process.env.GATE_SMS_OPERATIONAL_ACTIONS_SINCE;
+    delete process.env.GATE_SMS_COMMITMENT_FOLLOWUP;
+  });
   test('gate off and missing activation epoch perform no database work', async () => {
     const conn = jest.fn();
     expect(await runSmsOperationalActions({ conn })).toEqual({ skipped: 'gate_off' });
@@ -613,6 +617,16 @@ describe('activation and intake', () => {
     expect(eligibleMessage({ ...source('The controller is outside.', 'outbound'),
       from_phone: numbers.locations.parrish.number, message_type: 'manual', status: 'delivered' })).toBe(false);
   });
+  test.each(['failed', 'undelivered'])('only captured promises retain eligibility after %s', (status) => {
+    process.env.GATE_SMS_OPERATIONAL_ACTIONS = 'true';
+    process.env.GATE_SMS_COMMITMENT_FOLLOWUP = 'true';
+    const message = { ...source("I'll send the estimate", 'outbound'),
+      from_phone: numbers.locations.parrish.number, to_phone: '+12025550101', message_type: 'manual', status };
+    expect(eligibleMessage(message)).toBe(false);
+    expect(eligibleMessage(message, { captured: true })).toBe(true);
+    expect(eligibleMessage({ ...message, message_type: 'confirmation' }, { captured: true })).toBe(false);
+  });
+
   test('excludes automated outbound messages, reactions and the AI number', () => {
     expect(eligibleMessage(source('Please send the estimate'))).toBe(true);
     expect(eligibleMessage({ ...source('Reminder', 'outbound'), from_phone: numbers.locations.parrish.number,

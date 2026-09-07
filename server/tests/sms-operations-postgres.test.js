@@ -543,7 +543,9 @@ postgres('SMS operations on PostgreSQL', () => {
     await applySmsCommitmentUpdate(mockPg, row.id, { customerId: message.customer_id, action: 'fulfill', reviewedBy: randomUUID() });
     expect(await mockPg('call_commitments').first()).toMatchObject({ status: 'fulfilled', human_state: 'confirmed' });
     expect((await mockPg('notifications').first()).read_at).not.toBeNull();
-    expect(await mockPg('audit_log').where({ action: 'sms.commitment.fulfill' })).toHaveLength(1);
+    const audits = await mockPg('audit_log').where({ action: 'sms.commitment.fulfill' });
+    expect(audits).toHaveLength(1);
+    expect(audits[0].actor_type).toBe('technician');
     expect(await listSmsCommitments(mockPg, { customerId: message.customer_id })).toEqual([]);
     expect(await refreshSmsCommitments({ conn: mockPg, now: new Date(now.getTime() + 25 * 3600000) })).toMatchObject({ scanned: 0 });
     expect(await mockPg('notifications')).toHaveLength(1);
@@ -589,6 +591,24 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await recordMessageOperations(mockPg, message, result, context)).toEqual({ skipped: 'source_changed' });
     expect(await mockPg('call_commitments')).toEqual([]);
     expect((await mockPg('sms_log').first()).operational_analysis).toBeNull();
+  });
+
+  test.each(['failed', 'undelivered'])('a captured outbound promise still follows up after %s', async (status) => {
+    message = { ...message, direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone,
+      message_type: 'manual', status: 'sent', message_body: "I'll send the estimate" };
+    await mockPg('sms_log').where({ id: message.id }).update(message);
+    context = await loadMessageContext(mockPg, message);
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], quote: message.message_body, basis: 'promise',
+      due_at: new Date(message.created_at.getTime() + 1000).toISOString() };
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('sms_log').where({ id: message.id }).update({ status });
+    const verify = jest.fn(async () => ({ verdict: 'open' }));
+    await refreshSmsCommitments({ conn: mockPg, now: new Date(message.created_at.getTime() + 2000), verify });
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.any(String),
+      expect.objectContaining({ metadata: expect.objectContaining({ triggerKey: 'sms_operational_followup' }) }));
   });
 
   test('disabled automation keeps recorded open work readable', async () => {

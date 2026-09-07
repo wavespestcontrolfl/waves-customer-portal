@@ -31,7 +31,8 @@ const keyOf = (item) => `${item.party}:${item.kind}:${hashExtractionSource(
   JSON.stringify([item.quote, item.property_id, item.description]),
 ).slice(0, 20)}`;
 
-function eligibleMessage(message = {}) {
+function eligibleMessage(message = {}, { captured = false } = {}) {
+  const statuses = captured ? ['sent', 'delivered', 'failed', 'undelivered'] : ['sent', 'delivered'];
   const ourNumber = message.direction === 'inbound' ? message.to_phone : message.from_phone;
   return !!message.customer_id && !!message.message_body
     && !isInternalTestCustomerId(message.customer_id)
@@ -39,7 +40,7 @@ function eligibleMessage(message = {}) {
     && !!numbers.findByNumber(ourNumber)
     && !EXCLUDED_TYPES.includes(message.message_type)
     && (message.direction === 'inbound'
-      || (smsCommitmentsEnabled() && HUMAN_TYPES.includes(message.message_type) && ['sent', 'delivered'].includes(message.status)));
+      || (smsCommitmentsEnabled() && HUMAN_TYPES.includes(message.message_type) && statuses.includes(message.status)));
 }
 
 // Temporal qualifiers anywhere in the current SMS require staff review, even
@@ -258,7 +259,8 @@ async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, re
     if (!smsCommitmentsEnabled()) throw Object.assign(new Error('SMS follow-up is disabled'), { status: 409 });
     const { applyHumanUpdate } = require('./call-commitments');
     const updated = await applyHumanUpdate(trx, id, { action, note, reviewedBy });
-    await recordAuditEvent({ trx, critical: true, actor_type: 'admin', actor_id: reviewedBy,
+    // Staff tokens resolve to technicians rows, including the admin role.
+    await recordAuditEvent({ trx, critical: true, actor_type: 'technician', actor_id: reviewedBy,
       action: `sms.commitment.${action}`, resource_type: 'call_commitment', resource_id: id,
       metadata: { sms_log_id: source.id, customer_id: customerId } });
     await trx('notifications').where({ recipient_type: 'admin' })
@@ -289,7 +291,9 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
     if (!smsCommitmentsEnabled()) return { scanned, fulfilled, unverified, skipped: 'gate_off' };
     scanned += 1;
     const message = await conn('sms_log').where({ id: row.sms_log_id }).first(...SOURCE_COLUMNS);
-    if (!message || !eligibleMessage(message)) continue;
+    // A later delivery failure cannot erase already-recorded staff work.
+    // Intake still refuses failed sources; captured promises stay actionable.
+    if (!message || !eligibleMessage(message, { captured: true })) continue;
     // The SMS foreign key follows merges and merge undo. Embedded context
     // is only a snapshot; never let its former owner strand the obligation.
     const current = { ...row, sms_context: { ...row.sms_context, customer_id: message.customer_id } };
@@ -302,7 +306,7 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
       const customer = await trx('customers').where({ id: message.customer_id }).whereNull('deleted_at').forUpdate().first();
       if (!customer) return;
       const source = await trx('sms_log').where({ id: message.id }).forUpdate().first();
-      if (!source || !eligibleMessage(source) || source.customer_id !== message.customer_id || source.message_body !== message.message_body) return;
+      if (!source || !eligibleMessage(source, { captured: true }) || source.customer_id !== message.customer_id || source.message_body !== message.message_body) return;
       const live = await trx('call_commitments').where({ id: row.id }).forUpdate().first();
       if (!smsCommitmentsEnabled() || live?.status !== 'open' || live.human_state != null) return;
       const latest = { ...live, sms_context: { ...live.sms_context, customer_id: source.customer_id } };
