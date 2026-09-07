@@ -15,6 +15,11 @@ function refuse(reason) {
 /** Called by the canonical saved-card charger under its invoice/customer locks. */
 async function assertVisitCompletionCharge(trx, invoice, packetId) {
   if (invoice.visit_completion_packet_id !== packetId || invoice.payer_id) refuse('invoice_owner_changed');
+  // Plan creation holds this invoice lock, but a draft may have no reminder
+  // sequence to stop. The plan itself owns its collection arrangement.
+  if (await trx('payment_plans').where({ invoice_id: invoice.id, status: 'active' }).first('id')) {
+    refuse('active_payment_plan');
+  }
   const peek = await trx('visit_completion_packets as p').join('service_visits as v', 'v.id', 'p.visit_id')
     .where('p.id', packetId).first('v.id', 'v.stop_base_key');
   if (!peek) refuse('packet_missing');

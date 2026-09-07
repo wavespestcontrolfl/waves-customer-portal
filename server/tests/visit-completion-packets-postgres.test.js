@@ -85,6 +85,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     // Only the synthetic fixture's rows; the private database's seeded catalog
     // and migration data remain intact for later billing/UI verification.
     await mockPg('stripe_orphan_charges').where({ customer_id: fixture.customerId }).del();
+    await mockPg('payment_plans').where({ customer_id: fixture.customerId }).del();
     await mockPg('invoices').where({ customer_id: fixture.customerId }).del();
     if (fixture.estimateIds.length) {
       await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ source_estimate_id: null });
@@ -270,6 +271,39 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).update({ status: 'refunded' });
     expect((await require('../services/closeout-status').getCloseoutStatus(fixture.serviceIds[1], { knex: mockPg })).facts.invoice)
       .toMatchObject({ reason: 'parked_manual_refunded_invoice', refundedInvoiceId: saved.body.billing.invoiceId });
+  });
+
+  test.each(['active', 'completed', 'cancelled'])('the %s installment plan is checked even without a reminder sequence', async (planStatus) => {
+    const methodId = randomUUID();
+    await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,
+      processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_fixture_plan',
+      is_default: true, autopay_enabled: true, exp_month: 12, exp_year: new Date().getUTCFullYear() + 1 });
+    await mockPg('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true, autopay_payment_method_id: methodId });
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    await mockPg('payment_plans').insert({ customer_id: fixture.customerId, invoice_id: invoiceId,
+      total_balance: 240, payment_amount: 60, payment_frequency: 'weekly',
+      plan_start_date: etDateString(), next_payment_date: etDateString(new Date(Date.now() + 7 * 86400000)),
+      status: planStatus });
+    expect(await mockPg('invoice_followup_sequences').where({ invoice_id: invoiceId })).toHaveLength(0);
+    let providerSubmissions = 0;
+    chargeInvoiceWithSavedCard.mockImplementation(async (id, _method, options) => {
+      await mockPg.transaction(async (trx) => {
+        const invoice = await trx('invoices').where({ id }).forUpdate().first();
+        await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+        await assertVisitCompletionCharge(trx, invoice, options.requireVisitCompletionPacketId);
+        providerSubmissions += 1;
+        await trx('invoices').where({ id }).update({ status: 'paid', stripe_payment_intent_id: 'pi_fixture_plan' });
+      });
+    });
+    const expectedState = planStatus === 'active' ? 'office_required' : 'paid';
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: expectedState });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: expectedState });
+    expect(providerSubmissions).toBe(planStatus === 'active' ? 0 : 1);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+      .toMatchObject({ status: planStatus === 'active' ? 'suppressed' : 'sent' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('an interrupted accepted ACH payment recovers without a second collection', async () => {
