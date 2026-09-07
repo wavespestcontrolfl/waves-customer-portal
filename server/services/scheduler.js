@@ -554,6 +554,12 @@ function initScheduledJobs() {
   const { isEnabled, logGateStatus } = require('../config/feature-gates');
   logGateStatus();
 
+  // A previous process that died mid-job (deploy kill) left its job_health
+  // row at 'running'; settle every such row whose advisory lock nobody
+  // holds (cron-lock.settleDeadRunningJobs). Fire-and-forget, fail-soft.
+  require('../utils/cron-lock').settleDeadRunningJobs()
+    .catch((err) => logger.warn(`[scheduler] dead-running job_health settle failed: ${err.message}`));
+
   // Cancel-notice late-claim rollout boundary (codex #3233 r35): stamped
   // at BOOT when the hook gate is on, so the boundary necessarily
   // predates every gated cancellation this deploy processes — a cancel

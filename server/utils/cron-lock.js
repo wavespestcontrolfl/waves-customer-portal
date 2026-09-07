@@ -551,4 +551,52 @@ function getHeldConnection() {
   return lockSlotContext.getStore()?.conn;
 }
 
-module.exports = { runExclusive, isLocked, recordJobStart, recordJobEnd, recordMissedTick, wasLockSkipped, sanitizeJobError, getHeldConnection };
+/**
+ * Settle job_health rows a dead process left at 'running'. recordJobStart
+ * writes 'running' and only the body's end writes anything else, so a
+ * deploy kill (or OOM) mid-body leaves the row saying running until the
+ * job's NEXT tick overwrites it — a weekly job reads as stuck for a week
+ * and the watchers re-alert every pass (ops-inbox triage 2026-09-05 lane
+ * 3: voice-profile-distiller, auto-dispatch; 09-07: three rows at 100–240
+ * minutes). The advisory lock is the proof of death: it is session-scoped,
+ * so a process that exited holds nothing. Every running row whose lock is
+ * FREE is marked failed with the reason; a row whose lock is HELD is an
+ * overlapping instance still in its body and is left alone, and an
+ * unknown probe (null) never settles on a guess. The update is pinned to
+ * the observed last_started_at so a tick that restarted the job between
+ * the read and the write keeps its fresh 'running'. Called once at boot
+ * from the scheduler; fail-soft, returns the settled job names.
+ */
+async function settleDeadRunningJobs() {
+  let rows;
+  try {
+    rows = await db('job_health').where({ last_status: 'running' }).select('job_name', 'last_started_at');
+  } catch (err) {
+    logger.warn(`[cron-lock] dead-running settle skipped: job_health unreadable (${err.message})`);
+    return [];
+  }
+  const settled = [];
+  for (const row of rows || []) {
+    const held = await isLocked(row.job_name);
+    if (held !== false) continue;
+    try {
+      const now = new Date();
+      const n = await db('job_health')
+        .where({ job_name: row.job_name, last_status: 'running', last_started_at: row.last_started_at })
+        .update({
+          last_status: 'failed',
+          last_finished_at: now,
+          updated_at: now,
+          last_error: 'process exited mid-run (advisory lock not held at boot)',
+          consecutive_failures: db.raw('consecutive_failures + 1'),
+        });
+      if (n) settled.push(row.job_name);
+    } catch (err) {
+      logger.warn(`[cron-lock] ${row.job_name}: dead-running settle failed (${err.message})`);
+    }
+  }
+  if (settled.length) logger.warn(`[cron-lock] settled ${settled.length} job_health row(s) left running by a dead process: ${settled.join(', ')}`);
+  return settled;
+}
+
+module.exports = { runExclusive, isLocked, recordJobStart, recordJobEnd, recordMissedTick, settleDeadRunningJobs, wasLockSkipped, sanitizeJobError, getHeldConnection };
