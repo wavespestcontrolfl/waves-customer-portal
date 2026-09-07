@@ -8,6 +8,7 @@
  * Set these as environment variables on Railway:
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
+ *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
@@ -2465,6 +2466,16 @@ const gates = {
   // gateEnvValue at CALL time, so a flip needs no redeploy; this entry is for
   // logGateStatus.
   techVisitNotifications: gateEnvValue('GATE_TECH_VISIT_NOTIFICATIONS'),
+
+  // Per-tech Twilio lines (Field Team Program Phase 0 item 3,
+  // config/twilio-numbers.js `fieldTech` + services/tech-line.js). ON: a text
+  // to a tech line also lands as a tech-home card + push for the technician
+  // holding it, a call rings that tech's cell before the office list, and the
+  // customer card carries the line. OFF (unset is the kill switch, dev AND
+  // prod): the registry reports the line as an unassigned office number —
+  // nothing dropped, nothing tech-specific. Read at CALL time by the
+  // registry; this entry is for logGateStatus.
+  techLines: gateEnvValue('GATE_TECH_LINES'),
 
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 

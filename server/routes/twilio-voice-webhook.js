@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { ringTargetForLine } = require('../services/tech-line');
 const twilio = require('twilio');
 const VoiceResponse = twilio.twiml.VoiceResponse;
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
@@ -156,15 +157,25 @@ function connectingAnnouncement(row) {
  * and /call-complete as the action. Shared by /voice and the PR 2A transfer
  * in /relay-complete — one shape, so the screen URLs never diverge.
  */
-function appendStaffRingDial(twiml, forwardNumbers, ringTimeoutSec, { language = null } = {}) {
+// Tech line (GATE_TECH_LINES): the holder's cell rings alone for this long
+// before the office list takes over — shorter than the office ring so a caller
+// who reaches voicemail waited ~50s at most, not a full minute.
+const TECH_LINE_RING_SEC = 20;
+
+function appendStaffRingDial(twiml, forwardNumbers, ringTimeoutSec, { language = null, stage = null } = {}) {
+  // A Spanish caller's selection rides the action (the ?lang=es the relay
+  // leg already uses), so an unanswered ring's voicemail stays Spanish.
+  // `stage=tech_line` marks the tech-first leg: /call-complete continues
+  // into the office list instead of voicemail when nobody accepted.
+  const params = [];
+  if (stage) params.push(`stage=${stage}`);
+  if (/^es/i.test(String(language || ''))) params.push('lang=es');
   const dial = twiml.dial({
     record: 'record-from-answer-dual',
     recordingStatusCallback: '/api/webhooks/twilio/recording-status',
     recordingStatusCallbackEvent: 'completed',
     timeout: ringTimeoutSec,
-    // A Spanish caller's selection rides the action (the ?lang=es the relay
-    // leg already uses), so an unanswered ring's voicemail stays Spanish.
-    action: /^es/i.test(String(language || '')) ? '/api/webhooks/twilio/call-complete?lang=es' : '/api/webhooks/twilio/call-complete',
+    action: `/api/webhooks/twilio/call-complete${params.length ? `?${params.join('&')}` : ''}`,
     answerOnBridge: true,
   });
   for (const number of forwardNumbers) {
@@ -1480,6 +1491,20 @@ router.post('/voice', async (req, res) => {
     // Waves-owned voicemail recorder.
     const twiml = new VoiceResponse();
     appendLanguageVestibule(twiml, { greetingUrl, vestibule }); // greeting = disclosure; replayed on a menu re-entry (hook P0)
+    // Tech line (GATE_TECH_LINES): the technician holding the line rings
+    // first, alone, with the same press-1 screen; an unaccepted leg continues
+    // into the office list from /call-complete?stage=tech_line, and voicemail
+    // only after both (owner ruling: tech cell → office → voicemail). No
+    // assignable holder or no cell on file → the office list rings as today.
+    if (numberConfig?.type === 'tech_line') {
+      const techCell = await ringTargetForLine(To).catch(() => null);
+      if (techCell) {
+        logger.info(`[voice] tech line ${maskPhone(To)}: ringing the holder first for ${maskSid(CallSid)}`);
+        appendStaffRingDial(twiml, [techCell], TECH_LINE_RING_SEC, { stage: 'tech_line' });
+        return res.type('text/xml').send(twiml.toString());
+      }
+    }
+
     const forwardNumbers = getFallbackForwardNumbers();
     if (forwardNumbers.length === 0) {
       logger.error('[voice] No inbound staff forward numbers configured; sending caller to Waves voicemail');
@@ -1532,6 +1557,22 @@ router.post('/call-complete', async (req, res) => {
       duration,
       forwardAccepted,
     });
+
+    // Tech line, stage 1 over without an accept (no answer, busy, or carrier
+    // voicemail picked up and nobody pressed 1): ring the office list now —
+    // the same TwiML an office line gets. The caller is still live, so no
+    // outcome is stamped here; the office leg's own /call-complete does that
+    // (voicemail / AI backstop / human, unchanged). An empty office list
+    // falls through to voicemail below exactly as an office line would.
+    if (req.query.stage === 'tech_line' && shouldRecordVoicemail) {
+      const officeNumbers = getFallbackForwardNumbers();
+      if (officeNumbers.length) {
+        logger.info(`[call-complete] tech line leg ${status} for ${maskSid(CallSid)} — ringing the office list`);
+        const twiml = new VoiceResponse();
+        appendStaffRingDial(twiml, officeNumbers, 30, { language: req.query.lang === 'es' ? 'es' : null });
+        return res.type('text/xml').send(twiml.toString());
+      }
+    }
 
     const callUpdate = {
       status,

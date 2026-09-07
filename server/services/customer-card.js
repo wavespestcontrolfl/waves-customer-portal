@@ -374,6 +374,10 @@ async function getCardData(token) {
   const location = WAVES_LOCATIONS.find((l) => l.id === card.location_id) || WAVES_LOCATIONS[0];
 
   let tech = null;
+  // The tech's own Twilio line (GATE_TECH_LINES, services/tech-line.js)
+  // replaces the office number on the card: texts and calls to it reach the
+  // tech first and the office still sees every one. Null → office line.
+  let techLine = null;
   if (card.technician_id) {
     const row = await db('technicians')
       .where({ id: card.technician_id })
@@ -385,6 +389,7 @@ async function getCardData(token) {
         firstName: firstNameOf(row.name) || null,
         photoUrl: await resolveTechPhotoUrl(row.photo_s3_key, row.photo_url),
       };
+      techLine = await require('./tech-line').lineForTechnician(card.technician_id);
     }
   }
 
@@ -398,8 +403,8 @@ async function getCardData(token) {
     },
     tech,
     phone: {
-      display: location.phone,
-      e164: location.phoneRaw,
+      display: techLine ? techLine.formatted : location.phone,
+      e164: techLine ? techLine.number : location.phoneRaw,
     },
     reviewUrl: card.review_short_url || card.review_target_url || location.googleReviewUrl,
     referralUrl,
