@@ -1,3 +1,4 @@
+const { randomUUID } = require('node:crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const apns = require('./apns');
@@ -142,8 +143,12 @@ class PushNotificationService {
   // (bell notifications, admin alerts) are unaffected.
   async sendToCustomer(customerId, notification, opts = {}) {
     if (opts.notificationId) {
-      const previous = await db('notifications').where({ id: opts.notificationId, recipient_type: 'customer', recipient_id: customerId }).first('metadata');
-      if (previous?.metadata?.pushState === 'accepted') return { ...summarize([], 0), sent: 1, deduped: true };
+      try {
+        const previous = await db('notifications').where({ id: opts.notificationId, recipient_type: 'customer', recipient_id: customerId }).first('metadata');
+        if (previous?.metadata?.pushState === 'accepted') return { ...summarize([], 0), sent: 1, deduped: true };
+      } catch {
+        return { ...summarize([], 0), reason: 'push_in_flight' };
+      }
     }
     // opts.minUpdatedAt: only fan out to subscriptions with a heartbeat at or
     // after this instant (push_first freshness) — otherwise a stale
@@ -165,19 +170,31 @@ class PushNotificationService {
     if (opts.minUpdatedAt) query.where('updated_at', '>=', opts.minUpdatedAt);
     if (opts.nativeOnly) query.whereIn('platform', ['ios', 'android']);
     const subs = await query;
+    const attemptToken = randomUUID();
     if (opts.notificationId) {
-      // The existing bell row is the event ledger. Claim BEFORE provider
-      // handoff; an interrupted attempt remains uncertain, never accepted.
-      const claimed = await db('notifications').where({ id: opts.notificationId, recipient_type: 'customer', recipient_id: customerId })
-        .whereRaw("COALESCE(metadata->>'pushState', '') NOT IN ('sending', 'accepted')")
-        .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ pushState: 'sending', pushAttemptedAt: new Date().toISOString() })]) });
-      if (!claimed) {
-        const current = await db('notifications').where({ id: opts.notificationId, recipient_type: 'customer', recipient_id: customerId }).first('metadata');
-        const accepted = current?.metadata?.pushState === 'accepted';
-        return { ...summarize([], 0), sent: Number(accepted), deduped: true, reason: accepted ? null : 'push_in_flight' };
+      // Reuse this bell/event claim with a bounded lease. Its native collapse
+      // tag stays unchanged on crash recovery. The lease covers every bounded
+      // provider stage plus headroom, rather than expiring mid-fan-out.
+      const leaseUntil = new Date(Date.now() + Math.max(120000, subs.length * 20000 + 30000)).toISOString();
+      try {
+        const claimed = await db('notifications').where({ id: opts.notificationId, recipient_type: 'customer', recipient_id: customerId })
+          .whereRaw(`COALESCE(metadata->>'pushState', '') <> 'accepted' AND (
+            COALESCE(metadata->>'pushState', '') <> 'sending' OR
+            COALESCE(NULLIF(metadata->>'pushLeaseUntil', '')::timestamptz,
+              NULLIF(metadata->>'pushAttemptedAt', '')::timestamptz + interval '10 minutes',
+              '-infinity'::timestamptz) < now())`)
+          .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ pushState: 'sending', pushAttemptToken: attemptToken, pushAttemptedAt: new Date().toISOString(), pushLeaseUntil: leaseUntil })]) });
+        if (!claimed) {
+          const current = await db('notifications').where({ id: opts.notificationId, recipient_type: 'customer', recipient_id: customerId }).first('metadata');
+          const accepted = current?.metadata?.pushState === 'accepted';
+          return { ...summarize([], 0), sent: Number(accepted), deduped: true, reason: accepted ? null : 'push_in_flight' };
+        }
+      } catch {
+        return { ...summarize([], 0), reason: 'push_in_flight' };
       }
     }
     const results = [];
+    let claimLost = false;
     for (const sub of subs) {
       if (typeof opts.shouldContinue === 'function') {
         let go = false;
@@ -187,20 +204,36 @@ class PushNotificationService {
           continue;
         }
       }
-      results.push(await sendSubscription(sub, notification).catch(() => ({ sent: false, failed: true, reason: 'provider_failure' })));
+      if (opts.notificationId) {
+        // A paused old worker cannot hand off another device after a newer
+        // worker reclaimed its expired lease.
+        const owned = await db('notifications').where({ id: opts.notificationId })
+          .whereRaw("metadata->>'pushAttemptToken' = ? AND (metadata->>'pushLeaseUntil')::timestamptz > now()", [attemptToken]).first('id').catch(() => null);
+        if (!owned) { claimLost = true; break; }
+      }
+      const result = await sendSubscription(sub, notification).catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
+      results.push(result);
+      if (result.sent && opts.notificationId) {
+        // Persist the first acceptance before walking another device, so a
+        // later provider crash does not erase an already accepted event.
+        await db('notifications').where({ id: opts.notificationId })
+          .whereRaw("metadata->>'pushAttemptToken' = ?", [attemptToken])
+          .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ pushState: 'accepted', pushAcceptedAt: new Date().toISOString() })]) })
+          .catch((err) => logger.error(`[push] Acceptance persistence failed: ${err.code || 'db_error'}`));
+      }
     }
     const stats = summarize(results, subs.length);
-    if (opts.notificationId) {
+    if (opts.notificationId && !claimLost) {
       const accepted = stats.sent > 0;
       // A failed outcome write never discards KNOWN provider acceptance.
-      await db('notifications').where({ id: opts.notificationId }).update({
+      await db('notifications').where({ id: opts.notificationId }).whereRaw("metadata->>'pushAttemptToken' = ?", [attemptToken]).update({
         metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({
           pushState: accepted ? 'accepted' : 'failed',
           pushAcceptedAt: accepted ? new Date().toISOString() : null,
         })]),
       }).catch((err) => logger.error(`[push] Outcome persistence failed: ${err.code || 'db_error'}`));
     }
-    return stats;
+    return claimLost && !stats.sent ? { ...stats, reason: 'push_in_flight' } : stats;
   }
 
   async sendToAdmins(notification) {

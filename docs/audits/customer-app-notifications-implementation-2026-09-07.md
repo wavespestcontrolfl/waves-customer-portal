@@ -70,6 +70,11 @@ promotions, review asks and media delivery remain outside the shortcut.
   shortcut, account switch, stale status and receipt choice at 1440px and 390px.
 - Production build and its brand/domain checks passed during implementation.
   Screenshots use fictional preview records.
+- Review regressions passed: 281 backend unit cases, 13 PostgreSQL cases and
+  21 client cases. Added coverage verifies abandoned-claim recovery, current
+  worker ownership, acceptance before fan-out, both legacy preference routes,
+  attempt-scoped en-route keys, deferred deposit receipts, SMS-compatible
+  fallback bodies, JWT refresh, and permission revocation on native foreground.
 
 Installed iPhone/Android delivery and taps still require owner test devices.
 No customer test notification, production gate flip, merge or deployment has

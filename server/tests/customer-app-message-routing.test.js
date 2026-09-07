@@ -140,3 +140,14 @@ test('automated app delivery observes the existing ET send window', async () => 
     expect(Twilio.sendSMS).not.toHaveBeenCalled();
   } finally { jest.useRealTimers(); }
 });
+
+test('an emoji-bearing supported notice keeps its allowed SMS fallback and records why', async () => {
+  Twilio.sendSMS.mockResolvedValue({ success: true, sid: 'SMemoji' });
+  expect(await sendCustomerMessage({ ...input, body: 'Your receipt is ready ✅' })).toMatchObject({
+    sent: true, channel: 'sms', requestedChannel: 'push', fallbackReason: 'push_body_unsupported',
+  });
+  expect(Twilio.sendSMS).toHaveBeenCalledTimes(1);
+  expect(Twilio.sendSMS.mock.calls[0][2]).toMatchObject({ explicitPushOnly: false, skipPushRouting: true });
+  prefs.sms_enabled = false;
+  expect(await sendCustomerMessage({ ...input, body: 'Your receipt is ready ✅' })).toMatchObject({ sent: false, code: 'SMS_OPTED_OUT' });
+});

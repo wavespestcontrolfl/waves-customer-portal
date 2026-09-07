@@ -4,7 +4,7 @@ const REFRESH_LEASE_KEY = 'waves_refresh_lease';
 const REFRESH_LEASE_MS = 15 * 1000;
 const REFRESH_ACQUIRE_MS = 12 * 1000;
 
-function tokenSessionIdentity(token) {
+export function tokenSessionIdentity(token) {
   if (!token || typeof token !== 'string') return null;
   try {
     const segment = token.split('.')[1];
@@ -21,7 +21,7 @@ function tokenSessionIdentity(token) {
   }
 }
 
-function sameRequestSession(left, right) {
+export function sameRequestSession(left, right) {
   return Boolean(left && right
     && left.customerId === right.customerId
     // Access tokens minted before durable refresh sessions shipped have no

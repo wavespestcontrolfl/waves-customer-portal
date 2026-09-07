@@ -18,7 +18,7 @@
  *
  * The web push path (lib/push-subscribe.js + /admin/push/subscribe) is untouched.
  */
-import api from '../utils/api';
+import api, { tokenSessionIdentity, sameRequestSession } from '../utils/api';
 import { isNativeApp, nativePlatform } from './platform';
 import { navigateToCustomerUrl } from './nativeLinks';
 
@@ -88,7 +88,7 @@ async function postToken(token) {
       method: 'POST',
       body: JSON.stringify({ platform, token, deviceInfo: `${platform} · WavesApp` }),
     });
-    if (authToken() !== jwt) return false;
+    if (authToken() !== jwt && !sameRequestSession(tokenSessionIdentity(jwt), tokenSessionIdentity(authToken()))) return false;
     pendingToken = null;
     return true;
   } catch (err) {
@@ -125,6 +125,12 @@ async function bindPushListeners(PushNotifications) {
     await PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
       const url = action?.notification?.data?.url;
       if (url && typeof window !== 'undefined') navigateToCustomerUrl(url);
+    });
+    const { App } = await import('@capacitor/app');
+    await App.addListener('appStateChange', ({ isActive }) => {
+      // Permission may change in OS Settings without restarting this app.
+      // Reconcile the token on every return, including outside Settings.
+      if (isActive) void initNativePush();
     });
   } catch (error) {
     // A partial bind must be retryable after an app/plugin recovery.
@@ -187,7 +193,10 @@ export async function requestNativePushPermission() {
 /** Confirm this device's registration, separately from its OS permission. */
 export async function nativePushConnectionState() {
   const permission = await nativePushPermissionState();
-  if (permission !== 'granted') return permission;
+  if (permission !== 'granted') {
+    await revokeRegistrationForDeniedPermission();
+    return permission;
+  }
   const token = rememberedToken();
   if (token) return await postToken(token) ? 'granted' : 'registration_unavailable';
   return requestNativePushPermission();

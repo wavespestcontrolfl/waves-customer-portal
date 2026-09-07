@@ -102,7 +102,7 @@ async function scheduledDepositReceiptAllowed(msg) {
       .where({ customer_id: msg.customer_id })
       .first('payment_receipt_channel');
     const channel = prefs?.payment_receipt_channel || 'sms';
-    return channel === 'sms' || channel === 'both';
+    return channel === 'sms' || channel === 'both' || channel === 'push';
   } catch {
     return true;
   }

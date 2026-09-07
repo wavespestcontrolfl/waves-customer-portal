@@ -201,6 +201,12 @@ async function sendCustomerMessage(input) {
   contactState = await loadSuppressionState(sendInput, contactState);
   const PushRouting = require('./push-channel-routing');
   if (await PushRouting.wantsAppFirst(sendInput)) {
+    if (!validateNoCustomerEmoji({ ...sendInput, channel: 'push' }, policy).ok) {
+      const fallback = await sendCustomerMessage({ ...input, channel: 'sms', metadata: {
+        ...input.metadata, requestedChannel: 'push', appFallbackReason: 'push_body_unsupported',
+      } });
+      return { ...fallback, requestedChannel: 'push', fallbackReason: 'push_body_unsupported' };
+    }
     sendInput.channel = 'push';
     sendInput.metadata = {
       ...sendInput.metadata, requestedChannel: 'push',

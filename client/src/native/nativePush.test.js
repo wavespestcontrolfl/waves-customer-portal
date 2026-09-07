@@ -22,16 +22,20 @@ vi.mock('./platform', () => ({
   nativePlatform: () => 'ios',
 }));
 vi.mock('./nativeLinks', () => ({ navigateToCustomerUrl }));
-vi.mock('../utils/api', () => ({ default: { request: vi.fn(async () => ({})) } }));
+vi.mock('../utils/api', async (importOriginal) => ({ ...await importOriginal(), default: { request: vi.fn(async () => ({})) } }));
 vi.mock('@capacitor/push-notifications', () => ({
   PushNotifications: nativeMocks.PushNotifications,
 }));
+vi.mock('@capacitor/app', () => ({ App: {
+  addListener: vi.fn(async (name, callback) => { nativeMocks.state.listeners[name] = callback; return { remove: vi.fn() }; }),
+} }));
 
 import api from '../utils/api';
 import {
   flushNativePushToken,
   initNativePush,
   nativePushPermissionState,
+  nativePushConnectionState,
   requestNativePushPermission,
 } from './nativePush';
 
@@ -119,4 +123,42 @@ describe('nativePush permission and tap handling', () => {
       }),
     }));
   });
+});
+
+it('accepts server registration after a refresh rotates the same customer session', async () => {
+  const jwt = (expiry, customerId = 'fixture-customer', sessionId = 'fixture-session') => `h.${btoa(JSON.stringify({ customerId, sessionId, exp: expiry }))}.s`;
+  localStorage.setItem('waves_token', jwt(1));
+  nativeMocks.state.permission = 'granted';
+  api.request.mockImplementationOnce(async () => {
+    localStorage.setItem('waves_token', jwt(2));
+    return { success: true };
+  });
+  await expect(requestNativePushPermission()).resolves.toBe('granted');
+  api.request.mockImplementationOnce(async () => {
+    localStorage.setItem('waves_token', jwt(3, 'other-customer', 'other-session'));
+    return { success: true };
+  });
+  await expect(requestNativePushPermission()).resolves.toBe('registration_unavailable');
+});
+
+it('revokes the remembered token when connection checking finds permission was removed', async () => {
+  localStorage.setItem('waves_token', 'test-customer-session');
+  nativeMocks.state.permission = 'granted';
+  await expect(requestNativePushPermission()).resolves.toBe('granted');
+  nativeMocks.state.permission = 'denied';
+  api.request.mockResolvedValueOnce({ deactivated: 1 });
+  await expect(nativePushConnectionState()).resolves.toBe('denied');
+  expect(api.request).toHaveBeenLastCalledWith('/push/native-unsubscribe', expect.objectContaining({ method: 'POST' }));
+  expect(localStorage.getItem('waves_native_push_token')).toBeNull();
+});
+
+it('revokes permission on native foreground even when the settings page is closed', async () => {
+  localStorage.setItem('waves_token', 'test-customer-session');
+  nativeMocks.state.permission = 'granted';
+  await initNativePush();
+  nativeMocks.state.permission = 'denied';
+  api.request.mockResolvedValueOnce({ deactivated: 1 });
+  nativeMocks.state.listeners.appStateChange({ isActive: true });
+  await vi.waitFor(() => expect(localStorage.getItem('waves_native_push_token')).toBeNull());
+  expect(api.request).toHaveBeenLastCalledWith('/push/native-unsubscribe', expect.objectContaining({ method: 'POST' }));
 });

@@ -24,6 +24,17 @@ export default function useAppNotifications(available, customerId) {
     return () => { current = false; };
   }, [available, customerId, attempt]);
 
+  useEffect(() => {
+    if (!available) return undefined;
+    const onVisible = () => { if (document.visibilityState === 'visible') refresh(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', refresh);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', refresh);
+    };
+  }, [available, refresh]);
+
   const enable = async () => {
     setBusy(true);
     const result = await requestNativePushPermission();
@@ -31,5 +42,5 @@ export default function useAppNotifications(available, customerId) {
     setBusy(false);
     if (result === 'granted') refresh();
   };
-  return { status, deviceState, busy, refresh, enable, ready: status?.enabled === true && status?.fresh === true };
+  return { status, deviceState, busy, refresh, enable, ready: status?.enabled === true && status?.fresh === true && ['web', 'granted'].includes(deviceState) };
 }

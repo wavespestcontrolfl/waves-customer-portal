@@ -1323,7 +1323,7 @@ const TwilioService = {
               original_message_type: "tech_arrived",
               appointment_progress_event: "tech_arrived",
               useCustomerChannel: true,
-              notificationEventKey: `scheduled-service:${scheduledServiceId}:arrived`,
+              ...(scheduledServiceId ? { notificationEventKey: `scheduled-service:${arrivalOccurrenceKey({ scheduledServiceId, scheduledDate, scheduledWindowStart, arrivedAt, customerId })}:arrived` } : {}),
             },
           }),
         );

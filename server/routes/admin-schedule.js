@@ -12911,14 +12911,14 @@ router.put('/:id/status', async (req, res, next) => {
       // the visit notice (covered / claim in flight / claim error / lease
       // expired) does not push at all.
       const nonOwner = enRouteResult && ['covered', 'claim_in_flight', 'claim_error', 'lease_expired'].includes(String(enRouteResult.smsOutcome || ''));
-      if (!nonOwner) {
+      if (!nonOwner && enRouteResult?.enRouteAt) {
         try {
           const NotificationService = require('../services/notification-service');
           await NotificationService.notifyCustomer(svc.customer_id, 'service', 'Technician en route', `Your Waves technician is on the way.`, {
             icon: '\u{1F697}',
             preferenceKey: 'tech_en_route',
             push: await require('../services/messaging/push-channel-routing').bellPushAllowed(svc.customer_id, 'tech_en_route'),
-            dedupeKey: svc.visit_id ? `visit:${svc.visit_id}:en-route` : `scheduled-service:${svc.id}:en-route`,
+            dedupeKey: trackTransitions.enRouteNotificationKey(svc, enRouteResult.enRouteAt),
             metadata: { scheduledServiceId: svc.id, ...(svc.visit_id ? { visitId: svc.visit_id } : {}) },
           });
         } catch (e) { logger.error(`[notifications] En route notification failed: ${e.message}`); }

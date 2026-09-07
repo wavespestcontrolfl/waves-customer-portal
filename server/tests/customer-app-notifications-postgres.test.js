@@ -52,6 +52,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     app = express();
     app.use(express.json());
     app.use('/api/notifications', require('../routes/notifications'));
+    app.use('/api/notification-prefs', require('../routes/notification-prefs'));
     app.use('/api/push', require('../routes/push'));
     app.use((err, req, res, next) => res.status(err.isJoi ? 400 : 500).json({ error: err.message }));
     server = await new Promise((resolve) => { const listener = app.listen(0, '127.0.0.1', () => resolve(listener)); });
@@ -134,6 +135,18 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect((await put({ enRouteChannel: 'push', weatherAlerts: false })).status).toBe(200);
   });
 
+  test('the deployed legacy endpoint hides App first and preserves it on a full preference round trip', async () => {
+    await mockPg('notification_prefs').where({ customer_id: property }).update({
+      en_route_channel: 'push', service_complete_channel: 'push', payment_receipt_channel: 'push',
+    });
+    const legacy = await get('/api/notification-prefs');
+    expect(legacy.body).toMatchObject({ enRouteChannel: 'sms', serviceCompleteChannel: 'sms', paymentReceiptChannel: 'sms' });
+    expect((await put({ ...legacy.body, weatherAlerts: false }, '/api/notification-prefs')).status).toBe(200);
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject({
+      en_route_channel: 'push', service_complete_channel: 'push', payment_receipt_channel: 'push', weather_alerts: false,
+    });
+  });
+
   test('global push off persists the bell and remains effective during rollback', async () => {
     await device();
     expect((await put({ pushEnabled: false })).status).toBe(200);
@@ -188,5 +201,55 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     expect((await first).push.accepted).toBe(true);
     expect(apns.send).toHaveBeenCalledTimes(1);
     expect((await mockPg('notifications').count('* as count').first()).count).toBe('1');
+  });
+
+  test.each([true, false])('an abandoned claim recovers with an explicit lease: %s', async (hasLease) => {
+    await device();
+    const bell = await Notifications.notifyCustomer(property, 'service', 'QA update', 'Fixture', { dedupeKey: 'qa-abandoned', push: false });
+    await mockPg('notifications').where({ id: bell.id }).update({ metadata: {
+      ...bell.metadata,
+      pushState: 'sending', pushAttemptToken: 'abandoned',
+      pushAttemptedAt: new Date(Date.now() - 11 * 60000).toISOString(),
+      ...(hasLease ? { pushLeaseUntil: new Date(Date.now() - 60000).toISOString() } : {}),
+    } });
+    const retry = await Notifications.notifyCustomer(property, 'service', 'QA update', 'Fixture', { dedupeKey: 'qa-abandoned', awaitPush: true });
+    expect(retry.id).toBe(bell.id);
+    expect(retry.push.accepted).toBe(true);
+    expect(apns.send).toHaveBeenCalledTimes(1);
+    expect((await mockPg('notifications').where({ id: bell.id }).first()).metadata).toMatchObject({ pushState: 'accepted' });
+  });
+
+  test('a resumed old worker cannot hand off a device or overwrite a newer claim', async () => {
+    await device();
+    const bell = await Notifications.notifyCustomer(property, 'service', 'QA update', 'Fixture', { dedupeKey: 'qa-owner-change', push: false });
+    const result = await Push.sendToCustomer(property, { title: 'QA update' }, {
+      notificationId: bell.id,
+      shouldContinue: async () => {
+        await mockPg('notifications').where({ id: bell.id }).update({ metadata: {
+          pushState: 'sending', pushAttemptToken: 'newer-worker',
+          pushLeaseUntil: new Date(Date.now() + 120000).toISOString(),
+        } });
+        return true;
+      },
+    });
+    expect(result).toMatchObject({ sent: 0, reason: 'push_in_flight' });
+    expect(apns.send).not.toHaveBeenCalled();
+    expect((await mockPg('notifications').where({ id: bell.id }).first()).metadata.pushAttemptToken).toBe('newer-worker');
+  });
+
+  test('provider acceptance is durable before the next device handoff', async () => {
+    await device(owner);
+    await device(property, 'android');
+    const bell = await Notifications.notifyCustomer(property, 'service', 'QA update', 'Fixture', { dedupeKey: 'qa-fanout-acceptance', push: false });
+    let checks = 0;
+    const result = await Push.sendToCustomer(property, { title: 'QA update' }, {
+      notificationId: bell.id,
+      shouldContinue: async () => {
+        if (++checks === 2) expect((await mockPg('notifications').where({ id: bell.id }).first()).metadata.pushState).toBe('accepted');
+        return true;
+      },
+    });
+    expect(checks).toBe(2);
+    expect(result.sent).toBe(2);
   });
 });
