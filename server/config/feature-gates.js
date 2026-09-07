@@ -2071,7 +2071,7 @@ const gates = {
   // (minutes per turf zone, hold, conditional-on-rain) from
   // @waves/irrigation-runtime buildWeekPlan. Off = today's copy exactly.
   // Kill = unset GATE_IRRIGATION_WEEK_PLAN.
-  irrigationWeekPlan: process.env.GATE_IRRIGATION_WEEK_PLAN === 'true',
+  irrigationWeekPlan: gateEnvValue('GATE_IRRIGATION_WEEK_PLAN'),
 
   // Saved Monday plan in My Property + the existing property-alerts sweep.
   // Explicit opt-in everywhere; email plan and property-alert gates still apply.

@@ -61,7 +61,6 @@ const SKIP = !process.env.DATABASE_URL;
     jest.clearAllMocks();
     mockFailedPlanReads = 0;
     delete process.env.GATE_PROPERTY_ALERTS;
-    gates.irrigationWeekPlan = true;
     gates.irrigationWeeklyEmail = true;
     process.env.GATE_IRRIGATION_APP_PLAN = 'true';
     process.env.GATE_IRRIGATION_WEEK_PLAN = 'true';
@@ -104,7 +103,6 @@ const SKIP = !process.env.DATABASE_URL;
     delete process.env.GATE_PROPERTY_ALERTS;
     delete process.env.IRRIGATION_RESTRICTION_POLICY;
     global.fetch = originalFetch;
-    gates.irrigationWeekPlan = false;
     gates.irrigationWeeklyEmail = false;
     await database?.destroy();
   });
@@ -144,6 +142,71 @@ const SKIP = !process.env.DATABASE_URL;
   async function resetDraft() {
     await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).delete();
   }
+
+  async function addLawnCustomer() {
+    const id = randomUUID();
+    await mockTransaction('customers').insert({ id, first_name: 'Second', phone: '9415550101',
+      email: 'second@example.invalid', active: true, pipeline_stage: 'active_customer',
+      address_line1: '200 Fixture Lane', city: 'Sarasota', zip: '34236', latitude: 27.3, longitude: -82.5 });
+    await mockTransaction('property_preferences').insert({ customer_id: id, irrigation_system: true,
+      irrigation_run_minutes: 20, watering_days: JSON.stringify(['Mon', 'Wed', 'Fri', 'Sun']), irrigation_system_type: JSON.stringify(['spray']), rain_sensor: false });
+    await mockTransaction('customer_turf_profiles').insert({ customer_id: id, grass_type: 'st_augustine', county: 'Sarasota', active: true });
+    await mockTransaction('scheduled_services').insert({ customer_id: id, scheduled_date: '2026-09-10',
+      service_type: 'Lawn Care Program', status: 'confirmed', is_recurring: true });
+    return id;
+  }
+
+  test.each(['true', '1', 'on'])('the shared gate parser publishes a plan for %s', async (value) => {
+    await resetDraft();
+    gates.irrigationWeeklyEmail = false;
+    process.env.GATE_IRRIGATION_WEEK_PLAN = value;
+    expect(await runWeeklyIrrigationEmailSweep({ now })).toMatchObject({ published: 1, sent: 0, failed: 0 });
+    expect(await loadCustomerWateringPlan(customerId, { now })).not.toBeNull();
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+  }, 30000);
+
+  test('all app plans survive an early email delivery that runs past the publication cutoff', async () => {
+    await resetDraft();
+    await addLawnCustomer();
+    let time = now;
+    EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async (options) => {
+      expect(await mockTransaction('irrigation_week_plans').whereNotNull('published_at')).toHaveLength(2);
+      expect(await options.onQueued()).toBe(true);
+      time = new Date('2026-09-07T16:01:00Z');
+      return { sent: true, providerAttempted: true };
+    });
+    const result = await runWeeklyIrrigationEmailSweep({ now, clock: () => time });
+    expect(result).toMatchObject({ published: 2, sent: 1, failed: 0, plan: { window_closed: 1 } });
+    for (const row of await mockTransaction('irrigation_week_plans')) {
+      expect(row.published_at).toEqual(now);
+      expect(await loadCustomerWateringPlan(row.customer_id, { now: time })).not.toBeNull();
+    }
+  }, 30000);
+
+  test.each(['email_opt_out', 'recipient_change', 'home_move', 'schedule_change'])('a delayed email rechecks %s before the next provider call', async (change) => {
+    await resetDraft();
+    const secondId = await addLawnCustomer();
+    EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async (options) => {
+      expect(await options.onQueued()).toBe(true);
+      const delayedId = [customerId, secondId].find(id => id !== options.recipientId);
+      if (change === 'email_opt_out') await mockTransaction('notification_prefs').insert({ customer_id: delayedId, email_enabled: false });
+      if (change === 'recipient_change') await mockTransaction('customers').where({ id: delayedId }).update({ email: 'changed@example.invalid' });
+      if (change === 'home_move') await mockTransaction('property_preferences').where({ customer_id: delayedId }).update({ irrigation_home_changed_at: now });
+      if (change === 'schedule_change') await mockTransaction('property_preferences').where({ customer_id: delayedId }).update({ irrigation_run_minutes: 40 });
+      return { sent: true, providerAttempted: true };
+    });
+    expect(await runWeeklyIrrigationEmailSweep({ now })).toMatchObject({ published: 2, sent: 1, attempted: 1, failed: 0 });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+  }, 30000);
+
+  test.each([0, 1])('an email cap of %s still publishes every app plan', async (maxSendAttempts) => {
+    await resetDraft();
+    await addLawnCustomer();
+    expect(await runWeeklyIrrigationEmailSweep({ now, maxSendAttempts })).toMatchObject({
+      published: 2, sent: maxSendAttempts, attempted: maxSendAttempts, failed: 0,
+    });
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(maxSendAttempts);
+  }, 30000);
 
   test.each([false, true])('publishes without an email when the email gate is %s and the customer opted out', async (emailGate) => {
     await resetDraft();
@@ -246,7 +309,7 @@ const SKIP = !process.env.DATABASE_URL;
     gates.irrigationWeeklyEmail = true;
     await runWeeklyIrrigationEmailSweep({ now: new Date('2026-09-07T17:00:00Z') });
     delete process.env.GATE_IRRIGATION_APP_PLAN;
-    gates.irrigationWeekPlan = false;
+    process.env.GATE_IRRIGATION_WEEK_PLAN = 'false';
     await runWeeklyIrrigationEmailSweep({ now });
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
   }, 30000);
@@ -340,6 +403,35 @@ const SKIP = !process.env.DATABASE_URL;
     ]);
     expect(await mockTransaction('irrigation_week_plans').where({ customer_id: loser })).toHaveLength(0);
     expect((await loadCustomerWateringPlan(customerId, { now })).sentAt).toBeNull();
+  }, 30000);
+
+  test.each(['stamped', 'provider_accepted'])('a customer merge keeps the emailed decision over a different app publication (%s)', async (evidence) => {
+    const loser = randomUUID();
+    await mockTransaction('customers').insert({ id: loser, first_name: 'Sample', phone: '9415550101', active: true });
+    await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).update({ published_at: now });
+    const current = (await findEligibleCustomers({ now, customerId }))[0];
+    const emailedDecision = buildWeeklyEmailDecision({
+      ...weeklyInputsForCustomer(current, { weekEnding: '2026-09-06', weekWeather: { rainInches: 0.2, et0Inches: 1.6 },
+        weekPlanEnabled: true, planWeekEnd: '2026-09-13', now }),
+      forecastRainInches: 0.1, forecastEt0Inches: 1.6,
+    });
+    await persistWeekPlan({ customerId: loser, weekEnding: '2026-09-06', planAsOf: now,
+      decisionInputs: emailedDecision.decisionInputs, restriction: emailedDecision.restriction, plan: emailedDecision.weekPlan });
+    const emailed = await mockTransaction('irrigation_week_plans').where({ customer_id: loser }).first();
+    const published = await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).first();
+    expect(emailed.decision_hash).not.toBe(published.decision_hash);
+    if (evidence === 'stamped') await mockTransaction('irrigation_week_plans').where({ id: emailed.id }).update({ sent_at: now });
+    else await mockTransaction('email_messages').insert({
+      trigger_event_id: `irrigation.weekly:${loser}:2026-09-06`, recipient_email_snapshot: 'sample@example.invalid',
+      status: 'sent', categories: JSON.stringify([`plan:${emailed.decision_hash}`]),
+    });
+    const { repointWeekPlansKeepAvailable } = require('../services/customer-dedupe')._test;
+    await repointWeekPlansKeepAvailable(mockTransaction, 'irrigation_week_plans', 'customer_id', customerId, loser);
+    const survivor = await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).first();
+    expect(survivor.id).toBe(emailed.id);
+    expect(survivor.decision_hash).toBe(emailed.decision_hash);
+    expect(survivor.sent_at).not.toBeNull();
+    expect((await loadCustomerWateringPlan(customerId, { now })).instruction).toBe(emailedDecision.payload.week_plan);
   }, 30000);
 
 });

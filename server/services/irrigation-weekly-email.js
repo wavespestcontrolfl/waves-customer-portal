@@ -1234,7 +1234,8 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
   // given.
   const tick = clock || (now ? () => now : () => new Date());
   const weekEnding = lastCompletedWeekEnding(startedAt);
-  const appPublication = gateEnvValue('GATE_IRRIGATION_APP_PLAN') && gateEnvValue('GATE_IRRIGATION_WEEK_PLAN');
+  const weekPlanGate = gateEnvValue('GATE_IRRIGATION_WEEK_PLAN');
+  const appPublication = gateEnvValue('GATE_IRRIGATION_APP_PLAN') && weekPlanGate;
   const emailEnabled = isEnabled('irrigationWeeklyEmail');
   const candidates = await findEligibleCustomers({ now: startedAt, includeApp: appPublication });
 
@@ -1268,9 +1269,305 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
     const { dayOfWeek, hour } = etParts(at);
     return dayOfWeek === 1 && hour < PLAN_WINDOW_END_HOUR_ET;
   };
-  const weekPlanGate = isEnabled('irrigationWeekPlan');
   // Plan-week horizon: the Sunday after the completed week (ET).
   const planWeekEnd = etDateString(addETDays(new Date(`${weekEnding}T16:00:00Z`), 7));
+
+  const pendingEmails = [];
+  // Both preparation failures and ambiguous provider outcomes use the same
+  // durable delivery reconciliation before releasing a snapshot claim.
+  const recordFailure = async (err, customer, snapshotArgs) => {
+    // A throw is AMBIGUOUS (sendTemplate can throw after the provider
+    // accepted). Reconcile from the durable record: delivered → stamp;
+    // definitely not delivered → drop the unsent row so a retry's plan is
+    // the one both sent and stored; in flight/unknown → leave it for the
+    // next run to reconcile.
+    if (snapshotArgs) {
+      const prior = await weekPlanDeliveryState({ triggerEventId: snapshotArgs.triggerEventId, idempotencyKey: snapshotArgs.idempotencyKey });
+      if (prior.state === 'sent') {
+        if (prior.decisionHash) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: prior.decisionHash });
+      } else if (prior.state === null || prior.state === 'blocked') {
+        // Never reached the provider / suppressed: definitely not delivered.
+        // 'failed' is AMBIGUOUS (the library can mark a row failed when its
+        // post-provider status update fails) — the row is retained for a
+        // later reconciliation once the delivery webhook repairs the record.
+        await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
+      }
+    }
+    summary.failed += 1;
+    const reason = sanitizeFailureReason(err);
+    logger.error(`[irrigation-weekly-email] send failed for customer ${customer.id}: ${reason}`);
+    await logEmailAttempt({
+      customerId: customer.id,
+      templateKey: 'irrigation.weekly',
+      status: 'failed',
+      failureReason: reason,
+      weekEnding,
+    });
+  };
+  const deliverEmail = async ({ customer, decision, decisionInputs, weekWeather, priorWeek, snapshotArgs, forecastRainInches, forecastEt0Inches, triggerEventId, idempotencyKey }) => {
+    // The queue-transition renewal's verdict: true (renewed), false (claim
+    // LOST to another worker), null (unreadable after retries) — the abort
+    // below is counted by cause, never all as "claimed elsewhere".
+    let claimRenewal = null;
+    // The plan window closed between this customer's decision and the queue
+    // transition: the plan is withheld (an actionable plan must never go
+    // out after the cutoff), counted window_closed.
+    let windowClosedAtQueue = false;
+    // The home moved between this customer's re-read and the queue
+    // transition (a fresh irrigation_home_changed_at stamp): the decided
+    // plan sized the FORMER home — withhold it (codex gh-r38).
+    let homeMovedAtQueue = false;
+    // The stamp could not be read at the queue transition: the final home
+    // check before a legal/controller instruction must fail CLOSED — the
+    // plan is not sent this run (codex gh-r40).
+    let stampCheckFailedAtQueue = false;
+    try {
+      if (summary.attempted >= maxSendAttempts) { summary.skipped.capped += 1; return; }
+      if (appPublication) {
+        // Publication can prepare the whole audience before email starts.
+        // Revalidate delayed work against the current recipient, preferences
+        // and property before consuming an attempt or calling the provider.
+        const current = (await findEligibleCustomers({ customerId: customer.id, now: tick() }))[0];
+        if (!current || String(current.email).trim().toLowerCase() !== String(customer.email).trim().toLowerCase()) {
+          summary.skipped.no_longer_eligible += 1;
+          return;
+        }
+        const stampAt = (value) => (value ? new Date(value).getTime() : null);
+        if (stampAt(current.irrigation_home_changed_at) !== stampAt(customer.irrigation_home_changed_at)) {
+          summary.plan.home_moved += 1;
+          return;
+        }
+        const currentDecision = snapshotArgs
+          ? replayWeekPlanForCustomer(snapshotArgs, current)
+          : buildWeeklyEmailDecision({
+            ...weeklyInputsForCustomer(current, { weekEnding, weekWeather, priorWeek, weekPlanEnabled: false, planWeekEnd, now: decisionInputs.now }),
+            forecastRainInches, forecastEt0Inches,
+          });
+        if (!currentDecision || !isDeepStrictEqual(currentDecision.payload, decision.payload)) {
+          summary.plan.unavailable += 1;
+          return;
+        }
+      }
+      // Consume the cap BEFORE the provider call: an error thrown after
+      // SendGrid accepts (audit/DB failure) must still count as an attempt.
+      summary.attempted += 1;
+      // A queued row another worker is about to abort (it lost its claim at
+      // the queue transition) collides as EMAIL_SEND_IN_PROGRESS for a
+      // moment; this weekly send must not be lost to that window — retry a
+      // few times before treating it as in flight (codex gh-r21).
+      // `decision` / `snapshotArgs` are read at CALL time: the window-closed
+      // re-dispatch below swaps in the pre-plan decision with no snapshot
+      // (⇒ no onQueued renewal, no plan category).
+      const dispatch = async () => {
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            return await EmailTemplateLibrary.sendTemplate({
+        templateKey: decision.templateKey,
+        to: String(customer.email).trim(),
+        payload: decision.payload,
+        recipientType: 'customer',
+        recipientId: customer.id,
+        triggerEventId,
+        idempotencyKey,
+        // "plan:<hash>" binds the durable message record to the snapshot it
+        // was built from — reconciliation stamps only that row.
+        categories: ['irrigation', 'irrigation_weekly', decision.reason, ...(snapshotArgs?.decisionHash ? [planCategory(snapshotArgs.decisionHash)] : [])],
+        suppressionGroupKey: SUPPRESSION_GROUP,
+        // sendOne must not log the raw SendGrid body (it can echo the
+        // recipient address) — this sweep logs sanitizeFailureReason instead.
+        suppressProviderErrorLog: true,
+        // Renew the snapshot claim on the SAME transition the library's own
+        // in-flight lease starts (the queued row), so the two leases can't
+        // drift apart across template resolution / suppression checks.
+        // Ownership must be VERIFIED at the queue transition: only an
+        // explicit `true` renewal dispatches — a lost claim (false) and an
+        // unreadable one (null, after retries) both abort inside the
+        // library (fail closed; a reclaimed snapshot must never be
+        // followed by this worker's older decision).
+        onQueued: async () => {
+            if (!snapshotArgs?.claimToken) {
+              // Every pre-plan fallback rechecks publication at dispatch,
+              // including a DB-error fallback or a gate-off, late retry.
+              // Unknown availability cannot authorize a contradictory email.
+              const available = await hasSentWeekPlan({ customerId: customer.id, weekEnding, includePublished: true });
+              if (available === null) stampCheckFailedAtQueue = true;
+              return available === false;
+            }
+            // Re-read the move stamp at dispatch UNDER the property-
+            // preferences advisory lock: a plain MVCC read would not wait
+            // for an address-change transaction that already holds the lock
+            // and is about to commit the new stamp (codex gh-r38/r39) — the
+            // lock makes an in-flight move commit first, then the committed
+            // stamp is read. A changed stamp means the decision sized the
+            // former home — abort the plan. An UNREADABLE check also aborts
+            // (fail closed — this is the last home check before a legal
+            // instruction; the snapshot stays claimable for a retry —
+            // codex gh-r40).
+            // The stamp check and the claim renewal run in ONE transaction
+            // holding the prefs advisory lock, so a move cannot commit
+            // between the check and the renewal (codex gh-r47) — the only
+            // remaining window is the provider call itself, which no DB
+            // fence can cover.
+            let queueVerdict;
+            try {
+              queueVerdict = await db.transaction(async (trx) => {
+                await trx.raw(
+                  'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+                  ['property-preferences', String(customer.id)],
+                );
+                const row = await trx('property_preferences').where({ customer_id: customer.id }).first('irrigation_home_changed_at');
+                const stampAt = (v) => (v ? new Date(v).getTime() : null);
+                if (stampAt(row?.irrigation_home_changed_at) !== stampAt(customer.irrigation_home_changed_at)) return { moved: true };
+                const renewed = await renewWeekPlanClaimWithRetry({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken, conn: trx });
+                return { renewed };
+              });
+            } catch (err) {
+              logger.error(`[irrigation-weekly-email] move-stamp re-read failed for ${customer.id} — plan withheld this run: ${err.message}`);
+              stampCheckFailedAtQueue = true;
+              return false;
+            }
+            if (queueVerdict.moved) { homeMovedAtQueue = true; return false; }
+            // Re-read the clock AFTER the home check: the window-closed
+            // fallback rebuilds the pre-plan email from this customer's
+            // loaded inputs, so a move that committed before the cutoff
+            // must win — otherwise the fallback quotes the former home's
+            // rainfall and schedule (codex gh-r33/r42).
+            if (!planWindowOpen(tick())) { windowClosedAtQueue = true; return false; }
+            claimRenewal = queueVerdict.renewed;
+            return claimRenewal === true;
+          },
+            });
+          } catch (err) {
+            if (err?.code !== 'EMAIL_SEND_IN_PROGRESS' || attempt >= IN_PROGRESS_RETRIES) throw err;
+            await new Promise((resolve) => setTimeout(resolve, inProgressRetryMs));
+          }
+        }
+      };
+      let result = await dispatch();
+
+      if (result.aborted && windowClosedAtQueue && snapshotArgs?.published) {
+        summary.plan.window_closed += 1;
+        if (!result.providerAttempted) summary.attempted -= 1;
+        return;
+      }
+      if (result.aborted && windowClosedAtQueue) {
+        // The cutoff passed while this send waited on the provider: the
+        // plan is withheld and its unsent snapshot discarded (this worker's
+        // claim). The week's check-in still goes out NOW on the safe
+        // pre-plan template — the Monday cron is the only scheduled run, so
+        // a "later run" would never come for a slow sweep's tail (codex
+        // gh-r35). The aborted row is a pre-provider failure the library
+        // retries under the same idempotency key.
+        summary.plan.window_closed += 1;
+        logger.warn(`[irrigation-weekly-email] plan window closed before dispatch for ${customer.id}/${weekEnding} — plan withheld, sending the pre-plan email`);
+        await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
+        decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches, forecastEt0Inches, weekPlanEnabled: false });
+        snapshotArgs = null;
+        windowClosedAtQueue = false;
+        if (!decision.shouldSend) {
+          summary.attempted -= 1; // the aborted attempt never reached the provider
+          if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
+          else summary.skipped.unknown += 1;
+          return;
+        }
+        result = await dispatch();
+      }
+
+      // Idempotency-dedupe and suppression short-circuit inside the library
+      // BEFORE any SendGrid call — refund the budget so a long run of
+      // already-sent/suppressed rows cannot starve the rest of the list. The
+      // library marks results that DID reach the provider this call
+      // (providerAttempted) — those keep their attempt even when reported as
+      // deduped (webhook/supersede races), as does a thrown error.
+      if ((result.deduped || result.blocked || result.aborted) && !result.providerAttempted) summary.attempted -= 1;
+
+      // The claim renewal at the queue transition found this worker no
+      // longer owns the snapshot (an overlapping sweep replaced it): the
+      // library aborted before dispatch — nothing to stamp, and the discard
+      // is the new owner's to make (codex gh-r20).
+      if (result.aborted) {
+        if (stampCheckFailedAtQueue) {
+          // Ops exception, not a resolved race: nothing was sent, the unsent
+          // snapshot stays claimable past its lease for a retry.
+          summary.plan.claim_error += 1;
+          return;
+        }
+        if (homeMovedAtQueue) {
+          // The plan was decided for the former home: discard its unsent
+          // snapshot and send nothing this run — every loaded input (county,
+          // coordinates, schedule) is about the old premise, so no template
+          // built from them is safe. The move stamp itself already routes
+          // the customer to the reconfirm flow.
+          summary.plan.home_moved += 1;
+          logger.warn(`[irrigation-weekly-email] home moved before dispatch for ${customer.id}/${weekEnding} — plan withheld`);
+          await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
+          return;
+        }
+        if (claimRenewal === null) {
+          // Unreadable renewal even after retries: NOT evidence of another
+          // owner. Fail closed on the send, but say so — this customer's
+          // plan week is an ops exception, not a resolved race (hook P1 on
+          // 45beb0731). The unsent snapshot stays claimable past its lease.
+          summary.plan.claim_error += 1;
+          logger.error(`[irrigation-weekly-email] claim renewal unreadable for ${customer.id}/${weekEnding} — plan email not sent this run`);
+          return;
+        }
+        summary.plan.claimed_elsewhere += 1;
+        return;
+      }
+
+      if (snapshotArgs) {
+        if (result.sent && (!result.deduped || result.providerAttempted)) {
+          // The email built from THIS decision reached the provider (including
+          // the accepted-then-superseded race reported as
+          // sent+deduped+providerAttempted). Pre-send write may have failed
+          // transiently — one more try, then stamp by this decision's hash.
+          const hash = snapshotArgs.decisionHash || (await persistWeekPlan(snapshotArgs)).hash;
+          // The writer rejects a missing hash. Retry one transient stamp
+          // failure; the durable delivery record still permits reconciliation.
+          const stamped = await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash, claimToken: snapshotArgs.claimToken });
+          if (!stamped) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash, claimToken: snapshotArgs.claimToken });
+        } else if (result.deduped) {
+          // Deduped without a provider attempt: the durable record decides,
+          // and only the row it names is stamped.
+          const prior = await weekPlanDeliveryState({ triggerEventId, idempotencyKey });
+          if (prior.state === 'sent' && prior.decisionHash) {
+            await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: prior.decisionHash });
+          }
+        } else {
+          // Blocked / not sent: this decision was never delivered.
+          await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
+        }
+      }
+
+      if (result.deduped) {
+        summary.deduped += 1;
+      } else if (result.sent) {
+        summary.sent += 1;
+        await logEmailAttempt({
+          customerId: customer.id,
+          templateKey: decision.templateKey,
+          status: 'sent',
+          providerMessageId: result.message?.provider_message_id || null,
+          sentAt: result.message?.sent_at || null,
+          weekEnding,
+        });
+      } else if (result.blocked) {
+        summary.blocked += 1;
+      } else {
+        summary.failed += 1;
+        await logEmailAttempt({
+          customerId: customer.id,
+          templateKey: decision.templateKey,
+          status: 'failed',
+          failureReason: sanitizeFailureReason({ message: result.reason || result.message?.error_message || 'email_not_sent' }),
+          weekEnding,
+        });
+      }
+    } catch (err) {
+      await recordFailure(err, customer, snapshotArgs);
+    }
+  };
 
   for (let customer of candidates) {
     if (summary.attempted >= maxSendAttempts && !appPublication) {
@@ -1308,22 +1605,6 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
     }
     // Hoisted so the catch can discard a pre-send snapshot when the send throws.
     let snapshotArgs = null;
-    // The queue-transition renewal's verdict: true (renewed), false (claim
-    // LOST to another worker), null (unreadable after retries) — the abort
-    // below is counted by cause, never all as "claimed elsewhere".
-    let claimRenewal = null;
-    // The plan window closed between this customer's decision and the queue
-    // transition: the plan is withheld (an actionable plan must never go
-    // out after the cutoff), counted window_closed.
-    let windowClosedAtQueue = false;
-    // The home moved between this customer's re-read and the queue
-    // transition (a fresh irrigation_home_changed_at stamp): the decided
-    // plan sized the FORMER home — withhold it (codex gh-r38).
-    let homeMovedAtQueue = false;
-    // The stamp could not be read at the queue transition: the final home
-    // check before a legal/controller instruction must fail CLOSED — the
-    // plan is not sent this run (codex gh-r40).
-    let stampCheckFailedAtQueue = false;
     // THIS customer's clock reading: the window verdict and the snapshot's
     // planAsOf come from it, not from the sweep's start time.
     const planAsOf = tick();
@@ -1523,255 +1804,17 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       // An unavailable plan never falls into an email-only template when
       // email is disabled. Publication does not consume the email send cap.
       if (!canEmail || !decision.shouldSend) continue;
-      if (summary.attempted >= maxSendAttempts) { summary.skipped.capped += 1; continue; }
-      // Consume the cap BEFORE the provider call: an error thrown after
-      // SendGrid accepts (audit/DB failure) must still count as an attempt.
-      summary.attempted += 1;
-      // A queued row another worker is about to abort (it lost its claim at
-      // the queue transition) collides as EMAIL_SEND_IN_PROGRESS for a
-      // moment; this weekly send must not be lost to that window — retry a
-      // few times before treating it as in flight (codex gh-r21).
-      // `decision` / `snapshotArgs` are read at CALL time: the window-closed
-      // re-dispatch below swaps in the pre-plan decision with no snapshot
-      // (⇒ no onQueued renewal, no plan category).
-      const dispatch = async () => {
-        for (let attempt = 0; ; attempt += 1) {
-          try {
-            return await EmailTemplateLibrary.sendTemplate({
-        templateKey: decision.templateKey,
-        to: String(customer.email).trim(),
-        payload: decision.payload,
-        recipientType: 'customer',
-        recipientId: customer.id,
-        triggerEventId,
-        idempotencyKey,
-        // "plan:<hash>" binds the durable message record to the snapshot it
-        // was built from — reconciliation stamps only that row.
-        categories: ['irrigation', 'irrigation_weekly', decision.reason, ...(snapshotArgs?.decisionHash ? [planCategory(snapshotArgs.decisionHash)] : [])],
-        suppressionGroupKey: SUPPRESSION_GROUP,
-        // sendOne must not log the raw SendGrid body (it can echo the
-        // recipient address) — this sweep logs sanitizeFailureReason instead.
-        suppressProviderErrorLog: true,
-        // Renew the snapshot claim on the SAME transition the library's own
-        // in-flight lease starts (the queued row), so the two leases can't
-        // drift apart across template resolution / suppression checks.
-        // Ownership must be VERIFIED at the queue transition: only an
-        // explicit `true` renewal dispatches — a lost claim (false) and an
-        // unreadable one (null, after retries) both abort inside the
-        // library (fail closed; a reclaimed snapshot must never be
-        // followed by this worker's older decision).
-        onQueued: async () => {
-            if (!snapshotArgs?.claimToken) {
-              // Every pre-plan fallback rechecks publication at dispatch,
-              // including a DB-error fallback or a gate-off, late retry.
-              // Unknown availability cannot authorize a contradictory email.
-              const available = await hasSentWeekPlan({ customerId: customer.id, weekEnding, includePublished: true });
-              if (available === null) stampCheckFailedAtQueue = true;
-              return available === false;
-            }
-            // Re-read the move stamp at dispatch UNDER the property-
-            // preferences advisory lock: a plain MVCC read would not wait
-            // for an address-change transaction that already holds the lock
-            // and is about to commit the new stamp (codex gh-r38/r39) — the
-            // lock makes an in-flight move commit first, then the committed
-            // stamp is read. A changed stamp means the decision sized the
-            // former home — abort the plan. An UNREADABLE check also aborts
-            // (fail closed — this is the last home check before a legal
-            // instruction; the snapshot stays claimable for a retry —
-            // codex gh-r40).
-            // The stamp check and the claim renewal run in ONE transaction
-            // holding the prefs advisory lock, so a move cannot commit
-            // between the check and the renewal (codex gh-r47) — the only
-            // remaining window is the provider call itself, which no DB
-            // fence can cover.
-            let queueVerdict;
-            try {
-              queueVerdict = await db.transaction(async (trx) => {
-                await trx.raw(
-                  'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-                  ['property-preferences', String(customer.id)],
-                );
-                const row = await trx('property_preferences').where({ customer_id: customer.id }).first('irrigation_home_changed_at');
-                const stampAt = (v) => (v ? new Date(v).getTime() : null);
-                if (stampAt(row?.irrigation_home_changed_at) !== stampAt(customer.irrigation_home_changed_at)) return { moved: true };
-                const renewed = await renewWeekPlanClaimWithRetry({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken, conn: trx });
-                return { renewed };
-              });
-            } catch (err) {
-              logger.error(`[irrigation-weekly-email] move-stamp re-read failed for ${customer.id} — plan withheld this run: ${err.message}`);
-              stampCheckFailedAtQueue = true;
-              return false;
-            }
-            if (queueVerdict.moved) { homeMovedAtQueue = true; return false; }
-            // Re-read the clock AFTER the home check: the window-closed
-            // fallback rebuilds the pre-plan email from this customer's
-            // loaded inputs, so a move that committed before the cutoff
-            // must win — otherwise the fallback quotes the former home's
-            // rainfall and schedule (codex gh-r33/r42).
-            if (!planWindowOpen(tick())) { windowClosedAtQueue = true; return false; }
-            claimRenewal = queueVerdict.renewed;
-            return claimRenewal === true;
-          },
-            });
-          } catch (err) {
-            if (err?.code !== 'EMAIL_SEND_IN_PROGRESS' || attempt >= IN_PROGRESS_RETRIES) throw err;
-            await new Promise((resolve) => setTimeout(resolve, inProgressRetryMs));
-          }
-        }
-      };
-      let result = await dispatch();
-
-      if (result.aborted && windowClosedAtQueue && snapshotArgs?.published) {
-        summary.plan.window_closed += 1;
-        if (!result.providerAttempted) summary.attempted -= 1;
-        continue;
-      }
-      if (result.aborted && windowClosedAtQueue) {
-        // The cutoff passed while this send waited on the provider: the
-        // plan is withheld and its unsent snapshot discarded (this worker's
-        // claim). The week's check-in still goes out NOW on the safe
-        // pre-plan template — the Monday cron is the only scheduled run, so
-        // a "later run" would never come for a slow sweep's tail (codex
-        // gh-r35). The aborted row is a pre-provider failure the library
-        // retries under the same idempotency key.
-        summary.plan.window_closed += 1;
-        logger.warn(`[irrigation-weekly-email] plan window closed before dispatch for ${customer.id}/${weekEnding} — plan withheld, sending the pre-plan email`);
-        await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
-        decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches, forecastEt0Inches, weekPlanEnabled: false });
-        snapshotArgs = null;
-        windowClosedAtQueue = false;
-        if (!decision.shouldSend) {
-          summary.attempted -= 1; // the aborted attempt never reached the provider
-          if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
-          else summary.skipped.unknown += 1;
-          continue;
-        }
-        result = await dispatch();
-      }
-
-      // Idempotency-dedupe and suppression short-circuit inside the library
-      // BEFORE any SendGrid call — refund the budget so a long run of
-      // already-sent/suppressed rows cannot starve the rest of the list. The
-      // library marks results that DID reach the provider this call
-      // (providerAttempted) — those keep their attempt even when reported as
-      // deduped (webhook/supersede races), as does a thrown error.
-      if ((result.deduped || result.blocked || result.aborted) && !result.providerAttempted) summary.attempted -= 1;
-
-      // The claim renewal at the queue transition found this worker no
-      // longer owns the snapshot (an overlapping sweep replaced it): the
-      // library aborted before dispatch — nothing to stamp, and the discard
-      // is the new owner's to make (codex gh-r20).
-      if (result.aborted) {
-        if (stampCheckFailedAtQueue) {
-          // Ops exception, not a resolved race: nothing was sent, the unsent
-          // snapshot stays claimable past its lease for a retry.
-          summary.plan.claim_error += 1;
-          continue;
-        }
-        if (homeMovedAtQueue) {
-          // The plan was decided for the former home: discard its unsent
-          // snapshot and send nothing this run — every loaded input (county,
-          // coordinates, schedule) is about the old premise, so no template
-          // built from them is safe. The move stamp itself already routes
-          // the customer to the reconfirm flow.
-          summary.plan.home_moved += 1;
-          logger.warn(`[irrigation-weekly-email] home moved before dispatch for ${customer.id}/${weekEnding} — plan withheld`);
-          await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
-          continue;
-        }
-        if (claimRenewal === null) {
-          // Unreadable renewal even after retries: NOT evidence of another
-          // owner. Fail closed on the send, but say so — this customer's
-          // plan week is an ops exception, not a resolved race (hook P1 on
-          // 45beb0731). The unsent snapshot stays claimable past its lease.
-          summary.plan.claim_error += 1;
-          logger.error(`[irrigation-weekly-email] claim renewal unreadable for ${customer.id}/${weekEnding} — plan email not sent this run`);
-          continue;
-        }
-        summary.plan.claimed_elsewhere += 1;
-        continue;
-      }
-
-      if (snapshotArgs) {
-        if (result.sent && (!result.deduped || result.providerAttempted)) {
-          // The email built from THIS decision reached the provider (including
-          // the accepted-then-superseded race reported as
-          // sent+deduped+providerAttempted). Pre-send write may have failed
-          // transiently — one more try, then stamp by this decision's hash.
-          const hash = snapshotArgs.decisionHash || (await persistWeekPlan(snapshotArgs)).hash;
-          if (hash) {
-            // One retry on a transient stamp failure; the delivery record
-            // (plan:<hash>) still lets loadCurrentWeekPlan reconcile later.
-            const stamped = await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash, claimToken: snapshotArgs.claimToken });
-            if (!stamped) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash, claimToken: snapshotArgs.claimToken });
-          }
-        } else if (result.deduped) {
-          // Deduped without a provider attempt: the durable record decides,
-          // and only the row it names is stamped.
-          const prior = await weekPlanDeliveryState({ triggerEventId, idempotencyKey });
-          if (prior.state === 'sent' && prior.decisionHash) {
-            await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: prior.decisionHash });
-          }
-        } else {
-          // Blocked / not sent: this decision was never delivered.
-          await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
-        }
-      }
-
-      if (result.deduped) {
-        summary.deduped += 1;
-      } else if (result.sent) {
-        summary.sent += 1;
-        await logEmailAttempt({
-          customerId: customer.id,
-          templateKey: decision.templateKey,
-          status: 'sent',
-          providerMessageId: result.message?.provider_message_id || null,
-          sentAt: result.message?.sent_at || null,
-          weekEnding,
-        });
-      } else if (result.blocked) {
-        summary.blocked += 1;
-      } else {
-        summary.failed += 1;
-        await logEmailAttempt({
-          customerId: customer.id,
-          templateKey: decision.templateKey,
-          status: 'failed',
-          failureReason: sanitizeFailureReason({ message: result.reason || result.message?.error_message || 'email_not_sent' }),
-          weekEnding,
-        });
-      }
+      const email = { customer, decision, decisionInputs, weekWeather, priorWeek, snapshotArgs, forecastRainInches, forecastEt0Inches, triggerEventId, idempotencyKey };
+      if (appPublication) pendingEmails.push(email);
+      else await deliverEmail(email);
     } catch (err) {
-      // A throw is AMBIGUOUS (sendTemplate can throw after the provider
-      // accepted). Reconcile from the durable record: delivered → stamp;
-      // definitely not delivered → drop the unsent row so a retry's plan is
-      // the one both sent and stored; in flight/unknown → leave it for the
-      // next run to reconcile.
-      if (snapshotArgs) {
-        const prior = await weekPlanDeliveryState({ triggerEventId: snapshotArgs.triggerEventId, idempotencyKey: snapshotArgs.idempotencyKey });
-        if (prior.state === 'sent') {
-          if (prior.decisionHash) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: prior.decisionHash });
-        } else if (prior.state === null || prior.state === 'blocked') {
-          // Never reached the provider / suppressed: definitely not delivered.
-          // 'failed' is AMBIGUOUS (the library can mark a row failed when its
-          // post-provider status update fails) — the row is retained for a
-          // later reconciliation once the delivery webhook repairs the record.
-          await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
-        }
-      }
-      summary.failed += 1;
-      const reason = sanitizeFailureReason(err);
-      logger.error(`[irrigation-weekly-email] send failed for customer ${customer.id}: ${reason}`);
-      await logEmailAttempt({
-        customerId: customer.id,
-        templateKey: 'irrigation.weekly',
-        status: 'failed',
-        failureReason: reason,
-        weekEnding,
-      });
+      await recordFailure(err, customer, snapshotArgs);
     }
   }
+
+  // Every publishable snapshot is durable before an email provider can delay
+  // the sweep. Legacy email-only runs still deliver at each customer's turn.
+  for (const email of pendingEmails) await deliverEmail(email);
 
   logger.info(
     `[irrigation-weekly-email] week ending ${weekEnding}: ${summary.candidates} candidate(s), `

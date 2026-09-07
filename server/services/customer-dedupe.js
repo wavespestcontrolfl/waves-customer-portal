@@ -652,8 +652,8 @@ async function repointRowwiseDropCollisions(trx, table, column, winnerId, loserI
 // loser's sent snapshot in favour of an unsent one: the report then hides
 // the plan the customer got and the sweep resends a possibly different
 // plan (codex #3565 gh-r15). An available row beats a draft; equal
-// availability ranks retain the winner's row. App publication never mints
-// an email delivery timestamp.
+// availability ranks retain the winner's row. Actual email delivery ranks
+// above app publication, which never mints an email delivery timestamp.
 // "Delivered" for a week-plan row: stamped sent_at, OR a durable customer-week
 // delivery record (email_messages at trigger_event_id
 // `irrigation.weekly:<customer>:<week>`, provider-accepted status) whose
@@ -686,14 +686,19 @@ async function repointWeekPlansKeepAvailable(trx, table, column, winnerId, loser
   let replaced = 0;
   let dropped = 0;
   let stamped = 0;
-  // Rank: available (published_at or sent_at) > accepted email awaiting a
-  // stamp > unpublished draft.
+  // Rank: stamped email > accepted email awaiting a stamp > app publication
+  // > unpublished draft. The inbox decision must survive a publication collision.
   // The higher rank survives; ties keep the winner's row. A retained row that
   // is accepted-but-unstamped is stamped here — once the two customers'
   // delivery records share one identity, weekPlanDeliveryState may name the
   // deleted row's hash, so the survivor could otherwise never be stamped
   // and the report plan would stay absent (codex gh-r18).
-  const rank = async (row, customerId) => (row ? (row.published_at || row.sent_at ? 2 : (await weekPlanDelivered(trx, row, customerId) ? 1 : 0)) : -1);
+  const rank = async (row, customerId) => {
+    if (!row) return -1;
+    if (row.sent_at) return 3;
+    if (await weekPlanDelivered(trx, row, customerId)) return 2;
+    return row.published_at ? 1 : 0;
+  };
   for (const row of rows) {
     try {
       await trx.transaction(async (sp) => {
@@ -728,7 +733,7 @@ async function repointWeekPlansKeepAvailable(trx, table, column, winnerId, loser
       dropped += 1;
       kept = winnerRow; keptRank = winnerRank;
     }
-    if (kept && keptRank === 1) {
+    if (kept && keptRank === 2) {
       await trx(table).where({ id: kept.id }).update({ sent_at: trx.fn.now(), updated_at: trx.fn.now() });
       stamped += 1;
     }

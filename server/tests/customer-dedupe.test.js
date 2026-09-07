@@ -904,6 +904,29 @@ describe('executeMerge', () => {
       expect(trx.rows[0].sent_at).toBeNull();
     });
 
+    it.each([
+      [WINNER, 'stamped'], [LOSER, 'stamped'],
+      [WINNER, 'provider_accepted'], [LOSER, 'provider_accepted'],
+    ])('keeps %s actual email decision over a different publication (%s)', async (emailedCustomer, evidence) => {
+      const emailedId = emailedCustomer === WINNER ? 'w1' : 'l1';
+      const rows = [WINNER, LOSER].map((customerId, index) => ({
+        id: index === 0 ? 'w1' : 'l1', customer_id: customerId, week_ending: '2026-08-23',
+        decision_hash: `hash-${customerId}`,
+        sent_at: customerId === emailedCustomer && evidence === 'stamped' ? '2026-08-24T10:00:00Z' : null,
+        published_at: customerId === emailedCustomer ? null : '2026-08-24T09:00:00Z',
+      }));
+      const messages = evidence === 'provider_accepted' ? [{
+        trigger_event_id: `irrigation.weekly:${emailedCustomer}:2026-08-23`, status: 'sent',
+        categories: JSON.stringify([`plan:hash-${emailedCustomer}`]),
+      }] : [];
+      const trx = fakeTrx(rows, messages);
+      await repointWeekPlansKeepAvailable(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(trx.rows).toEqual([expect.objectContaining({
+        id: emailedId, customer_id: WINNER, decision_hash: `hash-${emailedCustomer}`,
+        sent_at: evidence === 'stamped' ? '2026-08-24T10:00:00Z' : 'NOW()',
+      })]);
+    });
+
     it('moves a non-colliding week and drops the loser copy when the winner already SENT that week', async () => {
       const trx = fakeTrx([
         { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: '2026-08-24T10:00:00Z' },

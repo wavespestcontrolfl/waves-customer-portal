@@ -190,9 +190,9 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     expect(sweep).toMatch(/rainSensor: rainSensorConfirmedAfterMove\(customer\) && \(customer\.rain_sensor === true \|\| customer\.rain_sensor === 't'\),/);
     // gh-r40: an unreadable stamp read at the queue transition fails CLOSED (plan withheld, counted claim_error, snapshot claimable).
     expect(sweep).toMatch(/stampCheckFailedAtQueue = true;\s*return false;/);
-    expect(sweep).toMatch(/if \(stampCheckFailedAtQueue\) \{[\s\S]*?summary\.plan\.claim_error \+= 1;\s*continue;\s*\}/);
+    expect(sweep).toMatch(/if \(stampCheckFailedAtQueue\) \{[\s\S]*?summary\.plan\.claim_error \+= 1;\s*return;\s*\}/);
     // gh-r38: the move stamp is re-read at the queue transition; a changed stamp withholds the plan and sends nothing.
-    expect(sweep).toMatch(/if \(homeMovedAtQueue\) \{[\s\S]*?summary\.plan\.home_moved \+= 1;[\s\S]*?await discardUnsentWeekPlan\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*continue;\s*\}/);
+    expect(sweep).toMatch(/if \(homeMovedAtQueue\) \{[\s\S]*?summary\.plan\.home_moved \+= 1;[\s\S]*?await discardUnsentWeekPlan\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*return;\s*\}/);
     // gh-r38: each candidate is re-read through the SAME audience query at their turn.
     expect(sweep).toMatch(/const fresh = await findEligibleCustomers\(\{ now: tick\(\), customerId: customer\.id, includeApp: appPublication \}\);\s*if \(!fresh\.length\) \{ summary\.skipped\.no_longer_eligible \+= 1; continue; \}/);
     // gh-r45: a move stamp that changed since the audience load = mid-transition row (coords may still be the
@@ -208,7 +208,7 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     expect(lib).toMatch(/\.where\(\{ id: message\.id, status: 'queued', send_attempt_token: sendAttemptToken \}\)\s*\.update\(\{ status: 'failed', error_message: reason/);
     // A LOST claim aborts inside the library; the sweep counts it claimed_elsewhere and stamps nothing (gh-r20).
     // …an UNREADABLE renewal (null after retries) is counted claim_error and logged, never claimed_elsewhere (hook P1 on 45beb0731).
-    expect(sweep).toMatch(/if \(result\.aborted\) \{[\s\S]*?if \(claimRenewal === null\) \{[^}]*summary\.plan\.claim_error \+= 1;\s*logger\.error\([^)]*claim renewal unreadable[^)]*\);\s*continue;\s*\}\s*summary\.plan\.claimed_elsewhere \+= 1;\s*continue;\s*\}/);
+    expect(sweep).toMatch(/if \(result\.aborted\) \{[\s\S]*?if \(claimRenewal === null\) \{[^}]*summary\.plan\.claim_error \+= 1;\s*logger\.error\([^)]*claim renewal unreadable[^)]*\);\s*return;\s*\}\s*summary\.plan\.claimed_elsewhere \+= 1;\s*return;\s*\}/);
     expect(lib).toMatch(/keep = \(await onQueued\(message\)\) !== false;/);
     // gh-r21: the new owner retries a momentary EMAIL_SEND_IN_PROGRESS collision instead of losing the week's email.
     expect(sweep).toMatch(/if \(err\?\.code !== 'EMAIL_SEND_IN_PROGRESS' \|\| attempt >= IN_PROGRESS_RETRIES\) throw err;/);
