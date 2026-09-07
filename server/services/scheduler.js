@@ -4173,7 +4173,8 @@ function initScheduledJobs() {
           // can follow provider acceptance, so stop for explicit staff review.
           let sendData = est.estimate_data;
           try { if (typeof sendData === 'string') sendData = JSON.parse(sendData); } catch { sendData = null; }
-          const reviewedSchedule = (sendData?.manualSendAttempts || []).some((entry) => entry.scheduleReview);
+          const scheduledAt = est.scheduled_at ? new Date(est.scheduled_at).toISOString() : null;
+          const reviewedSchedule = scheduledAt && (sendData?.manualSendAttempts || []).some((entry) => entry.scheduleReview?.scheduledAt === scheduledAt);
           await markScheduledEstimateSendFailure(est, e.message, { retry: !deterministicRefusal && !reviewedSchedule, now });
         }
       }

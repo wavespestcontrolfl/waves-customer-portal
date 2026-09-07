@@ -619,7 +619,7 @@ describe('Action Inbox generators', () => {
       href: '/admin/leads',
     });
     const excluded = capture.find(
-      (c) => c.table === 'leads' && c.method === 'whereNotIn' && c.args[0] === 'status',
+      (c) => c.table === 'leads' && c.method === 'whereNotIn' && c.args[0] === 'leads.status',
     );
     expect(excluded.args[1]).toBe(NON_ENGAGED_LEAD_STATUSES);
 
