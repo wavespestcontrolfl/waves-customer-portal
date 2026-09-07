@@ -83,7 +83,8 @@ async function revertPropertyPreferenceCompanions({ trx, proposal, target, compa
   // Approvals already persisted by previews may carry the earlier value map.
   const baselineHashes = baseline.input_hashes || Object.fromEntries(
     Object.entries(baseline.inputs || {}).map(([field, value]) => [field, hashSensitiveValue(value)]));
-  const laterEvidence = Object.entries(now.input_hashes).some(([field, hash]) => hash !== baselineHashes[field])
+  const laterEvidence = Object.keys({ ...baselineHashes, ...now.input_hashes })
+    .some((field) => now.input_hashes[field] !== baselineHashes[field])
     || now.confirmed.some((field) => !baseline.confirmed.includes(field));
   if (laterEvidence) return { reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } };
   await trx('property_preferences')

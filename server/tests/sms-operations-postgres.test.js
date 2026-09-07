@@ -494,6 +494,10 @@ postgres('SMS operations on PostgreSQL', () => {
     await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_issues: null, irrigation_confirmed_fields: JSON.stringify(['watering_days']) });
     expect(await revert()).toEqual({ reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } });
     expect((await mockPg('property_preferences').first()).irrigation_system).toBe(true);
+    // Clearing a pre-existing input is still a portal edit confirming irrigation.
+    await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_confirmed_fields: JSON.stringify([]),
+      irrigation_schedule_notes: null });
+    expect(await revert()).toEqual({ reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } });
     // An edit to a pre-existing input after approval is later evidence too.
     await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_confirmed_fields: JSON.stringify([]),
       irrigation_schedule_notes: 'Changed private watering instructions.' });
