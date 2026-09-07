@@ -205,8 +205,12 @@ postgres('visit summary recipient recovery', () => {
     const replay = require('../services/messaging/deferred-replay-registry');
     expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', queued.metadata)).toMatchObject({ ok: true });
     const effect = await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first();
-    const heldMeta = { ...queued.metadata, quiet_hours_hold_at: new Date(new Date(effect.claimed_at).getTime() + 1).toISOString() };
+    const heldMeta = { ...queued.metadata, quiet_hours_hold_at: new Date(effect.claimed_at).toISOString() };
     expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', heldMeta)).toMatchObject({ ok: true });
+    // The retry re-claimed the effect after the hold stamp; make that gap
+    // real rather than relying on the two claims landing >1 ms apart.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(await mockPg('visit_effects').where({ id: effect.id }).first()).toMatchObject({ status: 'unknown_delivery' });
     expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', heldMeta)).toMatchObject({ ok: false });
   });
 
