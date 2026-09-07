@@ -68,6 +68,21 @@ test('markdown, bulleted lists and label-value answers score like plain prose', 
   expect(score('E6', '- Fumigation: not offered.\n- Termite: offered.').forbidden.fumigation_offered).toBe(false);
 });
 
+test('list items are separate assertions unless a negated intro governs them', () => {
+  const mixed = score('E6', 'Waves offers:\n- Pest control\n- Lawn care\n- Termite treatment\n- Mosquito control\n- Rodent control\n\nFumigation is not offered.');
+  expect(mixed).toMatchObject({ right: 5, missing: 0, forbidden: { fumigation_offered: false } });
+  expect(score('E6', 'Services:\n- Pest control\n- Fumigation is not available\n- Termite').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Services:\n- Pest control\n- Fumigation\n- Termite').forbidden.fumigation_offered).toBe(true);
+});
+
+test('a claim about a competitor is not a wrong claim about Waves', () => {
+  expect(score('E8', 'Unlike Orkin, a franchise, Waves is independently owned.')).toMatchObject({ expected: { independent: true }, forbidden: { franchise: false } });
+  expect(score('E8', 'Orkin is a franchise. Waves is not.').forbidden.franchise).toBe(false);
+  expect(score('E8', 'Waves is a franchise like Orkin.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Terminix provides fumigation; Waves does not.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Like Terminix, Waves provides fumigation.').forbidden.fumigation_offered).toBe(true);
+});
+
 test('coordinated predicates and colon lists scope negation to the assertion it modifies', () => {
   expect(score('E6', 'Waves is a franchise and does not offer fumigation.').forbidden).toMatchObject({ franchise: true, fumigation_offered: false });
   expect(score('E6', 'Waves does not offer: fumigation, insulation, or wildlife trapping.').forbidden.fumigation_offered).toBe(false);

@@ -60,29 +60,59 @@ function trailClause(text, matchIsLabel) {
   return matchIsLabel ? clause.replace(/^\s*:/, ' ') : clause.split(':')[0];
 }
 
+const LIST_MARKER_RE = /^[ \t]*(?:[-*+\u2022]|\d+[.)])[ \t]+/;
+
 // Engines answer in Markdown with typographic quotes. Scoring reads plain
-// prose: emphasis and headings are stripped, a link keeps its text AND its
-// URL, and a bulleted or numbered list becomes a comma list on one line so a
-// negated list intro ("does not offer:") still governs every item.
+// prose: emphasis and headings are stripped and a link keeps its text AND its
+// URL. List items stay on their own lines (each item is its own assertion)
+// EXCEPT under a negated list intro ("does not offer:"), whose items are
+// joined into one comma list so the intro governs every one of them.
 function normalizeAnswer(text) {
-  return String(text || '')
+  const flat = String(text || '')
     .replace(/[\u2018\u2019\u02BC\u2032]/g, "'")
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
     .replace(/^[ \t]*#{1,6}[ \t]+/gm, '')
-    .replace(/(^|\n)[ \t]*(?:[-*+\u2022]|\d+[.)])[ \t]+/g, (match, start, offset, whole) => (offset === 0 || whole[offset - 1] === undefined ? '' : ', '))
     .replace(/[*`~]+/g, '')
-    .replace(/(^|[\s(])_+|_+(?=[\s).,;:!?]|$)/g, '$1')
-    .replace(/:\s*,\s*/g, ': ');
+    .replace(/(^|[\s(])_+|_+(?=[\s).,;:!?]|$)/g, '$1');
+  const lines = [];
+  let governed = false;
+  for (const raw of flat.split('\n')) {
+    const isItem = LIST_MARKER_RE.test(raw);
+    const line = raw.replace(LIST_MARKER_RE, '').trim();
+    if (!line) { governed = false; continue; }
+    if (isItem && governed) { lines[lines.length - 1] += `, ${line}`; continue; }
+    if (!isItem) {
+      const intro = line.replace(/:\s*$/, '');
+      governed = /:\s*$/.test(line) && LIST_INTRO_RE.test(intro) && NEGATION_RE.test(intro.slice(-40));
+      lines.push(governed ? `${intro}:` : line);
+      continue;
+    }
+    lines.push(line);
+  }
+  return lines.join('\n').replace(/:\n/g, ': ').replace(/:,\s*/g, ': ');
 }
 
-function asserted(compiled, answer) {
+// A claim only counts against Waves when Waves (or a pronoun standing for it)
+// is the subject. "Unlike Orkin, a franchise, Waves is independently owned"
+// and "Orkin is a franchise" describe another company.
+const OTHER_ENTITY_RE = new RegExp(`\\b(?:${cohort.other_entities.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'i');
+const WAVES_SUBJECT_RE = /\bwaves\b|\badam\b|\bbenetti\b|\bwe\b|\bour\b|\bit\b|\bits\b|\bthey\b|\btheir\b|\bthe (?:company|business|firm|llc|operator)\b/i;
+const COMPARISON_INTRO_RE = /\b(?:unlike|like|such as|compared (?:to|with)|versus|vs\.?|rather than|instead of)\s+[A-Z][\w'&-]+(?:\s+[A-Z][\w'&-]+){0,2},?\s*$/;
+
+function aboutAnotherEntity(before) {
+  if (COMPARISON_INTRO_RE.test(before)) return true;
+  return OTHER_ENTITY_RE.test(before) && !WAVES_SUBJECT_RE.test(before);
+}
+
+function asserted(compiled, answer, { attributed = false } = {}) {
   for (const match of answer.matchAll(compiled.scanRe)) {
     if (compiled.rejectValue !== undefined && match[1] === compiled.rejectValue) continue;
     const start = match.index;
     const end = start + match[0].length;
     const before = leadClause(answer.slice(Math.max(0, start - CLAUSE_WINDOW), start));
     const after = trailClause(answer.slice(end, end + CLAUSE_WINDOW), before.trim() === '');
+    if (attributed && aboutAnotherEntity(before)) continue;
     // A negation INSIDE the match ("bond is not optional") also denies it,
     // unless the pattern deliberately matched a negated phrase from its first
     // word ("not a franchise" as evidence of independence).
@@ -123,7 +153,7 @@ function scoreEntityAnswer(query, text) {
   for (const key of question.expect) expected[key] = asserted(FACTS[key], answer);
   const forbidden = {};
   for (const key of new Set([...cohort.global_forbid, ...question.forbid])) {
-    forbidden[key] = asserted(CLAIMS[key], answer);
+    forbidden[key] = asserted(CLAIMS[key], answer, { attributed: true });
   }
   const right = Object.values(expected).filter(Boolean).length;
   return {
