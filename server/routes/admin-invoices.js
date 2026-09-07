@@ -591,17 +591,64 @@ router.get('/customers/search', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// GET /service-records/:customerId — get recent services for a customer (to link invoice)
+// Visit statuses an office invoice may be linked to before the closeout —
+// the live vocabulary (job-status.js). Owner ruling 2026-09-07: an invoice
+// linked to its visit at creation is the ONLY way the completion knows the
+// visit is already billed; an unattached invoice is never paired by
+// inference, so the picker must offer the open visit, not just the record.
+const OPEN_VISIT_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
+// A NULL status is a live visit (the repository's live-visit convention —
+// prepaid-series.js liveRows; the column is nullable), so a legacy row must
+// be linkable here too (GitHub P1 #4131): left out, its office invoice stays
+// unattached and completion mints the duplicate this path exists to prevent.
+const isOpenVisitStatus = (status) => status == null || OPEN_VISIT_STATUSES.includes(String(status));
+
+// GET /service-records/:customerId — the visit picker's feed: recent
+// completed visits (service records) AND the customer's open visits.
 router.get('/service-records/:customerId', async (req, res, next) => {
   try {
     const records = await db('service_records')
       .where({ customer_id: req.params.customerId })
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
-      .select('service_records.id', 'service_records.service_date', 'service_records.service_type',
+      // Plain YYYY-MM-DD like the open visits below: the picker labels build
+      // `new Date(date + 'T12:00:00')`, which a timestamp breaks ("Invalid
+      // Date" — seen in the ui-verify pass).
+      .select('service_records.id', db.raw("to_char(service_records.service_date, 'YYYY-MM-DD') as service_date"), 'service_records.service_type',
         'service_records.status', 'technicians.name as tech_name')
-      .orderBy('service_date', 'desc')
+      .orderBy('service_records.service_date', 'desc')
       .limit(20);
-    res.json({ records });
+    // Prepaid visits (recorded prepayment or annual-prepay coverage) are not
+    // offered — they need no new invoice and the create route refuses them.
+    const openVisits = await db('scheduled_services')
+      .where({ 'scheduled_services.customer_id': req.params.customerId })
+      .where((qb) => qb.whereNull('scheduled_services.status').orWhereIn('scheduled_services.status', OPEN_VISIT_STATUSES))
+      .where((qb) => qb.whereNull('scheduled_services.prepaid_amount').orWhere('scheduled_services.prepaid_amount', '<=', 0))
+      .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+      .select('scheduled_services.id', db.raw("to_char(scheduled_services.scheduled_date, 'YYYY-MM-DD') as scheduled_date"),
+        'scheduled_services.service_type', 'scheduled_services.status', 'scheduled_services.source_estimate_id', 'technicians.name as tech_name')
+      .orderBy('scheduled_services.scheduled_date', 'asc')
+      .limit(20);
+    // The pending estimate deposit the linked mint will credit automatically
+    // (pre-push P1): the form previews it so the operator sees the balance
+    // the customer will actually be sent, not the gross.
+    // Never for a payer-billed visit (pre-push P1): InvoiceService.create
+    // skips the homeowner's deposit when a third-party Bill-To resolves, so
+    // the preview must show zero credit there too — same resolver, same
+    // fail-soft-to-self-pay contract.
+    const { pendingDepositCredit } = require('../services/estimate-deposits');
+    const { resolveForInvoice } = require('../services/payer');
+    for (const visit of openVisits) {
+      let credit = null;
+      if (visit.source_estimate_id) {
+        try {
+          const payer = await resolveForInvoice({ customerId: req.params.customerId, scheduledServiceId: visit.id });
+          credit = payer?.payerId ? null : await pendingDepositCredit(visit.source_estimate_id);
+        } catch { credit = null; }
+      }
+      visit.deposit_credit = credit ? Number(credit.amount) : 0;
+      delete visit.source_estimate_id;
+    }
+    res.json({ records, openVisits });
   } catch (err) { next(err); }
 });
 
@@ -924,11 +971,40 @@ router.delete('/:id/attachments/:attachmentId', requireAdmin, async (req, res, n
 // POST / — create invoice manually
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
-    const { customerId, serviceRecordId, title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate } = req.body;
+    const { customerId, serviceRecordId, scheduledServiceId, expectedDepositCredit, title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate } = req.body;
     if (!customerId) return res.status(400).json({ error: 'customerId required' });
     if (!lineItems?.length) return res.status(400).json({ error: 'lineItems required' });
     if (serviceDate && !/^\d{4}-\d{2}-\d{2}$/.test(String(serviceDate))) {
       return res.status(400).json({ error: 'serviceDate must be YYYY-MM-DD' });
+    }
+    if (serviceRecordId && scheduledServiceId) {
+      return res.status(400).json({ error: 'Link the invoice to a completed visit OR an open visit, not both' });
+    }
+    if (expectedDepositCredit != null && !(Number.isFinite(Number(expectedDepositCredit)) && Number(expectedDepositCredit) >= 0)) {
+      return res.status(400).json({ error: 'expectedDepositCredit must be a non-negative number' });
+    }
+    // An OPEN visit picked from the Invoices page (owner ruling 2026-09-07):
+    // it must be this customer's and still open — a closed or dead visit is
+    // linked through its service record or not at all. Fail closed.
+    let pickedOpenVisit = null;
+    if (scheduledServiceId) {
+      if (!/^[0-9a-f-]{36}$/i.test(String(scheduledServiceId))) return res.status(400).json({ error: 'scheduledServiceId must be a uuid' });
+      const visit = await db('scheduled_services').where({ id: scheduledServiceId }).first();
+      if (!visit || String(visit.customer_id) !== String(customerId)) {
+        return res.status(400).json({ error: 'That visit does not belong to this customer' });
+      }
+      if (!isOpenVisitStatus(visit.status)) {
+        return res.status(409).json({ error: `That visit is ${visit.status} — link a completed visit through its service record instead`, code: 'visit_not_open' });
+      }
+      // A prepaid visit (cash/Zelle recorded on the visit, or covered by an
+      // annual prepay term) must not get a fresh collectible invoice — the
+      // customer would pay twice before completion (pre-push P0). Charge Now
+      // owns prepaid crediting; this office path refuses, fail closed.
+      const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+      if (Number(visit.prepaid_amount) > 0 || await AnnualPrepayRenewals.annualPrepayCoversVisit(visit)) {
+        return res.status(409).json({ error: 'That visit is already prepaid — it needs no new invoice (use Charge now from the schedule to credit the prepayment)', code: 'visit_prepaid' });
+      }
+      pickedOpenVisit = visit;
     }
 
     // Serialize LINKED manual creates under the shared mint lock (owner
@@ -962,7 +1038,62 @@ router.post('/', requireAdmin, async (req, res, next) => {
       ...(linkedScheduledServiceId ? { scheduledServiceId: linkedScheduledServiceId } : {}),
       title, lineItems, notes, emailMessage, dueDate, taxRate, discountIds, serviceDate,
     };
-    const invoice = (linkedScheduledServiceId || stampedEstimateId)
+    // An OPEN visit rides the ONE scheduled-visit mint helper (Charge Now,
+    // billing recovery, completion all do) — pre-push P0 ×2: under the mint
+    // lock chain it adopts an invoice another writer attached first instead
+    // of cutting a second collectible one, and it applies and consumes the
+    // visit's pending estimate deposit atomically (waves-billing deposit
+    // invariant) — a bare create here would bill the full amount again and
+    // the completion, reusing this linked row, would never roll it forward.
+    // Explicit operator lines bill what the operator typed
+    // (allowPriceMovement: the stale-price refusal guards derived prices).
+    // Ownership + open status are re-verified ROW-LOCKED inside the chain
+    // (pre-push P1): a cancellation finishing between the pre-check and the
+    // lock must refuse, not get a fresh invoice on a dead visit.
+    const mintForOpenVisit = async () => {
+      const { mintScheduledServiceInvoiceWithDeposit } = require('../services/scheduled-invoice-mint');
+      return mintScheduledServiceInvoiceWithDeposit({
+        svc: pickedOpenVisit,
+        allowPriceMovement: true,
+        // The credit the form previewed (GitHub P1): the helper refuses the
+        // mint if the credit it would apply differs, so the invoice the
+        // customer is sent is the balance the operator approved.
+        expectedDepositCredit: expectedDepositCredit == null ? null : Number(expectedDepositCredit),
+        assertEligibleInTrx: async (trx) => {
+          const still = await trx('scheduled_services').where({ id: pickedOpenVisit.id }).forUpdate().first('id', 'customer_id', 'status', 'prepaid_amount');
+          if (!still || String(still.customer_id) !== String(customerId) || !isOpenVisitStatus(still.status)) {
+            const e = new Error(`That visit is no longer open for this customer${still ? ` (${still.status})` : ''} — nothing was created`);
+            e.status = 409; e.code = 'visit_not_open';
+            throw e;
+          }
+          if (Number(still.prepaid_amount) > 0) {
+            const e = new Error('That visit was prepaid while this invoice was being created — nothing was created');
+            e.status = 409; e.code = 'visit_prepaid';
+            throw e;
+          }
+        },
+        buildCreateParams: () => ({ ...createArgs, scheduledServiceId: pickedOpenVisit.id }),
+      });
+    };
+    let invoice;
+    if (pickedOpenVisit) {
+      let minted;
+      try {
+        minted = await mintForOpenVisit();
+      } catch (err) {
+        if (err?.status === 409) return res.status(409).json({ error: err.message, code: err.code || 'visit_not_open' }); // visit_not_open | visit_prepaid | SCHEDULED_PRICE_MOVED | DEPOSIT_CREDIT_CHANGED
+        throw err;
+      }
+      if (minted.reused) {
+        return res.status(409).json({
+          error: `That visit already has invoice ${minted.invoice.invoice_number || minted.invoice.id} — open it instead of creating another`,
+          code: 'visit_already_invoiced',
+          invoiceId: minted.invoice.id,
+        });
+      }
+      invoice = minted.invoice;
+    } else {
+      invoice = (linkedScheduledServiceId || stampedEstimateId)
       ? await db.transaction(async (trx) => {
         if (linkedScheduledServiceId) {
           const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
@@ -973,7 +1104,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
         }
         return InvoiceService.create({ ...createArgs, database: trx });
       })
-      : await InvoiceService.create(createArgs);
+        : await InvoiceService.create(createArgs);
+    }
     if (stampedEstimateId) {
       // Post-commit retirement: the new coverage rewrites/resolves the
       // parked alert now, not on the next completion. Best-effort — the

@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ATTACHMENT_HELP_TEXT,
+  adminFetch,
   ATTACHMENT_VISIBILITY_TEXT,
   attachmentTotalBytes,
   buildInvoiceListParams,
@@ -16,6 +17,25 @@ import {
   persistedSendDisposition,
   validateAttachmentFiles,
 } from "./AdminInvoicesPage.jsx";
+
+describe("AdminInvoicesPage adminFetch error shape", () => {
+  it("keeps the server's error code on a refused request so callers can branch on it (deposit drift → reload the visit)", async () => {
+    vi.stubGlobal("localStorage", { getItem: () => "tok" });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      JSON.stringify({ error: "The deposit credit changed while this invoice was being created — nothing was created.", code: "DEPOSIT_CREDIT_CHANGED" }),
+      { status: 409, headers: { "Content-Type": "application/json" } },
+    )));
+    try {
+      await expect(adminFetch("/admin/invoices", { method: "POST", body: "{}" })).rejects.toMatchObject({
+        status: 409,
+        code: "DEPOSIT_CREDIT_CHANGED",
+        message: expect.stringContaining("nothing was created"),
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
 
 describe("AdminInvoicesPage Zelle notice candidates", () => {
   const near = { invoice_id: "n", invoice_number: "WPC-2026-0003", customer_name: "Sam Roe", amount_due_cents: 12000, exact_amount: false, name_match: false };

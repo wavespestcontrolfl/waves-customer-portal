@@ -108,7 +108,7 @@ const D = {
   inputBorder: "#D4D4D8",
 };
 
-async function adminFetch(path, options = {}) {
+export async function adminFetch(path, options = {}) {
   const r = await fetch(`${API_BASE}${path}`, {
     headers: {
       Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
@@ -118,15 +118,20 @@ async function adminFetch(path, options = {}) {
   });
   if (!r.ok) {
     let message = `HTTP ${r.status}`;
+    let code = null;
     try {
       const data = await r.clone().json();
       message = data.error || data.message || message;
+      // The server's machine-readable code (e.g. DEPOSIT_CREDIT_CHANGED) —
+      // callers branch on it.
+      if (data.code) code = String(data.code);
     } catch {
       const text = await r.text().catch(() => "");
       if (text) message = text;
     }
     const err = new Error(message);
     err.status = r.status;
+    if (code) err.code = code;
     throw err;
   }
   return r.json();
@@ -4982,6 +4987,11 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [serviceRecords, setServiceRecords] = useState([]);
   const [selectedService, setSelectedService] = useState(null);
+  // The customer's OPEN visits (pending/confirmed/en route/on site) — an
+  // invoice raised before the closeout links to its visit here, so the
+  // completion reuses it instead of minting a second one.
+  const [openVisits, setOpenVisits] = useState([]);
+  const [selectedOpenVisit, setSelectedOpenVisit] = useState(null);
   const [serviceDate, setServiceDate] = useState(defaultServiceDate);
   const [lineItems, setLineItems] = useState(() => [newLineItem()]);
   const [notes, setNotes] = useState("");
@@ -5100,14 +5110,23 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
 
   // Load service records when customer selected (skip in edit mode — the
   // service-history linker is hidden and the update route can't relink it).
+  // The picker feed: completed records + open visits (each with the deposit
+  // credit the linked mint will apply). Re-read after a deposit-drift
+  // refusal below, so the summary shows the credit that will actually apply.
+  const loadVisitPicker = async (customerId) => {
+    const d = await adminFetch(`/admin/invoices/service-records/${customerId}`);
+    setServiceRecords(d.records || []);
+    const visits = d.openVisits || [];
+    setOpenVisits(visits);
+    return visits;
+  };
   useEffect(() => {
     if (editMode || !selectedCustomer) {
       setServiceRecords([]);
+      setOpenVisits([]);
       return;
     }
-    adminFetch(`/admin/invoices/service-records/${selectedCustomer.id}`)
-      .then((d) => setServiceRecords(d.records || []))
-      .catch(() => {});
+    loadVisitPicker(selectedCustomer.id).catch(() => {});
   }, [selectedCustomer]);
 
   // Service library search for active line item
@@ -5361,7 +5380,12 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       : 0;
   const tax = afterDiscount * taxRate;
   const total = afterDiscount + tax;
-  const cardCharge = computeCardTotal(total);
+  // An open visit's pending estimate deposit is credited automatically when
+  // the linked invoice is created — preview it so the operator sees the
+  // balance the customer will actually be sent (surcharge follows the balance).
+  const depositCredit = Math.min(total, Math.max(0, Number(selectedOpenVisit?.deposit_credit) || 0));
+  const balanceDue = Math.max(0, Math.round((total - depositCredit) * 100) / 100);
+  const cardCharge = computeCardTotal(balanceDue);
 
   const dateOnly = (date) => {
     const parts = new Intl.DateTimeFormat("en-US", {
@@ -5533,6 +5557,12 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       const body = {
         customerId: selectedCustomer.id,
         serviceRecordId: selectedService?.id || null,
+        scheduledServiceId: selectedOpenVisit?.id || null,
+        // The deposit credit the summary previewed: the server refuses the
+        // create (409 DEPOSIT_CREDIT_CHANGED) when the credit it would
+        // actually apply differs, so the customer is never sent an amount
+        // the operator did not see — nothing is created, nothing is sent.
+        ...(selectedOpenVisit ? { expectedDepositCredit: depositCredit } : {}),
         serviceDate,
         lineItems: lineItems
           .filter((i) => i.description && Number(i.unit_price) !== 0)
@@ -5659,6 +5689,17 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       onCreated();
     } catch (e) {
       showToast(`Error: ${e.message}`);
+      if (e.code === "DEPOSIT_CREDIT_CHANGED" && selectedOpenVisit && selectedCustomer) {
+        // Nothing was created — the deposit moved between the preview and
+        // the create. Reload the visit so the summary shows the credit that
+        // will actually apply before the operator tries again.
+        try {
+          const visits = await loadVisitPicker(selectedCustomer.id);
+          setSelectedOpenVisit(visits.find((v) => v.id === selectedOpenVisit.id) || null);
+        } catch {
+          /* the toast already asks for a reload */
+        }
+      }
     }
     setSaving(false);
   };
@@ -6076,6 +6117,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                   onClick={() => {
                     setSelectedCustomer(null);
                     setSelectedService(null);
+                    setSelectedOpenVisit(null);
                     setCustomerQuery("");
                   }}
                   style={{
@@ -6126,6 +6168,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                         // Drop any visit picked for the previous customer so a
                         // stale service record can't be linked across customers.
                         setSelectedService(null);
+                        setSelectedOpenVisit(null);
                         setServiceRecords([]);
                         setCustomers([]);
                         setCustomerQuery("");
@@ -6161,21 +6204,28 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
             </div>
           )}
         </div>
-        {!editMode && serviceRecords.length > 0 && (
+        {!editMode && (serviceRecords.length > 0 || openVisits.length > 0) && (
           <div style={panelStyle()}>
-            {sectionHeader("Service History")}
+            {sectionHeader("Link to visit")}
             <select
-              value={selectedService?.id || ""}
+              value={
+                selectedOpenVisit ? `visit:${selectedOpenVisit.id}` : selectedService ? `record:${selectedService.id}` : ""
+              }
               onChange={(e) => {
-                const sr = serviceRecords.find((r) => r.id === e.target.value);
+                const [kind, id] = String(e.target.value).split(":");
+                const sr = kind === "record" ? serviceRecords.find((r) => r.id === id) : null;
+                const ov = kind === "visit" ? openVisits.find((v) => v.id === id) : null;
                 setSelectedService(sr || null);
-                if (sr?.service_date) setServiceDate(sr.service_date);
-                if (sr && lineItems.length === 1 && !lineItems[0].description) {
+                setSelectedOpenVisit(ov || null);
+                const picked = sr || ov;
+                const pickedDate = sr?.service_date || ov?.scheduled_date;
+                if (pickedDate) setServiceDate(pickedDate);
+                if (picked && lineItems.length === 1 && !lineItems[0].description) {
                   setLineItems([
                     {
                       ...lineItems[0],
                       _kind: "service",
-                      description: sr.service_type,
+                      description: picked.service_type,
                       quantity: 1,
                       unit_price: 0,
                     },
@@ -6184,16 +6234,35 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
               }}
               style={sInput(isMobile)}
             >
-              {" "}
-              <option value="">No service linked</option>
-              {serviceRecords.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.service_type} --{" "}
-                  {new Date(r.service_date + "T12:00:00").toLocaleDateString()}{" "}
-                  -- {r.tech_name || "Unknown tech"}
-                </option>
-              ))}
-            </select>{" "}
+              <option value="">No visit linked</option>
+              {openVisits.length > 0 && (
+                <optgroup label="Open visits (not yet completed)">
+                  {openVisits.map((v) => (
+                    <option key={v.id} value={`visit:${v.id}`}>
+                      {v.service_type} --{" "}
+                      {new Date(v.scheduled_date + "T12:00:00").toLocaleDateString()}{" "}
+                      -- {String(v.status || "scheduled").replace("_", " ")}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {serviceRecords.length > 0 && (
+                <optgroup label="Completed visits">
+                  {serviceRecords.map((r) => (
+                    <option key={r.id} value={`record:${r.id}`}>
+                      {r.service_type} --{" "}
+                      {new Date(r.service_date + "T12:00:00").toLocaleDateString()}{" "}
+                      -- {r.tech_name || "Unknown tech"}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+            {selectedOpenVisit && (
+              <div style={{ color: D.muted, fontSize: 14, marginTop: 8 }}>
+                Linked to the open visit — when it is completed, this invoice is reused instead of a new one being created.
+              </div>
+            )}
           </div>
         )}
         {!editMode && (
@@ -7172,6 +7241,18 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
               <span style={summaryLabelStyle}>Total</span>
               <span style={summaryAmountStyle}>${total.toFixed(2)}</span>{" "}
             </div>
+            {depositCredit > 0 && (
+              <>
+                <div style={{ ...summaryRowStyle(), marginTop: 6 }}>
+                  <span style={summaryLabelStyle}>Deposit credit (paid at acceptance) — applied automatically</span>
+                  <span style={summaryAmountStyle}>-${depositCredit.toFixed(2)}</span>
+                </div>
+                <div style={{ ...summaryRowStyle(16, 700), marginTop: 4 }}>
+                  <span style={summaryLabelStyle}>Balance due</span>
+                  <span style={summaryAmountStyle}>${balanceDue.toFixed(2)}</span>
+                </div>
+              </>
+            )}
             {cardCharge.surcharge > 0 && (
               <div style={{ ...summaryRowStyle(), marginTop: 6 }}>
                 {" "}
