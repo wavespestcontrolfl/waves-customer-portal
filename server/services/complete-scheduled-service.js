@@ -16,7 +16,7 @@ const TermiteStations = require('../services/termite-stations');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
-const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft } = require('../services/nutrient-ledger');
+const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft, ledgerRowCoverage } = require('../services/nutrient-ledger');
 const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
 const { lawnCompletionDefaultsEnabled } = require('../services/lawn-completion-defaults');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
@@ -503,10 +503,11 @@ function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, in
     .filter(Boolean);
 }
 
+// Missing / ambiguous rig no longer blocks the plan (owner ruling
+// 2026-09-07), so only a calibration that exists but is stale or unverified
+// is worth an advisory line.
 function calibrationLockoutBlocks(plan) {
   const lockoutCodes = new Set([
-    'missing_calibration',
-    'equipment_selection_required',
     'expired_calibration',
     'calibration_not_field_verified',
   ]);
@@ -4172,6 +4173,9 @@ async function completeScheduledService(completionInput, packetRecord = null) {
       try {
         const annualN = plan?.propertyGate?.annualN || null;
         const lawnSqft = Number(plan?.propertyGate?.lawnSqft || 0);
+        // Annual N is per 1,000 sq ft of the WHOLE property — the same
+        // denominator calculateNutrientLedger uses — never the visit area.
+        const propertyLawnSqft = Number(plan?.propertyGate?.profileLawnSqft || lawnSqft || 0);
         const limit = Number(annualN?.limit);
         // The catalog scan runs whenever products were submitted — the
         // unquantified-unit detection must NOT hide behind the area/limit
@@ -4200,7 +4204,11 @@ async function completeScheduledService(completionInput, packetRecord = null) {
               // instead of inventing a density here.
               unquantifiedNProducts.push(catalog.name || 'nitrogen product');
             } else if (treatedSqft > 0) {
-              actualVisitN += (pounds * (Number(catalog.analysis_n) / 100)) / (treatedSqft / 1000);
+              // Per 1,000 sq ft of the whole lawn: a product confined to one
+              // zone counts in proportion to its coverage (ledgerRowCoverage),
+              // the same way the annual ledger aggregates it.
+              actualVisitN += ((pounds * (Number(catalog.analysis_n) / 100)) / (treatedSqft / 1000))
+                * ledgerRowCoverage({ lawn_sqft: treatedSqft }, propertyLawnSqft);
             }
           }
           const used = Number(annualN?.used || 0);
@@ -4331,9 +4339,13 @@ async function completeScheduledService(completionInput, packetRecord = null) {
       // (The closeout no longer submits equipmentSystemId at all, so keying
       // this off the raw request field would clear every resolved assignment
       // and null out scheduled_services' assignment downstream — Codex P1.)
+      // An assignment whose calibration is no longer active (the plan says
+      // `unresolved`) is cleared the same way: the math ran on the protocol
+      // carrier, so persisting the stale rig would fabricate equipment
+      // usage (Codex #4124 r3 P1).
       const selectedIsFieldVerified =
         selectedCalibration?.calibration_status === 'field_verified';
-      if (calibrationBypass && !selectedIsFieldVerified) {
+      if ((calibrationBypass && !selectedIsFieldVerified) || plan?.equipmentCalibration?.unresolved) {
         waveguardEquipmentSystemId = null;
         waveguardCalibrationId = null;
         waveguardCalibrationCleared = true;

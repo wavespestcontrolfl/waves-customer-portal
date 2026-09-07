@@ -112,11 +112,24 @@ async function recordServiceProductNutrients(trx, {
   return row;
 }
 
-function summarizeLedgerRows(rows, year) {
+// A ledger row's per-1,000 rate describes the area it treated. Annual totals
+// are per 1,000 sq ft of the WHOLE lawn, so a partial-zone row counts in
+// proportion to its coverage: 1 lb N/1k on half the lawn is 0.5 lb N/1k for
+// the year. A row without a recorded area, or with no known lawn area to
+// compare against, keeps the legacy whole-lawn weight of 1.
+function ledgerRowCoverage(row, lawnSqft) {
+  const treated = Number(row.lawn_sqft ?? row.lawnSqft);
+  const lawn = Number(lawnSqft);
+  if (!(treated > 0) || !(lawn > 0)) return 1;
+  return Math.min(1, treated / lawn);
+}
+
+function summarizeLedgerRows(rows, year, { lawnSqft = null } = {}) {
   const totals = rows.reduce((acc, row) => {
-    acc.nApplied += Number(row.n_applied_per_1000 || row.nAppliedPer1000 || 0);
-    acc.pApplied += Number(row.p_applied_per_1000 || row.pAppliedPer1000 || 0);
-    acc.kApplied += Number(row.k_applied_per_1000 || row.kAppliedPer1000 || 0);
+    const coverage = ledgerRowCoverage(row, lawnSqft);
+    acc.nApplied += Number(row.n_applied_per_1000 || row.nAppliedPer1000 || 0) * coverage;
+    acc.pApplied += Number(row.p_applied_per_1000 || row.pAppliedPer1000 || 0) * coverage;
+    acc.kApplied += Number(row.k_applied_per_1000 || row.kAppliedPer1000 || 0) * coverage;
     return acc;
   }, { nApplied: 0, pApplied: 0, kApplied: 0 });
 
@@ -136,6 +149,7 @@ function summarizeLedgerRows(rows, year) {
 module.exports = {
   amountToPounds,
   calculateAppliedNutrients,
+  ledgerRowCoverage,
   nutrientTreatedSqft,
   recordServiceProductNutrients,
   summarizeLedgerRows,

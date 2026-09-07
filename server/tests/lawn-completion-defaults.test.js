@@ -76,12 +76,12 @@ test('a nonmember can use an explicitly assigned window; a spot default stays sp
   expect(buildLawnCompletionDefaults(plan, context).items[0].applicationMethod).toBe('spot_treatment');
 });
 
-test.each(['WDG', 'WG', 'WP', 'liquid', 'granular', 'G'])('formulation %s determines the default application method, not its weight unit', formulation => {
+test.each(['WDG', 'WG', 'WP', 'liquid', 'granular', 'G', 'Granule (G)', 'Granule (restricted-use)', 'Granular pre-emergent on fertilizer', 'Granular bait', 'Water-dispersible granule (WDG)', 'Water-soluble granule (WSG)', 'Water-dispersible granule (WG)', 'Suspension concentrate (SC)'])('formulation %s determines the default application method, not its weight unit', formulation => {
   const { plan, context } = fixture();
   plan.mixCalculator.items[0].product.formulation = formulation;
   plan.mixCalculator.items[0].mix.amountUnit = 'oz';
   expect(buildLawnCompletionDefaults(plan, context).items[0].applicationMethod)
-    .toBe(['granular', 'G'].includes(formulation) ? 'granular_broadcast' : 'broadcast_spray');
+    .toBe(['granular', 'G', 'Granule (G)', 'Granule (restricted-use)', 'Granular pre-emergent on fertilizer', 'Granular bait'].includes(formulation) ? 'granular_broadcast' : 'broadcast_spray');
 });
 
 test('an exact assigned archived version remains eligible, but drafts and partial assignments do not', () => {
