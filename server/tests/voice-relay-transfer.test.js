@@ -412,7 +412,7 @@ describe('pre-push hook round 9', () => {
     // from the row's metadata and reads the written value back (a stash landing between the read and the write is still composed).
     expect(src.includes('relayPending = transferred;')).toBe(true); // …and on every write of a reconnected call (PR 2B)
     expect(src.match(/await writeTranscript\(/g)).toHaveLength(4); // primary, both fallbacks, and the relay-only rejection write
-    expect(src).toMatch(/CASE WHEN \? IS NOT NULL THEN '\[AI segment\]' \|\| E'\\\\n' \|\| \? \|\| .*\|\| \?::text ELSE \?::text END/); // the relay text = the stash, else the segments (PR 2B), composed inside the UPDATE
+    expect(src).toContain("composeRelayTranscriptSql(db, relayTextSql(),"); // the shared budget uses the current row's relay text
     expect(src.includes("COALESCE(NULLIF(metadata->'relay_transcript'->>'text', ''), ?, CASE WHEN transcription_provider = ? THEN NULLIF(transcription, '') END)")).toBe(true);
     expect(src).toContain("}, ['transcription']);");
     expect(src).toContain("const freshRecorded = recordedFallbackOf(freshCall);");
@@ -465,13 +465,12 @@ describe('pre-push hook round 9', () => {
     expect(builder.whereIn).toHaveBeenCalledWith('call_outcome', ['voicemail', 'ai_transferred']); // …or a transferred row whose recording was already processed
     expect(builder.whereRaw).toHaveBeenCalledWith(expect.stringContaining("relay_handoff') IS NOT NULL"));
     // The column salvage itself only takes an ai_transferred row whose columns are still Sandy's (provider NULL / conversation_relay).
-    const src = require('fs').readFileSync(require.resolve('../services/voice-agent/relay-conversation'), 'utf8');
     expect(builder.whereRaw).toHaveBeenCalledWith("(call_outcome = 'relay_failed' OR transcription_provider IS NULL OR transcription_provider = ?)", ['conversation_relay']);
     // The recording owns the columns — unless the processor already wrote the recorded leg ALONE (it read the row
     // before this stash): then the AI segment is prepended in the same statement (codex r6 P1); a composite / empty
     // column / Sandy's own transcript is left as it is.
-    expect(updates[2].transcription.sql).toMatch(/^CASE WHEN \(transcription IS NOT NULL AND transcription <> '' AND transcription NOT LIKE '\[AI segment\]%' AND transcription_provider IS DISTINCT FROM 'conversation_relay'\) THEN \? \|\| E'\\n\\n\[' \|\| CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END \|\| E' segment\]\\n' \|\| transcription ELSE transcription END$/);
-    expect(updates[2].transcription.bindings[0]).toMatch(/^\[AI segment\]\n/);
+    expect(updates[2].transcription.sql).toMatch(/^CASE WHEN \(transcription IS NOT NULL AND transcription <> '' AND transcription NOT LIKE '\[AI segment\]%' AND transcription_provider IS DISTINCT FROM 'conversation_relay'\) THEN \? ELSE transcription END$/);
+    expect(updates[2].transcription.bindings[0].bindings[0]).toBe('[AI segment]\n');
     expect(updates[2].transcript_structured.sql).toMatch(/THEN NULL ELSE transcript_structured END$/);
     expect(updates[2].metadata.bindings[0]).toContain('"relay_transcript"');
     const logger = require('../services/logger');
@@ -580,14 +579,14 @@ describe('whisper + AI segment', () => {
   });
   test('composeRelaySegment keeps the relay transcript for any row carrying the persisted packet — including the no-answer voicemail fallback', () => {
     const row = { call_outcome: 'ai_transferred', metadata: JSON.stringify({ relay_handoff: { context_available: true } }), transcription_provider: 'conversation_relay', transcription: 'Caller: hi\nSandy: hello', transcription_metadata: JSON.stringify({ provider: 'conversation_relay', latency: { p50: 1 } }) };
-    expect(transfer.composeRelaySegment(row)).toEqual({ text: '[AI segment]\nCaller: hi\nSandy: hello', metadata: { provider: 'conversation_relay', latency: { p50: 1 } } });
+    expect(transfer.composeRelaySegment(row)).toEqual({ text: 'Caller: hi\nSandy: hello', metadata: { provider: 'conversation_relay', latency: { p50: 1 } } });
     expect(transfer.composeRelaySegment({ ...row, call_outcome: 'voicemail' })).not.toBeNull(); // nobody pressed 1 ⇒ voicemail, AI segment survives
     expect(transfer.composeRelaySegment({ ...row, metadata: { relay_handoff: { context_available: false } } })).not.toBeNull();
     expect(transfer.composeRelaySegment({ ...row, metadata: {} })).toBeNull(); // an ordinary relay call: the processor path is unchanged
     expect(transfer.composeRelaySegment({ ...row, metadata: { relay_transfer_ring_at: '2026-09-05T00:00:00Z' } })).not.toBeNull(); // both packet writes failed, the ring claim still marks the transfer
     // The recording-status swap cleared the transcript columns: the metadata copy end() stashed still rebuilds the segment (P1).
     const swapped = { call_outcome: 'voicemail', transcription: null, transcription_provider: null, transcription_metadata: null, metadata: { relay_handoff: { context_available: true }, relay_transcript: { text: 'Caller: hi\nSandy: hello', metadata: { provider: 'conversation_relay' } } } };
-    expect(transfer.composeRelaySegment(swapped)).toEqual({ text: '[AI segment]\nCaller: hi\nSandy: hello', metadata: { provider: 'conversation_relay' } });
+    expect(transfer.composeRelaySegment(swapped)).toEqual({ text: 'Caller: hi\nSandy: hello', metadata: { provider: 'conversation_relay' } });
     expect(transfer.composeRelaySegment({ ...row, transcription_provider: 'openai' })).toBeNull();
     expect(transfer.composeRelaySegment({ ...row, transcription: '' })).toBeNull();
   });
