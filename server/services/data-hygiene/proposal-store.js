@@ -210,6 +210,15 @@ const EXTRACTION_MESSAGE_SID = `COALESCE(evidence->>'twilio_sid',
   (SELECT twilio_sid FROM sms_log WHERE id = NULLIF(data_hygiene_proposals.evidence->>'sms_log_id', '')::uuid),
   (SELECT twilio_sid FROM messages WHERE id = NULLIF(data_hygiene_proposals.evidence->>'message_id', '')::uuid))`;
 
+async function findSmsExtractionProposals({ trx = null, scope_id, sms_log_id, twilio_sid }) {
+  return (trx || db)('data_hygiene_proposals')
+    .where({ scope_type: 'customer', scope_id, source: 'message-extraction', resource_type: 'property_preferences' })
+    .where(function sameMessage() {
+      this.whereRaw("evidence->>'sms_log_id' = ?", [sms_log_id]);
+      if (twilio_sid) this.orWhereRaw(`${EXTRACTION_MESSAGE_SID} = ?`, [twilio_sid]);
+    }).orderBy('created_at', 'desc').select('id', 'field', 'status', 'evidence');
+}
+
 async function stalePendingExtractionProposals({ trx = null, scope_id, field, source = 'message-extraction', notNewerThan = null, sameMessageSid = null }) {
   const client = trx || db;
   const query = client('data_hygiene_proposals')
@@ -249,5 +258,6 @@ module.exports = {
   stalePendingNormalizationForResource,
   stalePendingExtractionProposals,
   findPendingExtractionProposal,
+  findSmsExtractionProposals,
   isSensitiveProposal,
 };

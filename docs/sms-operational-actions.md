@@ -30,10 +30,6 @@ Customer 360’s Comms tab displays a paged SMS follow-up list with Mark done an
 
 Admin bells link directly to `/admin/customers?customerId=<customerId>&tab=comms`. Private codes and source quotes stay out of bell previews. Reading a bell does not complete work; still-open obligations can re-alert after a rolling 24 hours through the existing admin dedupe mechanism. Fulfillment evidence strips duplicate raw-body fields and scrubs SMS records chronologically; a split payment readback that merges record boundaries requires review before any provider call. A cached verdict is keyed by the evidence, obligation, provider policy and extraction contract; changed evidence invalidates it, and provider/schema failures retry after one hour. The call watchdog retains its separate daily 7:20 ET cadence.
 
-## Relationship to data-hygiene extraction
-
-The admin-triggered data-hygiene extraction phase keeps proposing regex matches from the unified inbox for human approval; it never auto-applies, so it cannot host an automatic empty-field write. This lane shares its compare-and-set writer and receipt store instead. When it fills a field, it marks that customer's pending message-extraction proposals for the same field stale in the same transaction, so staff are not asked to approve work whose before-value check can no longer pass. The reverse order needs nothing extra: the extraction phase already skips values the live profile contains. The call-profile enrichment writer takes the same customer preference lock and re-reads the row under it before appending, so a call processed while an SMS fact lands adds to that value instead of replacing it from a stale snapshot.
-
 ## Activation and rollback
 
 Disabled unless `GATE_SMS_OPERATIONAL_ACTIONS=true` and `GATE_SMS_OPERATIONAL_ACTIONS_SINCE=<ISO instant with offset>` are both set. Choose the activation timestamp deliberately; historical training messages are not imported. Commitment capture, overdue checks and profile closure controls additionally require `GATE_SMS_COMMITMENT_FOLLOWUP=true`. Unset either gate to stop follow-up; recorded work remains visible. Unset the profile gate to revoke all capture.
@@ -52,9 +48,21 @@ without timed overdue bells.
 
 `server/tests/sms-operational-actions.test.js` covers grounding, code fidelity, profile authority, concurrent-edit decisions and gate behavior. `server/tests/sms-operations-postgres.test.js` checks atomicity, replay, profile-fact ordering, source relinks, unavailable customers and evidence-preserving rollback in a private schema cloned from a migrated synthetic database. CI supplies its ephemeral PostgreSQL database. Local database execution requires a verified dedicated dev/preview database.
 
-## Deferred P2
+## Explicit replay
 
-Automatic replay of analyzed messages needs reconciliation of previously audited writes, obligations and terminal extraction receipts. Changing a model version or correcting a body does not authorize replay. Keep the one-shot marker until receipt-aware reconciliation is implemented.
+Changing a model version or correcting a source body never clears analysis markers or terminal receipts. An operator may request a replay of one already-analyzed inbound SMS with `node ops/agents/replay-sms-profile.js --sms-log-id=<uuid>`. The default runs the extractor and previews actual field dispositions through the shared writer in a transaction that is rolled back. It reports new proposals, preserved pending work, prior applied fields and validation exceptions without exposing private values. Add `--execute` to persist the reviewed-queue results. Both modes incur normal LLM usage; preview rolls back proposal, vault, receipt, analysis and capture-audit writes and suppresses exception bells. Both the SMS gate and activation timestamp still apply, and messages before activation remain excluded.
+
+Replayed results always require staff review. Prior automatic-write audits and applied or reverted proposals for the same SMS identify fields that must remain untouched, including inbox twins linked by Twilio message id. An identical pending proposal stays pending; an identical terminal proposal keeps its disposition. New eligible facts use the existing vaulted proposal queue and its chronology, authority and before-value checks. The replay has its own extraction receipt per extractor version and source hash, plus a critical audit; it preserves the original analysis and receipts. A failed replay leaves prior work intact and records a bounded retry attempt. No obligations, customer communications, scheduling writes or automatic profile changes run during replay, even while commitment capture is enabled.
+
+Replay reconciles the stable message identity, field and vault value hash, so
+an extractor-version change or later creation of a preferences row cannot
+reopen an identical rejected fact. Inbox twins use their linked Twilio identity.
+Contact preferences join the existing sensitive approval/revert path through
+migration `20260907000021_sms_replay_contact_preference.js`; replay itself
+never writes the preference. The migration rollback refuses to remove the
+allowance while a NULL-target contact-preference proposal still exists.
+
+## Scheduled source identity
 
 Scheduled outbound SMS has one capture identity: the original queue row.
 The provider delivery row is excluded from capture when `metadata.scheduled_sms_log_id` identifies a scheduled outbound row for

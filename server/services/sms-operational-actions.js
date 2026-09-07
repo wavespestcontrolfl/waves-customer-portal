@@ -10,14 +10,18 @@ const numbers = require('../config/twilio-numbers');
 const { runExclusive } = require('../utils/cron-lock');
 const { recordAuditEvent } = require('./audit-log');
 const NotificationService = require('./notification-service');
-const { hashExtractionSource, recordExtractionAttempt } = require('./data-hygiene/source-extraction-store');
-const { stalePendingExtractionProposals, findPendingExtractionProposal, upsertSensitiveProposal } = require('./data-hygiene/proposal-store');
+const { validate: isUuid } = require('uuid');
+const { hashExtractionSource, recordExtractionAttempt, shouldSkipExtraction, TERMINAL_STATUSES } = require('./data-hygiene/source-extraction-store');
+const { stalePendingExtractionProposals, findPendingExtractionProposal, upsertSensitiveProposal, findSmsExtractionProposals, buildIdempotencyKey } = require('./data-hygiene/proposal-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
 const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode } = require('./sms-operational-extractor');
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
 const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment } = require('./sms-commitment-fulfillment');
+
+const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
+const REPLAY_VERSION = `${VERSION}:replay`;
 
 const enabled = () => gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS');
 const smsCommitmentsEnabled = () => enabled() && gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP');
@@ -123,10 +127,8 @@ async function proposeFact(trx, message, fact, current) {
   // The customer's newest statement wins. Only a matching Twilio identity
   // identifies a twin; a distinct newer correction always outranks this SMS.
   if (await findPendingExtractionProposal({ trx, scope_id: message.customer_id, field: fact.field,
-    newerThan: message.created_at, sameMessageSid: message.twilio_sid })) return null;
-  await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field,
-    notNewerThan: message.created_at, sameMessageSid: message.twilio_sid });
-  const proposal = await upsertSensitiveProposal({
+    newerThan: message.created_at, sameMessageSid: message.twilio_sid })) return { id: null, created: false };
+  const input = {
     rule_id: 'extract.sms_profile', rule_version: VERSION, resource_type: 'property_preferences',
     resource_id: current?.id || null, scope_type: 'customer', scope_id: message.customer_id, field: fact.field,
     current_value: current?.[fact.field] ?? null, proposed_value: fact.value,
@@ -137,8 +139,21 @@ async function proposeFact(trx, message, fact, current) {
       channel: 'sms', source_at: new Date(message.created_at).toISOString(), twilio_sid: message.twilio_sid || null,
       property_id: fact.property_id, extractor_version: VERSION,
       source_excerpt: 'Customer SMS; the text is in the vault and the customer conversation.' },
-  }, { trx });
-  return proposal.id;
+  };
+  // Re-extraction can return an identical proposal. Preserve its pending or
+  // terminal disposition before retiring siblings; the idempotent insert
+  // would otherwise leave that very proposal stale with no replacement.
+  const prior = await findSmsExtractionProposals({ trx, scope_id: message.customer_id,
+    sms_log_id: message.id, twilio_sid: message.twilio_sid });
+  const sameFact = prior.filter((proposal) => proposal.field === fact.field
+    && proposal.evidence?.after_hash === hashSensitiveValue(fact.value));
+  const existing = sameFact.find((proposal) => proposal.status !== 'pending') || sameFact[0]
+    || await trx('data_hygiene_proposals').where({ idempotency_key: buildIdempotencyKey(input) }).first('id', 'status');
+  if (existing) return { id: existing.status === 'pending' ? existing.id : null, created: false };
+  await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field,
+    notNewerThan: message.created_at, sameMessageSid: message.twilio_sid });
+  const proposal = await upsertSensitiveProposal(input, { trx });
+  return { id: proposal.id, created: proposal.inserted };
 }
 
 async function applyFacts(trx, message, facts, context) {
@@ -148,15 +163,23 @@ async function applyFacts(trx, message, facts, context) {
   // fields in one batch claim the same text for different topics.
   const mixedTopics = new Set(facts.filter((f) => !AUTO_APPLY_FIELDS.has(f.field)).map((f) => f.field)).size > 1;
   for (const fact of facts) {
+    if (context.replayAppliedFields?.has(fact.field)) {
+      outcomes.push({ ...fact, outcome: 'previously_applied' });
+      continue;
+    }
     const duplicateField = facts.filter((f) => f.field === fact.field).length > 1;
     const negatedReview = REVIEW_ON_NEGATION[fact.field];
     const negated = negatedReview && NEGATED_OR_UNCERTAIN.test(message.message_body);
     const verdict = duplicateField ? 'conflicting_facts' : negated ? negatedReview
       : mixedTopics && !AUTO_APPLY_FIELDS.has(fact.field) ? 'mixed_topics' : factVerdict(fact, context);
     if (verdict !== 'apply') { outcomes.push({ ...fact, outcome: verdict }); continue; }
-    if (!AUTO_APPLY_FIELDS.has(fact.field)) {
-      const proposalId = await proposeFact(trx, message, fact, persistedCurrent);
-      outcomes.push({ ...fact, outcome: proposalId ? 'proposed' : 'superseded', proposal_id: proposalId });
+    // An explicit replay can offer new facts to staff but cannot refill a
+    // cleared field or repeat an automatic write from an older message.
+    if (context.replayAppliedFields || !AUTO_APPLY_FIELDS.has(fact.field)) {
+      const proposal = await proposeFact(trx, message, fact, persistedCurrent);
+      const proposalId = proposal.id;
+      outcomes.push({ ...fact, outcome: proposalId ? 'proposed' : 'superseded', proposal_id: proposalId,
+        proposal_created: proposal.created });
       continue;
     }
     // A newer distinct pending proposal for this typed field (the extraction
@@ -228,7 +251,22 @@ async function loadMessageContext(conn, message) {
   return { message, history: history.reverse(), properties, preferences: preferences || {}, captureCommitments: smsCommitmentsEnabled() };
 }
 
+async function appliedSmsProfileFields(conn, message) {
+  const [audits, proposals] = await Promise.all([
+    conn('audit_log').where({ action: 'sms.property_preference.updated', resource_type: 'property_preferences' })
+      .whereRaw("metadata->>'sms_log_id' = ?", [message.id]).pluck('metadata'),
+    findSmsExtractionProposals({ trx: conn, scope_id: message.customer_id,
+      sms_log_id: message.id, twilio_sid: message.twilio_sid }),
+  ]);
+  return new Set([...audits.map((entry) => entry.field),
+    ...proposals.filter((proposal) => ['approved', 'auto_applied', 'reverted'].includes(proposal.status)).map((proposal) => proposal.field)]);
+}
+
 async function recordMessageOperations(conn, message, extracted, matchedContext) {
+  const replay = matchedContext.replay === true;
+  if (replay && message.direction !== 'inbound') return { skipped: 'source_changed' };
+  const extractorVersion = replay ? REPLAY_VERSION : VERSION;
+  const obligations = !replay && matchedContext.captureCommitments ? extracted.obligations : [];
   return conn.transaction(async (trx) => {
     // Match portal preference saves and merges: preference advisory lock,
     // customer, then its SMS rows. Do not hold a child row while awaiting its owner.
@@ -239,27 +277,34 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     const source = await trx('sms_log').modify(withoutScheduledDeliveryTwins, 'sms_log')
       .where({ id: message.id }).forUpdate().first();
     const live = await scheduledSourceMessage(trx, source);
-    if (!enabled() || matchedContext.captureCommitments !== smsCommitmentsEnabled()) return { skipped: 'gate_changed' };
+    const gatesPermitWrite = [enabled(), replay || matchedContext.captureCommitments === smsCommitmentsEnabled()].every(Boolean);
+    if (!gatesPermitWrite) return { skipped: 'gate_changed' };
     if (!eligibleMessage(live) || ['customer_id', 'message_body', 'direction', 'message_type', 'from_phone', 'to_phone']
       .some((field) => (live[field] ?? null) !== (message[field] ?? null))) return { skipped: 'source_changed' };
     if (new Date(live.created_at).getTime() !== new Date(message.created_at).getTime()) return { skipped: 'source_changed' };
     const since = gateEnvTimestamp('GATE_SMS_OPERATIONAL_ACTIONS_SINCE');
     if (!since || new Date(live.created_at) < since) return { skipped: 'outside_activation_window' };
-    if (live.operational_analysis?.version === VERSION) return { skipped: 'already_processed' };
+    let replayAppliedFields;
+    const receipt = { trx, source_type: 'message', source_id: message.id,
+      extractor_version: extractorVersion, source_hash: hashExtractionSource(message.message_body) };
+    if (replay) {
+      const prior = await shouldSkipExtraction(receipt);
+      if (prior.skip) return { skipped: 'replay_receipt_terminal', receipt_status: prior.existing.status };
+      replayAppliedFields = await appliedSmsProfileFields(trx, live);
+    } else if (live.operational_analysis?.version === VERSION) return { skipped: 'already_processed' };
     const properties = await trx('customer_properties').where({ customer_id: customer.id, active: true }).select('id');
-    const current = await trx('property_preferences').where({ customer_id: customer.id }).forUpdate().first();
+    const [current = {}] = await trx('property_preferences').where({ customer_id: customer.id }).forUpdate().limit(1).select('*');
     const sender = { inbound: message.from_phone, outbound: message.to_phone }[message.direction];
     const matches = await trx('customers').whereNull('deleted_at')
       .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tail(sender)]).limit(2).select('id');
     const senderIsPrimary = matches.length === 1 && matches[0].id === customer.id;
     const facts = await applyFacts(trx, message, extracted.facts, {
-      properties, current: current || {}, expectedCurrent: matchedContext.preferences, senderIsPrimary, messageBody: message.message_body,
+      properties, current, expectedCurrent: matchedContext.preferences, senderIsPrimary, messageBody: message.message_body,
+      replayAppliedFields,
     });
-    const obligations = matchedContext.captureCommitments ? extracted.obligations : [];
-    const dropped = extracted.dropped;
-    for (const item of obligations) {
+    if (obligations.length) await trx('call_commitments').insert(obligations.map((item) => {
       const propertyValid = properties.some((p) => p.id === item.property_id);
-      await trx('call_commitments').insert({
+      return {
         sms_log_id: message.id, commitment_key: keyOf(item), party: item.party, kind: item.kind,
         description: item.description, channel: 'sms', due_at: item.due_at,
         due_basis: item.due_at ? 'stated' : null, source: 'ai', extractor_version: VERSION,
@@ -267,14 +312,20 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
           speaker: { inbound: 'caller', outbound: 'agent' }[message.direction] }]),
         sms_context: { basis: item.basis, due_text: item.due_text, property_id: propertyValid ? item.property_id : null,
           property_ambiguous: !propertyValid, customer_id: customer.id, source_at: message.created_at },
-      }).onConflict(['sms_log_id', 'commitment_key']).ignore();
+      };
+    })).onConflict(['sms_log_id', 'commitment_key']).ignore();
+    let analysis = { version: VERSION, processed_at: new Date().toISOString(), facts, dropped: extracted.dropped };
+    if (replay) {
+      await recordAuditEvent({ trx, critical: true, actor_type: 'system', action: 'sms.profile.replayed',
+        resource_type: 'sms_log', resource_id: message.id,
+        metadata: { initiated_by: 'operator', extractor_version: VERSION,
+          outcomes: facts.map(({ field, outcome, proposal_id }) => ({ field, outcome, proposal_id })) } });
+      analysis = { ...live.operational_analysis, replay: analysis };
     }
-    const analysis = { version: VERSION, processed_at: new Date().toISOString(), facts, dropped };
     await trx('sms_log').where({ id: message.id }).update({ operational_analysis: analysis });
-    await recordExtractionAttempt({ trx, source_type: 'message', source_id: message.id, extractor_version: VERSION,
-      source_hash: hashExtractionSource(message.message_body), status: 'ok', proposal_count: facts.length + obligations.length });
-    const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded'].includes(f.outcome));
-    if (exceptions.length + extracted.dropped) {
+    await recordExtractionAttempt({ ...receipt, status: 'ok', proposal_count: facts.length + obligations.length });
+    const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'].includes(f.outcome));
+    if (!matchedContext.dryRun && exceptions.length + extracted.dropped) {
       const notif = await NotificationService.notifyAdmin('alert', 'SMS instructions need review',
         'Part of this message needs an evidence, property, timing, or existing-value check. Open the customer profile to review the source conversation.',
         { trx, bell: true, dedupeKey: `sms-property-instructions:${message.id}`,
@@ -282,9 +333,11 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
           metadata: { triggerKey: 'sms_operational_exception', customerId: customer.id, sms_log_id: message.id,
             fields: exceptions.map((f) => f.field), unverified_count: extracted.dropped,
             reasons: [...new Set(exceptions.map((f) => f.outcome))] } });
-      if (!notif?.id) throw new Error('sms_operations_bell_not_persisted');
+      if (!notif.id) throw new Error('sms_operations_bell_not_persisted');
     }
-    return { recorded: obligations.length, applied: facts.filter((f) => f.outcome === 'applied').length };
+    return { recorded: obligations.length, applied: facts.filter((f) => f.outcome === 'applied').length,
+      proposed: facts.filter((f) => f.outcome === 'proposed').length,
+      preserved: facts.filter((f) => f.outcome === 'previously_applied').length };
   });
 }
 
@@ -484,4 +537,62 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   return { scanned, fulfilled, unverified };
 }
 
-module.exports = { smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate };
+// Explicit operator action only. The scheduled intake never clears analysis
+// markers or terminal receipts to replay messages after a model/body change.
+async function replaySmsProfile({ smsLogId, execute = false, conn = db, extract = extractSmsOperations } = {}) {
+  if (!isUuid(smsLogId)) return { skipped: 'invalid_sms_log_id' };
+  if (!enabled()) return { skipped: 'gate_off' };
+  const since = gateEnvTimestamp('GATE_SMS_OPERATIONAL_ACTIONS_SINCE');
+  if (!since) return { skipped: 'activation_time_required' };
+  const message = await conn('sms_log as s').where({ 's.id': smsLogId, 's.direction': 'inbound' })
+    .where('s.created_at', '>=', since)
+    .whereExists(function availableCustomer() {
+      this.select(1).from('customers as c').whereRaw('c.id = s.customer_id').whereNull('c.deleted_at');
+    }).first(...SOURCE_COLUMNS.map((column) => `s.${column}`), 's.operational_analysis');
+  if (!eligibleMessage(message)) return { skipped: 'source_unavailable' };
+  const previousReceipt = await conn('data_hygiene_source_extractions')
+    .where({ source_type: 'message', source_id: smsLogId }).whereIn('status', TERMINAL_STATUSES).first('id');
+  if (!message.operational_analysis && !previousReceipt) return { skipped: 'not_previously_analyzed' };
+  const receipt = { trx: conn, source_type: 'message', source_id: smsLogId,
+    extractor_version: REPLAY_VERSION, source_hash: hashExtractionSource(message.message_body) };
+  const prior = await shouldSkipExtraction(receipt);
+  if (prior.skip) return { skipped: 'replay_receipt_terminal', receipt_status: prior.existing.status };
+  return runExclusive('sms-operational-actions', async () => {
+    try {
+      if (!enabled()) return { skipped: 'gate_off' };
+      const lockedReceipt = await shouldSkipExtraction(receipt);
+      if (lockedReceipt.skip) return { skipped: 'replay_receipt_terminal', receipt_status: lockedReceipt.existing.status };
+      const context = { ...await loadMessageContext(conn, message), captureCommitments: false };
+      const extracted = await extract(context);
+      if (execute) return await recordMessageOperations(conn, message, extracted, { ...context, replay: true });
+      const preview = await conn.transaction();
+      try {
+        const outcome = await recordMessageOperations(preview, message, extracted, { ...context, replay: true, dryRun: true });
+        if (outcome.skipped) return { dry_run: true, ...outcome };
+        const simulated = await preview('sms_log').where({ id: smsLogId }).first('operational_analysis');
+        const outcomes = simulated.operational_analysis.replay.facts.map((fact) => ({
+          field: fact.field, action: fact.outcome === 'proposed'
+            ? (fact.proposal_created ? 'create_proposal' : 'preserve_pending') : fact.outcome,
+        }));
+        return { dry_run: true, sms_log_id: smsLogId, ...outcome,
+          unverified_count: simulated.operational_analysis.replay.dropped, outcomes };
+      } finally {
+        await preview.rollback();
+      }
+    } catch {
+      if (!execute) return { dry_run: true, failed: true };
+      return conn.transaction(async (trx) => {
+        // Success locks this same source before recording its receipt. A
+        // delayed failure must not downgrade an already committed replay.
+        const live = await trx('sms_log').where({ id: smsLogId }).forUpdate().first('id');
+        if (!live || !enabled()) return { failed: true };
+        const completed = await shouldSkipExtraction({ ...receipt, trx });
+        if (completed.skip) return { skipped: 'replay_receipt_terminal', receipt_status: completed.existing.status };
+        await recordExtractionAttempt({ ...receipt, trx, status: 'failed', error_message: 'sms_profile_replay_failed' });
+        return { failed: true };
+      });
+    }
+  }, { recordHealth: false });
+}
+
+module.exports = { smsCommitmentsEnabled, eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate };

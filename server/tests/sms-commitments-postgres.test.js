@@ -12,13 +12,14 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
-const { recordMessageOperations, loadMessageContext, runSmsOperationalActions, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate } = require('../services/sms-operational-actions');
+const { recordMessageOperations, loadMessageContext, runSmsOperationalActions, replaySmsProfile, refreshSmsCommitments, listSmsCommitments, applySmsCommitmentUpdate } = require('../services/sms-operational-actions');
 const numbers = require('../config/twilio-numbers');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { loadSmsFulfillmentEvidence, admissibleWitness, verifySmsFulfillment, revalidateSmsFulfillment } = require('../services/sms-commitment-fulfillment');
 const NotificationService = require('../services/notification-service');
 const { etDateString } = require('../utils/datetime-et');
 const migration = require('../models/migrations/20260906000001_sms_operational_actions');
+const replayMigration = require('../models/migrations/20260907000021_sms_replay_contact_preference');
 const irrigationRevisionMigration = require('../models/migrations/20260907000020_property_irrigation_revision');
 const { listOpenCommitments } = require('../services/call-commitments');
 const connection = process.env.SMS_OPERATIONS_TEST_DATABASE_URL;
@@ -52,6 +53,7 @@ postgres('SMS commitments on PostgreSQL', () => {
       await admin.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
     }
     await irrigationRevisionMigration.up(mockPg);
+    await mockPg.transaction((trx) => replayMigration.up(trx));
   });
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -86,6 +88,32 @@ postgres('SMS commitments on PostgreSQL', () => {
   });
 
   
+
+  test.each([false, true])('profile replay with commitment capture enabled never records obligations (execute=%s)', async (execute) => {
+    await mockPg('sms_log').where({ id: message.id }).update({ operational_analysis: { version: 'previous' } });
+    const extract = jest.fn(async (input) => {
+      expect(input.captureCommitments).toBe(false);
+      return result; // Even a provider returning obligations cannot extend replay's scope.
+    });
+    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute, extract }))
+      .toMatchObject({ recorded: 0, applied: 0, proposed: 1 });
+    expect(extract).toHaveBeenCalledTimes(1);
+    expect(await mockPg('call_commitments')).toHaveLength(0);
+    expect(await mockPg('data_hygiene_proposals')).toHaveLength(execute ? 1 : 0);
+    expect(await mockPg('property_preferences')).toHaveLength(0);
+  });
+
+  test('profile replay excludes outbound promises even while commitment capture is enabled', async () => {
+    await mockPg('sms_log').where({ id: message.id }).update({
+      direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone,
+      message_type: 'manual', status: 'sent', operational_analysis: { version: 'previous' },
+    });
+    const extract = jest.fn();
+    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, extract }))
+      .toEqual({ skipped: 'source_unavailable' });
+    expect(extract).not.toHaveBeenCalled();
+    expect(await mockPg('call_commitments')).toHaveLength(0);
+  });
 
   test.each([
     'We do not have an irrigation system.', "We don't have sprinklers.",
