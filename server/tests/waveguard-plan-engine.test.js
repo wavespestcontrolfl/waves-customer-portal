@@ -155,7 +155,14 @@ describe('waveguard-plan-engine helpers', () => {
     expect(summarizeCalibration({
       calibration: null,
       date: new Date('2026-05-01T12:00:00'),
-    })).toEqual({ selected: null, inferred: false, blocks: [], warnings: [] });
+    })).toEqual({ selected: null, inferred: false, unresolved: false, blocks: [], warnings: [] });
+  });
+
+  test('an assigned rig with no active calibration is unresolved — a warning, never a block (Codex #4124 r3 P1)', () => {
+    const result = summarizeCalibration({ calibration: null, calibrations: [], assigned: true, date: new Date('2026-05-01T12:00:00') });
+    expect(result).toMatchObject({ selected: null, inferred: false, unresolved: true, blocks: [] });
+    expect(result.warnings.map((w) => w.code)).toEqual(['assigned_rig_unresolved']);
+    expect(summarizeCalibration({ calibration: null, calibrations: [], assigned: false }).unresolved).toBe(false);
 
     const expired = summarizeCalibration({
       calibration: {

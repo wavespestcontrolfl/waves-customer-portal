@@ -4320,9 +4320,13 @@ async function completeScheduledService(completionInput, packetRecord = null) {
       // (The closeout no longer submits equipmentSystemId at all, so keying
       // this off the raw request field would clear every resolved assignment
       // and null out scheduled_services' assignment downstream — Codex P1.)
+      // An assignment whose calibration is no longer active (the plan says
+      // `unresolved`) is cleared the same way: the math ran on the protocol
+      // carrier, so persisting the stale rig would fabricate equipment
+      // usage (Codex #4124 r3 P1).
       const selectedIsFieldVerified =
         selectedCalibration?.calibration_status === 'field_verified';
-      if (calibrationBypass && !selectedIsFieldVerified) {
+      if ((calibrationBypass && !selectedIsFieldVerified) || plan?.equipmentCalibration?.unresolved) {
         waveguardEquipmentSystemId = null;
         waveguardCalibrationId = null;
         waveguardCalibrationCleared = true;

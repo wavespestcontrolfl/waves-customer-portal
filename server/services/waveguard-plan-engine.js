@@ -869,7 +869,7 @@ function resolveAmongActive(activeCalibrations) {
   return tanks.find((row) => row.calibration_status === 'field_verified') || tanks[0];
 }
 
-function summarizeCalibration({ calibration, calibrations }) {
+function summarizeCalibration({ calibration, calibrations, assigned = false }) {
   const activeCalibrations = Array.isArray(calibrations)
     ? calibrations
     : (calibration ? [calibration] : []);
@@ -880,7 +880,19 @@ function summarizeCalibration({ calibration, calibrations }) {
   // math may use it; completion must not record it as equipment used
   // (Codex #4124 r2 P1).
   const inferred = !calibration && Boolean(selected);
+  // unresolved = the visit names a rig whose calibration is no longer
+  // active (deactivated / deleted since). Not a block — the protocol
+  // carrier applies — but the closeout must clear the stale assignment
+  // rather than persist it as equipment used (Codex #4124 r3 P1).
+  const unresolved = Boolean(assigned) && !activeCalibrations.length;
   const warnings = [];
+  if (unresolved) {
+    warnings.push({
+      code: 'assigned_rig_unresolved',
+      severity: 'warning',
+      message: 'The rig assigned to this visit has no active calibration; the protocol carrier is used and the assignment is not recorded as used.',
+    });
+  }
   if (selected && !selected.tank_capacity_gal) {
     warnings.push({
       code: 'missing_tank_capacity',
@@ -888,7 +900,7 @@ function summarizeCalibration({ calibration, calibrations }) {
       message: 'Equipment tank capacity is missing; tank-fill checks are limited.',
     });
   }
-  return { selected, inferred, blocks: [], warnings };
+  return { selected, inferred, unresolved, blocks: [], warnings };
 }
 
 function calculateNutrients(items, lawnSqft) {
@@ -1342,6 +1354,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const calibrationSummary = summarizeCalibration({
     calibration: assignedRig && activeCalibrations.length === 1 ? activeCalibrations[0] : null,
     calibrations: activeCalibrations,
+    assigned: assignedRig,
     date: serviceDate,
   });
   const calibration = calibrationSummary.selected;
