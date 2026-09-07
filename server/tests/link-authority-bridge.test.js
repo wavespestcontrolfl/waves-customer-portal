@@ -28,7 +28,7 @@ const NOW = new Date('2026-09-03T07:35:00Z');
 const EARLIER = new Date('2026-09-01T00:00:00Z');
 const HASH = 'a'.repeat(64);
 const policyRow = (over = {}) => ({ id: 1, ...P.normalizePolicyRow(null), updated_at: EARLIER, ...over });
-const domainRow = (over = {}) => ({ id: uid(), domain: 'example.org', source: 'competitor_gap', agent_state: 'qualified', score: 75, spam_score: 2, best_path_id: null, updated_at: EARLIER, ...over });
+const domainRow = (over = {}) => ({ id: uid(), domain: 'example.org', source: 'competitor_gap', agent_state: 'qualified', score: 75, spam_score: 2, enriched_at: EARLIER, best_path_id: null, updated_at: EARLIER, ...over });
 const pathRow = (domain, over = {}) => ({
   id: uid(), domain_id: domain.id, acquisition_type: 'self_service_free', link_type: 'directory', submission_url: 'https://example.org/add',
   estimated_cost_cents: null, renewal_cost_cents: null, renewal_period: null, currency: 'unknown', fee_scope: null, merchant_binding: null,
@@ -356,30 +356,36 @@ describe('floors and waivers', () => {
     expect(r).toMatchObject({ redecided: WAVES_LOCATIONS.length, aggregateChanges: 0 });
     expect(db._tables.seo_link_domains[0]).toMatchObject({ agent_state: 'rejected', rejected_by: 'owner' });
   });
-  test('an unenriched qualified domain (spam_score null) is not selected: no rows, no bounce to investigating, until the enrichment stamps it', async () => {
+  test('INVALID (enriched, but the provider carried no spam score) stamps and sends the domain back to investigating', async () => {
     const { db } = scenario({ domain: { spam_score: null } });
+    await run(db);
+    expect(rows(db).every((x) => x.level === 'INVALID')).toBe(true);
+    expect(domainState(db)).toBe('investigating');
+  });
+  test('a qualified domain still awaiting its first enrichment (enriched_at null) is not selected: no rows, no bounce to investigating, until the enrichment stamps it', async () => {
+    const { db } = scenario({ domain: { spam_score: null, enriched_at: null } });
     expect(await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).toEqual([]);
     expect(await run(db)).toMatchObject({ selected: 0, decided: 0, rowsWritten: 0, aggregateChanges: 0 });
     expect(rows(db)).toEqual([]);
     expect(domainState(db)).toBe('qualified');
     // the Sunday enrichment lands → selected as unbridged and decided on the next nightly
-    Object.assign(db._tables.seo_link_domains[0], { spam_score: 2, updated_at: new Date(NOW.getTime() + 1000) });
+    Object.assign(db._tables.seo_link_domains[0], { spam_score: 2, enriched_at: new Date(NOW.getTime() + 1000), updated_at: new Date(NOW.getTime() + 1000) });
     expect((await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).map((x) => x.why)).toEqual(['unbridged']);
     await run(db, { now: new Date(NOW.getTime() + 60000) });
     expect(rows(db).length).toBeGreaterThan(0);
     expect(rows(db).every((x) => x.level !== 'INVALID')).toBe(true);
   });
-  test('a FORCED unenriched domain (admin retry / waiver click) is still visited: INVALID stamps and sends it back to investigating', async () => {
-    const { db, d } = scenario({ domain: { spam_score: null } });
+  test('a FORCED domain awaiting enrichment (admin retry / waiver click) is still visited: INVALID stamps and sends it back to investigating', async () => {
+    const { db, d } = scenario({ domain: { spam_score: null, enriched_at: null } });
     await run(db, { domainIds: [d.id] });
     expect(rows(db).every((x) => x.level === 'INVALID')).toBe(true);
     expect(domainState(db)).toBe('investigating');
   });
-  test('an unenriched domain that already owns open rows is still re-decided (INVALID) so its rows stay honest', async () => {
+  test('a domain awaiting enrichment that already owns open rows is still re-decided (INVALID) so its rows stay honest', async () => {
     const { db } = scenario();
     await run(db);
     expect(rows(db).every((x) => x.level !== 'INVALID')).toBe(true);
-    Object.assign(db._tables.seo_link_domains[0], { spam_score: null, updated_at: new Date(NOW.getTime() + 1000) }); // a forced re-enrich cleared it
+    Object.assign(db._tables.seo_link_domains[0], { spam_score: null, enriched_at: null, updated_at: new Date(NOW.getTime() + 1000) }); // its enrichment stamp was reset
     expect((await selection.selectDomains(db, { domainIds: null, limit: 10, policyUpdatedAt: EARLIER })).map((x) => x.why)).toEqual(['stale']);
     await run(db, { now: new Date(NOW.getTime() + 60000) });
     expect(rows(db).filter((x) => !x.ended_at).every((x) => x.level === 'INVALID')).toBe(true);

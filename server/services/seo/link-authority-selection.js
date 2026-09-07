@@ -8,9 +8,9 @@
  * the rule reads plainly and can never starve: a bridged domain that stays
  * `qualified` (owner-routed policy) is only re-selected when something it
  * depends on moved, so the batch always advances to the next unbridged one.
- * An unbridged domain the weekly enrichment has not reached (spam_score null)
- * is not visited at all: it can only be decided INVALID, and INVALID would
- * bounce it to the investigator for a fresh model pass every night.
+ * An unbridged domain the weekly enrichment has not reached (enriched_at
+ * null) is not visited at all: it can only be decided INVALID, and INVALID
+ * would bounce it to the investigator for a fresh model pass every night.
  */
 
 const { WAVES_LOCATIONS } = require('../../config/locations');
@@ -112,13 +112,16 @@ const rotationOutcome = (r, path) => {
 async function selectDomains(db, { domainIds, limit, policyUpdatedAt }) {
   const forced = new Set(domainIds || []);
   // candidates: bridge-owned state, or owning an open row (satisfied or not), or carrying an active waiver, or explicitly requested.
-  // An UNENRICHED domain (spam_score null: the Sunday enrichment has not reached it) is not a candidate on its state
-  // alone — every row the bridge could write is INVALID (validityFailure), the aggregate would send it back to
+  // A domain still AWAITING its first enrichment (enriched_at null: the Sunday enrichment has not reached it — it
+  // stamps every domain it visits, spam_score present or not) is not a candidate on its state alone — every row the
+  // bridge could write is INVALID ("unenriched: spam_score", validityFailure), the aggregate would send it back to
   // `investigating`, and the investigator would re-qualify it with a fresh model pass that never touches spam_score:
-  // one LLM call per night for no new information. It waits in place; the enrichment stamps spam_score (+ updated_at)
-  // and the next nightly selects it as unbridged. A domain that already owns rows or a waiver is still re-decided
-  // (its rows must stay honest), and a forced id is always visited.
-  const owned = await db('seo_link_domains').whereIn('agent_state', [...BRIDGE_STATES]).whereNotNull('best_path_id').whereNotNull('spam_score').orderBy('updated_at', 'asc').select('id');
+  // one LLM call per night for no new information. It waits in place; the enrichment stamps it (+ updated_at) and
+  // the next nightly selects it as unbridged. An ENRICHED domain whose provider response carried no spam score is
+  // not awaiting anything (enrichment never re-spends on it) and keeps the INVALID → investigating path, visible in
+  // the registry; a domain that already owns rows or a waiver is still re-decided (its rows must stay honest), and a
+  // forced id is always visited.
+  const owned = await db('seo_link_domains').whereIn('agent_state', [...BRIDGE_STATES]).whereNotNull('best_path_id').whereNotNull('enriched_at').orderBy('updated_at', 'asc').select('id');
   const open = await db(AUTH).whereNull('ended_at').select('prospect_id', 'path_id', 'path_revision', 'dimension', 'instance_kind', 'level', 'decided_at', 'satisfied_at', 'satisfied_reason', 'accepted_terms_hash');
   const owners = open.length ? await db('seo_link_prospects').whereIn('id', [...new Set(open.map((r) => r.prospect_id))]).whereNotNull('domain_id').select('id', 'domain_id') : [];
   const waivers = await db('seo_link_floor_waivers').whereNull('invalidated_at').select('domain_id', 'path_id', 'approved_at');
