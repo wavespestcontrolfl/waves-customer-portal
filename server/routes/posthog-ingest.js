@@ -58,10 +58,16 @@ const DROP_RESPONSE_HEADERS = new Set([
 
 function upstreamUrl(req) {
   // originalUrl keeps the query string; baseUrl is the mount point ('/ingest').
-  const tail = String(req.originalUrl || '').slice(String(req.baseUrl || '').length) || '/';
+  const raw = String(req.originalUrl || '').slice(String(req.baseUrl || '').length);
+  // Pin to the fixed origin: a protocol-relative tail ('//evil.com/e/') or a
+  // backslash one ('/\\evil.com') would otherwise resolve OFF the PostHog host
+  // (WHATWG URL treats '\\' as '/' for https). Collapse every leading slash /
+  // backslash to a single '/', then let URL normalise any ../ inside.
+  const tail = '/' + raw.replace(/^[\\/]+/, '');
   const base = tail.startsWith('/static/') ? ASSET_HOST : API_HOST;
-  // new URL() collapses any ../ so the path can never escape the fixed host.
-  return new URL(tail, base).toString();
+  const url = new URL(tail, base);
+  if (url.origin !== base) throw new Error('upstream origin escaped');
+  return url.toString();
 }
 
 function upstreamHeaders(req) {
@@ -75,7 +81,12 @@ function upstreamHeaders(req) {
 }
 
 async function proxy(req, res) {
-  const url = upstreamUrl(req);
+  let url;
+  try {
+    url = upstreamUrl(req);
+  } catch {
+    return res.status(400).end();
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
   try {

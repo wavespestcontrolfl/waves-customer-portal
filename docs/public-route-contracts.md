@@ -602,6 +602,31 @@ AND server feature-cache warm — the client SDK fetches feature definitions
 only after it says enabled, which is what makes unsetting GATE_GROWTHBOOK a
 real rollback for client experiments too (and keeps clients dark while the
 server can't validate exposure keys)).
+`/ingest/*` (first-party PostHog ingest proxy — no auth, no token; the
+browser SDK on the hub and on `/book` posts here instead of `*.posthog.com`
+so ad blockers stop dropping funnel events. **Gated behind
+GATE_POSTHOG_INGEST_PROXY** (generic 404 when off, no upstream call).
+Mounted in `server/index.js` ABOVE helmet, the CORS allowlist and the body
+parsers → `routes/posthog-ingest.js`. Invariants: the upstream origins are
+FIXED constants (`https://us.i.posthog.com`; `/static/*` →
+`https://us-assets.i.posthog.com`) and the resolved URL's origin is asserted
+against them (400 otherwise) — leading `/` and `\` runs are collapsed to one
+`/` first, so a protocol-relative (`//evil.com/e/`) or backslash tail can
+never resolve off-host (SSRF, Codex r1 on #4027); GET/POST/OPTIONS only
+(405); 2 MB raw body cap (413); 10 s upstream timeout (502).
+Inbound `cookie`, `authorization`, `referer`, hop-by-hop and client-IP
+headers are stripped and `X-Forwarded-For` is set to `req.ip`
+(trust-proxy aware) so PostHog GeoIP survives; `origin` and `content-type`
+pass through so PostHog's own CORS reflection answers the browser (spoke
+origins never touch the portal allowlist). Outbound `set-cookie`,
+`content-encoding`, `content-length` and HSTS are dropped and
+`Cross-Origin-Resource-Policy: cross-origin` is set so the hub can load
+`array.js` cross-origin. Bodies are never logged (upstream failures only).
+The global `/api/` limiter does not apply (different prefix, mounted above
+it); abuse is bounded to forwarding to PostHog's public ingest, which the
+public project key already permits directly. Kill = unset the gate AND
+revert the caller's host env (hub `PUBLIC_POSTHOG_HOST`, portal
+`VITE_POSTHOG_HOST`) — an SDK pointed at a 404 just drops events.)
 `/api/public/services/menu` (read-only catalog-derived product menu the
 website quote form renders from — no auth, no token, no params, no PII.
 Mounted at `server/index.js` → `routes/public-services-menu.js`; payload is

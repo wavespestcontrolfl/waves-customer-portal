@@ -103,6 +103,23 @@ describe('upstream routing', () => {
     expect(url.startsWith(router.ASSET_HOST + '/')).toBe(true);
     expect(url).not.toContain('..');
   });
+
+  test('protocol-relative and backslash tails stay pinned to the PostHog origin (SSRF)', () => {
+    const cases = ['/ingest//evil.com/e/?x=1', '/ingest///evil.com/e/', '/ingest/\\\\evil.com/e/', '/ingest/\\\\/evil.com/static/array.js'];
+    for (const originalUrl of cases) {
+      const url = router.upstreamUrl({ originalUrl, baseUrl: '/ingest' });
+      const u = new URL(url);
+      expect([router.API_HOST, router.ASSET_HOST]).toContain(u.origin);
+      expect(u.hostname.endsWith('.posthog.com')).toBe(true);
+    }
+    expect(router.upstreamUrl({ originalUrl: '/ingest//evil.com/e/?x=1', baseUrl: '/ingest' })).toBe(`${router.API_HOST}/evil.com/e/?x=1`);
+  });
+
+  test('a protocol-relative request over HTTP never reaches a foreign host', async () => {
+    await request({ path: '/ingest//evil.com/e/' });
+    expect(fetchCalls).toHaveLength(1);
+    expect(new URL(fetchCalls[0].url).origin).toBe(router.API_HOST);
+  });
 });
 
 describe('request boundary', () => {
