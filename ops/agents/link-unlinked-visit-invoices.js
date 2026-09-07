@@ -13,13 +13,16 @@
 // Pairing rule (every "no" leaves the invoice alone):
 //   - the invoice is live (not void/refunded/canceled), unlinked, not an
 //     annual-prepay or archived row, and has a service_date BEFORE today
-//     (ET). Past dates only: every scheduling writer refuses a past date
-//     (create, reschedule, self-booking), so nothing can add a second visit
-//     to that customer/date while the batch runs — the single-visit
-//     predicate below can only change through status changes on existing
-//     rows, which the locked visit row + the locked recheck cover (GitHub
-//     r3 P1). A same-day invoice is the runtime's job: the Invoices page
-//     links it to its open visit at creation.
+//     (ET). Past dates only (GitHub r3 P1): a same-day invoice is the
+//     runtime's job — the Invoices page links it to its open visit at
+//     creation. A past date is NOT immune to schedule writes: a silent
+//     record correction may move a visit into the past
+//     (admin-schedule update-details with notifyCustomer false), so under
+//     --execute the customer row is locked FOR UPDATE (an INSERT of a new
+//     visit takes FOR KEY SHARE on it through the FK and waits) and EVERY
+//     visit row the customer has is locked FOR UPDATE (a date move or a
+//     status flip on any of them waits) before the single-visit predicate
+//     is re-evaluated — held through commit (pre-push r4 + r5 P1).
 //   - the customer has exactly ONE live visit on that date, with NO add-on
 //     lines, no other non-void invoice (direct or through its service
 //     records), and not owned by a saved grouped closeout;
@@ -140,13 +143,17 @@ async function evaluate(conn, invoiceId, catalogNames, { lock = false } = {}) {
     if (!svc || DEAD_VISIT_STATUSES.includes(String(svc.status)) || dateOnly(svc.scheduled_date) !== day) return { skip: 'visitChanged' };
     // Uniqueness AGAIN under the locks (pre-push P1): a visit moved onto or
     // reactivated for this date while we waited makes the pairing a guess.
-    // EVERY row the customer has on this date is locked here, dead statuses
-    // included, and stays locked through commit — a `rescheduled` sibling
-    // flipped back to `confirmed` by the schedule status route contends on
-    // its own row, not on the selected visit's chain (pre-push r4 P1).
-    const sameDay = await conn('scheduled_services').where({ customer_id: inv.customer_id })
-      .whereRaw('scheduled_date::date = ?::date', [day]).forUpdate().select('id', 'status');
-    const stillOne = sameDay.filter((row) => !DEAD_VISIT_STATUSES.includes(String(row.status)));
+    // The customer row goes FOR UPDATE (upgrading the chain's KEY SHARE):
+    // an INSERT of a new visit for this customer takes FOR KEY SHARE on it
+    // through the FK and waits for our commit. Then EVERY visit row the
+    // customer has — any date, any status — is locked: a silent past-date
+    // edit moving another visit onto this date, or a `rescheduled` sibling
+    // flipped back to `confirmed`, contends on its own row and waits
+    // (pre-push r4 + r5 P1). The predicate is then read from the locked set.
+    await conn.raw('SELECT id FROM customers WHERE id = ? FOR UPDATE', [inv.customer_id]);
+    const allVisits = await conn('scheduled_services').where({ customer_id: inv.customer_id })
+      .forUpdate().select('id', 'scheduled_date', 'status');
+    const stillOne = allVisits.filter((row) => dateOnly(row.scheduled_date) === day && !DEAD_VISIT_STATUSES.includes(String(row.status)));
     if (stillOne.length !== 1 || String(stillOne[0].id) !== String(svc.id)) return { skip: 'ambiguous' };
   } else {
     svc = await conn('scheduled_services').where({ id: visits[0].id }).first('id', 'customer_id', 'scheduled_date', 'service_type', 'status', 'technician_id');
