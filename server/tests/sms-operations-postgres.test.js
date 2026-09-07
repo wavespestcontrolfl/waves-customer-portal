@@ -111,11 +111,25 @@ postgres('SMS operations on PostgreSQL', () => {
       expect(receipts).toHaveLength(1);
       expect(receipts[0].source_id).toBe(queue.id);
       const loaded = await loadMessageContext(mockPg, message);
-      expect(loaded.history.map((entry) => entry.id)).toEqual([queue.id]);
+      expect(loaded.history.map((entry) => entry.id)).toEqual(order === 'missing-provider' ? [queue.id] : [queue.id, provider.id]);
       expect(JSON.stringify(loaded)).not.toContain('scheduled_sms_log_id');
       expect(JSON.stringify(loaded)).not.toContain('invalid.example');
     },
   );
+
+  test('conversation history keeps provider evidence when scheduled send endpoints refresh', async () => {
+    const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
+      twilio_sid: null, from_phone: numbers.locations.bradenton.number, to_phone: '+12025550199',
+      created_at: new Date(message.created_at.getTime() - 600),
+      scheduled_for: new Date(message.created_at.getTime() - 800), status: 'sent' };
+    const provider = { ...queue, id: randomUUID(), twilio_sid: `SM${randomUUID().replaceAll('-', '')}`,
+      from_phone: message.to_phone, to_phone: message.from_phone, scheduled_for: null,
+      created_at: new Date(message.created_at.getTime() - 500), metadata: { scheduled_sms_log_id: queue.id } };
+    await mockPg('sms_log').insert([queue, provider]);
+    const loaded = await loadMessageContext(mockPg, message);
+    expect(loaded.history.map((entry) => entry.id)).toEqual([provider.id]);
+    expect(loaded.history[0]).not.toHaveProperty('metadata');
+  });
 
   test('identical separate sends and orphan or mismatched provider links stay distinct', async () => {
     const base = { ...message, direction: 'outbound', message_type: 'manual',

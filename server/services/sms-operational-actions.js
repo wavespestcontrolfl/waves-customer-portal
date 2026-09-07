@@ -191,7 +191,7 @@ function withoutScheduledDeliveryTwins(query, alias) {
 
 async function loadMessageContext(conn, message) {
   const [history, properties, preferences] = await Promise.all([
-    conn('sms_log').modify(withoutScheduledDeliveryTwins, 'sms_log').where({ customer_id: message.customer_id }).where('created_at', '<', new Date(message.created_at))
+    conn('sms_log').where({ customer_id: message.customer_id }).where('created_at', '<', new Date(message.created_at))
       .where(function endpoints() {
         this.where({ from_phone: message.from_phone, to_phone: message.to_phone })
           .orWhere({ from_phone: message.to_phone, to_phone: message.from_phone });
