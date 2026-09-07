@@ -97,7 +97,7 @@ describe('customer notification native push dispatch', () => {
       category: 'service',
       notificationId: 'notification-1',
       tag: 'scheduled-service:service-1:en-route',
-    });
+    }, { notificationId: 'notification-1' });
     expect(result.push).toEqual({ queued: true });
     resolvePush({ subscriptions: 1, sent: 1, expired: 0, failed: 0, skipped: 0 });
   });
@@ -161,7 +161,7 @@ describe('customer notification native push dispatch', () => {
       pushOptions: { ephemeral: true, shouldContinue },
     });
     expect(result.push).toEqual({ queued: true, subscriptions: 3, accepted: 1, failed: 1, expired: 1, skipped: 0 });
-    expect(PushService.sendToCustomer).toHaveBeenCalledWith('customer-1', expect.objectContaining({ ephemeral: true }), { ephemeral: true, shouldContinue });
+    expect(PushService.sendToCustomer).toHaveBeenCalledWith('customer-1', expect.objectContaining({ ephemeral: true }), { ephemeral: true, shouldContinue, notificationId: 'notification-1' });
   });
 
   test('an awaited provider rejection preserves the bell and records failure without claiming acceptance', async () => {
