@@ -62,9 +62,11 @@ async function placeBridgeCall({ to, bridgePhone, from, customer = null, source,
     });
   } catch (err) {
     if (callLogId) {
-      await db('call_log').where({ id: callLogId })
-        .update({ status: 'failed', updated_at: new Date() })
-        .catch((markErr) => logger.warn(`[call-bridge] failed-mark skipped for ${callLogId}: ${markErr.message}`));
+      try {
+        await db('call_log').where({ id: callLogId }).update({ status: 'failed', updated_at: new Date() });
+      } catch (markErr) {
+        logger.warn(`[call-bridge] failed-mark skipped for ${callLogId}: ${markErr.message}`);
+      }
     }
     throw err;
   }

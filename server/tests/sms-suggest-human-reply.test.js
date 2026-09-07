@@ -33,7 +33,7 @@ beforeEach(() => { jest.clearAllMocks(); isEnabled.mockReturnValue(false); });
 test('parks the thread\'s pending suggestions under the lock; no reservation while auto-send is dark', async () => {
   const { trx, inserted } = trxWith({ pending: [{ id: 'd1' }, { id: 'd2' }], parked: [{ id: 'd1' }, { id: 'd2' }] });
   const out = await suggest.reserveHumanReply({ to: '+19415550100', customerId: 'c1', fromNumber: '+19413529161', body: 'hi', adminUserId: 'tech-1' });
-  expect(out).toEqual({ parkedDecisionIds: ['d1', 'd2'], reservationId: null, autoSendInFlight: false });
+  expect(out).toEqual({ parkedDecisionIds: ['d1', 'd2'], reservationId: null, autoSendInFlight: false, phoneLast10: '9415550100', startedAt: expect.any(Date) });
   expect(trx.raw).toHaveBeenCalled(); // lockSuggestThread
   expect(inserted).toHaveLength(0);
   expect(hasActiveAutoSendClaim).not.toHaveBeenCalled();
@@ -44,7 +44,7 @@ test('with auto-send on: backs off an active claim, else leaves the sending mark
   hasActiveAutoSendClaim.mockResolvedValueOnce(true);
   trxWith();
   expect(await suggest.reserveHumanReply({ to: '+19415550100', customerId: 'c1', fromNumber: '+19413529161', body: 'hi' }))
-    .toEqual({ parkedDecisionIds: [], reservationId: null, autoSendInFlight: true });
+    .toEqual(expect.objectContaining({ parkedDecisionIds: [], reservationId: null, autoSendInFlight: true }));
 
   const { inserted } = trxWith();
   const out = await suggest.reserveHumanReply({ to: '+19415550100', customerId: 'c1', fromNumber: '+19413529161', body: 'hi', adminUserId: 'tech-1' });
@@ -52,21 +52,43 @@ test('with auto-send on: backs off an active claim, else leaves the sending mark
   expect(inserted[0]).toMatchObject({ table: 'sms_log', row: { direction: 'outbound', status: 'sending', message_type: 'manual', to_phone: '+19415550100', from_phone: '+19413529161', admin_user_id: 'tech-1' } });
 });
 
-test('settle: deletes the marker; sent → parked ignored, not sent → reopened', async () => {
+function settleDb({ stale = [] } = {}) {
   const del = jest.fn(async () => 1);
   const update = jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'd1', entity_id: 'draft-1' }]) }));
   const chain = { del, update };
-  chain.where = jest.fn(() => chain);
-  chain.whereIn = jest.fn(() => chain);
+  for (const m of ['where', 'whereIn', 'whereNot', 'whereRaw', 'leftJoin']) chain[m] = jest.fn(() => chain);
+  chain.select = jest.fn(async () => stale);
   db.mockImplementation(() => chain);
+  db.raw = jest.fn(async () => undefined);
   db.transaction = jest.fn(async (cb) => cb(db));
+  return { del, update, chain };
+}
 
-  await suggest.settleHumanReply({ parkedDecisionIds: ['d1'], reservationId: 'resv-1', sent: true, reviewedBy: 'tech-1' });
+test('settle: deletes the marker; sent → parked ignored, not sent → reopened', async () => {
+  const { del, update } = settleDb();
+  await suggest.settleHumanReply({ phoneLast10: '9415550100', startedAt: new Date(), parkedDecisionIds: ['d1'], reservationId: 'resv-1', sent: true, reviewedBy: 'tech-1' });
   expect(del).toHaveBeenCalled();
   expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'ignored', reviewed_by: 'tech-1' }));
 
   jest.clearAllMocks();
-  await suggest.settleHumanReply({ parkedDecisionIds: ['d1'], reservationId: null, sent: false });
+  await suggest.settleHumanReply({ phoneLast10: '9415550100', startedAt: new Date(), parkedDecisionIds: ['d1'], reservationId: null, sent: false });
   expect(del).not.toHaveBeenCalled();
   expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'pending_review' }));
+  expect(db.raw).not.toHaveBeenCalled(); // no sweep on an unsent reply
+});
+
+test('settle (sent): sweeps a card published between the park commit and the accept, under the thread lock, cutoff at send start', async () => {
+  const startedAt = new Date('2026-09-07T12:00:00Z');
+  const { update, chain } = settleDb({ stale: [{ id: 'd9', entity_id: 'draft-9' }] });
+  await suggest.settleHumanReply({ phoneLast10: '9415550100', startedAt, parkedDecisionIds: [], reservationId: null, sent: true, reviewedBy: 'tech-1' });
+  expect(db.raw).toHaveBeenCalled(); // lockSuggestThread
+  expect(chain.where).toHaveBeenCalledWith('s.created_at', '<', startedAt);
+  expect(chain.whereIn).toHaveBeenCalledWith('id', ['d9']);
+  expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'ignored', correction_note: 'A staff reply to this thread was sent.', reviewed_by: 'tech-1' }));
+});
+
+test('settle (sent) with no thread key or start time skips the sweep', async () => {
+  const { update } = settleDb({ stale: [{ id: 'd9', entity_id: 'draft-9' }] });
+  await suggest.settleHumanReply({ phoneLast10: null, startedAt: null, parkedDecisionIds: [], reservationId: null, sent: true });
+  expect(update).not.toHaveBeenCalled();
 });

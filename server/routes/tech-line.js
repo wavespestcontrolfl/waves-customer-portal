@@ -123,8 +123,15 @@ router.post('/sms', async (req, res, next) => {
         },
       });
     } catch (err) {
-      await settleHumanReply({ ...reply, sent: false, reviewedBy: req.technicianId }).catch(() => {});
-      return next(sanitized(err, 'text'));
+      // A throw AFTER Twilio accepted (the audit write failed — the error
+      // carries the provider outcome, the composer's convention) means the
+      // customer HAS the text: it is answered, and the tech must not be
+      // invited to send it again (codex #4072 r2 P1).
+      const accepted = err?.providerOutcome?.sent === true && isRealProviderSend(err.providerOutcome);
+      await settleHumanReply({ ...reply, sent: accepted, reviewedBy: req.technicianId }).catch(() => {});
+      if (!accepted) return next(sanitized(err, 'text'));
+      logger.error(`[tech-line] text accepted but its audit write failed (${String(err.code || err.name || 'error')}) for visit ${target.visit.id}`);
+      return res.json({ success: true, from: publicLine(ctx) });
     }
     // A suppression / gate-off sentinel comes back sent:true with no real
     // provider id — the tech must not see "Sent." for a text that never left.

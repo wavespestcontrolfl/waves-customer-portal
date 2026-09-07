@@ -24,11 +24,11 @@ const { isEnabled } = require('../config/feature-gates');
 const {
   SUGGEST_WORKFLOW,
   HUMAN_REPLY_TYPES,
-  revertDraftsToShadow,
   markSuggestionScheduled,
   parkThreadSuggestions,
   reopenScheduledSuggestions,
   ignoreParkedSuggestions,
+  sweepStaleSuggestionsAfterReply,
   lockSuggestThread,
   suggestionAnchorIsStale,
   supersedeStaleDecision,
@@ -976,67 +976,15 @@ router.post('/sms', async (req, res, next) => {
       await ignoreParkedSuggestions({ decisionIds: parkedThreadIds, reviewedBy: req.technicianId || 'Admin' });
     }
 
-    // Belt-and-braces sweep for cards published BETWEEN the park commit and
-    // send completion (the thread lock releases when the park transaction
-    // commits, and a publish can land while Twilio runs). Phone-scoped
-    // through the suggestion's inbound sms_log row — the same ownership
-    // match the composer card fetch uses. Cutoff on the INBOUND's timestamp
-    // vs send start: a suggestion for a customer message that arrived while
-    // the send was in flight was never on the operator's screen and must
-    // keep its card.
-    const runStaleSweep = async () => {
-      const ignoredPhoneLast10 = normalizePhoneLast10(to);
-      if (!ignoredPhoneLast10) return;
-      await db.transaction(async (trx) => {
-        // Same thread lock the drafter's publish takes: a publish that
-        // hasn't committed yet will land AFTER this sweep and re-check
-        // the (now committed) outbound in its answered guard.
-        await lockSuggestThread(trx, ignoredPhoneLast10);
-
-        // s is always the suggestion's INBOUND row — from_phone is the
-        // customer; matching to_phone (the Waves line) would sweep every
-        // suggestion that arrived on that line.
-        const staleQuery = trx('agent_decisions as ad')
-          .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
-          .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
-          .where('s.created_at', '<', sendStartedAt)
-          .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [ignoredPhoneLast10]);
-        if (verifiedAgentDecision?.id) staleQuery.whereNot('ad.id', verifiedAgentDecision.id);
-        const stale = await staleQuery.select('ad.id', 'ad.entity_id');
-        if (stale.length) {
-          // Revert only rows the guarded UPDATE actually changed: a parallel
-          // operator can send one of these suggestions between the SELECT
-          // and the UPDATE, and that draft must stay out of the judge pool.
-          const ignored = await trx('agent_decisions')
-            .whereIn('id', stale.map((r) => r.id))
-            .where('status', 'pending_review')
-            .update({
-              status: 'ignored',
-              human_verdict: 'ignored',
-              correction_note: 'Staff sent their own reply from the SMS inbox.',
-              reviewed_by: req.technicianId || 'Admin',
-              reviewed_at: new Date(),
-              updated_at: new Date(),
-            })
-            .returning(['id', 'entity_id']);
-          await revertDraftsToShadow(trx, ignored.map((r) => r.entity_id));
-        }
-      });
-    };
-    // Retried once: this sweep is the only path that resolves cards
-    // published between the park commit and send completion — cards it
-    // misses have no recovery linkage and stay actionable on an answered
-    // thread until the next staff send on the thread or the 48h expiry.
-    try {
-      await runStaleSweep();
-    } catch (sweepErr) {
-      logger.warn(`[sms-suggest] stale-card sweep failed, retrying once: ${sweepErr.message}`);
-      try {
-        await runStaleSweep();
-      } catch (retryErr) {
-        logger.error(`[sms-suggest] stale-card sweep failed twice — pending cards may linger on an answered thread until the next send or expiry: ${retryErr.message}`);
-      }
-    }
+    // Cards published BETWEEN the park commit and send completion — the
+    // shared post-reply sweep (sms-suggest-mode.js), retried once.
+    await sweepStaleSuggestionsAfterReply({
+      phoneLast10: normalizePhoneLast10(to),
+      sendStartedAt,
+      excludeDecisionId: verifiedAgentDecision?.id,
+      reviewedBy: req.technicianId || 'Admin',
+      note: 'Staff sent their own reply from the SMS inbox.',
+    });
 
     res.json(reviewEmailOutcome ? { ...result, reviewEmail: reviewEmailOutcome } : result);
   } catch (err) {

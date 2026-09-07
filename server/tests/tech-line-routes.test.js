@@ -111,6 +111,22 @@ describe('POST /sms', () => {
     expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ sent: false }));
   });
 
+  test('a throw AFTER Twilio accepted settles the thread as answered and reports Sent — never a retry invitation', async () => {
+    primeVisit();
+    sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('insert into messaging_audit_log — pg down'), { providerOutcome: { sent: true, providerMessageId: 'SM-real' } }));
+    const r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'hi' } });
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toEqual({ success: true, from: LINE });
+    expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ sent: true, reviewedBy: 'tech-1' }));
+  });
+
+  test('a throw after a SUPPRESSED accept (sentinel id) is still a failure — nothing left', async () => {
+    primeVisit();
+    sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit down'), { providerOutcome: { sent: true, providerMessageId: 'gate-blocked' } }));
+    await expect(call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'hi' } })).rejects.toMatchObject({ statusCode: 500 });
+    expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ sent: false }));
+  });
+
   test('a visit on another tech\'s route is refused; an admin may text any visit', async () => {
     primeVisit({ visit: { id: VISIT, customer_id: 'c1', technician_id: 'tech-2' } });
     expect((await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'hi' } })).statusCode).toBe(403);

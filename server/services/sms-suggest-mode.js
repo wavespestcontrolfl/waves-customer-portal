@@ -694,7 +694,11 @@ async function parkThreadSuggestions({ phoneLast10, excludeDecisionId }, dbh = d
  */
 async function reserveHumanReply({ to, customerId = null, fromNumber, body, adminUserId = null }) {
   const threadLast10 = String(to || '').replace(/\D/g, '').slice(-10) || null;
-  if (!threadLast10) return { parkedDecisionIds: [], reservationId: null, autoSendInFlight: false };
+  // Cutoff for the post-send stale sweep: a suggestion for an inbound that
+  // arrives AFTER this was never on the operator's screen and keeps its card.
+  const startedAt = new Date();
+  const base = { phoneLast10: threadLast10, startedAt };
+  if (!threadLast10) return { ...base, parkedDecisionIds: [], reservationId: null, autoSendInFlight: false };
   const autoSend = require('./sms-auto-send');
   const { isEnabled } = require('../config/feature-gates');
   return db.transaction(async (trx) => {
@@ -702,7 +706,7 @@ async function reserveHumanReply({ to, customerId = null, fromNumber, body, admi
     let reservationId = null;
     if (isEnabled('smsAutoSend')) {
       if (await autoSend.hasActiveAutoSendClaim(trx, { threadLast10, customerId })) {
-        return { parkedDecisionIds: [], reservationId: null, autoSendInFlight: true };
+        return { ...base, parkedDecisionIds: [], reservationId: null, autoSendInFlight: true };
       }
       const [resv] = await trx('sms_log')
         .insert({
@@ -720,20 +724,88 @@ async function reserveHumanReply({ to, customerId = null, fromNumber, body, admi
       reservationId = resv?.id || null;
     }
     const parkedDecisionIds = await parkThreadSuggestions({ phoneLast10: threadLast10 }, trx);
-    return { parkedDecisionIds, reservationId, autoSendInFlight: false };
+    return { ...base, parkedDecisionIds, reservationId, autoSendInFlight: false };
   });
 }
 
-async function settleHumanReply({ parkedDecisionIds = [], reservationId = null, sent, reviewedBy, reason }) {
+async function settleHumanReply({ phoneLast10 = null, startedAt = null, parkedDecisionIds = [], reservationId = null, sent, reviewedBy, reason }) {
   if (reservationId) {
     await db('sms_log').where({ id: reservationId }).del().catch((delErr) => {
       // Bounded: reconcileAutoSendClaims sweeps stale 'sending' reservations.
       logger.warn(`[sms-auto-send] manual reservation cleanup failed (${reservationId}): ${delErr.message}`);
     });
   }
-  if (!parkedDecisionIds.length) return;
-  if (sent) await ignoreParkedSuggestions({ decisionIds: parkedDecisionIds, reviewedBy });
-  else await reopenScheduledSuggestions({ decisionIds: parkedDecisionIds, reason: reason || 'The staff reply was not sent — suggestion reopened.' });
+  if (!sent) {
+    if (parkedDecisionIds.length) await reopenScheduledSuggestions({ decisionIds: parkedDecisionIds, reason: reason || 'The staff reply was not sent — suggestion reopened.' });
+    return;
+  }
+  if (parkedDecisionIds.length) await ignoreParkedSuggestions({ decisionIds: parkedDecisionIds, reviewedBy });
+  // The reserve transaction's lock released at its commit; a publish that
+  // started before the reply can land between that commit and Twilio's
+  // accept — the same interval the admin composer sweeps (codex #4072 r2 P1).
+  await sweepStaleSuggestionsAfterReply({ phoneLast10, sendStartedAt: startedAt, reviewedBy, note: 'A staff reply to this thread was sent.' });
+}
+
+/**
+ * Belt-and-braces sweep for cards published BETWEEN the park commit and
+ * send completion (the thread lock releases when the park transaction
+ * commits, and a publish can land while Twilio runs). Phone-scoped
+ * through the suggestion's inbound sms_log row — the same ownership
+ * match the composer card fetch uses. Cutoff on the INBOUND's timestamp
+ * vs send start: a suggestion for a customer message that arrived while
+ * the send was in flight was never on the operator's screen and must
+ * keep its card. Retried once: this is the only path that resolves those
+ * cards — ones it misses have no recovery linkage and stay actionable on
+ * an answered thread until the next staff send or the 48h expiry.
+ */
+async function sweepStaleSuggestionsAfterReply({ phoneLast10, sendStartedAt, excludeDecisionId = null, reviewedBy, note }) {
+  if (!phoneLast10 || !sendStartedAt) return;
+  const runStaleSweep = async () => {
+    await db.transaction(async (trx) => {
+      // Same thread lock the drafter's publish takes: a publish that
+      // hasn't committed yet will land AFTER this sweep and re-check
+      // the (now committed) outbound in its answered guard.
+      await lockSuggestThread(trx, phoneLast10);
+
+      // s is always the suggestion's INBOUND row — from_phone is the
+      // customer; matching to_phone (the Waves line) would sweep every
+      // suggestion that arrived on that line.
+      const staleQuery = trx('agent_decisions as ad')
+        .leftJoin('sms_log as s', 'ad.sms_log_id', 's.id')
+        .where({ 'ad.workflow': SUGGEST_WORKFLOW, 'ad.status': 'pending_review' })
+        .where('s.created_at', '<', sendStartedAt)
+        .whereRaw("RIGHT(REGEXP_REPLACE(COALESCE(s.from_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phoneLast10]);
+      if (excludeDecisionId) staleQuery.whereNot('ad.id', excludeDecisionId);
+      const stale = await staleQuery.select('ad.id', 'ad.entity_id');
+      if (!stale.length) return;
+      // Revert only rows the guarded UPDATE actually changed: a parallel
+      // operator can send one of these suggestions between the SELECT
+      // and the UPDATE, and that draft must stay out of the judge pool.
+      const ignored = await trx('agent_decisions')
+        .whereIn('id', stale.map((r) => r.id))
+        .where('status', 'pending_review')
+        .update({
+          status: 'ignored',
+          human_verdict: 'ignored',
+          correction_note: note,
+          reviewed_by: reviewedBy || 'Admin',
+          reviewed_at: new Date(),
+          updated_at: new Date(),
+        })
+        .returning(['id', 'entity_id']);
+      await revertDraftsToShadow(trx, ignored.map((r) => r.entity_id));
+    });
+  };
+  try {
+    await runStaleSweep();
+  } catch (sweepErr) {
+    logger.warn(`[sms-suggest] stale-card sweep failed, retrying once: ${sweepErr.message}`);
+    try {
+      await runStaleSweep();
+    } catch (retryErr) {
+      logger.error(`[sms-suggest] stale-card sweep failed twice — pending cards may linger on an answered thread until the next send or expiry: ${retryErr.message}`);
+    }
+  }
 }
 
 /** Cancel/failure path: the customer was never answered — the cards return. */
@@ -966,6 +1038,7 @@ module.exports = {
   parkThreadSuggestions,
   reserveHumanReply,
   settleHumanReply,
+  sweepStaleSuggestionsAfterReply,
   reopenScheduledSuggestions,
   ignoreParkedSuggestions,
   resolveSuggestionAfterSend,
