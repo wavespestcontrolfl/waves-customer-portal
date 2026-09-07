@@ -1,3 +1,4 @@
+const { calculateNutrients } = require('../services/waveguard-plan-engine');
 const { summarizeLedgerRows, ledgerRowCoverage } = require('../services/nutrient-ledger');
 
 test('annual totals weight a ledger row by the share of the lawn it treated', () => {
@@ -14,4 +15,12 @@ test('annual totals weight a ledger row by the share of the lawn it treated', ()
   expect(summarizeLedgerRows([{ n_applied_per_1000: 1 }, { n_applied_per_1000: 1, lawn_sqft: null }], 2026, { lawnSqft: 2000 }).nApplied).toBe(2);
   expect(ledgerRowCoverage({ lawn_sqft: 3000 }, 2000)).toBe(1);
   expect(ledgerRowCoverage({ lawn_sqft: 500 }, 2000)).toBe(0.25);
+});
+
+test('the planned nutrient projection is per 1,000 sq ft of the whole property, not the visit area', () => {
+  const items = [{ product: { analysis_n: 20 }, mix: { amount: 5, amountUnit: 'lb' } }];
+  expect(calculateNutrients(items, 1000).nPer1000).toBe(1);
+  expect(calculateNutrients(items, 1000, { propertyLawnSqft: 4000 }).nPer1000).toBe(0.25);
+  // A visit area larger than the saved property area keeps the visit area.
+  expect(calculateNutrients(items, 4000, { propertyLawnSqft: 1000 }).nPer1000).toBe(0.25);
 });

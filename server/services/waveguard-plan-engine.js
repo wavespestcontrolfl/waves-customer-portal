@@ -907,8 +907,12 @@ function summarizeCalibration({ calibration, calibrations }) {
   return { selected, blocks, warnings };
 }
 
-function calculateNutrients(items, lawnSqft) {
+// Quantities are mixed for the treated (visit) area; the annual budget is per
+// 1,000 sq ft of the WHOLE property, so the projection divides by the saved
+// property area when a visit-only override is smaller than it.
+function calculateNutrients(items, lawnSqft, { propertyLawnSqft = null } = {}) {
   const treatedUnits = Number(lawnSqft || 0) / 1000;
+  const budgetUnits = Math.max(treatedUnits, Number(propertyLawnSqft || 0) / 1000);
   const totals = { n: 0, p: 0, k: 0 };
   for (const item of items) {
     const amount = Number(item.mix?.amount || 0);
@@ -920,9 +924,9 @@ function calculateNutrients(items, lawnSqft) {
     totals.k += pounds * (Number(item.product.analysis_k || 0) / 100);
   }
   return {
-    nPer1000: treatedUnits ? Number((totals.n / treatedUnits).toFixed(3)) : 0,
-    pPer1000: treatedUnits ? Number((totals.p / treatedUnits).toFixed(3)) : 0,
-    kPer1000: treatedUnits ? Number((totals.k / treatedUnits).toFixed(3)) : 0,
+    nPer1000: budgetUnits ? Number((totals.n / budgetUnits).toFixed(3)) : 0,
+    pPer1000: budgetUnits ? Number((totals.p / budgetUnits).toFixed(3)) : 0,
+    kPer1000: budgetUnits ? Number((totals.k / budgetUnits).toFixed(3)) : 0,
   };
 }
 
@@ -1461,7 +1465,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const materialCostSummary = summarizeMaterialCost(plannedItems);
 
   const ordinanceSummary = summarizeOrdinanceStatus({ date: serviceDate, ordinances, candidateItems: plannedItems });
-  const nutrientProjection = calculateNutrients(plannedItems, lawnSqft);
+  const nutrientProjection = calculateNutrients(plannedItems, lawnSqft, { propertyLawnSqft: profile?.lawn_sqft });
   const inventorySummary = summarizeInventoryStatus(plannedItems);
   const warnings = [
     ...ordinanceSummary.warnings,
