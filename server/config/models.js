@@ -73,6 +73,7 @@ const DEFAULTS = Object.freeze({
   LAWN_CHALLENGE: 'claude-opus-4-8',
   CALL_RESEARCH_ANTHROPIC: 'claude-opus-4-8',
   CALL_EXTRACTION_ANTHROPIC: 'claude-opus-4-8',
+  VOICE_JUDGE: 'claude-opus-4-8',
   OPENAI_BALANCED: 'gpt-5.6-terra',
   OPENAI_FAST: 'gpt-5.6-luna',
   OPENAI_REPORT_WRITER: 'gpt-5.6-sol',
@@ -117,6 +118,13 @@ const CALL_RESEARCH_ANTHROPIC = process.env.MODEL_CALL_RESEARCH_ANTHROPIC || DEF
 // V2 call-extraction's Anthropic fallback leg — same pinning rationale, own
 // env so extraction and the research miner can diverge deliberately.
 const CALL_EXTRACTION_ANTHROPIC = process.env.MODEL_CALL_EXTRACTION_ANTHROPIC || DEFAULTS.CALL_EXTRACTION_ANTHROPIC;
+
+// Voice relay eval judge (services/eval/voice-relay-judge.js — the weekly
+// Sandy scorecard; the Sandy self-audit shares it). Pinned under the registry
+// convention rather than riding FLAGSHIP: a judge that moves with the tier
+// re-baselines every scorecard, so it moves only when MODEL_VOICE_JUDGE is
+// set deliberately.
+const VOICE_JUDGE = process.env.MODEL_VOICE_JUDGE || DEFAULTS.VOICE_JUDGE;
 
 // ── Cross-provider routing ────────────────────────────────────────────
 // Provider ids — so callers / services/llm/call.js never hardcode a string.
@@ -307,6 +315,14 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: DEEP }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),
+  voiceJudge: Object.freeze({
+    name: 'voiceJudge',
+    // Voice relay eval judge: the pinned Claude leg, Sol as the cross-provider
+    // backup. A verdict from the fallback leg is stamped judge_fallback and
+    // never flips a scenario's pass/fail (services/eval/voice-relay-judge.js).
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VOICE_JUDGE }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
+  }),
 });
 
 module.exports = {
@@ -320,6 +336,7 @@ module.exports = {
   LAWN_CHALLENGE,
   CALL_RESEARCH_ANTHROPIC,
   CALL_EXTRACTION_ANTHROPIC,
+  VOICE_JUDGE,
   // Cross-provider routing (additive — legacy tier exports above are unchanged)
   PROVIDER,
   ROUTES,

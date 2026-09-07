@@ -2656,6 +2656,32 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY MONDAY 3:50AM ET — Voice relay conversation eval. Replays the
+  // synthetic-caller scenario fixture (server/fixtures/voice-relay-eval/)
+  // through the LIVE Sandy conversation loop and the pinned judge, in a CHILD
+  // PROCESS: each scenario sets the relay's gate env vars (context, booking,
+  // transfer, recovery) for its own run, and those must never touch the
+  // process that is answering real calls. The harness never closes a session
+  // (no call_log write, no capture floor) and refuses DB access while a
+  // scenario runs; the child writes one admin notification on repeated
+  // failure. runExclusive: live model calls; don't double-spend on
+  // deploy-overlap ticks. Kill switch: GATE_VOICE_RELAY_EVAL=false.
+  // =========================================================================
+  cron.schedule('50 3 * * 1', async () => {
+    if (!isEnabled('voiceRelayEval')) return;
+    logger.info('Running: voice relay conversation eval');
+    try {
+      await runExclusive('voice-relay-eval', async () => {
+        const { runVoiceRelayEvalProcess, summaryLine } = require('./eval/voice-relay-replay');
+        const result = await runVoiceRelayEvalProcess();
+        logger.info(`Voice relay eval done: status=${result.status}${result.flaky ? ' flaky=true' : ''} | ${summaryLine(result.summary || {})}`);
+      });
+    } catch (err) {
+      logger.error(`Voice relay eval failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 5:30AM ET — Expire past events. classifyFreshness never emits an
   // 'expired' status and nothing else transitions an event out of its fresh
   // state once its date passes, so a one_time/annual event would keep its high
