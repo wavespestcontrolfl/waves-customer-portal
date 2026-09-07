@@ -46,6 +46,7 @@ invoked by a human or an agent session, on purpose, from the repo root.
 | `pricing-funnel-report.js` | READ-ONLY | Pricing funnel standing instrument: close rates DEDUPED BY CUSTOMER for pest (solo), lawn, and pest+lawn bundles, banded by size and price ($/visit; $/1k-sqft/app), with accepted-vs-expired price medians. `--since=YYYY-MM-DD` for era cuts, `--lane=pest\|lawn`. Feeds pricing decisions (owner directive 2026-08-04) and the /weekly-marketing sweep. |
 | `auto-order-revoke.js` | MUTATES (dry-run default) | Revokes ONE dispatched automatic vendor order (`--order=<vendor_orders.id>`): a `placed` row, or a post-submit `needs_review` row whose `placed_at` is stamped (the vendor call went out but never confirmed — "may or may not have gone out"); a `placing` row is still the dispatcher's and is refused, and a `needs_review` row with nothing dispatched has no vendor order to revoke. Ledger row → `needs_review` with `evidence.revokedAt`, its restock request (must still be `open`/`ordered` — a `received` one is refused) → `cancelled` with reason `revoked_vendor_order`, critical `procurement.vendor_order.revoked` audit row. Nothing is sent to the vendor — cancel with Sticker Mule / SiteOne by hand FIRST, then run with `--cancelled-with-vendor --execute` (the guard refuses without it). The revoked request is never reopened (an open request with an auto-orderable vendor gets neither a dispatch claim — the ledger row is unique — nor the sweep's manual bell); the next 6:10 sweep raises a fresh request the dispatcher can claim, or order by hand from the Restock tab. `--list` prints every unreconciled dispatched row (placing / placed / post-submit needs_review whose request is not yet received and that is not already revoked) across ALL months. |
 | `reset-out-of-area-coords.js` | MUTATES (dry-run default) | Clears customer coordinates that lie OUTSIDE the service-area box (`server/services/service-area.js`) so the hourly geocoder backstop sweep re-geocodes them through the PR #3802 guard (coarse / partial / out-of-area Google answers now stay null). Per customer, one transaction: guarded `customers` reset (exact prior coordinates), the primary `customer_properties` mirror row, any open `scheduled_services` stamps copied from it (routing prefers the visit stamp), and an `audit_log` `customer.geocode.reset` row carrying the previous coordinates + reset ids (reversible). Exit 1 when any row was skipped. Pins inside the box are never touched. First run 2026-09-03: 16 rows. |
+| `twilio-number-audit.js` | READ-ONLY | Twilio number + compliance coverage audit: every owned number vs `server/config/twilio-numbers.js` (an unregistered number has its inbound SMS DROPPED), webhook drift vs the fleet's canonical voice/SMS/status-callback config (the 2026-08-12 Google Ads → Sandy-sandbox misroute), assignment to every LIVE Trust Hub product (customer profile, SHAKEN/STIR, CNAM, Voice Integrity, Branded Calling — the console's per-number "Not started" items), and A2P sender-pool / toll-free-verification coverage. Exits 1 on defects. Run after every number purchase and before flipping a lane that sends from a new line. |
 
 ## Sibling: `ops/backup/`
 
@@ -79,6 +80,9 @@ what was asked; never dump full tables or the variable store.
 ## Usage
 
 ```sh
+# Read-only: is every Twilio number registered, on the canonical webhooks, and compliance-covered?
+railway run node ops/agents/twilio-number-audit.js
+
 # Read-only: grab one live token per public page type
 railway run --service Postgres node ops/agents/pull-page-tokens.js
 
