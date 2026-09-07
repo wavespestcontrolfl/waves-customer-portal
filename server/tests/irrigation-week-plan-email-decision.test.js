@@ -5,7 +5,7 @@
  * unavailable plan falls back to the pre-plan template; gate off = untouched.
  */
 jest.mock('../models/db', () => { const m = jest.fn(); m.raw = jest.fn((e) => e); m.fn = { now: () => 'now()' }; return m; });
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => false), isEnabled: jest.fn(() => true) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const {
@@ -138,7 +138,7 @@ describe('sweep — plan mode only on Monday', () => {
     expect(src).toMatch(/if \(claim\.error\) \{[\s\S]{0,400}weekPlanEnabled: false/);
     expect(src).toMatch(/\} else \{\s*snapshotArgs\.decisionHash = claim\.hash;\s*\}/);
     // The sweep passes the plan week's Sunday so the restriction must cover the whole week.
-    expect(src).toMatch(/planWeekEnd,\s*now: planAsOf,/);
+    expect(src).toMatch(/planWeekEnd,\s*now: saved \? new Date\(saved\.planAsOf\) : planAsOf,/);
     // Delivery reconciliation is customer/week scoped (trigger_event_id)…
     expect(src).toMatch(/weekPlanDeliveryState\(\{ triggerEventId, idempotencyKey \}\)/);
     // …and a prior delivery ends the customer's turn: never a second email on a new recipient key.
@@ -171,7 +171,7 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     expect(sweep).toMatch(/scheduleUnconfirmed,\s*\}\);/); // renderWeekPlanEmail ctx
   });
   test('the prior week\'s sent plan feeds the cool-season cadence', () => {
-    expect(sweep).toMatch(/const priorWeek = weekPlanEnabled \? await loadPriorWeekPlan\(\{ customerId: customer\.id, weekEnding, home: \{ addressLine1: customer\.address_line1, addressLine2: customer\.address_line2, city: customer\.city, zip: customer\.zip \} \}\) : null;/);
+    expect(sweep).toMatch(/weekPlanEnabled \? await loadPriorWeekPlan\(\{ customerId: customer\.id, weekEnding, home: \{ addressLine1: customer\.address_line1, addressLine2: customer\.address_line2, city: customer\.city, zip: customer\.zip \} \}\) : null;/);
     expect(sweep).toMatch(/const priorWeekPrescribedInches = priorWeek \? priorWeek\.prescribedInches : null;/);
     // A known move rides into the jurisdiction resolver (stale profile county rejected).
     expect(sweep).toMatch(/resolveRestrictionCounty\(\{ county: customer\.turf_county, profileCity: customer\.turf_city, city: customer\.city, zip: customer\.zip, homeMoved: !!customer\.irrigation_home_changed_at, movedAt: customer\.irrigation_home_changed_at \|\| null, countyConfirmed: countyConfirmedAfterMove\(customer\) \}\)/);
@@ -190,11 +190,11 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     expect(sweep).toMatch(/rainSensor: rainSensorConfirmedAfterMove\(customer\) && \(customer\.rain_sensor === true \|\| customer\.rain_sensor === 't'\),/);
     // gh-r40: an unreadable stamp read at the queue transition fails CLOSED (plan withheld, counted claim_error, snapshot claimable).
     expect(sweep).toMatch(/stampCheckFailedAtQueue = true;\s*return false;/);
-    expect(sweep).toMatch(/if \(stampCheckFailedAtQueue\) \{[\s\S]*?summary\.plan\.claim_error \+= 1;\s*continue;\s*\}/);
+    expect(sweep).toMatch(/if \(stampCheckFailedAtQueue\) \{[\s\S]*?summary\.plan\.claim_error \+= 1;\s*return;\s*\}/);
     // gh-r38: the move stamp is re-read at the queue transition; a changed stamp withholds the plan and sends nothing.
-    expect(sweep).toMatch(/if \(homeMovedAtQueue\) \{[\s\S]*?summary\.plan\.home_moved \+= 1;[\s\S]*?await discardUnsentWeekPlan\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*continue;\s*\}/);
+    expect(sweep).toMatch(/if \(homeMovedAtQueue\) \{[\s\S]*?summary\.plan\.home_moved \+= 1;[\s\S]*?await discardUnsentWeekPlan\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*return;\s*\}/);
     // gh-r38: each candidate is re-read through the SAME audience query at their turn.
-    expect(sweep).toMatch(/const fresh = await findEligibleCustomers\(\{ now: startedAt, customerId: customer\.id \}\);\s*if \(!fresh\.length\) \{ summary\.skipped\.no_longer_eligible \+= 1; continue; \}/);
+    expect(sweep).toMatch(/const fresh = await findEligibleCustomers\(\{ now: tick\(\), customerId: customer\.id, includeApp: appPublication \}\);\s*if \(!fresh\.length\) \{ summary\.skipped\.no_longer_eligible \+= 1; continue; \}/);
     // gh-r45: a move stamp that changed since the audience load = mid-transition row (coords may still be the
     // former home's — the address paths clear/re-geocode asynchronously) — the customer is skipped this run.
     expect(sweep).toMatch(/if \(stampMsAt\(fresh\[0\]\.irrigation_home_changed_at\) !== stampMsAt\(customer\.irrigation_home_changed_at\)\) \{\s*summary\.skipped\.home_moved_mid_sweep \+= 1;[\s\S]*?continue;\s*\}\s*customer = fresh\[0\];/);
@@ -204,11 +204,11 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     expect(sweep).toMatch(/const tick = clock \|\| \(now \? \(\) => now : \(\) => new Date\(\)\);/);
     // gh-r35: a plan that misses the cutoff at the queue transition is withheld AND the pre-plan
     // check-in still goes out in THIS run (the Monday cron is the only scheduled run).
-    expect(sweep).toMatch(/let result = await dispatch\(\);\s*if \(result\.aborted && windowClosedAtQueue\) \{[\s\S]*?summary\.plan\.window_closed \+= 1;[\s\S]*?await discardUnsentWeekPlan\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*decision = buildWeeklyEmailDecision\(\{ \.\.\.decisionInputs, forecastRainInches, forecastEt0Inches, weekPlanEnabled: false \}\);\s*snapshotArgs = null;\s*windowClosedAtQueue = false;[\s\S]*?result = await dispatch\(\);\s*\}/);
+    expect(sweep).toMatch(/let result = await dispatch\(\);[\s\S]*?if \(result\.aborted && windowClosedAtQueue\) \{[\s\S]*?summary\.plan\.window_closed \+= 1;[\s\S]*?await discardUnsentWeekPlan\(\{ customerId: customer\.id, weekEnding, claimToken: snapshotArgs\.claimToken \}\);\s*decision = buildWeeklyEmailDecision\(\{ \.\.\.decisionInputs, forecastRainInches, forecastEt0Inches, weekPlanEnabled: false \}\);\s*snapshotArgs = null;\s*windowClosedAtQueue = false;[\s\S]*?result = await dispatch\(\);\s*\}/);
     expect(lib).toMatch(/\.where\(\{ id: message\.id, status: 'queued', send_attempt_token: sendAttemptToken \}\)\s*\.update\(\{ status: 'failed', error_message: reason/);
     // A LOST claim aborts inside the library; the sweep counts it claimed_elsewhere and stamps nothing (gh-r20).
     // …an UNREADABLE renewal (null after retries) is counted claim_error and logged, never claimed_elsewhere (hook P1 on 45beb0731).
-    expect(sweep).toMatch(/if \(result\.aborted\) \{[\s\S]*?if \(claimRenewal === null\) \{[^}]*summary\.plan\.claim_error \+= 1;\s*logger\.error\([^)]*claim renewal unreadable[^)]*\);\s*continue;\s*\}\s*summary\.plan\.claimed_elsewhere \+= 1;\s*continue;\s*\}/);
+    expect(sweep).toMatch(/if \(result\.aborted\) \{[\s\S]*?if \(claimRenewal === null\) \{[^}]*summary\.plan\.claim_error \+= 1;\s*logger\.error\([^)]*claim renewal unreadable[^)]*\);\s*return;\s*\}\s*summary\.plan\.claimed_elsewhere \+= 1;\s*return;\s*\}/);
     expect(lib).toMatch(/keep = \(await onQueued\(message\)\) !== false;/);
     // gh-r21: the new owner retries a momentary EMAIL_SEND_IN_PROGRESS collision instead of losing the week's email.
     expect(sweep).toMatch(/if \(err\?\.code !== 'EMAIL_SEND_IN_PROGRESS' \|\| attempt >= IN_PROGRESS_RETRIES\) throw err;/);
