@@ -465,7 +465,9 @@ function inputMatches(input = {}, when = {}) {
  * scenario-wrong call never receives it) and `once` (consumed by its first
  * match). Conditioned entries are tried first, in order; unconditioned
  * entries require all one-shot matches to have been consumed, then step by
- * invocation count, the last one repeating. Returns
+ * invocation count, the last one repeating — unless it is `once`, which
+ * stops the repeat (a second success would award a write receipt the
+ * fixture never set up). Returns
  * `{ response }`, `{ mismatch: true }` when no response is eligible, or null
  * when the fixture has no entry for the tool at all.
  */
@@ -484,7 +486,11 @@ function pickToolResponse(scenario, name, n, input = {}, used = {}) {
     }
   }
   if (!unconditioned.length || conditioned.some((entry) => entry.once && !used[`${name}:${entries.indexOf(entry)}`])) return { mismatch: true };
-  return { response: unconditioned[Math.min(Math.max(n, 1), unconditioned.length) - 1] };
+  const entry = unconditioned[Math.min(Math.max(n, 1), unconditioned.length) - 1];
+  const key = `${name}:${entries.indexOf(entry)}`;
+  if (entry.once && used[key]) return { mismatch: true };
+  if (entry.once) used[key] = true;
+  return { response: entry };
 }
 
 // The live capture_lead accumulates the estimate fields across one call's

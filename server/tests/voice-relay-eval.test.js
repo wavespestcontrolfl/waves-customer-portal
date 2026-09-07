@@ -804,6 +804,8 @@ describe('voice relay eval — argument-matched fixture answers', () => {
       request_booking: [{ when: { slot_ref: 'S2' }, once: true, text: 'placed S2', booking: true }, { text: 'already placed' }],
       get_pricing: [{ when: { service: 'pest_control' }, text: '$129' }],
       lookup_customer: ['first', 'second'],
+      request_reservice: [{ text: 'filed', reservice: true, once: true }],
+      transfer_to_office: [{ text: 'ringing', transfer: true, once: true }, { text: 'already ringing' }],
     } } };
     const used = {};
     expect(pickToolResponse(scenario, 'request_booking', 1, { slot_ref: 'S1' }, used)).toEqual({ mismatch: true });
@@ -814,6 +816,12 @@ describe('voice relay eval — argument-matched fixture answers', () => {
     expect(pickToolResponse(scenario, 'request_booking', 2, { slot_ref: 'S3' }, used).response.text).toBe('already placed');
     expect(pickToolResponse(scenario, 'get_pricing', 1, { service: 'pest_control' }, used).response.text).toBe('$129');
     expect(pickToolResponse(scenario, 'get_pricing', 1, { service: 'lawn_care' }, used)).toEqual({ mismatch: true });
+    // An unconditioned one-shot answers once; as the last entry it does not repeat — the fixture has no answer for a second call.
+    expect(pickToolResponse(scenario, 'request_reservice', 1, {}, used).response.text).toBe('filed');
+    expect(pickToolResponse(scenario, 'request_reservice', 2, {}, used)).toEqual({ mismatch: true });
+    expect(pickToolResponse(scenario, 'request_reservice', 1, {}, used)).toEqual({ mismatch: true });
+    expect(pickToolResponse(scenario, 'transfer_to_office', 1, {}, used).response.text).toBe('ringing');
+    expect(pickToolResponse(scenario, 'transfer_to_office', 2, {}, used).response.text).toBe('already ringing');
     expect(pickToolResponse(scenario, 'lookup_customer', 1, {}, used).response.text).toBe('first');
     expect(pickToolResponse(scenario, 'lookup_customer', 3, {}, used).response.text).toBe('second');
     expect(pickToolResponse(scenario, 'capture_lead', 1, {}, used)).toBeNull();
