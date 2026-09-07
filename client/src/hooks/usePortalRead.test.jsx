@@ -39,6 +39,24 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('customer portal reads', () => {
+  it('queues an unlock behind an active refresh and retries after it fails', async () => {
+    const pending = deferred();
+    const load = vi.fn().mockResolvedValueOnce({ title: 'Saved visit' })
+      .mockReturnValueOnce(pending.promise).mockResolvedValue({ title: 'Current visit' });
+    const { rerender } = render(<App load={load} />);
+    await screen.findByText('Saved visit');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    biometric.locked = true;
+    rerender(<App load={load} />);
+    biometric.locked = false;
+    rerender(<App load={load} />);
+    expect(load).toHaveBeenCalledTimes(2);
+    await act(async () => pending.reject(new Error('Connection interrupted')));
+    expect(load).toHaveBeenCalledTimes(3);
+    expect(screen.getByTestId('state')).toHaveTextContent('ready');
+    expect(screen.getByTestId('data')).toHaveTextContent('Current visit');
+  });
+
   it('queues one reconnect retry behind an active refresh and recovers without another gesture', async () => {
     const pending = deferred();
     const recovered = deferred();

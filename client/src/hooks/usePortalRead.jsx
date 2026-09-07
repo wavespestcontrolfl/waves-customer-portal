@@ -12,7 +12,7 @@ export function PortalReadProvider({ enabled, children }) {
   const [online, setOnline] = useState(() => navigator.onLine !== false);
   const [refreshing, setRefreshing] = useState(false);
   const refreshingRef = useRef(false);
-  const reconnectPending = useRef(false);
+  const refreshQueued = useRef(false);
   const lastRefresh = useRef(Date.now());
   const locked = useBiometricLock();
   const lockedRef = useRef(locked);
@@ -30,9 +30,9 @@ export function PortalReadProvider({ enabled, children }) {
     setRefreshing(true);
     try {
       do {
-        reconnectPending.current = false;
+        refreshQueued.current = false;
         await Promise.allSettled([...readers].map(read => read()));
-      } while (reconnectPending.current && !lockedRef.current && navigator.onLine !== false);
+      } while (refreshQueued.current && !lockedRef.current && navigator.onLine !== false);
     } finally {
       refreshingRef.current = false;
       setRefreshing(false);
@@ -46,7 +46,7 @@ export function PortalReadProvider({ enabled, children }) {
     };
     const reconnect = () => {
       setOnline(true);
-      reconnectPending.current = refreshingRef.current;
+      refreshQueued.current = refreshingRef.current;
       void refresh();
     };
     const disconnect = () => setOnline(false);
@@ -64,7 +64,10 @@ export function PortalReadProvider({ enabled, children }) {
 
   const wasLocked = useRef(locked);
   useEffect(() => {
-    if (wasLocked.current && !locked) void refresh();
+    if (wasLocked.current && !locked) {
+      refreshQueued.current = refreshingRef.current;
+      void refresh();
+    }
     wasLocked.current = locked;
   }, [locked, refresh]);
 
