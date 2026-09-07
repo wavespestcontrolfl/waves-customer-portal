@@ -129,6 +129,28 @@ const OFFICE_FACT = Object.freeze({
   unknown: 'Office hours were unavailable to the agent: no office hours and no callback time may be stated.',
 });
 
+// The user turn as a table of [label, value, block] sections, so the prompt
+// is data and every branch is visible in one place. A block section renders
+// its value on the lines below the label; an inline one on the same line.
+const scalar = (v, fallback = '(none)') => (v == null || v === '' ? fallback : String(v));
+function specSections(spec, { language, toolsAvailable, officeHours, callerBlock }) {
+  const range = spec.response_range || {};
+  return [
+    ['Language of the call', language === 'es' ? 'Spanish (the agent must answer in Spanish)' : 'English'],
+    ['Tools the agent had on this call', toolsAvailable.length ? toolsAvailable.join(', ') : '(none listed)'],
+    ['GRADING NOTES — hidden truth the agent never saw (what the tools would say, what the scenario set up); a write outcome here counts only after the matching [tool] line', list(spec.fixture_facts), true],
+    ['CONTEXT THE AGENT WAS GIVEN — claims may trace here', `${list(OFFICE_FACT[officeHours] ? [OFFICE_FACT[officeHours]] : [])}\nAccount data block at the start of the call (the agent may state it to a VERIFIED caller, confirm-only to a recognised one):\n${callerBlock ? String(callerBlock).trim() : '  (none — unknown caller)'}`, true],
+    ['required_facts', list(spec.required_facts), true],
+    ['prohibited_facts', list(spec.prohibited_facts), true],
+    ['required_action', scalar(spec.required_action)],
+    ['acceptable_actions', list(spec.acceptable_actions), true],
+    ['transfer_required', spec.transfer_required === true ? 'true' : 'false'],
+    ['ideal_move', scalar(spec.ideal_move, '(not specified)')],
+    ['response_range', `${Number.isFinite(range.min) ? range.min : 1}-${Number.isFinite(range.max) ? range.max : 3} sentences per agent turn`],
+    ['max_words_per_agent_turn', String(Number.isFinite(spec.max_words_per_agent_turn) ? spec.max_words_per_agent_turn : 60)],
+  ];
+}
+
 /**
  * The user turn: the spec, the context the agent was actually given (its
  * KNOWN CALLER block and the office clock — fixture facts the agent may rely
@@ -136,55 +158,32 @@ const OFFICE_FACT = Object.freeze({
  * (Caller: / Agent: / [tool] name → result) the harness rendered.
  */
 function buildJudgePrompt(spec = {}, transcript = '', { language = 'en', toolsAvailable = [], officeHours = null, callerBlock = null } = {}) {
-  const range = spec.response_range || {};
-  const officeFact = OFFICE_FACT[officeHours] || null;
-  const text = [
-    'SCENARIO SPEC',
-    `Language of the call: ${language === 'es' ? 'Spanish (the agent must answer in Spanish)' : 'English'}`,
-    `Tools the agent had on this call: ${toolsAvailable.length ? toolsAvailable.join(', ') : '(none listed)'}`,
-    `GRADING NOTES — hidden truth the agent never saw (what the tools would say, what the scenario set up); a write outcome here counts only after the matching [tool] line:\n${list(spec.fixture_facts)}`,
-    `CONTEXT THE AGENT WAS GIVEN — claims may trace here:\n${list(officeFact ? [officeFact] : [])}\nAccount data block at the start of the call (the agent may state it to a VERIFIED caller, confirm-only to a recognised one):\n${callerBlock ? String(callerBlock).trim() : '  (none — unknown caller)'}`,
-    `required_facts:\n${list(spec.required_facts)}`,
-    `prohibited_facts:\n${list(spec.prohibited_facts)}`,
-    `required_action: ${spec.required_action || '(none)'}`,
-    `acceptable_actions:\n${list(spec.acceptable_actions)}`,
-    `transfer_required: ${spec.transfer_required === true ? 'true' : 'false'}`,
-    `ideal_move: ${spec.ideal_move || '(not specified)'}`,
-    `response_range: ${Number.isFinite(range.min) ? range.min : 1}-${Number.isFinite(range.max) ? range.max : 3} sentences per agent turn`,
-    `max_words_per_agent_turn: ${Number.isFinite(spec.max_words_per_agent_turn) ? spec.max_words_per_agent_turn : 60}`,
-    '',
-    'TRANSCRIPT',
-    String(transcript || '').trim() || '(empty — the agent said nothing)',
-  ].join('\n');
+  const sections = specSections(spec, { language, toolsAvailable, officeHours, callerBlock })
+    .map(([label, value, block]) => (block ? `${label}:\n${value}` : `${label}: ${value}`));
+  const text = ['SCENARIO SPEC', ...sections, '', 'TRANSCRIPT', String(transcript || '').trim() || '(empty — the agent said nothing)'].join('\n');
   return { system: SYSTEM_PROMPT, text };
 }
+
+// Every conditional branch of the template, as the values each axis can take.
+const TEMPLATE_AXES = Object.freeze({
+  language: ['en', 'es'],
+  transferRequired: [false, true],
+  officeHours: [null, 'open', 'closed', 'unknown'],
+  callerBlock: [null, 'BLOCK'],
+  toolsAvailable: [[], ['T']],
+});
+const cartesian = (axes) => Object.entries(axes).reduce((acc, [key, values]) => acc.flatMap((row) => values.map((v) => ({ ...row, [key]: v }))), [{}]);
 
 /**
  * The prompt-template fingerprint every verdict carries: the version, the
  * system prompt, the output schema (its descriptions are grading
  * instructions too) and the user-turn template rendered through EVERY
- * conditional branch — both languages, transfer required or not, each office
- * state, with and without an account block, with and without tools — so a
- * grading-instruction change on any branch moves the fingerprint. The
- * scenario's own content never enters it.
+ * branch of TEMPLATE_AXES, so a grading-instruction change on any branch
+ * moves the fingerprint. The scenario's own content never enters it.
  */
 function judgePromptSha() {
-  const probeSpec = {
-    fixture_facts: ['F'], required_facts: ['R'], prohibited_facts: ['P'], required_action: 'A', acceptable_actions: ['B'],
-    ideal_move: 'I', response_range: { min: 1, max: 2 }, max_words_per_agent_turn: 40,
-  };
-  const renderings = [];
-  for (const language of ['en', 'es']) {
-    for (const transferRequired of [false, true]) {
-      for (const officeHours of [null, 'open', 'closed', 'unknown']) {
-        for (const callerBlock of [null, 'BLOCK']) {
-          for (const toolsAvailable of [[], ['T']]) {
-            renderings.push(buildJudgePrompt({ ...probeSpec, transfer_required: transferRequired }, 'X', { language, toolsAvailable, officeHours, callerBlock }).text);
-          }
-        }
-      }
-    }
-  }
+  const probeSpec = { fixture_facts: ['F'], required_facts: ['R'], prohibited_facts: ['P'], required_action: 'A', acceptable_actions: ['B'], ideal_move: 'I', response_range: { min: 1, max: 2 }, max_words_per_agent_turn: 40 };
+  const renderings = cartesian(TEMPLATE_AXES).map(({ transferRequired, ...opts }) => buildJudgePrompt({ ...probeSpec, transfer_required: transferRequired }, 'X', opts).text);
   return sha256([JUDGE_PROMPT_VERSION, SYSTEM_PROMPT, JSON.stringify(JUDGE_SCHEMA), JSON.stringify(OFFICE_FACT), ...renderings].join('\n'));
 }
 
@@ -313,5 +312,5 @@ module.exports = {
   parseVerdict,
   judgeTranscript,
   judgePromptSha,
-  _internals: { SYSTEM_PROMPT, OFFICE_FACT, REQUIRED_FIELDS, stripFence, JUDGE_MAX_TOKENS },
+  _internals: { SYSTEM_PROMPT, OFFICE_FACT, REQUIRED_FIELDS, TEMPLATE_AXES, cartesian, stripFence, JUDGE_MAX_TOKENS },
 };

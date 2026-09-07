@@ -54,6 +54,8 @@ describe('voice relay eval — fixture lint', () => {
     expect(fixture.schemaVersion).toBe(replay.SCHEMA_VERSION);
     expect(fixture.scenarios).toHaveLength(34);
     expect(replay.lintFixture(fixture)).toEqual([]);
+    // A recording or a wrong number never earns a scheduling lookup.
+    for (const id of ['robocall', 'wrong-number']) expect(fixture.scenarios.find((s) => s.id === id).allowedTools).toEqual(['capture_lead']);
     for (const s of fixture.scenarios) {
       expect(s.spec).toBeTruthy();
       expect(s.allowedTools.length).toBeGreaterThan(0);
@@ -87,6 +89,7 @@ describe('voice relay eval — fixture lint', () => {
         { ...good, id: 'no-allowlist', allowedTools: [] },
         { ...good, id: 'bad-allowlist', allowedTools: ['launch_missiles'] },
         { ...good, id: 'expects-outside', allowedTools: ['find_slots'] },
+        { ...good, id: 'bad-when', fixtures: { toolResponses: { capture_lead: [{ when: 'yes', text: 'x' }] } } },
         { ...good, id: 'bad-fixture-tool', fixtures: { toolResponses: { not_a_tool: 'x' } } },
       ],
     };
@@ -104,6 +107,7 @@ describe('voice relay eval — fixture lint', () => {
     expect(joined).toMatch(/no-allowlist: allowedTools must be a non-empty list/);
     expect(joined).toMatch(/bad-allowlist: allowedTools names unknown tool "launch_missiles"/);
     expect(joined).toMatch(/expects-outside: expect tools_called_include names "capture_lead", which allowedTools does not allow/);
+    expect(joined).toMatch(/bad-when: toolResponses.capture_lead: when must be a non-empty object/);
     expect(joined).toMatch(/bad-fixture-tool: toolResponses names unknown tool "not_a_tool"/);
     expect(replay.lintFixture({ schemaVersion: 'nope', scenarios: [] })).toEqual(expect.arrayContaining([expect.stringMatching(/schemaVersion/), 'fixture: no scenarios']));
   });
@@ -219,6 +223,35 @@ describe('voice relay eval — each expect key', () => {
   });
 });
 
+describe('voice relay eval — argument-matched fixture answers', () => {
+  const { _internals: { pickToolResponse, inputMatches, MISMATCH_TEXT } } = require('../services/eval/voice-relay-replay');
+
+  test('inputMatches: strings are case-insensitive substrings, arrays any-of, everything else strict', () => {
+    expect(inputMatches({ service: 'pest_control', n: 2, ok: true }, { service: 'PEST', n: 2, ok: true })).toBe(true);
+    expect(inputMatches({ service: 'lawn_care' }, { service: 'pest_control' })).toBe(false);
+    expect(inputMatches({ lane: 'lawn' }, { lane: ['pest', 'lawn'] })).toBe(true);
+    expect(inputMatches({}, { slot_ref: 'S2' })).toBe(false);
+  });
+
+  test('conditioned entries answer their arguments first (once consumed on first match); unconditioned entries step by count; all-conditioned with no match is a mismatch', () => {
+    const scenario = { fixtures: { toolResponses: {
+      request_booking: [{ when: { slot_ref: 'S2' }, once: true, text: 'placed S2', booking: true }, { text: 'already placed' }],
+      get_pricing: [{ when: { service: 'pest_control' }, text: '$129' }],
+      lookup_customer: ['first', 'second'],
+    } } };
+    const used = {};
+    expect(pickToolResponse(scenario, 'request_booking', 1, { slot_ref: 'S2' }, used).response.text).toBe('placed S2');
+    expect(pickToolResponse(scenario, 'request_booking', 2, { slot_ref: 'S2' }, used).response.text).toBe('already placed'); // once: consumed
+    expect(pickToolResponse(scenario, 'request_booking', 2, { slot_ref: 'S3' }, used).response.text).toBe('already placed');
+    expect(pickToolResponse(scenario, 'get_pricing', 1, { service: 'pest_control' }, used).response.text).toBe('$129');
+    expect(pickToolResponse(scenario, 'get_pricing', 1, { service: 'lawn_care' }, used)).toEqual({ mismatch: true });
+    expect(pickToolResponse(scenario, 'lookup_customer', 1, {}, used).response.text).toBe('first');
+    expect(pickToolResponse(scenario, 'lookup_customer', 3, {}, used).response.text).toBe('second');
+    expect(pickToolResponse(scenario, 'capture_lead', 1, {}, used)).toBeNull();
+    expect(MISMATCH_TEXT).toMatch(/nothing was done/);
+  });
+});
+
 describe('voice relay eval — severity aggregation', () => {
   const { _internals: { scenarioStatus, qualityScore, summarize } } = require('../services/eval/voice-relay-replay');
   const c = (severity, status, adjudicated = false) => ({ check: `x-${severity}`, severity, status, adjudicated, detail: '' });
@@ -313,6 +346,7 @@ describe('voice relay eval — the judge', () => {
     expect(sha).toBe(crypto.createHash('sha256').update(parts.join('\n')).digest('hex'));
     expect(parts.filter((x) => /Spanish/.test(x)).length).toBeGreaterThan(0);
     expect(parts.filter((x) => /transfer_required: true/.test(x)).length).toBeGreaterThan(0);
+    expect(judge._internals.cartesian(judge._internals.TEMPLATE_AXES)).toHaveLength(64);
   });
 
   test('judgeTranscript dispatches the voiceJudge policy on its lane and stamps model, provider, fallback and prompt sha', async () => {
@@ -356,7 +390,8 @@ describe('voice relay eval — the judge', () => {
     expect(scenarioStatus({ checks: advisory })).toBe('pass');
 
     const pinned = judgeChecks(scenario, { ok: true, judge_fallback: false, verdict });
-    expect(pinned.find((c) => c.check === 'judge:verdict')).toMatchObject({ status: 'fail', severity: 'major' });
+    // A fail explained by a detail finding is counted once, on that finding's line.
+    expect(pinned.find((c) => c.check === 'judge:verdict')).toMatchObject({ status: 'pass', detail: 'failed on the findings below' });
     // A holistic "fail" with clean detail fields is still a failed verdict.
     const holistic = judgeChecks(scenario, { ok: true, judge_fallback: false, verdict: { ...verdict, pass: false, forbidden_claims: [], required_facts_missing: [], action_ok: true, transfer_ok: true, empathy_ok: true, tone: 4, rationale: 'rushed the caller off the line' } });
     expect(holistic.find((c) => c.check === 'judge:verdict')).toMatchObject({ status: 'fail', detail: expect.stringContaining('rushed') });
@@ -563,6 +598,31 @@ describe('voice relay eval — the harness', () => {
     }), { judge: false });
     expect(result.checks[0]).toMatchObject({ check: 'allowed_tools', severity: 'critical', status: 'fail', detail: expect.stringContaining('request_booking') });
     expect(result.status).toBe('fail');
+  });
+
+  test('a hanging fixture answer never hides an invalid call: validation runs first, and a mismatch gets the refusal', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    replay.installHarness();
+    // capture_lead without its required call_summary against a hanging answer: rejected, not hung.
+    script.push(toolUse('capture_lead', { first_name: 'Owen' }), say('A team member will follow up.'));
+    const hung = await replay.runScenario(scenario({ id: 'harness-hang-invalid', fixtures: { officeHours: 'unknown', toolResponses: { capture_lead: { hang: true } } }, turns: [{ caller: 'hi' }], expect: [] }), { judge: false });
+    expect(hung.toolCalls[0]).toMatchObject({ name: 'capture_lead', invalid: true, ok: false });
+    expect(hung.toolCalls[0].text).toMatch(/Missing required argument "call_summary"/);
+    expect(hung.officeStatus).toBe('unknown');
+    // A schema-valid slot the scenario did not set up gets the mismatch refusal, never another slot's success.
+    script.push(toolUse('find_slots', { when: 'next week' }, 't0'), toolUse('request_booking', { slot_ref: 'S1' }), say('Sorry — a team member will call to find a time.'));
+    const wrong = await replay.runScenario(scenario({
+      id: 'harness-mismatch', gates: { context: true, booking: true }, allowedTools: ['find_slots', 'request_booking', 'capture_lead'],
+      caller: { from: '+19415550131', verified: true, context: { customer: { id: 'c1', first_name: 'Dana' }, tier: 'full', attested: true, block: 'KNOWN CALLER — test\n<<<KNOWN CALLER DATA\nFirst name: Dana\nEND KNOWN CALLER DATA>>>', dataTurn: null } },
+      fixtures: { officeHours: 'open', toolResponses: { find_slots: 'Open times: Monday at 9 AM (slot_ref: S1); Tuesday at 1 PM (slot_ref: S2).', request_booking: [{ when: { slot_ref: 'S2' }, text: 'placed S2', booking: true }], capture_lead: { text: 'Noted.', capture: { leadCreated: false } } } },
+      turns: [{ caller: 'Book Tuesday.' }], expect: [{ check: 'tools_called_include', value: ['request_booking'], severity: 'major' }],
+    }), { judge: false });
+    const booking = wrong.toolCalls.find((t) => t.name === 'request_booking');
+    expect(booking).toMatchObject({ invalid: true, mismatch: true, ok: false, receipt: false });
+    expect(booking.text).toMatch(/nothing was done/);
+    expect(wrong.checks.find((c) => c.check === 'tools_called_include').status).toBe('fail');
+    expect(wrong.officeStatus).toBe('open');
   });
 
   test('an interrupted utterance is graded as what the caller heard, with the full text kept as planned', async () => {
@@ -789,6 +849,16 @@ describe('voice relay eval — scheduled wrapper and child process', () => {
     await expect(replay.runVoiceRelayEvalProcess({ execFileImpl: child(3, JSON.stringify({ status: 'inconclusive' })) })).resolves.toMatchObject({ status: 'inconclusive' });
     await expect(replay.runVoiceRelayEvalProcess({ execFileImpl: child(2, '', 'Voice relay eval failed to run: boom') })).rejects.toThrow(/exited 2: Voice relay eval failed to run: boom/);
     await expect(replay.runVoiceRelayEvalProcess({ execFileImpl: child(0, 'not json') })).rejects.toThrow(/exited 0/);
+  });
+
+  test('a bell that fails to insert leaves a FINISHED result with notificationError, never a throw', async () => {
+    const notify = jest.fn(async () => { throw new Error('notification insert failed'); });
+    const sendEmail = jest.fn(async () => ({ ok: true }));
+    const out = await replay.runVoiceRelayEval({ runReplay: async () => failing(), notify, sendEmail });
+    expect(out.status).toBe('fail');
+    expect(out.notificationError).toMatch(/notification insert failed/);
+    expect(out.summary.failed).toBe(1);
+    expect(sendEmail).toHaveBeenCalledTimes(1);
   });
 
   test('a crashed eval child pages through the inconclusive path', async () => {

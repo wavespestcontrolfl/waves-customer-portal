@@ -34,6 +34,29 @@ const ARGS = Object.fromEntries(
   })
 );
 
+function printReport(result, summaryLine) {
+  console.log('\n-- Voice relay conversation eval --\n');
+  console.log(`Status: ${result.status}${result.flaky ? ' (flaky pass-on-retry)' : ''}`);
+  if (result.error) console.log(`Could not run: ${result.error.message}`);
+  if (result.summary) console.log(summaryLine(result.summary));
+  if (result.notificationError) console.log(`Notification insert failed (email channel attempted): ${result.notificationError}`);
+  for (const scenario of result.results || []) printScenario(scenario);
+  if (result.attempts && result.attempts.length > 1) console.log(`Attempts: ${result.attempts.map((a) => a.status).join(' -> ')}`);
+  console.log('');
+}
+
+function judgeLine(judge) {
+  if (!judge) return 'judge skipped';
+  if (!judge.ok) return `judge unavailable (${judge.reason})`;
+  return `judge ${judge.verdict.pass ? 'pass' : 'FAIL'} tone=${judge.verdict.tone ?? 'n/a'}${judge.judge_fallback ? ' (fallback leg — advisory)' : ''}`;
+}
+
+function printScenario(scenario) {
+  console.log(`  ${(scenario.status || 'error').padEnd(6)} ${scenario.id.padEnd(30)} ${judgeLine(scenario.judge)}`);
+  if (scenario.error) console.log(`         replay error: ${scenario.error.message}`);
+  for (const miss of (scenario.checks || []).filter((c) => c.status === 'fail')) console.log(`         ${miss.severity}${miss.adjudicated ? '*' : ''} ${miss.check}: ${miss.detail}`);
+}
+
 (async function main() {
   try {
     if (ARGS.json) logger.transports.forEach((t) => { t.silent = true; });
@@ -48,26 +71,8 @@ const ARGS = Object.fromEntries(
     if (ARGS['no-judge']) opts.judge = false;
 
     const result = await runVoiceRelayEval(opts);
-
-    if (ARGS.json) {
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-    } else {
-      console.log('\n-- Voice relay conversation eval --\n');
-      console.log(`Status: ${result.status}${result.flaky ? ' (flaky pass-on-retry)' : ''}`);
-      if (result.error) console.log(`Could not run: ${result.error.message}`);
-      if (result.summary) console.log(summaryLine(result.summary));
-      for (const scenario of result.results || []) {
-        const misses = (scenario.checks || []).filter((c) => c.status === 'fail');
-        const judge = scenario.judge
-          ? (scenario.judge.ok ? `judge ${scenario.judge.verdict.pass ? 'pass' : 'FAIL'} tone=${scenario.judge.verdict.tone ?? 'n/a'}${scenario.judge.judge_fallback ? ' (fallback leg — advisory)' : ''}` : `judge unavailable (${scenario.judge.reason})`)
-          : 'judge skipped';
-        console.log(`  ${(scenario.status || 'error').padEnd(6)} ${scenario.id.padEnd(30)} ${judge}`);
-        if (scenario.error) console.log(`         replay error: ${scenario.error.message}`);
-        for (const miss of misses) console.log(`         ${miss.severity}${miss.adjudicated ? '*' : ''} ${miss.check}: ${miss.detail}`);
-      }
-      if (result.attempts && result.attempts.length > 1) console.log(`Attempts: ${result.attempts.map((a) => a.status).join(' -> ')}`);
-      console.log('');
-    }
+    if (ARGS.json) process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    else printReport(result, summaryLine);
 
     if (result.status === 'fail') process.exitCode = 1;
     else if (result.status === 'inconclusive') process.exitCode = 3;

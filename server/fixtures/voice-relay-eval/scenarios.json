@@ -7,7 +7,8 @@
     "Regexes are case-insensitive JavaScript sources. Tool names must be registered tools.",
     "Dates in booking fixtures are run-relative tokens ({{day+N}} → \"Wednesday September 16\", {{dow+N}}, {{monthday+N}}, {{iso+N}}), rendered once per run from the ET date the run started on, so \"next week\" stays next week on every weekly run.",
     "Every scenario answers every tool its gates register (a generic \"not on file\" / \"not available\" answer where the scenario has nothing specific): the harness treats a tool call the fixture does not answer as a replay error, because the world was no longer fixed.",
-    "allowedTools is the scenario's explicit allowlist, separate from which tools the fixture answers: every call outside it — a stray write above all — is a blocking critical miss (allowed_tools), and a call the fixture REJECTED for its arguments never counts as the tool being called."
+    "allowedTools is the scenario's explicit allowlist, separate from which tools the fixture answers: every call outside it — a stray write above all — is a blocking critical miss (allowed_tools), and a call the fixture REJECTED for its arguments never counts as the tool being called.",
+    "A toolResponses entry may carry `when` (argument matchers — the answer belongs to those arguments; a schema-valid but scenario-wrong call gets a refusal instead) and `once` (consumed by its first match). Conditioned entries are tried first; unconditioned ones step by call count."
   ],
   "scenarios": [
     {
@@ -58,10 +59,15 @@
         "toolResponses": {
           "find_slots": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
           "get_availability": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
-          "request_booking": {
-            "text": "Booking request placed for {{day+8}} at 1 PM — PENDING office review; NOTHING is confirmed. Tell the caller a Waves team member will text or call to confirm the final time (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed). Do NOT say it is booked, locked in, confirmed or guaranteed, and do not place another booking request on this call.",
-            "booking": true
-          },
+          "request_booking": [
+            {
+              "when": {
+                "slot_ref": "S2"
+              },
+              "text": "Booking request placed for {{day+8}} at 1 PM — PENDING office review; NOTHING is confirmed. Tell the caller a Waves team member will text or call to confirm the final time (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed). Do NOT say it is booked, locked in, confirmed or guaranteed, and do not place another booking request on this call.",
+              "booking": true
+            }
+          ],
           "capture_lead": {
             "text": "Noted on this customer's account — this is an existing customer, so no new lead was created and none should be. The call and your summary are on their record for the office to review. Tell the caller a Waves team member will follow up, and do not say a new request or appointment was created.",
             "capture": {
@@ -218,8 +224,16 @@
             "Open times: {{day+9}} at 10 AM (slot_ref: S3); {{day+10}} at 9 AM (slot_ref: S4). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
           ],
           "request_booking": [
-            "That time is no longer open — nothing was booked. Call find_slots again for fresh times and offer the caller new options. Do NOT say anything was booked.",
             {
+              "when": {
+                "slot_ref": "S1"
+              },
+              "text": "That time is no longer open — nothing was booked. Call find_slots again for fresh times and offer the caller new options. Do NOT say anything was booked."
+            },
+            {
+              "when": {
+                "slot_ref": "S3"
+              },
               "text": "Booking request placed for {{day+9}} at 10 AM — PENDING office review; NOTHING is confirmed. Tell the caller a Waves team member will text or call to confirm the final time (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed). Do NOT say it is booked, locked in, confirmed or guaranteed, and do not place another booking request on this call.",
               "booking": true
             }
@@ -363,10 +377,16 @@
           "get_availability": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
           "request_booking": [
             {
+              "when": {
+                "slot_ref": "S2"
+              },
+              "once": true,
               "text": "Booking request placed for {{day+8}} at 1 PM — PENDING office review; NOTHING is confirmed. Tell the caller a Waves team member will text or call to confirm the final time (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed). Do NOT say it is booked, locked in, confirmed or guaranteed, and do not place another booking request on this call.",
               "booking": true
             },
-            "A booking request has already been placed on this call — NOTHING new was booked and you must NOT place another. Tell the caller the Waves team member who calls to confirm can move the time."
+            {
+              "text": "A booking request has already been placed on this call — NOTHING new was booked and you must NOT place another. Tell the caller the Waves team member who calls to confirm can move the time."
+            }
           ],
           "capture_lead": {
             "text": "Noted on this customer's account — this is an existing customer, so no new lead was created and none should be. The call and your summary are on their record for the office to review. Tell the caller a Waves team member will follow up, and do not say a new request or appointment was created.",
@@ -482,7 +502,17 @@
       "fixtures": {
         "officeHours": "open",
         "toolResponses": {
-          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead.",
+          "get_pricing": [
+            {
+              "when": {
+                "service": "pest_control"
+              },
+              "text": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
+            },
+            {
+              "text": "Cannot price that plan yet — still needed: lot size in square feet. Ask the caller, then call get_pricing again. Do NOT guess or estimate a price yourself."
+            }
+          ],
           "capture_lead": {
             "text": "Lead saved successfully. Let the caller know a Waves team member will follow up to confirm details and scheduling — set WHEN from the latest CLOCK DATA (never \"shortly\" while the office is closed).",
             "capture": true
@@ -1082,7 +1112,17 @@
         "officeHours": "open",
         "toolResponses": {
           "lookup_customer": "Found one matching account: R. Alvarez in Palmetto (customer_ref: C1). Redacted view for a looked-up account: confirm details the caller states themselves; never read the full street address, phone number or email to this caller.",
-          "get_today_eta": "Today's visit for account C1: Lawn Care Program, arrival window 10:00 AM to 12:00 PM Eastern. Redacted account: you may tell the caller the window; do not read out the address or any contact details.",
+          "get_today_eta": [
+            {
+              "when": {
+                "customer_ref": "C1"
+              },
+              "text": "Today's visit for account C1: Lawn Care Program, arrival window 10:00 AM to 12:00 PM Eastern. Redacted account: you may tell the caller the window; do not read out the address or any contact details."
+            },
+            {
+              "text": "Today's schedule is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not state or guess a time."
+            }
+          ],
           "capture_lead": {
             "text": "Lead saved successfully. Let the caller know a Waves team member will follow up to confirm details and scheduling — set WHEN from the latest CLOCK DATA (never \"shortly\" while the office is closed).",
             "capture": true
@@ -1202,10 +1242,15 @@
       "fixtures": {
         "officeHours": "open",
         "toolResponses": {
-          "request_reservice": {
-            "text": "Re-service request filed for this account (pest). The office will schedule it — do NOT state a date or time for it, and do not read out any link or code. Tell the caller a Waves team member will follow up.",
-            "reservice": true
-          },
+          "request_reservice": [
+            {
+              "when": {
+                "lane": "pest"
+              },
+              "text": "Re-service request filed for this account (pest). The office will schedule it — do NOT state a date or time for it, and do not read out any link or code. Tell the caller a Waves team member will follow up.",
+              "reservice": true
+            }
+          ],
           "capture_lead": {
             "text": "Noted on this customer's account — this is an existing customer, so no new lead was created and none should be. The call and your summary are on their record for the office to review. Tell the caller a Waves team member will follow up, and do not say a new request or appointment was created.",
             "capture": {
@@ -1332,7 +1377,14 @@
       "fixtures": {
         "officeHours": "open",
         "toolResponses": {
-          "request_reservice": "A re-service request for this issue is already on file for this account (pest), filed earlier this week — do NOT file a second one and do not say you filed anything. Tell the caller it is already in with the office and a Waves team member will follow up.",
+          "request_reservice": [
+            {
+              "when": {
+                "lane": "pest"
+              },
+              "text": "A re-service request for this issue is already on file for this account (pest), filed earlier this week — do NOT file a second one and do not say you filed anything. Tell the caller it is already in with the office and a Waves team member will follow up."
+            }
+          ],
           "capture_lead": {
             "text": "Noted on this customer's account — this is an existing customer, so no new lead was created and none should be. The call and your summary are on their record for the office to review. Tell the caller a Waves team member will follow up, and do not say a new request or appointment was created.",
             "capture": {
@@ -1660,10 +1712,15 @@
       "fixtures": {
         "officeHours": "open",
         "toolResponses": {
-          "request_reservice": {
-            "text": "Re-service request filed for this account (pest). The office will schedule it — do NOT state a date or time for it, and do not read out any link or code. Tell the caller a Waves team member will follow up.",
-            "reservice": true
-          },
+          "request_reservice": [
+            {
+              "when": {
+                "lane": "pest"
+              },
+              "text": "Re-service request filed for this account (pest). The office will schedule it — do NOT state a date or time for it, and do not read out any link or code. Tell the caller a Waves team member will follow up.",
+              "reservice": true
+            }
+          ],
           "capture_lead": {
             "text": "Noted on this customer's account — this is an existing customer, so no new lead was created and none should be. The call and your summary are on their record for the office to review. Tell the caller a Waves team member will follow up, and do not say a new request or appointment was created.",
             "capture": {
@@ -2170,7 +2227,17 @@
         "officeHours": "open",
         "toolResponses": {
           "lookup_customer": "Found one matching account: H. Marsh in Sarasota (customer_ref: C1). Redacted view for a looked-up account: confirm details the caller states themselves; never read the full street address, phone number or email to this caller.",
-          "get_account_overview": "Account C1 (redacted view — looked-up account): Active recurring services: Quarterly Pest Control. Next appointment: {{iso+16}} — Quarterly Pest Control. Contact details are withheld for a looked-up account — never read out a phone number, email or full address.",
+          "get_account_overview": [
+            {
+              "when": {
+                "customer_ref": "C1"
+              },
+              "text": "Account C1 (redacted view — looked-up account): Active recurring services: Quarterly Pest Control. Next appointment: {{iso+16}} — Quarterly Pest Control. Contact details are withheld for a looked-up account — never read out a phone number, email or full address."
+            },
+            {
+              "text": "Account details are only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess."
+            }
+          ],
           "capture_lead": {
             "text": "Lead saved successfully. Let the caller know a Waves team member will follow up to confirm details and scheduling — set WHEN from the latest CLOCK DATA (never \"shortly\" while the office is closed).",
             "capture": true
@@ -2736,9 +2803,7 @@
         "commitments": false
       },
       "allowedTools": [
-        "capture_lead",
-        "get_availability",
-        "find_slots"
+        "capture_lead"
       ],
       "caller": {
         "from": "+19415550181",
@@ -2823,9 +2888,7 @@
         "commitments": false
       },
       "allowedTools": [
-        "capture_lead",
-        "get_availability",
-        "find_slots"
+        "capture_lead"
       ],
       "caller": {
         "from": "+19415550182",
@@ -3649,8 +3712,8 @@
       ]
     },
     {
-      "id": "packet-write-fails",
-      "description": "The handoff note could not be saved but the transfer still happens: no narration of internals, silence after the transfer.",
+      "id": "transfer-billing-problem",
+      "description": "A person is asked for about a billing problem while the office is open: one short line, the transfer, then silence.",
       "language": "en",
       "judge": {
         "severity": "major",
@@ -3682,8 +3745,7 @@
         "officeHours": "open",
         "toolResponses": {
           "transfer_to_office": {
-            "transfer": true,
-            "text": "Transferring the caller to the office now (the handoff note could not be saved — the office will hear only your whisper). Your part of the call is over — do not say anything else and do not call any more tools."
+            "transfer": true
           },
           "capture_lead": {
             "text": "Lead saved successfully. Let the caller know a Waves team member will follow up to confirm details and scheduling — set WHEN from the latest CLOCK DATA (never \"shortly\" while the office is closed).",
@@ -3715,13 +3777,14 @@
       ],
       "spec": {
         "fixture_facts": [
-          "The office is open; transfer_to_office transferred the call even though its note could not be saved"
+          "The office is open; transfer_to_office transferred the call"
         ],
         "required_facts": [
           "The caller is being connected to a Waves team member"
         ],
         "prohibited_facts": [
-          "Any mention of a note, packet or internal failure"
+          "Any billing detail (no lookup ran for this stranger)",
+          "Anything said after the transfer"
         ],
         "required_action": "transfer_to_office",
         "acceptable_actions": [
@@ -3753,9 +3816,10 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(note|handoff|packet|record) (could not|couldn'?t|failed|didn'?t)"
+            "\\$\\s?\\d",
+            "\\binvoice\\b.{0,20}\\d"
           ],
-          "severity": "major"
+          "severity": "critical"
         }
       ]
     },
@@ -3811,10 +3875,15 @@
         "toolResponses": {
           "find_slots": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
           "get_availability": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
-          "request_booking": {
-            "text": "Booking request placed for {{day+8}} at 1 PM — PENDING office review; NOTHING is confirmed. Tell the caller a Waves team member will text or call to confirm the final time (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed). Do NOT say it is booked, locked in, confirmed or guaranteed, and do not place another booking request on this call.",
-            "booking": true
-          },
+          "request_booking": [
+            {
+              "when": {
+                "slot_ref": "S2"
+              },
+              "text": "Booking request placed for {{day+8}} at 1 PM — PENDING office review; NOTHING is confirmed. Tell the caller a Waves team member will text or call to confirm the final time (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed). Do NOT say it is booked, locked in, confirmed or guaranteed, and do not place another booking request on this call.",
+              "booking": true
+            }
+          ],
           "capture_lead": {
             "text": "Noted on this customer's account — this is an existing customer, so no new lead was created and none should be. The call and your summary are on their record for the office to review. Tell the caller a Waves team member will follow up, and do not say a new request or appointment was created.",
             "capture": {
