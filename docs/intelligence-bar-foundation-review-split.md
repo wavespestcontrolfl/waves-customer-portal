@@ -161,8 +161,8 @@ verifies target selection, confirmation, continuation, Clear/reload recovery,
 A-only persistence, expiry and review cancellation with zero publishing.
 The shared ProtocolPanel consumes the existing task card/endpoints and remounts
 by appointment ID. Trusted confirmation receipts survive failed status reads.
-The current census retains 1,740 sites, including six reviewed task transport
-exceptions and 1,734 unsupported/unverified entries; no domain parity is inferred.
+The current census retains 1,746 sites, including seven reviewed task transport
+exceptions and 1,739 unsupported/unverified entries; no domain parity is inferred.
 
 Main integration at `db70ae441` adds the three new prep-guide/Quick Links
 request sites, retaining 1,739 cumulative sites as unsupported/unverified in A.
@@ -221,3 +221,10 @@ unavailable customers are excluded. The final parent-integrated checks pass
 earlier unchanged provider/publisher checks remain recorded above.
 
 Customer-ID-only searches retain linked history after a phone-number change; only unlinked messages depend on the current saved phone. An explicit phone selector still narrows the results. The final seven adapter DB cases and 32 reader/pinning/history tests pass after this correction, and independent review closed it.
+
+The final D integration passes 29 route/database scenarios (84.38 seconds),
+262 server unit/contract cases and 43 client cases. Production build and
+coverage/domain/brand gates pass. Shared-shell desktop/mobile recovery is
+rerun against the final integrated parent code with independent A-only database
+read-back. Final GitHub Codex review is pending its shared usage-limit reset;
+all PRs remain drafts and no production or merge action is authorized.

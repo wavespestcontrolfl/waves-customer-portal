@@ -136,26 +136,25 @@ source commit and remain **unmapped**. The prior fingerprint and retired sites
 remain recorded. This addresses CI's merged-main census drift without claiming
 support for those new portal actions.
 
-Current foundation census: 1,740 retained UI sites; six current transport
-exceptions; 1,734 sites still unsupported/unverified in the matrix. Historical
+Current foundation census: 1,746 retained UI sites; seven current transport
+exceptions; 1,739 sites still unsupported/unverified in the matrix. Historical
 transport calls remain recorded after their frontend sites changed. Registration of existing tools
 has deliberately not been relabeled as verified application parity.
 
 ## Verification evidence
 
 The integrated runtime passes all 29 real PostgreSQL route scenarios in one
-run (82.48 seconds), including receipt preservation in the response after
+run (84.38 seconds), including receipt preservation in the response after
 Continue. The bulk preview and execution use the same private approved cohort;
 persisted approval formats stay unchanged. Model-proposed alternate SMS names
 cannot replace a resolved customer before approval.
 
-The earlier integrated unit run passes 251 tests across ten suites, with an
-additional bulk-preview regression. After the response snapshot change, all
-69 affected route/confirmation/history tests pass. The shared hook, real shell
-and global bar pass 33 client tests, including duplicate-name selection,
-confirmation, continuation, saved-task recovery, stale responses and unavailable
-status reads. Earlier card/session checks remain applicable. These tests use a
-scripted model and isolated database, not a live-model evaluation.
+The final parent-integrated server run passes all 262 tests across ten suites.
+The shared hook, shell, global bar, cards and session identity pass 43 client
+tests. These cover duplicate-name selection, confirmations, continuation,
+saved-task recovery, stale responses and unavailable status reads. The parent
+recovery/target suites independently pass 28 real PostgreSQL cases. These are
+scripted-model and isolated-database checks, not a live-model evaluation.
 
 The shared ProtocolPanel bar uses the same durable task card and task endpoints
 as the global bar. Navigation remounts it by appointment ID. Confirmed and
