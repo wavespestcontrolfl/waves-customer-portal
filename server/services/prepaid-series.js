@@ -3,6 +3,7 @@
 // scheduled_services.prepaid_* columns already exist per-visit; this module
 // fans a series-level payment across siblings and reconstructs the "visit X of
 // Y · N more covered" context for the appointment detail UI.
+const { recordAuditEvent } = require('./audit-log');
 
 // Statuses that should NOT receive a prepayment stamp. A completed visit
 // already has its books closed; cancelled / no-show / skipped are dead rows
@@ -158,6 +159,15 @@ async function stampSeriesPrepaid(db, {
         })
         .returning(['id', 'prepaid_amount', 'prepaid_method', 'prepaid_note', 'prepaid_at', 'scheduled_date']);
       if (!updated) throw new Error('Series prepayment did not update every locked visit');
+      // Retain the allocation even if every live stamp is later erased. The
+      // audit and money marker commit together, including booking transactions.
+      await recordAuditEvent({
+        actor_type: 'system', action: 'prepaid_series.allocated',
+        resource_type: 'scheduled_service', resource_id: row.id,
+        metadata: { customer_id: anchor.customer_id, series_parent_id: parentId,
+          prepaid_amount: amt, prepaid_method: method || null, prepaid_at: now.toISOString() },
+        critical: true, trx,
+      });
       updatedRows.push(updated);
     }
   });
@@ -168,6 +178,40 @@ async function stampSeriesPrepaid(db, {
     seriesTotal: Number(totalAmount),
     updatedRows,
   };
+}
+
+// The existing explicit whole-series clear retires its allocation evidence.
+// Single-visit clears intentionally leave it outstanding for reconciliation.
+async function clearSeriesPrepaid(db, anchor) {
+  const parentId = resolveSeriesParentId(anchor);
+  return db.transaction(async (trx) => {
+    // Same live-row lock order as stamping/cancellation. Lock even erased
+    // stamps so a concurrent payment cannot be retired without being cleared.
+    await fetchSeriesRows(trx, parentId, { lock: true });
+    const family = await fetchSeriesRows(trx, parentId);
+    const ids = family.filter((row) => row.customer_id === anchor.customer_id).map((row) => row.id);
+    const cleared = await trx('scheduled_services').whereIn('id', ids)
+      .whereNotNull('prepaid_amount')
+      .update({ prepaid_amount: null, prepaid_method: null, prepaid_note: null, prepaid_at: null })
+      .returning(['id']);
+    const allocations = await trx('audit_log as allocation')
+      .where({ 'allocation.action': 'prepaid_series.allocated', 'allocation.resource_type': 'scheduled_service' })
+      .whereIn('allocation.resource_id', ids)
+      .whereRaw("allocation.metadata->>'customer_id' = ?", [anchor.customer_id])
+      .whereNotExists(function retired() {
+        this.select(trx.raw('1')).from('audit_log as cleared')
+          .where({ 'cleared.action': 'prepaid_series.cleared', 'cleared.resource_type': 'prepaid_series_allocation' })
+          .whereRaw('cleared.resource_id = allocation.id');
+      }).select('allocation.id');
+    for (const allocation of allocations) {
+      await recordAuditEvent({
+        actor_type: 'system', action: 'prepaid_series.cleared',
+        resource_type: 'prepaid_series_allocation', resource_id: allocation.id,
+        metadata: { customer_id: anchor.customer_id, series_parent_id: parentId }, critical: true, trx,
+      });
+    }
+    return { success: true, clearedCount: cleared.length, seriesParentId: parentId };
+  });
 }
 
 // Build the "visit X of Y · N more covered" context for the appointment detail
@@ -273,6 +317,7 @@ module.exports = {
   fetchSeriesRows,
   splitTotalAcrossVisits,
   stampSeriesPrepaid,
+  clearSeriesPrepaid,
   buildPrepaidSeriesContext,
   listCustomerPrepaidPlans,
 };

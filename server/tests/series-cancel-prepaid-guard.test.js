@@ -80,7 +80,11 @@ jest.mock('../models/db', () => {
           then: (res, rej) => Promise.resolve(rows.length).then(res, rej),
         };
       },
-      async insert(r) { state.writes.push({ table, op: 'insert', r }); return [1]; },
+      insert(r) {
+        state.writes.push({ table, op: 'insert', r });
+        return { returning: async () => [{ id: 'allocation-audit' }],
+          then: (resolve, reject) => Promise.resolve([1]).then(resolve, reject) };
+      },
       // Awaiting the builder (the target select) resolves every scheduled
       // service — the harness owns the scope filtering by what it seeds.
       then(resolve, reject) {
@@ -274,6 +278,8 @@ test('series prepayment preserves numeric-string inputs and exact-cent allocatio
   expect(res.status).toBe(200);
   const result = await res.json();
   expect(result.updatedRows.map((row) => row.prepaid_amount)).toEqual([33.33, 33.33, 33.34]);
+  const audits = db.__state.writes.filter((write) => write.table === 'audit_log');
+  expect(audits.map((write) => write.r.metadata.prepaid_amount)).toEqual([33.33, 33.33, 33.34]);
 });
 
 describe('term coverage is decided by the canonical reader, not a status list (pre-push P0 on #3878)', () => {

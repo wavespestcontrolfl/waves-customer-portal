@@ -65,7 +65,7 @@ const { technicianReportCustomerCopy, containsReportAccessCode } = require('../s
 const CompletionRecap = require('../services/completion-recap');
 const {
   stampSeriesPrepaid,
-  resolveSeriesParentId,
+  clearSeriesPrepaid,
   buildPrepaidSeriesContext,
 } = require('../services/prepaid-series');
 // Single-visit prepaid stamp: refuse only rows that are genuinely over.
@@ -11328,20 +11328,7 @@ router.delete('/:id/prepaid', async (req, res, next) => {
       }
       const anchor = await db('scheduled_services').where({ id: req.params.id }).first();
       if (!anchor) return res.status(404).json({ error: 'Scheduled service not found' });
-      const parentId = resolveSeriesParentId(anchor);
-      const cleared = await db('scheduled_services')
-        .where(function () {
-          this.where('recurring_parent_id', parentId).orWhere('id', parentId);
-        })
-        .whereNotNull('prepaid_amount')
-        .update({
-          prepaid_amount: null,
-          prepaid_method: null,
-          prepaid_note: null,
-          prepaid_at: null,
-        })
-        .returning(['id']);
-      return res.json({ success: true, clearedCount: cleared.length, seriesParentId: parentId });
+      return res.json(await clearSeriesPrepaid(db, anchor));
     }
     const cleared = await db('scheduled_services').where({ id: req.params.id })
       .modify((q) => technicianLiveVisitFilter(req, q))

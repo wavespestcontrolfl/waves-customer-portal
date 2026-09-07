@@ -11,7 +11,7 @@ jest.mock('../models/db', () => {
   return db;
 });
 const { randomUUID, randomBytes } = require('node:crypto');
-const { stampSeriesPrepaid } = require('../services/prepaid-series');
+const { stampSeriesPrepaid, clearSeriesPrepaid } = require('../services/prepaid-series');
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'synthetic-notification' })) }));
 jest.mock('../services/irrigation-weekly-email', () => ({
   findLawnEmailAudienceGaps: jest.fn(async () => []), findUnstampedRecurringLawnMembers: jest.fn(async () => []),
@@ -246,6 +246,60 @@ postgres('prepaid series integrity against migrated PostgreSQL', () => {
     await visit({ recurring_parent_id: root.id, scheduled_date: '2040-03-15' });
     const result = await stampSeriesPrepaid(trx, { anchorServiceId: root.id, totalAmount: 100, method: 'check', useExistingTransaction: true });
     expect(result.updatedRows.map((row) => Number(row.prepaid_amount))).toEqual([33.33, 33.33, 33.34]);
+    const audits = await trx('audit_log').where({ action: 'prepaid_series.allocated' })
+      .whereRaw("metadata->>'customer_id' = ?", [customerId]);
+    expect(audits).toHaveLength(3);
+    expect(audits.map((audit) => audit.metadata.prepaid_amount).sort()).toEqual([33.33, 33.33, 33.34]);
+  });
+
+  test.each([1, 2])('an audited %i-visit series detects erased slices and explicit whole-series clearing retires evidence', async (count) => {
+    const root = await visit({ estimated_price: 100, recurring_pattern: count === 1 ? 'annual' : 'semiannual', is_recurring: false });
+    if (count === 2) await visit({ recurring_parent_id: root.id, estimated_price: 100, scheduled_date: '2040-07-15' });
+    const stamp = await stampSeriesPrepaid(trx, { anchorServiceId: root.id, totalAmount: 100 * count, method: 'cash', useExistingTransaction: true });
+    const { runInner } = require('../services/schedule-integrity-watchdog');
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
+    // Single-visit clear leaves the series payment unreconciled, even with
+    // no surviving positive stamps and no current recurrence flag.
+    await trx('scheduled_services').where({ id: root.id }).update({ prepaid_amount: null, prepaid_method: null, prepaid_at: null });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
+    await trx('scheduled_services').where({ id: root.id }).update({ prepaid_amount: 10, prepaid_method: 'cash', prepaid_at: stamp.updatedRows[0].prepaid_at });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
+    await trx('scheduled_services').where({ id: root.id }).update({ prepaid_amount: 100 });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
+    await trx('scheduled_services').whereIn('id', stamp.updatedRows.map((row) => row.id))
+      .update({ prepaid_amount: null, prepaid_method: null, prepaid_at: null });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
+    expect(await clearSeriesPrepaid(trx, root)).toMatchObject({ success: true, clearedCount: 0 });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
+    // Retiring old audit ids must never retire a subsequent series payment.
+    await stampSeriesPrepaid(trx, { anchorServiceId: root.id, totalAmount: 120 * count, method: 'check', useExistingTransaction: true });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
+    await trx('scheduled_services').where({ id: root.id }).update({ prepaid_amount: null, prepaid_method: null, prepaid_at: null });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
+    expect(await clearSeriesPrepaid(trx, root)).toMatchObject({ success: true, clearedCount: count - 1 });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
+    expect(await trx('audit_log').where({ action: 'prepaid_series.allocated' })
+      .whereRaw("metadata->>'customer_id' = ?", [customerId])).toHaveLength(count * 2);
+  });
+
+  test('allocation audit failure rolls back both the series stamps and its clear', async () => {
+    const root = await visit({ estimated_price: 100 });
+    const failAudit = async (sp) => {
+      await sp.raw(`CREATE FUNCTION pg_temp.reject_prepaid_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'synthetic audit failure'; END $$`);
+      await sp.raw('CREATE TRIGGER fixture_reject_prepaid_audit BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION pg_temp.reject_prepaid_audit()');
+    };
+    await expect(trx.transaction(async (sp) => {
+      await failAudit(sp);
+      await stampSeriesPrepaid(sp, { anchorServiceId: root.id, totalAmount: 100, method: 'cash', useExistingTransaction: true });
+    })).rejects.toThrow('synthetic audit failure');
+    expect((await trx('scheduled_services').where({ id: root.id }).first()).prepaid_amount).toBeNull();
+    await stampSeriesPrepaid(trx, { anchorServiceId: root.id, totalAmount: 100, method: 'cash', useExistingTransaction: true });
+    await expect(trx.transaction(async (sp) => {
+      await failAudit(sp);
+      await clearSeriesPrepaid(sp, root);
+    })).rejects.toThrow('synthetic audit failure');
+    expect(Number((await trx('scheduled_services').where({ id: root.id }).first()).prepaid_amount)).toBe(100);
   });
 
   test('an annual stamp on a later sibling prevents every manual write', async () => {

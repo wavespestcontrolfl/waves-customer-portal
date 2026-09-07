@@ -1,3 +1,4 @@
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => 'allocation-audit') }));
 const {
   splitTotalAcrossVisits,
   resolveSeriesParentId,
