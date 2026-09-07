@@ -42,6 +42,7 @@ const { CUSTOMER_STAGES } = require('./customer-stages');
 const { etParts, etDateString, addETDays } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { detectServiceLine } = require('./service-report/service-line-configs');
+const { appPlanEnabled, loadCustomerWateringPlan } = require('./irrigation-app-plan');
 
 const MAX_ALERTS_PER_RUN = 500;
 const CROSS_RULE_CAP_DAYS = 7; // at most one alert per customer per week, across rules
@@ -190,7 +191,42 @@ async function reassuranceRuleCandidates({ now = new Date(), knex = db } = {}) {
   return candidates;
 }
 
-const RULES = [rainRuleCandidates, reassuranceRuleCandidates];
+async function weeklyPlanCandidates({ now = new Date() } = {}) {
+  if (!appPlanEnabled()) return [];
+  const { findEligibleCustomers } = require('./irrigation-weekly-email');
+  const customers = await findEligibleCustomers({ now });
+  const candidates = [];
+  for (const customer of customers) {
+    const plan = await loadCustomerWateringPlan(customer.id, { now, customer });
+    if (!plan) continue;
+    candidates.push({
+      customerId: customer.id,
+      ruleKey: 'irrigation_weekly_plan',
+      dedupeKey: `irrigation_weekly_plan:${plan.weekEnding}`,
+      title: plan.title,
+      body: plan.notificationBody,
+      link: `/?tab=property&wateringPlanCustomer=${encodeURIComponent(customer.id)}`,
+      payload: { weekEnding: plan.weekEnding, sentAt: plan.sentAt, validThrough: plan.validThrough },
+      cooldownDays: 7,
+    });
+  }
+  return candidates;
+}
+
+// Keep a valid weekly plan authoritative all week. Candidates are read daily
+// to suppress competing advisories, but only Monday can deliver the push.
+const RULES = [weeklyPlanCandidates, rainRuleCandidates, reassuranceRuleCandidates];
+
+async function weeklyPlanStillCurrent(candidate, { now = new Date(), knex = db } = {}) {
+  const { dayOfWeek, hour } = etParts(now);
+  if (!appPlanEnabled() || !gateEnvValue('GATE_PROPERTY_ALERTS') || dayOfWeek !== 1 || hour < 8 || hour >= 20) return false;
+  const { inCustomerQuietHours } = require('./notification-dispatcher');
+  const prefs = await knex('notification_prefs').where({ customer_id: candidate.customerId })
+    .first('weather_alerts', 'quiet_hours_start', 'quiet_hours_end');
+  if (prefs && (prefs.weather_alerts === false || inCustomerQuietHours(prefs, now))) return false;
+  const plan = await loadCustomerWateringPlan(candidate.customerId, { now });
+  return !!plan && plan.weekEnding === candidate.payload.weekEnding && plan.sentAt === candidate.payload.sentAt;
+}
 
 // ---------------------------------------------------------------------------
 // Caps + delivery
@@ -214,6 +250,10 @@ async function candidatePassesCaps(candidate, { now = new Date(), knex = db } = 
   const capMs = CROSS_RULE_CAP_DAYS * 24 * 3600 * 1000;
   const cooldownMs = candidate.cooldownDays * 24 * 3600 * 1000;
   for (const row of recent) {
+    // Monday's execution can drift by seconds (or cross a DST change).
+    // A completed prior calendar week must not cancel the next whole week.
+    if (candidate.ruleKey === 'irrigation_weekly_plan' && row.rule_key === candidate.ruleKey
+      && etDateString(new Date(row.fired_at)) <= etDateString(addETDays(now, -CROSS_RULE_CAP_DAYS))) continue;
     const age = now.getTime() - new Date(row.fired_at).getTime();
     if (age < capMs) return false;
     if (row.rule_key === candidate.ruleKey && age < cooldownMs) return false;
@@ -222,6 +262,10 @@ async function candidatePassesCaps(candidate, { now = new Date(), knex = db } = 
 }
 
 async function deliverAlert(candidate, { knex = db, now = new Date() } = {}) {
+  const weeklyPlan = candidate.ruleKey === 'irrigation_weekly_plan';
+  if (weeklyPlan && !(await weeklyPlanStillCurrent(candidate, { knex, now }))) {
+    return { delivered: false, reason: 'plan_unavailable' };
+  }
   // Customer quiet hours (codex #3390 P1): the mid-morning cron satisfies
   // the GLOBAL 8–8 window, but a customer's own configured window can cover
   // 10:05 too, and the preferences surface promises it is honored. Same
@@ -255,11 +299,18 @@ async function deliverAlert(candidate, { knex = db, now = new Date() } = {}) {
     candidate.title,
     candidate.body,
     {
-      link: '/',
+      link: candidate.link || '/',
       dedupeKey: candidate.dedupeKey,
       // notification_prefs.weather_alerts (default true) — the customer's
       // opt-out for weather/property advisories.
       preferenceKey: 'weather_alerts',
+      ...(weeklyPlan ? {
+        awaitPush: true,
+        pushOptions: {
+          ephemeral: true,
+          shouldContinue: () => weeklyPlanStillCurrent(candidate, { knex }),
+        },
+      } : {}),
     }
   );
   if (!result) return { delivered: false, reason: 'notify_failed' };
@@ -277,7 +328,10 @@ async function deliverAlert(candidate, { knex = db, now = new Date() } = {}) {
         dedupe_key: candidate.dedupeKey,
         title: candidate.title,
         body: candidate.body,
-        payload: JSON.stringify(candidate.payload || {}),
+        payload: JSON.stringify({
+          ...(candidate.payload || {}),
+          ...(weeklyPlan ? { delivery: { notificationId: result.id, push: result.push || null } } : {}),
+        }),
       })
       .onConflict(['customer_id', 'dedupe_key'])
       .ignore()
@@ -287,7 +341,7 @@ async function deliverAlert(candidate, { knex = db, now = new Date() } = {}) {
     // next sweep (dedupe prevents a duplicate push).
     logger.warn(`[property-alerts] ledger insert failed after delivery (${candidate.ruleKey}): ${err.message}`);
   }
-  return { delivered: true, deduped: !!result.deduped };
+  return { delivered: true, deduped: !!result.deduped, ...(weeklyPlan ? { push: result.push || null } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -298,15 +352,20 @@ async function runPropertyAlertsSweep({ now = new Date(), knex = db, maxAlerts =
   const gateOn = gateEnvValue('GATE_PROPERTY_ALERTS');
   const summary = { gate: gateOn ? 'on' : 'off', candidates: 0, delivered: 0, capped: 0, skipped: 0 };
 
-  const candidates = [];
+  let candidates = [];
+  let weeklyRuleFailed = false;
   for (const rule of RULES) {
     try {
       candidates.push(...await rule({ now, knex }));
     } catch (err) {
+      if (rule === weeklyPlanCandidates && appPlanEnabled()) weeklyRuleFailed = true;
       // One rule's failure never blocks the others.
       logger.warn(`[property-alerts] rule failed (${rule.name}): ${err.message}`);
     }
   }
+  const weeklyCustomers = new Set(candidates.filter((c) => c.ruleKey === 'irrigation_weekly_plan').map((c) => c.customerId));
+  candidates = candidates.filter((candidate) => candidate.ruleKey === 'irrigation_weekly_plan'
+    || (!weeklyCustomers.has(candidate.customerId) && !(weeklyRuleFailed && candidate.ruleKey === 'rain_skip_irrigation')));
   summary.candidates = candidates.length;
 
   if (!gateOn) {
@@ -316,6 +375,7 @@ async function runPropertyAlertsSweep({ now = new Date(), knex = db, maxAlerts =
   }
 
   for (const candidate of candidates) {
+    if (candidate.ruleKey === 'irrigation_weekly_plan' && etParts(now).dayOfWeek !== 1) continue;
     if (summary.delivered >= maxAlerts) {
       // No silent caps: say what was dropped.
       logger.warn(`[property-alerts] run cap ${maxAlerts} reached — ${candidates.length - summary.delivered - summary.capped - summary.skipped} candidate(s) deferred to the next run`);
@@ -326,7 +386,7 @@ async function runPropertyAlertsSweep({ now = new Date(), knex = db, maxAlerts =
         summary.capped += 1;
         continue;
       }
-      const outcome = await deliverAlert(candidate, { knex });
+      const outcome = await deliverAlert(candidate, { knex, now });
       if (outcome.delivered) summary.delivered += 1;
       else summary.skipped += 1;
     } catch (err) {
@@ -341,6 +401,9 @@ async function runPropertyAlertsSweep({ now = new Date(), knex = db, maxAlerts =
 async function listCustomerAlerts(customerId, { knex = db, limit = 5, withinDays = 30 } = {}) {
   const rows = await knex('customer_alerts')
     .where({ customer_id: customerId })
+    // Weekly instructions are exposed only by the current-plan reader. This
+    // historical 30-day feed cannot validate them after a move/settings edit.
+    .whereNot('rule_key', 'irrigation_weekly_plan')
     .where('fired_at', '>=', addETDays(new Date(), -withinDays))
     .orderBy('fired_at', 'desc')
     .limit(limit)

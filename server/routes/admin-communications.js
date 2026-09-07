@@ -9,7 +9,7 @@ const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { normalizePhone } = require('../utils/phone');
+const { normalizePhone, phoneMatchDigits } = require('../utils/phone');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { parseETDateTime, etDateString, etParts } = require('../utils/datetime-et');
@@ -1150,10 +1150,18 @@ const PREP_REFUSAL_COPY = {
   prep_send_busy: () => 'Another prep send for this customer is in progress — try again in a moment.',
   unsupported_pest_type: () => 'That prep type is not available yet.',
   unsupported_channel: () => 'Choose Email, Text, or Both.',
+  // The sprinkler timer guide is a seasonal tip for recurring lawn customers, sent once.
+  not_recurring_lawn: () => 'The sprinkler timer guide is for recurring lawn customers who get the Monday watering plan — this customer is not one, so it was not sent.',
+  seasonal_tips_off: () => 'This customer turned off Seasonal Lawn Tips, and the sprinkler timer guide is one — it was not sent.',
+  email_opted_out: () => 'This customer turned off email — choose Text to send the sprinkler timer guide link instead.',
+  seasonal_tips_not_opted_in: () => 'A sprinkler timer guide text needs the customer\'s Seasonal Lawn Tips opt-in (a text is a marketing message) — this customer has not opted in, so choose Email.',
+  guide_already_sent: (r) => `This customer already received the sprinkler timer guide${r.sentAt ? ` on ${new Date(r.sentAt).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}` : ''} — it is sent once. The guide link is in the composer's link library if they need it again.`,
+  guide_check_failed: () => "Couldn't confirm this customer's preferences or send history — try again.",
 };
 // Both delivered the email but not the text: why the text did not go, by the
 // link's own reason (an unplanned text); anything else = the number.
 const PREP_TEXT_DOWN_COPY = {
+  seasonal_tips_not_opted_in: () => 'The text was not sent — a sprinkler timer guide text needs the customer\'s Seasonal Lawn Tips opt-in, and this customer has not opted in.',
   no_upcoming_visit: () => 'The text was not sent — this guide can only be texted as a link, and the customer has no upcoming visit of that type to attach it to.',
   prep_page_taken: (r) => `The text was not sent — the customer's next visit already carries the ${r.takenBy || 'other'} prep page.`,
   prep_link_failed: () => 'The text was not sent — the guide page link could not be built; try Text again later.',
@@ -1162,7 +1170,7 @@ const PREP_TEXT_DOWN_COPY = {
 };
 // SendGrid MAY have accepted the email (post-dispatch throw): the page claim
 // is kept and "try again" would double-send the guide (GH Codex #3856 r8 P2).
-// The text leg is never uncertain (sendPrepSms).
+// Standalone guide texts also retain uncertain provider outcomes for reconciliation.
 const PREP_EMAIL_UNCERTAIN_COPY = "The prep email may or may not have gone out — check the customer's email log before sending it again.";
 
 function manualPrepMessage(result) {
@@ -1176,10 +1184,15 @@ function manualPrepMessage(result) {
   if (result.smsSent) parts.push(`texted to ${result.phone}`);
   const sent = `${result.label} prep ${parts.join(' and ')}.`;
   if (result.reason !== 'partial') return sent;
+  if (result.pestType === 'sprinkler_timer') {
+    const missing = result.failedChannel === 'sms' ? 'Text' : 'Email';
+    return `${sent} ${missing} delivery was not confirmed. Check delivery history; this one-time guide cannot be retried with Send prep guide.`;
+  }
   if (result.failedChannel === 'sms') {
     const why = PREP_TEXT_DOWN_COPY[result.smsLinkReason];
     return `${sent} ${why ? why(result) : 'The text did not go out — send it again as Text once the number is confirmed.'}`;
   }
+  if (result.emailSkipReason === 'email_opted_out') return `${sent} The email was not sent — this customer turned off email.`;
   return result.emailUncertain
     ? `${sent} The email may or may not have gone out — check the customer's email log before sending it again.`
     : `${sent} The email did not go out — send it again as Email once the address is confirmed.`;
@@ -1370,6 +1383,13 @@ router.get('/log', async (req, res, next) => {
           .orWhereNull('customers.phone'));
     }
 
+    // Exact contact match for a lead that has no customer record yet. Never
+    // use broad body/name search to choose the conversation or mark it read.
+    if (req.query.phone !== undefined) {
+      const phones = phoneMatchDigits(req.query.phone);
+      if (!phones.length) return res.status(400).json({ error: 'A valid contact phone is required' });
+      query = query.whereRaw("regexp_replace(COALESCE(conversations.contact_phone, ''), '[^0-9]', '', 'g') = ANY (?::text[])", [phones]);
+    }
     if (customerId) query = query.where('conversations.customer_id', customerId);
     if (direction) query = query.where('messages.direction', direction);
     if (messageType) query = query.where('messages.message_type', messageType);
@@ -1526,6 +1546,14 @@ router.post('/messages/read', async (req, res, next) => {
       messageIds: ids, conversationIds, readBefore, adminUserId: req.technicianId || null, role: req.techRole,
     });
     res.json({ success: true, updated, notificationsCleared });
+  } catch (err) { next(err); }
+});
+
+// Same conversation count consumed by Customer 360's one global badge.
+router.get('/unread-count', requireAdmin, async (req, res, next) => {
+  try {
+    const { countUnreadInboundSms } = require('../services/inbound-sms-read');
+    res.json(await countUnreadInboundSms({ excludePhones: ADMIN_PHONES }));
   } catch (err) { next(err); }
 });
 

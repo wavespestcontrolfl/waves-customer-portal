@@ -1,7 +1,9 @@
 /**
  * procurement/adapters/stickermule.js — Sticker Mule REORDER adapter.
  *
- * The Sticker Mule API (stickermule.com/api, read 2026-09-03) is reorder-only:
+ * The Sticker Mule API (https://www.stickermule.com/api — the documented and
+ * only resolving host; `api.stickermule.com` is a dead CNAME, verified live
+ * 2026-09-06) is reorder-only:
  * every order is a re-run of an item the account already bought by hand
  * (GET /api/items lists them by id). Bearer key = STICKERMULE_API_KEY.
  * Endpoints used: GET /api/items, GET /api/addresses, GET /api/payments,
@@ -29,7 +31,7 @@
 // The production origin is FIXED: the bearer key is only ever sent here. No
 // env override — a typo'd or compromised value would exfiltrate the vendor
 // credential (Codex r4 P1); tests inject fetchImpl instead.
-const BASE_URL = 'https://api.stickermule.com';
+const BASE_URL = 'https://www.stickermule.com';
 const TIMEOUT_MS = 30000;
 
 class RefusedError extends Error {
@@ -83,7 +85,9 @@ async function bindingQuote({ vendorSku, quantity }, { fetchImpl = fetch } = {})
     return items.length === 1 && String(items[0].id) === String(vendorSku) && items[0].quantity === qty && orderTotalCents(o) != null;
   });
   if (!matches.length) return null;
-  const ts = (o) => Date.parse(o?.createdAt || o?.created_at || o?.date || '') || 0;
+  // The live list stamps `placedAt` (read 2026-09-06); the other keys are
+  // kept for the documented shapes.
+  const ts = (o) => Date.parse(o?.placedAt || o?.createdAt || o?.created_at || o?.date || '') || 0;
   matches.sort((a, b) => ts(b) - ts(a));
   const last = matches[0];
   return { cents: orderTotalCents(last), source: `order ${last.number ?? '?'}` };

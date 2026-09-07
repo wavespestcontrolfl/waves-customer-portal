@@ -10717,6 +10717,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             estimate: acceptedEstimateForScheduling,
             serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
             selectedFrequency: acceptedSchedulingFrequencyKey,
+            serviceCadences,
             // Rung 1 was pre-acquired on this key at the top of this txn —
             // commitReservation re-checks the hold still sits on it.
             preLockedDate: acceptPreLockedDate,
@@ -10773,6 +10774,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               estimate: acceptedEstimateForScheduling,
               serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
               selectedFrequency: acceptedSchedulingFrequencyKey,
+              serviceCadences,
               // Rung 1 was pre-acquired on this key at the top of this txn —
               // commitReservation re-checks the hold still sits on it.
               preLockedDate: acceptPreLockedDate,
@@ -25510,6 +25512,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // its "draft preview, not sent" banner + accept guards off this. Absent
       // (not false) otherwise so customer responses stay byte-identical.
       ...(adminDraftPreview ? { adminDraftPreview: true } : {}),
+      ...(verifiedStaffPreview ? { verifiedStaffPreview: true } : {}),
       // Soft-exit sheet (GATE_ESTIMATE_SOFT_EXIT). Include-when-TRUE only:
       // gate on, a live accept-active row, never a staff draft preview (the
       // write 404s a draft). Absent otherwise so gate-off responses stay

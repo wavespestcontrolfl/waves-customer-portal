@@ -344,6 +344,10 @@ const gates = {
   // ==='true' in EVERY environment; kill switch: unset.
   visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
 
+  // Creation only: stamped reservations retain their full service capacity
+  // through acceptance even after this gate is disabled. Strict opt-in.
+  visitCombinedCapacity: process.env.GATE_VISIT_COMBINED_CAPACITY === 'true',
+
   // Quote-wizard repeat-run dedupe (#3834 split, PR A′): a tokenless
   // /calculate rerun of an OPEN quote_wizard lead (same email + phone +
   // address + service, 30 days) files as status 'duplicate' carrying
@@ -725,6 +729,11 @@ const gates = {
   // reply a human actually sent. Burns one Anthropic call per inbound
   // customer SMS, so prod requires explicit opt-in.
   smsShadowDrafts: isProd ? process.env.GATE_SMS_SHADOW_DRAFTS === 'true' : true,
+
+  // SMS private-profile capture + existing admin exception bells. Runtime reads the gate again before writes. Activation
+  // also requires GATE_SMS_OPERATIONAL_ACTIONS_SINCE (an offset ISO instant)
+  // so enabling this lane never applies the historical training corpus.
+  smsOperationalActions: gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS'),
 
   // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
   // human-authored SMS replies + consent-gated call transcripts into
@@ -1425,6 +1434,18 @@ const gates = {
   // the office's manual match flow; already-made links keep their
   // link_source='click_auto' stamp for audit.
   reviewClickAutoLink: process.env.GATE_REVIEW_CLICK_AUTOLINK === 'true',
+
+  // First-party PostHog ingest proxy: /ingest/* on the portal origin forwards
+  // to PostHog Cloud so ad blockers stop dropping the hub's and /book's funnel
+  // events (10–25% by PostHog's figure). Inert until a caller points its SDK
+  // host at it (hub PUBLIC_POSTHOG_HOST / portal VITE_POSTHOG_HOST). Kill:
+  // unset → 404; revert the caller's host env too, or its SDK keeps posting
+  // into the 404. This entry is for logGateStatus; the route reads
+  // gateEnvValue('GATE_POSTHOG_INGEST_PROXY') at REQUEST time (the techTips
+  // idiom), so a flip needs no CODE deploy — Railway's automatic redeploy on
+  // the variable change is what restarts the process with the new value;
+  // never set it with --skip-deploys. See server/routes/posthog-ingest.js.
+  posthogIngestProxy: gateEnvValue('GATE_POSTHOG_INGEST_PROXY'),
   // The surname rung of that matcher (click_name: the ONE in-window clicker
   // whose complete last name is the reviewer's; see
   // findConfidentClickMatch). Ships DARK on its own switch because its
@@ -2045,6 +2066,10 @@ const gates = {
   // @waves/irrigation-runtime buildWeekPlan. Off = today's copy exactly.
   // Kill = unset GATE_IRRIGATION_WEEK_PLAN.
   irrigationWeekPlan: process.env.GATE_IRRIGATION_WEEK_PLAN === 'true',
+
+  // Saved Monday plan in My Property + the existing property-alerts sweep.
+  // Explicit opt-in everywhere; email plan and property-alert gates still apply.
+  irrigationAppPlan: process.env.GATE_IRRIGATION_APP_PLAN === 'true',
 
   // Existing-customer campaign drafts (V1) — the seasonal-reactivation cron and
   // the daily upsell generator write message_drafts status='pending' rows

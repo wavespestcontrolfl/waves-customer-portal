@@ -1,30 +1,6 @@
-// client/src/pages/admin/EstimateToolViewV2.jsx
-// Monochrome V2 of EstimateToolView. Strict 1:1 on state, refs, effects,
-// callbacks, and API calls — all copied verbatim from V1. Only the render
-// chrome is reskinned (panels ->Card, tier rows ->zinc, color accents
-// collapsed to zinc ramp + alert-fg reserved for real alerts).
-//
-// Endpoints preserved:
-//   POST /admin/estimator/property-lookup
-//   POST /admin/lookup/satellite-ai
-//   POST /admin/estimator/calculate-estimate
-//   POST /admin/estimates           (save)
-//   POST /admin/estimates/:id/send  (+ scheduledAt)
-//   GET  /admin/customers?search=   (lookup + send-form lookup)
-//   GET  /admin/discounts           (manual-discount presets)
-//
-// Monochrome rules applied:
-// - All panels = Card
-// - All primary buttons = Button variant="primary" (zinc-900)
-// - Supporting buttons = secondary (white + hairline) or ghost
-// - Status lines: "ok" =>zinc, "err" =>alert-fg, "loading" =>zinc
-// - Field-verify banners and critical confidence flags use alert-fg
-// - Tier rows: selected = zinc-900 ring, recommended = zinc-900 dot,
-//   dimmed = opacity-50 (no green/teal tint)
-// - "Recurring -15% one-time" chip = neutral Badge
-// - Manual discount panel = neutral Card
-// - Roboto enforced across the full Create Estimate experience
-// - Existing customer banner = neutral Card with dot indicator
+import { useCustomerSms, openEstimateMessages } from "../../components/admin/customer360/CustomerSmsPanel";
+// Canonical admin estimate builder. Create and revise share service inputs
+// and the server pricing path; preview uses the persisted customer renderer.
 import React, {
   useState,
   useEffect,
@@ -44,7 +20,6 @@ import {
   fmtInt,
   isCommercialEstimateInput,
   resolveLookupPropertyTypeAutofill,
-  rodentBaitBracketForFootprint,
   rodentBaitPolicyNote,
   rodentBaitWaveguardFlags,
   termiteBaitSelectionLabel,
@@ -53,7 +28,8 @@ import {
 import { useNavigate } from "react-router-dom";
 import { Button, Badge, Card, cn } from "../../components/ui";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
-import { ExternalLink, Monitor, X } from "lucide-react";
+import { ExternalLink } from "lucide-react";
+import { useEstimateSend } from "../../components/admin/EstimateSendDialog";
 import {
   buildManualDiscountPayload,
   buildServiceSpecificDiscountPayloads,
@@ -67,10 +43,7 @@ import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDis
 import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed } from "../../lib/lookupPrefill";
 import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
-import {
-  normalizePhoneDigits,
-  mergePhoneLookupMatch,
-} from "./estimateSendPhoneLookup";
+
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const ROBOTO = "'Roboto', Arial, sans-serif";
@@ -369,7 +342,6 @@ const ADDRESS_ASK_REASONS = new Set([
 
 // A dwelling unit designator anywhere in a typed address (the server's
 // unit-scope model reads the same forms; "#" alone counts).
-const UNIT_DESIGNATOR_RE = /\b(?:apt|apartment|unit)\.?\s*#?\s*[\w-]+|#\s*\w+/i;
 
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -409,6 +381,8 @@ function buildTurfRequestProfile(baseProfile, form) {
       form.bedArea,
       Number(baseProfile.estimatedBedAreaSf) || 0,
     ),
+    bedAreaSource: form._manualFields?.includes("bedArea") && parseNonNegativeNumber(form.bedArea) !== undefined
+      ? "manual" : baseProfile.bedAreaSource,
   };
   // footprintUnknown (association aggregate, story count unknown): the
   // summed living area over a defaulted story count is NOT a ground-floor
@@ -459,26 +433,6 @@ function buildTurfRequestProfile(baseProfile, form) {
   profile.treeShrubDensity = formIsCommercial ? form.treeShrubDensity || null : null;
   profile.mosquitoPressure = formIsCommercial ? form.mosquitoPressure || null : null;
   return profile;
-}
-
-function summarizeEstimateSend(data) {
-  const parts = [];
-  if (data?.channels?.sms) {
-    parts.push(
-      data.channels.sms.ok
-        ? "SMS sent"
-        : `SMS failed: ${data.channels.sms.error || "unknown error"}`,
-    );
-  }
-  if (data?.channels?.email) {
-    parts.push(
-      data.channels.email.ok
-        ? "Email sent"
-        : `Email failed: ${data.channels.email.error || "unknown error"}`,
-    );
-  }
-  if (parts.length === 0) return data?.error || "Estimate send failed";
-  return parts.join(" / ");
 }
 
 async function summarizeEstimateResponseFailure(response, fallbackLabel) {
@@ -563,7 +517,7 @@ class EstimateErrorBoundary extends Component {
           <div className="text-18 font-medium text-alert-fg mb-3">
             Estimate render error
           </div>{" "}
-          <pre className="text-12 text-ink-secondary mb-4 whitespace-pre-wrap text-left max-h-48 overflow-auto">
+          <pre className="text-14 text-ink-secondary mb-4 whitespace-pre-wrap text-left max-h-48 overflow-auto">
             {this.state.error.message}
             {"\n"}
             {this.state.error.stack}
@@ -582,10 +536,11 @@ class EstimateErrorBoundary extends Component {
 const FormCtx = createContext({});
 
 function FieldV2({ label, children, className }) {
+  const control = React.Children.toArray(children).find((child) => child?.props?.k);
   return (
     <div className={cn("mb-4", className)}>
       {" "}
-      <label className="block text-13 font-bold text-zinc-900 tracking-normal mb-2 md:text-11 md:font-medium md:text-ink-secondary md:uppercase md:tracking-label md:mb-1.5">
+      <label htmlFor={control ? `estimate-${control.props.k}` : undefined} className="block text-14 font-medium text-zinc-900 mb-2">
         {label}
       </label>
       {children}
@@ -594,7 +549,7 @@ function FieldV2({ label, children, className }) {
 }
 
 const INPUT_CLS =
-  "w-full h-10 px-3 text-14 text-zinc-900 bg-white border-hairline border-zinc-300 " +
+  "w-full h-11 px-3 text-16 text-zinc-900 bg-white border-hairline border-zinc-300 " +
   "rounded-sm u-focus-ring placeholder:text-ink-disabled";
 
 const CONTACT_FIELDS = new Set([
@@ -604,6 +559,23 @@ const CONTACT_FIELDS = new Set([
   "customerPhone",
   "customerEmail",
 ]);
+// Measurements and property facts cannot follow a draft to another address.
+// Cadence and service selections remain available for the new property.
+const PROPERTY_FORM_FIELDS = [
+  "homeSqFt", "lotSqFt", "stories", "unitCount", "propertyType", "isCommercial",
+  "commercialSubtype", "commercialRiskType", "hasPool", "hasPoolCage", "poolCageSize",
+  "shrubDensity", "treeDensity", "landscapeComplexity", "nearWater", "bedArea",
+  "palmCount", "palmTreatmentCount", "palmDbhInches", "treeCount", "measuredTurfSf",
+  "termiteFootprintSqFt", "termitePerimeterLF", "trenchingPerimeterLF",
+  "trenchingConcreteLF", "trenchingDirtLF", "boracareSqft", "boracareSurfaceLinearFt",
+  "trenchingConcretePct", "trenchingEstimateFromFootprint", "trenchingLabelConfirmed",
+  "boracareSurfaceHeightFt", "preslabSqft", "preslabLabelConfirmed", "plugArea",
+  "topDressArea", "fleaExteriorAreaSqFt", "fleaExteriorAreaSource", "fleaExteriorZones",
+  "palmDiagnosisConfirmed", "palmLicensedApplicator", "palmHighDose", "palmLargeDiameter",
+  "palmNonstandardProduct", "_termiteFootprintAuto", "_trenchingPerimeterAuto",
+  "_boracareSqftAuto", "_preslabSqftAuto", "_palmCountAuto",
+  "stingSpecies", "stingTier", "stingRemoval", "stingAggressive", "stingHeight", "stingConfined",
+];
 const SEND_FIELDS = new Set(["scheduleSend", "scheduledAt"]);
 const DELIVERY_OPTION_FIELDS = new Set(["showOneTimeOption", "billByInvoice"]);
 const ONE_TIME_PEST_CHOICE = { floor: 199, multiplier: 2.2 };
@@ -847,15 +819,6 @@ function oneTimePestChoiceAmountForPreview(R = {}, form = {}) {
   return oneTimePestChoiceAmountFromTier(tier);
 }
 
-function formatDatetimeLocal(date) {
-  const pad = (value) => String(value).padStart(2, "0");
-  return (
-    [date.getFullYear(), pad(date.getMonth() + 1), pad(date.getDate())].join(
-      "-",
-    ) + `T${pad(date.getHours())}:${pad(date.getMinutes())}`
-  );
-}
-
 function parseNonNegativeInteger(value) {
   if (value === undefined || value === null || value === "") return null;
   const n = parseInt(value, 10);
@@ -957,6 +920,7 @@ function InputV2({ k, type = "text", placeholder, min, max, className }) {
   const { form, set } = useContext(FormCtx);
   return (
     <input
+      id={`estimate-${k}`}
       type={type}
       value={form[k] ?? ""}
       onChange={(e) => set(k, e.target.value)}
@@ -972,6 +936,7 @@ function SelectV2({ k, options }) {
   const { form, set } = useContext(FormCtx);
   return (
     <select
+      id={`estimate-${k}`}
       value={form[k] ?? ""}
       onChange={(e) => set(k, e.target.value)}
       className={cn(
@@ -996,7 +961,7 @@ function CheckboxV2({ k, label }) {
   const { form, toggle } = useContext(FormCtx);
   const checked = !!form[k];
   return (
-    <label className="relative flex items-center gap-2.5 mb-2.5 cursor-pointer text-14 text-zinc-900 select-none">
+    <label className="relative flex items-center gap-2.5 min-h-11 mb-1 cursor-pointer text-14 text-zinc-900 select-none focus-within:ring-2 focus-within:ring-zinc-900 focus-within:rounded-sm">
       {" "}
       <span
         className={cn(
@@ -1067,7 +1032,7 @@ function StatusLine({ status }) {
   return (
     <div
       className={cn(
-        " text-12 px-3 py-2 rounded-xs mb-3 whitespace-pre-line border-hairline",
+        " text-14 px-3 py-2 rounded-xs mb-3 whitespace-pre-line border-hairline",
         isErr
           ? "bg-alert-bg text-alert-fg border-alert-fg"
           : "bg-zinc-50 text-ink-secondary border-zinc-200",
@@ -1110,7 +1075,7 @@ function TierRowV2({
       {" "}
       <div className="text-14 font-medium text-zinc-900 flex items-center gap-1.5">
         {name}
-        {selected && <span className="text-11 u-nums"></span>}
+        {selected && <span className="text-14 u-nums"></span>}
         {!selected && recommended && (
           <span
             className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900"
@@ -1118,7 +1083,7 @@ function TierRowV2({
           />
         )}
       </div>{" "}
-      <div className="text-12 text-ink-secondary break-words">{detail}</div>{" "}
+      <div className="text-14 text-ink-secondary break-words">{detail}</div>{" "}
       <div className="text-14 font-medium text-zinc-900 text-right u-nums">
         {price}
       </div>{" "}
@@ -1128,7 +1093,7 @@ function TierRowV2({
 
 function Tag({ children }) {
   return (
-    <span className="inline-block text-11 font-medium uppercase tracking-label px-2 py-0.5 rounded-xs bg-zinc-100 text-ink-secondary ml-2 align-middle">
+    <span className="inline-block text-14 font-medium uppercase tracking-label px-2 py-0.5 rounded-xs bg-zinc-100 text-ink-secondary ml-2 align-middle">
       {children}
     </span>
   );
@@ -1136,7 +1101,7 @@ function Tag({ children }) {
 
 function FieldVerifyTag({ children }) {
   return (
-    <span className="inline-block text-11 font-medium uppercase tracking-label px-2 py-0.5 rounded-xs bg-alert-bg text-alert-fg ml-2 align-middle">
+    <span className="inline-block text-14 font-medium uppercase tracking-label px-2 py-0.5 rounded-xs bg-alert-bg text-alert-fg ml-2 align-middle">
       {children}
     </span>
   );
@@ -1144,7 +1109,7 @@ function FieldVerifyTag({ children }) {
 
 function DiscBadge({ children }) {
   return (
-    <span className="inline-block text-11 font-medium uppercase tracking-label px-2 py-0.5 rounded-xs bg-zinc-900 text-white ml-2 align-middle u-nums">
+    <span className="inline-block text-14 font-medium uppercase tracking-label px-2 py-0.5 rounded-xs bg-zinc-900 text-white ml-2 align-middle u-nums">
       {children}
     </span>
   );
@@ -1152,7 +1117,7 @@ function DiscBadge({ children }) {
 
 function GroupHeader({ children }) {
   return (
-    <div className="text-22 font-bold tracking-tight text-zinc-900 mt-7 mb-3 md:text-12 md:font-medium md:uppercase md:tracking-label md:mb-4 md:pb-2 md:border-b-hairline md:border-zinc-300">
+    <div className="text-22 font-bold tracking-tight text-zinc-900 mt-7 mb-3 md:text-14 md:font-medium md:uppercase md:tracking-label md:mb-4 md:pb-2 md:border-b-hairline md:border-zinc-300">
       {children}
     </div>
   );
@@ -1171,20 +1136,6 @@ function SectionTitle({ children, className }) {
   );
 }
 
-const CUSTOMER_PREVIEW_PERKS = [
-  "Priority scheduling",
-  "Re-service between visits at no charge",
-  "Locked-in pricing for 12 months",
-  "Free annual termite inspection",
-  "15% off one-time treatments",
-  "Customer portal for service history",
-];
-
-function firstNameFromCustomerName(name) {
-  const first = String(name || "").trim().split(/\s+/)[0];
-  return first || "there";
-}
-
 function selectedPestTierForPreview(R, form) {
   const tiers = Array.isArray(R?.pestTiers) ? R.pestTiers : [];
   if (!tiers.length) return null;
@@ -1193,154 +1144,6 @@ function selectedPestTierForPreview(R, form) {
     tiers.find((t) => t.recommended) ||
     tiers[0]
   );
-}
-
-function cadenceFromPestTier(tier) {
-  const apps = Number(tier?.apps || 0);
-  if (apps >= 12) {
-    return { key: "monthly", label: "Monthly", intervalMonths: 1, period: "/mo" };
-  }
-  if (apps >= 6) {
-    return {
-      key: "bi_monthly",
-      label: "Bi-monthly",
-      intervalMonths: 2,
-      period: "/bi-monthly",
-    };
-  }
-  return { key: "quarterly", label: "Quarterly", intervalMonths: 3, period: "/quarter" };
-}
-
-function fallbackCadenceForPreview(E) {
-  // Mirror the customer page (estimate-public renderPage): with no pest tier,
-  // a termite-bait recurring line displays the total on the QUARTERLY cadence
-  // (hasTermiteBait → selectedRecurringFrequencyKey 'quarterly'); every other
-  // non-pest program bills monthly and the engine's grandTotal is already a
-  // monthly number. The old unconditional-quarterly fallback showed a
-  // lawn-only estimate as "$360/quarter" when the customer is billed $120/mo.
-  const services = Array.isArray(E?.recurring?.services) ? E.recurring.services : [];
-  const hasTermiteBait = services.some((s) => {
-    const label = String(s?.service || s?.name || s?.label || s?.displayName || "").toLowerCase();
-    return label.includes("termite") && label.includes("bait");
-  });
-  if (hasTermiteBait) {
-    return {
-      key: "quarterly",
-      label: "Quarterly",
-      intervalMonths: 3,
-      period: "/quarter",
-    };
-  }
-  // SOLO per-application rodent bait (2026-08-29 realignment): the row bills
-  // per application on its own cadence, but the fallback would show
-  // annual/12 as "/mo" — the customer's estimate says "$X per application".
-  // Keyed on the billing-unit marker so a pinned LEGACY monthly rodent row
-  // (no marker) keeps the monthly path. Solo only, same bundle rule as the
-  // commercial branch below.
-  const perApplicationRodent = services.length === 1 && services[0]?.perApplicationBilled === true ? services[0] : null;
-  if (perApplicationRodent) {
-    const visits = Number(perApplicationRodent.visitsPerYear ?? perApplicationRodent.visits) || 4;
-    if (visits < 6) {
-      return { key: "quarterly", label: "Quarterly", intervalMonths: 3, period: "/application" };
-    }
-    if (visits < 12) {
-      return { key: "bi_monthly", label: "Bi-monthly", intervalMonths: 2, period: "/application" };
-    }
-  }
-  // SOLO commercial pest sells one cadence (risk bucket / estimator override)
-  // and has no residential pest tiers, so without this the preview takes the
-  // monthly path and shows annual/12 as "$X/mo" even for a 4x/6x program.
-  // monthlyTotal × intervalMonths lands on the per-application amount
-  // (annual/12 × 3 = annual/4 for quarterly). Solo ONLY: in a mixed bundle the
-  // preview total spans services with their own cadences, so converting the
-  // combined monthly by the pest cadence would invent a bundle price — mixed
-  // stays on the monthly path (codex #3240 r6).
-  const commercialPest = services.length === 1 && services.find((s) => {
-    const label = String(s?.service || s?.name || s?.label || s?.displayName || "").toLowerCase();
-    return label.includes("commercial") && label.includes("pest");
-  });
-  if (commercialPest) {
-    const visits = Number(commercialPest.visitsPerYear ?? commercialPest.visits ?? commercialPest.frequency) || 12;
-    if (visits < 6) {
-      return { key: "quarterly", label: "Quarterly", intervalMonths: 3, period: "/quarter" };
-    }
-    if (visits < 12) {
-      return { key: "bi_monthly", label: "Bi-monthly", intervalMonths: 2, period: "/2 months" };
-    }
-  }
-  return {
-    key: "monthly",
-    label: "Monthly",
-    intervalMonths: 1,
-    period: "/mo",
-  };
-}
-
-function customerPreviewPricing(E, pestTier, form) {
-  const oneTimeChoiceAmount = oneTimePestChoiceAmountForPreview(E?.results, form);
-  const pestOnlyChoice =
-    !!form.showOneTimeOption &&
-    !!pestTier &&
-    oneTimeChoiceAmount > 0;
-
-  if (pestOnlyChoice) {
-    const baseMonthly = Number(pestTier.mo || 0);
-    const discount = Number(E?.recurring?.discount || 0);
-    return {
-      monthlyTotal: Math.max(0, Math.round(baseMonthly * (1 - discount) * 100) / 100),
-      baseMonthly,
-    };
-  }
-
-  const grandTotal = Number(E?.recurring?.grandTotal);
-  const hasGrandTotal =
-    E?.recurring?.grandTotal !== undefined &&
-    E?.recurring?.grandTotal !== null &&
-    Number.isFinite(grandTotal);
-  const monthlyTotal = hasGrandTotal
-    ? grandTotal
-    : Number(E?.recurring?.monthlyTotal || 0) +
-      Number(E?.recurring?.rodentBaitMo || 0) +
-      Number(E?.recurring?.palmInjectionMo || 0);
-  const annualBeforeDiscount = Number(E?.recurring?.annualBeforeDiscount || 0);
-  return {
-    monthlyTotal,
-    baseMonthly: annualBeforeDiscount > 0 ? annualBeforeDiscount / 12 : monthlyTotal,
-  };
-}
-
-function previewVisitsLabel(visits) {
-  const n = Number(visits);
-  if (n === 12) return "Monthly";
-  if (n === 9) return "9-visit";
-  if (n === 8) return "8-visit";
-  if (n === 6) return "Bi-monthly";
-  if (n === 4) return "Quarterly";
-  if (n === 2) return "Semi-annual";
-  if (n === 1) return "Annual";
-  return n > 0 ? `${n}-visit` : "";
-}
-
-function previewRecurringServiceName(service) {
-  return service?.name || service?.label || service?.displayName || "";
-}
-
-function previewRecurringFrequencyLabel(name, R) {
-  const label = String(name || "").toLowerCase();
-  if (label.includes("lawn") && Array.isArray(R?.lawn)) {
-    const selected = R.lawn.find((tier) => tier.recommended) || R.lawn[0];
-    return previewVisitsLabel(selected?.v);
-  }
-  if (label.includes("mosquito") && Array.isArray(R?.mq)) {
-    const selected = selectedMosquitoTier(R);
-    return previewVisitsLabel(selected?.v);
-  }
-  if (label.includes("tree") && Array.isArray(R?.ts)) {
-    const selected = R.ts.find((tier) => tier.recommended) || R.ts[0];
-    return previewVisitsLabel(selected?.v);
-  }
-  if (label.includes("termite") && label.includes("bait")) return "Quarterly";
-  return "";
 }
 
 function mosquitoTierSelectionFlags(R, tier, index) {
@@ -1358,102 +1161,6 @@ function mosquitoTierSelectionFlags(R, tier, index) {
   return { selected, recommended, dimmed: !selected };
 }
 
-function selectedMosquitoTier(R) {
-  const tiers = Array.isArray(R?.mq) ? R.mq : [];
-  const ri = Number(R?.mqMeta?.ri);
-  return tiers.find((tier) => tier.selected || tier.isSelected) ||
-    (Number.isInteger(ri) ? tiers[ri] : null) ||
-    tiers.find((tier) => tier.recommended || tier.isRecommended) ||
-    tiers[0] ||
-    null;
-}
-
-function previewRecurringDisplayName(service) {
-  return service?.displayName || previewRecurringServiceName(service);
-}
-
-function isFrequencyQualifiedPreviewLabel(label) {
-  return /\b(monthly|bi[-\s]?monthly|quarterly|seasonal|annual|semi[-\s]?annual|\d+\s*(?:x|visits?|visit)|x\/yr)\b/i.test(
-    String(label || ""),
-  );
-}
-
-function previewRecurringServiceLabel(service, R) {
-  const name = previewRecurringServiceName(service);
-  if (!name) return "";
-  const displayName = previewRecurringDisplayName(service);
-  if (
-    displayName &&
-    displayName !== name &&
-    isFrequencyQualifiedPreviewLabel(displayName)
-  ) {
-    return displayName;
-  }
-  const frequency = previewRecurringFrequencyLabel(name, R);
-  return frequency ? `${frequency} ${displayName || name}` : displayName || name;
-}
-
-function previewServiceLabel(E, R, form) {
-  const pestTier = selectedPestTierForPreview(R, form);
-  if (pestTier) {
-    const cadence = cadenceFromPestTier(pestTier);
-    if (form.showOneTimeOption && oneTimePestChoiceAmountForPreview(R, form) > 0) {
-      return `${cadence.label} Pest Control or One-Time Pest Control`;
-    }
-    const bundledNames = (E?.recurring?.services || [])
-      .filter((service) => {
-        const name = previewRecurringServiceName(service).toLowerCase();
-        return name && !name.includes("pest");
-      })
-      .map((service) => previewRecurringServiceLabel(service, R))
-      .filter(Boolean);
-    return [`${cadence.label} Pest Control`, ...bundledNames].join(" + ");
-  }
-
-  const names = (E?.recurring?.services || [])
-    .map((s) => previewRecurringServiceLabel(s, R))
-    .filter(Boolean)
-    .slice(0, 3);
-  if (names.length) return names.join(" + ");
-
-  const oneTimeNames = [
-    ...(E?.oneTime?.items || []),
-    ...(E?.oneTime?.specItems || []),
-  ]
-    .map((s) => s.displayName || s.name)
-    .filter(Boolean)
-    .slice(0, 3);
-  return oneTimeNames.length ? oneTimeNames.join(" + ") : "Custom quote";
-}
-
-function propertyLineForPreview(E, R) {
-  const p = E?.property || {};
-  const rows = [];
-  const homeSqFt = Number(p.homeSqFt || 0);
-  const lotSqFt = Number(p.lotSqFt || 0);
-  const hasLawnService = (E?.recurring?.services || []).some((service) =>
-    previewRecurringServiceName(service).toLowerCase().includes("lawn"),
-  );
-  const lawnSqFt = hasLawnService ? Number(R?.lawnMeta?.lsf || p.turfSf || 0) : 0;
-  const termitePerimeter = Number(R?.tmBait?.perim || 0);
-  if (homeSqFt > 0) rows.push(`${Math.round(homeSqFt).toLocaleString()} sq ft home`);
-  if (lotSqFt > 0) rows.push(`${Math.round(lotSqFt).toLocaleString()} sq ft lot`);
-  if (lawnSqFt > 0) rows.push(`${Math.round(lawnSqFt).toLocaleString()} sq ft treatable lawn`);
-  if (termitePerimeter > 0) rows.push(`${Math.round(termitePerimeter).toLocaleString()} linear ft termite perimeter`);
-  return rows.join(" · ");
-}
-
-// Operator-only confirmation that the generated estimate priced the
-// pest_initial_roach line from the typed override rather than the bracket.
-// Lives next to the override input — the customer-preview fee card is a 1:1
-// replica of the customer page and must not grow internal annotations.
-// `variant` matches the line to the input's own branch: an estimate can carry
-// BOTH a recurring auto-fired line and a standalone native line, each with
-// its own override field (codex P2 #3223).
-// NOTE: defined ABOVE the INITIAL_ROACH_PREVIEW_RE marker on purpose — the
-// client-estimate-engine-pricing-drift test slices the source from that
-// marker to firstVisitFeesForCustomerPreview and evals it as plain JS, so
-// JSX must stay out of that window.
 function RoachOverrideAppliedNote({ estimate, variant }) {
   const item = (estimate?.oneTime?.items || []).find(
     (it) =>
@@ -1462,7 +1169,7 @@ function RoachOverrideAppliedNote({ estimate, variant }) {
   );
   if (!item || !item.priceOverridden) return null;
   return (
-    <div className="text-11 text-ink-secondary mt-1">
+    <div className="text-14 text-ink-secondary mt-1">
       Override applied: {fmtInt(item.price)} on the generated estimate
       {Number.isFinite(Number(item.bracketPrice))
         ? ` (engine bracket price ${fmtInt(item.bracketPrice)})`
@@ -1472,631 +1179,8 @@ function RoachOverrideAppliedNote({ estimate, variant }) {
   );
 }
 
-const INITIAL_ROACH_PREVIEW_RE = /initial.*(palmetto|german|roach).*knockdown/i;
-
-function previewServiceKey(item, fallbackLabel = "") {
-  const service = String(item?.service || "").toLowerCase();
-  if (service) return service;
-  const label = String(
-    fallbackLabel || item?.label || item?.displayName || item?.name || "",
-  ).toLowerCase();
-  if (INITIAL_ROACH_PREVIEW_RE.test(label)) return "pest_initial_roach";
-  if (label.includes("waveguard setup") || label.includes("membership")) {
-    return "waveguard_setup";
-  }
-  return "";
-}
-
-function previewLineAmount(price) {
-  return price < 0 ? `-${fmtInt(Math.abs(price))}` : fmtInt(price);
-}
-
-function termiteInstallPreviewRow(E) {
-  const price = Number(E?.oneTime?.tmInstall || 0);
-  if (!Number.isFinite(price) || price <= 0) return null;
-  const tmBait = E?.results?.tmBait || {};
-  const stations = Number(tmBait.sta || tmBait.stations || 0);
-  const perimeter = Number(tmBait.perim || tmBait.perimeter || 0);
-  const detail = [
-    stations > 0 ? `${Math.round(stations).toLocaleString()} stations` : null,
-    perimeter > 0 ? `${Math.round(perimeter).toLocaleString()} linear ft perimeter` : null,
-  ].filter(Boolean).join(" · ");
-  return {
-    service: "termite_bait_installation",
-    name: "Termite bait installation",
-    price,
-    detail,
-  };
-}
-
-function oneTimeRowsForCustomerPreview(E, {
-  includeSetupFees = false,
-  setupFeeAmount = 0,
-  oneTimeTotal = null,
-  excludeServices = [],
-} = {}) {
-  const specRows = Array.isArray(E?.specItems)
-    ? E.specItems
-    : (E?.oneTime?.specItems || []);
-  const rows = [
-    ...(E?.oneTime?.items || []),
-    ...specRows.filter((item) => {
-      const price = Number(item.price ?? item.amount ?? item.total ?? 0);
-      return !item.onProg && Number.isFinite(price) && price !== 0;
-    }),
-  ];
-
-  const excluded = new Set(
-    excludeServices.map((service) => String(service || "").toLowerCase()).filter(Boolean),
-  );
-  const seen = new Set();
-  const displayRows = [];
-
-  const addRow = (item) => {
-    const name = item.displayName || item.label || item.name || "One-time service";
-    const price = Number(item.price ?? item.amount ?? item.total ?? 0);
-    const detail = serviceDetailText(item);
-    const service = previewServiceKey(item, name);
-    const label = String(name).toLowerCase();
-    const isSetupFee =
-      service === "waveguard_setup" ||
-      label.includes("waveguard setup") ||
-      label.includes("membership");
-    if (
-      !Number.isFinite(price) ||
-      price === 0 ||
-      excluded.has(service) ||
-      (!includeSetupFees && isSetupFee)
-    ) {
-      return;
-    }
-    const key = `${service}|${name}|${price}|${detail}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    displayRows.push({ service, name, price, detail });
-  };
-
-  rows.forEach(addRow);
-  const termiteInstallRow = termiteInstallPreviewRow(E);
-  if (termiteInstallRow) {
-    const hasTermiteInstallRow = displayRows.some((row) => {
-      const label = String(row.name || "").toLowerCase();
-      return (
-        row.service === "termite_bait_installation" ||
-        (label.includes("termite") && label.includes("install")) ||
-        (label.includes("trelona") && label.includes("install")) ||
-        (label.includes("install") && Math.abs(row.price - termiteInstallRow.price) <= 0.01)
-      );
-    });
-    if (!hasTermiteInstallRow) addRow(termiteInstallRow);
-  }
-
-  const setupFee = includeSetupFees ? Number(setupFeeAmount || 0) : 0;
-  const targetTotal = Number(oneTimeTotal);
-  const rowsTotal = displayRows.reduce((sum, row) => sum + row.price, 0);
-  const hasSetupRow = displayRows.some((row) => row.service === "waveguard_setup");
-  const targetIncludesSetupFee =
-    setupFee > 0 &&
-    !hasSetupRow &&
-    Number.isFinite(targetTotal) &&
-    targetTotal > 0 &&
-    Math.abs(targetTotal - (rowsTotal + setupFee)) <= 0.01;
-  if (targetIncludesSetupFee) {
-    addRow({
-      service: "waveguard_setup",
-      name: "WaveGuard setup",
-      price: setupFee,
-      detail: "Membership setup fee",
-    });
-  }
-
-  return displayRows;
-}
-
-function isWaveGuardSetupPreviewRow(row = {}) {
-  const service = String(row.service || "").toLowerCase();
-  const text = `${row.name || ""} ${row.label || ""} ${row.detail || ""}`.toLowerCase();
-  return service === "waveguard_setup" ||
-    text.includes("waveguard setup") ||
-    text.includes("waveguard membership") ||
-    text.includes("membership setup fee");
-}
-
-function isOneTimePestChoicePreviewRow(row = {}) {
-  const service = String(row.service || "").toLowerCase();
-  const text = `${service} ${row.name || ""} ${row.label || ""}`.toLowerCase().replace(/[_-]+/g, " ");
-  if (service === "pest_initial_roach" || INITIAL_ROACH_PREVIEW_RE.test(text)) return false;
-  return service === "one_time_pest" ||
-    text.includes("one time pest") ||
-    text.includes("one-time pest") ||
-    text.includes("onetime pest");
-}
-
-function isPestSpecialtyPreviewRow(row = {}) {
-  const service = String(row.service || "").toLowerCase();
-  const text = `${service} ${row.name || ""} ${row.label || ""}`.toLowerCase().replace(/[_-]+/g, " ");
-  if (
-    service === "pest_control" ||
-    service === "pest_initial_cleanout" ||
-    service === "initial_pest_cleanout" ||
-    service === "pest_cleanout" ||
-    text.includes("initial pest cleanout") ||
-    text.includes("general pest cleanout")
-  ) {
-    return false;
-  }
-  return service === "pest_initial_roach" ||
-    /\b(roach|cockroach|ant|spider|flea|wasp|bee|hornet|stinging|bed\s*bug|bedbug)\b/.test(text);
-}
-
-function oneTimePestSpecialtyRowsForCustomerPreview(E) {
-  return oneTimeRowsForCustomerPreview(E).filter((row) => {
-    const price = Number(row.price || 0);
-    const service = String(row.service || "").toLowerCase();
-    return Number.isFinite(price) &&
-      price > 0 &&
-      service !== "one_time_adjustment" &&
-      !isWaveGuardSetupPreviewRow(row) &&
-      !isOneTimePestChoicePreviewRow(row) &&
-      isPestSpecialtyPreviewRow(row);
-  });
-}
-
-function oneTimePestChoiceRowsForCustomerPreview(E, pestChoiceAmount) {
-  const amount = Number(pestChoiceAmount || 0);
-  if (!Number.isFinite(amount) || amount <= 0) return [];
-  return [{
-    service: "one_time_pest",
-    name: "One-Time Pest Control",
-    price: Math.round(amount * 100) / 100,
-    detail: "Single treatment",
-  }, ...oneTimePestSpecialtyRowsForCustomerPreview(E)];
-}
-
-function firstVisitFeesForCustomerPreview(E, pestTier) {
-  const rows = [];
-  const hasRecurringPest = !!pestTier;
-  const setupFee = hasRecurringPest
-    ? Number(E?.oneTime?.membershipFee || pestTier?.init || 0)
-    : 0;
-  if (setupFee > 0) {
-    rows.push({
-      service: "waveguard_setup",
-      name: "WaveGuard setup",
-      price: setupFee,
-      waivedWithPrepay: true,
-    });
-  }
-
-  const oneTimeSources = [
-    ...(E?.oneTime?.items || []),
-    ...(E?.oneTime?.specItems || []),
-    ...(Array.isArray(E?.specItems) ? E.specItems : []),
-  ];
-  const roachItem = oneTimeSources.find((item) => {
-    const name = item?.displayName || item?.label || item?.name || "";
-    return previewServiceKey(item, name) === "pest_initial_roach";
-  });
-  const roachPrice = Number(roachItem?.price ?? roachItem?.amount ?? roachItem?.total ?? 0);
-  if (Number.isFinite(roachPrice) && roachPrice > 0) {
-    rows.push({
-      service: "pest_initial_roach",
-      name: roachItem.displayName || roachItem.label || roachItem.name || "Cockroach Treatment",
-      price: roachPrice,
-      detail: roachItem.detail || roachItem.det || roachItem.note || "",
-      waivedWithPrepay: false,
-    });
-  }
-
-  const seen = new Set();
-  return rows.filter((row) => {
-    const key = `${row.service}|${row.name}|${row.price}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function oneTimeChoicePreviewMeta(E, pestTier, oneTimeRows = []) {
-  const rawRows = [
-    ...(E?.oneTime?.items || []),
-    ...(E?.oneTime?.specItems || []),
-    ...(Array.isArray(E?.specItems) ? E.specItems : []),
-  ].map((item) => {
-    const name = item?.displayName || item?.label || item?.name || "One-time service";
-    return {
-      service: previewServiceKey(item, name),
-      name,
-    };
-  });
-  const termiteInstallRow = termiteInstallPreviewRow(E);
-  if (termiteInstallRow) rawRows.push(termiteInstallRow);
-  const candidates = (oneTimeRows.length ? oneTimeRows : rawRows).filter(
-    (row) => row.service !== "waveguard_setup",
-  );
-  const oneTimeText = candidates
-    .map((row) => `${row.service || ""} ${row.name || ""}`)
-    .join(" ")
-    .toLowerCase();
-  const recurringText = (E?.recurring?.services || [])
-    .map((service) => previewRecurringServiceName(service))
-    .join(" ")
-    .toLowerCase();
-  const matches = (needle) =>
-    oneTimeText.includes(needle) || (!oneTimeText && recurringText.includes(needle));
-
-  // German Roach Cleanout only — must not catch the non-roach "Initial Pest
-  // Cleanout" (pest_initial_cleanout) service, which keeps the standard
-  // one-time pest copy. Mirrors isGermanRoachCleanoutOneTimeItem on the server.
-  if (matches("german roach") || (matches("roach") && matches("cleanout"))) {
-    const visitMatch = oneTimeText.match(/(\d+)\s*visit/);
-    const n = visitMatch ? Number(visitMatch[1]) : 0;
-    const words = { 1: "One visit", 2: "Two visits", 3: "Three visits", 4: "Four visits" };
-    const phrase = words[n] || (n > 0 ? `${n} visits` : "Multiple visits");
-    return {
-      recurringLabel: "German Roach Cleanout",
-      oneTimeLabel: "German Roach Cleanout",
-      description:
-        `${phrase} to break the breeding cycle. Pay on service day, no recurring schedule. 100% guaranteed with the Waves Guarantee.`,
-    };
-  }
-  if (matches("mosquito")) {
-    return {
-      recurringLabel: "Recurring Mosquito Control",
-      oneTimeLabel: "One-Time Mosquito Control",
-      description:
-        "One visit, pay on service day. No recurring schedule, no program discount. Includes the applicable one-time callback period after this visit.",
-    };
-  }
-  if (matches("lawn")) {
-    return {
-      recurringLabel: "Recurring Lawn Care",
-      oneTimeLabel: "One-Time Lawn Care",
-      description:
-        "One visit, pay on service day. No recurring schedule, no program discount.",
-    };
-  }
-  if (matches("termite")) {
-    return {
-      recurringLabel: "Recurring Termite Protection",
-      oneTimeLabel: "One-Time Termite Service",
-      description:
-        "One visit, pay on service day. No recurring schedule, no program discount.",
-    };
-  }
-
-  const hasPest =
-    !!pestTier ||
-    /\b(pest|roach|ant|spider|flea|wasp|bed\s*bug|bedbug)\b/.test(oneTimeText) ||
-    (!oneTimeText && recurringText.includes("pest"));
-  if (hasPest) {
-    return {
-      recurringLabel: "Recurring Pest Control",
-      oneTimeLabel: "One-Time Pest Control",
-      description:
-        "One visit, pay on service day. No recurring schedule, no tier discount. Includes a 30-day callback period if pest activity returns after this visit.",
-    };
-  }
-
-  const fallbackName = candidates.find((row) => row.name)?.name || "One-Time Service";
-  return {
-    recurringLabel: "Recurring Service",
-    oneTimeLabel: fallbackName.replace(/^OT\b/i, "One-Time"),
-    description:
-      "One visit, pay on service day. No recurring schedule, no program discount.",
-  };
-}
-
-function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq, presentMode = false }) {
-  if (!E) return null;
-
-  const pestTier = selectedPestTierForPreview(R, form);
-  const cadence = pestTier
-    ? cadenceFromPestTier(pestTier)
-    : fallbackCadenceForPreview(E, R, form);
-  const { monthlyTotal, baseMonthly } = customerPreviewPricing(E, pestTier, form);
-  const intervalTotal = Math.round(monthlyTotal * cadence.intervalMonths * 100) / 100;
-  const intervalBase = Math.round(baseMonthly * cadence.intervalMonths * 100) / 100;
-  const intervalSavings = Math.max(0, Math.round((intervalBase - intervalTotal) * 100) / 100);
-  const waveGuardTier = E.recurring?.waveGuardTier || E.recurring?.tier || "Bronze";
-  const firstVisitFees = firstVisitFeesForCustomerPreview(E, pestTier);
-  const dayPrice = monthlyTotal > 0 ? Math.round((monthlyTotal * 12 / 365) * 100) / 100 : 0;
-  const serviceLabel = previewServiceLabel(E, R, form);
-  const propertyLine = propertyLineForPreview(E, R);
-  const oneTimeStandaloneTotal = Number(E.oneTime?.total || 0);
-  const oneTimePestChoiceAmount = oneTimePestChoiceAmountForPreview(R, form);
-  const pestChoiceRows = oneTimePestChoiceRowsForCustomerPreview(E, oneTimePestChoiceAmount);
-  const oneTimeChoiceAmount = pestChoiceRows.length
-    ? pestChoiceRows.reduce((sum, row) => Math.round((sum + Number(row.price || 0)) * 100) / 100, 0)
-    : oneTimeStandaloneTotal;
-  const hasOneTimeChoice = !!form.showOneTimeOption && oneTimeChoiceAmount > 0 && monthlyTotal > 0;
-  const oneTimeRows = oneTimeRowsForCustomerPreview(E, {
-    excludeServices: firstVisitFees.map((fee) => fee.service),
-  });
-  const oneTimeChoiceRows = hasOneTimeChoice
-    ? (pestChoiceRows.length ? pestChoiceRows : [{
-        service: "one_time_pest",
-        name: "One-Time Pest Control",
-        price: oneTimeChoiceAmount,
-        detail: "Single treatment",
-      }])
-    : oneTimeRowsForCustomerPreview(E, {
-        includeSetupFees: true,
-        setupFeeAmount: firstVisitFees.find((fee) => fee.service === "waveguard_setup")?.price || 0,
-        oneTimeTotal: oneTimeStandaloneTotal,
-      });
-  const oneTimeChoiceMeta = oneTimeChoicePreviewMeta(E, pestTier, oneTimeChoiceRows);
-  const aiMetrics = [
-    E.property?.homeSqFt ? { label: "Home", value: `${Math.round(E.property.homeSqFt).toLocaleString()} sq ft` } : null,
-    E.property?.lotSqFt ? { label: "Lot", value: `${Math.round(E.property.lotSqFt).toLocaleString()} sq ft` } : null,
-    R?.lawnMeta?.lsf ? { label: "Treatable lawn", value: `${Math.round(R.lawnMeta.lsf).toLocaleString()} sq ft` } : null,
-    E.property?.complexity || E.property?.landscapeComplexity
-      ? { label: "Complexity", value: String(E.property.complexity || E.property.landscapeComplexity).toLowerCase() }
-      : null,
-  ].filter(Boolean);
-
-  return (
-    <div className="customer-preview-scope cp-scene rounded-sm overflow-hidden border-hairline border-[rgba(4,57,94,0.16)] mb-6">
-      <div className="bg-white/60 backdrop-blur border-b border-[rgba(4,57,94,0.12)] px-5 py-3 flex items-center justify-between gap-4">
-        <span className="text-13 font-medium text-[#04395E]">(941) 297-5749</span>
-        <img src="/waves-logo.png" alt="Waves" className="h-7 block" />
-      </div>
-
-      <div className="px-5 py-6 max-w-[720px] mx-auto">
-        <div className="text-11 uppercase tracking-[0.12em] font-bold text-[rgba(12,21,40,0.7)] mb-1">
-          Your estimate · {serviceLabel}
-        </div>
-        <h2 className="customer-preview-display text-[#04395E] text-[34px] leading-[1.08] m-0">
-          Hey {firstNameFromCustomerName(form.customerName)}, here's your custom quote.
-        </h2>
-        {form.address && (
-          <div className="text-18 text-[rgba(12,21,40,0.7)] leading-snug mt-4">
-            {form.address}
-          </div>
-        )}
-        {propertyLine && (
-          <div className="text-13 text-[rgba(12,21,40,0.66)] mt-1">{propertyLine}</div>
-        )}
-
-        {pestTier && Array.isArray(R?.pestTiers) && R.pestTiers.length > 1 && (
-          <div className="cp-glass-card rounded-[14px] px-4 py-4 mt-5">
-            <div className="text-12 font-bold uppercase tracking-[0.08em] text-[rgba(12,21,40,0.6)] mb-3">
-              How often?
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              {R.pestTiers.map((tier) => {
-                const selected = String(tier.apps) === String(form.pestFreq);
-                return (
-                  <button
-                    type="button"
-                    key={tier.label}
-                    onClick={() => onSelectPestFreq?.(tier.apps)}
-                    className={cn(
-                      "rounded-[14px] px-3 py-3 text-left transition-colors",
-                      selected ? "cp-gold text-[#1B2C5B]" : "cp-chip text-[#04395E]",
-                    )}
-                  >
-                    <span className="block text-13 font-medium">{tier.label}</span>
-                    <span className={cn("block text-11 mt-1", selected ? "text-[#1B2C5B]/80" : "text-[rgba(12,21,40,0.6)]")}>
-                      {fmt(tier.pa)}/visit
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {hasOneTimeChoice && (
-          <div className="cp-chip rounded-full p-1 mt-5 flex gap-1">
-            <div className="cp-gold flex-1 rounded-full text-[#1B2C5B] text-center text-13 font-medium px-3 py-2">
-              {oneTimeChoiceMeta.recurringLabel}
-            </div>
-            <div className="flex-1 rounded-full text-[rgba(4,57,94,0.75)] text-center text-13 font-medium px-3 py-2">
-              {oneTimeChoiceMeta.oneTimeLabel}
-            </div>
-          </div>
-        )}
-
-        {monthlyTotal > 0 ? (
-          <div className="pt-5 pb-3">
-            <div className="flex items-baseline gap-2 flex-wrap">
-              {intervalSavings > 0 && (
-                <span className="customer-preview-display text-24 text-[rgba(12,21,40,0.4)] line-through">
-                  {fmt(intervalBase)}{cadence.period}
-                </span>
-              )}
-              <span className="customer-preview-display text-[58px] leading-none text-[#04395E] u-nums">
-                {fmt(intervalTotal)}
-              </span>
-              <span className="text-24 font-medium text-[rgba(12,21,40,0.66)]">{cadence.period}</span>
-              <span className="inline-block px-3 py-1 rounded-full bg-[rgba(4,57,94,0.08)] text-[#04395E] text-12 font-bold tracking-[0.02em]">
-                WaveGuard {waveGuardTier}
-              </span>
-            </div>
-            {/* The "You save" line is intentionally absent: intervalBase −
-                intervalTotal is the anchor-vs-cadence delta, not a tier
-                discount (owner directive; matches the customer page). The
-                struck anchor above still shows a discount was applied. */}
-            {dayPrice > 0 && (
-              <div className="text-14 text-[rgba(12,21,40,0.66)] mt-2">
-                That's just {fmt(dayPrice)}/day for complete home protection.
-              </div>
-            )}
-            {firstVisitFees.map((fee) => (
-              <div
-                key={`${fee.service}-${fee.price}`}
-                className="cp-glass-soft mt-3 max-w-[520px] p-3.5 rounded-[10px]"
-              >
-                <div className="text-14 font-bold text-[#04395E]">
-                  + {fmtInt(fee.price)} one-time {fee.name}
-                </div>
-                {fee.detail && (
-                  <div className="text-12 text-[rgba(12,21,40,0.66)] mt-0.5">{fee.detail}</div>
-                )}
-                {fee.waivedWithPrepay && (
-                  <div className="text-12 text-[rgba(12,21,40,0.66)] mt-0.5">
-                    Waived when the customer pays the year in full up front.
-                  </div>
-                )}
-              </div>
-            ))}
-            {/* Standalone risk-free / 90-day line removed to match the
-                customer page — #2969 deduped it there (the CTA micro is the
-                one sanctioned spot), so the "matches the customer page"
-                promise above holds again. */}
-          </div>
-        ) : oneTimeStandaloneTotal > 0 ? (
-          <div className="pt-5 pb-3">
-            <div className="flex items-baseline gap-2 flex-wrap">
-              <span className="customer-preview-display text-[58px] leading-none text-[#04395E] u-nums">
-                {fmt(oneTimeStandaloneTotal)}
-              </span>
-              <span className="text-24 font-medium text-[rgba(12,21,40,0.66)]">one-time</span>
-            </div>
-            <div className="text-14 text-[rgba(12,21,40,0.66)] mt-2">
-              One visit, pay on service day. No recurring schedule.
-            </div>
-          </div>
-        ) : null}
-
-        {hasOneTimeChoice && (
-          <div className="cp-glass-card rounded-[14px] p-5 mt-4">
-            <div className="text-11 uppercase tracking-[0.12em] font-bold text-[rgba(12,21,40,0.7)] mb-1">
-              {oneTimeChoiceMeta.oneTimeLabel}
-            </div>
-            <div className="flex items-baseline gap-2 flex-wrap">
-              <span className="customer-preview-display text-[42px] leading-none text-[#04395E] u-nums">
-                {fmt(oneTimeChoiceAmount)}
-              </span>
-              <span className="text-20 font-medium text-[rgba(12,21,40,0.66)]">one-time</span>
-            </div>
-            <div className="text-14 text-[rgba(12,21,40,0.66)] mt-2">
-              {oneTimeChoiceMeta.description}
-            </div>
-            {oneTimeChoiceRows.length > 0 && (
-              <div className="divide-y divide-[rgba(4,57,94,0.12)] mt-4">
-                {oneTimeChoiceRows.map((item) => (
-                  <div key={`${item.name}-${item.price}`} className="flex justify-between gap-4 py-2 text-14">
-                    <div className="text-[rgba(12,21,40,0.7)]">
-                      <div>{item.name}</div>
-                      {item.detail && <div className="text-12 text-[rgba(12,21,40,0.66)] mt-0.5">{item.detail}</div>}
-                    </div>
-                    <div className={cn("font-medium u-nums", item.price < 0 ? "text-[#16A34A]" : "text-[#04395E]")}>
-                      {previewLineAmount(item.price)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {(satelliteUrl || aiMetrics.length > 0) && (
-          <div className="cp-glass-card rounded-[14px] p-5 mt-4">
-            <div className="text-11 uppercase tracking-[0.12em] font-bold text-[rgba(12,21,40,0.7)] mb-1">
-              Waves AI analysis
-            </div>
-            <div className="customer-preview-display text-24 leading-tight text-[#04395E] mb-2">
-              Here's what we found at your property
-            </div>
-            {satelliteUrl && (
-              <img
-                src={satelliteUrl}
-                alt="Satellite view"
-                className="w-full max-h-64 object-cover rounded-[10px] border border-white/70 mb-3"
-              />
-            )}
-            {aiMetrics.length > 0 && (
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                {aiMetrics.map((metric) => (
-                  <div key={metric.label} className="cp-glass-soft rounded-[10px] px-3 py-2">
-                    <div className="text-10 uppercase tracking-[0.08em] text-[rgba(12,21,40,0.66)] font-bold">
-                      {metric.label}
-                    </div>
-                    <div className="customer-preview-display text-18 text-[#04395E] capitalize">
-                      {metric.value}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {!presentMode && (
-          <div className="cp-glass-card rounded-[14px] p-5 mt-4">
-            <div className="customer-preview-display text-24 leading-tight text-[#04395E] mb-3">
-              Find a date &amp; time that works for you
-            </div>
-            <div className="text-14 text-[rgba(12,21,40,0.66)] leading-relaxed mb-4">
-              These are the route windows customers see after opening their secure estimate link.
-            </div>
-            <div className="bg-white/40 border border-dashed border-[rgba(4,57,94,0.25)] rounded-[10px] p-4 text-center text-13 text-[rgba(12,21,40,0.66)]">
-              Live route availability loads on the public estimate.
-            </div>
-          </div>
-        )}
-
-        {oneTimeRows.length > 0 && !hasOneTimeChoice && (
-          <div className="cp-glass-card rounded-[14px] p-5 mt-4">
-            <div className="text-15 font-bold text-[#04395E] mb-2">
-              One-time items billed separately
-            </div>
-            <div className="divide-y divide-[rgba(4,57,94,0.12)]">
-              {oneTimeRows.map((item) => (
-                <div key={`${item.name}-${item.price}`} className="flex justify-between gap-4 py-2 text-14">
-                  <div className="text-[rgba(12,21,40,0.7)]">
-                    <div>{item.name}</div>
-                    {item.detail && <div className="text-12 text-[rgba(12,21,40,0.66)] mt-0.5">{item.detail}</div>}
-                  </div>
-                  <div className={cn("font-medium u-nums", item.price < 0 ? "text-[#16A34A]" : "text-[#04395E]")}>
-                    {previewLineAmount(item.price)}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {monthlyTotal > 0 && (
-          <div className="cp-glass-card rounded-[14px] p-5 mt-4">
-            <div className="customer-preview-display text-24 leading-tight text-[#04395E] mb-3">
-              What WaveGuard members get
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-2">
-              {CUSTOMER_PREVIEW_PERKS.map((perk) => (
-                <div key={perk} className="text-14 text-[rgba(12,21,40,0.7)] flex gap-2">
-                  <span className="text-[#16A34A] font-bold">✓</span>
-                  <span>{perk}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <div className="cp-navy-panel text-white text-center rounded-[14px] p-6 mt-4">
-          <div className="customer-preview-display text-26 leading-tight">
-            Go Waves!
-          </div>
-          <div className="customer-preview-display text-20 leading-tight text-white/90 mt-1">
-            Wave Goodbye to Pests!
-          </div>
-          <div className="text-14 text-white/80 mt-2">No surprise increases, no hidden fees.</div>
-          {!presentMode && (
-            <div className="cp-gold inline-flex mt-4 px-5 py-3 rounded-full text-[#1B2C5B] text-15 font-medium">
-              Pick a time and book
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ═══════════════════════════════════════════════════════════════
 // MAIN COMPONENT — EstimateToolViewV2
-// State, refs, effects, callbacks all copied verbatim from V1.
 // ═══════════════════════════════════════════════════════════════
 export default function EstimateToolViewV2({
   initialLeadId = "",
@@ -2110,6 +1194,9 @@ export default function EstimateToolViewV2({
   // the form seeds from its saved inputs and Save PUTs a revision instead of
   // creating a new estimate (the customer's link stays the same).
   editEstimateId = "",
+  onDraftSaved,
+  onBack,
+  onStartNew,
 } = {}) {
   const navigate = useNavigate();
   // ── Google Maps script (verbatim from V1) ─────────────────────
@@ -2185,11 +1272,7 @@ export default function EstimateToolViewV2({
     ac.addListener("place_changed", () => {
       const p = ac.getPlace();
       if (p && p.formatted_address) {
-        setForm((f) => ({
-          ...f,
-          address: p.formatted_address,
-          measuredTurfSf: "",
-        }));
+        set("address", p.formatted_address);
       }
     });
     autocompleteRef.current = ac;
@@ -2347,8 +1430,8 @@ export default function EstimateToolViewV2({
     foamRecurringPoints: "5",
     foamRecurringFreq: "quarterly",
     roachType: "REGULAR",
-    svcLawn: true,
-    svcPest: true,
+    svcLawn: false,
+    svcPest: false,
     svcTs: false,
     svcInjection: false,
     svcMosquito: false,
@@ -2390,6 +1473,12 @@ export default function EstimateToolViewV2({
     fleaExteriorAreaSource: "UNKNOWN",
     fleaExteriorZones: [],
     svcWasp: false,
+    stingSpecies: "PAPER_WASP",
+    stingTier: "2",
+    stingRemoval: "NONE",
+    stingAggressive: "NO",
+    stingHeight: "GROUND",
+    stingConfined: "NO",
     svcRoach: false,
     svcBedbug: false,
     svcExclusion: false,
@@ -2402,6 +1491,15 @@ export default function EstimateToolViewV2({
     billByInvoice: false,
   });
 
+  function clearedPropertyFields() {
+    const defaults = buildDefaultEstimateForm();
+    return {
+      ...EMPTY_PROPERTY_MEASUREMENTS,
+      ...Object.fromEntries(PROPERTY_FORM_FIELDS.map((field) => [field, defaults[field] ?? ""])),
+      propertyId: "", _manualFields: [], _unitCountEdited: false,
+    };
+  }
+
   const [form, setForm] = useState(() =>
     buildDefaultEstimateForm({
       leadId: initialLeadId,
@@ -2413,7 +1511,6 @@ export default function EstimateToolViewV2({
       serviceInterest: initialServiceInterest,
     }),
   );
-  const propertyAddressRef = useRef(String(form.address || "").trim());
 
   useEffect(() => {
     const incoming = {
@@ -2437,7 +1534,8 @@ export default function EstimateToolViewV2({
           next[key] = value;
         }
       }
-      if (prefillIdentityChanged) next.measuredTurfSf = "";
+      if (initialAddress && initialAddress !== f.address) Object.assign(next, clearedPropertyFields());
+      else if (prefillIdentityChanged) next.measuredTurfSf = "";
       return next;
     });
   }, [
@@ -2574,97 +1672,6 @@ export default function EstimateToolViewV2({
         ? { name: "4-service bundle", discount: 0.2 }
         : tierMap[recurringCount] || tierMap[0];
 
-    const sqft = Number(form.homeSqFt) || 2000;
-    const lotSqft = Number(form.lotSqFt) || 8000;
-    const approx = {};
-    if (form.svcLawn && !commercialDetected) approx.lawn = Math.max(55, Math.round(sqft * 0.028 + 10));
-    if (form.svcPest && !commercialDetected) {
-      const freqMult = { 4: 1, 6: 1.3, 12: 2.2 };
-      approx.pest = Math.max(
-        35,
-        Math.round((sqft * 0.022 + 20) * (freqMult[form.pestFreq] || 1)),
-      );
-    }
-    if (form.svcTs && !commercialDetected)
-      approx.ts = Math.max(
-        45,
-        Math.round((Number(form.bedArea) || lotSqft * 0.15) * 0.012 + 30),
-      );
-    if (form.svcInjection) {
-      const treatmentCount = parsePositiveInteger(form.palmTreatmentCount)
-        ?? (String(form.palmTreatmentCount || "").trim() === "" ? parsePositiveInteger(form.palmCount) : undefined);
-      if (treatmentCount) {
-        const pricePerPalm = form.palmTreatmentType === "nutrition" ? 35 : 75;
-        const appsPerYear = form.palmTreatmentType === "nutrition" ? (parsePositiveInteger(form.palmAppsPerYear) || 1) : 2;
-        approx.injection = Math.round(
-          (Math.max(treatmentCount * pricePerPalm, 75) * appsPerYear) / 12,
-        );
-      }
-    }
-    if (form.svcMosquito && !commercialDetected) {
-      // Rough preview; engine is authoritative. Mirrors the server's 500-sf
-      // step interpolation between per-visit bucket anchors (no pressure
-      // factors), then visits/yr -> levelized monthly.
-      const mqSeasonal = form.mosquitoProgram === "seasonal9";
-      const mqAnchors = mqSeasonal
-        ? [[8000, 77], [12000, 80], [18000, 83], [35000, 90], [64500, 102]]
-        : [[8000, 69], [12000, 72], [18000, 77], [35000, 81], [73500, 90]];
-      const mqTreatable = Math.max(0, lotSqft - (sqft || 0));
-      const mqStepped = Math.ceil(mqTreatable / 500) * 500;
-      let mqPerVisit = mqAnchors[mqAnchors.length - 1][1];
-      if (mqStepped <= mqAnchors[0][0]) {
-        mqPerVisit = mqAnchors[0][1];
-      } else {
-        for (let i = 1; i < mqAnchors.length; i++) {
-          if (mqStepped <= mqAnchors[i][0]) {
-            const [aSq, aPr] = mqAnchors[i - 1];
-            const [bSq, bPr] = mqAnchors[i];
-            mqPerVisit = Math.round(aPr + ((mqStepped - aSq) / (bSq - aSq)) * (bPr - aPr));
-            break;
-          }
-        }
-      }
-      approx.mosquito = Math.round((mqPerVisit * (mqSeasonal ? 9 : 12)) / 12);
-    }
-    if (form.svcTermiteBait && !commercialDetected) approx.termiteBait = 50;
-    if (form.svcRodentBait && !commercialDetected) {
-      // LIVE footprint-bracket ladder (pricing_config.rodent_bait_brackets,
-      // loaded into the engine module by refreshPricingConfig — codex #3591
-      // r16 P1): per-visit × 4 ÷ 12 as a monthly-equivalent preview figure;
-      // the engine is authoritative.
-      const rbPerVisit = rodentBaitBracketForFootprint(sqft).perVisit;
-      approx.rodentBait = Math.round((rbPerVisit * 4) / 12);
-    }
-    if (form.svcFoamRecurring) {
-      // Rough preview; engine is authoritative. One-time per-visit by tier
-      // (no floor) × cadence multiplier × visits/yr ÷ 12.
-      const oneTimeByPoints = { 5: 182, 10: 308, 15: 434, 20: 598 };
-      const cadMult = { quarterly: 0.9, bimonthly: 0.85, monthly: 0.8 };
-      const cadVisits = { quarterly: 4, bimonthly: 6, monthly: 12 };
-      const cad = cadMult[form.foamRecurringFreq] ? form.foamRecurringFreq : "quarterly";
-      const base = oneTimeByPoints[form.foamRecurringPoints] || oneTimeByPoints[5];
-      approx.foamRecurring = Math.round((base * cadMult[cad] * cadVisits[cad]) / 12);
-    }
-
-    // Rodent revenue leaves the discountable subtotal when the LIVE policy
-    // excludes it from the tier % (codex #3591 r84 P2) — the authoritative
-    // engine reads the same exclude_from_pct_discount flag, so the preview
-    // must not show a tier reduction the engine will not apply.
-    const rodentPctExcluded = rodentWaveguardPosture.excludeFromPctDiscount === true;
-    const separateRecurringMonthly = (approx.injection || 0) + (approx.foamRecurring || 0)
-      + (rodentPctExcluded ? (approx.rodentBait || 0) : 0);
-    const discountableRecurringMonthlyBefore = Object.entries(approx).reduce(
-      (s, [key, value]) => s + (key === "injection" || key === "foamRecurring" || (rodentPctExcluded && key === "rodentBait") ? 0 : value),
-      0,
-    );
-    const recurringMonthly = Math.round(
-      discountableRecurringMonthlyBefore * (1 - tier.discount) + separateRecurringMonthly,
-    );
-    const annualRecurring = recurringMonthly * 12;
-    const annualSavings = Math.round(
-      discountableRecurringMonthlyBefore * tier.discount * 12,
-    );
-
     const onetimeKeys = [
       "svcOnetimePest",
       "svcOnetimeLawn",
@@ -2700,9 +1707,6 @@ export default function EstimateToolViewV2({
       commercialManualQuoteCount,
       onetimeCount,
       tier,
-      recurringMonthly,
-      annualRecurring,
-      annualSavings,
       anySelected,
     };
   }, [form, rodentWaveguardPosture]);
@@ -2741,17 +1745,6 @@ export default function EstimateToolViewV2({
   useEffect(() => {
     formAddressRef.current = String(form.address || "");
   }, [form.address]);
-  // Send-form phone lookup guards (rules in estimateSendPhoneLookup.js):
-  // the sequence + abort pair kills stale responses so a slow lookup for a
-  // previous number can't land on a newer one, and the auto-fill ref tracks
-  // what the lookup wrote so it never clobbers operator-entered name/email.
-  const sendPhoneLookupSeqRef = useRef(0);
-  const sendPhoneLookupAbortRef = useRef(null);
-  const sendPhoneAutoFillRef = useRef({ name: null, email: null });
-  // Full-screen, pricing-only "present to customer" mode — hides the booking
-  // section + book CTA so the operator can show prices in person (issue: in-person
-  // billing display). Reuses CustomerEstimatePreviewV2 with presentMode=true.
-  const [presentMode, setPresentMode] = useState(false);
   // Set when the server-authoritative price (Decision #2) differs from the
   // client preview at save time, so the operator isn't left quoting a stale number.
   const [priceRecomputeNotice, setPriceRecomputeNotice] = useState(null);
@@ -2766,14 +1759,40 @@ export default function EstimateToolViewV2({
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [sending, setSending] = useState(false);
-  const [showSendForm, setShowSendForm] = useState(false);
-  const [sendSearch, setSendSearch] = useState("");
-  const [sendCustomerResults, setSendCustomerResults] = useState([]);
+  const openSend = useEstimateSend();
   const token = localStorage.getItem("waves_admin_token");
   const authHeaders = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${token}`,
   };
+
+  function formFromEditSource(d) {
+    return {
+          ...buildDefaultEstimateForm(),
+          ...(d.inputs || {}),
+          // Live contact columns win over the stored form snapshot, and a
+          // revise never re-links a lead — the row keeps its own linkage
+          // server-side, so the form's leadId must stay blank here.
+          leadId: "",
+          customerId: d.customerId || "",
+          propertyId: d.propertyId || "",
+          address: d.address || "",
+          customerName: d.customerName || "",
+          customerPhone: d.customerPhone || "",
+          customerEmail: d.customerEmail || "",
+          // Delivery flags too: the pipeline's 1×-option / invoice-mode
+          // toggles PATCH the row columns after the original save, so the
+          // stored inputs snapshot can be stale — saving it back would
+          // silently flip the row's settings.
+          showOneTimeOption: !!d.showOneTimeOption,
+          billByInvoice: !!d.billByInvoice,
+          // Row notes win over the inputs snapshot for the same reason —
+          // lead/webhook/automation rows carry notes the builder never wrote,
+          // and the revise PUT sends form.notes back verbatim; seeding ""
+          // would erase them on a service-only edit.
+          notes: d.notes || "",
+        };
+  }
 
   // ── Edit mode: reopen an existing estimate for in-place revision ──
   // Loaded from GET /:id/edit-source. `hasInputs` is false for estimates
@@ -2781,6 +1800,51 @@ export default function EstimateToolViewV2({
   // contact fields only and the operator rebuilds the quote before saving.
   const [editMode, setEditMode] = useState(null);
   const [editLoadError, setEditLoadError] = useState(null);
+  useEffect(() => {
+    if (!editMode || !/^#estimate-(customer|services|pricing|review)$/.test(window.location.hash)) return;
+    requestAnimationFrame(() => document.querySelector(window.location.hash)?.scrollIntoView({ block: "start" }));
+  }, [editMode?.id]);
+  const [saveError, setSaveError] = useState("");
+  const saveInFlightRef = useRef(false);
+  const draftIdRef = useRef(null);
+  const savedFormRef = useRef(JSON.stringify(form));
+  const formRef = useRef(form);
+  formRef.current = form;
+  const dirty = JSON.stringify(form) !== savedFormRef.current;
+  const openMessages = useCustomerSms();
+  useEffect(() => {
+    if (!dirty) return undefined;
+    const beforeUnload = (event) => { event.preventDefault(); event.returnValue = ""; };
+    const guardLink = (event) => {
+      const link = event.target.closest?.("a[href]");
+      if (!link || link.target === "_blank" || event.metaKey || event.ctrlKey || link.hash) return;
+      if (!window.confirm("Leave this estimate with unsaved changes?")) {
+        event.preventDefault(); event.stopPropagation();
+      }
+    };
+    // Browser Back/Forward does not click an anchor. BrowserRouter tracks
+    // an index on each entry, letting cancellation restore that entry before
+    // its ordinary popstate listener can unmount this unsaved editor.
+    const entryIndex = window.history.state?.idx;
+    let restoring = false;
+    const guardHistory = (event) => {
+      if (restoring) { restoring = false; event.stopImmediatePropagation(); return; }
+      const nextIndex = event.state?.idx;
+      if (!Number.isInteger(entryIndex) || !Number.isInteger(nextIndex) || entryIndex === nextIndex) return;
+      if (window.confirm("Leave this estimate with unsaved changes?")) return;
+      event.stopImmediatePropagation();
+      restoring = true;
+      window.history.go(entryIndex - nextIndex);
+    };
+    window.addEventListener("popstate", guardHistory, true);
+    window.addEventListener("beforeunload", beforeUnload);
+    document.addEventListener("click", guardLink, true);
+    return () => {
+      window.removeEventListener("popstate", guardHistory, true);
+      window.removeEventListener("beforeunload", beforeUnload);
+      document.removeEventListener("click", guardLink, true);
+    };
+  }, [dirty]);
 
   // Multi-property group: anchor id set when the operator chains "Add another
   // property" off a saved estimate (the next save joins the anchor's group via
@@ -2870,7 +1934,7 @@ export default function EstimateToolViewV2({
   }, [activeLeadId, groupAnchorId]);
 
   useEffect(() => {
-    if (!editEstimateId) return undefined;
+    if (!editEstimateId || editEstimateId === editMode?.id) return undefined;
     let cancelled = false;
     (async () => {
       setEditLoadError(null);
@@ -2894,47 +1958,24 @@ export default function EstimateToolViewV2({
           );
           return;
         }
-        const seeded = {
-          ...buildDefaultEstimateForm(),
-          ...(d.inputs || {}),
-          // Live contact columns win over the stored form snapshot, and a
-          // revise never re-links a lead — the row keeps its own linkage
-          // server-side, so the form's leadId must stay blank here.
-          leadId: "",
-          customerId: d.customerId || "",
-          address: d.address || "",
-          customerName: d.customerName || "",
-          customerPhone: d.customerPhone || "",
-          customerEmail: d.customerEmail || "",
-          // Delivery flags too: the pipeline's 1×-option / invoice-mode
-          // toggles PATCH the row columns after the original save, so the
-          // stored inputs snapshot can be stale — saving it back would
-          // silently flip the row's settings.
-          showOneTimeOption: !!d.showOneTimeOption,
-          billByInvoice: !!d.billByInvoice,
-          // Row notes win over the inputs snapshot for the same reason —
-          // lead/webhook/automation rows carry notes the builder never wrote,
-          // and the revise PUT sends form.notes back verbatim; seeding ""
-          // would erase them on a service-only edit.
-          notes: d.notes || "",
-        };
+        const seeded = formFromEditSource(d);
         // Reopening the SAME job must not trip the per-job rodent-guarantee
         // confirmation reset (it fires on identity change vs this ref).
         rgIdentityRef.current = `${seeded.address || ""}|${seeded.customerId || ""}|${seeded.customerName || ""}|${seeded.customerEmail || ""}`;
-        // Hydration supplies this estimate's own measurements; it is not an
-        // address edit carrying another property's form values.
-        propertyAddressRef.current = String(seeded.address || "").trim();
+        previousAddressRef.current = seeded.address;
+        savedFormRef.current = JSON.stringify(seeded);
         setForm(seeded);
         setEnrichedProfile(d.engineProfile || null);
         setLookupMeta(null);
         setSatelliteData(null);
-        setEstimate(null);
-        setSavedId(null);
-        setSavedViewUrl(null);
+        setEstimate(d.result ? { ...d.result, engineRequest: d.engineRequest } : null);
+        setSavedId(d.id);
+        setSavedViewUrl(estimatePreviewUrlFromSave(d));
         setPriceRecomputeNotice(null);
         setEditMode({
           id: d.id,
           status: d.status,
+          editVersion: d.editVersion,
           customerName: d.customerName || "",
           hasInputs: !!d.inputs,
         });
@@ -2957,7 +1998,10 @@ export default function EstimateToolViewV2({
   }, [editEstimateId]);
 
   function exitEditMode() {
+    if (dirty && !window.confirm("Start a new estimate with unsaved changes?")) return;
+    onStartNew?.();
     setEditMode(null);
+    draftIdRef.current = null;
     setEditLoadError(null);
     setForm(buildDefaultEstimateForm());
     setEnrichedProfile(null);
@@ -2974,6 +2018,20 @@ export default function EstimateToolViewV2({
     preLinkContactRef.current = null;
   }
 
+  const previousAddressRef = useRef(form.address);
+  useEffect(() => {
+    if (previousAddressRef.current === form.address) return;
+    previousAddressRef.current = form.address;
+    unitLookupAddressRef.current = "";
+    setLookupMeta(null);
+    lookupSeqRef.current += 1;
+    lookupAbortRef.current?.abort();
+    setEnrichedProfile(null);
+    setSatelliteData(null);
+    setLookupStatus({ type: "", msg: "" });
+    setSatelliteStatus({ type: "", msg: "" });
+  }, [form.address]);
+
   const set = useCallback((key, val) => {
     setForm((f) => {
       const next = {
@@ -2986,7 +2044,9 @@ export default function EstimateToolViewV2({
         // Typing a NEW address immediately invalidates the previous
         // address's unit count — the save-before-lookup path could
         // otherwise permanently verify A's count against B (codex P1 r7).
-        ...(key === "address" ? { measuredTurfSf: "", unitCount: "", _unitCountEdited: false } : {}),
+        ...(key === "address" ? {
+          ...clearedPropertyFields(),
+        } : { _manualFields: [...new Set([...(f._manualFields || []), key])] }),
         ...(key === "poolCageSize" ? { _poolCageSizeEdited: true } : {}),
         ...(key === "stories" ? { _storiesEdited: true } : {}),
         ...(key === "homeSqFt" ? { _homeSqFtEdited: true } : {}),
@@ -3107,28 +2167,13 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
   }, []);
 
-  const searchSendCustomers = useCallback(async (q) => {
-    if (!q || q.length < 2) {
-      setSendCustomerResults([]);
-      return;
-    }
-    try {
-      const r = await fetch(
-        `/api/admin/customers?search=${encodeURIComponent(q)}&limit=5`,
-        { headers: authHeaders },
-      );
-      if (r.ok) {
-        const d = await r.json();
-        setSendCustomerResults(d.customers || d || []);
-      }
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
   // Prefill bait-station footprint from house sqft, but keep BoraCare and
   // Pre-Slab manual because those measurements often are not property-record values.
   useEffect(() => {
+    // Reopening a persisted offer must not add today's inferred measurements
+    // or dirty fields for an unselected service. Explicit measurement/service
+    // edits clear savedId before this effect runs.
+    if (!form.svcTermiteBait || savedId) return;
     const sqft = Number(form.homeSqFt) || 0;
     const st = Math.max(1, Number(form.stories) || 1);
     if (sqft > 0) {
@@ -3154,7 +2199,7 @@ export default function EstimateToolViewV2({
         return { ...f, ...upd, _termiteFootprintAuto: true };
       });
     }
-  }, [form.homeSqFt, form.stories]);
+  }, [form.homeSqFt, form.stories, form.svcTermiteBait]);
 
   const searchCustomers = useCallback(async (q) => {
     if (!q || q.length < 2) {
@@ -3221,8 +2266,9 @@ export default function EstimateToolViewV2({
     setForm((f) => ({
       ...f,
       customerId: c.id || "",
+      propertyId: "",
       ...(adoptAddress
-        ? { address: c.address || f.address, measuredTurfSf: "" }
+        ? { ...(c.address && c.address !== f.address ? clearedPropertyFields() : {}), address: c.address || f.address }
         : {}),
       customerName: name,
       customerPhone: c.phone || f.customerPhone || "",
@@ -3256,7 +2302,7 @@ export default function EstimateToolViewV2({
     // they are — only the linkage and its pricing flag go.
     const restore = preLinkContactRef.current || { isRecurringCustomer: "NO" };
     preLinkContactRef.current = null;
-    setForm((f) => ({ ...f, customerId: "", ...restore }));
+    setForm((f) => ({ ...f, customerId: "", propertyId: "", ...restore }));
     setEstimate(null);
     setSavedId(null);
     setSavedViewUrl(null);
@@ -3304,6 +2350,31 @@ export default function EstimateToolViewV2({
       cancelled = true;
     };
   }, [existingCustomerMatch?.id, form.customerId]);
+  const [customerProperties, setCustomerProperties] = useState([]);
+  const [propertiesError, setPropertiesError] = useState("");
+  useEffect(() => {
+    setCustomerProperties([]);
+    setPropertiesError("");
+    if (!form.customerId) return undefined;
+    const controller = new AbortController();
+    void adminFetch(`/admin/customers/${encodeURIComponent(form.customerId)}/properties`, { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Could not load service properties. Retry before choosing an address.");
+        const data = await response.json();
+        if (!controller.signal.aborted) setCustomerProperties(data.properties || []);
+      }).catch((error) => { if (!controller.signal.aborted) setPropertiesError(error.message); });
+    return () => controller.abort();
+  }, [form.customerId]);
+
+  function selectServiceProperty(propertyId) {
+    const property = customerProperties.find((item) => item.id === propertyId);
+    if (!property) { set("propertyId", ""); return; }
+    const address = [[property.address_line1, property.address_line2].filter(Boolean).join(" "), property.city,
+      [property.state, property.zip].filter(Boolean).join(" ")].filter(Boolean).join(", ");
+    set("address", address);
+    setForm((current) => ({ ...current, propertyId }));
+  }
+
   // The linked customer's OPEN address-review cards (an owed unit number,
   // an unverified address) from the call that created the lead. Without
   // this the property panel prices whatever address the lead carries and
@@ -3347,23 +2418,6 @@ export default function EstimateToolViewV2({
   const [verifySaveState, setVerifySaveState] = useState({});
   const verificationVersionRef = useRef(0);
 
-  useEffect(() => {
-    const address = String(form.address || "").trim();
-    if (propertyAddressRef.current === address) return;
-    propertyAddressRef.current = address;
-    ++lookupSeqRef.current;
-    lookupAbortRef.current?.abort();
-    unitLookupAddressRef.current = "";
-    setForm((f) => ({ ...f, ...EMPTY_PROPERTY_MEASUREMENTS }));
-    setEnrichedProfile(null);
-    setLookupMeta(null);
-    setSatelliteData(null);
-    setLookupStatus({ type: "", msg: "" });
-    setSatelliteStatus({ type: "", msg: "" });
-    setEstimate(null);
-    setSavedId(null);
-    setSavedViewUrl(null);
-  }, [form.address]);
 
   // A "saved" badge only describes the values it was clicked for — moving to
   // another address or editing sqft/lot/stories re-arms the action.
@@ -3606,7 +2660,6 @@ export default function EstimateToolViewV2({
     setEstimate(null);
     setSavedId(null);
     setSavedViewUrl(null);
-    setShowSendForm(false);
     setLookupStatus({ type: "", msg: "" });
     setEnrichedProfile(null);
     setExistingCustomerMatch(null);
@@ -3819,10 +2872,15 @@ export default function EstimateToolViewV2({
   // add it to the first estimate too via Edit if it was saved without one).
   // The lead link is NOT carried over: a lead attaches to one estimate.
   function addAnotherProperty(prefill = {}) {
+    if (dirty && !window.confirm("Start another property and discard unsaved changes?")) return;
     const anchorId = savedId || editMode?.id;
     if (!anchorId) return;
     setGroupAnchorId(anchorId);
+    lookupAbortRef.current?.abort();
+    lookupSeqRef.current += 1;
+    onStartNew?.();
     setEditMode(null);
+    draftIdRef.current = null;
     setEditLoadError(null);
     const multiHome = discountPresets.find((x) => x.discount_key === "multi_home");
     setForm((f) => ({
@@ -3856,7 +2914,6 @@ export default function EstimateToolViewV2({
     setSavedId(null);
     setSavedViewUrl(null);
     setPriceRecomputeNotice(null);
-    setShowSendForm(false);
   }
 
   function toggleServiceSpecificDiscount(key) {
@@ -3884,7 +2941,6 @@ export default function EstimateToolViewV2({
       msg: refresh ? "Refreshing property records and satellite analysis…" : "Checking property records and satellite analysis…",
     });
     setSatelliteStatus({ type: "", msg: "" });
-    setForm((f) => ({ ...f, measuredTurfSf: "" }));
     setEstimate(null);
     setSavedId(null);
     setSavedViewUrl(null);
@@ -4074,6 +3130,19 @@ export default function EstimateToolViewV2({
           }
           next._palmCountAuto = false;
         }
+        for (const key of f._manualFields || []) {
+          if (PROPERTY_FORM_FIELDS.includes(key)) next[key] = f[key];
+        }
+        if (f._manualFields?.includes("palmCount")) next._palmCountAuto = false;
+        if (f._manualFields?.includes("termiteFootprintSqFt")) next._termiteFootprintAuto = false;
+        if (f._manualFields?.includes("trenchingPerimeterLF")) next._trenchingPerimeterAuto = false;
+        if (f._manualFields?.includes("boracareSqft")) next._boracareSqftAuto = false;
+        if (f._manualFields?.includes("preslabSqft")) next._preslabSqftAuto = false;
+        if (f._manualFields?.includes("stories")) next._storiesEdited = f._storiesEdited;
+        if (f._manualFields?.includes("unitCount")) {
+          next._unitCountEdited = f._unitCountEdited;
+          next._unitCountAddress = f._unitCountAddress;
+        }
         return next;
       });
       // Invalidate again at apply time (mirrors doSatelliteAnalysis): a
@@ -4182,133 +3251,8 @@ export default function EstimateToolViewV2({
     }
   }
 
-  async function doSatelliteAnalysis() {
-    const address = form.address.trim();
-    if (!address) {
-      setSatelliteStatus({ type: "err", msg: "Enter an address first" });
-      return;
-    }
-    // A unit lookup dropped every parcel-wide read on purpose; this action
-    // would write them straight back (lot, bed area, canopy, densities,
-    // pool, water) — pre-push codex P1 r4.
-    // …the same address, OR any address still carrying a dwelling unit
-    // ("Apt 204" corrected to "Apt 205" is the same parcel — codex r4 P1).
-    if (enrichedProfile?.residentialUnitLookup
-      && (unitLookupAddressRef.current === address || UNIT_DESIGNATOR_RE.test(address))) {
-      setSatelliteStatus({
-        type: "err",
-        msg: "Satellite analysis reads the whole parcel — not applied to a single-unit lookup. Enter the unit's own figures.",
-      });
-      return;
-    }
-    setSatelliteStatus({
-      type: "loading",
-      msg: "Analyzing satellite imagery with AI...",
-    });
-    setSatelliteData(null);
-    // Clearing measuredTurfSf is already a pricing edit, and the analysis
-    // below rewrites lot/bed/palm/termite inputs — invalidate up front exactly
-    // like doLookup so a generated estimate can't sit on pre-analysis inputs.
-    setForm((f) => ({ ...f, measuredTurfSf: "" }));
-    setEstimate(null);
-    setSavedId(null);
-    setSavedViewUrl(null);
-    try {
-      const r = await fetch("/api/admin/lookup/satellite-ai", {
-        method: "POST",
-        headers: authHeaders,
-        body: JSON.stringify({ address }),
-      });
-      const data = await r.json();
-      if (data.error) {
-        setSatelliteStatus({ type: "err", msg: data.error });
-        return;
-      }
-
-      const aiSources = normalizeAiSources(
-        data.aiSources || data._sources || data.source,
-      );
-      setSatelliteData({
-        ...data,
-        aiSources,
-        aiWarnings: buildAiProviderWarnings({
-          sources: aiSources,
-          errors: data.errors || [],
-          providerStatus: data.providerStatus,
-        }),
-      });
-
-      const upd = {};
-      if (data.lot_sqft) upd.lotSqFt = String(Math.round(data.lot_sqft));
-      if (data.bed_area_sqft)
-        upd.bedArea = String(Math.round(data.bed_area_sqft));
-      if (data.palm_count) upd.palmCount = String(data.palm_count);
-      if (data.tree_count) upd.treeCount = String(data.tree_count);
-      const satShrubDensity = normalizeDensityValue(data.shrub_density);
-      if (satShrubDensity) upd.shrubDensity = satShrubDensity;
-      const satTreeDensity = normalizeDensityValue(data.tree_density);
-      if (satTreeDensity) upd.treeDensity = satTreeDensity;
-      if (data.landscape_complexity)
-        upd.landscapeComplexity = data.landscape_complexity;
-      if (data.has_pool) upd.hasPool = "YES";
-      if (data.has_pool_cage) upd.hasPoolCage = "YES";
-      if (data.near_water) upd.nearWater = "YES";
-      if (data.property_type || data.category) {
-        Object.assign(upd, resolveLookupPropertyTypeAutofill(data.property_type, data.category));
-      }
-      const termiteFootprintNumber = lookupTermiteFootprintSqFt(data);
-      if (termiteFootprintNumber)
-        upd.termiteFootprintSqFt = String(Math.round(termiteFootprintNumber));
-      const perimeterNumber = parsePositiveNumber(data.perimeter_linear_ft);
-      if (perimeterNumber)
-        upd.trenchingPerimeterLF = String(Math.round(perimeterNumber));
-      const atticSqFt =
-        data.attic_sqft ||
-        data.atticSqFt ||
-        data.raw_wood_sqft ||
-        data.rawWoodSqFt;
-      const atticNumber = parsePositiveNumber(atticSqFt);
-      if (atticNumber)
-        upd.boracareSqft = String(Math.round(atticNumber));
-      const slabSqFt =
-        data.slab_sqft ||
-        data.slabSqFt ||
-        data.foundation_sqft ||
-        data.foundationSqFt;
-      const slabNumber = parsePositiveNumber(slabSqFt);
-      if (slabNumber)
-        upd.preslabSqft = String(Math.round(slabNumber));
-
-      setForm((f) => {
-        const next = { ...f, ...upd };
-        if (upd.palmCount && String(f.palmTreatmentCount || "").trim() === "") {
-          next.palmTreatmentCount = upd.palmCount;
-        }
-        return next;
-      });
-      // Invalidate again at apply time: a Generate run while the analysis was
-      // in flight would otherwise keep a price from pre-analysis inputs.
-      setEstimate(null);
-      setSavedId(null);
-      setSavedViewUrl(null);
-
-      const verify = (data.fieldVerify || []).length;
-      const conf =
-        data.confidence === "high"
-          ? "HIGH"
-          : data.confidence === "medium"
-            ? "MEDIUM"
-            : "LOW";
-      setSatelliteStatus({
-        type: "ok",
-        msg: `AI Analysis complete — Confidence: ${conf} (${data.agreementPct || "?"}% model agreement)${verify > 0 ? ` · ${verify} field(s) flagged for field verification` : ""}`,
-      });
-    } catch (e) {
-      setSatelliteStatus({ type: "err", msg: e.message });
-    }
-  }
-
   async function doGenerate(overrides = {}) {
+    if (editEstimateId && !editMode) return null;
     if (generating) return null;
     // Snapshot the invalidation version. Inputs stay editable while the
     // calculate call is in flight, so an edit that lands mid-flight must make
@@ -4633,6 +3577,16 @@ export default function EstimateToolViewV2({
         fleaExteriorAreaSource: form.fleaExteriorAreaSource || "UNKNOWN",
         fleaExteriorZones: Array.isArray(form.fleaExteriorZones) ? form.fleaExteriorZones : [],
       };
+      if (form.svcWasp) {
+        Object.assign(options, {
+          stingSpecies: form.stingSpecies,
+          stingTier: Number(form.stingTier),
+          stingRemoval: form.stingRemoval,
+          stingAggressive: form.stingAggressive,
+          stingHeight: form.stingHeight,
+          stingConfined: form.stingConfined,
+        });
+      }
       if (form.svcInjection) {
         options.palmInjection = {
           selected: true,
@@ -4819,97 +3773,6 @@ export default function EstimateToolViewV2({
         return null;
       }
 
-      if (!result.modifiers) {
-        const p = result.property || profile || {};
-        const mods = [];
-        const add = (svc, label, impact, type) =>
-          mods.push({ service: svc, label, impact, type });
-        const interp = (v, b) => {
-          if (v <= b[0].at) return b[0].adj;
-          if (v >= b[b.length - 1].at) return b[b.length - 1].adj;
-          for (let i = 1; i < b.length; i++) {
-            if (v <= b[i].at) {
-              const lo = b[i - 1];
-              const hi = b[i];
-              const ratio = (v - lo.at) / (hi.at - lo.at);
-              return Math.round(lo.adj + ratio * (hi.adj - lo.adj));
-            }
-          }
-          return 0;
-        };
-        const homeSf = p.homeSqFt || p.squareFootage || 0;
-        const stories = p.stories || 1;
-        const fp = p.footprint || Math.round(homeSf / stories);
-        add(
-          "property",
-          `Home: ${homeSf.toLocaleString()} sq ft · ${stories} story`,
-          0,
-          "info",
-        );
-        // footprintUnknown: 0 is a refusal to claim a footprint, not a tiny
-        // slab — re-deriving homeSqFt/stories for the breakdown would show
-        // an adjustment the engine never charged (codex P1 #2721).
-        if (p.footprintUnknown === true) {
-          add("pest", "Footprint: field measurement required", 0, "info");
-        } else {
-          const fpAdj = interp(fp, [
-            { at: 800, adj: -15 },
-            { at: 1200, adj: -10 },
-            { at: 1500, adj: -5 },
-            { at: 1750, adj: -5 },
-            { at: 2000, adj: 0 },
-            { at: 2500, adj: 3 },
-            { at: 3000, adj: 6 },
-            { at: 4000, adj: 10 },
-            { at: 5500, adj: 16 },
-          ]);
-          add(
-            "pest",
-            `Footprint: ${fp.toLocaleString()} sq ft → ${fpAdj >= 0 ? "+" : ""}$${fpAdj}/visit`,
-            fpAdj,
-            fpAdj > 0 ? "up" : fpAdj < 0 ? "down" : "info",
-          );
-        }
-        if (p.poolCage === "YES") {
-          const cageSize = String(p.poolCageSize || "MEDIUM").toUpperCase();
-          const cageAdj =
-            { SMALL: 5, MEDIUM: 8, LARGE: 12, OVERSIZED: 18 }[cageSize] || 8;
-          add(
-            "pest",
-            `Pool cage (${cageSize.toLowerCase()}): +$${cageAdj}/visit`,
-            cageAdj,
-            "up",
-          );
-        } else if (p.pool === "YES")
-          add("pest", "Pool (no cage): $0/visit", 0, "info");
-        else add("pest", "No pool: $0/visit", 0, "info");
-        const sd = p.shrubDensity || p.shrubs;
-        if (sd === "HEAVY") add("pest", "Heavy shrubs: +$6/visit", 6, "up");
-        else if (sd === "MODERATE")
-          add("pest", "Moderate shrubs: $0/visit", 0, "info");
-        else if (sd === "LIGHT")
-          add("pest", "Light shrubs: -$5/visit", -5, "down");
-        else add("pest", "Shrubs: not specified", 0, "info");
-        const lc = p.landscapeComplexity || p.complexity;
-        if (lc === "COMPLEX")
-          add("pest", "Complex landscape: +$3/visit", 3, "up");
-        else if (lc === "SIMPLE")
-          add("pest", "Simple landscape: -$5/visit", -5, "down");
-        else add("pest", `${lc || "Simple"} landscape: $0/visit`, 0, "info");
-        const nw = p.nearWater || p.waterProximity;
-        if (nw && nw !== "NONE" && nw !== "NO" && nw !== false)
-          add("pest", "Near water: +$3/visit", 3, "up");
-        else add("pest", "No water nearby: $0/visit", 0, "info");
-        if (p.yearBuilt)
-          add(
-            "property",
-            `Built: ${p.yearBuilt} · ${p.constructionMaterial || "CBS"} · ${p.foundationType || "Slab"} · ${p.roofType || "Shingle"}`,
-            0,
-            "info",
-          );
-        result.modifiers = mods;
-      }
-
       // Stale rental gate (codex P1, round 2): the availability probe runs
       // once at mount, so GATE_TERMITE_STATION_RENTAL flipped OFF mid-session
       // (a deploy under an open tab) still sends termiteOwnership='rent' —
@@ -4960,6 +3823,8 @@ export default function EstimateToolViewV2({
   // freshly returned estimate — the `estimate` state in this closure is still
   // the pre-generate value (React state doesn't update mid-handler).
   async function doSave(estimateOverride = null, { deferInvoiceTotals = false } = {}) {
+    if (editEstimateId && !editMode) return null;
+    if (saveInFlightRef.current) return null;
     const estimateToSave = estimateOverride || estimate;
     if (!estimateToSave) return null;
     const deliveryError = validateDeliveryOptions(form, estimateToSave, { deferInvoiceTotals });
@@ -4967,7 +3832,10 @@ export default function EstimateToolViewV2({
       alert(deliveryError);
       return null;
     }
+    saveInFlightRef.current = true;
     setSaving(true);
+    setSaveError("");
+    const savingForm = JSON.stringify(form);
     try {
       const E = estimateToSave;
       const quoteRequired = estimateRequiresQuote(E);
@@ -4978,7 +3846,10 @@ export default function EstimateToolViewV2({
         serviceSpecificDiscounts: E.serviceSpecificDiscounts || E.totals?.serviceSpecificDiscounts || [],
       };
       const isEditRevision = !!editMode?.id;
+      if (!isEditRevision && !draftIdRef.current) draftIdRef.current = crypto.randomUUID();
       const payload = {
+        ...(isEditRevision ? { expectedEditVersion: editMode.editVersion } : { clientDraftId: draftIdRef.current }),
+        propertyId: form.propertyId || null,
         address: form.address,
         customerName: form.customerName || "",
         customerPhone: form.customerPhone || "",
@@ -5051,16 +3922,22 @@ export default function EstimateToolViewV2({
       const recomputeNotice = serverRecomputeNotice(d, monthlyTotal, onetimeTotal);
       setPriceRecomputeNotice(recomputeNotice);
       setMemberLinkageWarning(d.memberLinkageWarning || null);
-      setSavedId(id);
-      setSavedViewUrl(viewUrl);
+      setEditMode({ id, status: d.status || "draft", editVersion: d.editVersion, customerName: form.customerName || "", hasInputs: true });
+      savedFormRef.current = savingForm;
+      // A slow save must not bless fields edited while it was in flight.
+      const stillCurrent = JSON.stringify(formRef.current) === savingForm;
+      setSavedId(stillCurrent ? id : null);
+      setSavedViewUrl(stillCurrent ? viewUrl : null);
+      onDraftSaved?.(id);
       // recomputeNotice + memberLinkageWarning ride along so saveAndSend can
       // gate the send on them — the banner state set above renders too late
       // to stop an in-flight send (codex #3338 r6).
       return { id, viewUrl, recomputeNotice, memberLinkageWarning: d.memberLinkageWarning || null };
     } catch (e) {
-      alert(e.message);
+      setSaveError(e.message);
       return null;
     } finally {
+      saveInFlightRef.current = false;
       setSaving(false);
     }
   }
@@ -5087,109 +3964,9 @@ export default function EstimateToolViewV2({
     if (saved?.id) navigate(`/admin/estimates/${saved.id}/proposal`);
   }
 
-  async function doSend(id, method) {
-    const useId = id || savedId;
-    if (!useId) {
-      alert("Save the estimate first.");
-      return;
-    }
-    // Provisional guard: a low-confidence / incomplete property lookup means the
-    // auto-priced quote may be wrong (the reported 0/100 new-construction case).
-    // Make the operator acknowledge before a firm quote goes to the customer.
-    const provisional = computeProvisionalState(enrichedProfile?.propertyDataQuality);
-    if (provisional.provisional) {
-      const proceed = window.confirm(
-        `This estimate is based on unverified property data (${provisionalSummary(provisional)}).\n\n` +
-          "Pricing may change once verified on site. Send the quote anyway?"
-      );
-      if (!proceed) return;
-    }
-    const sendMethod = method || "both";
-    let scheduled = null;
-    if (form.scheduleSend) {
-      if (!form.scheduledAt) {
-        alert("Pick a send time.");
-        return;
-      }
-      const when = new Date(form.scheduledAt);
-      if (isNaN(when.getTime())) {
-        alert("Invalid send time.");
-        return;
-      }
-      if (when <= new Date()) {
-        alert("Send time must be in the future.");
-        return;
-      }
-      // datetime-local has no timezone; serialize the instant the user picked
-      // (browser-local) to an unambiguous ISO string so the server doesn't
-      // re-parse "2026-04-26T03:48" as UTC and reject it as already past.
-      scheduled = when.toISOString();
-    }
-    setSending(true);
-    try {
-      const sendRequest = async () => {
-        const r = await fetch(`/api/admin/estimates/${useId}/send`, {
-          method: "POST",
-          headers: authHeaders,
-          body: JSON.stringify({
-            sendMethod,
-            scheduledAt: scheduled,
-            idempotencyKey:
-              globalThis.crypto?.randomUUID?.() ||
-              `estimate-send-${Date.now()}-${Math.random()}`,
-          }),
-        });
-        const d = await r.json().catch(() => ({}));
-        return { r, d };
-      };
-      const { r, d } = await sendRequest();
-      if (!r.ok)
-        throw new Error(summarizeEstimateSend(d) || `HTTP ${r.status}`);
-      const label =
-        sendMethod === "sms"
-          ? "SMS"
-          : sendMethod === "email"
-            ? "email"
-            : "SMS & email";
-      if (d.scheduled) {
-        const when = new Date(d.scheduledAt).toLocaleString();
-        alert(`Estimate scheduled via ${label} for ${when}`);
-      } else if (d.channels) {
-        const parts = [];
-        if (d.channels.sms)
-          parts.push(
-            d.channels.sms.ok
-              ? "SMS sent"
-              : `SMS failed: ${d.channels.sms.error}`,
-          );
-        if (d.channels.email)
-          parts.push(
-            d.channels.email.ok
-              ? "Email sent"
-              : `Email failed: ${d.channels.email.error}`,
-          );
-        if (d.groupPublicationFailures > 0) {
-          parts.push(
-            `${d.groupPublicationFailures} grouped propert${d.groupPublicationFailures === 1 ? "y" : "ies"} could NOT be published — they were returned to unsent; re-send them so the customer's link shows every property`,
-          );
-        }
-        const anyFail =
-          (d.channels.sms && !d.channels.sms.ok) ||
-          (d.channels.email && !d.channels.email.ok) ||
-          d.groupPublicationFailures > 0;
-        alert((anyFail ? "Send had issues: " : "Sent: ") + parts.join(" / "));
-      } else if (d.groupPublicationFailures > 0) {
-        alert(`Estimate sent via ${label}, but ${d.groupPublicationFailures} grouped propert${d.groupPublicationFailures === 1 ? "y" : "ies"} could NOT be published — re-send them so the customer's link shows every property.`);
-      } else {
-        alert(`Estimate sent via ${label}!`);
-      }
-    } catch (e) {
-      alert(e.message);
-    }
-    setSending(false);
-  }
-
   function nextEstimate() {
+    if (dirty && !window.confirm("Start another estimate with unsaved changes?")) return;
+    onStartNew?.();
     // A fresh estimate is OUTSIDE any group build: a stale anchor would make
     // the next unrelated save carry groupWithEstimateId and 400 on the
     // same-customer guard (codex #3244 r5). Clearing it also lets the
@@ -5197,6 +3974,7 @@ export default function EstimateToolViewV2({
     setGroupAnchorId(null);
     setForm((f) => ({
       ...f,
+      ...clearedPropertyFields(),
       address: "",
       homeSqFt: "",
       stories: "1",
@@ -5301,11 +4079,11 @@ export default function EstimateToolViewV2({
     // Save changes would still PUT the new quote over the estimate that was
     // being edited.
     setEditMode(null);
+    draftIdRef.current = null;
     setEditLoadError(null);
     setEstimate(null);
     setSavedId(null);
     setSavedViewUrl(null);
-    setShowSendForm(false);
     setLookupStatus({ type: "", msg: "" });
     setEnrichedProfile(null);
     setExistingCustomerMatch(null);
@@ -5317,106 +4095,55 @@ export default function EstimateToolViewV2({
     setCustomers([]);
   }
 
-  async function saveAndSend(method) {
+  async function reviewAndSend() {
     if (generating || saving || sending) return;
-    if (!estimate) {
-      alert('Click "Generate Estimate" first.');
+    if (!savedId || !editMode?.editVersion) {
+      setSaveError("Save this version before reviewing its recipient and sending.");
       return;
     }
-    if (form.scheduleSend) {
-      if (!form.scheduledAt) {
-        alert("Pick a send time.");
-        return;
+    const warnings = [
+      priceRecomputeNotice ? `The server recomputed the saved price: ${describeRecomputeNotice(priceRecomputeNotice)}.` : null,
+      memberLinkageWarning?.message,
+      provisionalState.provisional ? `Property data is provisional: ${provisionalSummary(provisionalState)}. Pricing may change after field verification.` : null,
+    ].filter(Boolean).join(" ");
+    setSending(true);
+    try {
+      const outcome = await openSend(savedId, { expectedEditVersion: editMode.editVersion, warning: warnings });
+      if (!outcome) return;
+      // Sending changes status/timestamps. Refresh our own concurrency token
+      // without discarding edits or claiming that a handoff means delivery.
+      const response = await fetch(`/api/admin/estimates/${editMode.id}/edit-source`, { headers: authHeaders });
+      const source = await response.json();
+      if (!response.ok) throw new Error(source.error || "Refresh the estimate before another edit.");
+      if (JSON.stringify(formRef.current) !== savedFormRef.current) {
+        throw new Error("The saved estimate changed while you were editing. Your fields are retained; reopen the saved version before another save.");
       }
-      const when = new Date(form.scheduledAt);
-      if (isNaN(when.getTime()) || when <= new Date()) {
-        alert("Send time must be a valid future date/time.");
-        return;
-      }
+      const seeded = formFromEditSource(source);
+      previousAddressRef.current = seeded.address;
+      rgIdentityRef.current = `${seeded.address || ""}|${seeded.customerId || ""}|${seeded.customerName || ""}|${seeded.customerEmail || ""}`;
+      savedFormRef.current = JSON.stringify(seeded);
+      setForm(seeded);
+      setEnrichedProfile(source.engineProfile || null);
+      setExistingCustomerMatch(source.customer || null);
+      setEditMode((current) => ({ ...current, status: source.status, editVersion: source.editVersion }));
+      if (!source.editable) setEditLoadError(source.blockReason);
+      setEstimate(source.result ? { ...source.result, engineRequest: source.engineRequest } : null);
+
+    } catch (err) {
+      setSaveError(err.message);
+    } finally {
+      setSending(false);
     }
-    const saved = savedId
-      ? // Already-saved path: any drift was surfaced by that earlier save and
-        // still lives in the banner state — gate on it the same way.
-        { id: savedId, viewUrl: savedViewUrl, recomputeNotice: priceRecomputeNotice, memberLinkageWarning }
-      : await doSave();
-    if (!saved?.id) return;
-    // Server-authoritative repricing (Decision #2) can move the number at save
-    // time (pricing-constant changes, existing-customer combined-tier fold).
-    // Without this gate the send fires before the recompute banner is even
-    // readable, so a price the operator never saw goes to the customer.
-    if (saved.recomputeNotice) {
-      const proceed = window.confirm(
-        `The server recomputed the final price on save: ${describeRecomputeNotice(saved.recomputeNotice)}.\n\n` +
-          "This recomputed price is what the customer will see. Send it?",
-      );
-      if (!proceed) return;
-    }
-    // Unlinked-member guard (codex #3338 r6): on a one-click Save & Send the
-    // warning banner renders after the send would already be gone — gate
-    // here, same trust pattern as the reprice confirm above. Cancel keeps
-    // the saved draft so the operator can link the customer and re-save.
-    if (saved.memberLinkageWarning) {
-      const proceed = window.confirm(
-        `${saved.memberLinkageWarning.message}\n\n` +
-          "Send anyway at non-member pricing?",
-      );
-      if (!proceed) return;
-    }
-    await doSend(saved.id, method);
   }
 
-  async function previewCustomerEstimate() {
+  function previewCustomerEstimate() {
     if (generating || saving || sending) return;
-    if (!estimate) {
-      alert('Click "Generate Estimate" first.');
+    if (!savedId || !savedViewUrl) {
+      setSaveError("Save this version before opening its customer preview.");
+      document.getElementById("estimate-review")?.scrollIntoView({ block: "start" });
       return;
     }
-    // In edit mode, saving PUBLISHES: the PUT rewrites the live row behind
-    // the customer's existing link, so the implicit save below would let a
-    // "just looking" preview push a half-finished revision to a sent/viewed
-    // estimate. Require the explicit Save changes click first.
-    if (editMode?.id && !savedViewUrl) {
-      alert(
-        'This estimate is being edited in place — previewing requires saving, ' +
-          'and saving publishes the revision to the customer\'s existing link. ' +
-          'Click "Save changes" first, then preview.',
-      );
-      return;
-    }
-
-    const pendingPreviewWindow = savedViewUrl
-      ? null
-      : window.open("about:blank", "_blank");
-    if (pendingPreviewWindow) pendingPreviewWindow.opener = null;
-    if (!savedViewUrl && !pendingPreviewWindow) {
-      alert("Your browser blocked the preview tab. Allow pop-ups and try again.");
-      return;
-    }
-
-    const saved = savedViewUrl
-      ? { id: savedId, viewUrl: savedViewUrl }
-      : await doSave();
-    if (!saved?.id) {
-      if (pendingPreviewWindow) pendingPreviewWindow.close();
-      return;
-    }
-    if (!saved.viewUrl) {
-      if (pendingPreviewWindow) pendingPreviewWindow.close();
-      alert("Preview link unavailable. Save the estimate and try again.");
-      return;
-    }
-    // A just-saved estimate is a DRAFT: the bare URL renders the legacy SSR
-    // page, not what the customer gets. The param routes staff to the real
-    // React customer page (staff-JWT-gated /data, banner, inert booking).
-    // Harmless on an already-sent estimate — published rows ignore it.
-    const previewUrl = saved.viewUrl.includes("?")
-      ? `${saved.viewUrl}&adminPreview=1`
-      : `${saved.viewUrl}?adminPreview=1`;
-    if (pendingPreviewWindow) {
-      pendingPreviewWindow.location.replace(previewUrl);
-    } else {
-      window.open(previewUrl, "_blank", "noopener,noreferrer");
-    }
+    window.open(`${savedViewUrl}${savedViewUrl.includes("?") ? "&" : "?"}adminPreview=1`, "_blank", "noopener,noreferrer");
   }
 
   const E = estimate;
@@ -5554,21 +4281,33 @@ export default function EstimateToolViewV2({
     ? "Palm count is required for palm injection pricing."
     : null;
   const formCtx = { form, set, toggle };
-  const sendBusy = generating || saving || sending;
   const provisionalState = computeProvisionalState(
     enrichedProfile?.propertyDataQuality
   );
   // Present-mode trust gates: a custom-quote estimate has no firm price to show,
   // and an unsaved one hasn't been through the server-authoritative recompute.
   const presentQuoteRequired = !!estimate && estimateRequiresQuote(estimate);
-  const presentUnsaved = !savedId;
-  const generateBusy = generating || saving || sending;
+  const generateBusy = generating || saving || sending || (!!editEstimateId && !editMode);
 
   // ═══════════════════════════════════════════════════════════════
   // RENDER
   // ═══════════════════════════════════════════════════════════════
   return (
     <FormCtx.Provider value={formCtx}>
+      <header className="px-4 md:px-7 py-4 border-b border-zinc-200 mb-5">
+        <Button variant="ghost" className="min-h-11 mb-2" onClick={() => {
+          if (!dirty || window.confirm("Leave this estimate with unsaved changes?")) onBack?.();
+        }}>← Back to Pipeline</Button>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h1 className="text-24 font-semibold">{editMode ? "Edit estimate" : "Create estimate"}</h1>
+          <span role="status" className="text-14 text-zinc-600">{saving ? "Saving…" : generating ? "Recalculating pricing…" : dirty ? "Unsaved changes" : editMode ? "Saved estimate loaded" : "New estimate"}</span>
+        </div>
+        {form.customerPhone && <Button variant="secondary" className="min-h-11" onClick={() => { void openEstimateMessages(form, openMessages); }}>Message contact</Button>}
+        <nav aria-label="Estimate sections" className="flex flex-wrap gap-2 mt-3">
+          {[["customer", "Customer & property"], ["services", "Services"], ["pricing", "Pricing & terms"], ["review", "Review & send"]].map(([key, label]) =>
+            <Button key={key} variant="ghost" className="min-h-11" onClick={() => document.getElementById(`estimate-${key}`)?.scrollIntoView({ block: "start" })}>{label}</Button>)}
+        </nav>
+      </header>
       {" "}
       <div
         className="max-w-[1440px] mx-auto px-4 md:px-7 pb-7 waves-roboto-scope"
@@ -5580,179 +4319,8 @@ export default function EstimateToolViewV2({
           .waves-roboto-scope * {
             font-family: ${ROBOTO} !important;
           }
-          /* Customer-preview glass system — mirrors the live estimate page's
-             glass theme (glass-theme.css) without mounting the glass engine,
-             which re-themes the whole <html> element and would glass the
-             admin chrome. Everything is scoped to .customer-preview-scope. */
-          .customer-preview-scope,
-          .customer-preview-scope * {
-            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
-              "Inter", "Segoe UI", Roboto, Helvetica, Arial, sans-serif !important;
-            -webkit-font-smoothing: antialiased;
-          }
-          .customer-preview-display {
-            font-weight: 700 !important;
-            letter-spacing: -0.03em !important;
-          }
-          .cp-scene {
-            background:
-              radial-gradient(1100px 700px at 85% -10%, rgba(10,126,194,.40), transparent 60%),
-              radial-gradient(900px 650px at -10% 30%, rgba(240,165,0,.16), transparent 55%),
-              radial-gradient(1000px 900px at 75% 95%, rgba(6,90,140,.32), transparent 60%),
-              radial-gradient(600px 400px at 40% 55%, rgba(56,170,225,.16), transparent 65%),
-              linear-gradient(180deg,#E0EEF9 0%,#F5FAFE 45%,#E5EFF7 100%);
-          }
-          .cp-glass-card {
-            position: relative;
-            background: linear-gradient(135deg, rgba(255,255,255,.45), rgba(255,255,255,.22)),
-              rgba(255,255,255,.35);
-            border: 1px solid rgba(255,255,255,.7);
-            backdrop-filter: blur(18px) saturate(165%);
-            -webkit-backdrop-filter: blur(18px) saturate(165%);
-            box-shadow: 0 8px 26px rgba(4,57,94,.08), inset 0 1px 0 rgba(255,255,255,.48),
-              inset 1px 1px 0 rgba(175,225,255,.22);
-          }
-          .cp-glass-soft {
-            background: linear-gradient(135deg, rgba(255,255,255,.5), rgba(255,255,255,.25)),
-              rgba(255,255,255,.3);
-            border: 1px solid rgba(255,255,255,.62);
-            box-shadow: inset 0 1px 0 rgba(255,255,255,.42);
-          }
-          .cp-chip {
-            background: linear-gradient(135deg, rgba(255,255,255,.34), rgba(255,255,255,.1)),
-              rgba(255,255,255,.22);
-            border: 1px solid rgba(255,255,255,.62);
-            backdrop-filter: blur(18px) saturate(170%);
-            -webkit-backdrop-filter: blur(18px) saturate(170%);
-            box-shadow: inset 0 1px 0 rgba(255,255,255,.42), 0 8px 22px rgba(4,57,94,.1);
-          }
-          .cp-chip:is(button):hover {
-            box-shadow: inset 0 1px 0 rgba(255,255,255,.5), 0 10px 26px rgba(4,57,94,.13),
-              0 0 22px rgba(10,126,194,.2);
-          }
-          .cp-gold {
-            background: linear-gradient(135deg, rgba(255,222,120,.6), rgba(244,176,20,.45)),
-              rgba(240,165,0,.38);
-            border: 1px solid rgba(255,238,180,.92);
-            box-shadow: 0 10px 26px rgba(180,110,0,.22), 0 0 18px rgba(240,165,0,.2),
-              inset 0 1px 0 rgba(255,255,255,.32), inset 0 -2px 8px rgba(180,110,0,.18);
-          }
-          .cp-navy-panel {
-            background: linear-gradient(135deg, #04395E, #065A8C);
-            border: 1px solid rgba(255,255,255,.2);
-            box-shadow: 0 18px 50px rgba(4,57,94,.28);
-          }
-        `}</style>{" "}
-        {/* Full-screen pricing-only present mode — show prices to the customer
-            in person without the booking section. Tier toggle stays live so the
-            operator can switch frequency in front of the customer. */}
-        {presentMode && E && (
-          <div className="cp-scene fixed inset-0 z-50 overflow-y-auto">
-            <div className="sticky top-0 z-10 border-b border-[rgba(4,57,94,0.14)] bg-white/80 backdrop-blur">
-              <div className="flex items-center justify-between gap-4 px-4 py-2.5">
-                <span className="text-11 font-medium uppercase tracking-[0.1em] text-[#6B7280]">
-                  Presenting to customer · pricing only
-                </span>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className="gap-1.5"
-                  onClick={() => setPresentMode(false)}
-                >
-                  <X size={14} strokeWidth={1.8} aria-hidden />
-                  Exit
-                </Button>
-              </div>
-              {/* Operator-facing warning strip — reasons the shown price may not be
-                  firm. Suppressed for custom quotes, which show no firm price at all. */}
-              {!presentQuoteRequired && priceRecomputeNotice && (
-                <div className="border-t border-zinc-200 bg-zinc-50 px-4 py-2 text-12 text-ink-secondary">
-                  Final price was server-recomputed on save
-                  {priceRecomputeNotice.serverMonthly != null && (
-                    <> — bills ${priceRecomputeNotice.serverMonthly.toFixed(2)}/mo (preview shows ${Number(priceRecomputeNotice.clientMonthly || 0).toFixed(2)})</>
-                  )}
-                  {priceRecomputeNotice.serverOnetime != null && (
-                    <> — ${priceRecomputeNotice.serverOnetime.toFixed(2)} one-time</>
-                  )}
-                  . Re-generate before quoting this price.
-                </div>
-              )}
-              {!presentQuoteRequired && provisionalState.provisional && (
-                <div className="border-t border-zinc-200 bg-zinc-50 px-4 py-2 text-12 text-ink-secondary">
-                  Provisional — based on unverified property data ({provisionalSummary(provisionalState)}). Price may change after field verification.
-                </div>
-              )}
-              {!presentQuoteRequired && presentUnsaved && (
-                <div className="border-t border-zinc-200 bg-zinc-50 px-4 py-2 text-12 text-ink-secondary">
-                  Unsaved preview — save the estimate to lock the server-authoritative price before quoting it as final.
-                </div>
-              )}
-            </div>
-            <div className="mx-auto max-w-[760px] px-3 py-5 md:px-5">
-              {presentQuoteRequired ? (
-                // Custom-quote estimate: no firm price to present (the saved/public
-                // flow zeroes totals and the link won't honor a partial price).
-                <div className="customer-preview-scope cp-glass-card rounded-[14px] p-8 text-center">
-                  <div className="customer-preview-display text-[28px] leading-tight text-[#04395E] mb-3">
-                    This is a custom quote
-                  </div>
-                  <div className="mx-auto max-w-[460px] text-15 leading-relaxed text-[rgba(12,21,40,0.66)]">
-                    The services selected need an on-site inspection before we can set a firm
-                    price, so there's no final number to show here yet. We'll prepare a detailed
-                    quote and send it over.
-                  </div>
-                </div>
-              ) : (
-                <div className="relative">
-                  {/* Mask the preview while regenerating so the customer never sees the
-                      newly-selected cadence paired with the previous tier's price. */}
-                  {generating && (
-                    <div className="absolute inset-0 z-10 flex items-start justify-center bg-[#EDF3F9]/70 pt-12 backdrop-blur-[1px]">
-                      <span className="rounded-full border border-[rgba(4,57,94,0.16)] bg-white px-4 py-2 text-13 font-medium text-[#04395E] shadow-sm">
-                        Updating pricing…
-                      </span>
-                    </div>
-                  )}
-                  <EstimateErrorBoundary key={JSON.stringify(estimate).slice(0, 100)}>
-                    <CustomerEstimatePreviewV2
-                      E={E}
-                      R={R}
-                      form={form}
-                      satelliteUrl={satelliteData?.imageUrl || null}
-                      presentMode
-                      onSelectPestFreq={async (apps) => {
-                        // Ignore tier taps while a recalc is in flight: doGenerate
-                        // early-returns on `generating`, but the form mutation below
-                        // would still apply, pairing the in-flight (old-tier) estimate
-                        // with the new cadence and showing the customer mismatched
-                        // pricing. Wait for the current generate to settle first.
-                        if (generating) return;
-                        // Update cadence + regenerate WITHOUT routing through set(),
-                        // which nulls `estimate` and would unmount this overlay
-                        // (presentMode && E) mid-presentation. doGenerate replaces the
-                        // estimate in place when it resolves. Still mirror set()'s
-                        // saved-state reset, since changing the cadence invalidates the
-                        // saved record (keeps the "unsaved preview" warning accurate).
-                        const prevPestFreq = form.pestFreq;
-                        setForm((f) => ({ ...f, pestFreq: String(apps) }));
-                        setSavedId(null);
-                        setSavedViewUrl(null);
-                        const regenerated = await doGenerate({ pestFreq: apps });
-                        // A failed regenerate leaves the previous estimate mounted —
-                        // restore its cadence so the visible price and form.pestFreq
-                        // stay paired (Save in that state would persist the old-cadence
-                        // engineRequest under inputs claiming the new cadence).
-                        if (!regenerated) {
-                          setForm((f) => ({ ...f, pestFreq: prevPestFreq }));
-                        }
-                      }}
-                    />
-                  </EstimateErrorBoundary>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
+          .waves-roboto-scope :is(button, input, select, textarea), .estimate-workflow-section { scroll-margin-block: 100px; }
+        `}</style>
         {editLoadError && (
           <div className="mb-4 flex items-start justify-between gap-4 border-hairline border-zinc-300 rounded-xs bg-zinc-50 px-4 py-3">
             <div className="text-14 text-zinc-700">
@@ -5779,8 +4347,9 @@ export default function EstimateToolViewV2({
                 status {editMode.status}
               </div>
               <div className="mt-1">
-                Saving updates the estimate the customer already has — the link
-                stays the same. Resend after saving to notify them.
+                {["sent", "viewed"].includes(editMode.status)
+                  ? "Saving publishes changes to the customer's existing link. Resend after saving to notify them."
+                  : "Saving keeps this draft under the same estimate. Sending is a separate action."}
               </div>
               {!editMode.hasInputs && (
                 <div className="mt-1">
@@ -5810,7 +4379,7 @@ export default function EstimateToolViewV2({
                     <div className="text-14 text-zinc-900 truncate">
                       {g.address || "(no address)"}
                     </div>
-                    <div className="text-12 text-ink-secondary">
+                    <div className="text-14 text-ink-secondary">
                       {g.monthlyTotal != null && g.monthlyTotal > 0
                         ? `$${Number(g.monthlyTotal).toFixed(2)}/mo`
                         : g.onetimeTotal != null && g.onetimeTotal > 0
@@ -5820,16 +4389,16 @@ export default function EstimateToolViewV2({
                   </div>
                   <Badge>{g.status}</Badge>
                   {editMode?.id === g.id || savedId === g.id ? (
-                    <span className="text-12 text-ink-secondary">
+                    <span className="text-14 text-ink-secondary">
                       on screen
                     </span>
                   ) : (
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() =>
-                        navigate(`/admin/estimates?editEstimateId=${g.id}`)
-                      }
+                      onClick={() => {
+                        if (!dirty || window.confirm("Leave this estimate with unsaved changes?")) navigate(`/admin/estimates?editEstimateId=${g.id}`);
+                      }}
                     >
                       Edit
                     </Button>
@@ -5842,7 +4411,7 @@ export default function EstimateToolViewV2({
                     <div className="text-14 text-zinc-900 truncate">
                       {form.address || "New property — enter address"}
                     </div>
-                    <div className="text-12 text-ink-secondary">
+                    <div className="text-14 text-ink-secondary">
                       current draft, not saved yet
                     </div>
                   </div>
@@ -5850,7 +4419,7 @@ export default function EstimateToolViewV2({
                 </div>
               )}
             </div>
-            <div className="text-12 text-ink-secondary mt-2">
+            <div className="text-14 text-ink-secondary mt-2">
               The 10% Multi-Home Discount applies to ADDED properties only —
               it is pre-selected on each new draft here. The first property
               stays full price (owner ruling 2026-08-06); do not add the
@@ -5881,7 +4450,7 @@ export default function EstimateToolViewV2({
                       <div className="text-14 text-zinc-900 truncate">
                         {composedAddress}
                       </div>
-                      <div className="text-12 text-ink-secondary">
+                      <div className="text-14 text-ink-secondary">
                         {[
                           p.is_rental ? "rental" : null,
                           p.property_type || null,
@@ -5904,16 +4473,23 @@ export default function EstimateToolViewV2({
               })}
             </div>
             {!savedId && !editMode?.id && (
-              <div className="text-12 text-ink-secondary mt-2">
+              <div className="text-14 text-ink-secondary mt-2">
                 Save the current estimate first — then each of these can be
                 quoted as the next property in the group.
               </div>
             )}
           </Card>
         )}
-        <div className="grid gap-7 grid-cols-1 lg:grid-cols-[440px_1fr]">
+        <div className="grid gap-7 grid-cols-1 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
           {/* ═══ LEFT COLUMN: FORM ═══ */}
-          <div className="space-y-4">
+          <div className="space-y-6 min-w-0">
+            <section id="estimate-customer" className="estimate-workflow-section space-y-4" aria-label="Customer and property">
+            <h2 className="text-20 font-semibold">Customer & property</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3">
+              <FieldV2 label="Customer name"><InputV2 k="customerName" /></FieldV2>
+              <FieldV2 label="Phone"><InputV2 k="customerPhone" type="tel" /></FieldV2>
+              <FieldV2 label="Email" className="sm:col-span-2"><InputV2 k="customerEmail" type="email" /></FieldV2>
+            </div>
             {/* Customer Lookup */}
             <div>
               {" "}
@@ -5945,7 +4521,7 @@ export default function EstimateToolViewV2({
                         <div className="text-14 text-zinc-900 font-medium">
                           {name}
                         </div>{" "}
-                        <div className="text-12 text-ink-secondary">
+                        <div className="text-14 text-ink-secondary">
                           {c.address || "no address on file"}
                           {c.phone ? ` · ${c.phone}` : ""}
                         </div>{" "}
@@ -5958,11 +4534,23 @@ export default function EstimateToolViewV2({
             {/* Property Lookup */}
             <div>
               {" "}
-              <PanelTitle>Property Lookup</PanelTitle>{" "}
-              <FieldV2 label="Address">
+              <PanelTitle>Service property</PanelTitle>
+              {propertiesError && <p role="alert" className="text-14 text-alert-fg mb-3">{propertiesError}</p>}
+              {customerProperties.length > 0 && <div className="mb-4">
+                <label htmlFor="estimate-service-property" className="block text-14 font-medium mb-2">Customer property</label>
+                <select id="estimate-service-property" className={INPUT_CLS} value={form.propertyId || ""} onChange={(event) => selectServiceProperty(event.target.value)}>
+                  <option value="">Choose a saved service property, or enter an address</option>
+                  {customerProperties.map((property) => <option key={property.id} value={property.id}>
+                    {[property.label, property.address_line1, property.address_line2, property.city, property.zip].filter(Boolean).join(" · ")}
+                  </option>)}
+                </select>
+                <p className="text-14 text-zinc-600 mt-2">Changing property clears its measurements. Contact and account records are unchanged.</p>
+              </div>}
+              <FieldV2 label="Service address">
                 {" "}
                 <input
                   ref={addressRef}
+                  aria-label="Service address"
                   type="text"
                   value={form.address}
                   onChange={(e) => set("address", e.target.value)}
@@ -5971,13 +4559,13 @@ export default function EstimateToolViewV2({
                 />{" "}
               </FieldV2>
               {form.leadServiceInterest && (
-                <div className="mb-3 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                <div className="mb-3 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900">
                   Lead interest:{" "}
                   <strong>{form.leadServiceInterest}</strong>{" "}
                 </div>
               )}
               <StatusLine status={lookupStatus} />{" "}
-              <div className="grid grid-cols-2 gap-2 mb-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
                 {" "}
                 <Button onClick={() => doLookup()} variant="primary" size="md" disabled={lookupStatus.type === "loading"}>
                   Property Lookup
@@ -5988,6 +4576,7 @@ export default function EstimateToolViewV2({
                   onClick={() => {
                     setForm((f) => ({
                       ...f,
+                      ...clearedPropertyFields(),
                       address: "",
                       homeSqFt: "",
                       lotSqFt: "",
@@ -6095,7 +4684,7 @@ export default function EstimateToolViewV2({
               {enrichedProfile?.fieldVerifyFlags?.length > 0 && (
                 <div className="mb-2.5 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs">
                   {enrichedProfile.fieldVerifyFlags.map((flag, i) => (
-                    <div key={i} className="text-12 text-alert-fg">
+                    <div key={i} className="text-14 text-alert-fg">
                       {typeof flag === "string"
                         ? flag.replace(/_/g, " ")
                         : (flag.field || flag.name || "").replace(/_/g, " ")}
@@ -6106,7 +4695,7 @@ export default function EstimateToolViewV2({
                 </div>
               )}
               {existingCustomerMatch && (
-                <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900 flex items-center gap-2">
+                <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900 flex items-center gap-2">
                   <span className="flex-1 min-w-0">
                     <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
                     Existing customer:{" "}
@@ -6139,7 +4728,7 @@ export default function EstimateToolViewV2({
                   (lookup skips suggestions, save carries the id), so the
                   operator needs the same Unlink here (see canUnlink). */}
               {!existingCustomerMatch && form.customerId && canUnlink && (
-                <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900 flex items-center gap-2">
+                <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900 flex items-center gap-2">
                   <span className="flex-1 min-w-0">
                     <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
                     Linked customer:{" "}
@@ -6223,7 +4812,7 @@ export default function EstimateToolViewV2({
                   </div>
                 )}
               {openAddressAsks.length > 0 && (
-                <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900">
                   <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
                   <strong>Address still being confirmed</strong>
                   {" — "}
@@ -6341,7 +4930,7 @@ export default function EstimateToolViewV2({
                             alt="Micro close"
                             className="w-full rounded-xs border border-zinc-900 aspect-square object-cover"
                           />{" "}
-                          <div className="text-11 text-zinc-900 text-center mt-0.5 font-medium uppercase tracking-label">
+                          <div className="text-14 text-zinc-900 text-center mt-0.5 font-medium uppercase tracking-label">
                             Micro
                           </div>{" "}
                         </div>
@@ -6354,7 +4943,7 @@ export default function EstimateToolViewV2({
                             alt="Ultra close"
                             className="w-full rounded-xs border border-zinc-900 aspect-square object-cover"
                           />{" "}
-                          <div className="text-11 text-zinc-900 text-center mt-0.5 font-medium uppercase tracking-label">
+                          <div className="text-14 text-zinc-900 text-center mt-0.5 font-medium uppercase tracking-label">
                             Ultra
                           </div>{" "}
                         </div>
@@ -6367,7 +4956,7 @@ export default function EstimateToolViewV2({
                             alt="Super close"
                             className="w-full rounded-xs border-hairline border-zinc-300 aspect-square object-cover"
                           />{" "}
-                          <div className="text-11 text-ink-tertiary text-center mt-0.5 uppercase tracking-label">
+                          <div className="text-14 text-ink-tertiary text-center mt-0.5 uppercase tracking-label">
                             Detail
                           </div>{" "}
                         </div>
@@ -6379,7 +4968,7 @@ export default function EstimateToolViewV2({
                           alt="Close view"
                           className="w-full rounded-xs border-hairline border-zinc-300 aspect-square object-cover"
                         />{" "}
-                        <div className="text-11 text-ink-tertiary text-center mt-0.5 uppercase tracking-label">
+                        <div className="text-14 text-ink-tertiary text-center mt-0.5 uppercase tracking-label">
                           Property
                         </div>{" "}
                       </div>
@@ -6391,14 +4980,14 @@ export default function EstimateToolViewV2({
                             alt="Area view"
                             className="w-full rounded-xs border-hairline border-zinc-300 aspect-square object-cover"
                           />{" "}
-                          <div className="text-11 text-ink-tertiary text-center mt-0.5 uppercase tracking-label">
+                          <div className="text-14 text-ink-tertiary text-center mt-0.5 uppercase tracking-label">
                             Area
                           </div>{" "}
                         </div>
                       )}
                     </div>
                     {satelliteData.aiSources?.length > 0 && (
-                      <div className="text-11 text-ink-secondary mb-1">
+                      <div className="text-14 text-ink-secondary mb-1">
                         AI Analysis: {formatAiSources(satelliteData.aiSources)}{" "}
                         {satelliteData.aiSources.length > 1
                           ? "(multi-model)"
@@ -6406,12 +4995,12 @@ export default function EstimateToolViewV2({
                       </div>
                     )}
                     {satelliteData.aiWarnings?.length > 0 && (
-                      <div className="text-11 text-alert-fg mb-1">
+                      <div className="text-14 text-alert-fg mb-1">
                         {satelliteData.aiWarnings.join(" ")}
                       </div>
                     )}
                     {satelliteData.fieldVerify?.length > 0 && (
-                      <div className="text-12 text-alert-fg font-medium px-3 py-1.5 bg-alert-bg rounded-xs">
+                      <div className="text-14 text-alert-fg font-medium px-3 py-1.5 bg-alert-bg rounded-xs">
                         Field verify:{" "}
                         {satelliteData.fieldVerify
                           .map((f) =>
@@ -6423,7 +5012,7 @@ export default function EstimateToolViewV2({
                       </div>
                     )}
                     {satelliteData.notes && (
-                      <div className="text-11 text-ink-tertiary mt-1 italic">
+                      <div className="text-14 text-ink-tertiary mt-1 italic">
                         {satelliteData.notes}
                       </div>
                     )}
@@ -6455,7 +5044,7 @@ export default function EstimateToolViewV2({
                   ]}
                 />{" "}
               </FieldV2>{" "}
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <FieldV2 label="Commercial">
                   <SelectV2
                     k="isCommercial"
@@ -6565,7 +5154,7 @@ export default function EstimateToolViewV2({
                 </FieldV2>
               )}
               {commercialDetected && (
-                <div className="mb-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-12 text-alert-fg">
+                <div className="mb-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-14 text-alert-fg">
                   {COMMERCIAL_WARNING_TEXT}
                   <div className="mt-2">
                     <Button
@@ -6584,7 +5173,7 @@ export default function EstimateToolViewV2({
                   </div>
                 </div>
               )}
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {" "}
                 <FieldV2 label="Home Sq Ft">
                   <InputV2 k="homeSqFt" type="number" placeholder="2000" />
@@ -6593,7 +5182,7 @@ export default function EstimateToolViewV2({
                   {" "}
                   <InputV2 k="stories" type="number" min="1" max="4" />
                   {enrichedProfile?.storiesSource === "default" && (
-                    <div className="mt-1 text-11 text-alert-fg">
+                    <div className="mt-1 text-14 text-alert-fg">
                       Verify stories — no data source confirmed a floor count.
                       Defaulted to 1; a 2-story home priced here would
                       under-charge.
@@ -6606,7 +5195,7 @@ export default function EstimateToolViewV2({
               </FieldV2>
               <FieldV2 label="Units on parcel">
                 <InputV2 k="unitCount" type="number" min="1" max="2000" placeholder="1" />
-                <div className="mt-1 text-11 opacity-70">
+                <div className="mt-1 text-14 opacity-70">
                   Whole-parcel total. Corrects a wrong lookup count (e.g. a
                   single condo unit read as the whole building) when saved as
                   verified.
@@ -6616,7 +5205,7 @@ export default function EstimateToolViewV2({
                     type="button"
                     onClick={saveVerifiedUnitCount}
                     disabled={unitSaveState === "saving" || unitSaveState === "saved"}
-                    className="mt-1 text-12 underline text-zinc-900 disabled:no-underline disabled:text-zinc-500"
+                    className="mt-1 text-14 underline text-zinc-900 disabled:no-underline disabled:text-zinc-500"
                   >
                     {unitSaveState === "saving"
                       ? "Saving verified count…"
@@ -6631,7 +5220,7 @@ export default function EstimateToolViewV2({
               {(form.svcTs || form.svcInjection) && (
                 <>
                   {" "}
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {" "}
                     {form.svcTs && (
                       <FieldV2 label="Bed Area (sq ft)">
@@ -6652,7 +5241,7 @@ export default function EstimateToolViewV2({
                     </FieldV2>
                   )}{" "}
                   {form.svcTs && !commercialDetected && (
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       {/* Residential only: the commercial ornamental pricer
                           has a fixed cadence and no access term, so these
                           would be inert there. Tier names are application
@@ -6757,7 +5346,7 @@ export default function EstimateToolViewV2({
                   />
                 </FieldV2>{" "}
               </div>{" "}
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {" "}
                 <FieldV2 label="Near Water">
                   <SelectV2
@@ -6779,7 +5368,7 @@ export default function EstimateToolViewV2({
                   />
                 </FieldV2>{" "}
               </div>{" "}
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {" "}
                 <FieldV2 label="After Hours">
                   <SelectV2
@@ -6804,21 +5393,23 @@ export default function EstimateToolViewV2({
                 </FieldV2>{" "}
               </div>{" "}
             </div>
+            </section>
             {/* Services */}
-            <div>
+            <section id="estimate-services" className="estimate-workflow-section" aria-label="Services">
+              <h2 className="text-20 font-semibold mb-4">Services</h2>
               {" "}
               <PanelTitle>Services to Quote</PanelTitle>{" "}
               <SubGroupLabel>Recurring Programs</SubGroupLabel>{" "}
               <CheckboxV2 k="svcLawn" label="Lawn Care" />
               {form.svcLawn && commercialDetected && (
-                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 text-12 text-zinc-600">
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 text-14 text-zinc-600">
                   Commercial turf treatment is auto-priced (estimated — confirmed on site). Residential lawn pricing is suppressed.
                 </div>
               )}
               {form.svcLawn && !commercialDetected && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <FieldV2 label="Grass Type / Track" className="mb-0">
                       {" "}
                       <SelectV2
@@ -6860,13 +5451,13 @@ export default function EstimateToolViewV2({
                         label="Bermudagrass suppression add-on (baked into per-application price)"
                       />
                       {form.bermudaSuppression && !bermudaSuppressionAvailable && (
-                        <div className="ml-7 mb-1 text-12 text-zinc-600">
+                        <div className="ml-7 mb-1 text-14 text-zinc-600">
                           This add-on is currently disabled (GATE_BERMUDA_SUPPRESSION) — uncheck it
                           to reprice, send, or accept this estimate without it.
                         </div>
                       )}
                       {form.bermudaSuppression && (
-                        <div className="ml-7 mb-1 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 text-12 text-zinc-600">
+                        <div className="ml-7 mb-1 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 text-14 text-zinc-600">
                           Recognition + Fusilade II tank mix under the FL 2(ee) — max 2 applications
                           per growing season, spring only. Verify before quoting: cultivar
                           (ProVista/Captiva excluded; Seville do-not-treat; CitraBlue or unknown
@@ -6886,10 +5477,10 @@ export default function EstimateToolViewV2({
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
                   <div className="flex items-center justify-between gap-3 mb-2">
-                    <div className="text-12 font-medium text-zinc-900">
+                    <div className="text-14 font-medium text-zinc-900">
                       Treatable Lawn Area
                     </div>
-                    <Badge variant="neutral" className="text-10 u-nums">
+                    <Badge variant="neutral" className="text-14 u-nums">
                       {aiTurfSqFt > 0 ? `AI ${formatSqFt(aiTurfSqFt)}` : lotEstimateTurfSqFt > 0 ? `Lot est. ${formatSqFt(lotEstimateTurfSqFt)}` : "AI 0 sf"}
                     </Badge>
                   </div>
@@ -6910,7 +5501,7 @@ export default function EstimateToolViewV2({
                         type="button"
                         variant="secondary"
                         size="sm"
-                        className="h-10 px-3 text-11"
+                        className="h-10 px-3 text-14"
                         onClick={() => set("measuredTurfSf", "")}
                       >
                         Clear
@@ -6926,7 +5517,7 @@ export default function EstimateToolViewV2({
                     onChange={(e) => set("measuredTurfSf", e.target.value)}
                     className="mt-3 w-full accent-zinc-900"
                   />
-                  <div className="mt-1 flex items-center justify-between text-11 text-ink-secondary">
+                  <div className="mt-1 flex items-center justify-between text-14 text-ink-secondary">
                     <span>0 sf</span>
                     <span className="font-medium text-zinc-900 u-nums">
                       {turfDisplaySource}:{" "}
@@ -6936,25 +5527,25 @@ export default function EstimateToolViewV2({
                   </div>
                   {enrichedProfile?.turfObservation === "unobservable" &&
                     confirmedTurfSqFt === null && (
-                      <div className="mt-2 text-11 text-amber-700">
+                      <div className="mt-2 text-14 text-amber-700">
                         Low confidence — satellite imagery appears to predate
                         construction, so this lot-based estimate is unverified.
                         Confirm sq ft before pricing.
                       </div>
                     )}
                   {needsTurfConfirmation && (
-                    <div className="mt-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-12 text-alert-fg">
+                    <div className="mt-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-14 text-alert-fg">
                       AI turf is over 20,000 sf. Confirm treatable lawn area
                       before generating lawn pricing.
                     </div>
                   )}
                   {!needsTurfConfirmation && showTurfReview && (
-                    <div className="mt-3 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                    <div className="mt-3 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900">
                       Review turf estimate: {turfReviewReasons.join(", ")}.
                     </div>
                   )}
                   {confirmedTurfSqFt !== null && confirmedTurfSqFt > 20000 && (
-                    <div className="mt-3 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                    <div className="mt-3 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900">
                       Confirmed turf is over 20,000 sf and will be marked for
                       custom quote review.
                     </div>
@@ -6963,14 +5554,14 @@ export default function EstimateToolViewV2({
               )}
               <CheckboxV2 k="svcPest" label="Pest Control" />
               {form.svcPest && commercialDetected && (
-                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 text-12 text-zinc-600">
+                <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 text-14 text-zinc-600">
                   Commercial pest is auto-priced (estimated — confirmed on site). Residential pest pricing is suppressed.
                 </div>
               )}
               {form.svcPest && !commercialDetected && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {" "}
                     <FieldV2 label="Frequency">
                       <SelectV2
@@ -7001,7 +5592,7 @@ export default function EstimateToolViewV2({
                   </div>{" "}
                   {form.roachModifier && form.roachModifier !== "NONE" && (
                     <>
-                      <div className="grid grid-cols-2 gap-3 mt-2">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2">
                         <FieldV2 label="One-Time Fee Override ($)">
                           <InputV2
                             k="roachFeeOverride"
@@ -7016,7 +5607,7 @@ export default function EstimateToolViewV2({
                       />
                     </>
                   )}
-                  <div className="text-11 text-ink-secondary mt-2">
+                  <div className="text-14 text-ink-secondary mt-2">
                     Adds a one-time Cockroach Treatment line to recurring pest. This is not a recurring per-visit multiplier.
                     {form.roachModifier && form.roachModifier !== "NONE"
                       ? " Leave the override blank to use the engine's footprint-bracket price."
@@ -7028,7 +5619,7 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcInjection" label="Palm Injection Service" />{" "}
               {form.svcInjection && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <FieldV2 label="Treatment Type">
                       <SelectV2 k="palmTreatmentType" options={PALM_TREATMENT_OPTIONS} />
                     </FieldV2>
@@ -7060,7 +5651,7 @@ export default function EstimateToolViewV2({
                     </FieldV2>
                   )}
                   {form.palmTreatmentType === "fungal" && (
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <FieldV2 label="Selected product">
                         <SelectV2
                           k="palmSelectedProduct"
@@ -7082,7 +5673,7 @@ export default function EstimateToolViewV2({
                     </FieldV2>
                   )}
                   {form.palmTreatmentType === "treeAge" && (
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <FieldV2 label="DBH inches">
                         <InputV2 k="palmDbhInches" type="number" placeholder="12" />
                       </FieldV2>
@@ -7104,7 +5695,7 @@ export default function EstimateToolViewV2({
                     <InputV2 k="palmCustomPricePerPalm" type="number" placeholder="Optional" />
                   </FieldV2>
                   {palmMeasurementWarning && (
-                    <div className="px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-12 text-alert-fg">
+                    <div className="px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-14 text-alert-fg">
                       {palmMeasurementWarning}
                     </div>
                   )}
@@ -7114,11 +5705,11 @@ export default function EstimateToolViewV2({
               {(form.svcMosquito || form.svcOnetimeMosquito) && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
-                  <div className="text-13 font-medium text-zinc-900 mb-2">
+                  <div className="text-14 font-medium text-zinc-900 mb-2">
                     Mosquito estimate
                   </div>{" "}
                   <div
-                    className={`grid ${form.svcMosquito ? "grid-cols-3" : "grid-cols-2"} gap-3`}
+                    className={`grid ${form.svcMosquito ? "grid-cols-1 sm:grid-cols-3" : "grid-cols-1 sm:grid-cols-2"} gap-3`}
                   >
                     {form.svcMosquito && (
                       <FieldV2 label="Program">
@@ -7158,11 +5749,11 @@ export default function EstimateToolViewV2({
                     </FieldV2>{" "}
                   </div>
                   {form.svcMosquito && (
-                    <div className="grid grid-cols-2 gap-3 mt-3 text-11 text-ink-secondary">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3 text-14 text-ink-secondary">
                       {" "}
                       <div className="bg-white border-hairline border-zinc-200 rounded-xs p-3">
                         {" "}
-                        <div className="text-12 font-medium text-zinc-900 mb-1">
+                        <div className="text-14 font-medium text-zinc-900 mb-1">
                           Seasonal Program
                         </div>
                         9 applications during mosquito season, roughly every 21
@@ -7170,7 +5761,7 @@ export default function EstimateToolViewV2({
                       </div>{" "}
                       <div className="bg-white border-hairline border-zinc-200 rounded-xs p-3">
                         {" "}
-                        <div className="text-12 font-medium text-zinc-900 mb-1">
+                        <div className="text-14 font-medium text-zinc-900 mb-1">
                           Monthly Program
                         </div>
                         12 applications year-round. Recommended for heavy tree
@@ -7183,10 +5774,10 @@ export default function EstimateToolViewV2({
                       {" "}
                       <div className="flex items-center justify-between gap-3 mb-2">
                         {" "}
-                        <div className="text-12 font-medium text-zinc-900">
+                        <div className="text-14 font-medium text-zinc-900">
                           Mosquito Protocol
                         </div>{" "}
-                        <Badge variant="neutral" className="text-10">
+                        <Badge variant="neutral" className="text-14">
                           Estimate reference
                         </Badge>{" "}
                       </div>{" "}
@@ -7194,10 +5785,10 @@ export default function EstimateToolViewV2({
                         {MOSQUITO_PROTOCOL_STEPS.map((step, index) => (
                           <div
                             key={step}
-                            className="flex gap-2 text-11 leading-snug text-ink-secondary"
+                            className="flex gap-2 text-14 leading-snug text-ink-secondary"
                           >
                             {" "}
-                            <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-zinc-300 text-10 font-medium text-zinc-700">
+                            <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-zinc-300 text-14 font-medium text-zinc-700">
                               {index + 1}
                             </span>{" "}
                             <span>{step}</span>{" "}
@@ -7209,7 +5800,7 @@ export default function EstimateToolViewV2({
                   {mosquitoRecommendations.length > 0 && (
                     <div className="mt-3 bg-zinc-50 border-hairline border-zinc-300 rounded-xs p-3">
                       {" "}
-                      <div className="text-12 font-medium text-zinc-900 mb-2">
+                      <div className="text-14 font-medium text-zinc-900 mb-2">
                         Field Recommendations
                       </div>{" "}
                       <div className="grid gap-2">
@@ -7221,10 +5812,10 @@ export default function EstimateToolViewV2({
                             {" "}
                             <div>
                               {" "}
-                              <div className="text-12 font-medium text-zinc-900">
+                              <div className="text-14 font-medium text-zinc-900">
                                 {recommendation.label}
                               </div>{" "}
-                              <div className="text-11 text-ink-secondary leading-snug">
+                              <div className="text-14 text-ink-secondary leading-snug">
                                 {recommendation.detail}
                               </div>{" "}
                             </div>{" "}
@@ -7232,7 +5823,7 @@ export default function EstimateToolViewV2({
                               type="button"
                               variant="secondary"
                               size="sm"
-                              className="h-7 shrink-0 px-2 text-11"
+                              className="h-7 shrink-0 px-2 text-14"
                               onClick={() =>
                                 applyMosquitoRecommendation(recommendation)
                               }
@@ -7249,7 +5840,7 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcTermiteBait" label="Termite Bait Stations" />{" "}
               <CheckboxV2 k="svcRodentBait" label="Rodent Bait Station" />
               {livePreview.recurringCount > 0 && (
-                <div className="mt-3 mb-1.5 px-3 py-2 rounded-xs bg-zinc-50 border-hairline border-zinc-300 text-12 text-zinc-900">
+                <div className="mt-3 mb-1.5 px-3 py-2 rounded-xs bg-zinc-50 border-hairline border-zinc-300 text-14 text-zinc-900">
                   {livePreview.recurringCount} service
                   {livePreview.recurringCount > 1 ? "s" : ""} selected →{" "}
                   <strong>{livePreview.tier.name}</strong>
@@ -7259,7 +5850,7 @@ export default function EstimateToolViewV2({
                 </div>
               )}
               {livePreview.commercialManualQuoteCount > 0 && (
-                <div className="mt-3 mb-1.5 px-3 py-2 rounded-xs bg-alert-bg border-hairline border-alert-fg text-12 text-alert-fg">
+                <div className="mt-3 mb-1.5 px-3 py-2 rounded-xs bg-alert-bg border-hairline border-alert-fg text-14 text-alert-fg">
                   {livePreview.commercialManualQuoteCount} commercial selection
                   {livePreview.commercialManualQuoteCount > 1 ? "s" : ""} (mosquito / termite) set to manual quote.
                 </div>
@@ -7288,7 +5879,7 @@ export default function EstimateToolViewV2({
               {form.svcPlugging && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {" "}
                     <FieldV2 label="Plug Area (sq ft)">
                       <InputV2
@@ -7321,7 +5912,7 @@ export default function EstimateToolViewV2({
                       placeholder="Blank = est. lawn"
                     />
                   </FieldV2>{" "}
-                  <div className="mt-1 text-11 text-zinc-500">
+                  <div className="mt-1 text-14 text-zinc-500">
                     Optional — enter sq ft for just the front or back yard.
                     Leave blank to auto-estimate from the property's lawn area.
                   </div>{" "}
@@ -7337,7 +5928,7 @@ export default function EstimateToolViewV2({
               />{" "}
               {form.svcDethatch && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <FieldV2 label="Lawn Sq Ft Used">
                       <input
                         type="text"
@@ -7393,22 +5984,22 @@ export default function EstimateToolViewV2({
                     </FieldV2>
                   </div>
                   {form.dethatchingCleanupLevel === "none" && !form.dethatchingDebrisRemovalIncluded && (
-                    <div className="mt-2 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                    <div className="mt-2 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900">
                       Base price does not include bagging or debris hauling.
                     </div>
                   )}
                   {(form.dethatchingCleanupLevel === "moderate" || form.dethatchingCleanupLevel === "heavy" || form.dethatchingDebrisRemovalIncluded) && (
-                    <div className="mt-2 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                    <div className="mt-2 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900">
                       Cleanup/debris removal included.
                     </div>
                   )}
                   {isDethatchingStAugustine && (
-                    <div className="mt-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-12 text-alert-fg">
+                    <div className="mt-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-14 text-alert-fg">
                       Manager approval required. Dethatching St. Augustine / Floratam can damage stolons.
                     </div>
                   )}
                   {isDethatchingStAugustine && (
-                    <div className="grid grid-cols-2 gap-3 mt-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
                       <FieldV2 label="Manager Approval Reason">
                         <SelectV2
                           k="dethatchingManagerApprovalReason"
@@ -7436,20 +6027,20 @@ export default function EstimateToolViewV2({
               {hasAnyTermiteSelection && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
-                  <div className="text-12 font-medium text-zinc-900 mb-2">
+                  <div className="text-14 font-medium text-zinc-900 mb-2">
                     Termite Measurements
                   </div>
-                  <div className="text-11 text-ink-secondary mb-3">
+                  <div className="text-14 text-ink-secondary mb-3">
                     Manual/admin-entered values override property lookup.
                   </div>
                   {termiteMeasurementWarnings.length > 0 && (
-                    <div className="mb-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-12 text-alert-fg">
+                    <div className="mb-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-14 text-alert-fg">
                       {termiteMeasurementWarnings.join(" ")}
                     </div>
                   )}
                   {form.svcTermiteBait && (
                     <>
-                      <div className="grid grid-cols-2 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <FieldV2 label="Footprint Sq Ft">
                           <InputV2
                             k="termiteFootprintSqFt"
@@ -7581,7 +6172,7 @@ export default function EstimateToolViewV2({
                           />
                         </FieldV2>
                       </div>
-                      <div className="grid grid-cols-2 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <FieldV2 label="Perimeter LF">
                           <InputV2
                             k="trenchingPerimeterLF"
@@ -7597,7 +6188,7 @@ export default function EstimateToolViewV2({
                           />
                         </FieldV2>
                       </div>
-                      <div className="grid grid-cols-2 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <FieldV2 label="Dirt Trench LF">
                           <InputV2
                             k="trenchingDirtLF"
@@ -7621,11 +6212,11 @@ export default function EstimateToolViewV2({
                         k="trenchingLabelConfirmed"
                         label="Label rate and trench depth confirmed"
                       />
-                      <div className="text-12 text-zinc-600 leading-snug mb-1">
+                      <div className="text-14 text-zinc-600 leading-snug mb-1">
                         {(TRENCHING_PRODUCT_META[form.trenchingProductKey] || TRENCHING_PRODUCT_META.taurus_sc).warning}
                         {form.trenchingApplicationRate === "high" ? " High rate requires label confirmation." : ""}
                       </div>
-                      <div className="text-11 text-zinc-500 leading-snug">
+                      <div className="text-14 text-zinc-500 leading-snug">
                         Admin config: {(TRENCHING_PRODUCT_META[form.trenchingProductKey] || TRENCHING_PRODUCT_META.taurus_sc).config}
                       </div>
                     </>
@@ -7663,7 +6254,7 @@ export default function EstimateToolViewV2({
                           options={PRE_SLAB_PRODUCT_OPTIONS}
                         />
                       </FieldV2>
-                      <div className="grid grid-cols-2 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         {" "}
                         <FieldV2 label="Slab Sq Ft">
                           <InputV2
@@ -7703,10 +6294,10 @@ export default function EstimateToolViewV2({
                         k="preslabLabelConfirmed"
                         label="Label rate and finished dilution confirmed"
                       />
-                      <div className="text-12 text-zinc-600 leading-snug mb-1">
+                      <div className="text-14 text-zinc-600 leading-snug mb-1">
                         Certificate of Compliance required. {(PRE_SLAB_PRODUCT_META[form.preslabProductKey] || PRE_SLAB_PRODUCT_META.termidor_sc).warning}
                       </div>
-                      <div className="text-11 text-zinc-500 leading-snug">
+                      <div className="text-14 text-zinc-500 leading-snug">
                         Admin config: {(PRE_SLAB_PRODUCT_META[form.preslabProductKey] || PRE_SLAB_PRODUCT_META.termidor_sc).config}
                       </div>
                     </>
@@ -7758,7 +6349,7 @@ export default function EstimateToolViewV2({
                       ]}
                     />{" "}
                   </FieldV2>{" "}
-                  <div className="text-11 text-zinc-500 leading-snug mt-2">
+                  <div className="text-14 text-zinc-500 leading-snug mt-2">
                     Per-visit rate is discounted off the one-time price by cadence. Standalone — does not count toward WaveGuard tier.
                   </div>
                 </div>
@@ -7770,7 +6361,7 @@ export default function EstimateToolViewV2({
               {form.svcFlea && (
                 <div className="ml-7 mb-3 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   <div className="mb-3">
-                    <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-2">
+                    <div className="text-14 font-medium text-ink-secondary uppercase tracking-label mb-2">
                       Infestation / prep complexity
                     </div>
                     <div className="flex flex-wrap gap-1.5">
@@ -7782,7 +6373,7 @@ export default function EstimateToolViewV2({
                             type="button"
                             onClick={() => set("fleaComplexity", option.value)}
                             className={cn(
-                              "h-8 px-2.5 rounded-sm border-hairline text-11 font-medium u-focus-ring",
+                              "h-8 px-2.5 rounded-sm border-hairline text-14 font-medium u-focus-ring",
                               active
                                 ? "bg-zinc-900 border-zinc-900 text-white"
                                 : "bg-white border-zinc-300 text-zinc-700 hover:bg-zinc-100",
@@ -7795,7 +6386,7 @@ export default function EstimateToolViewV2({
                       })}
                     </div>
                   </div>
-                  <label className="flex items-start gap-2.5 mb-3 cursor-pointer text-12 text-zinc-900 select-none">
+                  <label className="flex items-start gap-2.5 mb-3 cursor-pointer text-14 text-zinc-900 select-none">
                     <input
                       type="checkbox"
                       checked={!!form.fleaExteriorSourceSuspected}
@@ -7813,26 +6404,26 @@ export default function EstimateToolViewV2({
                     />
                     Add exterior flea treatment
                   </label>
-                  <div className="mb-3 text-11 text-ink-secondary leading-snug">
+                  <div className="mb-3 text-14 text-ink-secondary leading-snug">
                     Exterior treatment focuses on likely flea zones such as shaded pet areas, fence lines, under decks, foundation edges, and landscape beds.
                   </div>
                   {form.svcFleaExterior && (
                     <>
                       <div className="flex items-center justify-between gap-3 mb-2">
                         <div>
-                          <div className="text-12 font-medium text-zinc-900">
+                          <div className="text-14 font-medium text-zinc-900">
                             Treatable Lawn Area
                           </div>
-                          <div className="mt-0.5 text-11 text-ink-secondary leading-snug">
+                          <div className="mt-0.5 text-14 text-ink-secondary leading-snug">
                             Price exterior flea treatment based on treatable turf and yard area, not the full property lot.
                           </div>
                         </div>
-                        <Badge variant="neutral" className="text-10 u-nums">
+                        <Badge variant="neutral" className="text-14 u-nums">
                           Max {fleaExteriorMaxSqFt.toLocaleString()} sf
                         </Badge>
                       </div>
                       <div className="mb-3">
-                        <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-2">
+                        <div className="text-14 font-medium text-ink-secondary uppercase tracking-label mb-2">
                           Area source
                         </div>
                         <div className="flex flex-wrap gap-1.5">
@@ -7844,7 +6435,7 @@ export default function EstimateToolViewV2({
                                 type="button"
                                 onClick={() => set("fleaExteriorAreaSource", option.value)}
                                 className={cn(
-                                  "h-8 px-2.5 rounded-sm border-hairline text-11 font-medium u-focus-ring",
+                                  "h-8 px-2.5 rounded-sm border-hairline text-14 font-medium u-focus-ring",
                                   active
                                     ? "bg-zinc-900 border-zinc-900 text-white"
                                     : "bg-white border-zinc-300 text-zinc-700 hover:bg-zinc-100",
@@ -7882,7 +6473,7 @@ export default function EstimateToolViewV2({
                         className="mt-3 w-full accent-zinc-900"
                       />
                       <div
-                        className="mt-1 grid gap-1 text-10 text-ink-secondary"
+                        className="mt-1 grid gap-1 text-14 text-ink-secondary"
                         style={{ gridTemplateColumns: `repeat(${fleaExteriorSliderMarks.length}, minmax(0, 1fr))` }}
                       >
                         {fleaExteriorSliderMarks.map((mark, index) => (
@@ -7899,46 +6490,46 @@ export default function EstimateToolViewV2({
                           </span>
                         ))}
                       </div>
-                      <div className="mt-2 text-12 text-zinc-900 u-nums">
+                      <div className="mt-2 text-14 text-zinc-900 u-nums">
                         Using {fleaExteriorSourceLabel(fleaExteriorAreaSource)}:{" "}
                         {formatSqFt(fleaExteriorAreaSqFt)}
                       </div>
                       <div className="mt-3 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs">
-                        <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-1">
+                        <div className="text-14 font-medium text-ink-secondary uppercase tracking-label mb-1">
                           Exterior flea add-on
                         </div>
                         {fleaExteriorPreview.priceable ? (
-                          <div className="text-13 text-zinc-900 u-nums">
+                          <div className="text-14 text-zinc-900 u-nums">
                             ${fleaExteriorPreview.initial} initial + ${fleaExteriorPreview.followUp} follow-up = ${fleaExteriorPreview.total} total
                           </div>
                         ) : fleaExteriorPreview.configUnavailable ? (
-                          <div className="text-13 text-zinc-900">
+                          <div className="text-14 text-zinc-900">
                             Exterior flea pricing config is unavailable.
                           </div>
                         ) : fleaExteriorPreview.customQuote ? (
-                          <div className="text-13 text-zinc-900">
+                          <div className="text-14 text-zinc-900">
                             {(fleaExteriorPreview.maxSqFt || fleaExteriorMaxSqFt).toLocaleString()}+ sf. Custom quote required.
                           </div>
                         ) : (
-                          <div className="text-13 text-zinc-900">
+                          <div className="text-14 text-zinc-900">
                             Pricing needs a confirmed treatable lawn area.
                           </div>
                         )}
                       </div>
                       {fleaExteriorWarning && (
-                        <div className="mt-3 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-12 text-zinc-900">
+                        <div className="mt-3 px-3 py-2 bg-white border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900">
                           {fleaExteriorWarning}
                         </div>
                       )}
                       <div className="mt-3">
-                        <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-2">
+                        <div className="text-14 font-medium text-ink-secondary uppercase tracking-label mb-2">
                           Exterior treatment zones
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                           {FLEA_EXTERIOR_ZONES.map((zone) => (
                             <label
                               key={zone.value}
-                              className="flex items-center gap-2 text-12 text-zinc-900 cursor-pointer select-none"
+                              className="flex items-center gap-2 text-14 text-zinc-900 cursor-pointer select-none"
                             >
                               <input
                                 type="checkbox"
@@ -7959,7 +6550,7 @@ export default function EstimateToolViewV2({
               {form.svcRoach && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
-                  <div className="text-12 font-medium text-zinc-900 mb-2">
+                  <div className="text-14 font-medium text-zinc-900 mb-2">
                     Standalone / Specialty Services
                   </div>
                   <FieldV2 label="Service Type" className="mb-0">
@@ -7988,7 +6579,7 @@ export default function EstimateToolViewV2({
                     </FieldV2>
                   )}
                   {form.roachType === "GERMAN" && (
-                    <div className="text-11 text-ink-secondary mt-2">
+                    <div className="text-14 text-ink-secondary mt-2">
                       German Roach Cleanout is a separate specialty program, not the German version of native cockroach treatment.
                     </div>
                   )}
@@ -7999,7 +6590,7 @@ export default function EstimateToolViewV2({
                       // so an override typed here would price nothing. Point at
                       // the field that does apply instead of showing an inert
                       // input (codex P2 r2 #3223).
-                      <div className="text-11 text-ink-secondary mt-2">
+                      <div className="text-14 text-ink-secondary mt-2">
                         Covered by the recurring pest roach knockdown — this
                         standalone line is skipped. Use the One-Time Fee
                         Override under Pest Control's Roach Activity instead.
@@ -8013,7 +6604,7 @@ export default function EstimateToolViewV2({
                             placeholder="Engine price"
                           />
                         </FieldV2>
-                        <div className="text-11 text-ink-secondary mt-2">
+                        <div className="text-14 text-ink-secondary mt-2">
                           Leave blank to use the engine's footprint-bracket
                           price.
                         </div>
@@ -8025,12 +6616,36 @@ export default function EstimateToolViewV2({
                     ))}
                 </div>
               )}
-              <CheckboxV2 k="svcWasp" label="Bee / Wasp Nest Removal Service" />{" "}
+              <CheckboxV2 k="svcWasp" label="Bee / Wasp Nest Removal Service" />
+              {form.svcWasp && <div className="ml-7 mb-4 grid grid-cols-1 sm:grid-cols-2 gap-x-3">
+                <FieldV2 label="Species"><SelectV2 k="stingSpecies" options={[
+                  { value: "PAPER_WASP", label: "Paper wasps" }, { value: "YJ_AERIAL", label: "Yellow jackets — aerial" },
+                  { value: "YJ_GROUND", label: "Yellow jackets — ground" }, { value: "MUD_DAUBER", label: "Mud daubers" },
+                  { value: "HONEYBEE_NEW", label: "Honeybees — new colony" }, { value: "HONEYBEE_EST", label: "Honeybees — established" },
+                  { value: "CARPENTER", label: "Carpenter bees" }, { value: "BALDFACED", label: "Baldfaced hornets" },
+                  { value: "AFRICANIZED", label: "Africanized bees" },
+                ]} /></FieldV2>
+                <FieldV2 label="Scope tier"><SelectV2 k="stingTier" options={[1, 2, 3, 4].map((tier) => ({ value: String(tier), label: `Tier ${tier}` }))} /></FieldV2>
+                <FieldV2 label="Nest removal"><SelectV2 k="stingRemoval" options={[
+                  { value: "NONE", label: "No removal" }, { value: "SMALL", label: "Small nest" },
+                  { value: "LARGE", label: "Large comb" }, { value: "HONEYCOMB", label: "Honeycomb extraction" },
+                  { value: "RELOCATE", label: "Live bee relocation" },
+                ]} /></FieldV2>
+                <FieldV2 label="Aggressiveness"><SelectV2 k="stingAggressive" options={[
+                  { value: "NO", label: "None" }, { value: "MILD", label: "Mild" }, { value: "HIGH", label: "High" }, { value: "EXTREME", label: "Extreme" },
+                ]} /></FieldV2>
+                <FieldV2 label="Access height"><SelectV2 k="stingHeight" options={[
+                  { value: "GROUND", label: "Ground" }, { value: "MID", label: "Mid-level" }, { value: "HIGH", label: "High" },
+                ]} /></FieldV2>
+                <FieldV2 label="Confined space"><SelectV2 k="stingConfined" options={[
+                  { value: "NO", label: "No" }, { value: "YES", label: "Yes" },
+                ]} /></FieldV2>
+              </div>}
               <CheckboxV2 k="svcBedbug" label="Bed Bug Treatment Service" />
               {form.svcBedbug && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {" "}
                     <FieldV2 label="Rooms">
                       <InputV2 k="bedbugRooms" type="number" min="1" max="10" />
@@ -8114,7 +6729,7 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcRodentTrap" label="Rodent Trapping Service" />{" "}
               {form.svcRodentTrap && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
-                  <div className="text-12 text-zinc-600 mb-3">
+                  <div className="text-14 text-zinc-600 mb-3">
                     Standard plan — $350 flat, unlimited callbacks/checks for the active trapping job.
                   </div>
                   <CheckboxV2 k="rodentTrappingEmergency" label="Emergency surcharge" />
@@ -8123,7 +6738,7 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcTrapOnlyRetainer" label="Customer declined exclusion / trap-only monitoring" />
               {form.svcTrapOnlyRetainer && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <FieldV2 label="Retainer Plan">
                       <SelectV2
                         k="trapOnlyRetainerPlan"
@@ -8153,7 +6768,7 @@ export default function EstimateToolViewV2({
                       <CheckboxV2 k="trapOnlyAttachedToCompletedTrappingJob" label="Attached to completed trapping job (waive setup)" />
                     </div>
                   </div>
-                  <div className="text-12 text-zinc-600 mt-2">
+                  <div className="text-14 text-zinc-600 mt-2">
                     Trap-only monitoring is not a rodent guarantee because exclusion was declined.
                   </div>
                 </div>
@@ -8163,7 +6778,7 @@ export default function EstimateToolViewV2({
               {form.svcRodentSanitation && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
                   {" "}
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {" "}
                     <FieldV2 label="Tier">
                       <SelectV2
@@ -8202,8 +6817,8 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcExclusion" label="Rodent Exclusion Service" />
               {form.svcExclusion && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200 space-y-3">
-                  <p className="text-[11px] tracking-label uppercase text-zinc-400 font-medium">Wire Mesh Points</p>
-                  <div className="grid grid-cols-2 gap-3">
+                  <p className="text-14 tracking-label uppercase text-zinc-400 font-medium">Wire Mesh Points</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <FieldV2 label="Standard — $75/pt">
                       <InputV2 k="exclStandardWireMesh" type="number" min="0" />
                     </FieldV2>
@@ -8211,7 +6826,7 @@ export default function EstimateToolViewV2({
                       <InputV2 k="exclAdvancedWireMesh" type="number" min="0" />
                     </FieldV2>
                   </div>
-                  <p className="text-[11px] tracking-label uppercase text-zinc-400 font-medium">Bird Boxes</p>
+                  <p className="text-14 tracking-label uppercase text-zinc-400 font-medium">Bird Boxes</p>
                   <div className="grid grid-cols-3 gap-3">
                     <FieldV2 label="Standard — $150">
                       <InputV2 k="exclStandardBirdBox" type="number" min="0" />
@@ -8223,8 +6838,8 @@ export default function EstimateToolViewV2({
                       <InputV2 k="exclCustomBirdBox" type="number" min="0" />
                     </FieldV2>
                   </div>
-                  <p className="text-[11px] tracking-label uppercase text-zinc-400 font-medium">Linear Mesh (LF)</p>
-                  <div className="grid grid-cols-2 gap-3">
+                  <p className="text-14 tracking-label uppercase text-zinc-400 font-medium">Linear Mesh (LF)</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <FieldV2 label="Soft material — $14/LF">
                       <InputV2 k="exclMeshSoftLF" type="number" min="0" />
                     </FieldV2>
@@ -8246,19 +6861,70 @@ export default function EstimateToolViewV2({
               <CheckboxV2 k="svcRodentGuarantee" label="Rodent Guarantee Service" />
               {form.svcRodentGuarantee && (
                 <div className="ml-7 mb-2 p-3 bg-zinc-50 rounded-xs border-hairline border-zinc-200">
-                  <p className="text-[11px] tracking-label uppercase text-zinc-400 font-medium mb-2">
+                  <p className="text-14 tracking-label uppercase text-zinc-400 font-medium mb-2">
                     Guarantee Eligibility — all four required
                   </p>
                   <CheckboxV2 k="rgTrappingCompleted" label="Trapping completed" />
                   <CheckboxV2 k="rgExclusionCompleted" label="Exclusion completed" />
                   <CheckboxV2 k="rgSanitationBaseline" label="Sanitation completed or photo baseline on file" />
                   <CheckboxV2 k="rgNoActivityAfterFinalCheck" label="No activity after final trap check" />
-                  <div className="text-12 text-zinc-600 mt-2">
+                  <div className="text-14 text-zinc-600 mt-2">
                     $199–$299/yr by property tier. 12-month re-entry warranty, renewable annually — free re-service during the term. All four boxes must be confirmed or the guarantee will not be added.
                   </div>
                 </div>
               )}
-            </div>
+            </section>
+            <section id="estimate-pricing" className="estimate-workflow-section space-y-4" aria-label="Pricing and terms">
+            <h2 className="text-20 font-semibold">Pricing & terms</h2>
+            <label className="block text-14 font-medium">Customer-visible notes
+              <textarea className={`${INPUT_CLS} h-24 mt-2 py-2`} value={form.notes || ""} onChange={(event) => set("notes", event.target.value)} />
+            </label>
+            <p className="text-14 text-zinc-600">These notes appear on the customer estimate. Keep internal instructions in the lead activity record.</p>
+                <div className="mb-3 p-3 border-hairline border-zinc-300 rounded-xs bg-zinc-50">
+                  {" "}
+                  <div className="text-14 font-medium text-zinc-900 mb-2 uppercase tracking-label">
+                    Customer options
+                  </div>{" "}
+                  <label className="flex items-start gap-2 cursor-pointer text-14 text-zinc-900 select-none mb-2">
+                    {" "}
+                    <input
+                      type="checkbox"
+                      checked={form.showOneTimeOption || false}
+                      onChange={(e) =>
+                        setCustomerChoiceOption(e.target.checked)
+                      }
+                      className="accent-zinc-900 mt-0.5"
+                    />{" "}
+                    <span>
+                      {" "}
+                      <span className="font-medium">
+                        Offer one-time option
+                      </span>{" "}
+                      <span className="block text-14 text-ink-secondary">
+                        Customer sees a Recurring / One-time toggle for
+                        pest-only recurring estimates. Mixed service bundles
+                        should be sent without this option.
+                      </span>{" "}
+                    </span>{" "}
+                  </label>{" "}
+                  <label className="flex items-start gap-2 cursor-pointer text-14 text-zinc-900 select-none">
+                    {" "}
+                    <input
+                      type="checkbox"
+                      checked={form.billByInvoice || false}
+                      onChange={(e) => set("billByInvoice", e.target.checked)}
+                      className="accent-zinc-900 mt-0.5"
+                    />{" "}
+                    <span>
+                      {" "}
+                      <span className="font-medium">Bill by invoice</span>{" "}
+                      <span className="block text-14 text-ink-secondary">
+                        Skip onboarding / payment up front — create an invoice
+                        due immediately when the customer accepts.
+                      </span>{" "}
+                    </span>{" "}
+                  </label>{" "}
+                </div>{" "}
             {/* Manual / Custom Discount */}
             <div>
               {" "}
@@ -8293,12 +6959,12 @@ export default function EstimateToolViewV2({
                     (x) => x.discount_key === form.manualDiscountPreset,
                   );
                   return d?.description ? (
-                    <div className="text-11 text-ink-secondary -mt-1 mb-3">
+                    <div className="text-14 text-ink-secondary -mt-1 mb-3">
                       {d.description}
                     </div>
                   ) : null;
                 })()}
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {" "}
                 <FieldV2 label="Type">
                   {" "}
@@ -8341,7 +7007,7 @@ export default function EstimateToolViewV2({
                   </FieldV2>{" "}
                 </div>{" "}
               </div>{" "}
-              <div className="text-11 text-ink-tertiary mt-2">
+              <div className="text-14 text-ink-tertiary mt-2">
                 Applies after bundle/WaveGuard discounts to both recurring and
                 one-time services. Re-click Generate Estimate to recalculate.
               </div>{" "}
@@ -8356,7 +7022,7 @@ export default function EstimateToolViewV2({
                     return (
                       <label
                         key={credit.id || key}
-                        className="flex items-center justify-between gap-3 rounded-xs border-hairline border-zinc-300 bg-white px-3 py-2 text-12 text-zinc-900"
+                        className="flex items-center justify-between gap-3 rounded-xs border-hairline border-zinc-300 bg-white px-3 py-2 text-14 text-zinc-900"
                       >
                         <span>{credit.name}</span>
                         <input
@@ -8371,6 +7037,10 @@ export default function EstimateToolViewV2({
                 </div>
               </div>
             )}
+            </section>
+            <section id="estimate-review" className="estimate-workflow-section space-y-4" aria-label="Review and send">
+            <h2 className="text-20 font-semibold">Review & send</h2>
+            {saveError && <p role="alert" className="text-14 text-alert-fg">{saveError}</p>}
             {/* Action buttons */}
             <div
               className={cn(
@@ -8388,7 +7058,7 @@ export default function EstimateToolViewV2({
                 disabled={generateBusy}
                 variant="primary"
                 size="md"
-                className={cn("h-12", estimate ? "text-12" : "text-14")}
+                className={cn("h-12", estimate ? "text-14" : "text-14")}
               >
                 {generating
                   ? "Generating…"
@@ -8396,24 +7066,24 @@ export default function EstimateToolViewV2({
                     ? "Regenerate"
                     : "Generate Estimate"}
               </Button>{" "}
-              {estimate && editMode && (
+              {estimate && (
                 <Button
                   variant="secondary"
                   size="md"
-                  className="h-12 text-12"
+                  className="h-12 text-14"
                   disabled={generateBusy || saving}
                   onClick={() => doSave()}
                   title="Update the existing estimate — the customer's link shows the new quote without a resend"
                 >
-                  {saving ? "Saving…" : "Save changes"}
+                  {saving ? "Saving…" : editMode?.status === "sent" || editMode?.status === "viewed" ? "Save changes" : "Save draft"}
                 </Button>
               )}
               {estimate && (
                 <Button
                   variant="secondary"
                   size="md"
-                  className="h-12 text-12 gap-2"
-                  disabled={generateBusy}
+                  className="h-12 text-14 gap-2"
+                  disabled={generateBusy || saving || !savedId}
                   onClick={previewCustomerEstimate}
                   title="Open the customer-facing estimate in a new tab"
                 >
@@ -8424,286 +7094,19 @@ export default function EstimateToolViewV2({
               <Button
                 variant="secondary"
                 size="md"
-                className={cn("h-12", estimate ? "text-12" : "text-14")}
-                disabled={generateBusy}
-                onClick={async () => {
-                  if (estimate || (await doGenerate())) {
-                    setShowSendForm(true);
-                  }
-                }}
+                className={cn("h-12", estimate ? "text-14" : "text-14")}
+                disabled={generateBusy || !savedId}
+                onClick={reviewAndSend}
               >
-                {generating
-                  ? "Generating…"
-                  : estimate
-                    ? "Send"
-                    : "Send Estimate"}
+                Review and send
               </Button>{" "}
             </div>
-            {/* Send form */}
-            {showSendForm && (
-              <Card className="p-5 border-zinc-900">
-                {" "}
-                <PanelTitle>Send Estimate</PanelTitle>{" "}
-                {provisionalState.provisional && (
-                  <div className="mb-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs">
-                    <div className="text-12 font-medium text-alert-fg">
-                      Provisional estimate — {provisionalSummary(provisionalState)}.
-                    </div>
-                    <div className="text-11 text-ink-secondary mt-0.5">
-                      Pricing may change once verified on site. Confirm square
-                      footage, lot, stories, and property type in the property
-                      panel above (Save as field-verified) before sending a firm
-                      quote.
-                    </div>
-                  </div>
-                )}
-                <FieldV2 label="Customer Phone Number">
-                  {" "}
-                  <input
-                    type="tel"
-                    value={form.customerPhone || ""}
-                    onChange={async (e) => {
-                      const digits = normalizePhoneDigits(e.target.value);
-                      set("customerPhone", digits);
-                      // Every edit supersedes any in-flight lookup — bump the
-                      // sequence and abort the fetch so a slow response for a
-                      // previous number can never land on a newer one (a stale
-                      // match here means the quote texts a stranger).
-                      const seq = ++sendPhoneLookupSeqRef.current;
-                      if (sendPhoneLookupAbortRef.current) {
-                        sendPhoneLookupAbortRef.current.abort();
-                        sendPhoneLookupAbortRef.current = null;
-                      }
-                      // Only a complete number may fire the lookup — a 7-digit
-                      // prefix can match a same-exchange stranger.
-                      if (digits.length !== 10) return;
-                      const controller = new AbortController();
-                      sendPhoneLookupAbortRef.current = controller;
-                      try {
-                        const r = await fetch(
-                          `/api/admin/customers?search=${encodeURIComponent(digits)}&limit=1`,
-                          { headers: authHeaders, signal: controller.signal },
-                        );
-                        if (!r.ok || seq !== sendPhoneLookupSeqRef.current)
-                          return;
-                        const d = await r.json();
-                        if (seq !== sendPhoneLookupSeqRef.current) return;
-                        // A miss (c = null) must run the merge too: fields the
-                        // previous lookup filled would otherwise stay in place
-                        // and pair the old customer's name/email with the new
-                        // number on send. The merge clears owned fields on a
-                        // miss and never touches operator-entered ones.
-                        const c = (d.customers || d)?.[0] || null;
-                        setForm((f) => {
-                          const { updates, autoFill } = mergePhoneLookupMatch(
-                            f,
-                            c,
-                            sendPhoneAutoFillRef.current,
-                          );
-                          sendPhoneAutoFillRef.current = autoFill;
-                          return { ...f, ...updates };
-                        });
-                        // Contact fields feed the saved record — mirror the
-                        // CONTACT_FIELDS reset set() applies (saved snapshot
-                        // is stale; the generated estimate is not).
-                        setSavedId(null);
-                        setSavedViewUrl(null);
-                      } catch {
-                        /* aborted or failed lookup — never block typing */
-                      }
-                    }}
-                    placeholder="9415551234"
-                    className={cn(INPUT_CLS, "h-12 text-18 tracking-wider")}
-                  />{" "}
-                </FieldV2>
-                {form.customerName && (
-                  <div className="text-12 text-zinc-900 mb-3 px-3 py-2 bg-zinc-50 rounded-xs border-hairline border-zinc-300">
-                    Found: <strong>{form.customerName}</strong>
-                    {form.customerEmail ? ` · ${form.customerEmail}` : ""}
-                  </div>
-                )}
-                {!form.customerName && form.customerPhone?.length >= 7 && (
-                  <div className="mb-3 grid grid-cols-2 gap-2">
-                    {" "}
-                    <FieldV2 label="Name">
-                      {" "}
-                      <input
-                        type="text"
-                        value={form.customerName || ""}
-                        onChange={(e) => set("customerName", e.target.value)}
-                        placeholder="Full name"
-                        className={INPUT_CLS}
-                      />{" "}
-                    </FieldV2>{" "}
-                    <FieldV2 label="Email">
-                      {" "}
-                      <input
-                        type="email"
-                        value={form.customerEmail || ""}
-                        onChange={(e) => set("customerEmail", e.target.value)}
-                        placeholder="email@example.com"
-                        className={INPUT_CLS}
-                      />{" "}
-                    </FieldV2>{" "}
-                  </div>
-                )}
-                <div className="mb-3 p-3 border-hairline border-zinc-300 rounded-xs bg-zinc-50">
-                  {" "}
-                  <div className="text-11 font-medium text-zinc-900 mb-2 uppercase tracking-label">
-                    Customer options
-                  </div>{" "}
-                  <label className="flex items-start gap-2 cursor-pointer text-12 text-zinc-900 select-none mb-2">
-                    {" "}
-                    <input
-                      type="checkbox"
-                      checked={form.showOneTimeOption || false}
-                      onChange={(e) =>
-                        setCustomerChoiceOption(e.target.checked)
-                      }
-                      className="accent-zinc-900 mt-0.5"
-                    />{" "}
-                    <span>
-                      {" "}
-                      <span className="font-medium">
-                        Offer one-time option
-                      </span>{" "}
-                      <span className="block text-11 text-ink-secondary">
-                        Customer sees a Recurring / One-time toggle for
-                        pest-only recurring estimates. Mixed service bundles
-                        should be sent without this option.
-                      </span>{" "}
-                    </span>{" "}
-                  </label>{" "}
-                  <label className="flex items-start gap-2 cursor-pointer text-12 text-zinc-900 select-none">
-                    {" "}
-                    <input
-                      type="checkbox"
-                      checked={form.billByInvoice || false}
-                      onChange={(e) => set("billByInvoice", e.target.checked)}
-                      className="accent-zinc-900 mt-0.5"
-                    />{" "}
-                    <span>
-                      {" "}
-                      <span className="font-medium">Bill by invoice</span>{" "}
-                      <span className="block text-11 text-ink-secondary">
-                        Skip onboarding / payment up front — create an invoice
-                        due immediately when the customer accepts.
-                      </span>{" "}
-                    </span>{" "}
-                  </label>{" "}
-                </div>{" "}
-                <div className="flex items-center gap-2 mb-2 flex-wrap">
-                  {" "}
-                  <label className="flex items-center gap-2 cursor-pointer text-12 text-ink-secondary select-none">
-                    {" "}
-                    <input
-                      type="checkbox"
-                      checked={form.scheduleSend || false}
-                      onChange={(e) => set("scheduleSend", e.target.checked)}
-                      className="accent-zinc-900"
-                    />
-                    Schedule for later
-                  </label>
-                  {form.scheduleSend && (
-                    <input
-                      type="datetime-local"
-                      value={form.scheduledAt || ""}
-                      onChange={(e) => set("scheduledAt", e.target.value)}
-                      className={cn(INPUT_CLS, "w-auto h-8 text-12 px-2")}
-                    />
-                  )}
-                </div>
-                {form.scheduleSend && !form.scheduledAt && (
-                  <div className="text-11 text-ink-secondary mb-2">
-                    Quick:{" "}
-                    <button
-                      onClick={() => {
-                        const tomorrow = new Date();
-                        tomorrow.setDate(tomorrow.getDate() + 1);
-                        tomorrow.setHours(8, 0, 0, 0);
-                        set("scheduledAt", formatDatetimeLocal(tomorrow));
-                      }}
-                      className="underline font-medium u-focus-ring"
-                    >
-                      Tomorrow 8:00 AM
-                    </button>{" "}
-                  </div>
-                )}
-                <div className="flex flex-col gap-2">
-                  {" "}
-                  <div className="grid grid-cols-3 gap-2">
-                    {" "}
-                    <Button
-                      variant="secondary"
-                      size="md"
-                      onClick={async () => {
-                        if (!form.customerPhone) {
-                          alert("Enter a phone number.");
-                          return;
-                        }
-                        await saveAndSend("sms");
-                      }}
-                      disabled={sendBusy}
-                    >
-                      {sendBusy
-                        ? "…"
-                        : form.scheduleSend
-                          ? "Schedule SMS"
-                          : "SMS Only"}
-                    </Button>{" "}
-                    <Button
-                      variant="secondary"
-                      size="md"
-                      onClick={async () => {
-                        if (!form.customerEmail) {
-                          alert("Enter an email.");
-                          return;
-                        }
-                        await saveAndSend("email");
-                      }}
-                      disabled={sendBusy}
-                    >
-                      {sendBusy
-                        ? "…"
-                        : form.scheduleSend
-                          ? "Schedule Email"
-                          : "Email Only"}
-                    </Button>{" "}
-                    <Button
-                      variant="primary"
-                      size="md"
-                      onClick={async () => {
-                        if (!form.customerPhone && !form.customerEmail) {
-                          alert("Enter phone or email.");
-                          return;
-                        }
-                        await saveAndSend("both");
-                      }}
-                      disabled={sendBusy}
-                    >
-                      {sendBusy
-                        ? "…"
-                        : form.scheduleSend
-                          ? "Schedule Both"
-                          : "Both"}
-                    </Button>{" "}
-                  </div>{" "}
-                  <Button
-                    variant="ghost"
-                    size="md"
-                    onClick={() => setShowSendForm(false)}
-                  >
-                    Cancel
-                  </Button>{" "}
-                </div>{" "}
-              </Card>
-            )}
 
             {savedId && (
-              <div className="text-12 text-ink-secondary">
-                {editMode
-                  ? "Changes saved — the customer's link now shows the updated estimate. Resend to notify them."
-                  : `Saved — ID #${savedId}.`}
+              <div className="text-14 text-ink-secondary">
+                {["sent", "viewed"].includes(editMode?.status)
+                  ? "Changes saved to the existing customer link. Resend to notify them."
+                  : "Draft saved. It has not been sent."}
               </div>
             )}
             {(savedId || editMode?.id) && (
@@ -8717,6 +7120,7 @@ export default function EstimateToolViewV2({
               </Button>
             )}
 
+            {savedId && <Button variant="ghost" onClick={nextEstimate}>Next estimate (keep services)</Button>}
             {memberLinkageWarning && (
               <div className="text-14 text-ink bg-zinc-50 border-hairline border-zinc-300 rounded-sm p-3 mt-2">
                 <span className="font-medium">Member pricing not applied.</span>{" "}
@@ -8724,7 +7128,7 @@ export default function EstimateToolViewV2({
               </div>
             )}
             {priceRecomputeNotice && (
-              <div className="text-12 text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 mt-2">
+              <div className="text-14 text-ink-secondary bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-3 mt-2">
                 Final price recomputed on save (server-authoritative):
                 {priceRecomputeNotice.serverMonthly != null && (
                   <> {" "}${priceRecomputeNotice.serverMonthly.toFixed(2)}/mo (preview showed ${priceRecomputeNotice.clientMonthly.toFixed(2)})</>
@@ -8735,9 +7139,10 @@ export default function EstimateToolViewV2({
                 . The saved/billed price is the server value.
               </div>
             )}
+            </section>
           </div>
-          {/* ═══ RIGHT COLUMN: RESULTS ═══ */}
-          <div>
+          {/* Saved/working price summary and optional internal diagnostics. */}
+          <aside className="min-w-0 lg:sticky lg:top-6 self-start">
             {!estimate ? (
               <Card className="p-10 text-center">
                 {" "}
@@ -8760,9 +7165,9 @@ export default function EstimateToolViewV2({
                     : `${livePreview.totalRecurringCount} recurring/manual + ${livePreview.onetimeCount} one-time selected — click Generate Estimate`}
                 </div>
                 {enrichedProfile && (
-                  <div className="text-left px-4 py-3 bg-zinc-50 rounded-sm border-hairline border-zinc-200 mt-3 text-13 text-ink-secondary leading-relaxed">
+                  <div className="text-left px-4 py-3 bg-zinc-50 rounded-sm border-hairline border-zinc-200 mt-3 text-14 text-ink-secondary leading-relaxed">
                     {" "}
-                    <div className="text-11 font-medium text-zinc-900 uppercase tracking-label mb-1.5">
+                    <div className="text-14 font-medium text-zinc-900 uppercase tracking-label mb-1.5">
                       Current property inputs
                     </div>{" "}
                     <div>{form.address}</div>{" "}
@@ -8790,90 +7195,25 @@ export default function EstimateToolViewV2({
                 {" "}
                 <Card className="p-5">
                   {" "}
-                  <div className="flex flex-wrap justify-end gap-2 mb-2">
-                    {" "}
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      className="gap-1.5"
-                      onClick={previewCustomerEstimate}
-                      disabled={sendBusy}
-                      title="Open the customer-facing estimate in a new tab"
-                    >
-                      <ExternalLink size={13} strokeWidth={1.8} aria-hidden />
-                      Customer View
-                    </Button>{" "}
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      className="gap-1.5"
-                      onClick={() => setPresentMode(true)}
-                      title="Show pricing full-screen to the customer in person — no booking"
-                    >
-                      <Monitor size={13} strokeWidth={1.8} aria-hidden />
-                      Present to Customer
-                    </Button>{" "}
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onClick={nextEstimate}
-                    >
-                      Next Estimate (keep services)
-                    </Button>{" "}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => {
-                        // "New Estimate" forks to create semantics — clear
-                        // edit mode so the next save can't overwrite the
-                        // estimate that was being edited.
-                        setEditMode(null);
-                        setEditLoadError(null);
-                        setEstimate(null);
-                        setSavedId(null);
-                        setSavedViewUrl(null);
-                        setShowSendForm(false);
-                      }}
-                    >
-                      New Estimate
-                    </Button>{" "}
-                  </div>{" "}
-                  <div className="max-h-[calc(100vh-120px)] overflow-y-auto pr-2">
-                    {presentQuoteRequired ? (
-                      // Custom-quote estimate: the in-page preview must not
-                      // render full prices the customer will never see — the
-                      // saved/public flow zeroes totals and the customer page
-                      // shows "your account manager will finalize" with no
-                      // dollar amounts. (Present mode already gates this;
-                      // engine numbers stay in the details panel below.)
-                      <div className="customer-preview-scope cp-scene rounded-[14px] border border-[rgba(4,57,94,0.16)] p-8 text-center mb-2">
-                        <div className="customer-preview-display text-[24px] leading-tight text-[#04395E] mb-3">
-                          This is a custom quote
-                        </div>
-                        <div className="mx-auto max-w-[460px] text-14 leading-relaxed text-[rgba(12,21,40,0.66)]">
-                          The selected services need review before a firm
-                          price, so the customer page shows no dollar amounts —
-                          just that their account manager will finalize the
-                          quote. Engine pricing detail stays available under
-                          Estimator engine details below.
-                        </div>
-                      </div>
-                    ) : (
-                      <CustomerEstimatePreviewV2
-                        E={E}
-                        R={R}
-                        form={form}
-                        satelliteUrl={satelliteData?.imageUrl || null}
-                        onSelectPestFreq={(apps) => {
-                          set("pestFreq", String(apps));
-                          doGenerate({ pestFreq: apps });
-                        }}
-                      />
-                    )}
+                  <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                    <h2 className="text-18 font-semibold">Pricing summary</h2>
+                    <Button variant="secondary" onClick={previewCustomerEstimate} disabled={generateBusy || !savedId}>
+                      <ExternalLink size={16} aria-hidden /> Preview saved estimate
+                    </Button>
+                  </div>
+                  <p className="text-14 text-zinc-600 mb-4">{savedId ? "Saved pricing. Preview shows the customer document." : "Working pricing. Save this version before previewing or sending."}</p>
+                  {presentQuoteRequired ? <p role="status" className="text-14 mb-4">This scope requires a quote review before a firm price can be sent.</p> : (
+                    <dl className="grid grid-cols-2 gap-3 mb-4 text-14">
+                      <div><dt className="text-zinc-600">Recurring monthly equivalent</dt><dd className="text-20 font-semibold">{fmt(E.recurring?.grandTotal || 0)}</dd></div>
+                      <div><dt className="text-zinc-600">One-time and setup charges</dt><dd className="text-20 font-semibold">{fmt(E.oneTime?.total || 0)}</dd></div>
+                    </dl>
+                  )}
+                  <p className="text-14 text-zinc-600 mb-4">Service cadence, per-application amounts and payment choices appear in the saved customer preview.</p>
+                  <div>
                     <details className="border-hairline border-zinc-300 rounded-sm bg-white mb-2">
-                      <summary className="cursor-pointer px-4 py-3 text-13 font-medium text-zinc-900 list-none border-b-hairline border-zinc-200">
+                      <summary className="cursor-pointer px-4 py-3 text-14 font-medium text-zinc-900 list-none border-b-hairline border-zinc-200">
                         Estimator engine details
-                        <span className="block text-11 font-normal text-ink-secondary mt-1">
+                        <span className="block text-14 font-normal text-ink-secondary mt-1">
                           Property summary, pricing modifiers, production diagnostics, and raw program tiers.
                         </span>
                       </summary>
@@ -8897,7 +7237,7 @@ export default function EstimateToolViewV2({
                             )}
                             /mo
                           </div>{" "}
-                          <div className="text-12 text-ink-secondary mt-1">
+                          <div className="text-14 text-ink-secondary mt-1">
                             Recurring monthly
                             {E.recurring.savings > 0 ? " (bundle pricing)" : ""}
                             {E.manualDiscount &&
@@ -8913,7 +7253,7 @@ export default function EstimateToolViewV2({
                                 <div className="text-18 font-medium text-zinc-900 u-nums">
                                   {fmtInt(E.oneTime.total)}
                                 </div>{" "}
-                                <div className="text-11 text-ink-secondary uppercase tracking-label">
+                                <div className="text-14 text-ink-secondary uppercase tracking-label">
                                   {E.oneTime.tmInstall > 0
                                     ? `One-Time (incl ${fmtInt(E.oneTime.tmInstall)} install)`
                                     : "Recurring Membership"}
@@ -8925,7 +7265,7 @@ export default function EstimateToolViewV2({
                               <div className="text-18 font-medium text-zinc-900 u-nums">
                                 {fmt(E.totals.year1)}
                               </div>{" "}
-                              <div className="text-11 text-ink-secondary uppercase tracking-label">
+                              <div className="text-14 text-ink-secondary uppercase tracking-label">
                                 Year 1 Total
                               </div>{" "}
                             </div>
@@ -8935,7 +7275,7 @@ export default function EstimateToolViewV2({
                                 <div className="text-18 font-medium text-zinc-900 u-nums">
                                   -{fmt(E.recurring.savings)}
                                 </div>{" "}
-                                <div className="text-11 text-ink-secondary uppercase tracking-label">
+                                <div className="text-14 text-ink-secondary uppercase tracking-label">
                                   Bundle Savings/yr
                                 </div>{" "}
                               </div>
@@ -8957,7 +7297,7 @@ export default function EstimateToolViewV2({
                             }
                             if (parts.length < 2) return null;
                             return (
-                              <div className="bg-zinc-50 border-hairline border-zinc-300 rounded-sm px-4 py-3 mb-5 text-13 text-ink-secondary">
+                              <div className="bg-zinc-50 border-hairline border-zinc-300 rounded-sm px-4 py-3 mb-5 text-14 text-ink-secondary">
                                 {" "}
                                 <strong className="text-zinc-900">
                                   Recommended:
@@ -8968,7 +7308,7 @@ export default function EstimateToolViewV2({
                             );
                           })()}
                         {E.fieldVerify?.length > 0 && (
-                          <div className="bg-alert-bg border-hairline border-alert-fg rounded-sm px-4 py-3 mb-5 text-13 text-alert-fg">
+                          <div className="bg-alert-bg border-hairline border-alert-fg rounded-sm px-4 py-3 mb-5 text-14 text-alert-fg">
                             {" "}
                             <strong>Field Verify:</strong>{" "}
                             {E.fieldVerify
@@ -8991,7 +7331,7 @@ export default function EstimateToolViewV2({
                     <div className="mb-6">
                       {" "}
                       <SectionTitle>Property Summary</SectionTitle>{" "}
-                      <div className="text-13 text-ink-secondary leading-relaxed">
+                      <div className="text-14 text-ink-secondary leading-relaxed">
                         {" "}
                         <strong className="text-zinc-900">
                           {E.property?.type ||
@@ -9096,17 +7436,17 @@ export default function EstimateToolViewV2({
                               )}
                             >
                               {" "}
-                              <span className="text-11 text-ink-tertiary flex-shrink-0 w-3 text-center">
+                              <span className="text-14 text-ink-tertiary flex-shrink-0 w-3 text-center">
                                 {m.type === "up"
                                   ? "▲"
                                   : m.type === "down"
                                     ? "▼"
                                     : "·"}
                               </span>{" "}
-                              <span className="text-12 text-ink-secondary flex-1">
+                              <span className="text-14 text-ink-secondary flex-1">
                                 {m.label}
                               </span>{" "}
-                              <span className="text-11 font-medium text-zinc-900 u-nums">
+                              <span className="text-14 font-medium text-zinc-900 u-nums">
                                 {m.impact != null
                                   ? m.impact >= 0
                                     ? "+$" + m.impact
@@ -9195,7 +7535,7 @@ export default function EstimateToolViewV2({
                               ))}
                             </TierGridV2>
                             {R.pestInitialRoachPrice > 0 && (
-                              <div className="text-11 text-ink-secondary mt-1">
+                              <div className="text-14 text-ink-secondary mt-1">
                                 {R.pestRoachMod === "GERMAN"
                                   ? "German"
                                   : "Native"}{" "}
@@ -9288,7 +7628,7 @@ export default function EstimateToolViewV2({
                               </Tag>{" "}
                             </SectionTitle>{" "}
                             {R.tmBait.quoteRequired || R.tmBait.requiresMeasurement ? (
-                              <div className="text-12 text-ink-secondary">
+                              <div className="text-14 text-ink-secondary">
                                 Footprint sqft or perimeter LF is required before pricing termite bait.
                               </div>
                             ) : (
@@ -9330,7 +7670,7 @@ export default function EstimateToolViewV2({
                                     ) : null;
                                   })()}{" "}
                                 </TierGridV2>{" "}
-                                <div className="text-11 text-ink-secondary mt-1">
+                                <div className="text-14 text-ink-secondary mt-1">
                                   Install cost is a one-time setup fee, not a
                                   recurring charge
                                 </div>{" "}
@@ -9357,7 +7697,7 @@ export default function EstimateToolViewV2({
                                 recommended
                               />{" "}
                             </TierGridV2>{" "}
-                            <div className="text-11 text-ink-secondary mt-1">
+                            <div className="text-14 text-ink-secondary mt-1">
                               {rodentBaitPolicyNote(E)}
                             </div>{" "}
                           </div>
@@ -9439,16 +7779,16 @@ export default function EstimateToolViewV2({
                                     dimmed
                                   />{" "}
                                 </TierGridV2>{" "}
-                                <div className="text-12 text-ink-secondary italic mt-1">
+                                <div className="text-14 text-ink-secondary italic mt-1">
                                   Best scheduled before rainy season (Apr-May)
                                 </div>{" "}
                                 {item.warningText && (
-                                  <div className="text-11 text-ink-secondary mt-1">
+                                  <div className="text-14 text-ink-secondary mt-1">
                                     {item.warningText}
                                   </div>
                                 )}
                                 {item.allocatedChemicalCost !== undefined && (
-                                  <div className="text-11 text-ink-secondary mt-1">
+                                  <div className="text-14 text-ink-secondary mt-1">
                                     Internal: {item.finishedGallons} gal | {item.productOz} oz | Chemical ${item.allocatedChemicalCost}
                                     {item.labelConfirmed ? " | Label confirmed" : " | Label review required"}
                                   </div>
@@ -9479,7 +7819,7 @@ export default function EstimateToolViewV2({
                                     price={fmtInt(item.price)}
                                   />{" "}
                                 </TierGridV2>{" "}
-                                <div className="text-12 text-ink-secondary italic mt-1">
+                                <div className="text-14 text-ink-secondary italic mt-1">
                                   Best time: Oct-Mar (cooler attic temps)
                                 </div>{" "}
                               </div>
@@ -9518,21 +7858,21 @@ export default function EstimateToolViewV2({
                                   )}
                                 </TierGridV2>
                                 {!item.warrAdd && String(item.warrantyTier || "BASIC").toUpperCase() !== "NONE" && (
-                                  <div className="text-11 text-ink-secondary mt-1">
+                                  <div className="text-14 text-ink-secondary mt-1">
                                     {item.warrantyStatus || "No extended warranty selected"}
                                   </div>
                                 )}
                                 {!item.warrAdd && String(item.warrantyTier || "").toUpperCase() === "NONE" && (
-                                  <div className="text-11 text-ink-secondary mt-1">
+                                  <div className="text-14 text-ink-secondary mt-1">
                                     No warranty selected
                                   </div>
                                 )}
                                 {item.warningText && (
-                                  <div className="text-11 text-ink-secondary mt-1">
+                                  <div className="text-14 text-ink-secondary mt-1">
                                     {item.warningText}
                                   </div>
                                 )}
-                                <div className="text-11 text-ink-secondary mt-1">
+                                <div className="text-14 text-ink-secondary mt-1">
                                   Certificate of Compliance required{item.labelConfirmed ? " | Label confirmed" : " | Label review required"}
                                   {item.productCost !== undefined && item.rawPrice !== undefined
                                     ? ` | ${item.preSlabJobContextLabel || item.jobContext || "Standalone"} | ${item.productOz} oz | Allocated material $${item.productCost.toFixed(2)} | Raw $${item.rawPrice} | Floor $${item.contextualFloor || item.priceBeforeVolumeDiscount}`
@@ -9559,7 +7899,7 @@ export default function EstimateToolViewV2({
                                     price={fmtInt(item.price)}
                                   />{" "}
                                 </TierGridV2>{" "}
-                                <div className="text-11 text-ink-secondary mt-1">
+                                <div className="text-14 text-ink-secondary mt-1">
                                   For localized drywood, wall voids, door/window
                                   frames
                                 </div>{" "}
@@ -9585,7 +7925,7 @@ export default function EstimateToolViewV2({
                                   />{" "}
                                 </TierGridV2>
                                 {item.warn6 && (
-                                  <div className="text-11 text-ink-secondary mt-1">
+                                  <div className="text-14 text-ink-secondary mt-1">
                                     Sod may be more cost-effective at 6"
                                   </div>
                                 )}
@@ -9644,7 +7984,7 @@ export default function EstimateToolViewV2({
                               </TierGridV2>{" "}
                               {item.service === "pest_initial_roach" &&
                                 item.priceOverridden && (
-                                  <div className="text-11 text-ink-secondary mt-1">
+                                  <div className="text-14 text-ink-secondary mt-1">
                                     Fee manually overridden — engine bracket
                                     price is {fmtInt(item.bracketPrice)}.
                                   </div>
@@ -9667,14 +8007,14 @@ export default function EstimateToolViewV2({
                               className="bg-white border-hairline border-zinc-200 rounded-sm p-4"
                             >
                               {" "}
-                              <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-1">
+                              <div className="text-14 font-medium text-ink-secondary uppercase tracking-label mb-1">
                                 {s.name}
                               </div>{" "}
                               <div className="text-18 font-medium text-zinc-900 u-nums">
                                 {s.quoteRequired ? "Quote Required" : s.onProg ? "$0 — Included" : fmtInt(s.price)}
                               </div>{" "}
                               {serviceDetailText(s) && (
-                                <div className="text-12 text-ink-secondary mt-1">
+                                <div className="text-14 text-ink-secondary mt-1">
                                   {serviceDetailText(s)}
                                 </div>
                               )}{" "}
@@ -9697,7 +8037,7 @@ export default function EstimateToolViewV2({
                         marginNotes.length > 0;
                       if (!hasNotes) return null;
                       return (
-                        <div className="mb-6 p-3 bg-zinc-50 border-hairline border-zinc-300 rounded-sm text-12 text-zinc-900">
+                        <div className="mb-6 p-3 bg-zinc-50 border-hairline border-zinc-300 rounded-sm text-14 text-zinc-900">
                           <div className="font-medium mb-1">Pricing Review Notes</div>
                           {(pm.skippedServices || []).map((item, i) => (
                             <div key={`skip-${i}`} className="text-ink-secondary">
@@ -9740,7 +8080,7 @@ export default function EstimateToolViewV2({
                             <div className="text-18 font-medium text-zinc-900">
                               {E.recurring.serviceCount}-service bundle
                             </div>{" "}
-                            <div className="text-13 text-ink-secondary mt-0.5">
+                            <div className="text-14 text-ink-secondary mt-0.5">
                               {E.recurring.serviceCount} recurring service
                               {E.recurring.serviceCount > 1 ? "s" : ""} —{" "}
                               {Math.round(E.recurring.discount * 100)}% bundle
@@ -9755,7 +8095,7 @@ export default function EstimateToolViewV2({
                                 /year
                               </div>
                             )}
-                            <div className="grid grid-cols-[1fr_auto] gap-y-1 gap-x-4 text-13 mt-3 p-3 bg-white rounded-xs border-hairline border-zinc-200">
+                            <div className="grid grid-cols-[1fr_auto] gap-y-1 gap-x-4 text-14 mt-3 p-3 bg-white rounded-xs border-hairline border-zinc-200">
                               {E.recurring.services.map((s, i) => (
                                 <React.Fragment key={i}>
                                   {" "}
@@ -9763,7 +8103,7 @@ export default function EstimateToolViewV2({
                                     {" "}
                                     <div>{s.displayName || s.name}</div>
                                     {s.detail && (
-                                      <div className="text-11 text-ink-tertiary leading-snug mt-0.5">
+                                      <div className="text-14 text-ink-tertiary leading-snug mt-0.5">
                                         {s.detail}
                                       </div>
                                     )}
@@ -9911,7 +8251,7 @@ export default function EstimateToolViewV2({
                               {E.oneTime.items.map((item, i) => (
                                 <div
                                   key={i}
-                                  className="flex justify-between items-start gap-3 py-0.5 pl-4 text-13 text-ink-secondary"
+                                  className="flex justify-between items-start gap-3 py-0.5 pl-4 text-14 text-ink-secondary"
                                 >
                                   {" "}
                                   <span>
@@ -9919,7 +8259,7 @@ export default function EstimateToolViewV2({
                                     <span>
                                       {item.name}
                                       {item.waivedWithPrepay ? (
-                                        <span className="text-11 text-ink-tertiary ml-1">
+                                        <span className="text-14 text-ink-tertiary ml-1">
                                           waived with annual prepay
                                         </span>
                                       ) : (
@@ -9927,12 +8267,12 @@ export default function EstimateToolViewV2({
                                       )}
                                     </span>
                                     {item.detail && (
-                                      <span className="block text-11 text-ink-tertiary leading-snug mt-0.5">
+                                      <span className="block text-14 text-ink-tertiary leading-snug mt-0.5">
                                         {item.detail}
                                       </span>
                                     )}
                                   </span>{" "}
-                                  <span className="text-13 u-nums">
+                                  <span className="text-14 u-nums">
                                     {fmtInt(item.price)}
                                   </span>{" "}
                                 </div>
@@ -9940,36 +8280,36 @@ export default function EstimateToolViewV2({
                               {E.oneTime.specItems.map((s, i) => (
                                 <div
                                   key={`sp-${i}`}
-                                  className="flex justify-between items-start gap-3 py-0.5 pl-4 text-13 text-ink-secondary"
+                                  className="flex justify-between items-start gap-3 py-0.5 pl-4 text-14 text-ink-secondary"
                                 >
                                   {" "}
                                   <span>
                                     {s.name}
                                     {serviceDetailText(s) && (
-                                      <span className="block text-11 text-ink-tertiary leading-snug mt-0.5">
+                                      <span className="block text-14 text-ink-tertiary leading-snug mt-0.5">
                                         {serviceDetailText(s)}
                                       </span>
                                     )}
                                   </span>{" "}
-                                  <span className="text-13 u-nums">
+                                  <span className="text-14 u-nums">
                                     {s.quoteRequired ? "Quote Required" : fmtInt(s.price)}
                                   </span>{" "}
                                 </div>
                               ))}
                               {E.manualDiscount &&
                                 E.manualDiscount.oneTimeAmount > 0 && (
-                                  <div className="flex justify-between items-start gap-3 py-0.5 pl-4 text-13 text-ink-secondary">
+                                  <div className="flex justify-between items-start gap-3 py-0.5 pl-4 text-14 text-ink-secondary">
                                     {" "}
                                     <span>
                                       {E.manualDiscount.label ||
                                         (E.manualDiscount.type === "PERCENT"
                                           ? `Discount (${E.manualDiscount.value}%)`
                                           : `Discount`)}{" "}
-                                      <span className="text-11 text-ink-tertiary">
+                                      <span className="text-14 text-ink-tertiary">
                                         (one-time)
                                       </span>
                                     </span>{" "}
-                                    <span className="text-13 u-nums">
+                                    <span className="text-14 u-nums">
                                       -{fmtInt(E.manualDiscount.oneTimeAmount)}
                                     </span>{" "}
                                   </div>
@@ -10004,7 +8344,7 @@ export default function EstimateToolViewV2({
                 </Card>{" "}
               </EstimateErrorBoundary>
             )}
-          </div>{" "}
+          </aside>{" "}
         </div>{" "}
       </div>{" "}
     </FormCtx.Provider>

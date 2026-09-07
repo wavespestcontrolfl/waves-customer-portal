@@ -485,7 +485,9 @@ async function resolveReservationServiceProfile(client, row, opts = {}) {
   return estimateSlotAvailability.resolveEstimateSlotProfile(estimate, {
     serviceMode: opts.serviceMode,
     selectedFrequency: opts.selectedFrequency,
+    serviceCadences: opts.serviceCadences,
     durationMinutes: opts.durationMinutes,
+    preserveCombinedCapacity: opts.preserveCombinedCapacity,
   });
 }
 
@@ -792,6 +794,14 @@ async function reserveSlot({
         ? Number(serviceProfile.durationMinutes)
         : DEFAULT_DURATION_MINUTES;
       const windowEnd = addMinutesToTime(windowStart, effectiveDurationMinutes);
+
+      if (serviceProfile?.reservationServiceMix) {
+        const { capacityUnavailable } = require('./combined-visit-capacity');
+        if (!techId) throw capacityUnavailable();
+        await require('./technician-capabilities').assertCapabilitiesActive(
+          trx, techId, serviceProfile.services.map((service) => ({ service_type: service.service.replace(/_/g, ' ') })), capacityUnavailable,
+        );
+      }
 
       // Exact offer-membership proof: the HMAC binds surface, THIS estimate,
       // date, start, technician (null = unassigned), the profile-resolved
@@ -1114,6 +1124,8 @@ async function reserveSlot({
         reservation_expires_at: trx.raw(`NOW() + INTERVAL '${holdMins} minutes'`),
         payment_method_preference: null,
         estimated_duration_minutes: effectiveDurationMinutes,
+        ...(serviceProfile?.reservationServiceMix
+          ? { reservation_service_mix: serviceProfile.reservationServiceMix } : {}),
         notes,
         ...(catalogServiceId ? { service_id: catalogServiceId } : {}),
         // Durable identity evidence: the completion resolver checks
@@ -1200,6 +1212,7 @@ async function commitReservation({
   estimate = null,
   serviceMode = 'recurring',
   selectedFrequency = '',
+  serviceCadences = null,
   durationMinutes,
   preLockedDate = null,
   trx,
@@ -1329,16 +1342,30 @@ async function commitReservation({
       estimate,
       serviceMode,
       selectedFrequency,
+      serviceCadences,
       durationMinutes,
+      preserveCombinedCapacity: !!require('./combined-visit-capacity').capacityFromReservation(row),
     });
     const effectiveDurationMinutes = Number(serviceProfile?.durationMinutes) > 0
       ? Number(serviceProfile.durationMinutes)
       : null;
+    if (serviceProfile?.reservationServiceMix) {
+      const { capacityUnavailable } = require('./combined-visit-capacity');
+      if (!row.technician_id) throw capacityUnavailable();
+      await require('./technician-capabilities').assertCapabilitiesActive(
+        client, row.technician_id, serviceProfile.services.map((service) => ({ service_type: service.service.replace(/_/g, ' ') })), capacityUnavailable,
+      );
+    }
     const scheduledDate = dateOnly(row.scheduled_date);
     const windowStart = row.window_start;
     const windowEnd = effectiveDurationMinutes && scheduledDate && windowStart
       ? addMinutesToTime(windowStart, effectiveDurationMinutes)
       : null;
+
+    if (serviceProfile?.reservationServiceMix
+      && require('./scheduling/window-rules').parseHHMM(windowStart) + effectiveDurationMinutes > SLOT_DAY_END_MINUTES + ROUND_UP_GRACE_MINUTES) {
+      throw require('./combined-visit-capacity').capacityUnavailable();
+    }
 
     if (windowEnd) {
       const conflict = await client('scheduled_services')
@@ -1403,6 +1430,8 @@ async function commitReservation({
       customer_id: customerId,
       reservation_expires_at: null,
       updated_at: new Date(),
+      ...(serviceProfile?.reservationServiceMix || row.reservation_service_mix
+        ? { reservation_service_mix: serviceProfile?.reservationServiceMix || null } : {}),
     };
     if (paymentMethodPreference) {
       updates.payment_method_preference = paymentMethodPreference;

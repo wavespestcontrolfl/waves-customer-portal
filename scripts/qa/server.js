@@ -7,6 +7,11 @@ if (process.env.WAVES_LOCAL_DEV !== '1' || process.env.RAILWAY_DEPLOYMENT_ID || 
 if (new URL(process.env.DATABASE_URL).pathname !== `/waves_qa_${process.env.WAVES_WORKTREE_ID.replaceAll('-', '')}`) {
   throw new Error('QA server requires the worktree-owned database.');
 }
+// Keep production application behavior while using the verified dev connection.
+// This entry point has already rejected deployed and non-worktree databases.
+const knexConfig = require('../../server/knexfile');
+knexConfig.production.connection = knexConfig.development.connection;
+
 const fixture = JSON.parse(fs.readFileSync(process.env.QA_FIXTURE_FILE, 'utf8'));
 const captureFile = process.env.QA_CAPTURE_FILE;
 function capture(kind, detail) {
@@ -36,7 +41,10 @@ Twilio.checkVerificationCode = async (phone, code) => {
 };
 Twilio.sendSMS = async () => { capture('sms', {}); return { success: true, sid: 'SM_qa_fixture', status: 'queued' }; };
 const messaging = require('../../server/services/messaging/send-customer-message');
-messaging.sendCustomerMessage = async () => { capture('customer-message', {}); return { sent: true, channel: 'qa' }; };
+messaging.sendCustomerMessage = async (input) => {
+  capture('customer-message', { channel: input.channel, estimateId: input.estimateId || null });
+  return { sent: true, channel: 'qa', providerMessageId: 'SM_qa_fixture' };
+};
 
 // Real Stripe signature verification and application settlement code; only
 // external charge metadata lookup is simulated. No charge creation is enabled.

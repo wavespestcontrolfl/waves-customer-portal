@@ -133,7 +133,7 @@ export default function EmailPage({ navigation, active }) {
       )}
       <EmailSummary stats={stats} digest={digest} />
       {tab === "blocked" && <BlockedSenders mailbox={mailbox} />}
-      {tab === "inbox" && <EmailInbox mailbox={mailbox} editor={editor} />}
+      {tab === "inbox" && <EmailInbox active={active} mailbox={mailbox} editor={editor} />}
       <EmailComposer
         active={active}
         editor={editor}

@@ -60,9 +60,10 @@ import React, {
   useMemo,
   useRef,
 } from "react";
+import useLinkLibrary from "../../hooks/useLinkLibrary";
+import { STATIC_COMPOSER_LINKS, appendStaticLinkClause, libraryLinkClause } from "../../lib/composerLinks";
 import {
   Bell,
-  BookOpen,
   Bot,
   FileText,
   Headphones,
@@ -96,12 +97,6 @@ import {
   Badge,
   Button,
   Card,
-  Dialog,
-  Radio,
-  DialogHeader,
-  DialogTitle,
-  DialogBody,
-  DialogFooter,
   Select,
   cn,
 } from "../../components/ui";
@@ -735,30 +730,13 @@ export const CUSTOMER_COMPOSER_LINKS = [
   { key: "autopay_setup", name: "Auto Pay setup link", keywords: "autopay auto pay card on file save payment method bank ach enroll secure", dynamic: true },
   { key: "appointment", name: "Appointment page link", keywords: "appointment visit details confirm calendar upcoming next", dynamic: true },
   { key: "card_request", name: "Card request link", keywords: "card request secure appointment hold card on file first visit", dynamic: true },
-  { key: "prep_guide", name: "Prep guide link", keywords: "prep prepare checklist flea bed bug cockroach roach treatment", dynamic: true },
+  { key: "prep_guide", name: "Upcoming visit prep link", category: "guides", description: "Insert the prep link for this customer's upcoming visit", keywords: "prep prepare checklist flea bed bug cockroach roach treatment", dynamic: true },
   { key: "service_report", name: "Latest service report link", keywords: "report service report visit summary last recap", dynamic: true },
   { key: "contract", name: "Contract signing link", keywords: "contract sign signature agreement document esign", dynamic: true },
   { key: "statement", name: "Statement pay link", keywords: "statement payer bill-to property manager builder net30 pay", dynamic: true },
   { key: "project_report", name: "Project report link", keywords: "project report wdo termite inspection specialty findings pdf", dynamic: true },
-  {
-    key: "portal_login",
-    name: "Portal login",
-    url: "portal.wavespestcontrol.com/login",
-    clause: "Manage your account and appointments here",
-    keywords: "portal login account app sign in manage",
-  },
-  // Cancellation lands IN the portal (owner ruling 2026-09-03): the cancel
-  // flow lives on the My Plan tab behind login, so the link is the login
-  // page with the plan tab as its post-login destination (LoginPage's
-  // safeNextPath honors ?next=; same encoded form the project emails use).
-  {
-    key: "cancel_plan",
-    name: "Cancel plan link",
-    url: "portal.wavespestcontrol.com/login?next=%2F%3Ftab%3Dplan",
-    clause: "You can review or cancel your plan from your account here",
-    keywords: "cancel cancellation stop plan end service quit",
-  },
-].map((l) => ({ ...l, category: "customer" }));
+  ...STATIC_COMPOSER_LINKS,
+].map((l) => ({ category: "customer", ...l }));
 
 // Personalized empty-composer prefill for the generic minted links (the
 // reschedule/re-service builders above stay specialized). `clause` is the
@@ -771,26 +749,7 @@ export function buildCustomerLinkPrefill({ firstName, clause }) {
   return `Hi ${first}, it's Waves Pest Control. ${line}`;
 }
 
-// Append a static link clause to the composer body (empty body gets the
-// clause alone). Returns the body unchanged when the URL is already present
-// — a second click must not stack a duplicate link.
-export function appendStaticLinkClause(body, { url, clause }) {
-  const b = String(body || "");
-  if (b.includes(url)) return b;
-  if (!b.trim()) return clause;
-  return `${b.replace(/\s+$/, "")}\n\n${clause}`;
-}
-
-// The rendered insert text for a library row: "{clause}: {url}" with the
-// row's name standing in when no clause was authored (sitemap rows).
-export function libraryLinkClause(link) {
-  const prefix = String(link.clause || "").trim() || String(link.name || "").trim() || "More info";
-  return `${prefix}: ${link.url}`;
-}
-
 function SmsTab({ active }) {
-  // Prep-guide sender lives with the composer's other outbound actions.
-  const [prepSendOpen, setPrepSendOpen] = useState(false);
   // Server-verified role: draft APPROVAL is owner-only (PUT /approve and
   // /revise 403 for technicians). A tech following a draftId deep link
   // still gets the prefilled text/recipient, but sends as a plain manual
@@ -859,11 +818,7 @@ function SmsTab({ active }) {
   // Insert Link sheet — the searchable link library (customer links +
   // reviews + the whole website + app stores + socials).
   const [showLinkSheet, setShowLinkSheet] = useState(false);
-  // Library rows from GET /admin/communications/link-library, fetched once
-  // per page load on first open (search/filtering is client-side).
-  const [libraryLinks, setLibraryLinks] = useState(null);
-  const [libraryLoading, setLibraryLoading] = useState(false);
-  const [libraryError, setLibraryError] = useState(null);
+  const { links: libraryLinks, loading: libraryLoading, error: libraryError, retry: loadLinkLibrary } = useLinkLibrary(active && showLinkSheet);
   // Which minted customer link is mid-lookup ('reschedule' | 'reservice' |
   // a /customer-link kind), and the inserted minted links being tracked per
   // kind: { url, recipientKey, customerId, requestId?, contractId? }. Same bearer-link
@@ -1727,27 +1682,7 @@ function SmsTab({ active }) {
     }
   }, [insertedReservice, msgBody, toNumber, selectedCustomerId]);
 
-  // Load the link library once per page load — the sheet's search runs
-  // client-side over the full list (office review links + sitemap-synced
-  // website pages + hand-managed rows).
-  const loadLinkLibrary = async () => {
-    if (libraryLoading) return;
-    setLibraryLoading(true);
-    setLibraryError(null);
-    try {
-      const d = await adminFetch("/admin/communications/link-library");
-      setLibraryLinks(Array.isArray(d.links) ? d.links : []);
-    } catch (e) {
-      setLibraryError(`Couldn't load the link library: ${e.message}`);
-    } finally {
-      setLibraryLoading(false);
-    }
-  };
-
-  const openLinkSheet = () => {
-    setShowLinkSheet(true);
-    if (!libraryLinks && !libraryLoading) loadLinkLibrary();
-  };
+  const openLinkSheet = () => setShowLinkSheet(true);
 
   // Insert a static library row (or the portal-login customer row). No
   // bearer-link machinery — append once, confirm in the result line, and
@@ -1983,10 +1918,10 @@ function SmsTab({ active }) {
   // get a 403, so those rows are admin-only; the static rows stay staff-wide.
   const insertSheetLinks = useMemo(
     () => [
-      ...CUSTOMER_COMPOSER_LINKS.filter((l) => smsIsAdminRole || !l.dynamic),
+      ...CUSTOMER_COMPOSER_LINKS.filter((l) => !l.dynamic || (smsIsAdminRole && toNumber.trim())),
       ...(libraryLinks || []),
     ],
-    [libraryLinks, smsIsAdminRole],
+    [libraryLinks, smsIsAdminRole, toNumber],
   );
 
   const handleInsertSheetPick = (link, channel = null) => {
@@ -2832,10 +2767,9 @@ function SmsTab({ active }) {
             disabled={
               insertingResched ||
               insertingReservice ||
-              !!insertingCustomerLink ||
-              !toNumber.trim()
+              !!insertingCustomerLink || sending
             }
-            title="Quick Links — insert a customer, review, website, or app link into the message"
+            title="Quick Links — insert a link or send a prep guide"
             aria-haspopup="dialog"
             aria-expanded={showLinkSheet}
           >
@@ -2843,25 +2777,12 @@ function SmsTab({ active }) {
               ? "Adding…"
               : "Quick Links"}
           </Button>{" "}
-          <Button
-            variant="secondary"
-            className="gap-2"
-            onClick={() => setPrepSendOpen(true)}
-            aria-haspopup="dialog"
-            aria-expanded={prepSendOpen}
-          >
-            <BookOpen size={15} strokeWidth={1.9} aria-hidden />
-            Send prep guide
-          </Button>
         </div>
-        <PrepSendDialog
-          open={active && prepSendOpen}
-          onClose={() => setPrepSendOpen(false)}
-        />
         <InsertLinkSheet
           open={active && showLinkSheet}
           onClose={() => setShowLinkSheet(false)}
           links={insertSheetLinks}
+          recipientSearch={toSearch || toNumber}
           loading={libraryLoading}
           error={libraryError}
           onRetry={loadLinkLibrary}
@@ -3181,237 +3102,6 @@ function SmsTab({ active }) {
 }
 
 // ── Page ──────────────────────────────────────────────────────
-
-// Search a customer by name and send them a treatment prep guide. Smart
-// channel: the server emails the formatted guide when the customer has an
-// email on file, otherwise it texts the self-contained prep. Mirrors the
-// server's PREP_CONFIG allow-list (prep-guide-sender.js).
-const PREP_TYPES = [
-  { value: "flea", label: "Flea treatment" },
-  { value: "bed_bug", label: "Bed bug treatment" },
-  { value: "cockroach", label: "Cockroach treatment" },
-  { value: "interior_pest", label: "Interior pest treatment" },
-  { value: "rodent", label: "Rodent service" },
-  { value: "termite", label: "Termite service" },
-  { value: "mosquito", label: "Mosquito treatment" },
-  { value: "lawn", label: "Lawn treatment" },
-];
-
-// Operator-chosen channel (owner ruling 2026-09-03). Text carries the
-// guide page link, which needs an upcoming visit of that type.
-const PREP_CHANNELS = [
-  { value: "both", label: "Email and text" },
-  { value: "email", label: "Email only" },
-  { value: "sms", label: "Text only" },
-];
-
-function PrepSendDialog({ open, onClose }) {
-  const [pestType, setPestType] = useState("flea");
-  const [channel, setChannel] = useState("both");
-  const [search, setSearch] = useState("");
-  const [results, setResults] = useState([]);
-  const [searching, setSearching] = useState(false);
-  const [selected, setSelected] = useState(null);
-  const [sending, setSending] = useState(false);
-  const [result, setResult] = useState(null);
-
-  useEffect(() => {
-    if (!open) {
-      setPestType("flea");
-      setChannel("both");
-      setSearch("");
-      setResults([]);
-      setSelected(null);
-      setSending(false);
-      setResult(null);
-    }
-  }, [open]);
-
-  useEffect(() => {
-    if (selected) return undefined;
-    const q = search.trim();
-    if (q.length < 2) {
-      setResults([]);
-      // Clearing back below 2 chars cancels any in-flight debounce; reset the
-      // spinner too, or it stays stuck on "Searching…" with an empty input.
-      setSearching(false);
-      return undefined;
-    }
-    let cancelled = false;
-    // Drop any results from a previous query so a stale row can't be clicked
-    // and sent to the wrong customer during this query's debounce/fetch window.
-    setResults([]);
-    setSearching(true);
-    const t = setTimeout(async () => {
-      try {
-        const data = await adminFetch(
-          `/admin/customers?search=${encodeURIComponent(q)}&limit=8`,
-        );
-        if (!cancelled) setResults(data?.customers || []);
-      } catch {
-        if (!cancelled) setResults([]);
-      } finally {
-        if (!cancelled) setSearching(false);
-      }
-    }, 250);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-    };
-  }, [search, selected]);
-
-  const handleSend = async () => {
-    if (!selected || sending) return;
-    setSending(true);
-    setResult(null);
-    try {
-      const data = await adminFetch("/admin/communications/send-prep", {
-        method: "POST",
-        body: JSON.stringify({ customerId: selected.id, pestType, channel }),
-      });
-      // A Both send with one leg down is flagged, not celebrated.
-      setResult({ ok: !data?.partial, text: data?.message || "Prep sent." });
-    } catch (e) {
-      setResult({ ok: false, text: e.message || "Couldn't send the prep." });
-    } finally {
-      setSending(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onClose={onClose} size="md">
-      <DialogHeader>
-        <DialogTitle>Send prep guide</DialogTitle>
-      </DialogHeader>
-      <DialogBody>
-        <p className="text-13 text-zinc-600 mb-3">
-          Search a customer by name, pick the guide, and choose how it goes
-          out. A text carries the guide page link, so it needs an upcoming
-          visit of that type on the calendar.
-        </p>
-        <label className="block text-11 uppercase tracking-label text-zinc-500 mb-1">
-          Treatment
-        </label>
-        <select
-          value={pestType}
-          onChange={(e) => {
-            setPestType(e.target.value);
-            setResult(null);
-          }}
-          className="w-full h-10 px-3 mb-3 rounded-sm border-hairline border-zinc-200 text-14 text-zinc-900 bg-white u-focus-ring"
-        >
-          {PREP_TYPES.map((p) => (
-            <option key={p.value} value={p.value}>
-              {p.label}
-            </option>
-          ))}
-        </select>
-        <fieldset className="flex flex-col gap-2 border-0 p-0 m-0 mb-3 min-w-0">
-          <legend className="text-11 uppercase tracking-label text-zinc-500 mb-1 p-0">Send by</legend>
-          {PREP_CHANNELS.map((c) => (
-            <Radio
-              key={c.value}
-              id={`prep-channel-${c.value}`}
-              name="prep-channel"
-              label={c.label}
-              checked={channel === c.value}
-              onChange={() => {
-                setChannel(c.value);
-                setResult(null);
-              }}
-              disabled={sending}
-            />
-          ))}
-        </fieldset>
-        {selected ? (
-          <div className="flex items-center justify-between border-hairline border-zinc-200 rounded-sm px-3 py-2.5">
-            <div className="min-w-0">
-              <div className="text-14 font-medium text-zinc-900 truncate">
-                {getCustomerOptionName(selected)}
-              </div>
-              <div className="text-12 text-zinc-500 truncate">
-                {selected.email || "No email on file"}
-                {selected.phone ? ` · ${selected.phone}` : ""}
-              </div>
-            </div>
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => {
-                setSelected(null);
-                setResult(null);
-              }}
-            >
-              Change
-            </Button>
-          </div>
-        ) : (
-          <>
-            <input
-              type="text"
-              autoFocus
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search customer by name…"
-              className="w-full h-10 px-3 rounded-sm border-hairline border-zinc-200 text-14 text-zinc-900 u-focus-ring"
-            />
-            {searching && (
-              <div className="text-12 text-zinc-500 mt-2">Searching…</div>
-            )}
-            {!searching &&
-              search.trim().length >= 2 &&
-              results.length === 0 && (
-                <div className="text-12 text-zinc-500 mt-2">
-                  No customers found.
-                </div>
-              )}
-            {results.length > 0 && (
-              <div className="mt-2 border-hairline border-zinc-200 rounded-sm divide-y divide-zinc-100 max-h-60 overflow-y-auto">
-                {results.map((c) => (
-                  <button
-                    key={c.id}
-                    type="button"
-                    onClick={() => {
-                      setSelected(c);
-                      setResults([]);
-                    }}
-                    className="w-full text-left px-3 py-2 hover:bg-zinc-50"
-                  >
-                    <div className="text-13 font-medium text-zinc-900">
-                      {getCustomerOptionName(c)}
-                    </div>
-                    <div className="text-12 text-zinc-500">
-                      {c.email || "No email"}
-                      {c.phone ? ` · ${c.phone}` : ""}
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-          </>
-        )}
-        {result && (
-          <div
-            className={cn(
-              "mt-3 text-12",
-              result.ok ? "text-zinc-900" : "text-alert-fg",
-            )}
-          >
-            {result.text}
-          </div>
-        )}
-      </DialogBody>
-      <DialogFooter>
-        <Button variant="secondary" onClick={onClose}>
-          Close
-        </Button>
-        <Button onClick={handleSend} disabled={!selected || sending}>
-          {sending ? "Sending…" : "Send prep guide"}
-        </Button>
-      </DialogFooter>
-    </Dialog>
-  );
-}
 
 // Usage-beacon leaf for the rendered tab state (exported for tests).
 // Underscore keys (call_routing; the email_templates back-compat hash →

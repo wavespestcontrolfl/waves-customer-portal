@@ -7,7 +7,11 @@
  */
 
 const mockCapture = jest.fn();
-jest.mock('@sentry/node', () => ({ captureException: (...args) => mockCapture(...args) }));
+const mockCaptureMessage = jest.fn();
+jest.mock('@sentry/node', () => ({
+  captureException: (...args) => mockCapture(...args),
+  captureMessage: (...args) => mockCaptureMessage(...args),
+}));
 jest.mock('express-rate-limit', () => () => (_req, _res, next) => next());
 
 const express = require('express');
@@ -22,7 +26,10 @@ beforeAll((done) => {
   server = app.listen(0, () => { baseUrl = `http://127.0.0.1:${server.address().port}`; done(); });
 });
 afterAll((done) => { server.close(done); });
-beforeEach(() => mockCapture.mockClear());
+beforeEach(() => {
+  mockCapture.mockClear();
+  mockCaptureMessage.mockReset();
+});
 
 const post = (body) => fetch(`${baseUrl}/api/client-errors`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -123,5 +130,82 @@ describe('POST /api/client-errors', () => {
     expect(mockCapture.mock.calls[0][1].tags).toEqual({
       source: 'client', client_context: 'none', client_route: 'none',
     });
+  });
+
+  test('native replay diagnostics identify platform, source and route families without creating an error', async () => {
+    const res = await post({
+      context: 'native-links',
+      nativeLink: { platform: 'ios', source: 'launch', outcome: 'replay-skipped', route: 'home', target: 'shortlink' },
+    });
+    expect(res.status).toBe(204);
+    expect(mockCapture).not.toHaveBeenCalled();
+    expect(mockCaptureMessage).toHaveBeenCalledWith('Native link: replay-skipped', {
+      level: 'info',
+      fingerprint: ['native-link', 'ios', 'launch', 'replay-skipped'],
+      tags: {
+        source: 'client', client_context: 'native-links', native_platform: 'ios',
+        link_source: 'launch', link_outcome: 'replay-skipped', link_route: 'home', link_target: 'shortlink',
+      },
+    });
+  });
+
+  test.each(['listener-error', 'lookup-error', 'lookup-timeout', 'storage-unavailable', 'navigation-failed'])(
+    'native %s reports at error severity', async (outcome) => {
+      await post({
+        context: 'native-links',
+        nativeLink: { platform: 'android', source: 'event', outcome, route: 'estimate', target: 'none' },
+      });
+      expect(mockCaptureMessage.mock.calls[0][1].level).toBe('error');
+      expect(mockCaptureMessage.mock.calls[0][1].tags.native_platform).toBe('android');
+    },
+  );
+
+  test('native diagnostics ignore URLs, tokens, messages and extra fields at every level', async () => {
+    await post({
+      context: 'native-links', name: 'private-test-name', route: '/estimate/private-test-token',
+      message: 'private-test-message',
+      nativeLink: {
+        platform: 'ios', source: 'event', outcome: 'navigation-requested', route: 'home', target: 'estimate',
+        url: 'https://example.invalid/estimate/private-test-token', stack: 'private-test-stack',
+      },
+    });
+    expect(mockCaptureMessage).toHaveBeenCalledTimes(1);
+    expect(mockCapture).not.toHaveBeenCalled();
+    expect(JSON.stringify(mockCaptureMessage.mock.calls)).not.toMatch(/private-test|https?:/);
+  });
+
+  test.each(['platform', 'source', 'outcome', 'route', 'target'])(
+    'native %s must be an exact allowlisted label', async (field) => {
+      for (const value of ['private-test-token', '/estimate/private-test-token', {}, null, ['ios']]) {
+        const res = await post({
+          context: 'native-links',
+          nativeLink: {
+            platform: 'ios', source: 'launch', outcome: 'received', route: 'home', target: 'estimate',
+            [field]: value,
+          },
+        });
+        expect(res.status).toBe(204);
+      }
+      expect(mockCaptureMessage).not.toHaveBeenCalled();
+      expect(mockCapture).not.toHaveBeenCalled();
+    },
+  );
+
+  test('missing native fields are discarded without falling through to generic error reporting', async () => {
+    for (const nativeLink of [undefined, null, {}, 'private-test-token']) {
+      const res = await post({ context: 'native-links', nativeLink });
+      expect(res.status).toBe(204);
+    }
+    expect(mockCaptureMessage).not.toHaveBeenCalled();
+    expect(mockCapture).not.toHaveBeenCalled();
+  });
+
+  test('a failing native diagnostic sink still returns 204', async () => {
+    mockCaptureMessage.mockImplementationOnce(() => { throw new Error('sink unavailable'); });
+    const res = await post({
+      context: 'native-links',
+      nativeLink: { platform: 'ios', source: 'launch', outcome: 'empty', route: 'home', target: 'none' },
+    });
+    expect(res.status).toBe(204);
   });
 });
