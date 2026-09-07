@@ -4279,6 +4279,18 @@ describe('third-party price citations and trusted sources', () => {
   });
 
   test.each([
+    'https://archive.org/download/untrusted-item/payload',
+    'https://archive.org/details/untrusted-item',
+    'https://uploads.archive.org/payload',
+    'https://web.archive.org/web/20260101/https://example.org/report',
+  ])('Archive.org sources require existing operator provenance or an exact brief URL: %s', (url) => {
+    const body = `See [reference](${url}).`;
+    expect(guardrails._internals.externalLinkFinding(body)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    expect(guardrails._internals.externalLinkFinding(body, { requiredSourceUrls: [url] })).toBeNull();
+    expect(guardrails._internals.externalLinkFinding(body, { operatorCitations: true })).toBeNull();
+  });
+
+  test.each([
     '<script src="https://www.northportfl.gov/script.js"></script>',
     '<iframe src="https://www.northportfl.gov/rules"></iframe>',
     '<form action="https://www.northportfl.gov/submit">Send</form>',

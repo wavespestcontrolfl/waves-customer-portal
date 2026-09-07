@@ -838,6 +838,9 @@ function citationOnlyHosts({ operatorCitations = false } = {}) {
     if (h) hosts.add(h);
   }
   if (operatorCitations) {
+    // Archive.org includes user-uploaded files; retain its existing operator
+    // scope instead of granting it to every mined draft.
+    hosts.add('archive.org');
     for (const h of curatedCompetitorSourceHosts()) hosts.add(h);
   }
   return hosts;
@@ -1572,7 +1575,7 @@ function normalizeHost(host) {
 // websites still require operator provenance or an exact brief source URL.
 const TRUSTED_CITATION_HOSTS = [
   'ufl.edu', 'epa.gov', 'cdc.gov', 'fdacs.gov', 'myfloridalicense.com',
-  'consumeraffairs.com', 'bbb.org', 'archive.org', 'web.archive.org',
+  'consumeraffairs.com', 'bbb.org',
 ];
 
 // Hosts of the curated competitor-facts `source` URLs — the exact pages an
