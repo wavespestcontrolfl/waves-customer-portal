@@ -3637,7 +3637,9 @@ function initScheduledJobs() {
             // in metadata and the replay forwards them, or the
             // require_input_ids validator would block a send the immediate
             // path already validated.
-            ...(claimMeta.invoice_id ? { invoiceId: claimMeta.invoice_id } : {}),
+            invoiceId: msg.message_type === 'service_complete_paid_receipt'
+              ? claimMeta.stamp_receipt_invoice_id
+              : claimMeta.invoice_id,
             ...(claimMeta.estimate_id ? { estimateId: claimMeta.estimate_id } : {}),
             // Inbound-reply provenance survives the retry rail: a transient
             // provider failure on an immediate AI reply (Twilio 429/5xx)
