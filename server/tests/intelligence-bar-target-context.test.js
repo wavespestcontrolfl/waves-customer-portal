@@ -239,6 +239,10 @@ test('bulk references use one query per table while preserving absent-record rej
   expect(await Context.validateRecordTarget({ lead_ids: leads.map(row => row.id), customer_id: A }, context())).toBeNull();
   expect(db.mock.calls.filter(([table]) => table === 'leads')).toHaveLength(1);
   expect(db.mock.calls.filter(([table]) => table === 'customers')).toHaveLength(1);
+  const params = { lead_ids: leads.map(row => row.id), customer_id: A };
+  const proof = await Context.validateRecordTarget(params, context(), { toolName: 'bulk_update_leads', forApproval: true });
+  rows.leads.reverse();
+  expect(await Context.validateRecordTarget(params, proof, { toolName: 'bulk_update_leads' })).toBeNull();
   rows.leads.pop();
   expect((await Context.validateRecordTarget({ lead_ids: leads.map(row => row.id) }, context())).code).toBe('record_unavailable');
 });
