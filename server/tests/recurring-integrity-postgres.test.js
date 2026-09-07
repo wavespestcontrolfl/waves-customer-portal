@@ -33,6 +33,10 @@ postgres('recurring integrity against migrated PostgreSQL', () => {
       && url.pathname === `/waves_qa_${String(process.env.WAVES_WORKTREE_ID || '').replaceAll('-', '')}`;
     if (!localCI && !ownedQA) throw new Error('Use disposable CI or this worktree\'s private QA database');
     database = require('knex')({ client: 'pg', connection, pool: { min: 0, max: 2 } });
+    require('../models/db').connection = database;
+    // The app loads acceptance's route module at startup. Load its shared
+    // pure reader here so Jest's cold transforms are outside a DB test's timer.
+    require('../services/plan-rate-ledger').acceptedRecurringBillingLines({});
   });
 
   beforeEach(async () => {
@@ -122,6 +126,17 @@ postgres('recurring integrity against migrated PostgreSQL', () => {
     expect(await findings()).toEqual([]);
   });
 
+  test('a scalar palm acceptance requires its own semiannual appointments', async () => {
+    await trx('estimates').where({ id: estimateId }).update({ estimate_data: { result: {
+      recurring: { palmInjectionMo: 25, palmInjectionAnn: 300 }, results: { injection: { appsPerYear: 2 } },
+    } } });
+    expect(await findings()).toEqual([expect.objectContaining({ serviceFamily: 'palm_injection', issues: ['missing_schedule'] })]);
+    const palm = { service_type: 'Semiannual Palm Injection', service_key_snapshot: 'palm_injection_semiannual', recurring_pattern: 'semiannual' };
+    const root = await visit(palm);
+    await visit({ ...palm, recurring_parent_id: root.id, scheduled_date: '2040-07-15' });
+    expect(await findings()).toEqual([]);
+  });
+
   test('legacy acceptances require explicit lineage before asserting schedule gaps', async () => {
     await trx('estimates').where({ id: estimateId }).update({ accepted_service_mode: null });
     const existing = await visit({ source_estimate_id: null });
@@ -173,8 +188,9 @@ postgres('recurring integrity against migrated PostgreSQL', () => {
     const root = await visit({ prepaid_method: 'check', prepaid_amount: 100, prepaid_at: paidAt });
     const child = await visit({ recurring_parent_id: root.id, created_at: new Date('2040-01-04T16:00:00Z'), estimated_price: 100 });
     expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
-    await visit({ recurring_parent_id: root.id, scheduled_date: '2040-02-15', prepaid_method: 'check',
+    const sibling = await visit({ recurring_parent_id: root.id, scheduled_date: '2040-02-15', prepaid_method: 'check',
       prepaid_amount: 100, prepaid_at: paidAt });
+    await visit({ recurring_parent_id: root.id, created_at: new Date('2040-01-06T16:00:00Z'), estimated_price: 100 });
     const result = await runInner({ now });
     expect(result).toMatchObject({ acceptedScheduleCheckFailed: false, prepayCoverageGaps: 1 });
     const notifications = require('../services/notification-service');
@@ -193,6 +209,50 @@ postgres('recurring integrity against migrated PostgreSQL', () => {
     expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
     expect(key()).not.toBe(originalKey);
     expect((await trx('scheduled_services').where({ id: child.id }).first()).updated_at).toEqual(child.updated_at);
+    const childRegressionKey = key();
+    await trx.transaction((sp) => sp('scheduled_services').where({ id: sibling.id }).update({ prepaid_amount: null, prepaid_at: null }));
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
+    await trx.transaction((sp) => sp('scheduled_services').where({ id: sibling.id }).update({ prepaid_amount: 100, prepaid_at: paidAt }));
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
+    expect(key()).not.toBe(childRegressionKey);
+  });
+
+  test('two children with a shared manual payment reveal a cleared parent stamp', async () => {
+    const { runInner } = require('../services/schedule-integrity-watchdog');
+    const root = await visit({ estimated_price: 100 });
+    const paidAt = new Date('2040-01-05T16:00:00Z');
+    await visit({ recurring_parent_id: root.id, scheduled_date: '2040-02-15', prepaid_method: 'check', prepaid_amount: 100, prepaid_at: paidAt });
+    const second = await visit({ recurring_parent_id: root.id, scheduled_date: '2040-03-15', prepaid_method: 'check', prepaid_amount: 100,
+      prepaid_at: new Date('2040-01-06T16:00:00Z') });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
+    await trx('scheduled_services').where({ id: second.id }).update({ prepaid_at: paidAt });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
+    expect(require('../services/notification-service').notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.any(String),
+      expect.objectContaining({ metadata: expect.objectContaining({ scheduled_service_id: root.id, issue: 'manual_series_stamp_missing' }) }));
+  });
+
+  test('linked unstamped priced visits alert only while their matching term has paid coverage', async () => {
+    const invoiceId = randomUUID();
+    const termId = randomUUID();
+    await trx('invoices').insert({ id: invoiceId, customer_id: customerId, invoice_number: `fixture-${invoiceId.slice(0, 20)}`,
+      token: randomBytes(32).toString('hex'), total: 400, subtotal: 400, status: 'paid' });
+    await trx('annual_prepay_terms').insert({ id: termId, customer_id: customerId, prepay_invoice_id: invoiceId,
+      status: 'active', term_start: '2040-01-01', term_end: '2041-01-01', prepay_amount: 400,
+      coverage_service_type: 'Monthly Pest Control Service', coverage_visit_count: 12 });
+    const root = await visit({ annual_prepay_term_id: termId, estimated_price: 100, is_recurring: false });
+    const { runInner } = require('../services/schedule-integrity-watchdog');
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
+    expect(require('../services/notification-service').notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.any(String),
+      expect.objectContaining({ metadata: expect.objectContaining({ scheduled_service_id: root.id, issue: 'annual_coverage_unverified' }) }));
+    await trx('annual_prepay_terms').where({ id: termId }).update({ coverage_service_type: 'Lawn Care' });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
+    await trx('annual_prepay_terms').where({ id: termId }).update({ coverage_service_type: 'Monthly Pest Control Service', status: 'cancelled' });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
+    await trx('annual_prepay_terms').where({ id: termId }).update({ status: 'payment_pending' });
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'sent' });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
+    await trx('invoices').where({ id: invoiceId }).update({ status: 'paid' });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
   });
 
   test('payment-only refund changes refresh the same annual visit\'s alert evidence', async () => {

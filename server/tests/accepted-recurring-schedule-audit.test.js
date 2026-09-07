@@ -96,6 +96,24 @@ test.each([1, 5, 10])('resolved bait plus %i-year bond schedules are audited wit
   }
 });
 
+test.each(['result', 'engineResult', 'root', 'duplicate'])('scalar palm programs are audited from the %s container', (shape) => {
+  const result = { recurring: { palmInjectionMo: 25, palmInjectionAnn: 300 }, results: { injection: { appsPerYear: 2 } } };
+  if (shape === 'duplicate') result.recurring.services = [{ service: 'palm_injection', name: 'Palm Injection', visitsPerYear: 2 }];
+  const estimate_data = shape === 'root' ? result : { [shape === 'duplicate' ? 'result' : shape]: result };
+  const e = estimate({ estimate_data });
+  expect(check(e)).toEqual([expect.objectContaining({ serviceFamily: 'palm_injection', pattern: 'semiannual', expectedVisits: 2, issues: ['missing_schedule'] })]);
+  const rows = series('semiannual', 2).map((row) => ({ ...row, service_type: 'Semiannual Palm Injection',
+    catalog_service_key: 'palm_injection_semiannual' }));
+  expect(check(e, rows)).toEqual([]);
+});
+
+test('a complete pest series cannot hide its unscheduled scalar palm supplement', () => {
+  const e = estimate();
+  e.estimate_data.result.recurring.palmInjectionMo = 25;
+  e.estimate_data.result.results = { injection: { appsPerYear: 2 } };
+  expect(check(e, series())).toEqual([expect.objectContaining({ serviceFamily: 'palm_injection', issues: ['missing_schedule'] })]);
+});
+
 test('a combined lawn and tree plan still requires schedule coverage for both families', () => {
   const previousGate = process.env.GATE_SEPARATE_COMBO_VISITS;
   delete process.env.GATE_SEPARATE_COMBO_VISITS;

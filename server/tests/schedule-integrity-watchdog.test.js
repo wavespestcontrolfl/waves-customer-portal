@@ -17,6 +17,8 @@ jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) })
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, fn) => fn()) }));
 jest.mock('../services/annual-prepay-renewals', () => ({
   annualPrepayCoversVisit: jest.fn(async () => false),
+  coveredTermsAsOf: jest.fn(() => require('../models/db')('annual_prepay_terms')),
+  serviceMatchesCoverage: jest.fn((row, type) => row.service_type === type),
   ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay_invoice',
 }));
 jest.mock('../services/irrigation-weekly-email', () => ({
@@ -69,11 +71,11 @@ function unpricedChild(over = {}) {
 
 // Thenable knex-chain stub: every builder method returns the chain; awaiting
 // it resolves the row list; .first() resolves per-dedupe-key presence.
-function makeDbMock({ staleRows = [], upcomingRows = [], alertedKeys = new Set() } = {}) {
+function makeDbMock({ staleRows = [], upcomingRows = [], coveredTerms = [], alertedKeys = new Set() } = {}) {
   db.mockImplementation((table) => {
     const rows = table === 'scheduled_services' ? staleRows
       : table === 'scheduled_services as ss' ? upcomingRows
-        : null;
+        : table === 'annual_prepay_terms' ? coveredTerms : null;
     const c = {};
     for (const m of ['whereIn', 'where', 'whereNull', 'whereNotIn', 'leftJoin', 'select', 'orderBy']) {
       c[m] = jest.fn(() => c);
@@ -350,15 +352,26 @@ describe('accepted-plan and prepay coverage detection', () => {
     expect(NotificationService.notifyAdmin.mock.calls.at(-1)[3].metadata.dedupeKey).not.toBe(key);
   });
 
-  test('manual coverage flags only children already present when the payment was allocated', () => {
-    const row = unpricedChild({ parent_prepaid_amount: 400, parent_prepaid_method: 'check',
-      parent_prepaid_at: '2026-08-01T16:00:00Z', created_at: '2026-08-01T15:59:00Z', parent_series_payment_evidence: true });
+  test('missing manual stamps need positive shared-family evidence and no existing allocation', () => {
+    const row = unpricedChild({ manual_series_payment_evidence: [['2040-01-05T16:00:00Z', 'check', [['parent', '101'], ['sibling', '102']]]] });
     expect(hasMissingManualSeriesStamp(row)).toBe(true);
     expect(hasMissingManualSeriesStamp({ ...row, prepaid_amount: 100 })).toBe(false);
-    expect(hasMissingManualSeriesStamp({ ...row, created_at: '2026-08-02T16:00:00Z' })).toBe(false);
-    expect(hasMissingManualSeriesStamp({ ...row, parent_prepaid_method: 'annual_prepay_invoice' })).toBe(false);
-    expect(hasMissingManualSeriesStamp({ ...row, is_recurring: false })).toBe(false);
-    expect(hasMissingManualSeriesStamp({ ...row, parent_series_payment_evidence: false })).toBe(false);
+    expect(hasMissingManualSeriesStamp({ ...row, recurring_parent_id: null })).toBe(true);
+    expect(hasMissingManualSeriesStamp({ ...row, manual_series_payment_evidence: [] })).toBe(false);
+    expect(hasMissingManualSeriesStamp({ ...row, manual_series_payment_evidence: null })).toBe(false);
+  });
+
+  test('a priced unstamped visit with live linked service coverage gets a review alert', async () => {
+    const row = unpricedChild({ estimated_price: 100, annual_prepay_term_id: 'term-1' });
+    makeDbMock({ upcomingRows: [row], coveredTerms: [{ id: 'term-1', customer_id: row.customer_id, coverage_service_type: row.service_type }] });
+    expect(await runInner({ now: NOW })).toMatchObject({ unpricedSeries: 0, prepayCoverageGaps: 1 });
+    expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata.issue).toBe('annual_coverage_unverified');
+    makeDbMock({ upcomingRows: [row], coveredTerms: [] });
+    expect(await runInner({ now: NOW })).toMatchObject({ prepayCoverageGaps: 0 });
+    makeDbMock({ upcomingRows: [row], coveredTerms: [{ id: 'term-1', customer_id: 'other-customer' }] });
+    expect(await runInner({ now: NOW })).toMatchObject({ prepayCoverageGaps: 0 });
+    makeDbMock({ upcomingRows: [row], coveredTerms: [{ id: 'term-1', customer_id: row.customer_id, coverage_service_type: 'Different Service' }] });
+    expect(await runInner({ now: NOW })).toMatchObject({ prepayCoverageGaps: 0 });
   });
 
   test('acceptance findings use the existing admin bell and evidence dedupe', async () => {

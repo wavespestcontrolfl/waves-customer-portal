@@ -27,7 +27,8 @@
  *  4. ACCEPTED PLAN GAPS — missing recurrence, applications or matching
  *     cadence/property evidence, starting from the accepted estimate.
  *  5. PREPAY COVERAGE GAPS — annual stamps the completion validator cannot
- *     verify, or an unstamped child present during a recorded series payment.
+ *     verify, missing stamps on linked paid terms, or an unstamped family
+ *     member present during a recorded manual series payment.
  *
  * Alerting mirrors call-booking-miss-watchdog: one bell per subject, deduped
  * forever via the notifications metadata dedupeKey, with a per-run cap so
@@ -111,15 +112,12 @@ function hasAnnualPrepaidStamp(row) {
 }
 
 function hasMissingManualSeriesStamp(row) {
-  // Extensions made AFTER the payment are not assumed covered. The manual
-  // series writer only allocates over the visits present when it runs.
-  return !!row?.recurring_parent_id && row.is_recurring === true
-    && row.parent_series_payment_evidence === true
-    && Number(row.parent_prepaid_amount) > 0
-    && row.parent_prepaid_method !== ANNUAL_PREPAY_METHOD
-    && !(Number(row.prepaid_amount) > 0)
-    && row.parent_prepaid_at != null && row.created_at != null
-    && new Date(row.created_at).getTime() <= new Date(row.parent_prepaid_at).getTime();
+  // The query requires at least two family members sharing the exact manual
+  // payment timestamp/method, with this visit already present at payment.
+  // One parent's single-visit payment and later extensions do not qualify.
+  return !(Number(row?.prepaid_amount) > 0)
+    && Array.isArray(row?.manual_series_payment_evidence)
+    && row.manual_series_payment_evidence.length > 0;
 }
 
 function isUnpricedSeriesVisit(row) {
@@ -189,7 +187,7 @@ async function runInner({ now = new Date() } = {}) {
     .where('ss.scheduled_date', '<=', etDateString(horizon))
     .where(function whereRecurring() {
       this.where('ss.is_recurring', true).orWhereNotNull('ss.recurring_parent_id')
-        .orWhere('ss.prepaid_method', ANNUAL_PREPAY_METHOD);
+        .orWhere('ss.prepaid_method', ANNUAL_PREPAY_METHOD).orWhereNotNull('ss.annual_prepay_term_id');
     })
     .select(
       'ss.id', 'ss.customer_id', 'ss.status', 'ss.service_type', 'ss.is_recurring',
@@ -199,10 +197,6 @@ async function runInner({ now = new Date() } = {}) {
       db.raw('ss.xmin::text as row_revision'),
       'parent.estimated_price as parent_estimated_price',
       'parent.primary_line_price as parent_primary_line_price',
-      'parent.prepaid_amount as parent_prepaid_amount',
-      'parent.prepaid_method as parent_prepaid_method',
-      'parent.prepaid_at as parent_prepaid_at',
-      db.raw('parent.xmin::text as parent_row_revision'),
       // Fingerprints only: coverage authority remains annualPrepayCoversVisit.
       // Include funding revisions so a repaired term can alert again after
       // a later refund/void even when best-effort visit cleanup did not run.
@@ -218,14 +212,22 @@ async function runInner({ now = new Date() } = {}) {
           AND p.stripe_payment_intent_id = prepay_invoice.stripe_payment_intent_id)
           OR (p.stripe_charge_id IS NOT NULL AND p.stripe_charge_id = prepay_invoice.stripe_charge_id)
       ) as prepay_payment_evidence`),
-      // Parent-only payment is a legitimate single-visit action. A sibling
-      // sharing the writer's exact prepaid_at stamp establishes series scope.
-      db.raw(`EXISTS (SELECT 1 FROM scheduled_services paid_sibling
-        WHERE paid_sibling.recurring_parent_id = parent.id
-          AND paid_sibling.customer_id = ss.customer_id
-          AND paid_sibling.prepaid_at = parent.prepaid_at
-          AND paid_sibling.prepaid_method IS NOT DISTINCT FROM parent.prepaid_method
-          AND paid_sibling.prepaid_amount > 0) as parent_series_payment_evidence`),
+      // Two matching payment stamps prove series scope even if the ROOT's
+      // stamp was cleared. Keep every evidentiary tuple version in the key:
+      // clearing/restoring a paid sibling must reopen an unchanged gap.
+      db.raw(`(SELECT jsonb_agg(jsonb_build_array(g.prepaid_at, g.prepaid_method, g.members)
+          ORDER BY g.prepaid_at, g.prepaid_method)
+        FROM (SELECT paid.prepaid_at, paid.prepaid_method,
+            jsonb_agg(jsonb_build_array(paid.id, paid.xmin::text) ORDER BY paid.id) AS members
+          FROM scheduled_services paid
+          WHERE (paid.recurring_parent_id = coalesce(ss.recurring_parent_id, ss.id)
+            OR paid.id = coalesce(ss.recurring_parent_id, ss.id))
+            AND paid.customer_id = ss.customer_id
+            AND paid.prepaid_at >= ss.created_at
+            AND paid.prepaid_amount > 0
+            AND paid.prepaid_method IS DISTINCT FROM 'annual_prepay_invoice'
+          GROUP BY paid.prepaid_at, paid.prepaid_method HAVING count(*) >= 2
+        ) g) as manual_series_payment_evidence`),
       db.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as service_date"),
     )
     .orderBy('ss.scheduled_date', 'asc');
@@ -235,11 +237,19 @@ async function runInner({ now = new Date() } = {}) {
   // annual-prepay stamp suppresses only when its linked term is live,
   // customer-matched, and coverage-service-matched. Lazy require mirrors the
   // feature-gates pattern and keeps module load light.
-  const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
+  const { annualPrepayCoversVisit, coveredTermsAsOf, serviceMatchesCoverage } = require('./annual-prepay-renewals');
+  const linkedTermIds = [...new Set(upcomingRows.map((row) => row.annual_prepay_term_id).filter(Boolean))];
+  const paidTerms = linkedTermIds.length ? await coveredTermsAsOf(db, null).whereIn('t.id', linkedTermIds)
+    .select('t.id', 't.customer_id', 't.coverage_service_type') : [];
+  const paidTermById = new Map(paidTerms.map((term) => [term.id, term]));
   for (const row of upcomingRows) {
     const annualStamp = row.prepaid_method === ANNUAL_PREPAY_METHOD;
     const annualCovered = annualStamp && await annualPrepayCoversVisit(row, db);
-    if (annualStamp && !annualCovered) prepayGaps.push({ row, issue: 'annual_coverage_unverified' });
+    const term = paidTermById.get(row.annual_prepay_term_id);
+    const linkedCoverage = term && term.customer_id === row.customer_id
+      && (!term.coverage_service_type || serviceMatchesCoverage(row, term.coverage_service_type));
+    const annualCoverageGap = annualStamp ? !annualCovered : !hasOutOfBandPrepaidStamp(row) && linkedCoverage;
+    if (annualCoverageGap) prepayGaps.push({ row, issue: 'annual_coverage_unverified' });
     if (hasMissingManualSeriesStamp(row)) prepayGaps.push({ row, issue: 'manual_series_stamp_missing' });
     if (!isUnpricedSeriesVisit(row)) continue;
     if (annualCovered) continue;
@@ -293,15 +303,16 @@ async function runInner({ now = new Date() } = {}) {
   alerts.push(...prepayGaps.map(({ row, issue }) => {
     const evidenceKey = createHash('sha256').update(JSON.stringify([
       row.row_revision, row.service_type, row.prepaid_amount, row.prepaid_method, row.annual_prepay_term_id,
-      row.parent_prepaid_amount, row.parent_prepaid_method, row.parent_prepaid_at, row.parent_row_revision,
+      row.manual_series_payment_evidence,
       row.prepay_term_evidence, row.prepay_invoice_evidence, row.prepay_payment_evidence,
     ])).digest('hex').slice(0, 20);
     return [
       `prepay-coverage:${row.id}:${issue}:${evidenceKey}`,
       `Prepaid coverage needs review before ${row.service_date}`,
-      issue === 'annual_coverage_unverified'
-        ? 'This visit carries an annual-prepay stamp that the completion coverage check cannot validate. Reconcile the payment, term and covered service before billing; a stamp alone does not prove payment.'
-        : 'This recurring child existed when its parent and siblings received the same manual series-payment stamp, but has no payment allocation. Reconcile the recorded payment and intended covered visits before billing.',
+      {
+        annual_coverage_unverified: 'This visit has an unverifiable annual-prepay stamp, or is linked to valid paid coverage with no stamp. Reconcile the payment, term and intended allocation before billing; a stamp alone does not prove payment.',
+        manual_series_stamp_missing: 'This visit existed when multiple members of its recurring family received the same manual series-payment stamp, but has no payment allocation. Reconcile the recorded payment and intended covered visits before billing.',
+      }[issue],
       { scheduled_service_id: row.id, customer_id: row.customer_id, issue },
     ];
   }));

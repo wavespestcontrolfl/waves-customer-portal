@@ -182,7 +182,7 @@ function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { 
   const data = typeof estimate.estimate_data === 'string'
     ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
   if (estimate.accepted_service_mode === 'one_time') return [];
-  const services = converter.recurringServicesFromEstimateData(data);
+  const services = require('./plan-rate-ledger').acceptedRecurringBillingLines(data);
   if (converter.shouldSuppressRecurringConversion({
     monthlyRate: estimate.monthly_total, annualTotal: estimate.annual_total,
     oneTimeTotal: estimate.onetime_total, recurringServices: services, estimateData: data,
