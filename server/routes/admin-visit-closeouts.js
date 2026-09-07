@@ -9,6 +9,7 @@ const { validate: isUuid } = require('uuid');
 const { completionOwnershipError } = require('../services/complete-scheduled-service');
 const { saveVisitCompletionPacket, runVisitCompletionPacketEffects } = require('../services/visit-completion-packets');
 const { dateOnly } = require('../services/visit-groups');
+const { technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
 
 const router = express.Router();
 router.use(adminAuthenticate, requireTechOrAdmin, noStore);
@@ -27,6 +28,9 @@ router.use('/:visitId', async (req, res, next) => {
       role: req.techRole, actorTechnicianId: req.technicianId, assignedTechnicianId: member.technician_id,
     })).find(Boolean);
     if (ownership) return res.status(ownership.status).json(ownership.payload);
+    const accessible = await technicianCurrentVisitFilter(req,
+      db('scheduled_services').where({ visit_id: visit.id })).select('id');
+    if (accessible.length !== members.length) return res.status(404).json({ error: 'Visit not found.' });
     const packet = await db('visit_completion_packets').where({ visit_id: visit.id }).first('id', 'status', 'error');
     if (!packet && Number(visit.behavior_version) < 2 && !isEnabled('visitCloseout')) return res.status(404).json({ error: 'Visit closeout is unavailable.' });
     req.visitCloseout = { visit, members, packet };

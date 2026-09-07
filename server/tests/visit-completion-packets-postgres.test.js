@@ -223,6 +223,21 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect((await request(path, { method: 'POST', auth, body: { ...submission(), actor: { techRole: 'admin' } } })).status).toBe(403);
     expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
     await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ technician_id: fixture.techId });
+    const assignedMember = await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).first();
+    const { addETDays, etDateString } = require('../utils/datetime-et');
+    for (const patch of [{ scheduled_date: etDateString(addETDays(new Date(), -8)) }, { status: 'cancelled' }]) {
+      await mockPg('scheduled_services').where({ id: assignedMember.id }).update(patch);
+      expect((await request(path, { auth })).status).toBe(404);
+      expect((await request(path, { method: 'POST', auth, body: { items: submission().items } })).status).toBe(404);
+      expect((await request(`${path}/resume`, { method: 'POST', auth, body: {} })).status).toBe(404);
+      await mockPg('technicians').where({ id: fixture.techId }).update({ role: 'admin' });
+      expect((await request(path, { auth })).status).toBe(200);
+      await mockPg('technicians').where({ id: fixture.techId }).update({ role: 'technician' });
+      await mockPg('scheduled_services').where({ id: assignedMember.id }).update({
+        scheduled_date: assignedMember.scheduled_date, status: assignedMember.status,
+      });
+    }
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
     if (fullBehavior) {
       expect((await request(`/api/admin/dispatch/${fixture.serviceIds[0]}/completion-status`, { auth })).status).toBe(409);
       delete process.env.DATA_HYGIENE_VAULT_KEY;
@@ -232,6 +247,22 @@ postgres('visit completion packet records on PostgreSQL', () => {
       process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
     }
     const date = dateOnly((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first()).scheduled_date);
+    const gateBeforeReadinessCheck = process.env.GATE_VISIT_CLOSEOUT;
+    process.env.GATE_VISIT_CLOSEOUT = 'true';
+    delete process.env.DATA_HYGIENE_VAULT_KEY;
+    const unavailableWeek = await request(`/api/admin/schedule/week?start=${date}`, { auth });
+    expect(unavailableWeek.status).toBe(200);
+    expect(unavailableWeek.body.visitCloseout).toBe(false);
+    expect(unavailableWeek.body.days.flatMap((day) => day.services)).toEqual(expect.arrayContaining(fixture.serviceIds.map((id) => (
+      expect.objectContaining({ id, visitCloseoutEnabled: fullBehavior })
+    ))));
+    const unavailableDay = await request(`/api/admin/schedule?date=${date}`, { auth });
+    expect(unavailableDay.status).toBe(200);
+    expect(unavailableDay.body.services).toEqual(expect.arrayContaining(fixture.serviceIds.map((id) => (
+      expect.objectContaining({ id, visitCloseoutEnabled: fullBehavior })
+    ))));
+    process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
+    process.env.GATE_VISIT_CLOSEOUT = gateBeforeReadinessCheck;
     const week = await request(`/api/admin/schedule/week?start=${date}`, { auth });
     expect(week.status).toBe(200);
     expect(week.body.days.flatMap((day) => day.services)).toEqual(expect.arrayContaining(fixture.serviceIds.map((id) => (

@@ -3978,9 +3978,10 @@ router.get('/', async (req, res, next) => {
       ? await db('service_visits').whereIn('id', visitIds).where('behavior_version', '>=', 2).select('id')
       : [];
     const closeoutVisitIds = new Set(closeoutVisits.map((visit) => visit.id));
+    const legacyCloseoutEnabled = isEnabled('visitCloseout') && Boolean(process.env.DATA_HYGIENE_VAULT_KEY);
     for (const service of enriched) {
       service.visitCloseoutPacket = closeoutByVisit.get(service.visitId) || null;
-      service.visitCloseoutEnabled = closeoutVisitIds.has(service.visitId) || isEnabled('visitCloseout');
+      service.visitCloseoutEnabled = closeoutVisitIds.has(service.visitId) || legacyCloseoutEnabled;
     }
 
     // Group by technician
@@ -4078,7 +4079,7 @@ router.get('/', async (req, res, next) => {
 // GET /api/admin/schedule/week
 router.get('/week', async (req, res, next) => {
   try {
-    const visitCloseoutEnabled = isEnabled('visitCloseout');
+    const visitCloseoutEnabled = isEnabled('visitCloseout') && Boolean(process.env.DATA_HYGIENE_VAULT_KEY);
     const startDate = req.query.start || etDateString();
     const start = new Date(startDate + 'T12:00:00');
     const days = [];
