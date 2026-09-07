@@ -152,6 +152,7 @@ const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.h
 const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_SHARED_TOOLS, ...CALL_RESEARCH_TOOLS];
 
 const AGENT_ESTIMATE_TOOL_NAMES = require('../services/intelligence-bar/agent-estimate-policy');
+const apiToolDefinition = require('../services/intelligence-bar/tool-definition');
 const AGENT_ESTIMATE_TOOLS = [...ESTIMATE_TOOLS, ...TECH_TOOLS, ...PROCUREMENT_TOOLS]
   .filter(tool => AGENT_ESTIMATE_TOOL_NAMES.has(tool.name));
 
@@ -1833,14 +1834,6 @@ The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice
 - If a tool reports access is not configured, relay its message — each names the exact service variable to add in the Railway dashboard
 - You CANNOT restart, redeploy, purge caches, resolve issues, or change configuration — never claim otherwise. Point the operator to the relevant dashboard for any change.`;
 
-// The Anthropic API rejects a tool definition carrying keys it does not
-// know (`400 tools.N.custom._contracts: Extra inputs are not permitted`).
-// Tool modules may carry underscore-prefixed metadata for the contract gate
-// (`_contracts`, `_sideEffects`, `_sonnetBacked` — read by
-// server/contract-tests/registry.js); that metadata never leaves the process.
-function apiToolDefinition(tool) {
-  return Object.fromEntries(Object.entries(tool).filter(([key]) => !key.startsWith('_')));
-}
 
 function getToolsForContext(context, isAdmin = false) {
   // Tech portal stays isolated — no base, no infra, tech-tools only.

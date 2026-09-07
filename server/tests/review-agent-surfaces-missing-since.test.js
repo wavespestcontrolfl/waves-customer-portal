@@ -256,6 +256,13 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
     expect(await guards[0]({ ...row })).toBeNull();
   });
 
+  test('a dismissed review is unavailable before a reply approval is built', async () => {
+    const row = liveReview({ dismissed: true });
+    state.rows.google_reviews = [row];
+    const tools = require('../services/intelligence-bar/review-tools');
+    expect(await tools.loadReviewReplyPin(row.id)).toBeNull();
+  });
+
   test.each(['customer_id', 'link_source', 'location_id', 'reviewer_name', 'review_created_at', 'gbp_review_name'])(
     'an approved review pin refuses changed %s even when draft grounding remains valid', async field => {
       const row = liveReview({ customer_id: 'cust-1', link_source: 'click_auto', location_id: 'bradenton',

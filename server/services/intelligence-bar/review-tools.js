@@ -26,7 +26,7 @@ function reviewPinChanged(review, pin) {
 
 async function loadReviewReplyPin(reviewId) {
   const review = await db('google_reviews').where('id', reviewId).first([...REVIEW_PIN_FIELDS, 'gbp_review_name']);
-  if (!review || review.reviewer_name === '_stats' || review.missing_since) return null;
+  if (!review || review.reviewer_name === '_stats' || review.missing_since || review.dismissed) return null;
   return { review_id: review.id, reviewer: review.reviewer_name, location: review.location_id,
     rating: review.star_rating, review_created_at: review.review_created_at,
     customer_id: review.customer_id || null, attribution: review.link_source || null,

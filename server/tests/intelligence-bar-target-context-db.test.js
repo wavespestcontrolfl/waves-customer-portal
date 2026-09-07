@@ -44,6 +44,7 @@ suite('IB target resolution against isolated PostgreSQL', () => {
     for (const request of requests) {
       const result = await Context.resolve(request);
       expect(result.target).toMatchObject({ customer_id: customerId, version });
+      expect(await Context.validateRecordTarget({ customer_id: customerId.toUpperCase() }, result)).toBeNull();
     }
   });
 
@@ -98,6 +99,37 @@ suite('IB target resolution against isolated PostgreSQL', () => {
       expect((await executeEmailTool('get_email_thread', { thread_id: foreign }, scope)).code).toBe('target_clarification_required');
     } finally {
       if (oldKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = oldKey;
+    }
+  });
+
+
+  test('selector-free call history inherits the resolved customer and reads only its persisted calls', async () => {
+    const foreignId = randomUUID(), ownCall = randomUUID(), foreignCall = randomUUID();
+    await mockDb('customers').insert({ id: foreignId, first_name: 'Synthetic', last_name: 'Foreigncalls',
+      phone: '+1555' + (Date.now()+3).toString().slice(-7) });
+    await mockDb('call_log').insert([
+      { id: ownCall, customer_id: customerId, call_sid: `fixture-${ownCall}`, direction: 'inbound', from_phone: '+15550101234', to_phone: '+15550104321', transcription: 'Owned synthetic call' },
+      { id: foreignCall, customer_id: foreignId, call_sid: `fixture-${foreignCall}`, direction: 'inbound', from_phone: '+15550105678', to_phone: '+15550104321', transcription: 'Foreign synthetic call' },
+    ]);
+    const comms = require('../services/intelligence-bar/comms-tools');
+    const schema = comms.COMMS_TOOLS.find(tool => tool.name === 'get_call_log').input_schema;
+    const task = await Context.resolve({ prompt: "Show this customer's calls", pageData: { customer_id: customerId } });
+    const prepared = await Context.prepareReadInput({ days_back: 7 }, task, { toolName: 'get_call_log', schema });
+    expect(prepared.input).toEqual({ days_back: 7, customer_id: customerId });
+    const result = await comms.executeCommsTool('get_call_log', prepared.input);
+    expect(result.calls.map(call => call.id)).toEqual([ownCall]);
+    expect(result.calls[0].transcript_excerpt).toBe('Owned synthetic call');
+  });
+
+  test('a real alternate customer named inside message content cannot replace the viewed recipient', async () => {
+    const recipientId = randomUUID();
+    await mockDb('customers').insert({ id: recipientId, first_name: 'Synthetic', last_name: 'Recipientfixture',
+      phone: '+1555' + (Date.now()+2).toString().slice(-7) });
+    for (const prefix of ['Text this customer', 'Email this customer', 'Send this customer a text', 'Update this customer and text them', 'Remind this customer', 'Notify this customer', 'Tell this customer']) {
+      const task = await Context.resolve({ prompt: `${prefix} that customer Synthetic Targetfixture canceled`,
+        pageData: { customer_id: recipientId } });
+      expect(task.target.customer_id).toBe(recipientId);
+      expect((await Context.validateRecordTarget({ customer_id: customerId }, task)).code).toBe('target_clarification_required');
     }
   });
 
