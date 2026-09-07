@@ -331,7 +331,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(status.facts.invoice).toMatchObject({ state: 'done', invoiceId: saved.body.billing.invoiceId, status: 'paid' });
     await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).update({ status: 'refunded' });
     expect((await require('../services/closeout-status').getCloseoutStatus(fixture.serviceIds[1], { knex: mockPg })).facts.invoice)
-      .toMatchObject({ reason: 'parked_manual_refunded_invoice', refundedInvoiceId: saved.body.billing.invoiceId });
+      .toMatchObject({ reason: 'parked_manual_reversed_packet_invoice', invoiceId: saved.body.billing.invoiceId, status: 'refunded' });
   });
 
   test.each(['active', 'completed', 'cancelled'])('the %s installment plan is checked even without a reminder sequence', async (planStatus) => {
@@ -669,7 +669,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
-  test.each(['void', 'canceled', 'cancelled'])('a %s packet invoice remains an office exception for every member', async (status) => {
+  test.each(['void', 'canceled', 'cancelled', 'refunded'])('a %s packet invoice remains an office exception for every member', async (status) => {
     const saved = await saveVisitCompletionPacket(submission());
     await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).update({ status });
     await mockPg('service_completion_attempts').whereIn('service_id', fixture.serviceIds).update({ status: 'succeeded' });
