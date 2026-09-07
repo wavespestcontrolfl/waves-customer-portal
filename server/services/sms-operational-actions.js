@@ -134,7 +134,7 @@ async function proposeFact(trx, message, fact, current) {
   const sameFact = prior.filter((proposal) => proposal.field === fact.field
     && proposal.evidence?.after_hash === hashSensitiveValue(fact.value));
   const existing = sameFact.find((proposal) => proposal.status !== 'pending') || sameFact[0]
-    || await trx('data_hygiene_proposals').where({ idempotency_key: buildIdempotencyKey(input) }).first('id', 'status');
+    || await trx('data_hygiene_proposals').where({ idempotency_key: buildIdempotencyKey(input) }).forUpdate().first('id', 'status');
   if (existing) return { id: existing.status === 'pending' ? existing.id : null, created: false };
   const retired = await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field,
     notNewerThan: message.created_at, sameMessageSid: message.twilio_sid });

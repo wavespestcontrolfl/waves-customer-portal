@@ -274,6 +274,22 @@ postgres('SMS operations on PostgreSQL', () => {
     expect((await mockPg('sms_log').first()).operational_analysis.replay.notification).toEqual(preview.notification);
   });
 
+  test('replay holds preserved proposal dispositions against concurrent staff rejection through commit', async () => {
+    await recordMessageOperations(mockPg, message, result, context);
+    const proposal = await mockPg('data_hygiene_proposals').first();
+    const previewHash = await replayPreviewHash();
+    await mockPg.transaction(async (trx) => {
+      await recordMessageOperations(trx, message, result, { ...context, replay: true, previewHash });
+      // The replay savepoint completed, but the owning transaction has not.
+      await expect(mockPg.transaction(async (reject) => {
+        await reject.raw("SET LOCAL lock_timeout = '100ms'");
+        return reject('data_hygiene_proposals').where({ id: proposal.id, status: 'pending' }).update({ status: 'rejected' });
+      })).rejects.toThrow('lock timeout');
+      expect((await trx('data_hygiene_proposals').where({ id: proposal.id }).first()).status).toBe('pending');
+    });
+    expect(await mockPg('data_hygiene_proposals').where({ id: proposal.id, status: 'pending' }).update({ status: 'rejected' })).toBe(1);
+  });
+
   test('provider object key order does not change an otherwise identical replay preview', async () => {
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
     const previewHash = await replayPreviewHash();
