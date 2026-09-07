@@ -1975,7 +1975,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // frozen backfillMintTaxRate and the live mint (round-10 contract),
       // and the returned rate is bounded to what the resume validator
       // accepts (finite, 0 <= rate < 1).
-      expect(source).toMatch(/const deriveCompletionTaxRate = \(\) => \{[\s\S]{0,1400}TaxCalculator\.calculateTax\(\s*\n\s*svc\.customer_id,\s*\n\s*svc\.service_type,\s*\n\s*Number\(invoiceAmount\) \|\| 0,\s*\n\s*visitIsPayerBilled \? \{ skipCustomerExemption: true \} : \{\},\s*\n\s*\);/);
+      expect(source).toMatch(/const deriveCompletionTaxRate = \(\) => \{[\s\S]{0,1400}TaxCalculator\.calculateTax\(\s*\n\s*svc\.customer_id,\s*\n\s*svc\.service_type,\s*\n\s*Number\(invoiceAmount\) \|\| 0,\s*\n\s*\{ database: db, skipCustomerExemption: visitIsPayerBilled \},\s*\n\s*\);/);
       // Payer authority at the freeze (pre-push P0): the payer resolves
       // BEFORE the rate derivation; an exempt payer freezes 0, a non-exempt
       // payer's rate excludes the service customer's certificate.
@@ -2109,7 +2109,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       expect((source.match(/const completionInvoiceTaxRate = /g) || []).length).toBe(1);
       // The COMPLETION transaction is the nearest trx open above the stamp
       // (the file has other, earlier transactions on other routes).
-      const trxAt = source.lastIndexOf("await db.transaction(async (trx) => {", stampAt);
+      const trxAt = source.lastIndexOf("const persistRecord = async (trx) => {", stampAt);
       const serializeAt = source.indexOf('structured_notes: serializeJsonb(structuredNotes),');
       expect(stampAt).toBeGreaterThan(trxAt);
       expect(serializeAt).toBeGreaterThan(stampAt);

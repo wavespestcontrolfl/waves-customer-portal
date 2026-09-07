@@ -56,6 +56,17 @@ jest.mock('../services/payer-statements', () => ({
 }));
 
 const db = require('../models/db');
+
+// Match knex's transaction identity; the root client is not its own trx.
+async function mockTransaction(callback) {
+  const trx = (...args) => db(...args);
+  trx.isTransaction = true;
+  trx.raw = db.raw;
+  trx.fn = db.fn;
+  trx.transaction = async (inner) => inner(trx);
+  return callback(trx);
+}
+
 // The send-progress snapshot passes db.raw(...) aggregate columns into
 // .first(); the table mocks ignore first()'s arguments, but raw must exist.
 // Plain function (not jest.fn) so clearAllMocks can't blank it.
@@ -304,7 +315,7 @@ describe('createFromService — estimate-deposit roll-forward', () => {
       }
       throw new Error(`Unexpected table query: ${table}`);
     });
-    db.transaction = jest.fn(async (fn) => fn(db));
+    db.transaction = jest.fn(mockTransaction);
     return { getInsertedInvoice: () => insertedInvoice };
   }
 
@@ -467,7 +478,7 @@ describe('createFromService — frozen-money backfill mints bypass scheduled rep
       }
       throw new Error(`Unexpected table query: ${table}`);
     });
-    db.transaction = jest.fn(async (fn) => fn(db));
+    db.transaction = jest.fn(mockTransaction);
     return {
       getInsertedInvoice: () => insertedInvoice,
       getTableCalls: () => tableCalls,
@@ -672,6 +683,7 @@ describe('createFromService — payer-statement accrual opt-out (skipAccrual, Co
     db.mockImplementation(handler);
     db.transaction = jest.fn(async (fn) => {
       const trx = (table) => handler(table);
+      trx.isTransaction = true;
       trx.transaction = async (inner) => inner(trx); // insertInvoiceRow savepoint
       trx.raw = jest.fn(async () => ({ rows: [] })); // advisory mint lock (PR #3476)
       return fn(trx);
@@ -806,7 +818,7 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
     jest.clearAllMocks();
     // Every edit now runs runEdit inside a transaction (invoice row lock is
     // the serialization point against dun sends) — pass-through.
-    db.transaction = jest.fn(async (fn) => fn(db));
+    db.transaction = jest.fn(mockTransaction);
   });
 
   // Re-reads the CURRENT invoice row at write time; some cases also probe
@@ -914,7 +926,7 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
       .mockResolvedValueOnce({ touches_sent: '2', last_touch_at: '2026-07-17T09:00:00Z' })
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({ touches_sent: '3', last_touch_at: '2026-07-17T12:00:30Z' });
-    db.transaction = jest.fn(async (fn) => fn(db));
+    db.transaction = jest.fn(mockTransaction);
     db.mockImplementation((table) => {
       if (table === 'invoices') {
         const q = {
@@ -965,7 +977,7 @@ describe('editability guard blocks updates once an invoice leaves the safe-to-ed
       .mockResolvedValueOnce({ touches_sent: '2', last_touch_at: '2026-07-17T09:00:00Z' })
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce({ touches_sent: '2', last_touch_at: '2026-07-17T09:00:00Z' });
-    db.transaction = jest.fn(async (fn) => fn(db));
+    db.transaction = jest.fn(mockTransaction);
     db.mockImplementation((table) => {
       if (table === 'invoices') {
         const q = {
