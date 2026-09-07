@@ -35,7 +35,8 @@ const PLATFORM_LIMITS = { instagram: 2200, facebook: 500, tiktok: 2200, gbp: 150
 
 // Gemini vision model ladder. Same env convention as lawn-assessment: the
 // per-service GEMINI_VISION_MODEL overrides the registry default; on a miss we
-// retry the prior Gemini, then fall back to Claude VISION.
+// retry GEMINI_VISION_FALLBACK when it names a different model, then fall back
+// to Claude VISION.
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
 const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 
@@ -57,14 +58,15 @@ Return ONLY a JSON object, no markdown or backticks:
  */
 async function analyzePhoto(image) {
   if (!image || !image.data) return null;
-  const payload = { laneId: 'tech_caption_vision', system: VISION_SYSTEM, text: 'Describe this field photo.', images: [image], jsonMode: true, maxTokens: 600 };
+  const payload = { laneId: 'tech_caption_vision', system: VISION_SYSTEM, text: 'Describe this field photo.', images: [image], jsonMode: true, maxTokens: 2048 }; // thinking spend counts against this ceiling (Gemini 3.x)
 
-  // Rung 1+2: Gemini (best, then prior). Rung 3: Claude VISION.
-  const attempts = [
-    () => llm.callGemini({ model: GEMINI_VISION_MODEL, ...payload }),
-    () => llm.callGemini({ model: GEMINI_VISION_FALLBACK_MODEL, ...payload }),
-    () => llm.callAnthropic({ model: MODELS.VISION, ...payload }),
-  ];
+  // Rung 1: Gemini best. Rung 2: the Gemini retry model, skipped when it is the
+  // same id (the registry default). Rung 3: Claude VISION.
+  const attempts = [() => llm.callGemini({ model: GEMINI_VISION_MODEL, ...payload })];
+  if (GEMINI_VISION_FALLBACK_MODEL && GEMINI_VISION_FALLBACK_MODEL !== GEMINI_VISION_MODEL) {
+    attempts.push(() => llm.callGemini({ model: GEMINI_VISION_FALLBACK_MODEL, ...payload }));
+  }
+  attempts.push(() => llm.callAnthropic({ model: MODELS.VISION, ...payload }));
   for (const attempt of attempts) {
     const res = await attempt();
     if (res && res.ok && res.json) {
