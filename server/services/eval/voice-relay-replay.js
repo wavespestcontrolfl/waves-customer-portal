@@ -46,6 +46,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
 const Joi = require('joi');
+const Ajv = require('ajv');
 const logger = require('../logger');
 const {
   attemptReplay, emailFailure, defaultNotify, defaultSendEmail,
@@ -351,15 +352,16 @@ function normalizeToolResponse(raw) {
   return null;
 }
 
-// The registered input schema of every tool Sandy can be given (name → schema).
-let toolSchemas = null;
-function toolSchema(name) {
-  if (!toolSchemas) {
+// Compile the live tool schemas once; validation never coerces model arguments.
+let toolValidators = null;
+function toolValidator(name) {
+  if (!toolValidators) {
     const { TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS } = require('../voice-agent/relay-tools');
     const { TRANSFER_TOOLS } = require('../voice-agent/relay-transfer');
-    toolSchemas = new Map([...TOOLS, ...CONTEXT_TOOLS, ...BOOKING_TOOLS, ...TRANSFER_TOOLS].map((t) => [t.name, t.input_schema || {}]));
+    const ajv = new Ajv();
+    toolValidators = new Map([...TOOLS, ...CONTEXT_TOOLS, ...BOOKING_TOOLS, ...TRANSFER_TOOLS].map((t) => [t.name, ajv.compile(t.input_schema || {})]));
   }
-  return toolSchemas.get(name) || null;
+  return toolValidators.get(name) || null;
 }
 
 const SLOT_REF_RE = /\(slot_ref: (S\d+)\)/g;
@@ -377,23 +379,22 @@ function offeredRefs(record, re) {
 
 /**
  * What the real tool would refuse before doing anything: a missing required
- * argument, a value outside its enum, a slot_ref the availability tools never
+ * argument, an invalid schema type or enum, a slot_ref the availability tools never
  * offered on this call, a customer_ref no lookup returned. Returns the refusal
  * text or null. A fixture answer is only ever handed to a VALID call — the
  * point of the fixed world is that an invented ref cannot "succeed".
  */
 function validateToolInput(name, input = {}, record) {
-  const schema = toolSchema(name);
-  if (!schema) return null;
-  const props = schema.properties || {};
-  for (const field of schema.required || []) {
-    if (input[field] === undefined || input[field] === null || String(input[field]).trim() === '') {
-      return `Missing required argument "${field}" — nothing was done. Ask the caller for it and call ${name} again.`;
-    }
+  const validate = toolValidator(name);
+  if (!validate) return null;
+  if (!validate(input)) {
+    const error = validate.errors[0];
+    if (error.keyword === 'required') return `Missing required argument "${error.params.missingProperty}" — nothing was done. Ask the caller for it and call ${name} again.`;
+    return `Invalid argument "${error.instancePath.slice(1) || 'input'}" for ${name}: ${error.message} — nothing was done.`;
   }
-  for (const [field, def] of Object.entries(props)) {
-    if (Array.isArray(def.enum) && input[field] !== undefined && !def.enum.includes(input[field])) {
-      return `"${input[field]}" is not a valid ${field} (one of: ${def.enum.join(', ')}) — nothing was done.`;
+  for (const field of validate.schema.required || []) {
+    if (String(input[field]).trim() === '') {
+      return `Missing required argument "${field}" — nothing was done. Ask the caller for it and call ${name} again.`;
     }
   }
   if (name === 'request_booking' && !offeredRefs(record, SLOT_REF_RE).has(String(input.slot_ref))) {

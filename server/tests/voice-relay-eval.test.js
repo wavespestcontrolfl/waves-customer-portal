@@ -162,6 +162,19 @@ describe('voice relay eval — run-relative dates', () => {
     // The raw file keeps the tokens (the run renders, the file does not move).
     expect(JSON.stringify(replay.loadFixture(FIXTURE_PATH).scenarios)).toMatch(/\{\{dow\+8\}\}/);
   });
+
+  test.each([
+    ['2026-09-20T03:30:00Z', '2026-09-19'],
+    ['2027-02-11T04:30:00Z', '2027-02-10'],
+  ])('the recognised caller appointment stays on the run date in ET at %s', (runDate, expectedDate) => {
+    const fixture = replay.loadFixture(FIXTURE_PATH);
+    expect(JSON.stringify(fixture)).not.toMatch(/Next appointment: \d{4}-\d{2}-\d{2}/);
+    const scenario = fixture.scenarios.find((s) => s.id === 'eta-recognised-redacted');
+    expect(scenario.caller.context.block).toContain('Next appointment: {{iso+0}}');
+    const rendered = replay.renderDateTokens(scenario, new Date(runDate));
+    expect(rendered.caller.context.block).toContain(`Next appointment: ${expectedDate} — Lawn Care Program`);
+    expect(JSON.stringify(rendered)).not.toContain('{{iso');
+  });
 });
 
 describe('voice relay eval — each expect key', () => {
@@ -189,6 +202,20 @@ describe('voice relay eval — each expect key', () => {
     expect(stray[0]).toMatchObject({ check: 'allowed_tools', status: 'fail', detail: expect.stringContaining('request_reservice') });
     const { scenarioStatus } = require('../services/eval/voice-relay-replay')._internals;
     expect(scenarioStatus({ checks: stray })).toBe('fail');
+  });
+
+  test.each([
+    ['read-tool-timeout', 'get_account_overview'],
+    ['write-tool-timeout', 'capture_lead'],
+  ])('%s fails if its hanging tool is skipped or invalid, but accepts a valid timed-out call', (id, name) => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === id);
+    for (const tools of [[], [{ name, invalid: true, ok: false }], [{ name, ok: false }]]) {
+      const checks = replay._internals.evaluateChecks(scenario, record({ agent: ['A team member will follow up to confirm.'], tools }));
+      const expected = tools.length && !tools[0].invalid ? 'pass' : 'fail';
+      expect(checks.find((c) => c.check === 'tools_called_include')).toMatchObject({ severity: 'critical', status: expected });
+      expect(replay._internals.scenarioStatus({ checks })).toBe(expected);
+    }
   });
 
   test('spoken_never_matches / spoken_matches_any are case-insensitive regexes over what was sent', () => {
@@ -419,6 +446,26 @@ describe('voice relay eval — the judge', () => {
     expect(MODELS.VOICE_JUDGE).toBe(process.env.MODEL_VOICE_JUDGE || MODELS.DEFAULTS.VOICE_JUDGE);
   });
 
+  test('unsupported bee-removal coverage survives parsing and blocks the unknown-service scenario', async () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const scenario = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'unknown-service');
+    const quote = 'Yes, Waves offers bee removal.';
+    const dispatch = jest.fn(async () => ({ ok: true, fallbackUsed: false, json: {
+      pass: false, forbidden_claims: [{ category: 'invented_coverage', quote }],
+      required_facts_missing: [], prohibited_facts_stated: [], action_taken: 'capture_lead',
+      action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 5,
+      rationale: 'The catalog does not support bee removal.',
+    } }));
+    const judged = await judge.judgeTranscript({ spec: scenario.spec, transcript: `Agent: ${quote}` }, { dispatch });
+    const params = dispatch.mock.calls[0][1];
+    expect(params.jsonSchema.properties.forbidden_claims.items.properties.category.enum).toContain('invented_coverage');
+    expect(judge.buildJudgePrompt(scenario.spec).system).toMatch(/invented_coverage includes claiming Waves offers a service/);
+    expect(judged.verdict.forbidden_claims).toEqual([{ category: 'invented_coverage', quote }]);
+    const checks = judgeChecks(scenario, judged);
+    expect(checks.find((c) => c.check === 'judge:forbidden_claim:invented_coverage')).toMatchObject({ severity: 'critical', status: 'fail' });
+    expect(scenarioStatus({ checks })).toBe('fail');
+  });
+
   test('fallback findings stay advisory; pinned forbidden claims block while ordinary majors need adjudication', () => {
     const scenario = { spec: { transfer_required: true }, judge: { severity: 'major', adjudicated: false } };
     const verdict = { pass: false, forbidden_claims: [{ category: 'invented_price', quote: '$99' }], required_facts_missing: ['x'], prohibited_facts_stated: [], action_taken: 'nothing', action_ok: false, transfer_ok: false, empathy_ok: false, brevity_ok: true, tone: 2 };
@@ -620,7 +667,7 @@ describe('voice relay eval — the harness', () => {
     const { validateToolInput } = replay._internals;
     const rec = { events: [{ kind: 'tool', name: 'find_slots', text: 'Open times: Monday at 9 AM (slot_ref: S1); Tuesday at 1 PM (slot_ref: S2).' }, { kind: 'tool', name: 'lookup_customer', text: 'Found one matching account: R. Alvarez (customer_ref: C1).' }] };
     expect(validateToolInput('capture_lead', {}, rec)).toMatch(/Missing required argument "call_summary"/);
-    expect(validateToolInput('capture_lead', { call_summary: 'x', lead_quality: 'scorching' }, rec)).toMatch(/not a valid lead_quality/);
+    expect(validateToolInput('capture_lead', { call_summary: 'x', lead_quality: 'scorching' }, rec)).toMatch(/lead_quality.*allowed values/);
     expect(validateToolInput('capture_lead', { call_summary: 'x', lead_quality: 'hot' }, rec)).toBeNull();
     expect(validateToolInput('request_booking', { slot_ref: 'S9' }, rec)).toMatch(/slot_ref "S9" was not offered/);
     expect(validateToolInput('request_booking', { slot_ref: 'S2' }, rec)).toBeNull();
@@ -640,6 +687,44 @@ describe('voice relay eval — the harness', () => {
     // The rejected call is not the tool being called: the critical expectation fails the scenario.
     expect(result.checks.find((c) => c.check === 'tools_called_include')).toMatchObject({ status: 'fail', detail: expect.stringContaining('rejected') });
     expect(result.status).toBe('fail');
+  });
+
+  test('registered schema types reject malformed values without coercion and retain optional fields', () => {
+    mockSdk();
+    const { validateToolInput } = require('../services/eval/voice-relay-replay')._internals;
+    for (const home_sqft of ['about two thousand', '2000', null, true, [], {}, NaN, Infinity]) {
+      expect(validateToolInput('get_pricing', { service: 'pest_control', home_sqft }, record())).toMatch(/home_sqft.*must be number/);
+    }
+    for (const input of [null, [], 'pest_control', 1, false]) {
+      expect(validateToolInput('get_pricing', input, record())).toMatch(/input.*must be object/);
+    }
+    expect(validateToolInput('get_pricing', { service: 'pest_control', home_sqft: 2000 }, record())).toBeNull();
+    expect(validateToolInput('get_pricing', { service: 'pest_control' }, record())).toBeNull();
+    expect(validateToolInput('capture_lead', { call_summary: 123 }, record())).toMatch(/call_summary.*must be string/);
+    expect(validateToolInput('capture_lead', { call_summary: '   ' }, record())).toMatch(/Missing required argument/);
+    expect(validateToolInput('capture_lead', { call_summary: 'Callback request', estimate_requested: 'false' }, record())).toMatch(/estimate_requested.*must be boolean/);
+    expect(validateToolInput('capture_lead', { call_summary: 'Callback request', estimate_requested: false }, record())).toBeNull();
+  });
+
+  test('a conditioned pricing fixture cannot succeed for a nonnumeric property size', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'pricing-gate-on');
+    const pricingScenario = { ...fixture, turns: [{ caller: 'What is the price for a 2000 square foot home?' }], expect: [exp('tools_called_include', ['get_pricing'], 'critical')] };
+    script.push(toolUse('get_pricing', { service: 'pest_control', home_sqft: 'about two thousand' }), say('I need to check the home size.'));
+    const invalid = await replay.runScenario(pricingScenario, { judge: false });
+    expect(invalid.error).toBeUndefined();
+    expect(invalid.toolCalls[0]).toMatchObject({ invalid: true, ok: false, receipt: false });
+    expect(invalid.toolCalls[0].text).toMatch(/home_sqft.*must be number/);
+    expect(invalid.transcript).not.toContain('$129');
+    expect(invalid.status).toBe('fail');
+
+    script.push(toolUse('get_pricing', { service: 'pest_control', home_sqft: 2000 }), say('Quarterly pest control is $129 per application.'));
+    const valid = await replay.runScenario(pricingScenario, { judge: false });
+    expect(valid.error).toBeUndefined();
+    expect(valid.toolCalls[0]).toMatchObject({ invalid: false, ok: true });
+    expect(valid.toolCalls[0].text).toContain('$129 per application');
+    expect(valid.status).toBe('pass');
   });
 
   test('a stray write outside allowedTools is a blocking miss even though the fixture answers it', async () => {
@@ -699,11 +784,13 @@ describe('voice relay eval — the harness', () => {
       return say('I do not have confirmation yet.');
     });
     const judgeFn = jest.fn(async () => ({ ok: true, judge_fallback: false, verdict: { pass: true, forbidden_claims: [], required_facts_missing: [], prohibited_facts_stated: [], action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 5 } }));
-    const pending = replay.runScenario({ ...fixture, turns: [{ caller: 'Please check that request.' }], expect: [] }, { judge: true, judgeFn });
+    const pending = replay.runScenario({ ...fixture, turns: [{ caller: 'Please check that request.' }] }, { judge: true, judgeFn });
     await jest.advanceTimersByTimeAsync(timeoutMs + 1);
     const result = await pending;
     expect(result.error).toBeUndefined();
     expect(result.toolCalls).toHaveLength(retry ? 2 : 1);
+    expect(result.checks.find((c) => c.check === 'tools_called_include')).toMatchObject({ severity: 'critical', status: 'pass' });
+    expect(result.status).toBe('pass');
     expect(result.toolCalls.map((t) => t.text)).toEqual(modelResults);
     for (const tool of result.toolCalls) {
       expect(tool).toMatchObject({ name, ok: false, receipt: false });
