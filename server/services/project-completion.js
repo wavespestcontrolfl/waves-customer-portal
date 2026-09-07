@@ -18,6 +18,7 @@ const {
 } = require('./project-types');
 const { createAlertOnce } = require('./dispatch-alerts');
 const { resolveWdoInspectionFee, wdoFeeIsExplicitZero } = require('./wdo-inspection-fee');
+const { settleOwedCompletionSupplies, completionSuppliesOwed, completionSuppliesOwedMarker } = require('./supplies-consumption');
 
 const NON_MEMBERSHIP_TIER_KEYS = new Set(['none', 'onetime', 'na', 'no', 'notset', 'commercial']);
 const TERMINAL_NON_COMPLETABLE_STATUSES = new Set(['cancelled', 'skipped', 'no_show']);
@@ -571,6 +572,14 @@ async function completeProjectBackedService({
   }
 
   let postCommitTrackServiceId = null;
+  // Set only when THIS close flips the visit to completed: the consumables
+  // hook runs after commit. Never on a re-close of an already-completed
+  // visit (a historical project predating the hook would otherwise deduct
+  // today's stock on replay — no movement exists for the unique index to
+  // match) and never for a `rescheduled` row (the legacy reschedule path
+  // leaves the replaced appointment linked; completing it performs no
+  // visit). GH codex #3996 r2 P2 ×2.
+  let postCommitConsumption = null;
   const result = await knex.transaction(async (trx) => {
     // Project row FIRST (codex #3344 r9 P2): the combined report/invoice
     // send (resolveOrCreateProjectInvoice) holds the project FOR UPDATE and
@@ -912,6 +921,19 @@ async function completeProjectBackedService({
         trx,
       });
       postCommitTrackServiceId = scheduledService.id;
+      // This transition owes the kit: the same durable service_records
+      // marker the recap flow writes (pest-recap.js), so a process death
+      // between this commit and the post-commit hook is retried by the next
+      // close of this project instead of lost (pre-push codex P1).
+      if (String(scheduledService.status || '').toLowerCase() !== 'rescheduled') {
+        if (serviceRecordCols.field_flags) {
+          await trx('service_records').where({ id: serviceRecord.id }).update({ field_flags: completionSuppliesOwedMarker(trx) });
+        }
+        postCommitConsumption = { scheduledService, serviceRecord, project };
+      }
+    } else if (completionSuppliesOwed(serviceRecord)) {
+      // Re-close of a visit an earlier close completed but never settled.
+      postCommitConsumption = { scheduledService, serviceRecord, project };
     }
 
     const projectUpdate = {
@@ -959,6 +981,31 @@ async function completeProjectBackedService({
       });
     } catch (err) {
       logger.warn(`[project-completion] track completion refresh failed for ${postCommitTrackServiceId}: ${err.message}`);
+    }
+  }
+
+  // Per-completion consumables (the termite protection notice on a WDO
+  // inspection / pre-treat / trenching / liquid treatment — every termite
+  // service completes through THIS path, never the normal closeout hook).
+  // Same posture as the normal path: after commit, own transaction,
+  // at-most-once per (product, visit), never throws (GH codex #3996 P1).
+  // The owed-marker settle/clear policy is the shared lifecycle in
+  // supplies-consumption.js — one rule for the recap route and this path.
+  if (postCommitConsumption) {
+    const { scheduledService, serviceRecord, project } = postCommitConsumption;
+    const serviceType = serviceRecord?.service_type || scheduledService.service_type || null;
+    try {
+      await settleOwedCompletionSupplies(knex, {
+        scheduledServiceId: scheduledService.id,
+        serviceRecordId: serviceRecord?.id || null,
+        customerId: scheduledService.customer_id || null,
+        technicianId: scheduledService.technician_id || null,
+        serviceLine: serviceRecord?.service_line || detectServiceLine(serviceType),
+        serviceType,
+        projectType: project.project_type || null,
+      });
+    } catch (err) {
+      logger.error(`[project-completion] completion supplies consumption failed for ${scheduledService.id}: ${err.message}`);
     }
   }
 

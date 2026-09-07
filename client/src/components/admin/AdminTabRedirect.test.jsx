@@ -26,6 +26,7 @@ function renderRedirect({
   preserveTabs,
   queryKey,
   remapQuery,
+  tabInHash,
 }) {
   render(
     <MemoryRouter initialEntries={[entry]}>
@@ -39,6 +40,7 @@ function renderRedirect({
               preserveTabs={preserveTabs}
               queryKey={queryKey}
               remapQuery={remapQuery}
+              tabInHash={tabInHash}
             />
           )}
         />
@@ -50,6 +52,13 @@ function renderRedirect({
 }
 
 describe("AdminTabRedirect", () => {
+  it("moves the Email alias into Communications while retaining message and fragment context", () => {
+    const destination = renderRedirect({
+      entry: "/admin/email?id=fixture-message&filter=a&filter=b#source=bell&tab=obsolete",
+      source: "/admin/email", to: "/admin/communications", tab: "email", tabInHash: true,
+    });
+    expect(destination).toBe("/admin/communications?id=fixture-message&filter=a&filter=b#source=bell&tab=email");
+  });
   it("moves a lead deep link into Pipeline without losing query or hash", () => {
     const destination = renderRedirect({
       entry: "/admin/leads?lead=lead-123&source=notification#activity",

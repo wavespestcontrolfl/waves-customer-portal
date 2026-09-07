@@ -1,0 +1,74 @@
+path,source_line,components,page_modules,redirect_parameters,disposition
+/admin/login,client/src/App.jsx:545,Navigate; AdminLoginPage,client/src/pages/AdminLoginPage.jsx,to=/,KEEP compatibility entry
+/admin/change-password,client/src/App.jsx:546,Navigate; AdminChangePasswordPage,client/src/pages/AdminChangePasswordPage.jsx,to=/,KEEP compatibility entry
+/admin/forgot-password,client/src/App.jsx:547,Navigate; AdminForgotPasswordPage,client/src/pages/AdminForgotPasswordPage.jsx,to=/,KEEP compatibility entry
+/admin/reset-password,client/src/App.jsx:548,Navigate; AdminResetPasswordPage,client/src/pages/AdminResetPasswordPage.jsx,to=/,KEEP compatibility entry
+/admin,client/src/App.jsx:559,Navigate; PageErrorBoundary; AdminLayout,client/src/components/AdminLayoutV2.jsx,to=/,KEEP compatibility entry
+/admin/dashboard,client/src/App.jsx:561,Suspense; RouteFallback; AdminDashboardPage,client/src/pages/admin/DashboardPageV2.jsx,,KEEP supported surface
+/admin/customers,client/src/App.jsx:562,Suspense; RouteFallback; AdminCustomersPage,client/src/pages/admin/CustomersPageV2.jsx,,KEEP supported surface
+/admin/customers/new,client/src/App.jsx:563,Suspense; RouteFallback; AdminCustomersPage,client/src/pages/admin/CustomersPageV2.jsx,,KEEP supported surface
+/admin/customers/duplicates,client/src/App.jsx:564,Suspense; RouteFallback; AdminDuplicateCustomersPage,client/src/pages/admin/DuplicateCustomersPage.jsx,,KEEP supported surface
+/admin/pipeline,client/src/App.jsx:565,Suspense; RouteFallback; AdminPipelinePage,client/src/pages/admin/EstimatesPageV2.jsx,,KEEP supported surface
+/admin/estimates,client/src/App.jsx:568,AdminTabRedirect,client/src/components/admin/AdminTabRedirect.jsx,to=/admin/pipeline; tab=estimates,KEEP compatibility entry
+/admin/agent-estimate,client/src/App.jsx:569,Suspense; div; AdminAgentEstimatePage,client/src/pages/admin/AgentEstimatePage.jsx,,KEEP supported surface
+/admin/estimates/:estimateId/proposal,client/src/App.jsx:570,Suspense; RouteFallback; AdminCommercialProposalPage,client/src/pages/admin/CommercialProposalPage.jsx,,KEEP supported surface
+/admin/dispatch,client/src/App.jsx:576,Suspense; RouteFallback; AdminDispatchPage,client/src/pages/admin/AdminDispatchPage.jsx,,KEEP supported surface
+/admin/schedule,client/src/App.jsx:577,ScheduleRedirect,,,KEEP compatibility entry
+/admin/revenue,client/src/App.jsx:578,Navigate,,to=/admin/dashboard,KEEP compatibility entry
+/admin/communications,client/src/App.jsx:579,Suspense; RouteFallback; AdminCommunicationsPage,client/src/pages/admin/CommunicationsPageV2.jsx,,KEEP supported surface
+/admin/reviews,client/src/App.jsx:580,Suspense; RouteFallback; AdminReviewsPage,client/src/pages/admin/ReviewsPage.jsx,,KEEP supported surface
+/admin/ads,client/src/App.jsx:581,Navigate,,to=/admin/ppc,KEEP compatibility entry
+/admin/ppc,client/src/App.jsx:582,Suspense; RouteFallback; AdminAdsPage,client/src/pages/admin/AdsPage.jsx,,KEEP supported surface
+/admin/seo,client/src/App.jsx:583,Suspense; RouteFallback; AdminSEOPage,client/src/pages/admin/SEOPage.jsx,,KEEP supported surface
+/admin/content-engine,client/src/App.jsx:585,Navigate,,to=/admin/blog?tab=autopilot,KEEP compatibility entry
+/admin/content-registry,client/src/App.jsx:586,Navigate,,to=/admin/blog?tab=registry,KEEP compatibility entry
+/admin/data-hygiene,client/src/App.jsx:587,Navigate,,to=/admin/agents?tab=hygiene,KEEP compatibility entry
+/admin/agents,client/src/App.jsx:588,Suspense; RouteFallback; AgentsHubPage,client/src/pages/admin/AgentsHubPage.jsx,,KEEP supported surface
+/admin/agent-decisions,client/src/App.jsx:589,Navigate,,to=/admin/agents?tab=decisions,KEEP compatibility entry
+/admin/drafts,client/src/App.jsx:591,Navigate,,to=/admin/agents?tab=drafts,KEEP compatibility entry
+/admin/blog,client/src/App.jsx:592,Suspense; RouteFallback; AdminBlogPage,client/src/pages/admin/BlogPage.jsx,,KEEP supported surface
+/admin/knowledge,client/src/App.jsx:593,Suspense; RouteFallback; KnowledgeHubPage,client/src/pages/admin/KnowledgeHubPage.jsx,,KEEP supported surface
+/admin/referrals,client/src/App.jsx:594,Suspense; RouteFallback; AdminReferralsPage,client/src/pages/admin/ReferralsPageV2.jsx,,KEEP supported surface
+/admin/social-media,client/src/App.jsx:595,Suspense; RouteFallback; AdminSocialMediaPage,client/src/pages/admin/SocialMediaPage.jsx,,KEEP supported surface
+/admin/tax,client/src/App.jsx:596,Suspense; RouteFallback; AdminTaxPage,client/src/pages/admin/TaxPage.jsx,,KEEP supported surface
+/admin/pricing,client/src/App.jsx:597,AdminTabRedirect,client/src/components/admin/AdminTabRedirect.jsx,to=/admin/pricing-logic; queryKey=area; tab=strategy,KEEP compatibility entry
+/admin/lawn-assessment,client/src/App.jsx:602,LawnAssessmentRedirect,,,KEEP compatibility entry
+/admin/lawn-assessments,client/src/App.jsx:603,Suspense; RouteFallback; AdminAssessmentsHubPage,client/src/pages/admin/AssessmentsHubPage.jsx,,KEEP supported surface
+/admin/recruiting,client/src/App.jsx:604,Suspense; RouteFallback; AdminRecruitingPage,client/src/pages/admin/RecruitingPage.jsx,,KEEP supported surface
+/admin/lawn-protocol,client/src/App.jsx:605,AdminTabRedirect,client/src/components/admin/AdminTabRedirect.jsx,to=/admin/service-library; tab=protocols,KEEP compatibility entry
+/admin/turf-height,client/src/App.jsx:623,Suspense; RouteFallback; AdminTurfHeightReviewPage,client/src/pages/admin/TurfHeightReviewPage.jsx,,KEEP supported surface
+/admin/equipment-calibration,client/src/App.jsx:624,AdminTabRedirect,client/src/components/admin/AdminTabRedirect.jsx,to=/admin/equipment; tab=calibrations,KEEP compatibility entry
+/admin/equipment,client/src/App.jsx:625,Suspense; RouteFallback; AdminEquipmentPage,client/src/pages/admin/EquipmentPage.jsx,,KEEP supported surface
+/admin/kb,client/src/App.jsx:626,AdminTabRedirect,client/src/components/admin/AdminTabRedirect.jsx,to=/admin/knowledge; queryKey=area; tab=base,KEEP compatibility entry
+/admin/invoices,client/src/App.jsx:641,Suspense; RouteFallback; AdminInvoicesPage,client/src/pages/admin/AdminInvoicesPage.jsx,,KEEP supported surface
+/admin/billing-recovery,client/src/App.jsx:642,Suspense; RouteFallback; BillingRecoveryPage,client/src/pages/admin/BillingRecoveryPage.jsx,,KEEP supported surface
+/admin/payers,client/src/App.jsx:643,Suspense; RouteFallback; PayersPage,client/src/pages/admin/PayersPage.jsx,,KEEP supported surface
+/admin/inventory,client/src/App.jsx:644,Suspense; RouteFallback; AdminInventoryPage,client/src/pages/admin/InventoryPage.jsx,,KEEP supported surface
+/admin/settings,client/src/App.jsx:645,Suspense; RouteFallback; AdminSettingsPage,client/src/pages/admin/SettingsPage.jsx,,KEEP supported surface
+/admin/settings/pest-pressure,client/src/App.jsx:646,Suspense; RouteFallback; PestPressureSettingsPage,client/src/pages/admin/PestPressureSettingsPage.jsx,,KEEP supported surface
+/admin/health,client/src/App.jsx:647,Navigate,,to=/admin/customers?view=health,KEEP compatibility entry
+/admin/timetracking,client/src/App.jsx:648,Suspense; RouteFallback; TimeTrackingPage,client/src/pages/admin/TimeTrackingPage.jsx,,KEEP supported surface
+/admin/leads,client/src/App.jsx:649,AdminTabRedirect,client/src/components/admin/AdminTabRedirect.jsx,to=/admin/pipeline; tab=leads,KEEP compatibility entry
+/admin/fleet,client/src/App.jsx:650,FleetRedirect,,,KEEP compatibility entry
+/admin/service-library,client/src/App.jsx:651,Suspense; RouteFallback; ServiceLibraryPage,client/src/pages/admin/ServiceLibraryPage.jsx,,KEEP supported surface
+/admin/projects,client/src/App.jsx:652,Suspense; RouteFallback; ProjectsPage,client/src/pages/admin/ProjectsPage.jsx,,KEEP supported surface
+/admin/contracts,client/src/App.jsx:653,Suspense; RouteFallback; AdminContractsPage,client/src/pages/admin/ContractsPage.jsx,,KEEP supported surface
+/admin/documents,client/src/App.jsx:654,Navigate,,to=/admin/contracts?tab=templates,KEEP compatibility entry
+/admin/document-requests,client/src/App.jsx:655,Navigate,,to=/admin/contracts?tab=requests,KEEP compatibility entry
+/admin/discounts,client/src/App.jsx:656,Navigate,,to=/admin/service-library?tab=discounts,KEEP compatibility entry
+/admin/compliance,client/src/App.jsx:657,Suspense; RouteFallback; CompliancePage,client/src/pages/admin/CompliancePage.jsx,,KEEP supported surface
+/admin/credentials,client/src/App.jsx:658,AdminTabRedirect,client/src/components/admin/AdminTabRedirect.jsx,to=/admin/compliance; tab=credentials,KEEP compatibility entry
+/admin/newsletter,client/src/App.jsx:659,Suspense; RouteFallback; NewsletterPage,client/src/pages/admin/NewsletterPage.jsx,,KEEP supported surface
+/admin/call-recordings,client/src/App.jsx:660,Navigate,,to=/admin/communications,KEEP compatibility entry
+/admin/phone-numbers,client/src/App.jsx:661,Navigate,,to=/admin/communications,KEEP compatibility entry
+/admin/email,client/src/App.jsx:662,Suspense; RouteFallback; AdminEmailPage,client/src/pages/admin/EmailPage.jsx,,KEEP supported surface
+/admin/banking,client/src/App.jsx:663,Suspense; RouteFallback; AdminBankingPage,client/src/pages/admin/BankingPage.jsx,,KEEP supported surface
+/admin/pricing-logic,client/src/App.jsx:664,Suspense; RouteFallback; PricingHubPage,client/src/pages/admin/PricingHubPage.jsx,,KEEP supported surface
+/admin/pricing-reality-check,client/src/App.jsx:665,Navigate,,to=/admin/pricing-logic?section=reality,KEEP compatibility entry
+/admin/tool-health,client/src/App.jsx:666,Suspense; RouteFallback; AdminToolHealthPage,client/src/pages/admin/ToolHealthPage.jsx,,KEEP supported surface
+/admin/auto-dispatch,client/src/App.jsx:667,AdminTabRedirect,client/src/components/admin/AdminTabRedirect.jsx,to=/admin/agents; tab=dispatch,KEEP compatibility entry
+/admin/price-match,client/src/App.jsx:668,Suspense; RouteFallback; AdminPriceMatchPage,client/src/pages/admin/PriceMatchPage.jsx,,KEEP supported surface
+/admin/price-change,client/src/App.jsx:669,AdminTabRedirect,client/src/components/admin/AdminTabRedirect.jsx,to=/admin/pricing-logic; queryKey=area; tab=notices,KEEP compatibility entry
+/admin/more,client/src/App.jsx:670,Suspense; RouteFallback; AdminMorePage,client/src/pages/admin/MorePage.jsx,,KEEP supported surface
+/admin/_design-system,client/src/App.jsx:671,Suspense; RouteFallback; DesignSystemPage,client/src/pages/admin/_DesignSystemPage.jsx,,KEEP supported surface
+/admin/_design-system/flags,client/src/App.jsx:672,Suspense; RouteFallback; DesignSystemFlagsPage,client/src/pages/admin/_DesignSystemFlagsPage.jsx,,KEEP supported surface

@@ -25,7 +25,7 @@ describe('models registry — cross-provider routing', () => {
     expect(M.OPENAI_BEST).toBe(M.OPENAI_BALANCED);
     expect(M.OPENAI_FAST).toBe(process.env.MODEL_OPENAI_FAST || 'gpt-5.6-luna');
     expect(M.OPENAI_REPORT_WRITER).toBe(process.env.MODEL_OPENAI_REPORT_WRITER || 'gpt-5.6-sol');
-    expect(M.GEMINI_VISION_BEST).toBe(process.env.MODEL_GEMINI_VISION || 'gemini-3.5-flash');
+    expect(M.GEMINI_VISION_BEST).toBe(process.env.MODEL_GEMINI_VISION || 'gemini-3.8-flash');
   });
 
   test('MODEL_OPENAI_BEST env override flows into OPENAI_BEST + ROUTES', () => {

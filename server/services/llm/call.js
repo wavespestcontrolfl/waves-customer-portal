@@ -382,6 +382,15 @@ async function callOpenAI({ model, system, text, images = [], documents = [], js
 }
 
 // ── Gemini ────────────────────────────────────────────────────────────
+// Every text part of the first Gemini candidate, joined. Gemini 3.x Flash is a
+// thinking model: a thought part can precede the answer part, so parts[0].text
+// alone misses the JSON. Parts the API marks as thoughts are skipped. The one
+// parser for callGemini AND the direct-fetch photo services.
+function geminiText(data) {
+  const candidate = ((data || {}).candidates || [])[0] || {};
+  return ((candidate.content || {}).parts || []).filter((p) => p && p.text && !p.thought).map((p) => p.text).join('');
+}
+
 /**
  * Gemini generateContent. jsonMode sets response_mime_type and joins ALL text
  * parts (a thinking model can emit a thought part before the answer part).
@@ -435,7 +444,7 @@ async function callGemini({ model, system, text, images = [], jsonMode = true, j
     }
     const data = (await resp.json()) || {};
     const candidate = (data.candidates || [])[0] || {};
-    const out = ((candidate.content || {}).parts || []).map((p) => p && p.text).filter(Boolean).join('');
+    const out = geminiText(data);
     const served = { servedModel: data.modelVersion, providerRef: data.responseId, usage: usageOf('gemini', data), latencyMs: elapsedMs(t0), response: out };
     const code = geminiVerdict(data, candidate, maxTokens);
     if (code) return failedLeg(base, served, code);
@@ -658,6 +667,7 @@ module.exports = {
   DEFAULT_FALLBACK_BUDGET_MS,
   callOpenAI,
   callGemini,
+  geminiText,
   callAnthropic,
   dispatch,
   dispatchWithFallback,

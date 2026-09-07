@@ -7,6 +7,21 @@ const SWFL_BOUNDS = {
   west: -83.05,
 };
 
+// This only preserves unit input in a form; server address identity stays authoritative.
+// Google's own long/short street names handle suffix changes without a second
+// street-suffix catalog in the browser.
+export function sameAutocompleteAddress(previous, parts) {
+  const key = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const streetMatches = [parts.line1, parts.line1Short]
+    .some((line) => line && key(line) === key(previous.line1));
+  return streetMatches && ['city', 'state', 'zip'].every((field) => {
+    if (!previous[field] || !parts[field]) return true;
+    const before = key(previous[field]);
+    const after = key(parts[field]);
+    return field === 'zip' ? before.slice(0, 5) === after.slice(0, 5) : before === after;
+  });
+}
+
 /**
  * Google Places address autocomplete input.
  *
@@ -14,13 +29,17 @@ const SWFL_BOUNDS = {
  *   value       — controlled input string
  *   onChange    — (value) => void  (fires on typing)
  *   onSelect    — (parts) => void  (fires when user picks a suggestion)
- *                 parts: { formatted, line1, line2, city, state, zip, lat, lng }
+ *                 parts: { formatted, line1, line1Short, line2, city, state, zip, lat, lng }
  *                 line2 = Google subpremise (unit/apt) when the user typed one;
  *                 line1 stays street-only so geocode/parcel matching is clean
  *   placeholder
  *   autoFocus
  *   style       — inline style overrides for the input
  *   country     — default 'us'
+ *   enabled     — false keeps a manual input without loading Google
+ *   appearance  — 'admin' selects the monochrome dropdown while focused
+ *   geocodeOnBlur — false requires an explicit suggestion selection
+ *   Other native input props (maxLength, aria-label, disabled) are forwarded.
  */
 export default function AddressAutocomplete({
   id,
@@ -33,6 +52,10 @@ export default function AddressAutocomplete({
   className,
   style,
   country = 'us',
+  enabled = true,
+  appearance = 'customer',
+  geocodeOnBlur = true,
+  ...inputProps
 }) {
   const inputRef = useRef(null);
   const acRef = useRef(null);
@@ -49,7 +72,7 @@ export default function AddressAutocomplete({
 
   useEffect(() => {
     const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
-    if (!apiKey) return;
+    if (!enabled || !apiKey) return;
 
     // Dropdown styles — light theme, match the booking page
     if (!document.getElementById('pac-light-style')) {
@@ -63,12 +86,26 @@ export default function AddressAutocomplete({
         .pac-item-query { color: #0B2545 !important; font-weight: 600 !important; }
         .pac-matched { color: #0FA3B1 !important; font-weight: 700 !important; }
         .pac-icon { display: none !important; }
-        .pac-logo::after { display: none !important; }
+        body[data-address-autocomplete-appearance="admin"] .pac-container { border-color: #D4D4D8 !important; border-radius: 4px !important; }
+        body[data-address-autocomplete-appearance="admin"] .pac-item { color: #52525B !important; font-weight: 400 !important; }
+        body[data-address-autocomplete-appearance="admin"] .pac-item:hover,
+        body[data-address-autocomplete-appearance="admin"] .pac-item-selected { background: #F4F4F5 !important; }
+        body[data-address-autocomplete-appearance="admin"] .pac-item-query,
+        body[data-address-autocomplete-appearance="admin"] .pac-matched { color: #18181B !important; font-weight: 500 !important; }
       `;
       document.head.appendChild(style);
     }
 
+    let disposed = false;
+    let listener;
+    let libraryRequested = false;
     function init() {
+      if (disposed) return false;
+      // A map may have loaded the API without the Places library.
+      if (window.google?.maps?.importLibrary && !window.google.maps.places && !libraryRequested) {
+        libraryRequested = true;
+        window.google.maps.importLibrary('places').then(init).catch(() => {});
+      }
       if (!window.google?.maps?.places || !inputRef.current || acRef.current) return false;
       const ac = new window.google.maps.places.Autocomplete(inputRef.current, {
         types: ['address'],
@@ -77,7 +114,7 @@ export default function AddressAutocomplete({
         strictBounds: false,
         fields: ['formatted_address', 'address_components', 'geometry'],
       });
-      ac.addListener('place_changed', () => {
+      listener = ac.addListener('place_changed', () => {
         const p = ac.getPlace();
         if (!p || !p.address_components) return;
         const get = (type) => {
@@ -94,6 +131,7 @@ export default function AddressAutocomplete({
         const parts = {
           formatted: p.formatted_address || '',
           line1,
+          line1Short: [get('street_number'), getShort('route')].filter(Boolean).join(' '),
           line2: get('subpremise'),
           city: get('locality') || get('sublocality') || get('postal_town'),
           state: getShort('administrative_area_level_1'),
@@ -109,28 +147,44 @@ export default function AddressAutocomplete({
       return true;
     }
 
-    if (init()) return;
-
-    // Script already loading? poll.
-    if (document.querySelector('script[src*="maps.googleapis.com/maps/api/js"]')) {
-      const iv = setInterval(() => { if (init()) clearInterval(iv); }, 250);
-      setTimeout(() => clearInterval(iv), 8000);
-      return () => clearInterval(iv);
-    }
-
-    const script = document.createElement('script');
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places&loading=async`;
-    script.async = true;
-    script.defer = true;
-    script.onload = () => {
-      const iv = setInterval(() => { if (init()) clearInterval(iv); }, 200);
-      setTimeout(() => clearInterval(iv), 8000);
+    const cleanup = () => {
+      disposed = true;
+      listener?.remove();
+      acRef.current?.unbindAll?.();
+      acRef.current = null;
     };
-    document.head.appendChild(script);
-  }, [country]);
+    if (init()) return cleanup;
+
+    let script = document.querySelector('script[src*="maps.googleapis.com/maps/api/js"]');
+    if (!script) {
+      script = document.createElement('script');
+      script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&libraries=places&loading=async`;
+      script.async = true;
+      document.head.appendChild(script);
+    }
+    let interval;
+    let timeout;
+    const startPolling = () => {
+      clearInterval(interval);
+      clearTimeout(timeout);
+      if (init()) return;
+      interval = setInterval(() => { if (init()) clearInterval(interval); }, 250);
+      timeout = setTimeout(() => clearInterval(interval), 8000);
+    };
+    // Slow downloads get a fresh initialization window once the API arrives.
+    script.addEventListener('load', startPolling);
+    startPolling();
+    return () => {
+      script.removeEventListener('load', startPolling);
+      clearInterval(interval);
+      clearTimeout(timeout);
+      cleanup();
+    };
+  }, [country, enabled]);
 
   return (
     <input
+      {...inputProps}
       id={id}
       name={name}
       ref={inputRef}
@@ -139,8 +193,16 @@ export default function AddressAutocomplete({
       className={className}
       placeholder={placeholder}
       value={value}
+      onFocus={() => {
+        document.body.dataset.addressAutocompleteAppearance = appearance;
+      }}
+      onKeyDown={(e) => {
+        // Google handles selection itself; Enter must not also submit the form.
+        if (!geocodeOnBlur && e.key === 'Enter' && acRef.current) e.preventDefault();
+      }}
       onChange={(e) => onChange?.(e.target.value)}
       onBlur={() => {
+        if (!enabled || !geocodeOnBlur) return;
         const typed = (inputRef.current?.value || '').trim();
         if (!typed || lastSelectedRef.current.includes(typed) || !window.google?.maps?.Geocoder) return;
         const geocoder = new window.google.maps.Geocoder();
@@ -163,6 +225,7 @@ export default function AddressAutocomplete({
           const parts = {
             formatted: p.formatted_address || typed,
             line1,
+            line1Short: [get('street_number'), getShort('route')].filter(Boolean).join(' '),
             line2: get('subpremise'),
             city: get('locality') || get('sublocality') || get('postal_town'),
             state: getShort('administrative_area_level_1'),

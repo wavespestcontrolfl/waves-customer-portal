@@ -26,7 +26,7 @@ import {
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
 import { refetchFlags, useFeatureFlag } from "../hooks/useFeatureFlag";
-import { adminFetch } from "../utils/admin-fetch";
+import { adminFetch, adminLoginUrl } from "../utils/admin-fetch";
 import { trackAdminPageView, markUsageSource } from "../lib/adminUsage";
 import {
   ADMIN_DESKTOP_NAV_SECTIONS,
@@ -35,7 +35,9 @@ import {
   isPathAdminOnly,
 } from "../config/adminNavigation";
 import NotificationBell from "./NotificationBell";
+import useUnreadConversations from "../hooks/useUnreadConversations";
 import GlobalCommandPalette from "./admin/GlobalCommandPalette";
+import { clearEmailDrafts } from "../lib/emailDrafts";
 
 function initialsFor(name) {
   if (!name) return "•";
@@ -51,6 +53,42 @@ function roleLabel(role) {
   return role.charAt(0).toUpperCase() + role.slice(1);
 }
 
+// Dark, not colored: the spec's unread marker for the inbox (§5.7). Hidden at
+// zero; capped so a backlog never widens the tab.
+function UnreadBadge({ count, style }) {
+  if (!(count > 0)) return null;
+  const label = count > 99 ? "99+" : String(count);
+  return (
+      <span
+        aria-hidden="true"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          minWidth: 18,
+          height: 18,
+          padding: "0 5px",
+          borderRadius: 9,
+          background: "var(--text-primary)",
+          color: "var(--surface-primary)",
+          fontSize: 11,
+          fontWeight: 500,
+          lineHeight: 1,
+          fontVariantNumeric: "tabular-nums",
+          ...style,
+        }}
+      >
+        {label}
+      </span>
+  );
+}
+
+// Read after the label, so the link announces "Messages, 5 unread conversations".
+function UnreadSrText({ count }) {
+  if (!(count > 0)) return null;
+  return <span className="sr-only">, {count} unread conversation{count === 1 ? "" : "s"}</span>;
+}
+
 export default function AdminLayoutV2() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -60,6 +98,10 @@ export default function AdminLayoutV2() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
   const paletteRef = useRef(null);
+  // Global Messages badge: conversations with an unread inbound text. Polled
+  // only once staff access is verified (same cadence as the bell). The icon's
+  // destination is the inbox, never a particular customer.
+  const unreadConversations = useUnreadConversations(authStatus === "ready" && ["admin", "owner"].includes(user?.role));
 
   // Safari bookmark identity lives in App (AdminSafariShell) so /admin/login
   // is covered. The layout only owns chrome geometry.
@@ -77,7 +119,7 @@ export default function AdminLayoutV2() {
   useEffect(() => {
     const token = localStorage.getItem("waves_admin_token");
     if (!token) {
-      navigate("/admin/login", { replace: true });
+      navigate(adminLoginUrl(location), { replace: true });
       return;
     }
     adminFetch("/admin/auth/me")
@@ -105,7 +147,7 @@ export default function AdminLayoutV2() {
           localStorage.removeItem("waves_admin_token");
           localStorage.removeItem("waves_admin_user");
           refetchFlags().catch(() => {});
-          navigate("/admin/login", { replace: true });
+          navigate(adminLoginUrl(location), { replace: true });
           return;
         }
         setAuthStatus("error");
@@ -151,6 +193,7 @@ export default function AdminLayoutV2() {
   }, [authStatus, location.pathname, location.search]);
 
   const handleLogout = () => {
+    clearEmailDrafts();
     localStorage.removeItem("waves_admin_token");
     localStorage.removeItem("waves_admin_user");
     refetchFlags().catch(() => {});
@@ -160,6 +203,10 @@ export default function AdminLayoutV2() {
   const openPalette = () => paletteRef.current?.open();
 
   const sidebarVisible = !isMobile || sidebarOpen;
+  // The redirect effect runs after render. Apply its existing role policy to
+  // the outlet too, so a restricted child's effects cannot run for one frame.
+  const canRenderRoute = authStatus === "ready"
+    && (user?.role === "admin" || !isPathAdminOnly(location.pathname));
 
   return (
     <IntelligenceBarPageDataProvider>
@@ -481,7 +528,13 @@ export default function AdminLayoutV2() {
                     }}
                   >
                     <Icon size={18} strokeWidth={1.75} aria-hidden />
-                    <span>{label}</span>
+                    <span style={{ flex: 1 }}>
+                      {label}
+                      {item.id === "communications" ? <UnreadSrText count={unreadConversations} /> : null}
+                    </span>
+                    {item.id === "communications" ? (
+                      <UnreadBadge count={unreadConversations} />
+                    ) : null}
                   </Link>
                 );
               })}
@@ -592,7 +645,7 @@ export default function AdminLayoutV2() {
         className="admin-main"
         ref={mainRef}
       >
-        {authStatus === "ready" ? (
+        {canRenderRoute ? (
           <Outlet context={{ user }} />
         ) : (
           <div role={authStatus === "error" ? "alert" : "status"}>
@@ -656,11 +709,19 @@ export default function AdminLayoutV2() {
                     minHeight: 44,
                   }}
                 >
-                  <Icon
-                    size={22}
-                    strokeWidth={active ? 2.25 : 1.75}
-                    aria-hidden
-                  />
+                  <span style={{ position: "relative", display: "inline-flex" }}>
+                    <Icon
+                      size={22}
+                      strokeWidth={active ? 2.25 : 1.75}
+                      aria-hidden
+                    />
+                    {item.id === "communications" ? (
+                      <UnreadBadge
+                        count={unreadConversations}
+                        style={{ position: "absolute", top: -6, right: -12 }}
+                      />
+                    ) : null}
+                  </span>
                   <span
                     style={{
                       fontSize: 12,
@@ -670,6 +731,7 @@ export default function AdminLayoutV2() {
                     }}
                   >
                     {label}
+                    {item.id === "communications" ? <UnreadSrText count={unreadConversations} /> : null}
                   </span>
                 </Link>
               );
@@ -679,7 +741,7 @@ export default function AdminLayoutV2() {
       )}
 
       {/* Global ⌘K palette */}
-      <GlobalCommandPalette ref={paletteRef} />
+      <GlobalCommandPalette ref={paletteRef} user={user} />
     </div>
     </IntelligenceBarPageDataProvider>
   );

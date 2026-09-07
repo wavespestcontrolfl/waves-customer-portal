@@ -1145,6 +1145,23 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
                         </div>
                       )}
 
+                      {Array.isArray(run.preview?.sources) && run.preview.sources.length > 0 && (
+                        <div style={{ marginTop: 10, display: "grid", gap: 6 }}>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, textTransform: "uppercase", letterSpacing: 1 }}>
+                            Source facts
+                          </div>
+                          {run.preview.sources.map((source, index) => (
+                            <div key={`${run.id}-source-${index}`} style={{ display: "flex", gap: 6, alignItems: "baseline", fontSize: 12, lineHeight: 1.45 }}>
+                              <span style={sBadge(`${D.heading}10`, D.heading)}>{source.type}</span>
+                              <span style={{ color: D.muted }}>
+                                <span style={{ color: D.heading, fontWeight: 500 }}>{source.label}</span>
+                                {source.detail ? ` — ${source.detail}` : ""}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
                       <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
                         <button
                           onClick={() => approveRun(run)}

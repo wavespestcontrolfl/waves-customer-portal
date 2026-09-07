@@ -511,6 +511,16 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
 });
 
 
+test('apply refuses a stale or out-of-bounds recurring due-date placement before calling the rebooker', async () => {
+  const row = { ...SERVICE, recurring_dispatch_due_date: '2026-08-04' };
+  db.mockImplementation(() => readRow(row));
+  await expect(applyAutoDispatchMove(row, BEST, 'run1')).rejects.toMatchObject({ code: 'RECURRING_DUE_DATE_LIMIT' });
+  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+
+  db.mockImplementation(() => readRow({ ...row, recurring_dispatch_due_date: '2026-08-05' }));
+  await expect(applyAutoDispatchMove(row, { ...BEST, date: '2026-08-06' }, 'run1')).rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
+});
+
 const LOCATION = {
   property_id: 'property-original', service_address_line1: '100 Example Street', service_address_line2: '',
   service_address_city: 'Example City', service_address_state: 'FL', service_address_zip: '00000', lat: '27.4', lng: '-82.5',
@@ -528,4 +538,28 @@ test('pins the complete location in the atomic rebooker expectation', async () =
   db.mockImplementation(() => queue.shift());
   await applyAutoDispatchMove(scored, BEST, 'run1', {});
   expect(SmartRebooker.reschedule.mock.calls[0][5].expect).toMatchObject(LOCATION);
+});
+
+
+test('confirmation after scoring prevents deferred placement', async () => {
+  const scored = { ...SERVICE, status: 'pending', window_start: null, window_end: null, recurring_dispatch_due_date: SERVICE.scheduled_date, customer_confirmed: false };
+  db.mockImplementation(() => readRow({ ...scored, customer_confirmed: true }));
+  await expect(applyAutoDispatchMove(scored, { ...BEST, date: SERVICE.scheduled_date }, 'run1'))
+    .rejects.toMatchObject({ code: 'STALE_PLACEMENT' });
+  expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+});
+
+test('pins confirmation in the deferred placement write and rechecks each locked member', async () => {
+  const scored = { ...SERVICE, recurring_dispatch_due_date: SERVICE.scheduled_date, customer_confirmed: false };
+  const queue = [readRow(scored), { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+  db.mockImplementation(() => queue.shift());
+  await applyAutoDispatchMove(scored, { ...BEST, date: SERVICE.scheduled_date }, 'run1');
+  const options = SmartRebooker.reschedule.mock.calls[0][5];
+  expect(options.expect).toMatchObject({ customer_confirmed: false });
+  const trx = jest.fn();
+  for (const id of [scored.id, 'grouped-sibling']) {
+    await expect(options.moveGuard({ trx, service: { ...scored, id, customer_confirmed: true } }))
+      .rejects.toMatchObject({ code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD' });
+  }
+  expect(trx).not.toHaveBeenCalled();
 });

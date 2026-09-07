@@ -597,7 +597,7 @@ function isSchedulableOneTimeEstimateLine(line) {
   return !(text.includes('waveguard') && (text.includes('setup') || text.includes('membership')));
 }
 
-function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurringDiscounted = false }) {
+function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurringDiscounted = false, includeSourceLines = false }) {
   const name = String(line?.displayName || line?.label || line?.name || line?.serviceName || line?.service || '').trim();
   if (!name) return null;
   // Per-VISIT fields first; the monthly fields are a last resort and carry
@@ -747,6 +747,10 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
         // must never stamp per-application provenance. Resolved key covers
         // name-only legacy rows (r3).
         if (resolvedServiceKey.startsWith('commercial_')) return {};
+        const manualAnnualValue = line?.manualFinalAnnual;
+        const manualAnnual = (typeof manualAnnualValue === 'number'
+          || (typeof manualAnnualValue === 'string' && manualAnnualValue.trim() !== ''))
+          ? moneyOrNull(manualAnnualValue) : null;
         const appliedPct = Number(line?.discount?.appliedDiscountPercent
           ?? line?.discount?.effectiveDiscount ?? 0);
         // Line-level OR parent-level (result.recurring.discount /
@@ -754,7 +758,7 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
         // on the row: refuse provenance rather than overstate.
         if ((appliedPct > 0 || parentRecurringDiscounted)
           && moneyOrNull(line?.priceAfterDiscount) == null
-          && !(Number.isFinite(Number(line?.manualFinalAnnual)) && Number(line.manualFinalAnnual) >= 0)
+          && manualAnnual === null
           && !(Number(line?.annualAfterDiscount) > 0)
           && !(Number(line?.finalAnnual) > 0)) {
           return {};
@@ -778,21 +782,29 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
         // discount that consumes the whole base stamps manualFinalAnnual: 0
         // — an accepted ZERO must win over the pre-manual annual, not be
         // rejected into it.
-        const acceptedAnnual = Number.isFinite(Number(line?.manualFinalAnnual))
-          && Number(line.manualFinalAnnual) >= 0
-          ? Number(line.manualFinalAnnual)
+        const acceptedAnnual = manualAnnual !== null
+          ? manualAnnual
           : (Number(line?.annualAfterDiscount) > 0 ? Number(line.annualAfterDiscount) : undefined);
         // An accepted annual of ZERO means the discount consumed the whole
         // base — there is no per-application CHARGE to quote, and the
         // canonical helper would fall back to the LIST rate here (its
         // discountedAnnual > 0 test). Refuse: the net totals tell the truth.
-        if (acceptedAnnual === 0) return {};
+        if (acceptedAnnual === 0 && !includeSourceLines) return {};
         // The rodent billing-unit marker must ride the adapter objects
         // (codex #3591 r5 P1): rodentBaitLineBillsMonthly inside the
         // canonical helper reads it off the LINE it receives — a fresh
         // object without it reclassifies a new per-application rodent row
         // as legacy monthly and returns no provenance.
         const billingMarker = line?.perApplicationBilled === true ? { perApplicationBilled: true } : {};
+        // Completion can represent a fully discounted application. Prove
+        // its unit/cadence through the canonical mapper using the original
+        // per-application base; a monthly line must never become free work.
+        if (includeSourceLines && (acceptedAnnual === 0 || discountedPerApp === 0)) {
+          const basis = perApplicationForLine({ service: resolvedServiceKey,
+            perApp: moneyOrNull(line?.perApp, line?.perTreatment), perVisit: line?.perVisit,
+            ...cadenceFields, ...billingMarker });
+          return basis ? { perApplicationPrice: 0 } : {};
+        }
         const pa = perApplicationForLine(discountedPerApp != null
           ? {
             service: resolvedServiceKey,
@@ -817,12 +829,12 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
   };
 }
 
-function scheduleLinesFromEstimate(estimate, serviceIndex) {
+function scheduleLinesFromEstimate(estimate, serviceIndex, { includeSourceLines = false } = {}) {
   const estData = parseJsonObject(estimate.estimate_data);
   let recurringSvcList = [];
   let oneTimeList = [];
   try {
-    const lists = acceptanceServiceLists(estData);
+    const lists = acceptanceServiceLists(estData, { preserveDuplicates: includeSourceLines });
     recurringSvcList = lists.recurringSvcList || [];
     oneTimeList = lists.oneTimeList || [];
   } catch {
@@ -866,9 +878,25 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
   const suppressFallback = onlyFilteredBillingRows && !hasRecurringEstimateTotal;
 
   const lines = [
-    ...recurringSvcList.map((line) => formatEstimateLine(line, { kind: 'recurring', estimate, serviceIndex, parentRecurringDiscounted })),
-    ...schedulableOneTimeList.map((line) => formatEstimateLine(line, { kind: 'one_time', estimate, serviceIndex })),
+    ...recurringSvcList.map((line, index) => {
+      const formatted = formatEstimateLine(line, { kind: 'recurring', estimate, serviceIndex, parentRecurringDiscounted, includeSourceLines });
+      return formatted && includeSourceLines
+        ? { ...formatted, sourceLine: line, sourceLineKey: `recurring:${index}`, parentRecurringDiscounted }
+        : formatted;
+    }),
+    ...schedulableOneTimeList.map((line, index) => {
+      const formatted = formatEstimateLine(line, { kind: 'one_time', estimate, serviceIndex });
+      return formatted && includeSourceLines
+        ? { ...formatted, sourceLine: line, sourceLineKey: `one_time:${index}` }
+        : formatted;
+    }),
   ].filter(Boolean);
+
+  // Completion must distinguish two otherwise identical sold lines and must
+  // never promote a quote-total fallback into this job's accepted price.
+  // Raw source lines remain server-internal; existing scheduling responses
+  // retain their display deduplication and fallback behavior below.
+  if (includeSourceLines) return lines;
 
   if (lines.length === 1 && lines[0].price == null) {
     lines[0].price = moneyOrNull(estimate.onetime_total, estimate.monthly_total);
@@ -2771,7 +2799,7 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         .select(
           'id', 'customer_id', 'status', 'token', 'service_interest', 'estimate_data',
           'estimate_slug', 'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
-          'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at',
+          'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at', 'property_id',
         ),
       db('services')
         // mosquito_seasonal is active as of 20260805000010, making the
@@ -2860,6 +2888,10 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
         // Human-facing estimate number (EST-YYYY-NNNN) — same reference the
         // customer sees on the public quote page, cited by the provenance card.
         estimateSlug: estimate.estimate_slug || null,
+        // The quoted property (estimates.property_id, nullable) — the New
+        // Appointment modal narrows the estimate list to the address being
+        // booked; an unlinked quote stays offered at every property.
+        propertyId: estimate.property_id || null,
         status: estimate.status,
         serviceInterest: estimate.service_interest,
         acceptedAt: estimate.accepted_at,
@@ -5185,6 +5217,8 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
     ].filter(Boolean).join('\n');
 
     const InvoiceService = require('../services/invoice');
+    const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
+    const sendReceipt = require('../config/feature-gates').gates.recordedAnnualPrepayReceipt;
     let result;
     await db.transaction(async (trx) => {
       await lockAndAssertNoAnnualPrepayOverlap(
@@ -5245,7 +5279,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           status: 'paid',
           paid_at: trx.fn.now(),
           payment_method: method,
-          payment_reference: reference || null,
+          payment_reference: reference,
           payment_recorded_by: recordedBy,
           payment_recorded_at: trx.fn.now(),
           updated_at: trx.fn.now(),
@@ -5336,8 +5370,20 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         }),
       }).catch((err) => logger.warn(`[customers:annual-prepay] activity_log insert failed: ${err.message}`));
 
+      if (sendReceipt) {
+        // Persist delivery with the payment so a restart cannot lose its receipt.
+        await ReceiptDeliveryQueue.enqueueReceiptDelivery({
+          invoiceId: updatedInvoice.id,
+          source: 'customer360_annual_prepay',
+          // Recording a past payment does not prove the customer acted now.
+          customerInitiated: false,
+          database: trx,
+        });
+      }
       result = { invoice: updatedInvoice, term, payment };
     });
+
+    if (sendReceipt) ReceiptDeliveryQueue.scheduleReceiptDeliveryDrain({ delayMs: 3000, limit: 5 });
 
     // A cash/check annual prepay is the customer paying — same automatic-
     // clear contract as every other receipt path. The helper owns the rules

@@ -93,6 +93,10 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // Complete Service: job-matched estimate evidence and reviewed discounts.
+  completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
+  // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
+  customerRecurringDispatch: gateEnvValue('GATE_CUSTOMER_RECURRING_DISPATCH'),
   // Payer Phase 2 — NET-terms consolidated statements (accrual core).
   // OFF unless explicitly enabled, in dev AND prod (unlike the dev-open gates
   // below): flipping it on changes invoice behaviour for net15/net30 payers
@@ -462,6 +466,12 @@ const gates = {
   // silently ignoring one (an ignored count reads to the office as a plan they
   // capped). Kill switch: unset or any non-'true' value; visits already added
   // or cancelled are not reversed when it flips.
+  // GATE_EDIT_APPT_ADDRESS also admits the New Appointment "Service address"
+  // picker (POST / with propertyId) — one flag for "the office chooses which
+  // of a multi-property customer's addresses a visit lands on". Off: the
+  // properties read answers canChangeAppointmentAddress:false, the modal
+  // hides the picker, and a propertyId on create is refused (409), so a
+  // stale tab cannot book to a secondary address while the lane is dark.
   editApptAddress: process.env.GATE_EDIT_APPT_ADDRESS === 'true',
   editApptVisitCount: process.env.GATE_EDIT_APPT_VISIT_COUNT === 'true',
 
@@ -1710,8 +1720,8 @@ const gates = {
   // (what each SWFL turf season is for) behind a toggle — education, not a
   // schedule (owner 2026-09-05: no per-season counts, month ranges, or
   // interval line). Gates the /data `lawnCalendar` block ({ programs: {
-  // [frequencyKey]: { visitsPerYear, cadence, months } } }, projected by
-  // describeLawnProgramCadence). No product, step, or fertilizer names
+  // [frequencyKey]: { visitsPerYear } } }, one entry per lawn frequency
+  // that is a catalog lawn plan). No product, step, or fertilizer names
   // (owner-owned business logic). Dev-open, prod dark.
   // Enable with GATE_ESTIMATE_LAWN_CALENDAR=true.
   estimateLawnCalendar: isProd ? process.env.GATE_ESTIMATE_LAWN_CALENDAR === 'true' : true,
@@ -1922,6 +1932,9 @@ const gates = {
   // Current-visit procedure and readable SOP sheet inside the Job Card drawer.
   // Uses the same visit resolver; unset restores the legacy protocol tabs.
   protocolSop: gateEnvValue('GATE_PROTOCOL_SOP'),
+  // Schedule day-view exceptions from the Job Card; no paragraph generation
+  // or cache writes. Requires GATE_JOB_CARD too; unset removes the strips.
+  dispatchReadiness: gateEnvValue('GATE_DISPATCH_READINESS'),
   // The wrapped-van scene on the appointment page + booking step 4 (owner
   // 2026-09-03). Rides the existing page payloads (appointment `vanScene`,
   // booking config `van_scene`) — no extra client fetch. Kill switch: unset
@@ -2070,6 +2083,11 @@ const gates = {
   // or sent. The mint/credit/send building blocks (Charge-now, send-receipt)
   // stay individually available regardless of this gate.
   prepaidInvoiceReceipt: isProd ? process.env.GATE_PREPAID_INVOICE === 'true' : true,
+
+  // Record collected annual prepay: commit a receipt job with the payment,
+  // then deliver through the standard receipt queue. Customer communications
+  // stay off in every environment until explicitly enabled.
+  recordedAnnualPrepayReceipt: process.env.GATE_RECORDED_ANNUAL_PREPAY_RECEIPT === 'true',
 
   // Zelle payment-notice reconciler — the Gmail sync recognises Capital One
   // "Someone sent you money with Zelle" notices (forwarded from the owner's
