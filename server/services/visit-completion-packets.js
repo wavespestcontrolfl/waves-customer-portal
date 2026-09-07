@@ -14,6 +14,7 @@ const { validate: isUuid } = require('uuid');
 const db = require('../models/db');
 const { hashCompletionRequest } = require('./completion-attempts');
 const { dateOnly, lockStop, stopBaseKey } = require('./visit-groups');
+const { TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
 const { cleanupUploadedServicePhotoObjects } = require('./service-photos');
 
 function failure(status, code, error) {
@@ -25,7 +26,7 @@ function packetRequest({ visitId, idempotencyKey, items }) {
       || !idempotencyKey.trim() || idempotencyKey.length > 120) {
     return { error: failure(400, 'visit_closeout_invalid', 'A visit and an idempotency key are required.') };
   }
-  if (!Array.isArray(items) || items.length < 2 || items.some((item) => (
+  if (!Array.isArray(items) || items.length < 1 || items.some((item) => (
     !isUuid(item?.serviceId) || !item.body || typeof item.body !== 'object' || Array.isArray(item.body)
   )) || new Set(items.map((item) => item.serviceId.toLowerCase())).size !== items.length) {
     return { error: failure(400, 'visit_closeout_members_invalid', 'Submit each visit service once with its completion form.') };
@@ -45,6 +46,22 @@ function packetRequest({ visitId, idempotencyKey, items }) {
     items: ordered.map((item) => ({ serviceId: item.serviceId, hash: hashCompletionRequest(item.body) })),
   })).digest('hex');
   return { visitId: canonicalVisitId, key: idempotencyKey.trim(), items: ordered, hash };
+}
+
+function packetSnapshot(request, actor, members, existing) {
+  if (existing) return { ...existing.payload, retainedMembers: existing.payload.retainedMembers || [] };
+  const retainedMembers = members.filter((member) => TERMINAL_ROW_STATUSES.includes(member.status))
+    .map((member) => ({ serviceId: member.id, status: member.status }));
+  const items = structuredClone(request.items);
+  for (const item of items) {
+    if (!Array.isArray(item.body.completionPhotos)) continue;
+    for (const photo of item.body.completionPhotos) {
+      if (photo && typeof photo === 'object') delete photo.data;
+    }
+  }
+  // The request hash still covers the original photo bytes. Uploaded objects
+  // belong to each service record; packet retries never upload them again.
+  return { items, actor, retainedMembers };
 }
 
 function recordsResult(packet, items, replayed = false) {
@@ -103,9 +120,16 @@ async function saveVisitCompletionRecords(input, database = db) {
         role: actor.techRole, actorTechnicianId: actor.technicianId, assignedTechnicianId: member.technician_id,
       })).find(Boolean);
       if (ownership) return { status: ownership.status, body: ownership.payload };
-      // Both lists are ordered by id: the visit's members must be exactly the
-      // submitted services.
-      if (members.map((member) => member.id).join() !== request.items.map((item) => item.serviceId).join()) {
+      const existing = await trx('visit_completion_packets').where({ visit_id: visit.id }).first();
+      const snapshot = packetSnapshot(request, actor, members, existing);
+      const retainedIds = new Set(snapshot.retainedMembers.map((member) => member.serviceId));
+      // Frozen visits retain terminal children as history. Only live children
+      // need forms on the first submit. Replays use saved form membership,
+      // since recording those services has already made them terminal too.
+      const formMemberIds = members.filter((member) => !retainedIds.has(member.id)).map((member) => member.id);
+      const frozenMemberIds = [...snapshot.items.map((item) => item.serviceId), ...retainedIds].sort();
+      if (formMemberIds.join() !== request.items.map((item) => item.serviceId).join()
+          || frozenMemberIds.join() !== members.map((member) => member.id).join()) {
         return failure(409, 'visit_members_changed', 'The visit service list changed. Refresh all service forms.');
       }
       if (members.some((member) => member.customer_id !== visit.customer_id
@@ -115,24 +139,21 @@ async function saveVisitCompletionRecords(input, database = db) {
           || stopBaseKey({ propertyId: member.property_id, customerId: member.customer_id, scheduledDate: member.scheduled_date }) !== visit.stop_base_key)) {
         return failure(409, 'visit_members_incompatible', 'These services no longer share one property, date and technician.');
       }
-      const existing = await trx('visit_completion_packets').where({ visit_id: visit.id }).first();
       if (existing) {
         if (existing.idempotency_key !== request.key || existing.request_hash !== request.hash) {
           return failure(409, 'visit_closeout_payload_mismatch', 'A saved closeout already owns this visit. Resume that closeout.');
         }
         const saved = await trx('visit_completion_packet_items').where({ packet_id: existing.id })
           .whereNotNull('service_record_id').orderBy('scheduled_service_id');
-        if (saved.length !== members.length) {
+        if (saved.map((item) => item.scheduled_service_id).join() !== formMemberIds.join()) {
           return failure(409, 'visit_closeout_pending', 'The saved closeout has not finished recording its services.');
         }
         return recordsResult(existing, saved, true);
       }
       if (visit.status !== 'open') return failure(409, 'visit_not_open', 'This visit is no longer open for closeout.');
-      const keyOwner = await trx('visit_completion_packets').where({ idempotency_key: request.key }).first('id');
-      if (keyOwner) return failure(409, 'visit_closeout_key_reused', 'The idempotency key belongs to another visit.');
       const [packet] = await trx('visit_completion_packets').insert({
         visit_id: visit.id, idempotency_key: request.key, request_hash: request.hash,
-        payload: JSON.stringify({ items: request.items, actor: input.actor }), status: 'processing',
+        payload: JSON.stringify(snapshot), status: 'processing',
       }).returning('*');
       await trx('service_visits').where({ id: visit.id }).update({
         status: 'closing', completion_submitted_at: trx.fn.now(), updated_at: trx.fn.now(),

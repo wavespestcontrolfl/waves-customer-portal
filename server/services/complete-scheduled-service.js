@@ -3732,12 +3732,12 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     let completionResolvedPayer = null;
     let completionTaxAuthorityError = null;
     try {
-      completionResolvedPayer = await require('../services/payer').resolveForInvoice({
-        database: db,
+      completionResolvedPayer = await savepointRead(db, (database) => require('../services/payer').resolveForInvoice({
+        database,
         customerId: svc.customer_id,
         scheduledServiceId: svc.id,
         throwOnError: true,
-      });
+      }));
     } catch (payerErr) {
       // First runs fail CLOSED (codex r10 P0): the payer identity feeds the
       // coverage suppressors and the money posture about to be FROZEN — a
@@ -6127,7 +6127,10 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             .update({ structured_notes: serializeJsonb(record.structured_notes) });
         }
 
-        if (treeShrubPhotoGateRequired) {
+        // Packets keep photo identities, not retryable image bytes. Every
+        // submitted photo must therefore be durable before the record phase
+        // returns; a failed upload rolls the packet back for a complete retry.
+        if (treeShrubPhotoGateRequired || (packetRecord && completionPhotos?.length)) {
           completionPhotoUploadResult = await uploadServicePhotoDataUrls({
             serviceRecordId: record.id,
             photos: completionPhotos,
@@ -6140,11 +6143,17 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           preCommitCompletionPhotoRows = preCommitCompletionPhotoRows.concat(completionPhotoUploadResult.photos || []);
           const uniqueCompletionPhotosUploaded = completionPhotoUploadResult.uniqueUploaded
             ?? completionPhotoUploadResult.uploaded;
-          if (uniqueCompletionPhotosUploaded < TREE_SHRUB_MIN_CLOSEOUT_PHOTOS) {
+          if (treeShrubPhotoGateRequired && uniqueCompletionPhotosUploaded < TREE_SHRUB_MIN_CLOSEOUT_PHOTOS) {
             throw treeShrubPhotoUploadRequiredError(
               completionPhotoUploadResult,
               TREE_SHRUB_MIN_CLOSEOUT_PHOTOS,
             );
+          }
+          if (packetRecord && completionPhotoUploadResult.failed > 0) {
+            const serverFailure = completionPhotoUploadResult.errors.some((error) => !error.statusCode || error.statusCode >= 500);
+            throw Object.assign(new Error('Every submitted photo must upload before the visit can close.'), {
+              code: 'visit_completion_photos_upload_failed', statusCode: serverFailure ? 503 : 400, isOperational: true,
+            });
           }
           completionPhotosUploadedBeforeCommit = true;
           const photoNotes = {
@@ -6154,7 +6163,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
               uniqueUploaded: uniqueCompletionPhotosUploaded,
               failed: completionPhotoUploadResult.failed,
               uploadedAt: new Date().toISOString(),
-              requiredMinimum: TREE_SHRUB_MIN_CLOSEOUT_PHOTOS,
+              ...(treeShrubPhotoGateRequired ? { requiredMinimum: TREE_SHRUB_MIN_CLOSEOUT_PHOTOS } : {}),
             },
           };
           record.structured_notes = photoNotes;
