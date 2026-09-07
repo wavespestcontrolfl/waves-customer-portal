@@ -78,6 +78,42 @@ test.each([
   expect(check(e, rows)).toEqual([]);
 });
 
+test.each([1, 5, 10])('resolved bait plus %i-year bond schedules are audited without a phantom rider visit', (years) => {
+  const previousGate = process.env.GATE_SEPARATE_COMBO_VISITS;
+  process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+  try {
+    const e = estimate({ estimate_data: { customerSelection: { frequency: 'quarterly' }, result: { recurring: { services: [
+      { service: 'termite_bait', name: 'Termite Bait', frequency: 'quarterly' },
+      { service: `termite_bond_${years}yr`, name: `Termite Bond (${years}-Year Term)`, frequency: 'quarterly' },
+    ] } } } });
+    expect(check(e)).toEqual([expect.objectContaining({ serviceFamily: 'termite_bait', pattern: 'quarterly', expectedVisits: 4, issues: ['missing_schedule'] })]);
+    const rows = series('quarterly', 4).map((row) => ({ ...row, catalog_service_key: 'termite_bait',
+      service_type: `Quarterly Termite Bait Station + Termite Bond Service (${years}-Year Term)` }));
+    expect(check(e, rows)).toEqual([]);
+  } finally {
+    if (previousGate === undefined) delete process.env.GATE_SEPARATE_COMBO_VISITS;
+    else process.env.GATE_SEPARATE_COMBO_VISITS = previousGate;
+  }
+});
+
+test('a combined lawn and tree plan still requires schedule coverage for both families', () => {
+  const previousGate = process.env.GATE_SEPARATE_COMBO_VISITS;
+  delete process.env.GATE_SEPARATE_COMBO_VISITS;
+  try {
+    const e = estimate({ estimate_data: { result: { recurring: { services: [
+      { service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 6 },
+      { service: 'tree_shrub', name: 'Tree and Shrub', visitsPerYear: 6 },
+    ] } } } });
+    const rows = series('bimonthly', 6).map((row) => ({ ...row, catalog_service_key: 'lawn_tree_shrub_combo', service_type: 'Lawn + Tree & Shrub Service' }));
+    expect(check(e, rows)).toEqual([]);
+    const lawnOnly = rows.map((row) => ({ ...row, catalog_service_key: 'lawn_program', service_type: 'Lawn Care' }));
+    expect(check(e, lawnOnly)).toEqual([expect.objectContaining({ serviceFamily: 'tree_shrub', issues: ['missing_schedule'] })]);
+  } finally {
+    if (previousGate === undefined) delete process.env.GATE_SEPARATE_COMBO_VISITS;
+    else process.env.GATE_SEPARATE_COMBO_VISITS = previousGate;
+  }
+});
+
 test('a one-time catalog treatment does not count as a recurring application', () => {
   const [gap] = check(estimate(), [parent({ catalog_billing_type: 'one_time' })]);
   expect(gap.issues).toEqual(['missing_schedule']);

@@ -193,12 +193,16 @@ function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { 
     acceptFrequency: acceptedFrequency,
     supplementalCompanions: converter.supplementalCompanionLines(data),
   });
-  // The scheduling combiner dedupes line + scalar shapes and supplies each
-  // standalone program's cadence. Combo visits satisfy their source families.
-  const units = [...remaining, ...combos.flatMap((combo) => combo.combinedFrom), ...standalone.map((unit) => unit.service)];
+  // Keep the combiner's resolved cadence/count while checking each covered
+  // family. Bond riders share the bait family and must not become extra visits.
+  const units = [
+    ...[...remaining, ...standalone.map((unit) => unit.service)]
+      .map((service) => ({ service, family: converter.seedingFamilyKey(service) })),
+    ...combos.flatMap((combo) => [...new Set(combo.combinedFrom.map((line) => converter.seedingFamilyKey(line)))]
+      .map((family) => ({ service: combo.service, family }))),
+  ];
   const findings = [];
-  for (const service of units) {
-    const family = converter.seedingFamilyKey(service);
+  for (const { service, family } of units) {
     if (heldFamilies.has(family)) continue;
     const pattern = converter.converterFollowUpSeedingPattern(service, {}, fallback, acceptedFrequency);
     // Commercial, billing riders and contradictory custom terms already use
