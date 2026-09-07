@@ -364,6 +364,78 @@ test('facts need Waves as the holder; claims cover subsidiaries, tenting, copula
   expect(score('E6', 'Waves provides tent-free termite treatment.').forbidden.fumigation_offered).toBe(false);
 });
 
+test('relations bind to Waves and to the thing they modify; an alternative is an exclusion (GitHub review r4)', () => {
+  // The license number needs Waves as the holder even when another holder follows it.
+  expect(score('E3', 'License JB351547 belongs to Orkin and is verifiable in the FDACS lookup.').expected.fdacs_license).toBe(false);
+  expect(score('E3', 'License JB351547 is registered to Orkin.').expected.fdacs_license).toBe(false);
+  expect(score('E3', 'License JB351547 belongs to Waves and is verifiable in the FDACS lookup.').expected.fdacs_license).toBe(true);
+  // "Same business" must connect the two queried names, not Waves and anyone.
+  expect(score('E9', 'Waves and Orkin are the same business.').expected.alias_same).toBe(false);
+  expect(score('E9', 'Waves and Sunshine Pest Control are the same business.').expected.alias_same).toBe(false);
+  expect(score('E9', 'Waves Pest Control and Waves Pest Control & Lawn Care are the same company.').expected.alias_same).toBe(true);
+  expect(score('E9', 'Both names refer to the same business.').expected.alias_same).toBe(true);
+  // The inverse parent-company form is a wrong owner.
+  expect(score('E1', 'The parent company of Waves is Rentokil.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'The parent company of Waves is Acme Holdings LLC.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'The parent company of Waves is not Rentokil.').forbidden.wrong_founder).toBe(false);
+  // A bond or warranty that includes repairs promises damage coverage.
+  expect(score('E7', 'The bond includes repairs for termite damage.').forbidden.damage_repair_coverage).toBe(true);
+  expect(score('E7', 'The warranty includes the cost of repairs for termite damage.').forbidden.damage_repair_coverage).toBe(true);
+  expect(score('E7', 'The bond does not include repairs for termite damage.').forbidden.damage_repair_coverage).toBe(false);
+  // "since YEAR" is a founding claim only about the company's existence.
+  expect(score('E4', 'Waves has held an FDACS license since 2019.').forbidden.wrong_founding_year).toBe(false);
+  expect(score('E4', 'Waves has served Sarasota since 2019.').forbidden.wrong_founding_year).toBe(false);
+  expect(score('E4', 'Waves has used this phone number since 2019.').forbidden.wrong_founding_year).toBe(false);
+  expect(score('E4', 'Waves has been around since 2019.').forbidden.wrong_founding_year).toBe(true);
+  expect(score('E4', 'In business since 2019.').forbidden.wrong_founding_year).toBe(true);
+  expect(score('E4', 'Waves has held an FDACS license since 2024.').expected.founded_2024).toBe(false);
+  // A same-named place in another state is outside the footprint; the state is read with the city.
+  expect(score('E5', 'Waves is headquartered in Lakewood, Colorado.').forbidden.out_of_footprint_hq).toBe(true);
+  expect(score('E5', 'Waves is headquartered in Sarasota, California.').forbidden.out_of_footprint_hq).toBe(true);
+  expect(score('E5', 'Headquarters: Venice, Italy').forbidden.out_of_footprint_hq).toBe(true);
+  expect(score('E5', 'Waves is headquartered in Lakewood Ranch, Florida.').forbidden.out_of_footprint_hq).toBe(false);
+  expect(score('E5', 'Waves is headquartered in Lakewood Ranch, FL, and serves Manatee County.')).toMatchObject({ forbidden: { out_of_footprint_hq: false }, expected: { manatee: true } });
+  expect(score('E5', 'Waves is based in Sarasota, Florida.').forbidden.out_of_footprint_hq).toBe(false);
+  // A former or dead website earns no contact credit, like a former phone number.
+  expect(score('E10', 'The old website was wavespestcontrol.com; its current site is unknown.').expected.website).toBe(false);
+  expect(score('E10', 'wavespestcontrol.com is no longer active.').expected.website).toBe(false);
+  expect(score('E10', 'Visit wavespestcontrol.com or call (941) 297-5749.')).toMatchObject({ right: 2 });
+  // Pest control counts only as an offering, a service phrase, or a list item.
+  expect(score('E6', 'Waves publishes articles about pest control but does not offer it.').expected.pest_control).toBe(false);
+  expect(score('E6', 'Pest control information is available from Waves, but the service is not.').expected.pest_control).toBe(false);
+  expect(score('E6', 'Services: pest control, lawn care.').expected.pest_control).toBe(true);
+  expect(score('E6', '- Pest control\n- Lawn care').expected.pest_control).toBe(true);
+  expect(score('E6', 'Waves is a pest control company serving Sarasota.').expected.pest_control).toBe(true);
+  // "Optional" must modify the bond, not a nearby treatment or inspection.
+  expect(score('E7', 'Termite treatment is optional, but the bond is mandatory.').expected.bond_optional).toBe(false);
+  expect(score('E7', 'An optional inspection comes with a required bond.').expected.bond_optional).toBe(false);
+  expect(score('E7', 'An optional, annually renewable bond is available.').expected.bond_optional).toBe(true);
+  // An office list is not a service area.
+  expect(score('E5', 'Waves has offices in Manatee, Sarasota, and Charlotte counties, but its service area is unknown.')).toMatchObject({ expected: { manatee: false, sarasota: false, charlotte: false } });
+  expect(score('E5', 'Waves is based in Manatee County.').expected.manatee).toBe(false);
+  expect(score('E5', 'Service area: Manatee, Sarasota, and Charlotte counties.')).toMatchObject({ expected: { manatee: true, sarasota: true, charlotte: true } });
+  // An independent company Waves hires is a vendor, not Waves.
+  expect(score('E8', 'Waves hires an independent company for inspections.').expected.independent).toBe(false);
+  expect(score('E8', 'Waves is an independent company.').expected.independent).toBe(true);
+  // Franchise wording must characterize Waves.
+  expect(score('E8', 'Waves works with a franchise owner.').forbidden.franchise).toBe(false);
+  expect(score('E8', 'Waves serves a franchise location.').forbidden.franchise).toBe(false);
+  expect(score('E8', 'Waves competes with a franchise network.').forbidden.franchise).toBe(false);
+  expect(score('E8', 'Waves is a franchise location.').forbidden.franchise).toBe(true);
+  expect(score('E8', 'Waves is part of a franchise network.').forbidden.franchise).toBe(true);
+  expect(score('E8', 'Waves operates as a franchise of Orkin.').forbidden.franchise).toBe(true);
+  expect(score('E8', 'Waves is a franchisee.').forbidden.franchise).toBe(true);
+  expect(score('E8', 'Waves is not a franchise.').forbidden.franchise).toBe(false);
+  // "As an alternative to fumigation" presents a different service.
+  expect(score('E6', 'Waves offers termite treatment as an alternative to fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves offers fumigation as an alternative to spot treatment.').forbidden.fumigation_offered).toBe(true);
+  // The thing included in year one must be the bond itself.
+  expect(score('E7', 'The first year includes treatment, while the bond is purchased separately.').forbidden.bond_included_first_year).toBe(false);
+  expect(score('E7', 'The initial year comes with treatment and the optional bond costs extra.').forbidden.bond_included_first_year).toBe(false);
+  expect(score('E7', 'The first year includes the bond.').forbidden.bond_included_first_year).toBe(true);
+  expect(score('E7', 'The bond is included in the first year.').forbidden.bond_included_first_year).toBe(true);
+});
+
 test('the founding-year fact needs founding context, but a bare year answer still counts', () => {
   expect(score('E4', 'Waves was founded in 2014, and its license was renewed in 2024.')).toMatchObject({ expected: { founded_2024: false }, forbidden: { wrong_founding_year: true } });
   expect(score('E4', '2024.').expected.founded_2024).toBe(true);

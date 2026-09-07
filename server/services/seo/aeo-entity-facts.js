@@ -61,8 +61,9 @@ function compile(def) {
 const NEGATION_RE = /\b(?:not(?! only)|no(?!-)|never|none|nor|doesn'?t|does not|do not|don'?t|isn'?t|is not|aren'?t|are not|wasn'?t|was not|cannot|can'?t|won'?t|will not|shouldn'?t|should not|neither)\b/i;
 // An exclusion preposition denies only the phrase it governs: "except
 // fumigation" and "without fumigation" deny, but "pest control without
-// contracts, including lawn care" does not reach lawn care.
-const EXCLUSION_RE = /\b(?:without|except|excluding|other than|aside from|outside of|rather than|instead of)\b/i;
+// contracts, including lawn care" does not reach lawn care. "As an
+// alternative to fumigation" and "in place of fumigation" exclude it too.
+const EXCLUSION_RE = /\b(?:without|except|excluding|other than|aside from|outside of|rather than|instead of|(?:an?\s+)?(?:alternatives?|substitutes?|replacements?)\s+(?:to|for)|in\s+(?:place|lieu)\s+of)\b/i;
 const ADJACENT_EXCLUSION_RE = new RegExp(`${EXCLUSION_RE.source}\\s+(?:(?:a|an|the|any|their|its|for|of)\\s+)?(?:[\\w'-]+\\s+){0,3}$`, 'i');
 // A question or an expression of uncertainty asserts nothing: "Does Waves
 // offer fumigation?", "It is unclear whether Waves offers fumigation".
