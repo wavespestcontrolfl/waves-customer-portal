@@ -229,7 +229,7 @@ async function unlinkedRecordIsReferenced(record, context) {
   const { targets = [], requestPhrase = '', explicitEmails = [] } = context;
   const ids = context.page?.ids || {};
   if (record.kind === 'review_id') return targets.length === 0 && context.reviewReference === record.id;
-  if (record.kind === 'call_id') return targets.length === 0;
+  if (['call_id', 'appointment_id'].includes(record.kind)) return targets.length === 0;
   if (!['lead_id', 'email_id', 'estimate_id'].includes(record.kind)) return true;
   const noun = record.kind.replace(/_id$/, '');
   if (ids[record.kind] === record.id && new RegExp(`\\b(?:this|that|current|selected|viewed|open)\\s+${noun}\\b`).test(requestPhrase)) return true;
