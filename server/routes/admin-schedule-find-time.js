@@ -30,7 +30,7 @@ const { gateEnvValue } = require('../config/feature-gates');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
 const { etDateString, addETDays, parseETDateTime, etParts } = require('../utils/datetime-et');
 const { serviceLocationSelects, resolveServiceLocation } = require('../services/scheduling/day-stops');
-const { arrivalWindowRoutingEnabled } = require('../services/scheduling/arrival-route');
+const { arrivalWindowRoutingEnabled, checkArrivalPlacement } = require('../services/scheduling/arrival-route');
 
 const MAX_FIND_TIME_DAYS = 90;
 
@@ -330,10 +330,10 @@ router.post('/', async (req, res) => {
     // What the hour already in the picker costs. Each engine slot is a route
     // gap (earliest aligned start .. latest_start_min, detour constant across
     // it), so the picked hour's gap is the first ranked slot whose bounds
-    // contain it. Arrival-window slots are one hour each (latest == start),
-    // so the same predicate finds them. No gap = the hour doesn't fit that
-    // day's route; a gap the tech-blind occupancy snapshot vetoes = same
-    // answer (fail-open on a snapshot error, like the chips guard).
+    // contain it. No gap = the hour doesn't fit that day's route; a gap the
+    // tech-blind occupancy snapshot vetoes = same answer (fail-open on a
+    // snapshot error, like the chips guard). Arrival-window mode asks the
+    // route checker directly instead (see below).
     let picked;
     // The engine floors a same-day search at ET now + 30 min (a slot is
     // never offered seconds before it starts), so on today an hour before
@@ -351,39 +351,59 @@ router.post('/', async (req, res) => {
       && (toMin(pickedStart) < DAY_START_HOUR * 60 || toMin(pickedStart) + spanMin > dayEndMin);
     if (hint && pickedStart && !pickedTooSoon && !pickedOutOfBounds) {
       const pickedMin = toMin(pickedStart);
-      const gap = rawSlots.find((s) => {
-        if (s.date !== from) return false;
-        const lo = toMin(s.start_time);
-        const hi = Number.isFinite(s.latest_start_min) ? s.latest_start_min : lo;
-        return lo != null && lo <= pickedMin && pickedMin <= hi;
-      });
-      picked = { start: pickedStart, fits: false };
-      if (gap) {
-        let clear = true;
-        if (gap.route_mode !== 'arrival_windows') {
+      const pickedWindow = { start: pickedStart, end: toHHMM(pickedMin + spanMin) };
+      if (useArrivalWindows) {
+        // The arrival simulation answers "unverified" for grouped visits,
+        // coordless stops, and in-progress routes, and the recommendation
+        // list simply omits those — so an empty list proves nothing. Ask
+        // the shared checker (the edit save-probe's) about THIS hour and
+        // reserve fits:false for a verified miss (pre-push P1). It scores
+        // the whole route, so there is no single insertion leg to name.
+        try {
+          const fit = await checkArrivalPlacement({
+            serviceId, date: from, technicianId: technicianId || undefined, excludeServiceIds,
+            windowStart: pickedWindow.start, windowEnd: pickedWindow.end, durationMinutes: spanMin,
+          });
+          if (fit.feasible) {
+            picked = {
+              start: pickedStart, fits: true, detour_minutes: fit.detourMinutes ?? null,
+              drive_in_minutes: null, from_home_base: null, from_name: null, technician: null,
+            };
+          } else if (fit.reason !== 'route_unverified') {
+            picked = { start: pickedStart, fits: false };
+          }
+        } catch (checkErr) {
+          logger.warn('[find-time] picked-hour arrival check failed (no verdict):', checkErr.message);
+        }
+      } else {
+        const gap = rawSlots.find((s) => {
+          if (s.date !== from) return false;
+          const lo = toMin(s.start_time);
+          const hi = Number.isFinite(s.latest_start_min) ? s.latest_start_min : lo;
+          return lo != null && lo <= pickedMin && pickedMin <= hi;
+        });
+        picked = { start: pickedStart, fits: false };
+        if (gap) {
+          let clear = true;
           try {
             clear = conflictsForTarget(
-              await loadOccupancy({ dateFrom: from, dateTo: from }), null, from,
-              { start: pickedStart, end: toHHMM(pickedMin + spanMin) },
+              await loadOccupancy({ dateFrom: from, dateTo: from }), null, from, pickedWindow,
               { excludeServiceIds: excluded },
             ).length === 0;
           } catch (guardErr) {
             logger.warn('[find-time] picked-hour occupancy guard failed (fail-open):', guardErr.message);
           }
-        }
-        if (clear) {
-          const arrival = gap.route_mode === 'arrival_windows';
-          picked = {
-            start: pickedStart,
-            fits: true,
-            detour_minutes: gap.detour_minutes ?? null,
-            // Arrival simulation scores the whole route, not one insertion
-            // leg — it has no "from" anchor to name.
-            drive_in_minutes: arrival ? null : (gap.drive_in_minutes ?? null),
-            from_home_base: arrival ? null : !gap.insertion?.after_stop_id,
-            from_name: arrival ? null : (gap.insertion?.after_name || null),
-            technician: gap.technician || null,
-          };
+          if (clear) {
+            picked = {
+              start: pickedStart,
+              fits: true,
+              detour_minutes: gap.detour_minutes ?? null,
+              drive_in_minutes: gap.drive_in_minutes ?? null,
+              from_home_base: !gap.insertion?.after_stop_id,
+              from_name: gap.insertion?.after_name || null,
+              technician: gap.technician || null,
+            };
+          }
         }
       }
     }

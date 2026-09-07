@@ -46,6 +46,12 @@ jest.mock('../services/scheduling/find-time', () => ({
   ...jest.requireActual('../services/scheduling/find-time'),
   findAvailableSlots: jest.fn(),
 }));
+// The arrival-mode picked-hour verdict asks the shared route checker
+// directly; the gate helper stays real so the env flag still decides.
+jest.mock('../services/scheduling/arrival-route', () => ({
+  ...jest.requireActual('../services/scheduling/arrival-route'),
+  checkArrivalPlacement: jest.fn(),
+}));
 // Only the snapshot loader is stubbed — conflictsForTarget stays REAL so
 // the guard's overlap semantics are the production ones.
 jest.mock('../services/rain-out', () => ({
@@ -56,6 +62,7 @@ jest.mock('../services/rain-out', () => ({
 const express = require('express');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { loadOccupancy } = require('../services/rain-out');
+const { checkArrivalPlacement } = require('../services/scheduling/arrival-route');
 const findTimeRouter = require('../routes/admin-schedule-find-time');
 
 let server;
@@ -455,4 +462,43 @@ test('a same-day picked hour before the engine\'s now+30 floor is not scored (no
   expect(early.picked).toBeUndefined();
   const later = await (await post({ ...TODAY, hint: true, slotStepMinutes: 60, pickedStart: '13:00' })).json();
   expect(later.picked).toMatchObject({ start: '13:00', fits: true });
+});
+
+test('arrival-window mode scores the picked hour with the shared route checker: feasible, unverified (no verdict), verified miss', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const saved = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+  process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  const db = require('../models/db');
+  db.raw = jest.fn((sql) => sql);
+  db.mockReturnValue({
+    where: () => ({
+      leftJoin: () => ({
+        first: async () => ({
+          lat: 27.55, lng: -82.4,
+          address_line1: '100 Fixture Street', city: 'Parrish', state: 'FL', zip: '34219',
+          visit_customer_id: 'fixture-customer', visit_profile_label: null,
+        }),
+      }),
+    }),
+  });
+  // The recommendation list is empty in all three cases — it proves nothing.
+  findAvailableSlots.mockResolvedValue({ slots: [], evaluated: 0 });
+  const req = { ...BASE, serviceId: 'fixture-service', technicianId: 't1', hint: true, arrivalWindows: true, slotStepMinutes: 60, pickedStart: '09:00' };
+  try {
+    checkArrivalPlacement.mockResolvedValue({ feasible: true, detourMinutes: 9, estimatedArrival: '09:44' });
+    let body = await (await post(req)).json();
+    expect(body.picked).toEqual({ start: '09:00', fits: true, detour_minutes: 9, drive_in_minutes: null, from_home_base: null, from_name: null, technician: null });
+    expect(checkArrivalPlacement).toHaveBeenCalledWith(expect.objectContaining({
+      serviceId: 'fixture-service', date: '2026-09-01', technicianId: 't1', windowStart: '09:00', windowEnd: '10:00', durationMinutes: 60,
+    }));
+    checkArrivalPlacement.mockResolvedValue({ feasible: false, reason: 'route_unverified' });
+    body = await (await post(req)).json();
+    expect(body.picked).toBeUndefined();
+    checkArrivalPlacement.mockResolvedValue({ feasible: false, reason: 'arrival_window' });
+    body = await (await post(req)).json();
+    expect(body.picked).toEqual({ start: '09:00', fits: false });
+  } finally {
+    if (saved === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = saved;
+  }
 });
