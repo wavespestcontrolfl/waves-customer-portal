@@ -165,6 +165,7 @@ router.post('/', async (req, res) => {
       durationMinutes, dateFrom, dateTo,
       technicianId, topN,
       hint, serviceId, arrivalWindows, excludeServiceIds, slotStepMinutes,
+      pickedStart,
     } = req.body || {};
 
     // Best-time hint consumers go dark behind GATE_BEST_TIME_HINTS — read
@@ -193,6 +194,11 @@ router.post('/', async (req, res) => {
         throw httpError(400, 'slotStepMinutes must be an integer between 1 and 120');
       }
     }
+    // Hint pickers send the hour currently in their time field so the answer
+    // can say what THAT hour costs, not only which hours rank best.
+    if (pickedStart !== undefined && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(pickedStart))) {
+      throw httpError(400, 'pickedStart must be HH:MM');
+    }
 
     const today = etDateString();
     const from = dateFrom || today;
@@ -220,8 +226,10 @@ router.post('/', async (req, res) => {
       dateTo: clampedTo,
       technicianId: technicianId || undefined,
       // Hint mode over-fetches so the occupancy guard below can drop hours
-      // without leaving the chips row short.
-      topN: hint ? Math.min(requestedTopN * 3, 30) : requestedTopN,
+      // without leaving the chips row short. Scoring a picked hour needs
+      // EVERY gap of the day (the picked hour can sit in the worst one), so
+      // that request takes the engine's whole list and slices below.
+      topN: hint ? (pickedStart ? 100 : Math.min(requestedTopN * 3, 30)) : requestedTopN,
       // undefined = the engine's own defaults ([] / exact-minute starts).
       excludeServiceIds,
       // Existing-visit staff hints share their route check with the edit
@@ -235,6 +243,18 @@ router.post('/', async (req, res) => {
       // which hid real weekend capacity from the staff picker.
       includeWeekends: true,
     });
+
+    const excluded = (excludeServiceIds || []).map(String);
+    const toMin = (hhmm) => {
+      const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})/);
+      return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+    };
+    const toHHMM = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
+    const step = slotStepMinutes !== undefined ? Number(slotStepMinutes) : 1;
+    const spanMin = Math.max(15, parseInt(durationMinutes, 10) || 60);
+    // The engine's answer before the guard slides earliest starts — the
+    // picked-hour lookup below needs each gap's ORIGINAL bounds.
+    const rawSlots = Array.isArray(result?.slots) ? result.slots.slice() : [];
 
     if (hint && Array.isArray(result?.slots) && result.slots.length) {
       // The engine walks per-technician routes, so a scheduled row with NO
@@ -253,14 +273,6 @@ router.post('/', async (req, res) => {
         await Promise.all([...new Set(result.slots.map((s) => s.date))].map(async (d) => {
           occupancyByDate.set(d, await loadOccupancy({ dateFrom: d, dateTo: d }));
         }));
-        const excluded = (excludeServiceIds || []).map(String);
-        const toMin = (hhmm) => {
-          const m = String(hhmm || '').match(/^(\d{1,2}):(\d{2})/);
-          return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
-        };
-        const toHHMM = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
-        const step = slotStepMinutes !== undefined ? Number(slotStepMinutes) : 1;
-        const spanMin = Math.max(15, parseInt(durationMinutes, 10) || 60);
         result.slots = result.slots.flatMap((s) => {
           // The full arrival simulation already checked every actual work
           // span against unassigned/other-tech work and live holds. Comparing
@@ -297,8 +309,56 @@ router.post('/', async (req, res) => {
       }).slice(0, requestedTopN);
     }
 
+    // What the hour already in the picker costs. Each engine slot is a route
+    // gap (earliest aligned start .. latest_start_min, detour constant across
+    // it), so the picked hour's gap is the first ranked slot whose bounds
+    // contain it. Arrival-window slots are one hour each (latest == start),
+    // so the same predicate finds them. No gap = the hour doesn't fit that
+    // day's route; a gap the tech-blind occupancy snapshot vetoes = same
+    // answer (fail-open on a snapshot error, like the chips guard).
+    let picked;
+    if (hint && pickedStart) {
+      const pickedMin = toMin(pickedStart);
+      const gap = rawSlots.find((s) => {
+        if (s.date !== from) return false;
+        const lo = toMin(s.start_time);
+        const hi = Number.isFinite(s.latest_start_min) ? s.latest_start_min : lo;
+        return lo != null && lo <= pickedMin && pickedMin <= hi;
+      });
+      picked = { start: pickedStart, fits: false };
+      if (gap) {
+        let clear = true;
+        if (gap.route_mode !== 'arrival_windows') {
+          try {
+            clear = conflictsForTarget(
+              await loadOccupancy({ dateFrom: from, dateTo: from }), null, from,
+              { start: pickedStart, end: toHHMM(pickedMin + spanMin) },
+              { excludeServiceIds: excluded },
+            ).length === 0;
+          } catch (guardErr) {
+            logger.warn('[find-time] picked-hour occupancy guard failed (fail-open):', guardErr.message);
+          }
+        }
+        if (clear) {
+          const arrival = gap.route_mode === 'arrival_windows';
+          picked = {
+            start: pickedStart,
+            fits: true,
+            detour_minutes: gap.detour_minutes ?? null,
+            // Arrival simulation scores the whole route, not one insertion
+            // leg — it has no "from" anchor to name.
+            drive_in_minutes: arrival ? null : (gap.drive_in_minutes ?? null),
+            from_home_base: arrival ? null : !gap.insertion?.after_stop_id,
+            from_name: arrival ? null : (gap.insertion?.after_name || null),
+            technician: gap.technician || null,
+          };
+        }
+      }
+    }
+
     res.json({
       ...result,
+      ...(picked ? { picked } : {}),
       target,
       range: { dateFrom: from, dateTo: clampedTo },
     });

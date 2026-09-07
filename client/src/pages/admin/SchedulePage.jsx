@@ -1525,7 +1525,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   });
   // Advisory drive-detour suggestions for the same fixed day — picking a
   // chip only fills the window fields (never saves).
-  const { bestTimes } = useBestTimes({
+  const { bestTimes, picked, bestInRange } = useBestTimes({
     arrivalWindows: true,
     date: form.scheduledDate,
     serviceId: service.id,
@@ -1533,6 +1533,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     durationMinutes: slotCheckDuration,
     technicianId: form.technicianId || undefined,
     excludeServiceIds: [service.id],
+    pickedStart: form.windowStart,
+    rangeFrom: etDateString(),
   });
   // Estimate provenance: if this appointment was scheduled from an accepted
   // estimate, surface the same quote/deposit/charge card the New Appointment
@@ -3888,8 +3890,22 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               />{" "}
               <BestTimeHint
                 bestTimes={bestTimes}
+                picked={picked}
+                bestInRange={bestInRange}
                 currentStart={form.windowStart}
+                currentDate={form.scheduledDate}
                 currentTechnicianId={form.technicianId}
+                onPickDate={(slot) =>
+                  setForm((f) => ({
+                    ...f,
+                    scheduledDate: slot.date,
+                    windowStart: slot.start,
+                    windowEnd: slot.end,
+                    technicianId: !f.technicianId && slot.technicianId
+                      ? slot.technicianId
+                      : f.technicianId,
+                  }))
+                }
                 onPick={(slot) =>
                   // An unassigned visit searched all techs, so the detour
                   // is slot.technicianId's — adopt that tech with the
@@ -6941,7 +6957,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   });
   // Advisory drive-detour suggestions for the picked day — a chip only sets
   // the start select, never submits the reschedule.
-  const { bestTimes: manualBestTimes } = useBestTimes({
+  const { bestTimes: manualBestTimes, picked: manualPicked, bestInRange: manualBestInRange } = useBestTimes({
     date: manualDate,
     serviceId: service.id,
     customerId: service.customerId || service.customer_id,
@@ -6951,6 +6967,8 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     // The reschedule submit can't change assignment, so an unassigned
     // visit's all-tech detours would be unactionable — no tech, no hint.
     enabled: showManual && !!manualDate && !!(service.technicianId || service.technician_id),
+    pickedStart: manualTime,
+    rangeFrom: etDateString(),
   });
 
   // One POST path for the suggested and custom pickers. A 409
@@ -7468,9 +7486,13 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           {showManual && (
             <BestTimeHint
               bestTimes={manualBestTimes}
+              picked={manualPicked}
+              bestInRange={manualBestInRange}
               currentStart={manualTime}
+              currentDate={manualDate}
               currentTechnicianId={service.technicianId || service.technician_id}
               onPick={(slot) => setManualTime(slot.start)}
+              onPickDate={(slot) => { setManualDate(slot.date); setManualTime(slot.start); }}
               style={{ marginTop: 10 }}
             />
           )}

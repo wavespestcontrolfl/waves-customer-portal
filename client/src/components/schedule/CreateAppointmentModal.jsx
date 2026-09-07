@@ -36,6 +36,7 @@ import SlotConflictNotice from './SlotConflictNotice';
 import { useSlotConflicts } from './useSlotConflicts';
 import BestTimeHint from './BestTimeHint';
 import { useBestTimes } from './useBestTimes';
+import { etDateString } from '../../lib/timezone';
 import { propertyRelationshipChip } from '../../lib/contact-roles';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -1737,7 +1738,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // the start time (window end is derived from durations at submit), and is
   // separate from the ranged "Find best times" panel above.
   const bestTimesTarget = bookingPropertyTarget(selectedBookingProperty);
-  const { bestTimes } = useBestTimes({
+  const { bestTimes, picked, bestInRange } = useBestTimes({
     date: apptDate ? String(apptDate).split('T')[0] : null,
     customerId: selectedCustomer?.id,
     // Rank at the CHOSEN property, not the customer's primary.
@@ -1747,6 +1748,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     durationMinutes: slotCheckDuration,
     // Same tech scoping as the ranged search — auto mode searches all techs.
     technicianId: techMode === 'choose' && techId ? techId : undefined,
+    pickedStart: windowStart,
+    rangeFrom: etDateString(),
   });
 
   // Submit
@@ -3377,13 +3380,25 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           <SlotConflictNotice conflicts={slotConflicts} style={{ marginBottom: 10 }} />
           <BestTimeHint
             bestTimes={bestTimes}
+            picked={picked}
+            bestInRange={bestInRange}
             currentStart={windowStart}
+            currentDate={apptDate ? String(apptDate).split('T')[0] : null}
             currentTechnicianId={techMode === 'choose' ? techId : null}
             onPick={(slot) => {
               // Mirror applySlot: the detour was scored for a specific
               // technician, so picking the chip adopts that tech too —
               // leaving auto mode would let assignment land elsewhere and
               // falsify the advertised detour.
+              setWindowStart(slot.start);
+              if (slot.technicianId) {
+                setTechMode('choose');
+                setTechId(slot.technicianId);
+                appliedSuggestionRef.current = true;
+              }
+            }}
+            onPickDate={(slot) => {
+              setApptDate(slot.date);
               setWindowStart(slot.start);
               if (slot.technicianId) {
                 setTechMode('choose');

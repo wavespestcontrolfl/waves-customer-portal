@@ -200,3 +200,28 @@ describe('technician pool (Field Team Program, Phase 0)', () => {
     ]));
   });
 });
+
+test('every gap names its two legs and the anchor the van leaves from (picked-hour hint)', async () => {
+  const stop = {
+    id: 's1', scheduled_date: FUTURE_DATE, technician_id: 't1',
+    // 11:00 stop: a 9:00 hour still clears the 1-min leg into it; the next
+    // gap opens at 12:01 and snaps to 13:00.
+    window_start: '11:00', window_end: '12:00', service_type: 'pest',
+    estimated_duration_minutes: 60,
+    svc_lat: 27.41, svc_lng: -82.41, cust_lat: null, cust_lng: null,
+    first_name: 'John', last_name: 'Kelleher', city: 'Bradenton',
+  };
+  db.mockImplementation((table) => (table === 'technicians' ? chain([{ id: 't1', name: 'A' }]) : chain([stop])));
+  const { slots } = await findAvailableSlots({ ...BASE, slotStepMinutes: 60, topN: 10 });
+  const byStart = Object.fromEntries(slots.map((s) => [s.start_time, s]));
+  // Mocked geometry: every leg is 0.5 mi → 1 legacy minute.
+  const first = byStart['09:00'];
+  expect(first.drive_in_minutes).toBe(1);
+  expect(first.drive_out_minutes).toBe(1);
+  expect(first.insertion.after_name).toBeNull(); // home base
+  expect(first.insertion.after_stop_id).toBeNull();
+  const second = byStart['13:00'];
+  expect(second.drive_in_minutes).toBe(1);
+  expect(second.insertion.after_name).toBe('John Kelleher');
+  expect(second.insertion.after_stop_id).toBe('s1');
+});

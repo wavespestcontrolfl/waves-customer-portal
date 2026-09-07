@@ -303,3 +303,73 @@ test.each([undefined, false, true])('existing-visit arrival routing requires exp
   if (arrivalWindows === true) expect(opts.arrivalWindow).toEqual({ serviceId: 'svc-1' });
   else expect(opts).not.toHaveProperty('arrivalWindow');
 });
+
+// ── Picked-hour scoring ──────────────────────────────────────────────
+// A hint request may carry the hour already in the picker; the answer says
+// what THAT hour costs (drive into the stop + what the insertion adds) by
+// finding the route gap whose bounds contain it.
+
+const gapSlot = (over = {}) => ({
+  rank: 1, date: '2026-09-01', start_time: '09:00', end_time: '10:00',
+  detour_minutes: 57, drive_in_minutes: 37, drive_out_minutes: 31, latest_start_min: 9 * 60,
+  insertion: { after: 'HQ (start of day)', after_name: null, after_stop_id: null, before: 'John Kelleher (11:00)', before_stop_id: 's-kel' },
+  technician: { id: 't1', name: 'A' },
+  ...over,
+});
+
+test('pickedStart inside a gap answers that gap\'s drive-in leg, origin and detour — and asks the engine for every gap', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  findAvailableSlots.mockResolvedValue({
+    slots: [
+      gapSlot(),
+      gapSlot({ rank: 2, start_time: '13:00', end_time: '14:00', latest_start_min: 15 * 60, detour_minutes: 4, drive_in_minutes: 12,
+        insertion: { after: 'Kyle Dilschneider (13:00)', after_name: 'Kyle Dilschneider', after_stop_id: 's-kyle', before: 'HQ (end of day)', before_stop_id: null } }),
+    ],
+    evaluated: 2,
+  });
+  const res = await post({ ...BASE, hint: true, slotStepMinutes: 60, topN: 3, pickedStart: '14:00' });
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body.picked).toEqual({
+    start: '14:00', fits: true, detour_minutes: 4, drive_in_minutes: 12,
+    from_home_base: false, from_name: 'Kyle Dilschneider', technician: { id: 't1', name: 'A' },
+  });
+  // The picked hour can sit in the worst gap of the day, so the engine's
+  // whole list is requested (the chips row is still sliced to topN).
+  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(100);
+  expect(body.slots).toHaveLength(2);
+});
+
+test('pickedStart in the first gap reports the home base as the origin', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot()], evaluated: 1 });
+  const body = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '09:00' })).json();
+  expect(body.picked).toMatchObject({ fits: true, drive_in_minutes: 37, from_home_base: true, from_name: null, detour_minutes: 57 });
+});
+
+test('pickedStart outside every gap does not fit', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot()], evaluated: 1 });
+  const body = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '16:00' })).json();
+  expect(body.picked).toEqual({ start: '16:00', fits: false });
+});
+
+test('a picked hour the tech-blind occupancy snapshot flags does not fit either', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot({ latest_start_min: 14 * 60 })], evaluated: 1 });
+  loadOccupancy.mockResolvedValue({ ...emptyOccupancy(), rows: [occupiedRow()] }); // 09:00–10:00, technician null
+  const body = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '09:00' })).json();
+  expect(body.picked).toEqual({ start: '09:00', fits: false });
+  // The chips row still slides past the occupied hour as before.
+  expect(body.slots[0].start_time).toBe('10:00');
+});
+
+test('garbage pickedStart 400s before the engine runs; no pickedStart means no picked key', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const bad = await post({ ...BASE, hint: true, pickedStart: '9am' });
+  expect(bad.status).toBe(400);
+  expect(findAvailableSlots).not.toHaveBeenCalled();
+  const body = await (await post({ ...BASE, hint: true })).json();
+  expect(body.picked).toBeUndefined();
+  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(30);
+});

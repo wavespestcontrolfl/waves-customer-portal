@@ -513,7 +513,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   // On a rest-of-route move the hint advises the tapped visit only; that's
   // fine, it's advisory (commit still shifts siblings by the window delta).
   const landingDate = isCustom ? customDate : (selected?.date || null);
-  const { bestTimes } = useBestTimes({
+  const { bestTimes, picked, bestInRange } = useBestTimes({
     date: landingDate,
     serviceId: service.id,
     customerId: service.customerId || service.customer_id,
@@ -527,6 +527,10 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     // Quick Move can't reassign, so an unassigned visit's all-tech
     // detours would be unactionable — no tech, no hint.
     enabled: !!landingDate && !!(service.technicianId || service.technician_id),
+    // What the chosen hour costs (preset window or the custom field), and
+    // the cheapest date+hour from the earliest day the move can land.
+    pickedStart: isCustom ? customStart : selected?.window?.start,
+    rangeFrom: todayStr,
   });
   // A same-day landing is floored at the next top-of-hour — raised further
   // by running_late (server enforces target_not_later). Never advertise an
@@ -534,6 +538,10 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   const floorBestTimes = landingDate === todayStr
     ? bestTimes.filter((s) => (hhmmToMin(s.start) ?? 0) >= minTodayStartMin)
     : bestTimes;
+  const floorBestInRange = bestInRange && bestInRange.date === todayStr
+    && (hhmmToMin(bestInRange.start) ?? 0) < minTodayStartMin
+    ? null
+    : bestInRange;
 
   // Two lists, one scope toggle (codex #3375 P2 ×2):
   //   conflicts      — what the ANCHOR's window hits. A route-scope push
@@ -843,9 +851,13 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                 so the chips go display-only. */}
             <BestTimeHint
               bestTimes={floorBestTimes}
+              picked={picked}
+              bestInRange={floorBestInRange}
               currentStart={isCustom ? customStart : selected?.window?.start}
+              currentDate={landingDate}
               currentTechnicianId={service.technicianId || service.technician_id}
               onPick={isCustom ? (slot) => setCustomStart(slot.start) : undefined}
+              onPickDate={isCustom ? (slot) => { setCustomDate(slot.date); setCustomStart(slot.start); } : undefined}
               style={{ marginTop: -8, marginBottom: 18 }}
             />
 
