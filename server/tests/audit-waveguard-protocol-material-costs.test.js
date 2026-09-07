@@ -85,6 +85,14 @@ test('a canonical plus name followed by another ingredient still remains incompl
   expect(row.issues).toContainEqual(expect.objectContaining({ reason: 'combined_products_unresolved' }));
 });
 
+test('a combined-application alias cannot hide a separate material', () => {
+  const aliasedProduct = { ...product, aliases: ['Synthetic Fertilizer + NIS'] };
+  const row = reportFor([{ ...visit, primary: 'Synthetic Fertilizer + NIS ($3)' }], [aliasedProduct]).rows[0];
+  expect(row.catalogSelectedSubtotal).toBeGreaterThan(0);
+  expect(row.catalogSelectedAnnual).toBeNull();
+  expect(row.issues).toContainEqual(expect.objectContaining({ reason: 'combined_products_unresolved' }));
+});
+
 test.each([
   [{ default_rate_per_1000: null }, 'missing_rate'],
   [{ cost_per_unit: null, best_price: null }, 'missing_cost'],

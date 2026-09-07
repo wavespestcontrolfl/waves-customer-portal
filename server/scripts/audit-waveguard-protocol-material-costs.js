@@ -124,8 +124,10 @@ function analyzeVisit({ trackKey, track, visit, products, options, lawnSqft = DE
   const selectedCombinedProducts = selectedItems.filter((item) => {
     if (!isMaterialIntentLine(item)) return false;
     const text = String(item.raw || '').replace(/\([^)]*\)/g, '').toLowerCase();
+    const canonicalName = String(item.product?.name || '').toLowerCase();
     const productNames = [item.product?.name, ...(item.product?.aliases || [])]
-      .filter((name) => name?.includes('+')).sort((a, b) => b.length - a.length);
+      .filter((name) => name?.includes('+') && canonicalName.includes(name.toLowerCase()))
+      .sort((a, b) => b.length - a.length);
     const remaining = productNames.reduce((rest, name) => rest.replace(name.toLowerCase(), ''), text);
     return /\+/.test(remaining);
   });
