@@ -208,10 +208,14 @@ const CHECK_VALUE_RULES = Object.freeze({
   commitment_requires_receipt: () => (v) => (v === true ? null : 'value must be true'),
 });
 
+const EXPECT_KEYS = Object.freeze(['check', 'value', 'severity', 'adjudicated']);
+
 function lintExpectation(e, i, knownTools) {
   const label = `expect[${i}]`;
   if (!e || !CHECKS.includes(e.check)) return [`${label}: unknown check "${e && e.check}"`];
   const problems = [];
+  // A misspelt key (`adjudciated`) would silently demote a blocking major.
+  for (const key of Object.keys(e).filter((k) => !EXPECT_KEYS.includes(k))) problems.push(`${label} (${e.check}): unknown key "${key}"`);
   if (!SEVERITIES.includes(e.severity)) problems.push(`${label} (${e.check}): severity must be critical | major | quality`);
   if (e.adjudicated != null && typeof e.adjudicated !== 'boolean') problems.push(`${label} (${e.check}): adjudicated must be boolean`);
   const problem = CHECK_VALUE_RULES[e.check](knownTools)(e.value);

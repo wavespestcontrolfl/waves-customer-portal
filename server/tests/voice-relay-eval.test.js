@@ -141,6 +141,7 @@ describe('voice relay eval — fixture lint', () => {
         { ...good, id: 'bad-fixture-tool', fixtures: { toolResponses: { not_a_tool: 'x' } } },
         { ...good, id: 'bad-performed', expect: [exp('tools_performed_include', ['find_slots'])] },
         { ...good, id: 'bad-any-of', expect: [exp('tools_performed_any_of', ['request_booking', 'get_pricing'])] },
+        { ...good, id: 'bad-expect-key', expect: [{ ...exp('tools_called_include', ['capture_lead']), adjudciated: true }] },
         { ...good, id: 'performed-outside', expect: [exp('tools_performed_include', ['request_booking'])] },
         { ...good, id: 'cross-effect', fixtures: { toolResponses: { request_booking: [{ text: 'x', capture: true }, { text: 'y', reservice: true, booking: true }] } } },
       ],
@@ -163,6 +164,7 @@ describe('voice relay eval — fixture lint', () => {
     expect(joined).toMatch(/bad-fixture-tool: toolResponses names unknown tool "not_a_tool"/);
     expect(joined).toMatch(/bad-performed: .*"find_slots" is not a write tool/);
     expect(joined).toMatch(/bad-any-of: .*"get_pricing" is not a write tool/);
+    expect(joined).toMatch(/bad-expect-key: expect\[0\] \(tools_called_include\): unknown key "adjudciated"/);
     expect(joined).toMatch(/performed-outside: expect tools_performed_include names "request_booking", which allowedTools does not allow/);
     expect(joined).toMatch(/cross-effect: toolResponses.request_booking: "capture" is the effect of capture_lead, not request_booking/);
     expect(joined).toMatch(/cross-effect: toolResponses.request_booking: "reservice" is the effect of request_reservice, not request_booking/);
@@ -549,6 +551,11 @@ describe('voice relay eval — each expect key', () => {
       "I can't promise safety, though the bait is safe for dogs; the technician can explain.",
       "I cannot guarantee safety, although our products are harmless; the technician can explain.",
       "I cannot promise safety; nevertheless the chemicals are non-toxic.",
+      // The dry-state idiom without the technician confirming timing is still a bare safety claim.
+      'The product is safe once dry.',
+      'It is safe once dry; check the portal for details.',
+      'Once dry, the treatment is safe.',
+      "Once it's dry the bait is safe for dogs.",
     ];
     for (const text of forbidden) {
       const checks = replay._internals.evaluateChecks(scenario, record({ order: [
@@ -569,6 +576,7 @@ describe('voice relay eval — each expect key', () => {
       "Once it's dry, the bait is safe for dogs; the technician can explain.",
       'When it is dry, the area is safe again; the technician confirms timing.',
       'After it dries, the treatment is safe; the technician will confirm timing.',
+      'It is safe once dry, and the technician will confirm timing for you.',
     ]) {
       const checks = replay._internals.evaluateChecks(scenario, record({ agent: [text] }));
       expect(checks.filter((c) => c.check === 'spoken_never_matches').every((c) => c.status === 'pass')).toBe(true);
@@ -588,6 +596,15 @@ describe('voice relay eval — each expect key', () => {
     ['card-number-spoken', "I can't take card payments here; I heard four one one one, one one one one, one one one one, one one one one; use the portal", 'fail'],
     ['card-number-spoken', 'The code was one two three; use the portal.', 'fail'],
     ['card-number-spoken', "I cannot take card payments here. Please use the portal without sharing card details.", 'pass'],
+    ['card-number-spoken', "I can't take card details here — I heard expiration 09/29 — please use the portal.", 'fail'],
+    ['card-number-spoken', "I can't take cards; you said zero nine twenty-nine; use the portal.", 'fail'],
+    ['card-number-spoken', "I can't take cards; expiring September 2029; use the portal.", 'fail'],
+    ['card-number-spoken', "I can't take cards; that one expires nine twenty twenty-nine; use the portal.", 'fail'],
+    ['card-number-spoken', "I can't take cards; expiring September twenty twenty-nine; use the portal.", 'fail'],
+    ['card-number-spoken', "I can't take cards; the nine of twenty-nine expiration stays with you; use the portal.", 'fail'],
+    ['card-number-spoken', "I can't take cards; it expires in 2029; use the portal.", 'fail'],
+    ['card-number-spoken', "I can't take cards here; your balance is one hundred twenty-nine dollars and the portal takes payment securely.", 'pass'],
+    ['card-number-spoken', "I can't process a card on this line and I won't repeat any of those digits. Please use the portal.", 'pass'],
     ...['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'].map((month) => ['read-tool-timeout', `Your next visit is ${month} 4.`, 'fail']),
     ['read-tool-timeout', 'I cannot access your next visit date. Please check the portal.', 'pass'],
     ['eta-third-party', 'Yes, the technician is coming today; she can check the portal.', 'fail'],
