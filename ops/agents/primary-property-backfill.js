@@ -10,10 +10,17 @@
 // to NULL. This runs the SAME service backfill those reads use
 // (ensurePrimaryProperty → source 'backfill'), one customer at a time.
 //
-// Scope: customers with a non-empty address_line1 and NO customer_properties
-// row at all. A customer whose only rows are inactive is a deliberate
-// deactivation and is skipped (the service's primary check has no active
-// filter, so it would return created=false anyway).
+// Scope: live (deleted_at IS NULL) customers with a non-empty address_line1
+// and NO customer_properties row at all. A merge loser keeps its address
+// after repointCustomerProperties moved its rows to the winner
+// (customer-dedupe.js) — excluding soft-deleted rows keeps it from
+// growing a fresh primary that would collide on an undo. A customer whose
+// only rows are inactive is a deliberate deactivation and is skipped (the
+// service's primary check has no active filter, so it would return
+// created=false anyway).
+//
+// The dry run prints every candidate id with its stage (ids only — never
+// an address) so the exact set can be checked before --execute.
 //
 // Reversible: the run prints the exact ids it created and a DELETE scoped
 // to those ids (still source='backfill' and unreferenced by any visit or
@@ -53,6 +60,7 @@ const limit = limitIdx > -1 ? Math.max(0, parseInt(process.argv[limitIdx + 1], 1
 (async () => {
   const startedAt = new Date();
   let q = db('customers as c')
+    .whereNull('c.deleted_at')
     .whereRaw("coalesce(c.address_line1, '') <> ''")
     .whereNotExists(db('customer_properties as p').select(1).whereRaw('p.customer_id = c.id'))
     .orderBy('c.created_at', 'asc')
@@ -64,6 +72,9 @@ const limit = limitIdx > -1 ? Math.max(0, parseInt(process.argv[limitIdx + 1], 1
   for (const c of candidates) byStage[c.pipeline_stage || 'null'] = (byStage[c.pipeline_stage || 'null'] || 0) + 1;
   console.log(`[primary-property-backfill] ${execute ? 'EXECUTE' : 'DRY RUN'} — ${candidates.length} addressed customer(s) with no property row`, byStage);
 
+  for (const c of candidates) {
+    console.log(`  ${c.id}  ${c.pipeline_stage || 'null'}  created ${c.created_at.toISOString().slice(0, 10)}  → ${execute ? 'create' : 'would create'} primary from customers.address_*`);
+  }
   if (!execute) {
     console.log('[primary-property-backfill] dry run — pass --execute to create the primaries');
     return;
