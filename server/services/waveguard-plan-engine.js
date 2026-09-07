@@ -854,57 +854,54 @@ function summarizeOrdinanceStatus({ date, ordinances, candidateItems }) {
   return { activeWindows, blocks, warnings };
 }
 
-function summarizeCalibration({ calibration, calibrations }) {
+// The rig is a convenience for tank-fill math, never a gate (owner ruling
+// 2026-09-07: the "select a rig" block had produced zero assignments in
+// prod and held every lawn visit). The assigned rig wins, a lone active rig
+// is used, and among several the tank rigs decide: one tank rig, or every
+// tank rig on the same carrier (both 110-gal rigs run the same gun and
+// pace), resolves; tank rigs that disagree resolve nothing and the protocol
+// window's default carrier applies downstream. Backpacks never decide a
+// tank mix.
+function resolveAmongActive(activeCalibrations) {
+  const tanks = activeCalibrations.filter((row) => row.system_type === 'tank');
+  if (!tanks.length) return null;
+  const carriers = new Set(tanks.map((row) => Number(row.carrier_gal_per_1000 || 0)));
+  if (carriers.size !== 1) return null;
+  return tanks.find((row) => row.calibration_status === 'field_verified') || tanks[0];
+}
+
+function summarizeCalibration({ calibration, calibrations, assigned = false }) {
   const activeCalibrations = Array.isArray(calibrations)
     ? calibrations
     : (calibration ? [calibration] : []);
-
-  if (!activeCalibrations.length) {
-    return {
-      selected: null,
-      blocks: [{
-        code: 'missing_calibration',
-        severity: 'block',
-        message: 'No active equipment calibration is available for mix math.',
-      }],
-      warnings: [],
-    };
-  }
-
-  if (activeCalibrations.length > 1 && !calibration) {
-    return {
-      selected: null,
-      blocks: [{
-        code: 'equipment_selection_required',
-        severity: 'block',
-        message: 'Multiple active equipment calibrations exist. Select the intended equipment system before mix math can be trusted.',
-      }],
-      warnings: [],
-      options: activeCalibrations.map((row) => ({
-        equipmentSystemId: row.equipment_system_id,
-        calibrationId: row.id,
-        systemName: row.system_name,
-        systemType: row.system_type,
-        carrierGalPer1000: row.carrier_gal_per_1000 ? Number(row.carrier_gal_per_1000) : null,
-        tankCapacityGal: row.tank_capacity_gal ? Number(row.tank_capacity_gal) : null,
-        expiresAt: row.expires_at || null,
-        calibrationStatus: row.calibration_status || null,
-      })),
-    };
-  }
-
-  const selected = calibration || activeCalibrations[0];
+  const selected = calibration
+    || (activeCalibrations.length === 1 ? activeCalibrations[0] : null)
+    || (activeCalibrations.length > 1 ? resolveAmongActive(activeCalibrations) : null);
+  // inferred = the engine picked the rig, the visit did not name it. Mix
+  // math may use it; completion must not record it as equipment used
+  // (Codex #4124 r2 P1).
+  const inferred = !calibration && Boolean(selected);
+  // unresolved = the visit names a rig whose calibration is no longer
+  // active (deactivated / deleted since). Not a block — the protocol
+  // carrier applies — but the closeout must clear the stale assignment
+  // rather than persist it as equipment used (Codex #4124 r3 P1).
+  const unresolved = Boolean(assigned) && !activeCalibrations.length;
   const warnings = [];
-  const blocks = [];
-  if (!selected.tank_capacity_gal) {
+  if (unresolved) {
+    warnings.push({
+      code: 'assigned_rig_unresolved',
+      severity: 'warning',
+      message: 'The rig assigned to this visit has no active calibration; the protocol carrier is used and the assignment is not recorded as used.',
+    });
+  }
+  if (selected && !selected.tank_capacity_gal) {
     warnings.push({
       code: 'missing_tank_capacity',
       severity: 'warning',
       message: 'Equipment tank capacity is missing; tank-fill checks are limited.',
     });
   }
-
-  return { selected, blocks, warnings };
+  return { selected, inferred, unresolved, blocks: [], warnings };
 }
 
 // Quantities are mixed for the treated (visit) area; the annual budget is per
@@ -1372,9 +1369,21 @@ async function buildPlanForService(serviceId, options = {}) {
   });
   const plannedCandidateItems = candidateItems.filter((item) => item.selected);
 
-  const calibrationSummary = summarizeCalibration({ calibrations: activeCalibrations, date: serviceDate });
+  // A rig the visit names (assignment or explicit request) is the visit's;
+  // anything else the summary picks is inferred.
+  const assignedRig = Boolean(options.equipmentSystemId || options.calibrationId || service.assigned_equipment_system_id || service.assigned_calibration_id);
+  const calibrationSummary = summarizeCalibration({
+    calibration: assignedRig && activeCalibrations.length === 1 ? activeCalibrations[0] : null,
+    calibrations: activeCalibrations,
+    assigned: assignedRig,
+    date: serviceDate,
+  });
   const calibration = calibrationSummary.selected;
-  const carrier = Number(calibration?.carrier_gal_per_1000 || 0);
+  // Rig carrier when one resolved, else the protocol window's default (the
+  // same fallback the completed-service report already reads).
+  const rigCarrier = Number(calibration?.carrier_gal_per_1000 || 0);
+  const carrier = rigCarrier > 0 ? rigCarrier : Number(structuredProtocol?.window?.defaultCarrierGalPer1000 || 0);
+  const carrierSource = rigCarrier > 0 ? 'rig' : (carrier > 0 ? 'protocol_default' : null);
   const lawnSqft = completionContext
     ? Number(options.lawnSqft !== undefined ? options.lawnSqft : (completionContext.propertyMatchesProfile ? profile?.lawn_sqft : 0)) || 0
     : Number(profile?.lawn_sqft || 0);
@@ -1664,7 +1673,8 @@ async function buildPlanForService(serviceId, options = {}) {
     },
     mixCalculator: {
       equipmentSystemId: calibration?.equipment_system_id || null,
-      carrierGalPer1000: calibration?.carrier_gal_per_1000 ? Number(calibration.carrier_gal_per_1000) : null,
+      carrierGalPer1000: carrier > 0 ? carrier : null,
+      carrierSource,
       tankCapacityGal: calibration?.tank_capacity_gal ? Number(calibration.tank_capacity_gal) : null,
       lawnSqft: completionContext ? lawnSqft || null : profile?.lawn_sqft || null,
       nutrientProjection,
