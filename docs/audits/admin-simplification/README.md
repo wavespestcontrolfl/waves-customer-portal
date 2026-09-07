@@ -4,6 +4,11 @@ Review baseline: `32de1dc5ccb5a2f9b6e5969db319df37b96a025d`, fetched `origin/mai
 
 ## Findings
 
+Follow-up implementation on `feat/admin-email-communications`:
+[Email now reuses Communications with draft and channel-state recovery](email-consolidation.md).
+The original inventory and initial cleanup results below remain a dated
+baseline; the follow-up document supplies its parity, verification and limits.
+
 1. **Name business work accurately before retiring AI panels.** Customers' “AI Advisor” is a retained operational panel for health signals, retention outreach and upsell dispositions, not a second chat assistant. The Intelligence Bar is already the general assistant, mounted once by the shell. Tax and advertising advisors also have saved reports and action histories that chat does not replace. Keep those workflows, give them specific names, and avoid a second tool registry or conversation store.
 2. **Communications has real editor overlap, but its queues are not interchangeable.** Events pairs notification triggers with SMS/email templates. The template library adds custom/unmapped content, email versions, previews and publication. Triage fixes call extraction/routing; Promises records commitments; CSR follow-ups are another record type. Agent Ops already aggregates persisted source records and links to their owners. Move discoverability first; do not create another universal queue or synchronize “resolved” across unrelated records.
 3. **Email belongs beside Communications.** Its operational inbox is currently filed under Marketing. Reuse the existing inbox and provider integration. Do not embed it behind a new tab until draft lifecycle and owner-only access are verified: current email drafts are component state, and unmounting can lose them.
@@ -134,7 +139,7 @@ performed by this session.
 ## Remaining decisions
 
 1. Which retention functions should share the Health panel, and must persistent outreach/upsell history be visible without opening chat? Preserve the existing owner-approved outreach boundary in every case.
-2. Should a future Messages shell retain both mounted channel drafts, persist them per account/thread, or prompt on switching? Current Email does not provide reliable draft recovery across unmount/reload. Establish this before embedding/retiring its route.
+2. The approved Email follow-up resolves the channel/draft blocker locally; see [Email parity and limits](email-consolidation.md). Its owner-only tab, per-account recovery and existing provider integration are ready for separate PR review. Cross-device draft sync and SMS reload recovery are outside this change.
 3. Which Events editor operations are intended for technicians? Events and SMS template APIs are staff-wide; email template APIs and the separate template-library navigation are owner-only. Consolidating everything into that library would remove currently accessible SMS editing. Preserve those APIs and resolve this disagreement before merging editors.
 4. Should communications triage be split by `triage_reason`/source into a contextual Agent Ops view? Specify the owner/assignment model and retain one source record, never synchronize separate queues.
 5. Approve Billing versus Accounting scopes and canonical A/R definitions; the task does not authorize changing them. Decide how to link both Operating Costs editors to one location without changing role access.

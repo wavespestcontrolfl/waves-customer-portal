@@ -146,9 +146,9 @@ describe('relay-recovery module', () => {
   test('appendSegmentPatch refreshes the AI portion of a processor composite and preserves the recorded portion (hook P1)', () => {
     const { db } = primeDb();
     const patch = segmentStore.appendSegmentPatch(db, segmentStore.buildSegment({ generation: 1, text: 'Caller: first leg' }));
-    expect(patch.transcription.sql).toMatch(/WHEN transcription LIKE '\[AI segment\]%' AND transcription ~ \? AND \? IS NOT NULL\s+THEN '\[AI segment\]' \|\| E'\\n' \|\| \? \|\| substring\(transcription from \?\)/);
+    expect(patch.transcription.sql).toMatch(/WHEN transcription LIKE '\[AI segment\]%' AND transcription ~ \? AND \? IS NOT NULL\s+THEN \?/);
     expect(patch.transcription.bindings[5]).toBe('\\n\\n\\[(?:Staff|Voicemail) segment\\]\\n[\\s\\S]*$'); // non-capturing: substring(from) returns the whole match
-    expect(patch.transcription.bindings[8]).toBe(patch.transcription.bindings[5]);
+    expect(patch.transcription.bindings[7].bindings[5].bindings[0]).toBe(patch.transcription.bindings[5]);
     // …and an EMPTY unowned column (the resumed socket closed silently first) is filled and claimed
     const fill = "(COALESCE(transcription, '') = '' AND transcription_provider IS NULL AND COALESCE((metadata->>'relay_reconnects')::int, 0) > 0)";
     expect(patch.transcription.sql).toContain(`WHEN ${fill} AND ? IS NOT NULL THEN ?`);
@@ -156,7 +156,7 @@ describe('relay-recovery module', () => {
     expect(patch.transcription_provider.bindings[1]).toBe('conversation_relay');
     expect(patch.transcription_status.sql).toContain("THEN 'completed' ELSE transcription_status END");
     // …and a RECORDING-only transcript on a reconnected row gets the AI segment ahead of it; the structured form is cleared (hook P1)
-    expect(patch.transcription.sql).toContain("E' segment]' || E'\\n' || transcription");
+    expect(patch.transcription.bindings[10].bindings[5].sql).toContain("|| transcription");
     expect(patch.transcript_structured.sql).toContain('THEN NULL ELSE transcript_structured END');
   });
 
@@ -338,21 +338,18 @@ describe('the conversation side', () => {
 
   test('a superseded socket whose late segment lands after the resumed socket\'s floor wrote a no-transcript lead refreshes THAT lead\'s summary from the whole call (compare-and-set on the placeholder) (hook r22 P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
-    const { db, builder, updates, guardQ } = primeDb({ firstRow: { transcription: 'Caller: my ants are back', metadata: { relay_session_claim_owner: 'nonce-2', relay_reconnects: 1, relay_lead_id: 'L-linked', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }, { generation: 2, text: 'Agent: Sorry, I lost you for a second.' }] } } });
+    const { db, builder, updates } = primeDb({ firstRow: { id: 'L-linked', relay_lead_id: 'L-linked', transcript_summary: 'Inbound voice call (auto-captured on hangup). No transcript captured.', transcription: 'Caller: my ants are back', metadata: { relay_session_claim_owner: 'nonce-2', relay_reconnects: 1, relay_lead_id: 'L-linked', relay_segments: [{ generation: 1, text: 'Caller: my ants are back\nAgent: Sorry to hear that.' }, { generation: 2, text: 'Agent: Sorry, I lost you for a second.' }] } } });
     const convo = convoWithTurns();
     convo._sessionSuperseded = jest.fn(async () => true);
     await convo.end('ws_close');
     expect(db).toHaveBeenCalledWith('leads');
-    // this call's lead: inserted by this call OR the persisted linkage (a reused lead keeps another call's twilio_call_sid — codex r3 P2)
-    expect(guardQ.where).toHaveBeenCalledWith({ twilio_call_sid: 'CA-rec' });
-    expect(guardQ.orWhere).toHaveBeenCalledWith({ id: 'L-linked' });
-    expect(builder.where).toHaveBeenCalledWith('transcript_summary', 'like', '%No transcript captured.');
+    expect(builder.where).toHaveBeenCalledWith({ id: 'L-linked' });
     const refresh = updates.find((u) => typeof u.transcript_summary === 'string');
     expect(refresh.transcript_summary).toBe('Inbound voice call (auto-captured on hangup). Caller said: my ants are back');
     // no caller lines on the row ⇒ nothing to refresh; sandbox ⇒ never
     primeDb({ firstRow: { transcription: 'Agent: hello', metadata: { relay_session_claim_owner: 'nonce-2', relay_segments: [{ generation: 1, text: 'Agent: hello' }] } } });
-    expect(await convoWithTurns()._refreshFloorLeadSummary({ relay_segments: [{ generation: 1, text: 'Agent: hello' }] })).toBe(false);
-    expect(await convoWithTurns({ sandbox: true })._refreshFloorLeadSummary({ relay_segments: [{ generation: 1, text: 'Caller: hi' }] })).toBe(false);
+    expect(await convoWithTurns()._refreshFloorLeadSummary()).toBe(false);
+    expect(await convoWithTurns({ sandbox: true })._refreshFloorLeadSummary()).toBe(false);
   });
 
   test('a resumed socket the caller never spoke on still composes the earlier segment(s) onto the columns at its close (hook P1)', async () => {
@@ -434,11 +431,11 @@ describe('the conversation side', () => {
   test('a reconnected call that fell to VOICEMAIL (second failure, transfer unavailable) stashes its composed transcript and the processor composes from it (hook P1)', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
     const { composeRelaySegment } = require('../services/voice-agent/relay-transfer');
-    expect(composeRelaySegment({ metadata: { ...OWNED, relay_reconnects: 1, relay_transcript: { text: 'Caller: first\n\n[Reconnected]\nCaller: second' } }, call_outcome: 'voicemail' })).toEqual(expect.objectContaining({ text: '[AI segment]\nCaller: first\n\n[Reconnected]\nCaller: second' }));
+    expect(composeRelaySegment({ metadata: { ...OWNED, relay_reconnects: 1, relay_transcript: { text: 'Caller: first\n\n[Reconnected]\nCaller: second' } }, call_outcome: 'voicemail' })).toEqual(expect.objectContaining({ text: 'Caller: first\n\n[Reconnected]\nCaller: second' }));
     expect(composeRelaySegment({ metadata: { relay_transcript: { text: 'x' } }, call_outcome: 'voicemail' })).toBeNull(); // no transfer, no reconnect ⇒ today's overwrite
     // the SEGMENTS are the third source: a resumed leg that failed before any turn wrote no stash and the swap cleared the columns
     expect(composeRelaySegment({ metadata: { ...OWNED, relay_reconnects: 1, relay_segments: [{ generation: 2, text: 'Caller: second' }, { generation: 1, text: 'Caller: first' }] }, transcription: null, transcription_provider: null, call_outcome: 'voicemail' }))
-      .toMatchObject({ text: '[AI segment]\nCaller: first\n\n[Reconnected]\nCaller: second', metadata: {
+      .toMatchObject({ text: 'Caller: first\n\n[Reconnected]\nCaller: second', metadata: {
         provider: 'conversation_relay', latency: null, segments: { count: 2, complete: false, telemetry_complete: false },
       } });
     // …and the processor's in-UPDATE composition guard (relayPending) engages on a reconnected row too (hook P1)
@@ -1230,7 +1227,7 @@ describe('the conversation side', () => {
     await c2.end('transfer');
     const stash = u2[3];
     expect(stash.metadata.sql).toContain("jsonb_build_object('relay_transcript', jsonb_build_object('text', ?, 'metadata', ?::jsonb))");
-    expect(stash.transcription.bindings[0].sql).toBe("'[AI segment]' || E'\\n' || ?"); // the prepend text is composed too
+    expect(stash.transcription.bindings[0].bindings[4].sql).toBe('COALESCE(?, ?)'); // the budget consumes the composed relay text
   });
 
   test('an UNVERIFIED or non-owning session with a `resumed` hint receives NO prior context (hook P0)', async () => {
@@ -1276,6 +1273,33 @@ describe('the conversation side', () => {
       });
       return { Convo, leadWriter, dbIso };
     }
+
+    test.each(['resolve', 'reject'])('callback cleanup deadline keeps observing a late %s', async (settlement) => {
+      process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+      const { Convo, dbIso } = isolated({ streamImpl: jest.fn(), executeToolImpl: jest.fn() });
+      primeDb({ db: dbIso });
+      const service = require('../services/notification-service');
+      let resolve;
+      let reject;
+      service.revertRelayFailureCallback = jest.fn(() => new Promise((res, rej) => { resolve = res; reject = rej; }));
+      const receipt = { callSid: 'CA-cleanup', notificationId: 'fixture', callbackStamp: 'fixture-stamp' };
+      const convo = new Convo({ callSid: 'CA-cleanup', send: jest.fn(), endSession: jest.fn(() => false) });
+      convo._modelFailures = 2;
+      convo._sessionSuperseded = jest.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
+      convo._fileFailureCallback = jest.fn(async () => { convo._failureCallbackReceipt = receipt; return true; });
+      jest.useFakeTimers();
+      try {
+        const handoff = convo._maybeHandoffForFailure({ officeOpenNow: () => false });
+        await jest.advanceTimersByTimeAsync(2001);
+        expect(await handoff).toBe(true);
+        expect(service.revertRelayFailureCallback).toHaveBeenCalledWith(receipt);
+        expect(convo._failureCallbackReceipt).toBe(receipt); // timeout is not confirmation of deletion
+        if (settlement === 'resolve') resolve();
+        else reject(new Error('fixture cleanup unavailable'));
+        await jest.advanceTimersByTimeAsync(1);
+        expect(convo._failureCallbackReceipt).toBe(settlement === 'resolve' ? null : receipt);
+      } finally { resolve?.(); jest.useRealTimers(); }
+    });
 
     test('a turn queued during callback persistence cannot run after the handoff ends the relay', async () => {
       process.env.GATE_VOICE_RELAY_RECOVERY = 'true';

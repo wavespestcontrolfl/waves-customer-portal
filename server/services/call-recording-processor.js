@@ -6786,8 +6786,9 @@ const CallRecordingProcessor = {
     );
     const STASH_SQL = '? IS NOT NULL';
     const composeInSql = (text) => db.raw(
-      `CASE WHEN ? IS NOT NULL THEN '[AI segment]' || E'\\n' || ? || E'\\n\\n[' || CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END || E' segment]' || E'\\n' || ?::text ELSE ?::text END`,
-      [relayTextSql(), relayTextSql(), text, text],
+      'CASE WHEN ? IS NOT NULL THEN ? ELSE ?::text END',
+      [relayTextSql(), require('./voice-agent/relay-transcript').composeRelayTranscriptSql(db, relayTextSql(),
+        db.raw("E'\\n\\n[' || CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END || E' segment]\\n' || ?::text", [text])), text],
     );
     const writeTranscript = async (query, patch) => {
       if (!relayPending) return Number(await query.update(patch)) || 0;
@@ -6827,7 +6828,7 @@ const CallRecordingProcessor = {
       if (!segment) return text;
       recordedSegmentText = text; // the hallucination guard below measures THIS against the recording, never the composite
       provenance.metadata.relay = segment.metadata;
-      return `${segment.text}\n\n[${label} segment]\n${text}`;
+      return require('./voice-agent/relay-transcript').composeRelayTranscript(segment.text, `\n\n[${label} segment]\n${text}`);
     };
     // Twilio CDN hasn't finished propagating the MP3 (404 or truncated
     // buffer for the known duration) — release the claim untouched instead
@@ -7236,11 +7237,11 @@ const CallRecordingProcessor = {
         // A silent/unavailable recording does not erase the caller's durable
         // AI conversation. Store the plain relay representation and retain
         // the AI label for extraction; there is no recorded half to invent.
-        transcription = relay.segment.text;
+        transcription = require('./voice-agent/relay-transcript').composeRelayTranscript(relay.segment.text);
         transcriptionProvenance = { provider: RELAY_TRANSCRIPTION_PROVIDER, model: null,
           metadata: { relay: relay.segment.metadata, recording_transcription_unavailable: true } };
         const wrote = await db('call_log').where({ id: call.id }).where('processing_token', procToken).update({
-          transcription: db.raw('COALESCE(?, ?)', [relayTextSql(), transcription.slice('[AI segment]\n'.length)]),
+          transcription: db.raw('COALESCE(?, ?)', [relayTextSql(), relay.segment.text]),
           transcription_provider: RELAY_TRANSCRIPTION_PROVIDER, transcription_status: 'completed',
           transcription_model: null, transcript_structured: null,
           transcription_metadata: transcriptionMetadataWrite(transcriptionProvenance.metadata), updated_at: new Date(),
@@ -7343,7 +7344,7 @@ const CallRecordingProcessor = {
         .where('processing_token', procToken).first('transcription', 'transcription_provider');
       if (!fresh) return abandonToPeer('the relay transcript refresh');
       const relayText = fresh.transcription_provider === RELAY_TRANSCRIPTION_PROVIDER
-        ? `[AI segment]\n${fresh.transcription || ''}` : fresh.transcription;
+        ? require('./voice-agent/relay-transcript').composeRelayTranscript(fresh.transcription) : fresh.transcription;
       if (relayText?.startsWith('[AI segment]') && relayText !== transcription) {
         transcription = relayText;
         recordedSegmentText = recordedPartOfComposite(transcription);

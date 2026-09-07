@@ -32,6 +32,19 @@ describe('relay segment storage representation', () => {
       segments: { complete: true, telemetry_complete: false } });
   });
 
+  test.each([20000, 70000])('composite budget preserves all %s recorded characters and both headers', (recordedChars) => {
+    const { composeRelayTranscript, MAX_TRANSCRIPT_CHARS } = require('../services/voice-agent/relay-transcript');
+    const recorded = '\n\n[Voicemail segment]\n' + '🌊'.repeat(recordedChars);
+    const ai = '🌊'.repeat(MAX_TRANSCRIPT_CHARS);
+    const composite = composeRelayTranscript(ai, recorded);
+    expect(composite.startsWith('[AI segment]\n')).toBe(true);
+    expect(composite.endsWith('[AI transcript truncated]' + recorded)).toBe(true);
+    expect(Array.from(composite)).toHaveLength(Math.max(MAX_TRANSCRIPT_CHARS,
+      Array.from('[AI segment]\n\n[AI transcript truncated]' + recorded).length));
+    expect(composeRelayTranscript('Caller: hello', '\n\n[Staff segment]\nStaff: hello'))
+      .toBe('[AI segment]\nCaller: hello\n\n[Staff segment]\nStaff: hello');
+  });
+
   test('retains the issued references and search context in the serialized record', () => {
     const slot = { date: '2026-01-02', startMinutes: 840, timeOfDay: 'afternoon', duration: 90 };
     const record = JSON.parse(JSON.stringify(segments.buildSegment({
