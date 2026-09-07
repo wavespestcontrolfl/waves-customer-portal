@@ -135,8 +135,13 @@ fi
 # re-stamped under a new filename. Rename/copy detection is exact-match
 # only, so a newer main file a stale branch merely lacks (D at the tip,
 # not checked — that is not a deletion) is never paired with the branch's
-# own similar boilerplate. Both baselines are fetched from the push's
-# remote first (bounded, non-interactive): origin/main so the tip is the
+# own similar boilerplate. Against the remote tip and the merge base, a
+# file whose pushed content already equals origin/main's is skipped: it
+# is main's deployed content (a branch that merged main after main
+# repaired a migration in place — #4078 — inherits the repair), and the
+# tip check still owns every real edit of it. Both baselines are fetched
+# from the push's remote first (bounded, non-interactive): origin/main so
+# the tip is the
 # deployed one, and a destination tip this clone has never fetched —
 # which is BLOCKED if it still cannot be inspected, because a force-push
 # over a tip the guard cannot diff is exactly the case it exists for.
@@ -176,8 +181,23 @@ guard_diff() {
   # name-status lines under the migrations dir, prefixed with the
   # baseline for the message. Exact-match rename AND copy detection
   # (--find-copies-harder lets an unchanged file be a copy source).
+  # A line whose pushed content is byte-identical to origin/main's is
+  # main's deployed content, not this push's edit — a branch that merged
+  # main after main repaired a migration in place inherits the repair —
+  # so it is dropped; the origin/main tip check owns that file. A
+  # deletion has no pushed content and is always kept.
   git diff --name-status --find-copies-harder -C100% --diff-filter="$3" "$1" "$2" -- "$MIGRATIONS_DIR" 2>/dev/null \
-    | sed "s|^|    vs ${1:0:9}: |"
+    | while IFS= read -r line; do
+        dest="${line##*$'\t'}"
+        if [ "$BASE_OK" = "1" ]; then
+          pushed_blob="$(git rev-parse --verify -q "$2:$dest" 2>/dev/null || true)"
+          base_blob="$(git rev-parse --verify -q "$GUARD_BASE:$dest" 2>/dev/null || true)"
+          if [ -n "$pushed_blob" ] && [ "$pushed_blob" = "$base_blob" ]; then
+            continue
+          fi
+        fi
+        printf '    vs %s: %s\n' "${1:0:9}" "$line"
+      done
 }
 if [ "${SKIP_MIGRATION_GUARD:-0}" = "1" ]; then
   echo "[migration-guard] SKIP_MIGRATION_GUARD=1 set — skipping applied-migration guard." >&2

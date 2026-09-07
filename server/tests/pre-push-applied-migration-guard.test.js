@@ -331,4 +331,42 @@ describe('pre-push applied-migration guard', () => {
     expect(String(failed.stderr)).toContain('HEAD -> ?');
     expect(String(failed.stderr)).toContain('M\t' + MIG_MAIN.split(path.sep).join('/'));
   });
+
+  // main repaired a migration in place (the hatch's legitimate case: its
+  // deploy had failed before migrating) and a branch merges main forward:
+  // the branch's old remote tip has the pre-repair file, so the remote
+  // diff reads M — but the content is main's, not the branch's edit
+  // (#4078 was pushed with the hatch for exactly this). A further edit on
+  // the branch is still blocked via the origin/main tip.
+  test('a branch that merges main forward and inherits a migration main repaired in place passes; editing it further is BLOCKED', () => {
+    const MIG_R = path.join(MIGRATIONS, '20260101000013_repaired_on_main.js');
+    const migRel = MIG_R.split(path.sep).join('/');
+    // main lands MIG_R; the branch is pushed carrying it.
+    git(other, ['checkout', '-q', 'main']);
+    git(other, ['pull', '-q', '--ff-only', 'origin', 'main']);
+    writeAndCommit(other, { [MIG_R]: migBody('repaired_on_main') }, 'migration that will need a repair');
+    git(other, ['push', '-q', 'origin', 'HEAD:main']);
+    git(work, ['fetch', '-q', 'origin']);
+    git(work, ['checkout', '-q', '-b', 'merge-forward', 'origin/main']);
+    writeAndCommit(work, { 'server/index.js': "module.exports = 'merge-forward';\n" }, 'feature work');
+    expect(pushResult(work, {}, 'HEAD:refs/heads/merge-forward').ok).toBe(true);
+    // main repairs MIG_R in place (from a clone without the hook).
+    const repaired = "exports.up = async () => { /* repaired on main after a failed deploy */ };\nexports.down = async () => {};\n";
+    writeAndCommit(other, { [MIG_R]: repaired }, 'repair migration in place');
+    git(other, ['push', '-q', 'origin', 'HEAD:main']);
+    // The branch merges main forward: HEAD now carries the repair, and the
+    // branch's remote tip still has the pre-repair file.
+    git(work, ['fetch', '-q', 'origin']);
+    git(work, ['merge', '-q', '--no-edit', 'origin/main']);
+    expect(git(work, ['show', 'HEAD:' + migRel])).toBe(repaired);
+    const r = pushResult(work, {}, 'HEAD:refs/heads/merge-forward');
+    expect(r.stderr).not.toMatch(/\[migration-guard\] BLOCKED/);
+    expect(r.ok).toBe(true);
+    // Editing the inherited file on the branch is the branch's edit.
+    writeAndCommit(work, { [MIG_R]: "exports.up = async () => { /* edited on the branch after the merge */ };\nexports.down = async () => {};\n" }, 'edit inherited repair');
+    const r2 = pushResult(work, {}, 'HEAD:refs/heads/merge-forward');
+    expect(r2.ok).toBe(false);
+    expect(r2.stderr).toMatch(/\[migration-guard\] BLOCKED/);
+    expect(r2.stderr).toContain('vs origin/main tip: M\t' + migRel);
+  });
 });
