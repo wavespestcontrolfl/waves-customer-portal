@@ -14,8 +14,13 @@
  * those CAN be paid (WDO inspection, rodent trapping setup); the workbench routes
  * them to needs-review, and at completion an explicit price is authoritative.
  *
- * Patterns are bare substrings (case-insensitive). The workbench wraps them as
- * `%pattern%` for SQL ILIKE.
+ * Patterns match on WORD BOUNDARIES, case-insensitively. They used to be bare
+ * substrings, and 're service' matched "Lawn Ca-re Service": every "Monthly /
+ * Every 6 Weeks Lawn Care Service" visit read as always-free from 2026-06-19
+ * (#1926) — skipped by the completion billing gates, hidden from the leak
+ * queue, and flagged by the closeout fact as an invoice on a free visit.
+ * SQL consumers use ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX (`~*`) so the two
+ * paths keep the same semantics.
  */
 const ALWAYS_FREE_SERVICE_TYPE_PATTERNS = [
   'appointment',
@@ -24,9 +29,14 @@ const ALWAYS_FREE_SERVICE_TYPE_PATTERNS = [
   'follow-up', 'followup', 'follow up', 're-visit', 'revisit',
 ];
 
+const escapeRe = (p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const ALWAYS_FREE_SERVICE_TYPE_RE = new RegExp(`\\b(?:${ALWAYS_FREE_SERVICE_TYPE_PATTERNS.map(escapeRe).join('|')})\\b`, 'i');
+// Postgres ARE: \m / \M are the word-start / word-end anchors. Pass as a
+// bound parameter to `~*` — never interpolate.
+const ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX = `\\m(?:${ALWAYS_FREE_SERVICE_TYPE_PATTERNS.map(escapeRe).join('|')})\\M`;
+
 function isAlwaysFreeServiceType(serviceType) {
-  const s = String(serviceType || '').toLowerCase();
-  return ALWAYS_FREE_SERVICE_TYPE_PATTERNS.some((p) => s.includes(p));
+  return ALWAYS_FREE_SERVICE_TYPE_RE.test(String(serviceType || ''));
 }
 
-module.exports = { ALWAYS_FREE_SERVICE_TYPE_PATTERNS, isAlwaysFreeServiceType };
+module.exports = { ALWAYS_FREE_SERVICE_TYPE_SQL_REGEX, isAlwaysFreeServiceType };
