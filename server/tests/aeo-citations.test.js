@@ -27,7 +27,7 @@ beforeEach(() => {
   global.fetch = jest.fn();
   jest.clearAllMocks();
 });
-afterEach(() => { global.fetch = savedFetch; process.env = savedEnv; });
+afterEach(() => { global.fetch = savedFetch; process.env = savedEnv; jest.useRealTimers(); });
 
 test('source-only results, prose URLs, brand mentions and linked citations stay distinct', () => {
   const prober = new LLMMentionProber();
@@ -56,19 +56,21 @@ test('rates exclude legacy, no-answer and unresolved evidence rather than record
   expect(summarizeObservations([])).toMatchObject({ citationRate: null, mentionRate: null });
 });
 
-test('the backlink dashboard excludes legacy source-only rows from both rates', async () => {
+test('the backlink dashboard measures the full cohort while limiting its detail list', async () => {
   const monitor = require('../services/seo/backlink-monitor');
   const basic = jest.spyOn(monitor, 'getDashboard').mockResolvedValue({});
-  const rows = [measured({ waves_mentioned: true }), measured({ waves_cited_urls: [WAVES] }),
-    measured({ measurement_version: null, waves_mentioned: true, waves_cited_urls: [WAVES] })];
+  const rows = Array.from({ length: 25 }, (_, i) => measured({ query: `question ${i}`, waves_mentioned: i === 0, waves_cited_urls: i >= 20 ? [WAVES] : [] }));
+  rows.push(measured({ query: 'legacy question', measurement_version: null, waves_mentioned: true, waves_cited_urls: [WAVES] }));
   db.mockImplementation(table => {
-    const results = table === 'seo_llm_mentions' ? rows : [];
+    const results = ['seo_llm_mentions', 'seo_llm_mention_queries'].includes(table) ? rows : [];
     const builder = { then: (resolve, reject) => Promise.resolve(results).then(resolve, reject), first: async () => ({ count: '0' }) };
     for (const method of ['where', 'whereRaw', 'orderBy', 'orderByRaw', 'limit', 'count']) builder[method] = () => builder;
     return builder;
   });
   try {
-    expect((await monitor.getFullDashboard()).llmStats).toMatchObject({ total: 3, measured: 2, mentionRate: 50, citationRate: 50, legacy: 1 });
+    const result = await monitor.getFullDashboard();
+    expect(result.llmMentions).toHaveLength(20);
+    expect(result.llmStats).toMatchObject({ total: 26, measured: 25, mentionRate: 4, citationRate: 20, legacy: 1 });
   } finally { basic.mockRestore(); }
 });
 
@@ -137,6 +139,7 @@ test('OpenAI uses citation annotations rather than unrelated annotation URLs', a
     content: 'Identify first.', annotations: [{ type: 'search_result', url: WAVES }, { type: 'url_citation', url_citation: { url: OTHER } }],
   } }] }) });
   expect((await new LLMMentionProber().probeOpenAI(query)).citedUrls).toEqual([OTHER]);
+  expect(JSON.parse(global.fetch.mock.calls[0][1].body)).toMatchObject({ model: 'gpt-5-search-api', web_search_options: {} });
 });
 
 test('Claude reads answer blocks and their citations when thinking leads', async () => {
@@ -170,6 +173,8 @@ test('an overview needs element attribution when only a possible source pool is 
   const answer = { type: 'ai_overview', markdown: 'Inspect first.', references: [{ url: WAVES }] };
   dataforseo.request.mockResolvedValue({ tasks: [{ status_code: 20000, result: [{ items: [answer] }] }] });
   expect(prober.parse(await prober.probeGoogleAIOverview(query))).toMatchObject({ answerAvailable: true, citationsComplete: false, wavesCitedUrls: [] });
+  answer.items = [{ type: 'ai_overview_element', text: 'Inspect first.' }];
+  expect(prober.parse(await prober.probeGoogleAIOverview(query))).toMatchObject({ answerAvailable: true, citationsComplete: false, wavesCitedUrls: [] });
   answer.items = [{ type: 'ai_overview_element', text: 'Inspect first.', references: [{ url: WAVES }] }];
   expect(prober.parse(await prober.probeGoogleAIOverview(query))).toMatchObject({ citationsComplete: true, wavesCitedUrls: [WAVES] });
 });
@@ -184,17 +189,16 @@ test('failed provider calls consume the attempt cap', async () => {
   expect(probe).toHaveBeenCalledTimes(200);
 });
 
-test('probe rotation orders driver Date values chronologically and honors same-day dedupe', async () => {
+test('probe rotation honors same-day dedupe', async () => {
   const prober = new LLMMentionProber();
   jest.spyOn(prober, 'getQueries').mockResolvedValue([{ query: 'newer' }, { query: 'older' }, { query: 'done today' }]);
   const probe = jest.fn().mockResolvedValue(null);
   Object.defineProperty(prober, 'providers', { value: { chatgpt: probe } });
   db.mockReturnValue({
-    select: () => ({ max: () => ({ groupBy: async () => [{ query: 'newer', llm_platform: 'chatgpt', last_checked: new Date('2026-09-04T00:00:00Z') }, { query: 'older', llm_platform: 'chatgpt', last_checked: new Date('2026-08-01T00:00:00Z') }] }) }),
     where: () => ({ select: async () => [{ query: 'done today', llm_platform: 'chatgpt' }] }),
   });
   await prober.runDaily();
-  expect(probe.mock.calls.map(args => args[0])).toEqual(['older', 'newer']);
+  expect(probe.mock.calls.map(args => args[0]).sort()).toEqual(['newer', 'older']);
 });
 
 test('disabling all managed queries does not reactivate fallback probes', async () => {
@@ -202,18 +206,24 @@ test('disabling all managed queries does not reactivate fallback probes', async 
   expect(await new LLMMentionProber().getQueries()).toEqual([]);
 });
 
-test('a partially observed question schedules its missing engine before repeating a measured engine', async () => {
+test('four failing engines cannot permanently starve a healthy engine under the run cap', async () => {
+  jest.useFakeTimers();
   const prober = new LLMMentionProber();
-  jest.spyOn(prober, 'getQueries').mockResolvedValue([{ query: 'one question' }]);
-  const calls = [];
+  const queries = Array.from({ length: 60 }, (_, i) => ({ query: `question ${i}` }));
+  jest.spyOn(prober, 'getQueries').mockResolvedValue(queries);
+  const healthyQuestions = new Set();
+  const failed = jest.fn().mockResolvedValue(null);
   Object.defineProperty(prober, 'providers', { value: {
-    chatgpt: async () => { calls.push('chatgpt'); return null; },
-    gemini: async () => { calls.push('gemini'); return null; },
+    chatgpt: failed, gemini: failed, claude: failed, google_ai_overview: failed,
+    perplexity: async question => { healthyQuestions.add(question); return { text: 'Inspect first.', model: 'test' }; },
   } });
   db.mockReturnValue({
-    select: () => ({ max: () => ({ groupBy: async () => [{ query: 'one question', llm_platform: 'chatgpt', last_checked: '2026-08-01' }] }) }),
     where: () => ({ select: async () => [] }),
+    insert: () => ({ onConflict: () => ({ ignore: async () => ({ rowCount: 1 }) }) }),
   });
-  await prober.runDaily();
-  expect(calls).toEqual(['gemini', 'chatgpt']);
+  for (const day of ['2030-01-01T12:00:00Z', '2030-01-02T12:00:00Z']) {
+    jest.setSystemTime(new Date(day));
+    expect((await prober.runDaily()).attempted).toBe(200);
+  }
+  expect(healthyQuestions.size).toBe(60);
 });

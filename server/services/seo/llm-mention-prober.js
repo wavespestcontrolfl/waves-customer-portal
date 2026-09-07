@@ -126,9 +126,9 @@ class LLMMentionProber {
 
   async probeOpenAI(query) {
     if (!process.env.OPENAI_API_KEY) return null;
-    // Search-preview models return live-web answers + url citation annotations,
-    // approximating what a consumer sees in ChatGPT rather than training recall.
-    const model = process.env.OPENAI_MENTIONS_MODEL || 'gpt-4o-search-preview';
+    // The retired 4o search preview returns 404. Keep the dedicated Chat
+    // Completions search workload and record its reported model separately.
+    const model = process.env.OPENAI_MENTIONS_MODEL || 'gpt-5-search-api';
     try {
       const res = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -139,6 +139,7 @@ class LLMMentionProber {
         },
         body: JSON.stringify({
           model,
+          web_search_options: {},
           messages: [{ role: 'user', content: query }],
         }),
       });
@@ -264,7 +265,7 @@ class LLMMentionProber {
       const elements = asJsonArray(aio.items).filter(item => item.type === 'ai_overview_element' && (item.text || item.markdown));
       const citedUrls = elements.flatMap(item => [...asJsonArray(item.references), ...asJsonArray(item.links)]).map(r => r?.url).filter(Boolean);
       const sourceUrls = asJsonArray(aio.references).map(r => r?.url).filter(Boolean);
-      return { text, citedUrls, sourceUrls, citationsComplete: elements.length > 0 || sourceUrls.length === 0,
+      return { text, citedUrls, sourceUrls, citationsComplete: citedUrls.length > 0 || sourceUrls.length === 0,
         model: 'dataforseo:ai_overview', grounded: true };
     } catch (err) {
       logger.warn(`[llm-mentions] AI Overview probe failed: ${err.message}`);
@@ -424,14 +425,14 @@ class LLMMentionProber {
     const providers = this.providers;
     const platforms = Object.keys(providers);
 
-    // A larger benchmark must not starve the tail of the managed list under
-    // the existing probe ceiling. Observe the least recently measured queries
-    // first for EACH engine; a partial query must not starve its later engines
-    // when the configured ceiling is smaller than the full provider set.
-    const history = await db('seo_llm_mentions').select('query', 'llm_platform').max('check_date as last_checked').groupBy('query', 'llm_platform');
-    const lastChecked = new Map(history.map(row => [`${row.query}::${row.llm_platform}`, observationDate(row.last_checked)]));
-    const pending = queries.flatMap(qrow => platforms.map(platform => ({ qrow, platform, key: `${qrow.query}::${platform}` })));
-    pending.sort((a, b) => (lastChecked.get(a.key) || '').localeCompare(lastChecked.get(b.key) || '') || a.key.localeCompare(b.key));
+    // Advance one attempt window each ET calendar day, including failed pairs.
+    // Successful-observation timestamps cannot rotate failures: enough broken
+    // pairs would remain perpetually oldest and monopolize the run ceiling.
+    const pairs = queries.flatMap(qrow => platforms.map(platform => ({ qrow, platform, key: `${qrow.query}::${platform}` })))
+      .sort((a, b) => a.key.localeCompare(b.key));
+    const dayOrdinal = Math.floor(Date.parse(`${checkDate}T00:00:00Z`) / 86400000);
+    const offset = pairs.length ? (dayOrdinal * MAX_PROBES_PER_RUN) % pairs.length : 0;
+    const pending = [...pairs.slice(offset), ...pairs.slice(0, offset)];
 
     // Today's already-recorded (query, platform) pairs → idempotency set.
     const existing = await db('seo_llm_mentions')
