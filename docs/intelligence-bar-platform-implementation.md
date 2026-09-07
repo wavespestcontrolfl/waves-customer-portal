@@ -318,3 +318,16 @@ verifies the original estimate changes once while the newer row stays untouched.
 Server unit/contract checks pass 252 cases; four affected client suites pass
 38 cases. The production build, brand, domain and coverage checks pass. The
 controlled browser evidence above remains applicable to the unchanged UI.
+
+The latest parent integration includes the focused selection correction #4094
+and converted-lead email ownership checks. Route regressions now prove that a
+stale selected customer cannot replace an unmatched name, authorize an incomplete
+named cohort, or shrink a complete cohort. A duplicate normalized phone also
+refuses conversation access without granting write authority.
+
+Review status: #4019's unmatched-name finding is addressed in the local runtime
+and these acceptance tests; final-head remote review remains required. The UUID
+dependency objection is unresolved. `server/package.json` already declares UUID
+9, and the client declaration makes the existing package available to isolated
+native installs, as recorded above. This is evidence for review, not a claim of
+owner approval or an accepted rebuttal.

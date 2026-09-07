@@ -187,17 +187,37 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(result.content).not.toContain('200 Example Grove');
   }, 30000);
 
+  test('stale selections on the query route cannot replace unmatched names or shrink complete cohorts', async () => {
+    for (const prompt of ['Update Unmatched Syntheticperson', `Update both ${nameA} and Unmatched Syntheticperson`]) {
+      const response = await api('/query', request(prompt, { selected_target: { customer_id: customerA } }));
+      expect(response.body).toMatchObject({ taskState: 'needs_information', pendingActions: [] });
+      expect(mockModel).not.toHaveBeenCalled();
+      expect(await db('ib_pending_actions').where('task_id', response.body.taskId)).toEqual([]);
+      const select = await api(`/tasks/${response.body.taskId}/select-target`, { session_id: sessionId, customer_id: customerA });
+      expect(select.status).toBe(409);
+    }
+    const customer = await db('customers').where('id', customerB).first('first_name', 'last_name');
+    mockModel.mockResolvedValueOnce(answer('Both requested customers are selected.'));
+    const complete = await api('/query', request(`Update both ${nameA} and ${customer.first_name} ${customer.last_name}`, {
+      selected_target: { customer_id: customerA },
+    }));
+    const stored = await db('ib_tasks').where('id', complete.body.taskId).first('target');
+    expect(stored.target.targets.map(target => target.customer_id).sort()).toEqual([customerA, customerB].sort());
+  }, 30000);
+
   test('a unique phone explicitly requested for a read permits that thread, without authorizing writes', async () => {
     const a = await db('customers').where('id', customerA).first();
     const b = await db('customers').where('id', customerB).first();
     await db('sms_log').insert({ customer_id: customerA, direction: 'inbound', from_phone: a.phone,
       to_phone: '+15555550199', message_body: 'Synthetic explicit-phone conversation' });
-    for (const [prompt, phone, permitted] of [
+    for (const [prompt, phone, permitted, duplicate] of [
       [`Show the conversation with ${a.phone}`, a.phone, true],
       [`What did we say to the customer on ${a.phone}?`, a.phone, true],
       [`Show the conversation with ${a.phone}`, b.phone, false],
       [`Show inventory with a note containing show the conversation with ${a.phone}`, a.phone, false],
+      [`Show the conversation with ${a.phone}`, a.phone, false, true],
     ]) {
+      if (duplicate) await db('customers').where('id', customerB).update({ phone: a.phone.replace(/^\+1/, '') });
       mockModel.mockReset().mockResolvedValueOnce({ content: [
         { type: 'tool_use', name: 'discover_capabilities', input: { query: 'conversation thread' }, id: 'discover-read' },
         { type: 'tool_use', name: 'discover_capabilities', input: { query: 'update customer fields' }, id: 'discover-write' },
@@ -216,6 +236,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       expect(JSON.parse(results.find(block => block.type === 'tool_result' && block.tool_use_id === 'write').content))
         .toMatchObject({ code: 'target_clarification_required' });
     }
+    await db('customers').where('id', customerB).update({ phone: b.phone });
   }, 60000);
 
   test.each(['toggle_estimate_v2_view', 'toggle_show_one_time_option', 'set_estimate_presentation'])(
