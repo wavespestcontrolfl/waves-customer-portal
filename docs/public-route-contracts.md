@@ -736,18 +736,16 @@ OFFERS an unlinked same-family row stays behind
 `GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE`.
 `/data` carries an optional `lawnCalendar` block behind
 `GATE_ESTIMATE_LAWN_CALENDAR` (dev-open, prod dark): `{ programs: {
-[frequencyKey]: { visitsPerYear, cadence, months } } }` for the recurring
-lawn section's frequencies, where `cadence` is the customer-facing interval
-line and `months` the 0-based ET month indices of the program's projected
-applications from the current month — both derived server-side by
-`describeLawnProgramCadence` (self-booking-plan-sync.js) from the catalog
-plan matching the frequency's visitsPerYear through the scheduler's own
-`buildRecurringOccurrenceDates`; no customer data, no dates. A frequency
-with no catalog plan is omitted; the key is ABSENT when the gate is off or
-nothing resolves (it was boolean `true` from 2026-08 until #3755). The page
-renders the count and fixed season copy from it and never derives an
-interval itself; since 2026-09-05 it shows neither `cadence` nor `months`
-(owner: education, not a schedule).
+[frequencyKey]: { visitsPerYear } } }` for each of the recurring lawn
+section's frequencies whose count matches a catalog lawn plan
+(`resolveLawnCareRecurringPlanByCount`, self-booking-plan-sync.js); no
+customer data, no dates. A frequency with no catalog plan is omitted; the
+key is ABSENT when the gate is off or nothing resolves (it was boolean
+`true` from 2026-08 until #3755). The page renders the count and fixed
+season copy from it and never derives an interval itself. The `cadence`
+interval line and projected `months` the entry carried from #3755 were
+dropped on 2026-09-06 once the page stopped reading them (owner
+2026-09-05: education, not a schedule).
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and a one-time-ONLY estimate whose billable rows all resolve to one copy

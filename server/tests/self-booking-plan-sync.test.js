@@ -13,12 +13,12 @@ const {
   isRodentLedServiceRow,
   isNonBaitRodentServiceRow,
   buildRecurringOccurrenceDates,
-  describeLawnProgramCadence,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
   isOneTimeBookingSource,
   representativePlanKeys,
   resolveLawnCareRecurringPlan,
+  resolveLawnCareRecurringPlanByCount,
   resolveMosquitoRecurringPlan,
   resolvePestControlRecurringPlan,
   resolveSelfBookedRecurringPlan,
@@ -29,23 +29,14 @@ const {
   uniqueServiceFamilies,
 } = require('../services/self-booking-plan-sync');
 
-describe('describeLawnProgramCadence', () => {
-  it('projects the 9x program at the catalog 42-day step from the base date', () => {
-    // Sep 1, Oct 13, Nov 24, Jan 5, Feb 16, Mar 30, May 11, Jun 22, Aug 3
-    expect(describeLawnProgramCadence(9, '2026-09-01')).toEqual({
-      visitsPerYear: 9, cadence: 'about every 42 days', months: [8, 9, 10, 0, 1, 2, 4, 5, 7],
-    });
-  });
-  it('names the month-pattern plans and projects them monthly', () => {
-    const monthly = describeLawnProgramCadence(12, '2026-09-01');
-    expect(monthly.cadence).toBe('about once a month');
-    expect(monthly.months).toEqual([8, 9, 10, 11, 0, 1, 2, 3, 4, 5, 6, 7]);
-    expect(describeLawnProgramCadence(6, '2026-09-01')).toMatchObject({ cadence: 'about every 2 months', months: [8, 10, 0, 2, 4, 6] });
-    expect(describeLawnProgramCadence(4, '2026-09-01')).toMatchObject({ cadence: 'about every 3 months', months: [8, 11, 2, 5] });
+describe('resolveLawnCareRecurringPlanByCount', () => {
+  it('matches the catalog lawn plan by its annual application count', () => {
+    expect(resolveLawnCareRecurringPlanByCount(9)).toMatchObject({ serviceKey: 'lawn_care_6week', visitsPerYear: 9 });
+    expect(resolveLawnCareRecurringPlanByCount('12')).toMatchObject({ serviceKey: 'lawn_care_monthly', visitsPerYear: 12 });
   });
   it('returns null for a count with no catalog plan', () => {
-    expect(describeLawnProgramCadence(8, '2026-09-01')).toBeNull();
-    expect(describeLawnProgramCadence(undefined, '2026-09-01')).toBeNull();
+    expect(resolveLawnCareRecurringPlanByCount(8)).toBeNull();
+    expect(resolveLawnCareRecurringPlanByCount(undefined)).toBeNull();
   });
 });
 

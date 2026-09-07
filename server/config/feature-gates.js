@@ -1713,8 +1713,8 @@ const gates = {
   // (what each SWFL turf season is for) behind a toggle — education, not a
   // schedule (owner 2026-09-05: no per-season counts, month ranges, or
   // interval line). Gates the /data `lawnCalendar` block ({ programs: {
-  // [frequencyKey]: { visitsPerYear, cadence, months } } }, projected by
-  // describeLawnProgramCadence). No product, step, or fertilizer names
+  // [frequencyKey]: { visitsPerYear } } }, one entry per lawn frequency
+  // that is a catalog lawn plan). No product, step, or fertilizer names
   // (owner-owned business logic). Dev-open, prod dark.
   // Enable with GATE_ESTIMATE_LAWN_CALENDAR=true.
   estimateLawnCalendar: isProd ? process.env.GATE_ESTIMATE_LAWN_CALENDAR === 'true' : true,
