@@ -579,6 +579,15 @@ async function sweepMissingPrimaryProperties({ limit = 100 } = {}) {
       `created=${results.created}, skipped=${results.skipped}, failed=${results.failed}`,
     );
   }
+  // Every row was attempted; now surface the failures to job_health (the
+  // scheduler runs this under runExclusive, which records success on a
+  // resolved promise) — counts only, never an address or SQL text.
+  if (results.failed > 0) {
+    throw Object.assign(
+      new Error(`primary backstop sweep: ${results.failed} of ${results.checked} row(s) failed`),
+      { results },
+    );
+  }
   return results;
 }
 

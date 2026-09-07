@@ -66,10 +66,14 @@ describe('sweepMissingPrimaryProperties (hourly primary backstop)', () => {
     expect(inserted).toHaveLength(0);
   });
 
-  test('a failing insert is counted, logged by code only, and does not stop the sweep', async () => {
+  test('a failing insert is counted, logged by code only, every row is still attempted, and the sweep then rejects so job_health records the failure', async () => {
     const err = Object.assign(new Error("insert into customer_properties (address_line1) values ('100 Main St')"), { code: '42P01' });
     installDb({ candidates: ['c1', 'c2'], customersById: { c1: live('c1'), c2: live('c2') }, insertError: err });
-    expect(await sweepMissingPrimaryProperties()).toEqual({ checked: 2, created: 0, skipped: 0, failed: 2 });
+    let thrown = null;
+    try { await sweepMissingPrimaryProperties(); } catch (e) { thrown = e; }
+    expect(thrown).not.toBeNull();
+    expect(thrown.message).toBe('primary backstop sweep: 2 of 2 row(s) failed');
+    expect(thrown.results).toEqual({ checked: 2, created: 0, skipped: 0, failed: 2 });
     expect(logger.error).toHaveBeenCalledTimes(2);
     expect(logger.error.mock.calls[0][0]).toContain('42P01');
     expect(logger.error.mock.calls[0][0]).not.toContain('Main St');
