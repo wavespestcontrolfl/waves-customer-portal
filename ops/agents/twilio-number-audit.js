@@ -39,6 +39,7 @@
 const path = require('path');
 const twilio = require('twilio');
 const REGISTRY = require(path.join(__dirname, '..', '..', 'server', 'config', 'twilio-numbers.js'));
+const { toE164 } = require(path.join(__dirname, '..', '..', 'server', 'utils', 'phone.js'));
 const { APP_ROUTING, SMS_ROUTING, SANDBOX_ROUTING, routingDrift } = require(path.join(__dirname, '..', '..', 'scripts', 'twilio', 'routing-contract.js'));
 
 const TOLL_FREE = /^\+1(800|833|844|855|866|877|888)\d{7}$/;
@@ -221,12 +222,12 @@ async function main() {
   const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
   const owned = (await client.incomingPhoneNumbers.list({ limit: 500 })).sort((a, b) => a.phoneNumber.localeCompare(b.phoneNumber));
   const numberBySid = new Map(owned.map(n => [n.sid, n.phoneNumber]));
-  // Matched on the last 10 digits, the same way the /relay-sandbox route matches
-  // Twilio's To (any format). A configured value that yields no match — a
-  // released number, a typo, or no digits at all — is a defect, distinct from unset.
+  // Normalised with the same toE164 the /relay-sandbox route applies to both the
+  // env value and Twilio's To, and compared exactly — so a value the route would
+  // never match (a released number, a stray country-code digit, no digits at
+  // all) is a defect here too, distinct from unset.
   const sandboxRaw = String(process.env.VOICE_RELAY_SANDBOX_NUMBER || '').trim();
-  const sandboxKey = last10(sandboxRaw);
-  const sandbox = sandboxKey ? owned.find(n => last10(n.phoneNumber) === sandboxKey) : null;
+  const sandbox = sandboxRaw ? owned.find(n => n.phoneNumber === toE164(sandboxRaw)) : null;
   const numbers = owned.filter(n => n !== sandbox);
   const fleet = numbers.map(n => n.phoneNumber);
 
