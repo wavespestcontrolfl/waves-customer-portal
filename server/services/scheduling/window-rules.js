@@ -158,11 +158,12 @@ async function probeSlotOverlap({
 }
 
 module.exports = {
+  parseHHMM,
+  minutesToHHMM,
   assertAdminAppointmentWindow,
   probeSlotOverlap,
   slotOverlapWarning,
   acquireAdminSlotLocks,
   ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
   ADMIN_DAY_END_MINUTES,
-  _internals: { parseHHMM, minutesToHHMM },
 };
