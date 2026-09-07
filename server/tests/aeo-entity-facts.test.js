@@ -43,13 +43,52 @@ test('founding year: 2024 is right; any other asserted year, earlier or later, i
   expect(score('E4', 'The company has been serving since 2014.')).toMatchObject({ expected: { founded_2024: false }, forbidden: { wrong_founding_year: true }, right: 0, missing: 1, wrong: 1 });
   expect(score('E4', 'Waves was founded in 2025.').forbidden.wrong_founding_year).toBe(true);
   expect(score('E4', 'Waves Pest Control was founded on February 6, 2014.').forbidden.wrong_founding_year).toBe(true);
-  expect(score('E4', '2014.').forbidden.wrong_founding_year).toBe(true);
+  expect(score('E4', '2014.').forbidden).toMatchObject({ wrong_founding_year: false, wrong_founding_year_bare: true });
   expect(score('E4', 'Waves was incorporated in 2014.').forbidden.wrong_founding_year).toBe(true);
-  expect(score('E4', '2024.').forbidden.wrong_founding_year).toBe(false);
+  expect(score('E4', '2024.').forbidden).toMatchObject({ wrong_founding_year: false, wrong_founding_year_bare: false });
   expect(score('E4', 'Waves Pest Control holds FDACS license JB351547, renewed in 2026.')).toMatchObject({ expected: { founded_2024: false }, forbidden: { wrong_founding_year: false } });
   expect(score('E4', 'The license was renewed in 2024.').expected.founded_2024).toBe(false);
   expect(score('E4', 'Waves Pest Control was founded on February 6, 2024.')).toMatchObject({ expected: { founded_2024: true }, forbidden: { wrong_founding_year: false } });
   expect(score('E4', 'It was not founded in 2019; it was founded in 2024.').forbidden.wrong_founding_year).toBe(false);
+});
+
+test('a bare year is a founding claim only on the founding question; elsewhere the year needs founding context', () => {
+  expect(score('E6', '2025 services include pest control, lawn care, termite, mosquito and rodent control.')).toMatchObject({ right: 5, forbidden: { wrong_founding_year: false } });
+  expect(score('E6', '2025 services include pest control.').forbidden).not.toHaveProperty('wrong_founding_year_bare');
+  expect(score('E4', '2025.').forbidden.wrong_founding_year_bare).toBe(true);
+  expect(score('E1', 'Adam Benetti. Founded in 2019.').forbidden.wrong_founding_year).toBe(true);
+  expect(score('E11', '2019 review: Waves Pest Control.').forbidden.wrong_founding_year).toBe(false);
+});
+
+test('the license question needs the verification path, not just the number', () => {
+  expect(score('E3', 'Waves holds FDACS license JB351547.')).toMatchObject({ expected: { fdacs_license: true, fdacs: true, license_verifiable: false }, right: 2, missing: 1 });
+  expect(score('E3', 'Waves holds FDACS license JB351547. You can verify the license in the FDACS lookup.')).toMatchObject({ right: 3, missing: 0 });
+  expect(score('E3', 'Waves holds FDACS license JB351547, but you cannot verify the license online.').expected.license_verifiable).toBe(false);
+});
+
+test('ownership by a competitor is a wrong owner even as a single name; acquisitions count too', () => {
+  expect(score('E1', 'Waves is owned by Rentokil.')).toMatchObject({ forbidden: { wrong_founder: true }, wrong: 1 });
+  expect(score('E1', 'Orkin owns Waves Pest Control.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'Waves Pest Control was acquired by Terminix.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'Waves is owned by HomeTeam.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'Waves is not owned by Orkin; Waves is owned by Adam Benetti.')).toMatchObject({ expected: { founder: true }, forbidden: { wrong_founder: false } });
+  expect(score('E1', 'Orkin is owned by Rollins. Waves is owned by Adam Benetti.').forbidden.wrong_founder).toBe(false);
+  expect(score('E1', 'Waves is owned by Adam.').forbidden.wrong_founder).toBe(false);
+});
+
+test('any asserted headquarters outside the footprint is a wrong claim; footprint places and the state are not', () => {
+  expect(score('E5', 'Waves is headquartered in New York.').forbidden.out_of_footprint_hq).toBe(true);
+  expect(score('E5', 'Waves is headquartered in Tallahassee, Florida.').forbidden.out_of_footprint_hq).toBe(true);
+  expect(score('E5', 'Waves is based in Tampa and serves Sarasota.')).toMatchObject({ expected: { sarasota: true }, forbidden: { out_of_footprint_hq: true } });
+  expect(score('E5', 'Waves is based in Central Florida.').forbidden.out_of_footprint_hq).toBe(true);
+  expect(score('E5', 'Waves is based in the Tampa Bay area.').forbidden.out_of_footprint_hq).toBe(true);
+  expect(score('E5', 'Waves is based in Florida.').forbidden.out_of_footprint_hq).toBe(false);
+  expect(score('E5', 'Waves is based in Southwest Florida.').forbidden.out_of_footprint_hq).toBe(false);
+  expect(score('E5', 'Waves is based in the Sarasota-Bradenton area.').forbidden.out_of_footprint_hq).toBe(false);
+  expect(score('E5', 'Waves is based in Lakewood Ranch (Manatee County), Florida.')).toMatchObject({ expected: { hq_lakewood_ranch: true }, forbidden: { out_of_footprint_hq: false } });
+  expect(score('E5', 'Waves is not based in Tampa; it is based in Lakewood Ranch.').forbidden.out_of_footprint_hq).toBe(false);
+  expect(score('E5', 'Orkin is headquartered in Atlanta. Waves is based in Lakewood Ranch.').forbidden.out_of_footprint_hq).toBe(false);
+  expect(score('E5', 'Offices located in Bradenton, Sarasota, Venice and Parrish.').forbidden.out_of_footprint_hq).toBe(false);
 });
 
 test('a denial in the same clause is not a wrong claim, whether it comes before or after the claim', () => {

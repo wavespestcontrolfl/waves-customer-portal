@@ -16,12 +16,22 @@
 const cohort = require('../../data/aeo-entity-cohort-v1.json');
 const { MEASUREMENT_VERSION } = require('./aeo-measurement');
 
+// `{{other_entities}}` in a pattern expands to the competitor list, matched
+// in any letter case even inside a case-sensitive pattern (the owner pattern
+// keeps its capitalized-name shape for unknown parties).
+const OTHER_ENTITY_ALTERNATION = cohort.other_entities
+  .map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/[a-z]/g, c => `[${c.toUpperCase()}${c}]`))
+  .join('|');
+
 function compile(def) {
   const flags = typeof def.flags === 'string' ? def.flags : 'i';
   return {
     label: def.label,
-    scanRe: new RegExp(def.pattern, flags.includes('g') ? flags : `${flags}g`),
+    scanRe: new RegExp(def.pattern.replace(/\{\{other_entities\}\}/g, OTHER_ENTITY_ALTERNATION), flags.includes('g') ? flags : `${flags}g`),
     rejectValue: typeof def.reject_value === 'string' ? def.reject_value : undefined,
+    // A captured value matching this (case-insensitive, anchors allowed) is
+    // an approved value, not a wrong claim: "based in Lakewood Ranch".
+    rejectRe: typeof def.reject_pattern === 'string' ? new RegExp(def.reject_pattern, 'i') : undefined,
     // 'prose' (default) matches the answer text with URLs removed; 'any' also
     // matches the collected URLs (a site or tel: link satisfies website/phone).
     scope: def.scope === 'any' ? 'any' : 'prose',
@@ -159,11 +169,18 @@ function matchesAnywhere(compiled, text) {
   return hit;
 }
 
+// A claim that captures a value ("founded in 2019", "based in Tampa") is
+// not wrong when the captured value is the approved one.
+function approvedValue(compiled, captured) {
+  return (compiled.rejectValue !== undefined && captured.includes(compiled.rejectValue))
+    || (compiled.rejectRe !== undefined && compiled.rejectRe.test(captured));
+}
+
 function asserted(compiled, answer) {
   for (const match of answer.matchAll(compiled.scanRe)) {
     // The captured value is the first defined group (a pattern may capture in
     // any one of its alternatives).
-    if (compiled.rejectValue !== undefined && (match.slice(1).find(v => v !== undefined) || '').includes(compiled.rejectValue)) continue;
+    if (approvedValue(compiled, (match.slice(1).find(v => v !== undefined) || '').trim())) continue;
     const start = match.index;
     let end = start + match[0].length;
     // A pattern may stop mid-word ("fumigat"); the assertion is the whole word.
