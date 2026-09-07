@@ -7,7 +7,6 @@ import { CUSTOMER_SURFACE } from './theme-customer';
 import { useGlassSurface } from './glass/glass-engine';
 import Icon from './components/Icon';
 import CustomerDialogHost from './components/brand/CustomerDialogHost';
-const StaffDocumentLibrary = React.lazy(() => import('./components/staffDocuments/Library'));
 
 function CustomerFailureScreen({ title, message, onRetry }) {
   useGlassSurface(true);
@@ -356,6 +355,7 @@ function lazyWithRetry(factory) {
 // admin platform plus the 500KB+ PortalPage before first paint. Same
 // lazyWithRetry + per-route Suspense treatment as the rest of the pages;
 // no rendered-output change.
+const StaffDocumentLibrary = lazyWithRetry(() => import('./components/staffDocuments/Library'));
 const PortalPage = lazyWithRetry(() => import('./pages/PortalPage'));
 const ReportViewPage = lazyWithRetry(() => import('./pages/ReportViewPage'));
 const ProjectReportViewPage = lazyWithRetry(() => import('./pages/ProjectReportViewPage'));

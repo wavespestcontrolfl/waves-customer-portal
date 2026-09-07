@@ -1,7 +1,12 @@
 const { launchBrowser } = require('../service-report/pdf-puppeteer');
 const { escapeHtml, hash, reject } = require('../staff-document-source');
+const { withDocumentPdfCapacity } = require('./estimate-doc-pdf');
 
 async function renderStaffDocumentPdf(detail, { acknowledgment = null, record = null } = {}) {
+  return withDocumentPdfCapacity(() => renderStaffDocument(detail, { acknowledgment, record }));
+}
+
+async function renderStaffDocument(detail, { acknowledgment, record }) {
   const { version, rendered } = detail;
   if (version.content_snapshot && hash(version.content_snapshot) !== version.content_hash) reject('Document integrity check failed.', 409);
   const browser = await launchBrowser();

@@ -67,10 +67,15 @@ router.get('/:id', handle(async (req, res) => {
   if (req.query.version) validate(uuid.required(), req.query.version);
   res.json(await documents.detail(req.params.id, actor(req), req.query.version, req.query.at ? instant(req.query.at) : null));
 }));
-router.post('/:id/issue', requireAdmin, handle(async (req, res) => {
+router.post('/:id/preview', requireAdmin, handle(async (req, res) => {
   validate(uuid.required(), req.params.id);
   validate(Joi.object({ version_id: uuid.required(), effective_at: Joi.string().required() }), req.body);
-  res.json({ version: await documents.publish(req.params.id, req.body.version_id, instant(req.body.effective_at, true), actor(req)) });
+  res.json(await documents.preview(req.params.id, req.body.version_id, instant(req.body.effective_at, true), actor(req)));
+}));
+router.post('/:id/issue', requireAdmin, handle(async (req, res) => {
+  validate(uuid.required(), req.params.id);
+  validate(Joi.object({ version_id: uuid.required(), effective_at: Joi.string().required(), preview_hash: Joi.string().hex().length(64).required() }), req.body);
+  res.json({ version: await documents.publish(req.params.id, req.body.version_id, instant(req.body.effective_at, true), req.body.preview_hash, actor(req)) });
 }));
 router.post('/versions/:id/acknowledge', handle(async (req, res) => {
   validate(uuid.required(), req.params.id);

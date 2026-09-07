@@ -41,6 +41,20 @@ async function insertVersion(trx, document, source, actor) {
   return version;
 }
 
+function previewOf(version, policy) {
+  const rendered = renderSource(sourceOf(version), policy?.values);
+  const policyId = rendered.used_variables.length ? policy?.id || null : null;
+  return { rendered, preview_hash: hash({ version_id: version.id, policy_values_id: policyId, rendered }) };
+}
+
+async function preview(id, versionId, at, actor) {
+  await loadDocument(db, id, actor);
+  const version = await db('document_template_versions').where({ id: versionId, template_id: id }).first();
+  if (!version) reject('Version not found', 404);
+  if (version.published_at) reject('Issued versions already have immutable wording.', 409);
+  return { ...previewOf(version, await policyAt(db, at)), effective_at: new Date(at).toISOString() };
+}
+
 async function issueVersion(trx, document, version, policy, at, actor) {
   const source = sourceOf(version);
   const rendered = renderSource(source, policy?.values);
@@ -87,7 +101,7 @@ async function saveDraft(input, actor) {
   });
 }
 
-async function publish(id, versionId, at, actor) {
+async function publish(id, versionId, at, previewHash, actor) {
   return db.transaction(async trx => {
     await lockLibrary(trx);
     const document = await loadDocument(trx, id, actor);
@@ -102,7 +116,9 @@ async function publish(id, versionId, at, actor) {
     // another version before them and silently make that replacement stale.
     const usesPolicy = renderSource(sourceOf(version), null).used_variables.length > 0;
     if (usesPolicy && await trx('policy_values').where('effective_at', '>', at).first('id')) reject('Choose an effective date on or after the scheduled policy revision.', 409);
-    return issueVersion(trx, document, version, await policyAt(trx, at), at, actor);
+    const policy = await policyAt(trx, at);
+    if (previewOf(version, policy).preview_hash !== previewHash) reject('The wording changed since preview. Refresh the wording and review it again.', 409);
+    return issueVersion(trx, document, version, policy, at, actor);
   });
 }
 
@@ -145,8 +161,9 @@ async function list(actor, { at = new Date(), search = '', asOf = false } = {}) 
   for (const document of documents) {
     const version = byTemplate.get(document.id);
     if (!version) continue;
-    if (search && !`${version.title} ${version.content_snapshot?.body || version.body}`.toLowerCase().includes(search.toLowerCase())) continue;
-    result.push({ ...document, version_id: version.id, title: version.title, version_number: version.version_number,
+    const title = version.content_snapshot?.title || version.title;
+    if (search && !`${title} ${version.content_snapshot?.body || version.body}`.toLowerCase().includes(search.toLowerCase())) continue;
+    result.push({ ...document, version_id: version.id, title, version_number: version.version_number,
       effective_at: version.effective_at, review_on: version.staff_metadata.review_on, owner_role: version.staff_metadata.owner_role,
       issued: !!version.published_at });
   }
@@ -164,14 +181,21 @@ async function detail(id, actor, versionId = null, at = null) {
   const policy = await policyAt(db, version.effective_at || new Date());
   const rendered = version.content_snapshot || renderSource(sourceOf(version), policy?.values);
   const acknowledgments = await db('staff_document_acknowledgments').where({ version_id: version.id }).modify(q => { if (!isAdmin(actor)) q.where('technician_id', actor.id); });
-  const records = await db('staff_document_records').where({ version_id: version.id }).modify(q => { if (!isAdmin(actor)) q.where(b => b.where('created_by', actor.id).orWhere('owner_id', actor.id)); }).orderBy('created_at', 'desc');
-  return { document, version, rendered, versions: versions.map(v => ({ id: v.id, number: v.version_number, effective_at: v.effective_at, hash: v.content_hash, issued: !!v.published_at })), acknowledgments, records };
+  const records = await db('staff_document_records').where({ version_id: version.id }).modify(q => { if (!isAdmin(actor)) q.where('owner_id', actor.id); }).orderBy('created_at', 'desc');
+  const currentVersion = versions.find(v => v.published_at && new Date(v.effective_at) <= new Date());
+  return { document, version, rendered, current_version_id: currentVersion?.id || null,
+    versions: versions.map(v => ({ id: v.id, number: v.version_number, effective_at: v.effective_at, hash: v.content_hash, issued: !!v.published_at })), acknowledgments, records };
 }
 
 async function recordableVersion(trx, id, actor, kind) {
-  const version = await trx('document_template_versions').where({ id }).whereNotNull('published_at').where('effective_at', '<=', new Date()).first();
+  await lockLibrary(trx);
+  const now = new Date();
+  const version = await trx('document_template_versions').where({ id }).whereNotNull('published_at').where('effective_at', '<=', now).first();
   if (!version) reject('Version not found', 404);
   const document = await loadDocument(trx, version.template_id, actor);
+  const current = await trx('document_template_versions').where({ template_id: version.template_id })
+    .whereNotNull('published_at').where('effective_at', '<=', now).orderBy('effective_at', 'desc').first('id');
+  if (current.id !== version.id) reject('This version has been superseded. Open the current version to sign or record work.', 409);
   if (kind === 'acknowledgment' && document.staff_kind !== 'policy') reject('Only policies require acknowledgment.');
   if (kind === 'record' && document.staff_kind === 'policy') reject('Policies use acknowledgments.');
   return version;
@@ -230,4 +254,4 @@ async function saveRecord(versionId, input, actor) {
   });
 }
 
-module.exports = { saveDraft, publish, updatePolicy, list, detail, acknowledge, saveRecord, recordAnswers, ACKNOWLEDGMENT };
+module.exports = { saveDraft, preview, publish, updatePolicy, list, detail, acknowledge, saveRecord, recordAnswers, ACKNOWLEDGMENT };

@@ -75,3 +75,15 @@ test('procedure completion requires every step and rejects duplicate or invented
 test('customer template authoring cannot create or reclassify a staff document', () => {
   expect(() => validateTemplatePayload({ audience: 'staff' }, { partial: true })).toThrow(/controlled Staff/);
 });
+
+test('titles resolve policy bindings and block unresolved decisions or unsupported bindings', () => {
+  const draft = { ...source('## Pay {#pay}\nRead the schedule.'), title: '{{policy.pay_frequency}} pay' };
+  const rendered = renderSource(draft, values);
+  expect(rendered.title).toBe('weekly pay');
+  expect(rendered.used_variables).toContain('policy.pay_frequency');
+  expect(() => checkRelease(draft, renderSource(draft), new Date())).toThrow(/Resolve/);
+  draft.title = '[DECISION: choose title]';
+  expect(() => checkRelease(draft, renderSource(draft, values), new Date())).toThrow(/Resolve/);
+  draft.title = '{{unknown.title}}';
+  expect(() => renderSource(draft, values)).toThrow(/binding/);
+});

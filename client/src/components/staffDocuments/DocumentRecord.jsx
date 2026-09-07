@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { etDatetimeLocalValue } from '../../lib/timezone';
 import { box, row, inputStyle, primaryStyle, buttonStyle, Field, request, dateLabel } from './common';
 
-export default function DocumentRecord({ detail, people, selfId, manage, onSaved }) {
+export default function DocumentRecord({ detail, people, selfId, manage, canWrite, onSaved }) {
   const { version, rendered, records } = detail;
   const [record, setRecord] = useState(null);
   const [answers, setAnswers] = useState({});
@@ -35,12 +35,13 @@ export default function DocumentRecord({ detail, people, selfId, manage, onSaved
     } catch (failure) { setError(failure.message); }
     finally { setBusy(false); }
   }
-  const locked = !!record?.completed_at;
+  const locked = !canWrite || !!record?.completed_at;
   const selectableRecords = [...new Map([...records, ...(record ? [record] : [])].map(item => [item.id, item])).values()];
   return <section style={{ ...box, marginTop: 24 }}>
-    <h2 style={{ marginTop: 0, fontSize: 20 }}>{rendered.kind === 'procedure' ? 'Checklist mode' : 'Create a record'}</h2>
+    <h2 style={{ marginTop: 0, fontSize: 20 }}>{!canWrite ? 'Historical records' : rendered.kind === 'procedure' ? 'Checklist mode' : 'Create a record'}</h2>
+    {!canWrite && <p>This version is historical. Open the current version to record new work.</p>}
     <p>Every record keeps this version and its hash. Completed records cannot be edited.</p>
-    <Field label="Saved records"><select style={inputStyle} value={record?.id || ''} onChange={e => selectRecord(selectableRecords.find(item => item.id === e.target.value) || null)}><option value="">New record</option>{selectableRecords.map(item => <option key={item.id} value={item.id}>{item.completed_at ? 'Completed' : 'Open'} · {dateLabel(item.created_at)} · {item.id.slice(0, 8)}</option>)}</select></Field>
+    <Field label="Saved records"><select style={inputStyle} value={record?.id || ''} onChange={e => selectRecord(selectableRecords.find(item => item.id === e.target.value) || null)}><option value="">{canWrite ? 'New record' : 'Choose historical record'}</option>{selectableRecords.map(item => <option key={item.id} value={item.id}>{item.completed_at ? 'Completed' : 'Open'} · {dateLabel(item.created_at)} · {item.id.slice(0, 8)}</option>)}</select></Field>
     {error && <p role="alert">{error}</p>}
     <fieldset disabled={busy || locked} style={{ border: 0, padding: 0, minWidth: 0 }}>
       <div style={row}>
@@ -55,7 +56,7 @@ export default function DocumentRecord({ detail, people, selfId, manage, onSaved
       })}
       {!locked && <div style={row}><button type="button" style={buttonStyle} onClick={() => save(false)}>Save open record</button><button type="button" style={primaryStyle} onClick={() => save(true)}>Complete record</button></div>}
     </fieldset>
-    {locked && <p>Completed {dateLabel(record.completed_at)}. Record {record.id}.</p>}
+    {record?.completed_at && <p>Completed {dateLabel(record.completed_at)}. Record {record.id}.</p>}
     {record && <button disabled={busy} type="button" style={buttonStyle} onClick={download}>Export record PDF</button>}
   </section>;
 }

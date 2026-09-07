@@ -30,7 +30,10 @@ citations, resolved wording, form schema, effective timestamp and shared values.
 Database triggers prevent modification/deletion of issued versions, policy-value
 revisions, acknowledgments and completed records. Open records cannot be deleted.
 Old versions remain readable, including the version in force at an Eastern date
-and time. A rollback refuses to remove populated document history.
+and time, with signed and completed-record exports. Only the version currently
+in force accepts new acknowledgments or record writes. Reassigning a record
+removes the former owner's access; technician reads follow current ownership.
+A rollback refuses to remove populated document history.
 
 `policy_values` stores typed pay frequency/schedule, PTO tiers, paid/unpaid holiday
 lists and equipment-deduction terms. Issuing values takes a transaction-scoped
@@ -40,6 +43,9 @@ rolls back the values and every replacement. Prior issued snapshots never change
 The audit log connects each revision to the prior values and new version hashes.
 Concurrent draft or value changes require reload through a base-revision check.
 Future effective versions are selected by time, without a second cron mechanism.
+The issuance preview resolves values for the selected Eastern effective time.
+Changing that time clears approval; issuance verifies the reviewed wording and
+policy revision under the same library lock and rejects a stale preview.
 
 ## Authoring and reviews
 
@@ -47,14 +53,16 @@ Each clause starts with `## Title {#stable-anchor}`. Retain its anchor when word
 changes. The supported Markdown subset is paragraphs, bullets, emphasis and HTTPS
 links. Raw HTML, executable MDX, embeds and external image fetching are excluded.
 The same escaped clause HTML renders in the portal and in PDFs, which reuse the
-service-report browser launcher. PDFs include version and full hash in the footer;
+service-report browser launcher and the existing estimate-document capacity limit
+(two concurrent browser exports by default, shared between both renderers).
+PDFs include version and full hash in the footer;
 an acknowledgment export includes the actual recorded signer and timestamp.
 
 Bindings are restricted to `{{policy.pay_frequency}}`, `{{policy.pay_schedule}}`,
 `{{policy.pto_accrual}}`, `{{policy.paid_holidays}}`,
 `{{policy.unpaid_holidays}}` and `{{policy.equipment_deduction_terms}}`.
 No owner-approved pay/benefit values are seeded. Unresolved bindings and explicit
-`[DECISION: ...]` markers prevent issuance.
+`[DECISION: ...]` markers in titles or body text prevent issuance.
 
 Every issued document requires an owner role and a next-review date within
 one year. A citation is stored alongside its clause anchor, label, HTTPS source,

@@ -106,16 +106,19 @@ function policyContext(values) {
 function renderSource(source, policyValues) {
   const context = policyContext(policyValues);
   const rendered = renderDocumentText(source.body, context);
+  const title = renderDocumentText(source.title, context);
+  const used = [...new Set([...rendered.usedVariables, ...title.usedVariables])].sort();
   const clauses = sections(rendered.rendered);
-  const unknown = rendered.usedVariables.filter(key => !/^policy\.(pay_frequency|pay_schedule|pto_accrual|paid_holidays|unpaid_holidays|equipment_deduction_terms)$/.test(key));
+  const unknown = used.filter(key => !/^policy\.(pay_frequency|pay_schedule|pto_accrual|paid_holidays|unpaid_holidays|equipment_deduction_terms)$/.test(key));
   if (unknown.length) reject(`Unsupported policy binding: ${unknown.join(', ')}`);
   for (const citation of source.metadata.citations) {
     if (!clauses.some(clause => clause.id === citation.anchor)) reject(`Citation has no matching clause: ${citation.anchor}`);
   }
   return {
-    title: source.title, body: rendered.rendered, sections: clauses,
-    metadata: source.metadata, used_variables: rendered.usedVariables,
-    unresolved: [...rendered.unresolvedVariables, ...(rendered.rendered.match(/\[DECISION:[^\]]+\]/g) || [])],
+    title: title.rendered, body: rendered.rendered, sections: clauses,
+    metadata: source.metadata, used_variables: used,
+    unresolved: [...new Set([...rendered.unresolvedVariables, ...title.unresolvedVariables,
+      ...(`${title.rendered}\n${rendered.rendered}`.match(/\[DECISION:[^\]]+\]/g) || [])])],
   };
 }
 

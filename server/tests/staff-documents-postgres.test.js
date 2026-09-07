@@ -20,6 +20,10 @@ describeDb('controlled staff documents on PostgreSQL', () => {
   const other = { id: randomUUID(), role: 'technician' };
   const run = randomUUID().slice(0, 8);
   const at = seconds => new Date(Date.now() + seconds * 1000);
+  const issue = async (id, versionId, effective, actor) => {
+    const preview = await documents.preview(id, versionId, effective, actor);
+    return documents.publish(id, versionId, effective, preview.preview_hash, actor);
+  };
   const reviewOn = () => at(30 * 86400).toISOString().slice(0, 10);
   const source = (body = '## PTO {#pto-accrual}\n{{policy.pto_accrual}}') => ({ title: `QA ${run}`, body,
     metadata: { owner_role: 'Office Manager', review_on: reviewOn(), citations: [], fields: [] } });
@@ -75,14 +79,14 @@ describeDb('controlled staff documents on PostgreSQL', () => {
   test('drafts are hidden from technicians and unresolved values block issuance', async () => {
     const draft = await documents.saveDraft({ key: `qa-${run}-blocked`, kind: 'policy', access: 'staff', source: source('## Authority {#authority}\n[DECISION: choose approver]') }, admin);
     await expect(documents.detail(draft.document.id, tech)).rejects.toMatchObject({ status: 404 });
-    await expect(documents.publish(draft.document.id, draft.version.id, at(-14), admin)).rejects.toThrow(/Resolve/);
+    await expect(issue(draft.document.id, draft.version.id, at(-14), admin)).rejects.toThrow(/Resolve/);
     expect((await db('document_template_versions').where({ id: draft.version.id }).first()).content_hash).toBeNull();
   });
   test('policies issue a canonical immutable snapshot with the approved data', async () => {
     handbook = await documents.saveDraft({ key: `qa-${run}-handbook`, kind: 'policy', access: 'staff', source: source() }, admin);
     offer = await documents.saveDraft({ key: `qa-${run}-offer`, kind: 'policy', access: 'staff', source: source() }, admin);
-    first = await documents.publish(handbook.document.id, handbook.version.id, at(-13), admin);
-    await documents.publish(offer.document.id, offer.version.id, at(-13), admin);
+    first = await issue(handbook.document.id, handbook.version.id, at(-13), admin);
+    await issue(offer.document.id, offer.version.id, at(-13), admin);
     expect(first.content_hash).toBe(hash(first.content_snapshot));
     expect(first.content_snapshot.body).toContain('40 hours');
     expect(first.content_snapshot.metadata.owner_role).toBe('Office Manager');
@@ -119,13 +123,13 @@ describeDb('controlled staff documents on PostgreSQL', () => {
   });
   test('stale base revisions and re-publication cannot silently overwrite history', async () => {
     await expect(documents.updatePolicy({ base_revision_id: null, values: values(90) }, at(-9), admin)).rejects.toMatchObject({ status: 409 });
-    await expect(documents.publish(handbook.document.id, first.id, at(-9), admin)).rejects.toMatchObject({ status: 409 });
+    await expect(issue(handbook.document.id, first.id, at(-9), admin)).rejects.toMatchObject({ status: 409 });
     await expect(documents.saveDraft({ id: handbook.document.id, base_version_id: first.id, source: source() }, admin)).rejects.toMatchObject({ status: 409 });
   });
   test('one failed document review rolls back the entire policy change', async () => {
     const shortReview = source(); shortReview.metadata.review_on = at(86400).toISOString().slice(0, 10);
     const guarded = await documents.saveDraft({ key: `qa-${run}-review`, kind: 'policy', access: 'staff', source: shortReview }, admin);
-    await documents.publish(guarded.document.id, guarded.version.id, at(-8), admin);
+    await issue(guarded.document.id, guarded.version.id, at(-8), admin);
     const before = await db('document_template_versions').count('* as n').first();
     await expect(documents.updatePolicy({ base_revision_id: policy.id, values: values(90) }, at(2 * 86400), admin)).rejects.toThrow(/review/i);
     expect((await db('policy_values').orderBy('revision', 'desc').first()).id).toBe(policy.id);
@@ -133,13 +137,13 @@ describeDb('controlled staff documents on PostgreSQL', () => {
   });
   test('admin-only documents are hidden from staff', async () => {
     const restricted = await documents.saveDraft({ key: `qa-${run}-restricted`, kind: 'form', access: 'admin', source: source('## Facts {#facts}\nRecord verified facts.') }, admin);
-    await documents.publish(restricted.document.id, restricted.version.id, at(-7), admin);
+    await issue(restricted.document.id, restricted.version.id, at(-7), admin);
     await expect(documents.detail(restricted.document.id, tech)).rejects.toMatchObject({ status: 404 });
     expect((await documents.list(tech)).some(item => item.id === restricted.document.id)).toBe(false);
   });
   test('procedure records enforce ownership and step completion', async () => {
     procedure = await documents.saveDraft({ key: `qa-${run}-procedure`, kind: 'procedure', access: 'staff', source: source('## First {#first}\nVerify facts.\n\n## Second {#second}\nRecord handover.') }, admin);
-    procedure.version = await documents.publish(procedure.document.id, procedure.version.id, at(-6), admin);
+    procedure.version = await issue(procedure.document.id, procedure.version.id, at(-6), admin);
     const payload = { content_hash: procedure.version.content_hash, owner_id: tech.id, due_at: at(60), answers: {}, completed_steps: ['first'], complete: false };
     await expect(documents.saveRecord(procedure.version.id, { ...payload, owner_id: other.id }, tech)).rejects.toMatchObject({ status: 403 });
     await expect(documents.saveRecord(procedure.version.id, { ...payload, complete: true }, tech)).rejects.toThrow(/every procedure step/);
@@ -158,9 +162,48 @@ describeDb('controlled staff documents on PostgreSQL', () => {
   });
 
   test('a future policy change does not block an unrelated procedure revision', async () => {
-    await documents.updatePolicy({ base_revision_id: policy.id, values: values(90) }, at(60), admin);
+    policy = (await documents.updatePolicy({ base_revision_id: policy.id, values: values(90) }, at(60), admin)).policy;
     const next = await documents.saveDraft({ id: procedure.document.id, base_version_id: procedure.version.id, source: source('## First {#first}\nUpdated synthetic procedure.\n\n## Second {#second}\nRecord handover.') }, admin);
-    const issued = await documents.publish(procedure.document.id, next.version.id, at(-1), admin);
+    const issued = await issue(procedure.document.id, next.version.id, at(-1), admin);
     expect(issued.content_snapshot.body).toContain('Updated synthetic procedure');
   });
+  test('superseded versions reject new evidence but retain historical reads', async () => {
+    await expect(documents.acknowledge(first.id, { content_hash: first.content_hash, signed_name: 'QA Other', accepted: true }, other)).rejects.toMatchObject({ status: 409 });
+    await expect(documents.saveRecord(procedure.version.id, { content_hash: procedure.version.content_hash, owner_id: tech.id, due_at: at(60), answers: {}, completed_steps: [], complete: false }, tech)).rejects.toMatchObject({ status: 409 });
+    const history = await documents.detail(procedure.document.id, tech, procedure.version.id);
+    expect(history.records[0].id).toBe(record.id);
+    expect(history.current_version_id).not.toBe(procedure.version.id);
+    expect((await documents.detail(handbook.document.id, tech, first.id)).acknowledgments[0].id).toBe(ack.id);
+  });
+  test('reassignment removes former-creator access and preserves current-owner access', async () => {
+    const current = (await documents.detail(procedure.document.id, tech)).version;
+    const payload = { content_hash: current.content_hash, owner_id: tech.id, due_at: at(60), answers: {}, completed_steps: [], complete: false };
+    const created = await documents.saveRecord(current.id, payload, tech);
+    await documents.saveRecord(current.id, { ...payload, id: created.id, base_updated_at: created.updated_at.toISOString(), owner_id: other.id }, admin);
+    expect((await documents.detail(procedure.document.id, tech)).records.some(r => r.id === created.id)).toBe(false);
+    expect((await documents.detail(procedure.document.id, other)).records.some(r => r.id === created.id)).toBe(true);
+    await expect(documents.saveRecord(current.id, { ...payload, id: created.id, base_updated_at: created.updated_at.toISOString() }, tech)).rejects.toMatchObject({ status: 404 });
+  });
+  test('future issuance uses exactly the policy wording reviewed for that effective time', async () => {
+    const draft = await documents.saveDraft({ key: `qa-${run}-future`, kind: 'policy', access: 'staff', source: source() }, admin);
+    expect((await documents.detail(draft.document.id, admin)).rendered.body).toContain('80 hours');
+    const effective = at(90);
+    const preview = await documents.preview(draft.document.id, draft.version.id, effective, admin);
+    expect(preview.rendered.body).toContain('90 hours');
+    const issued = await documents.publish(draft.document.id, draft.version.id, effective, preview.preview_hash, admin);
+    expect(issued.content_snapshot.body).toBe(preview.rendered.body);
+    await expect(documents.acknowledge(issued.id, { content_hash: issued.content_hash, signed_name: 'QA Other', accepted: true }, other)).rejects.toMatchObject({ status: 404 });
+  });
+  test('a policy revision after preview requires renewed review before issuance', async () => {
+    const draft = await documents.saveDraft({ key: `qa-${run}-stale-preview`, kind: 'policy', access: 'staff', source: source() }, admin);
+    const effective = at(180);
+    const preview = await documents.preview(draft.document.id, draft.version.id, effective, admin);
+    policy = (await documents.updatePolicy({ base_revision_id: policy.id, values: values(100) }, at(120), admin)).policy;
+    await expect(documents.publish(draft.document.id, draft.version.id, effective, preview.preview_hash, admin)).rejects.toMatchObject({ status: 409 });
+    expect((await db('document_template_versions').where({ id: draft.version.id }).first()).content_hash).toBeNull();
+    const refreshed = await documents.preview(draft.document.id, draft.version.id, effective, admin);
+    expect(refreshed.rendered.body).toContain('100 hours');
+    expect((await documents.publish(draft.document.id, draft.version.id, effective, refreshed.preview_hash, admin)).content_snapshot.body).toBe(refreshed.rendered.body);
+  });
+
 });

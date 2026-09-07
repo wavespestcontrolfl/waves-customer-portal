@@ -4,15 +4,30 @@ import DocumentRecord from './DocumentRecord';
 import { box, row, D, inputStyle, primaryStyle, buttonStyle, Field, request, dateLabel, reviewLabel } from './common';
 
 export default function DocumentReader({ detail, people, selfId, manage, onVersion, onEdit, onSaved }) {
-  const { document, version, rendered, versions, acknowledgments } = detail;
+  const { document, version, versions, acknowledgments } = detail;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [name, setName] = useState('');
   const [accepted, setAccepted] = useState(false);
   const [effective, setEffective] = useState(etDatetimeLocalValue(new Date(Date.now() + 5 * 60000)));
   const [issueAccepted, setIssueAccepted] = useState(false);
-  const canRecord = version.content_hash && new Date(version.effective_at) <= new Date();
+  const [preview, setPreview] = useState(null);
+  const [previewError, setPreviewError] = useState('');
+  const [refreshPreview, setRefreshPreview] = useState(0);
+  const needsPreview = manage && !version.content_hash;
+  const previewReady = preview?.effective === effective && preview?.refresh === refreshPreview;
+  const rendered = needsPreview && previewReady ? preview.rendered : detail.rendered;
+  const canRecord = Boolean(version.content_hash && detail.current_version_id === version.id);
   const ownAck = acknowledgments.find(item => item.technician_id === selfId);
+  useEffect(() => {
+    if (!needsPreview) return undefined;
+    const controller = new AbortController();
+    setIssueAccepted(false); setPreview(null); setPreviewError('');
+    request(`/${document.id}/preview`, { version_id: version.id, effective_at: effective }, controller.signal)
+      .then(result => { if (!controller.signal.aborted) setPreview({ ...result, effective, refresh: refreshPreview }); })
+      .catch(failure => { if (!controller.signal.aborted) setPreviewError(failure.message); });
+    return () => controller.abort();
+  }, [document.id, version.id, needsPreview, effective, refreshPreview]);
   useEffect(() => {
     const reveal = () => {
       const element = globalThis.document.getElementById(decodeURIComponent(window.location.hash.slice(1)));
@@ -44,6 +59,7 @@ export default function DocumentReader({ detail, people, selfId, manage, onVersi
     {rendered.unresolved.length > 0 && <div style={{ padding: 16, background: D.bg, borderRadius: 6 }}><strong>Decisions needed before issuance</strong><ul>{rendered.unresolved.map(value => <li key={value} style={{ overflowWrap: 'anywhere', marginTop: 6 }}>{value}</li>)}</ul></div>}
     {error && <p role="alert">{error}</p>}
     {manage && <div style={{ ...row, margin: '18px 0' }}><button style={buttonStyle} disabled={busy} onClick={onEdit}>Create revision</button></div>}
+    {needsPreview && <p role="status">{previewError || (previewReady ? 'Wording for the selected effective date is shown below.' : 'Loading wording for the selected effective date…')}</p>}
     <nav aria-label="Document clauses" style={{ ...row, margin: '20px 0' }}>{rendered.sections.map(section => <a key={section.id} href={`#${section.id}`} style={{ color: D.text, textDecoration: 'underline', padding: '6px 0' }}>{section.number}. {section.title}</a>)}</nav>
     {rendered.sections.map(section => {
       const content = <div style={{ padding: '4px 0 16px', lineHeight: 1.7, overflowWrap: 'anywhere' }}>
@@ -54,21 +70,23 @@ export default function DocumentReader({ detail, people, selfId, manage, onVersi
         ? <details id={section.id} key={section.id} style={{ borderTop: `1px solid ${D.border}`, scrollMarginTop: 'calc(88px + env(safe-area-inset-top, 0px))' }}><summary style={{ padding: '18px 0', fontWeight: 700, fontSize: 18, cursor: 'pointer' }}>{section.number}. {section.title}</summary>{content}</details>
         : <section id={section.id} key={section.id} style={{ borderTop: `1px solid ${D.border}`, scrollMarginTop: 'calc(88px + env(safe-area-inset-top, 0px))' }}><h2 style={{ fontSize: 20 }}>{section.number}. {section.title}</h2>{content}</section>;
     })}
-    {manage && !version.content_hash && <form onSubmit={event => { event.preventDefault(); act(async () => { await request(`/${document.id}/issue`, { version_id: version.id, effective_at: effective }); onSaved('Document issued.'); }); }} style={{ ...box, marginTop: 20, background: D.bg }}>
+    {needsPreview && <form onSubmit={event => { event.preventDefault(); if (!previewReady) return; act(async () => { await request(`/${document.id}/issue`, { version_id: version.id, effective_at: effective, preview_hash: preview.preview_hash }); onSaved('Document issued.'); }); }} style={{ ...box, marginTop: 20, background: D.bg }}>
       <h2 style={{ fontSize: 20 }}>Issue this version</h2>
-      <Field label="Effective date and time (Eastern)"><input type="datetime-local" required style={inputStyle} value={effective} onChange={e => setEffective(e.target.value)} /></Field>
-      <label style={{ ...row, marginBottom: 16 }}><input type="checkbox" required checked={issueAccepted} onChange={e => setIssueAccepted(e.target.checked)} />I reviewed the wording, authority, owner, citations and next-review date.</label>
-      <button type="submit" disabled={busy || !issueAccepted || rendered.unresolved.length > 0} style={primaryStyle}>Issue version {version.version_number}</button>
+      <Field label="Effective date and time (Eastern)"><input type="datetime-local" required disabled={busy} style={inputStyle} value={effective} onChange={e => { setIssueAccepted(false); setEffective(e.target.value); }} /></Field>
+      <button type="button" style={{ ...buttonStyle, marginBottom: 16 }} disabled={busy} onClick={() => { setIssueAccepted(false); setRefreshPreview(value => value + 1); }}>Refresh wording</button>
+      <label style={{ ...row, marginBottom: 16 }}><input type="checkbox" required disabled={!previewReady || busy} checked={issueAccepted} onChange={e => setIssueAccepted(e.target.checked)} />I reviewed the wording, authority, owner, citations and next-review date.</label>
+      <button type="submit" disabled={busy || !previewReady || !issueAccepted || rendered.unresolved.length > 0} style={primaryStyle}>Issue version {version.version_number}</button>
     </form>}
-    {canRecord && document.staff_kind === 'policy' && <section style={{ ...box, marginTop: 24 }}>
+    {version.content_hash && !canRecord && <div style={{ ...box, marginTop: 24 }}><p>This version is read-only. New acknowledgments and records use the version currently in force.</p>{detail.current_version_id && <button style={buttonStyle} onClick={() => onVersion(detail.current_version_id)}>Open current version</button>}</div>}
+    {version.content_hash && document.staff_kind === 'policy' && <section style={{ ...box, marginTop: 24 }}>
       <h2 style={{ fontSize: 20 }}>Your acknowledgment</h2>
-      {ownAck ? <><p>Signed by {ownAck.signed_name} on {dateLabel(ownAck.acknowledged_at)}.</p><button disabled={busy} style={buttonStyle} onClick={() => act(() => download(ownAck))}>Export signed acknowledgment</button></> : <form onSubmit={event => { event.preventDefault(); act(async () => { await request(`/versions/${version.id}/acknowledge`, { content_hash: version.content_hash, signed_name: name, accepted }); onSaved('Your acknowledgment was saved for this version.'); }); }}>
+      {ownAck ? <><p>Signed by {ownAck.signed_name} on {dateLabel(ownAck.acknowledged_at)}.</p><button disabled={busy} style={buttonStyle} onClick={() => act(() => download(ownAck))}>Export signed acknowledgment</button></> : canRecord ? <form onSubmit={event => { event.preventDefault(); act(async () => { await request(`/versions/${version.id}/acknowledge`, { content_hash: version.content_hash, signed_name: name, accepted }); onSaved('Your acknowledgment was saved for this version.'); }); }}>
         <p>{rendered.acknowledgment_statement}</p><Field label="Type your name"><input required maxLength={180} style={inputStyle} value={name} onChange={e => setName(e.target.value)} /></Field>
         <label style={{ ...row, marginBottom: 16 }}><input type="checkbox" required checked={accepted} onChange={e => setAccepted(e.target.checked)} />I acknowledge version {version.version_number} shown above.</label>
         <button type="submit" disabled={busy || !accepted} style={primaryStyle}>Sign acknowledgment</button>
-      </form>}
+      </form> : <p>You have no acknowledgment recorded for this version.</p>}
       {manage && acknowledgments.length > 0 && <details><summary style={{ paddingTop: 16 }}>All acknowledgments ({acknowledgments.length})</summary>{acknowledgments.map(ack => <p key={ack.id}>{ack.signed_name} · {dateLabel(ack.acknowledged_at)} <button disabled={busy} style={buttonStyle} onClick={() => act(() => download(ack))}>Signed PDF</button></p>)}</details>}
     </section>}
-    {canRecord && document.staff_kind !== 'policy' && <DocumentRecord key={version.id} detail={detail} people={people} selfId={selfId} manage={manage} onSaved={onSaved} />}
+    {version.content_hash && document.staff_kind !== 'policy' && <DocumentRecord key={version.id} detail={detail} people={people} selfId={selfId} manage={manage} canWrite={canRecord} onSaved={onSaved} />}
   </article>;
 }
