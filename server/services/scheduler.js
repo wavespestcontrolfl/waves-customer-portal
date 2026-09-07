@@ -1388,8 +1388,13 @@ function initScheduledJobs() {
   cron.schedule('0 */5 * * * *', async () => {
     if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;
     try {
-      const { runSmsOperationalActions, refreshSmsCommitments } = require('./sms-operational-actions');
+      const { runSmsOperationalActions } = require('./sms-operational-actions');
       await runSmsOperationalActions();
+    } catch {
+      logger.error('[sms-operations] intake did not complete');
+    }
+    try {
+      const { refreshSmsCommitments } = require('./sms-operational-actions');
       await runExclusive('sms-commitment-fulfillment', () => refreshSmsCommitments());
     } catch {
       logger.error('[sms-operations] commitment watcher did not complete');
