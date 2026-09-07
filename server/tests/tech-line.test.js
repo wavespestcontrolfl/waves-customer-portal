@@ -47,6 +47,13 @@ describe('technicianForLine / ringTargetForLine', () => {
     await expect(techLine.ringTargetForLine('+19413187612')).resolves.toBeNull();
   });
 
+  test("a holder whose phone is one of OUR Twilio lines never rings (no second inbound into /voice)", async () => {
+    db.mockImplementation(() => chain({ first: { ...HOLDER, phone: '+19413187612' } }));
+    await expect(techLine.ringTargetForLine(LINE)).resolves.toBeNull();
+    db.mockImplementation(() => chain({ first: { ...HOLDER, phone: '(941) 352-9161' } }));
+    await expect(techLine.ringTargetForLine(LINE)).resolves.toBeNull();
+  });
+
   test('a DB failure fails soft to null', async () => {
     db.mockImplementation(() => ({ where: () => ({ first: async () => { throw new Error('pg down'); } }) }));
     await expect(techLine.ringTargetForLine(LINE)).resolves.toBeNull();
