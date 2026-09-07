@@ -109,17 +109,20 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
   if (!packet) throw new Error('Visit completion packet not found');
   const visit = await database('service_visits').where({ id: packet.visit_id }).first();
   const invoice = await database('invoices').where({ visit_completion_packet_id: packet.id }).first();
-  if (visit.billing_hold) return { state: 'office_required', invoiceId: invoice?.id || null };
-  if (!invoice) return { state: 'no_charge', invoiceId: null };
-  if (['void', 'refunded', 'canceled', 'cancelled'].includes(invoice.status)) {
-    await database('service_visits').where({ id: visit.id }).update({
-      billing_hold: true, updated_at: database.fn.now(),
-    });
-    return { state: 'office_required', invoiceId: invoice.id };
+  if (visit.billing_hold || ['void', 'refunded', 'canceled', 'cancelled'].includes(invoice?.status)) {
+    if (!visit.billing_hold) {
+      await database('service_visits').where({ id: visit.id }).update({
+        billing_hold: true, updated_at: database.fn.now(),
+      });
+    }
+    const finalized = await VisitGroups.finalizeVisitNotification(visit.id, 'visit_payment', 'suppressed');
+    return { state: finalized.ok ? 'office_required' : 'payment_pending', invoiceId: invoice?.id || null };
   }
+  if (!invoice) return { state: 'no_charge', invoiceId: null };
   if (!isInvoiceCollectibleStatus(invoice.status)) {
     if (['paid', 'prepaid', 'processing'].includes(invoice.status)) {
-      await VisitGroups.finalizeVisitNotification(visit.id, 'visit_payment', 'sent');
+      const finalized = await VisitGroups.finalizeVisitNotification(visit.id, 'visit_payment', 'sent');
+      if (!finalized.ok) return { state: 'payment_pending', invoiceId: invoice.id };
       await database('service_visits').where({ id: visit.id }).update({
         payment_intent_id: invoice.stripe_payment_intent_id || null, updated_at: database.fn.now(),
       });

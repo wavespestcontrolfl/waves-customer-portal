@@ -279,6 +279,65 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 
+  test.each(['paid', 'prepaid', 'processing'])('a recovered %s invoice waits for payment-effect finalization', async (status) => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    const groups = require('../services/visit-groups');
+    const member = await mockPg('scheduled_services').where({ visit_id: fixture.visitId }).orderBy('id').first();
+    expect(await groups.claimVisitNotification(member, 'visit_payment')).toMatchObject({ state: 'owner' });
+    const paymentIntentId = status === 'prepaid' ? null : `pi_fixture_recovered_${status}`;
+    await mockPg('invoices').where({ id: invoiceId }).update({ status, stripe_payment_intent_id: paymentIntentId });
+    const finalizer = jest.spyOn(groups, 'finalizeVisitNotification').mockResolvedValueOnce({ ok: false });
+    try {
+      expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'payment_pending', invoiceId });
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+        .toMatchObject({ status: 'claimed' });
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first())
+        .toMatchObject({ payment_intent_id: null });
+      for (let replay = 0; replay < 2; replay++) {
+        expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: status, invoiceId });
+        expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+          .toMatchObject({ status: 'sent' });
+        expect(await mockPg('service_visits').where({ id: fixture.visitId }).first())
+          .toMatchObject({ payment_intent_id: paymentIntentId });
+      }
+    } finally {
+      finalizer.mockRestore();
+    }
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an office hold retries a lost payment-effect finalization before reporting reconciliation', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    await mockPg('invoices').where({ id: invoiceId }).update({ total: 0, stripe_payment_intent_id: 'pi_fixture_existing' });
+    const groups = require('../services/visit-groups');
+    const finalizer = jest.spyOn(groups, 'finalizeVisitNotification')
+      .mockResolvedValueOnce({ ok: false }).mockResolvedValueOnce({ ok: false });
+    try {
+      // First the guard persists the hold; then a recovery sees that hold.
+      // Both must remain retryable while their ledger finalization fails.
+      for (let retry = 0; retry < 2; retry++) {
+        expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'payment_pending', invoiceId });
+        expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true });
+        expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+          .toMatchObject({ status: 'claimed' });
+      }
+      for (let replay = 0; replay < 2; replay++) {
+        expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'office_required', invoiceId });
+        expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+          .toMatchObject({ status: 'suppressed' });
+      }
+    } finally {
+      finalizer.mockRestore();
+    }
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('a moved non-anchor member prevents collection until its saved stop is restored', async () => {
     const saved = await saveVisitCompletionPacket(submission());
     await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
@@ -333,6 +392,9 @@ postgres('visit completion packet records on PostgreSQL', () => {
       })]));
       expect(JSON.stringify(issues)).not.toContain('never minted');
     }
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'office_required', invoiceId: saved.body.billing.invoiceId });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+      .toMatchObject({ status: 'suppressed' });
   });
 
   test.each(['charging', 'charge_review', 'released'])('a %s card hold is rechecked at collection', async (status) => {
