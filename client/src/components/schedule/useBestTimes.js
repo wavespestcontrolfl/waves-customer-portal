@@ -65,7 +65,7 @@ function mapSlot(s, scopedToTech) {
 export function useBestTimes({
   date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds,
   arrivalWindows = false, enabled = true, address, lat, lng,
-  pickedStart, rangeFrom,
+  pickedStart, rangeFrom, sameDayFloorMin,
 }) {
   const [bestTimes, setBestTimes] = useState([]);
   const [picked, setPicked] = useState(null);
@@ -113,6 +113,10 @@ export function useBestTimes({
             // Appointment windows always start on the hour (owner directive),
             // so hint chips snap to it too.
             slotStepMinutes: 60,
+            // A picker's own same-day floor (minutes from midnight) — the
+            // server applies it while choosing, so a single-answer range
+            // search is the best hour that clears it.
+            sameDayFloorMin: Number.isInteger(sameDayFloorMin) ? sameDayFloorMin : undefined,
             ...extra,
           }),
         });
@@ -155,6 +159,6 @@ export function useBestTimes({
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, serviceId, customerId, durationMinutes, technicianId, excludeKey, arrivalWindows, address, lat, lng, pickedKey, rangeKey]);
+  }, [enabled, date, serviceId, customerId, durationMinutes, technicianId, excludeKey, arrivalWindows, address, lat, lng, pickedKey, rangeKey, sameDayFloorMin]);
   return { bestTimes, picked, bestInRange, checking };
 }

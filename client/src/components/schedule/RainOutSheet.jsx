@@ -531,17 +531,12 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     // the cheapest date+hour from the earliest day the move can land.
     pickedStart: isCustom ? customStart : selected?.window?.start,
     rangeFrom: todayStr,
+    // A same-day landing is floored at the next top-of-hour — raised
+    // further by running_late (server enforces target_not_later). The
+    // server applies it while choosing, so no chip ever advertises an
+    // hour that goes customElapsed the moment it's tapped.
+    sameDayFloorMin: minTodayStartMin,
   });
-  // A same-day landing is floored at the next top-of-hour — raised further
-  // by running_late (server enforces target_not_later). Never advertise an
-  // hour that goes customElapsed the moment it's tapped.
-  const floorBestTimes = landingDate === todayStr
-    ? bestTimes.filter((s) => (hhmmToMin(s.start) ?? 0) >= minTodayStartMin)
-    : bestTimes;
-  const floorBestInRange = bestInRange && bestInRange.date === todayStr
-    && (hhmmToMin(bestInRange.start) ?? 0) < minTodayStartMin
-    ? null
-    : bestInRange;
 
   // Two lists, one scope toggle (codex #3375 P2 ×2):
   //   conflicts      — what the ANCHOR's window hits. A route-scope push
@@ -850,9 +845,9 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                 active (they set the custom start); a preset target is fixed,
                 so the chips go display-only. */}
             <BestTimeHint
-              bestTimes={floorBestTimes}
+              bestTimes={bestTimes}
               picked={picked}
-              bestInRange={floorBestInRange}
+              bestInRange={bestInRange}
               currentStart={isCustom ? customStart : selected?.window?.start}
               currentDate={landingDate}
               currentTechnicianId={service.technicianId || service.technician_id}

@@ -23,13 +23,14 @@ it('scores the picked hour on the day and searches the next 3 days for the singl
   });
   vi.stubGlobal('fetch', fetch);
   const { result } = renderHook(() => useBestTimes({
-    date: '2035-01-02', serviceId: 'fixture', technicianId: 'tech', pickedStart: '09:00', rangeFrom: '2035-01-01',
+    date: '2035-01-02', serviceId: 'fixture', technicianId: 'tech', pickedStart: '09:00', rangeFrom: '2035-01-01', sameDayFloorMin: 14 * 60,
   }));
   await waitFor(() => expect(result.current.bestInRange).not.toBeNull());
   const bodies = fetch.mock.calls.map((c) => JSON.parse(c[1].body));
   expect(bodies).toHaveLength(2);
   expect(bodies.find((b) => b.pickedStart)).toMatchObject({ dateFrom: '2035-01-02', dateTo: '2035-01-02', pickedStart: '09:00', topN: 3, slotStepMinutes: 60 });
-  expect(bodies.find((b) => !b.pickedStart)).toMatchObject({ dateFrom: '2035-01-01', dateTo: '2035-01-04', topN: 1 });
+  expect(bodies.find((b) => !b.pickedStart)).toMatchObject({ dateFrom: '2035-01-01', dateTo: '2035-01-04', topN: 1, sameDayFloorMin: 840 });
+  expect(bodies.every((b) => b.sameDayFloorMin === 840)).toBe(true);
   expect(result.current.picked).toEqual({
     start: '09:00', fits: true, detourMinutes: 57, driveInMinutes: 37, fromHomeBase: true, fromName: null,
     technicianId: 'tech', technicianName: null,

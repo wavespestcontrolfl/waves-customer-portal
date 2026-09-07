@@ -165,7 +165,7 @@ router.post('/', async (req, res) => {
       durationMinutes, dateFrom, dateTo,
       technicianId, topN,
       hint, serviceId, arrivalWindows, excludeServiceIds, slotStepMinutes,
-      pickedStart,
+      pickedStart, sameDayFloorMin,
     } = req.body || {};
 
     // Best-time hint consumers go dark behind GATE_BEST_TIME_HINTS — read
@@ -199,6 +199,15 @@ router.post('/', async (req, res) => {
     if (pickedStart !== undefined && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(pickedStart))) {
       throw httpError(400, 'pickedStart must be HH:MM');
     }
+    // A picker's own same-day floor (next top of the hour, or the
+    // running-late target) in minutes from midnight — applied INSIDE the
+    // candidate walk below, so a topN:1 range answer is the best hour that
+    // clears it rather than a discarded early one (pre-push P1). The
+    // engine's now+30 lead still applies underneath.
+    if (sameDayFloorMin !== undefined && !(Number.isInteger(sameDayFloorMin) && sameDayFloorMin >= 0 && sameDayFloorMin <= 24 * 60)) {
+      throw httpError(400, 'sameDayFloorMin must be an integer number of minutes within the day');
+    }
+    const floorFor = (date) => (date === today && Number.isInteger(sameDayFloorMin) ? sameDayFloorMin : 0);
 
     const today = etDateString();
     const from = dateFrom || today;
@@ -276,14 +285,17 @@ router.post('/', async (req, res) => {
           occupancyByDate.set(d, await loadOccupancy({ dateFrom: d, dateTo: d }));
         }));
         result.slots = result.slots.flatMap((s) => {
+          const floorMin = floorFor(s.date);
           // The full arrival simulation already checked every actual work
           // span against unassigned/other-tech work and live holds. Comparing
           // its promise to nominal work blocks here would recreate the bug.
-          if (s.route_mode === 'arrival_windows') return [s];
+          if (s.route_mode === 'arrival_windows') return toMin(s.start_time) >= floorMin ? [s] : [];
           const baseMin = toMin(s.start_time);
           if (baseMin == null) return [];
           const latest = Number.isFinite(s.latest_start_min) ? s.latest_start_min : baseMin;
-          for (let m = baseMin; m <= latest; m += step) {
+          // Start the walk at the picker's floor (aligned up to the step)
+          // when the gap opens before it.
+          for (let m = Math.max(baseMin, Math.ceil(floorMin / step) * step); m <= latest; m += step) {
             const window = { start: toHHMM(m), end: toHHMM(m + spanMin) };
             const clear = conflictsForTarget(
               occupancyByDate.get(s.date), null, s.date, window,
@@ -297,6 +309,9 @@ router.post('/', async (req, res) => {
         });
       } catch (guardErr) {
         logger.warn('[find-time] hint occupancy guard failed (fail-open):', guardErr.message);
+        // Fail-open keeps the engine's answer, but never an hour the picker
+        // itself would refuse.
+        result.slots = result.slots.filter((s) => (toMin(s.start_time) ?? 0) >= floorFor(s.date));
       }
       // Unscoped searches rank technician/time PAIRS, so the top of the
       // list can be one hour three times over — dedupe by day+start (list

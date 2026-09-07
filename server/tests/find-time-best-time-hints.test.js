@@ -407,6 +407,29 @@ test('a topN:1 range hint survives three fully occupied gaps and answers the fou
   expect(body.slots.map((s) => [s.date, s.start_time])).toEqual([['2026-09-02', '10:00']]);
 });
 
+test('sameDayFloorMin is applied while choosing: a topN:1 range answer walks today\'s gap up to the floor instead of losing it', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  // Today (pinned 08-31) has one wide gap opening at 10:00; tomorrow a
+  // dearer 09:00. A running-late floor of 14:00 must yield today 14:00.
+  // Fresh object per call: the route reassigns result.slots, so one shared
+  // mock object would leak the first answer into the second request.
+  findAvailableSlots.mockImplementation(async () => ({
+    slots: [
+      gapSlot({ rank: 1, date: '2026-08-31', start_time: '10:00', end_time: '11:00', latest_start_min: 15 * 60, detour_minutes: 1 }),
+      gapSlot({ rank: 2, date: '2026-09-01', start_time: '09:00', end_time: '10:00', latest_start_min: 9 * 60, detour_minutes: 2 }),
+    ],
+    evaluated: 2,
+  }));
+  const body = await (await post({ ...BASE, dateFrom: '2026-08-31', dateTo: '2026-09-03', hint: true, slotStepMinutes: 60, topN: 1, sameDayFloorMin: 14 * 60 })).json();
+  expect(body.slots.map((s) => [s.date, s.start_time, s.end_time])).toEqual([['2026-08-31', '14:00', '15:00']]);
+  // A floor past the gap's last start drops today entirely and the next day answers.
+  const late = await (await post({ ...BASE, dateFrom: '2026-08-31', dateTo: '2026-09-03', hint: true, slotStepMinutes: 60, topN: 1, sameDayFloorMin: 16 * 60 })).json();
+  expect(late.slots.map((s) => [s.date, s.start_time])).toEqual([['2026-09-01', '09:00']]);
+  // Other days are never floored; garbage 400s.
+  expect(findAvailableSlots.mock.calls[0][0].topN).toBe(100);
+  expect((await post({ ...BASE, hint: true, sameDayFloorMin: '2pm' })).status).toBe(400);
+});
+
 test('a same-day picked hour before the engine\'s now+30 floor is not scored (no picked key), later hours are', async () => {
   process.env.GATE_BEST_TIME_HINTS = 'true';
   // ET now is pinned at 12:00 → the engine floors today at 12:30, so a
