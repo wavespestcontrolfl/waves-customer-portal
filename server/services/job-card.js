@@ -888,26 +888,17 @@ function rigAssignment(svc) {
   return { equipmentSystemId: svc?.assigned_equipment_system_id || null, calibrationId: svc?.assigned_calibration_id || null };
 }
 
-// The plan engine's calibration resolution (assigned rig first, one active
-// rig otherwise, none / ambiguous = no mix) decides the tank; only the
-// wording is the card's.
-const TANK_BLOCK_REASON = {
-  missing_calibration: 'No rig calibration on file',
-  equipment_selection_required: 'More than one rig is active — assign the rig on the Lawn plan',
-};
-
-// null = the read failed: the tank says the check is unavailable rather
-// than "no rig on file", which would send the tech to assign a rig for a
-// data outage.
+// The assigned rig's calibrations (or every active one when none is
+// assigned). A failed read is an empty list: the carrier then falls back
+// to the protocol default exactly as "no rig on file" does.
 async function loadRigCalibrations(dbh, rig) {
   try {
     return await getActiveCalibrations(dbh, { equipmentSystemId: rig?.equipmentSystemId || null, calibrationId: rig?.calibrationId || null }, { strict: true });
   } catch (err) {
     logger.warn(`[job-card] calibration read failed: ${err.message}`);
-    return null;
+    return [];
   }
 }
-const TANK_UNAVAILABLE = { calibrated: false, unavailable: true, reason: 'Rig calibration check unavailable', carrierGalPer1000: null, tankCapacityGal: null, expiresAt: null, systemName: null };
 
 // The instant a calibration must still be valid at: the later of now and
 // the appointment start — window_start on the service day, noon ET when no
@@ -922,27 +913,31 @@ function serviceDayInstant(serviceDate, now = new Date(), windowStart = null) {
   return start && start.getTime() > now.getTime() ? start : now;
 }
 
-// Calibration expiry / field verification no longer block (owner ruling,
-// #3935): the engine's remaining blocks are no rig and an ambiguous rig.
-function tankFromCalibrations(rows) {
-  if (rows === null) return { ...TANK_UNAVAILABLE };
-  const { selected: cal, blocks } = summarizeCalibration({ calibrations: Array.isArray(rows) ? rows : [] });
-  const block = blocks[0] || null;
-  const carrier = Number(cal?.carrier_gal_per_1000 || 0);
+// The rig is a convenience for tank-fill math, never a gate (owner ruling
+// 2026-09-07, after #3935 retired expiry / field verification): the assigned
+// rig or a lone active rig supplies the carrier; none or several falls back
+// to the lawn plan's protocol-default carrier. `calibrated` = a carrier
+// resolved from either source.
+function tankFromCalibrations(rows, fallbackCarrierGalPer1000 = null) {
+  const { selected: cal } = summarizeCalibration({ calibrations: Array.isArray(rows) ? rows : [] });
+  const rigCarrier = Number(cal?.carrier_gal_per_1000 || 0);
+  const fallback = Number(fallbackCarrierGalPer1000 || 0);
+  const carrier = rigCarrier > 0 ? rigCarrier : fallback;
   return {
-    calibrated: !block && carrier > 0,
-    reason: block ? (TANK_BLOCK_REASON[block.code] || block.message) : (carrier > 0 ? null : 'No carrier rate on file'),
+    calibrated: carrier > 0,
+    source: rigCarrier > 0 ? 'rig' : (carrier > 0 ? 'protocol_default' : null),
+    reason: carrier > 0 ? null : 'No carrier rate on file',
     carrierGalPer1000: carrier > 0 ? carrier : null,
-    tankCapacityGal: cal?.tank_capacity_gal != null ? Number(cal.tank_capacity_gal) : null,
-    expiresAt: cal?.expires_at || null,
-    systemName: cal?.system_name || null,
+    tankCapacityGal: rigCarrier > 0 && cal?.tank_capacity_gal != null ? Number(cal.tank_capacity_gal) : null,
+    expiresAt: rigCarrier > 0 ? (cal?.expires_at || null) : null,
+    systemName: rigCarrier > 0 ? (cal?.system_name || null) : null,
   };
 }
 
 /**
  * Amount of product for `gallons` of water: the label rate per 1,000 sq ft
- * divided by the calibrated carrier gallons per 1,000 sq ft. Null with a
- * reason when either number is missing.
+ * divided by the carrier gallons per 1,000 sq ft (rig calibration or the
+ * protocol default). Null with a reason when either number is missing.
  */
 function buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000, gallons }) {
   const gal = Number(gallons);
@@ -950,7 +945,7 @@ function buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000, gallons }) {
   const rate = Number(ratePer1000);
   const carrier = Number(carrierGalPer1000);
   if (!Number.isFinite(rate) || rate <= 0) return { amount: null, unit: rateUnit || null, reason: 'No verified rate on file' };
-  if (!Number.isFinite(carrier) || carrier <= 0) return { amount: null, unit: rateUnit || null, reason: 'Rig not calibrated' };
+  if (!Number.isFinite(carrier) || carrier <= 0) return { amount: null, unit: rateUnit || null, reason: 'No carrier rate on file' };
   const amount = (rate / carrier) * gal;
   // Four decimals: a 1-gal dose of a 0.113 oz/1,000 product at 2 gal/1,000
   // is 0.0565 oz, which two decimals would inflate by 6 %.
@@ -1080,7 +1075,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
       conditional: [],
       notes: structured.operatingSentence ? [structured.operatingSentence] : [],
     } : null;
-    return { visit: gate.month ? { month: gate.month, visit: gate.visit || null } : null, lines, blocks, procedure };
+    return { visit: gate.month ? { month: gate.month, visit: gate.visit || null } : null, lines, blocks, procedure, carrierGalPer1000: plan.mixCalculator?.carrierGalPer1000 ?? null };
   }
   return { ...resolveProtocolLines(facts.serviceType, facts.scheduledDate, protocols, catalog, { programKey: identityKey || null, serviceKey: facts.serviceKey || null }), blocks: [] };
 }
@@ -1460,7 +1455,7 @@ async function forecastAt({ coords, scheduledDate, now = new Date(), deps = {} }
 
 // A schedule strip reports exceptions from the card's existing evidence. No
 // amounts, access information, customer text, or vendor prices leave this view.
-function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, now }) {
+function dispatchReadiness({ facts, lines, blocks, sprayCheck, isToday, now }) {
   const issues = [];
   if (!lines.length) issues.push({ kind: 'protocol', status: 'unknown', label: 'No products resolved' });
   else if (sprayCheck.hold) issues.push({ kind: 'weather', status: 'hold', label: 'Weather hold' });
@@ -1475,14 +1470,6 @@ function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, no
     issues.push({ kind: 'stock', status: 'hold', label: 'Company stock low' });
   } else if (stock.some(item => item.inventory?.plannedAmountInventoryUnit == null || item.inventory?.onHand == null)) {
     issues.push({ kind: 'stock', status: 'unknown', label: 'Stock unverified' });
-  }
-  const needsCarrier = selected.some(line => {
-    if (!isTankMixable(line.product)) return false;
-    const areaRate = line.planMix?.ratePer1000 ?? line.product.default_rate_per_1000;
-    return areaRate != null || !perGallonRate(line.product);
-  });
-  if (!tank.calibrated && needsCarrier) {
-    issues.push({ kind: 'equipment', status: tank.unavailable ? 'unknown' : 'hold', label: tank.unavailable ? 'Rig check unavailable' : 'Rig needed' });
   }
   if (blocks.length) issues.push({ kind: 'plan', status: 'hold', label: 'Plan blocked' });
   return { serviceId: facts.serviceId, checkedAt: now.toISOString(), issues };
@@ -1501,14 +1488,14 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     loadRigCalibrations(dbh, facts.rig),
     forecastAt({ coords: facts.coords, scheduledDate: facts.scheduledDate, now, deps }),
   ]);
-  const tank = tankFromCalibrations(calibrations);
-  const { visit, lines, blocks, addons, note, procedure } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now });
+  const { visit, lines, blocks, addons, note, procedure, carrierGalPer1000 } = await resolveVisitLines({ facts, protocols, catalog, dbh, deps, now });
+  const tank = tankFromCalibrations(calibrations, carrierGalPer1000);
   const products = lines.map((l) => l.product);
   // Limits are judged from the appointment start (now once the window has
   // begun): a 3 pm stop opened at 8 am is checked against the 3 pm hours.
   const labelSources = await checkReviewedWeatherSources(products);
   const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources });
-  if (readinessOnly) return dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, now });
+  if (readinessOnly) return dispatchReadiness({ facts, lines, blocks, sprayCheck, isToday, now });
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
   const cards = await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, blocked: blocks.length > 0, tankReason: tank.calibrated ? null : tank.reason, includePricing, dbh });
 
@@ -1581,7 +1568,6 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // Fail closed: no visit row (missing id, unknown id, query failure) means
   // no rig assignment to trust, so no dose — never "any active rig".
   if (!product || !svc) return null;
-  const tank = tankFromCalibrations(await loadRigCalibrations(dbh, rigAssignment(svc)));
   // The non-lawn protocol line (primary visit or add-on) that names this
   // product: an add-on's product is judged under that add-on's protocol,
   // not the primary lawn plan (an off-protocol / blackout block of the lawn
@@ -1595,6 +1581,7 @@ async function mixForProduct(productId, gallons, { serviceId, dbh = db, deps = {
   // Same rule as the card: no plan at a non-primary address.
   const lawnPlan = primaryIsLawn ? (svc.address_diverges ? { plan: null, blocks: [ALTERNATE_ADDRESS_BLOCK] } : await loadLawnPlan(serviceId, { dbh, deps, now })) : null;
   const planned = lawnPlan?.plan ? [...(lawnPlan.plan.mixCalculator?.items || []), ...(lawnPlan.plan.mixCalculator?.conditionalOptions || [])].find((i) => i.product?.id === product.id) : null;
+  const tank = tankFromCalibrations(await loadRigCalibrations(dbh, rigAssignment(svc)), lawnPlan?.plan?.mixCalculator?.carrierGalPer1000);
   // The lawn plan governs every product it names (rate, blocks, approvals)
   // even when a non-lawn add-on's line names it too — Iron Plus on a lawn
   // plan with a Tree & Shrub add-on doses at the plan's rate, as the card

@@ -151,11 +151,11 @@ describe('waveguard-plan-engine helpers', () => {
     expect(result.blocks.map((b) => b.code)).toContain('nitrogen_blackout');
   });
 
-  test('mix inputs remain required but calibration expiry and verification are not approvals', () => {
+  test('no calibration is not a block — the plan falls back to the protocol carrier (owner ruling 2026-09-07)', () => {
     expect(summarizeCalibration({
       calibration: null,
       date: new Date('2026-05-01T12:00:00'),
-    }).blocks[0].code).toBe('missing_calibration');
+    })).toEqual({ selected: null, blocks: [], warnings: [] });
 
     const expired = summarizeCalibration({
       calibration: {
@@ -171,7 +171,7 @@ describe('waveguard-plan-engine helpers', () => {
     expect(expired.selected.carrier_gal_per_1000).toBe(2);
   });
 
-  test('summarizeCalibration blocks ambiguous active equipment calibrations', () => {
+  test('ambiguous active equipment calibrations select nothing and block nothing', () => {
     const result = summarizeCalibration({
       calibrations: [
         { equipment_system_id: 'tank', system_name: '110-Gallon Spray Tank #1', carrier_gal_per_1000: 2 },
@@ -181,8 +181,8 @@ describe('waveguard-plan-engine helpers', () => {
     });
 
     expect(result.selected).toBeNull();
-    expect(result.blocks[0].code).toBe('equipment_selection_required');
-    expect(result.options).toHaveLength(2);
+    expect(result.blocks).toEqual([]);
+    expect(result).not.toHaveProperty('options');
   });
 
   test('isConditionalSelected includes base products and excludes unselected optional products', () => {

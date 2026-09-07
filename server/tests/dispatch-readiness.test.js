@@ -3,7 +3,7 @@ const { _test: { dispatchReadiness }, buildSprayCheck } = require('../services/j
 const now = new Date('2026-09-04T13:00:00Z');
 const product = { id: 'product', name: 'Synthetic liquid', inventory_on_hand: 1, inventory_unit: 'gal', low_stock_threshold: 0, default_rate_per_1000: 2, rate_unit: 'fl_oz', label_verified_at: now, max_wind_mph: 10 };
 const line = { selected: true, product, planMix: { amount: 256, amountUnit: 'fl_oz' } };
-const base = { facts: { serviceId: 'visit' }, now, isToday: true, lines: [line], blocks: [], tank: { calibrated: true }, sprayCheck: { hold: false, verdicts: [{ verdict: 'ok' }] } };
+const base = { facts: { serviceId: 'visit' }, now, isToday: true, lines: [line], blocks: [], sprayCheck: { hold: false, verdicts: [{ verdict: 'ok' }] } };
 
 test('weather holds and a stock shortage survive missing readings and a blocked plan', () => {
   const hourly = [{ startTime: now.toISOString(), windMph: 20, temperatureF: null, rainChance: null }];
@@ -35,15 +35,14 @@ test('missing or unconvertible inventory evidence never becomes a stock clearanc
   }
 });
 
-test('future weather stays on the visit day and unavailable rig evidence stays unknown', () => {
-  const result = dispatchReadiness({ ...base, isToday: false, tank: { calibrated: false, unavailable: true } });
+test('future weather stays on the visit day', () => {
+  const result = dispatchReadiness({ ...base, isToday: false });
   expect(result.issues).toContainEqual({ kind: 'weather', status: 'unknown', label: 'Weather on visit day' });
-  expect(result.issues).toContainEqual({ kind: 'equipment', status: 'unknown', label: 'Rig check unavailable' });
 });
 
-test('per-gallon dilution does not require a carrier rig unless an area rate governs it', () => {
+test('the rig is never a readiness issue — an area-rate tank mix reads the protocol carrier (owner ruling 2026-09-07)', () => {
   const dilution = { ...line, planMix: null, product: { ...product, default_rate_per_1000: null, default_rate: '1', default_unit: 'fl_oz/gal' } };
-  const summary = input => dispatchReadiness({ ...base, lines: [input], tank: { calibrated: false } });
+  const summary = input => dispatchReadiness({ ...base, lines: [input] });
   expect(summary(dilution).issues.some(issue => issue.kind === 'equipment')).toBe(false);
-  expect(summary({ ...dilution, planMix: { ratePer1000: 2 } }).issues).toContainEqual({ kind: 'equipment', status: 'hold', label: 'Rig needed' });
+  expect(summary({ ...dilution, planMix: { ratePer1000: 2 } }).issues.some(issue => issue.kind === 'equipment')).toBe(false);
 });

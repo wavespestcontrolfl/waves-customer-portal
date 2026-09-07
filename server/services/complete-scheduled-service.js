@@ -501,10 +501,11 @@ function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, in
     .filter(Boolean);
 }
 
+// Missing / ambiguous rig no longer blocks the plan (owner ruling
+// 2026-09-07), so only a calibration that exists but is stale or unverified
+// is worth an advisory line.
 function calibrationLockoutBlocks(plan) {
   const lockoutCodes = new Set([
-    'missing_calibration',
-    'equipment_selection_required',
     'expired_calibration',
     'calibration_not_field_verified',
   ]);
