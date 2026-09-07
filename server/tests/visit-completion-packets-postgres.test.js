@@ -242,8 +242,9 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', total: 240 });
   });
 
-  test('billing recovery recognizes the shared invoice for every linked member', async () => {
+  test.each(['draft', 'void', 'refunded'])('billing recovery recognizes the %s shared invoice for every linked member', async (status) => {
     const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).update({ status });
     await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ completed_at: mockPg.fn.now() });
     const router = require('../routes/admin-billing-recovery');
     const handler = router.stack.find((layer) => layer.route?.path === '/leaks').route.stack.at(-1).handle;
