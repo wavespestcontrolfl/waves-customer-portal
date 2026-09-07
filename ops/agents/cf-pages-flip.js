@@ -163,12 +163,22 @@ async function waitForDeployment(cf, project, id, { timeoutMs = DEPLOY_TIMEOUT_M
   }
 }
 
-// Apply vars, redeploy the live commit, and undo the env change on any
-// failure. Returns the finished deployment.
-async function applyAndDeploy(cf, project, vars, { log = console.log, wait = waitForDeployment } = {}) {
+function prodEnvOf(p) {
+  return (p.deployment_configs && p.deployment_configs.production && p.deployment_configs.production.env_vars) || {};
+}
+
+// The values this run expects to find for its keys (undefined = absent).
+function snapshotOf(vars, env) {
+  const out = {};
+  for (const k of Object.keys(vars)) out[k] = env[k] ? env[k].value : undefined;
+  return out;
+}
+
+// Phase 1 — read, refuse, plan. No writes.
+async function planFlip(cf, project, vars) {
   const p = await cf(`/${project}`);
-  const prodEnv = (p.deployment_configs && p.deployment_configs.production && p.deployment_configs.production.env_vars) || {};
-  const refusal = refusalReason(vars, prodEnv);
+  const env = prodEnvOf(p);
+  const refusal = refusalReason(vars, env);
   if (refusal) throw new Error(`refused: ${refusal}`);
   const live = p.canonical_deployment;
   if (!live || !live.id) throw new Error('refused: project has no live production deployment to redeploy');
@@ -181,53 +191,104 @@ async function applyAndDeploy(cf, project, vars, { log = console.log, wait = wai
     const d = inflight[0];
     throw new Error(`refused: ${inflight.length} production deployment(s) still building (${d.id}, commit ${deployCommit(d) || '?'}, ${d.latest_stage && d.latest_stage.name}/${d.latest_stage && d.latest_stage.status}) — wait for them, then re-run`);
   }
-  const liveCommit = deployCommit(live);
-  const previous = rollbackFragment(vars, prodEnv);
+  return { live, liveCommit: deployCommit(live), planned: snapshotOf(vars, env) };
+}
+
+// Restore only what this run wrote and that still holds our value — a key
+// someone changed meanwhile (an emergency revoke, say) is left alone and
+// reported, never overwritten with a stale snapshot.
+async function restoreOurs(cf, project, vars, previous, log, why) {
+  log(`ROLLING BACK env (${why})`);
+  const current = prodEnvOf(await cf(`/${project}`));
+  const restore = {};
+  const conflicts = [];
+  for (const [k, v] of Object.entries(vars)) {
+    const cur = current[k] ? current[k].value : undefined;
+    if (cur === v) restore[k] = previous[k];
+    else if (cur === previous[k]?.value || (cur === undefined && previous[k] === null)) log(`${k} already at its previous value — nothing to restore`);
+    else conflicts.push(`${k} (now ${cur === undefined ? 'absent' : 'changed by someone else'})`);
+  }
+  if (Object.keys(restore).length) {
+    await cf(`/${project}`, { method: 'PATCH', body: JSON.stringify({ deployment_configs: { production: { env_vars: restore } } }) });
+    log('env restored to previous values for:', Object.keys(restore).join(', '));
+  }
+  if (conflicts.length) log('NOT restored (changed concurrently — check by hand):', conflicts.join('; '));
+}
+
+// Phase 2 — revalidate immediately before writing, then PATCH. A PATCH whose
+// answer is lost may still have been applied, so it is undone the same
+// conditional way before the error surfaces.
+async function writeEnv(cf, project, vars, planned, log) {
+  const env = prodEnvOf(await cf(`/${project}`));
+  const drift = Object.keys(vars).filter((k) => (env[k] ? env[k].value : undefined) !== planned[k]);
+  if (drift.length) throw new Error(`refused: ${drift.join(', ')} changed since planning — re-run`);
+  const previous = rollbackFragment(vars, env);
   const env_vars = {};
   for (const [k, v] of Object.entries(vars)) env_vars[k] = { type: 'plain_text', value: v };
-  await cf(`/${project}`, { method: 'PATCH', body: JSON.stringify({ deployment_configs: { production: { env_vars } } }) });
-  log('env PATCHed; redeploying live commit', liveCommit, 'from deployment', live.id);
-  // Restore only what this run wrote and that still holds our value — a key
-  // someone changed meanwhile (an emergency revoke, say) is left alone and
-  // reported, never overwritten with a stale snapshot.
-  const rollback = async (why) => {
-    log(`ROLLING BACK env (${why})`);
-    const now = await cf(`/${project}`);
-    const current = (now.deployment_configs && now.deployment_configs.production && now.deployment_configs.production.env_vars) || {};
-    const restore = {};
-    const conflicts = [];
-    for (const [k, v] of Object.entries(vars)) {
-      const cur = current[k] ? current[k].value : undefined;
-      if (cur === v) restore[k] = previous[k];
-      else conflicts.push(`${k} (now ${cur === undefined ? 'absent' : 'changed by someone else'})`);
-    }
-    if (Object.keys(restore).length) {
-      await cf(`/${project}`, { method: 'PATCH', body: JSON.stringify({ deployment_configs: { production: { env_vars: restore } } }) });
-      log('env restored to previous values for:', Object.keys(restore).join(', '));
-    }
-    if (conflicts.length) log('NOT restored (changed concurrently — check by hand):', conflicts.join('; '));
-  };
-  let dep;
-  let created = null;
+  const patchedAt = new Date().toISOString();
   try {
-    dep = await cf(`/${project}/deployments/${live.id}/retry`, { method: 'POST' });
-    created = dep && dep.id ? dep.id : null;
-    if (liveCommit && deployCommit(dep) && deployCommit(dep) !== liveCommit) {
-      throw new Error(`new deployment ${dep.id} is on commit ${deployCommit(dep)}, not the live ${liveCommit}`);
-    }
-    log('deployment created:', dep.id, 'commit=', deployCommit(dep));
-    dep = await wait(cf, project, dep.id, { log });
+    await cf(`/${project}`, { method: 'PATCH', body: JSON.stringify({ deployment_configs: { production: { env_vars } } }) });
   } catch (e) {
-    // Never restore the env while a created deployment could still finish
-    // with the flipped values snapshotted: a terminal one is already done,
-    // the wait loop already stopped a lost/over-ceiling one, anything else
-    // (commit mismatch, retry answered but wait never started) is stopped here.
-    if (created && !e.terminal && !e.stopped) await stopDeployment(cf, project, created, log);
-    await rollback(e.message);
+    await restoreOurs(cf, project, vars, previous, log, `env PATCH failed ambiguously: ${e.message}`);
     throw e;
   }
-  log('deployment finished:', dep.id, dep.latest_stage && dep.latest_stage.status, 'url=', dep.url);
+  log('env PATCHed');
+  return { previous, patchedAt };
+}
+
+// Phase 3 — retry the LIVE deployment. A lost answer may still have created
+// one: reconcile from the production list and stop anything in flight.
+async function redeployLive(cf, project, live, liveCommit, log) {
+  let dep;
+  try {
+    dep = await cf(`/${project}/deployments/${live.id}/retry`, { method: 'POST' });
+  } catch (e) {
+    const strays = await activeProductionDeployments(cf, project, live.id).catch(() => []);
+    for (const d of strays) await stopDeployment(cf, project, d.id, log);
+    throw new Error(`retry failed ambiguously (${e.message}); stopped ${strays.length} in-flight production deployment(s) best-effort — VERIFY in the Cloudflare dashboard`);
+  }
+  if (liveCommit && deployCommit(dep) && deployCommit(dep) !== liveCommit) {
+    await stopDeployment(cf, project, dep.id, log);
+    const err = new Error(`new deployment ${dep.id} is on commit ${deployCommit(dep)}, not the live ${liveCommit}`);
+    err.stopped = true;
+    throw err;
+  }
+  log('deployment created:', dep.id, 'commit=', deployCommit(dep), 'from live', live.id);
   return dep;
+}
+
+// Production deployments other than ours created after the env change: they
+// snapshotted the flipped values and a rollback cannot undo that.
+async function deploymentsSince(cf, project, sinceIso, excludeIds) {
+  const rows = (await cf(`/${project}/deployments?env=production&page=1&per_page=25`)) || [];
+  return rows.filter((d) => !excludeIds.includes(d.id) && (d.environment || 'production') === 'production' && d.created_on && d.created_on >= sinceIso);
+}
+
+// Apply vars, redeploy the live commit, and undo the env change on any
+// failure. Returns the finished deployment.
+async function applyAndDeploy(cf, project, vars, { log = console.log, wait = waitForDeployment } = {}) {
+  const plan = await planFlip(cf, project, vars);
+  const { previous, patchedAt } = await writeEnv(cf, project, vars, plan.planned, log);
+  let created = null;
+  try {
+    const dep = await redeployLive(cf, project, plan.live, plan.liveCommit, log);
+    created = dep.id;
+    const done = await wait(cf, project, dep.id, { log });
+    log('deployment finished:', done.id, done.latest_stage && done.latest_stage.status, 'url=', done.url);
+    return done;
+  } catch (e) {
+    // Never restore the env while a deployment could still finish with the
+    // flipped values snapshotted: a terminal one is done, the wait loop already
+    // stopped a lost/over-ceiling one, redeployLive stopped its own strays.
+    if (created && !e.terminal && !e.stopped) await stopDeployment(cf, project, created, log);
+    const others = await deploymentsSince(cf, project, patchedAt, [created, plan.live.id]).catch(() => []);
+    for (const d of others) {
+      log(`WARNING: production deployment ${d.id} (commit ${deployCommit(d) || '?'}, ${d.latest_stage && d.latest_stage.name}/${d.latest_stage && d.latest_stage.status}) started after the env change and carries the flipped values — verify or roll it back in the Cloudflare dashboard`);
+    }
+    await restoreOurs(cf, project, vars, previous, log, e.message);
+    if (others.length) e.message += ` — and ${others.length} other production deployment(s) started after the env change carry the flipped values (see log)`;
+    throw e;
+  }
 }
 
 async function main(argv, env) {
@@ -243,7 +304,7 @@ async function main(argv, env) {
   if (!project) return;
 
   const p = await cf(`/${project}`);
-  const prodEnv = (p.deployment_configs && p.deployment_configs.production && p.deployment_configs.production.env_vars) || {};
+  const prodEnv = prodEnvOf(p);
   console.log(`\n${p.name} production env keys:`, Object.keys(prodEnv).sort().join(', '));
   const live = p.canonical_deployment || p.latest_deployment;
   console.log('live prod deploy:', live && live.id, live && live.latest_stage && live.latest_stage.status, deployCommit(live));
@@ -257,7 +318,7 @@ async function main(argv, env) {
   await applyAndDeploy(cf, project, vars);
 }
 
-module.exports = { makeClient, refusalReason, rollbackFragment, waitForDeployment, applyAndDeploy, deployCommit, isInProgress, stopDeployment, activeProductionDeployments };
+module.exports = { makeClient, refusalReason, rollbackFragment, waitForDeployment, applyAndDeploy, deployCommit, isInProgress, stopDeployment, activeProductionDeployments, planFlip, writeEnv, redeployLive, restoreOurs, deploymentsSince };
 
 if (require.main === module) {
   main(process.argv.slice(2), process.env).catch((e) => { console.error('ERROR', e.message); process.exit(1); });

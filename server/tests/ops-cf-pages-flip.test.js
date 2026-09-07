@@ -6,31 +6,42 @@
  * followed to a TERMINAL state (soft timeout only warns; hard ceiling deletes
  * best-effort + tells the operator to verify), and the env change is rolled
  * back when the deployment cannot be created, lands on another commit, or
- * fails — never while it is still running. Cloudflare is a fake fetch.
+ * fails — never while it is still running; a lost PATCH or retry answer is
+ * reconciled (conditional undo / stray deployment stopped), the env is
+ * revalidated right before the write, and deployments that start during the
+ * wait are named in the failure. Cloudflare is a fake fetch.
  */
 const path = require('path');
 const flip = require(path.resolve(__dirname, '../../ops/agents/cf-pages-flip.js'));
 
-function fakeCloudflare({ liveCommit = 'abc123', retryCommit = 'abc123', retryFails = false, finalStatus = 'success', statuses = null, newerBuilding = false, newerSkipped = false, hiddenProdBuild = false, concurrentEdit = null } = {}) {
+function fakeCloudflare({ liveCommit = 'abc123', retryCommit = 'abc123', retryFails = false, retryThrows = false, patchThrows = false, driftBeforeWrite = null, lateDeployment = false, finalStatus = 'success', statuses = null, newerBuilding = false, newerSkipped = false, hiddenProdBuild = false, concurrentEdit = null } = {}) {
   const calls = [];
-  const project = {
+  // Live env state: PATCH merges into it (null deletes), exactly like Pages.
+  const env = { PUBLIC_EXISTING: { type: 'plain_text', value: 'old' }, PUBLIC_SECRETISH: { type: 'secret_text', value: 'x' } };
+  const project = () => ({
     name: 'hub', production_branch: 'main',
-    deployment_configs: { production: { env_vars: { PUBLIC_EXISTING: { type: 'plain_text', value: 'old' }, PUBLIC_SECRETISH: { type: 'secret_text', value: 'x' } } } },
-    canonical_deployment: { id: 'dep_live', latest_stage: { name: 'deploy', status: 'success' }, deployment_trigger: { metadata: { commit_hash: liveCommit } } },
+    deployment_configs: { production: { env_vars: JSON.parse(JSON.stringify(env)) } },
+    canonical_deployment: { id: 'dep_live', created_on: '2026-09-01T00:00:00Z', latest_stage: { name: 'deploy', status: 'success' }, deployment_trigger: { metadata: { commit_hash: liveCommit } } },
     latest_deployment: newerBuilding
-      ? { id: 'dep_newer', environment: 'production', latest_stage: { name: 'build', status: 'active' }, deployment_trigger: { metadata: { commit_hash: 'fff999' } } }
+      ? { id: 'dep_newer', environment: 'production', created_on: '2026-09-07T00:00:00Z', latest_stage: { name: 'build', status: 'active' }, deployment_trigger: { metadata: { commit_hash: 'fff999' } } }
       : newerSkipped
-        ? { id: 'dep_skipped', environment: 'production', latest_stage: { name: 'build', status: 'skipped' }, deployment_trigger: { metadata: { commit_hash: 'eee888' } } }
-        : { id: 'dep_live', environment: 'production', latest_stage: { name: 'deploy', status: 'success' }, deployment_trigger: { metadata: { commit_hash: liveCommit } } },
-  };
+        ? { id: 'dep_skipped', environment: 'production', created_on: '2026-09-07T00:00:00Z', latest_stage: { name: 'build', status: 'skipped' }, deployment_trigger: { metadata: { commit_hash: 'eee888' } } }
+        : { id: 'dep_live', environment: 'production', created_on: '2026-09-01T00:00:00Z', latest_stage: { name: 'deploy', status: 'success' }, deployment_trigger: { metadata: { commit_hash: liveCommit } } },
+  });
   let polls = 0;
+  let gets = 0;
   let patched = 0;
+  let retried = false;
   const listRows = () => {
+    const p = project();
     const rows = [];
-    if (hiddenProdBuild) rows.push({ id: 'dep_preview', environment: 'preview', latest_stage: { name: 'deploy', status: 'success' } }, { id: 'dep_hidden', environment: 'production', latest_stage: { name: 'build', status: 'active' }, deployment_trigger: { metadata: { commit_hash: 'ddd777' } } });
-    if (newerBuilding) rows.push(project.latest_deployment);
-    if (newerSkipped) rows.push(project.latest_deployment);
-    rows.push(project.canonical_deployment);
+    if (hiddenProdBuild) rows.push({ id: 'dep_preview', environment: 'preview', created_on: '2026-09-07T00:00:00Z', latest_stage: { name: 'deploy', status: 'success' } }, { id: 'dep_hidden', environment: 'production', created_on: '2026-09-07T00:00:00Z', latest_stage: { name: 'build', status: 'active' }, deployment_trigger: { metadata: { commit_hash: 'ddd777' } } });
+    if (newerBuilding || newerSkipped) rows.push(p.latest_deployment);
+    // An ambiguous retry (response lost) still created a deployment; a late
+    // unrelated deployment appears once our env is in place.
+    if (retryThrows && retried) rows.push({ id: 'dep_stray', environment: 'production', created_on: new Date(Date.now() + 1000).toISOString(), latest_stage: { name: 'build', status: 'active' }, deployment_trigger: { metadata: { commit_hash: liveCommit } } });
+    if (lateDeployment && patched) rows.push({ id: 'dep_late', environment: 'production', created_on: new Date(Date.now() + 60000).toISOString(), latest_stage: { name: 'deploy', status: 'success' }, deployment_trigger: { metadata: { commit_hash: 'ccc666' } } });
+    rows.push(p.canonical_deployment);
     return rows;
   };
   const fetchImpl = async (url, init = {}) => {
@@ -39,34 +50,36 @@ function fakeCloudflare({ liveCommit = 'abc123', retryCommit = 'abc123', retryFa
     calls.push({ method, p, body: init.body ? JSON.parse(init.body) : undefined });
     const ok = (result) => ({ json: async () => ({ success: true, result }) });
     if (method === 'GET' && p === '/hub') {
-      // After our PATCH, the project reflects what was written — unless a
-      // concurrent edit is being simulated for the rollback read.
-      if (patched && concurrentEdit) {
-        const env = { ...project.deployment_configs.production.env_vars, ...JSON.parse(JSON.stringify(calls.filter((c) => c.method === 'PATCH')[0].body.deployment_configs.production.env_vars)), ...concurrentEdit };
-        return ok({ ...project, deployment_configs: { production: { env_vars: env } } });
-      }
-      if (patched) {
-        const env = { ...project.deployment_configs.production.env_vars, ...calls.filter((c) => c.method === 'PATCH')[0].body.deployment_configs.production.env_vars };
-        return ok({ ...project, deployment_configs: { production: { env_vars: env } } });
-      }
-      return ok(project);
+      gets += 1;
+      // Drift: someone edits a key between the planning read and the write-time read.
+      if (driftBeforeWrite && gets === 2) Object.assign(env, driftBeforeWrite);
+      // A concurrent edit lands after our PATCH, before the rollback read.
+      if (concurrentEdit && patched && gets >= 3) Object.assign(env, concurrentEdit);
+      return ok(project());
     }
     if (method === 'GET' && p.startsWith('/hub/deployments?env=production')) return ok(listRows());
-    if (method === 'PATCH' && p === '/hub') { patched += 1; return ok(project); }
+    if (method === 'PATCH' && p === '/hub') {
+      patched += 1;
+      for (const [k, v] of Object.entries(init.body ? JSON.parse(init.body).deployment_configs.production.env_vars : {})) { if (v === null) delete env[k]; else env[k] = v; }
+      if (patchThrows && patched === 1) throw new Error('socket hang up');
+      return ok(project());
+    }
     if (method === 'POST' && p === '/hub/deployments/dep_live/retry') {
+      retried = true;
+      if (retryThrows) throw new Error('response lost');
       if (retryFails) return { json: async () => ({ success: false, errors: [{ message: 'retry refused' }] }) };
-      return ok({ id: 'dep_new', deployment_trigger: { metadata: { commit_hash: retryCommit } } });
+      return ok({ id: 'dep_new', created_on: new Date().toISOString(), deployment_trigger: { metadata: { commit_hash: retryCommit } } });
     }
     if (method === 'GET' && p === '/hub/deployments/dep_new') {
       const st = statuses ? statuses[Math.min(polls, statuses.length - 1)] : finalStatus;
       polls += 1;
       return ok({ id: 'dep_new', url: 'https://x', latest_stage: { name: 'deploy', status: st } });
     }
-    if (method === 'DELETE' && p.startsWith('/hub/deployments/dep_new')) return ok({});
+    if (method === 'DELETE' && p.startsWith('/hub/deployments/')) return ok({});
     return { json: async () => ({ success: false, errors: [{ message: 'unexpected ' + method + ' ' + p }] }) };
   };
   const cf = flip.makeClient({ token: 't', account: 'a', fetchImpl });
-  return { cf, calls };
+  return { cf, calls, env };
 }
 const quiet = { log: () => {} };
 const patches = (calls) => calls.filter((c) => c.method === 'PATCH').map((c) => c.body.deployment_configs.production.env_vars);
@@ -190,6 +203,38 @@ describe('applyAndDeploy', () => {
     const dels = calls.filter((c) => c.method === 'DELETE' && c.p.startsWith('/hub/deployments/dep_new'));
     expect(dels).toHaveLength(1);
     expect(calls.indexOf(dels[0])).toBeLessThan(calls.findIndex((c, i) => c.method === 'PATCH' && i > calls.findIndex((x) => x.method === 'PATCH')));
+    expect(patches(calls)[1]).toEqual({ PUBLIC_NEW: null });
+  });
+
+  test('env drifts between planning and the write → refused, no PATCH', async () => {
+    const { cf, calls } = fakeCloudflare({ driftBeforeWrite: { PUBLIC_EXISTING: { type: 'plain_text', value: 'someone-else' } } });
+    await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_EXISTING: 'new' }, quiet)).rejects.toThrow(/PUBLIC_EXISTING changed since planning/);
+    expect(patches(calls)).toEqual([]);
+  });
+
+  test('ambiguous env PATCH (answer lost but applied) → conditionally undone, error surfaces', async () => {
+    const { cf, calls, env } = fakeCloudflare({ patchThrows: true });
+    await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v', PUBLIC_EXISTING: 'new' }, quiet)).rejects.toThrow(/socket hang up/);
+    expect(patches(calls)[1]).toEqual({ PUBLIC_NEW: null, PUBLIC_EXISTING: { type: 'plain_text', value: 'old' } });
+    expect(env.PUBLIC_NEW).toBeUndefined();
+    expect(env.PUBLIC_EXISTING.value).toBe('old');
+    expect(calls.some((c) => c.method === 'POST')).toBe(false);
+  });
+
+  test('ambiguous retry (answer lost but a deployment was created) → the stray in-flight deployment is stopped, env rolled back, operator told to verify', async () => {
+    const { cf, calls } = fakeCloudflare({ retryThrows: true });
+    await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v' }, quiet)).rejects.toThrow(/retry failed ambiguously .*stopped 1 in-flight production deployment/);
+    const del = calls.findIndex((c) => c.method === 'DELETE' && c.p.startsWith('/hub/deployments/dep_stray'));
+    expect(del).toBeGreaterThan(-1);
+    expect(del).toBeLessThan(calls.findIndex((c, i) => c.method === 'PATCH' && i > calls.findIndex((x) => x.method === 'PATCH')));
+    expect(patches(calls)[1]).toEqual({ PUBLIC_NEW: null });
+  });
+
+  test('a production deployment that started during the wait is named in the failure — it carries the flipped values', async () => {
+    const logs = [];
+    const { cf, calls } = fakeCloudflare({ finalStatus: 'failure', lateDeployment: true });
+    await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v' }, { log: (...a) => logs.push(a.join(' ')), wait: (c, p, id, o) => flip.waitForDeployment(c, p, id, { ...o, pollMs: 1, sleep: async () => {} }) })).rejects.toThrow(/1 other production deployment\(s\) started after the env change/);
+    expect(logs.some((l) => /WARNING: production deployment dep_late .*carries the flipped values/.test(l))).toBe(true);
     expect(patches(calls)[1]).toEqual({ PUBLIC_NEW: null });
   });
 
