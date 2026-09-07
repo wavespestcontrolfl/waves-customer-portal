@@ -13,13 +13,16 @@
  * swallowed (the deployment is followed to a terminal state before any
  * restore, and the env stays flipped when that is impossible), a listing that
  * fails is never read as "no deployments", and a build that starts between the
- * planning check and the PATCH is caught after the write. Cloudflare is a fake
- * fetch.
+ * planning check and the PATCH is caught after the write, another operator's
+ * build that carries the flipped values is followed to its end but never
+ * deleted, a retry is only attributed to this run by live commit + time, the
+ * rollback never overwrites a concurrent retype, and a deployment whose commit
+ * cannot be resolved is refused. Cloudflare is a fake fetch.
  */
 const path = require('path');
 const flip = require(path.resolve(__dirname, '../../ops/agents/cf-pages-flip.js'));
 
-function fakeCloudflare({ liveCommit = 'abc123', retryCommit = 'abc123', retryFails = false, retryThrows = false, patchThrows = false, driftBeforeWrite = null, lateDeployment = false, finalStatus = 'success', statuses = null, newerBuilding = false, newerSkipped = false, hiddenProdBuild = false, concurrentEdit = null, deleteFails = false, listFailures = 0, buildAfterPlan = false, staleAfterSuccess = false } = {}) {
+function fakeCloudflare({ liveCommit = 'abc123', retryCommit = 'abc123', retryFails = false, retryThrows = false, patchThrows = false, driftBeforeWrite = null, lateDeployment = false, finalStatus = 'success', statuses = null, newerBuilding = false, newerSkipped = false, hiddenProdBuild = false, concurrentEdit = null, deleteFails = false, listFailures = 0, buildAfterPlan = false, staleAfterSuccess = false, foreignDuringRetry = false, otherStatuses = {} } = {}) {
   const calls = [];
   // Live env state: PATCH merges into it (null deletes), exactly like Pages.
   const env = { PUBLIC_EXISTING: { type: 'plain_text', value: 'old' }, PUBLIC_SECRETISH: { type: 'secret_text', value: 'x' } };
@@ -39,6 +42,8 @@ function fakeCloudflare({ liveCommit = 'abc123', retryCommit = 'abc123', retryFa
   let retried = false;
   let listCalls = 0;
   let listFailed = 0;
+  const deleted = new Set();
+  const otherPolls = {};
   const listRows = () => {
     const p = project();
     const rows = [];
@@ -46,14 +51,18 @@ function fakeCloudflare({ liveCommit = 'abc123', retryCommit = 'abc123', retryFa
     if (newerBuilding || newerSkipped) rows.push(p.latest_deployment);
     // An ambiguous retry (response lost) still created a deployment; a late
     // unrelated deployment appears once our env is in place.
+    // A build on ANOTHER commit that starts while the retry is in flight is
+    // some other operator's release.
+    if (foreignDuringRetry && retried) rows.push({ id: 'dep_foreign', environment: 'production', created_on: new Date(Date.now() + 1000).toISOString(), latest_stage: { name: 'build', status: 'active' }, deployment_trigger: { metadata: { commit_hash: 'zzz111' } } });
     if (retryThrows && retried) rows.push({ id: 'dep_stray', environment: 'production', created_on: new Date(Date.now() + 1000).toISOString(), latest_stage: { name: 'build', status: 'active' }, deployment_trigger: { metadata: { commit_hash: liveCommit } } });
     // A build that started between the planning check and the PATCH (it holds
     // the OLD env): visible only once the env has been written; on the
     // success-path variant only once our deployment has been polled.
     if ((buildAfterPlan && patched) || (staleAfterSuccess && polls)) rows.push({ id: 'dep_between', environment: 'production', created_on: '2026-09-07T00:00:00Z', latest_stage: { name: 'build', status: 'active' }, deployment_trigger: { metadata: { commit_hash: 'bbb555' } } });
-    if (lateDeployment && patched) rows.push({ id: 'dep_late', environment: 'production', created_on: new Date(Date.now() + 60000).toISOString(), latest_stage: { name: 'deploy', status: 'success' }, deployment_trigger: { metadata: { commit_hash: 'ccc666' } } });
+    if (lateDeployment && patched) rows.push({ id: 'dep_late', environment: 'production', created_on: new Date(Date.now() + 60000).toISOString(), latest_stage: lateDeployment === 'active' ? { name: 'build', status: 'active' } : { name: 'deploy', status: 'success' }, deployment_trigger: { metadata: { commit_hash: 'ccc666' } } });
     rows.push(p.canonical_deployment);
-    return rows;
+    // A force-deleted deployment is gone from the list, as on Pages.
+    return rows.filter((d) => !deleted.has(d.id));
   };
   const fetchImpl = async (url, init = {}) => {
     const method = init.method || 'GET';
@@ -91,7 +100,19 @@ function fakeCloudflare({ liveCommit = 'abc123', retryCommit = 'abc123', retryFa
       polls += 1;
       return ok({ id: 'dep_new', url: 'https://x', latest_stage: { name: 'deploy', status: st } });
     }
-    if (method === 'DELETE' && p.startsWith('/hub/deployments/')) return deleteFails ? { json: async () => ({ success: false, errors: [{ message: 'cannot delete an active deployment' }] }) } : ok({});
+    // Other deployments can be followed only when the test says how they end.
+    const other = /^\/hub\/deployments\/(dep_[a-z]+)$/.exec(p);
+    if (method === 'GET' && other && otherStatuses[other[1]]) {
+      const seq = otherStatuses[other[1]];
+      const n = otherPolls[other[1]] || 0;
+      otherPolls[other[1]] = n + 1;
+      return ok({ id: other[1], latest_stage: { name: 'deploy', status: seq[Math.min(n, seq.length - 1)] } });
+    }
+    if (method === 'DELETE' && p.startsWith('/hub/deployments/')) {
+      if (deleteFails) return { json: async () => ({ success: false, errors: [{ message: 'cannot delete an active deployment' }] }) };
+      deleted.add(p.replace('/hub/deployments/', '').replace('?force=true', ''));
+      return ok({});
+    }
     return { json: async () => ({ success: false, errors: [{ message: 'unexpected ' + method + ' ' + p }] }) };
   };
   const cf = flip.makeClient({ token: 't', account: 'a', fetchImpl });
@@ -242,7 +263,7 @@ describe('applyAndDeploy', () => {
 
   test('ambiguous retry (answer lost but a deployment was created) → the stray in-flight deployment is stopped, env rolled back, operator told to verify', async () => {
     const { cf, calls } = fakeCloudflare({ retryThrows: true });
-    await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v' }, quiet)).rejects.toThrow(/retry failed ambiguously .*1 in-flight production deployment\(s\) settled/);
+    await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v' }, quiet)).rejects.toThrow(/retry failed ambiguously .*1 in-flight production deployment\(s\) of this run settled/);
     const del = calls.findIndex((c) => c.method === 'DELETE' && c.p.startsWith('/hub/deployments/dep_stray'));
     expect(del).toBeGreaterThan(-1);
     expect(del).toBeLessThan(calls.findIndex((c, i) => c.method === 'PATCH' && i > calls.findIndex((x) => x.method === 'PATCH')));
@@ -288,7 +309,7 @@ describe('applyAndDeploy', () => {
 
   test('ambiguous retry: a reconciliation list that fails once is retried; one that keeps failing leaves the env flipped instead of reading as "no deployments"', async () => {
     const once = fakeCloudflare({ retryThrows: true, listFailures: 1 });
-    await expect(flip.applyAndDeploy(once.cf, 'hub', { PUBLIC_NEW: 'v' }, quiet)).rejects.toThrow(/1 in-flight production deployment\(s\) settled/);
+    await expect(flip.applyAndDeploy(once.cf, 'hub', { PUBLIC_NEW: 'v' }, quiet)).rejects.toThrow(/1 in-flight production deployment\(s\) of this run settled/);
     expect(once.calls.some((c) => c.method === 'DELETE' && c.p.startsWith('/hub/deployments/dep_stray'))).toBe(true);
     expect(patches(once.calls)[1]).toEqual({ PUBLIC_NEW: null });
     const always = fakeCloudflare({ retryThrows: true, listFailures: 99 });
@@ -319,6 +340,53 @@ describe('applyAndDeploy', () => {
     const dep = await flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v' }, { ...capture(logs), wait: (c, p, id, o) => flip.waitForDeployment(c, p, id, { ...o, pollMs: 1, sleep: async () => {} }) });
     expect(dep.id).toBe('dep_new');
     expect(logs.some((l) => /dep_between .*started BEFORE the env change .*OLD values/.test(l))).toBe(true);
+  });
+
+  test("another operator's build that started after the env change is followed to its end — never deleted — before the rollback; an unobservable one leaves the env flipped", async () => {
+    const logs = [];
+    const drained = fakeCloudflare({ finalStatus: 'failure', lateDeployment: 'active', otherStatuses: { dep_late: ['active', 'failure'] } });
+    await expect(flip.applyAndDeploy(drained.cf, 'hub', { PUBLIC_NEW: 'v' }, { ...capture(logs), wait: (c, p, id, o) => flip.waitForDeployment(c, p, id, { ...o, ...fastPoll }) })).rejects.toThrow(/1 other production deployment\(s\) started after the env change/);
+    expect(drained.calls.some((c) => c.method === 'DELETE' && c.p.includes('dep_late'))).toBe(false);
+    const lastFollow = drained.calls.map((c, i) => (c.method === 'GET' && c.p === '/hub/deployments/dep_late' ? i : -1)).filter((i) => i >= 0).pop();
+    expect(lastFollow).toBeGreaterThan(-1);
+    expect(lastFollow).toBeLessThan(rollbackIndex(drained.calls));
+    expect(patches(drained.calls)[1]).toEqual({ PUBLIC_NEW: null });
+    // Same build, but it cannot be followed → env stays flipped.
+    const dark = fakeCloudflare({ finalStatus: 'failure', lateDeployment: 'active' });
+    await expect(flip.applyAndDeploy(dark.cf, 'hub', { PUBLIC_NEW: 'v' }, { ...quiet, wait: (c, p, id, o) => flip.waitForDeployment(c, p, id, { ...o, ...fastPoll }) })).rejects.toThrow(/env NOT rolled back/);
+    expect(patches(dark.calls)).toHaveLength(1);
+    expect(dark.calls.some((c) => c.method === 'DELETE' && c.p.includes('dep_late'))).toBe(false);
+  });
+
+  test('ambiguous retry: only a deployment on the live commit created after our write is this run\'s — a concurrent build on another commit is never deleted', async () => {
+    const logs = [];
+    const { cf, calls } = fakeCloudflare({ retryThrows: true, foreignDuringRetry: true, otherStatuses: { dep_foreign: ['active', 'canceled'] } });
+    await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v' }, capture(logs))).rejects.toThrow(/1 in-flight production deployment\(s\) of this run settled/);
+    expect(calls.filter((c) => c.method === 'DELETE').map((c) => c.p)).toEqual(['/hub/deployments/dep_stray?force=true']);
+    expect(logs.some((l) => /dep_foreign .*not this run's retry — left alone/.test(l))).toBe(true);
+    // …and it is drained (followed to its end) before the env is restored.
+    expect(calls.some((c) => c.method === 'GET' && c.p === '/hub/deployments/dep_foreign')).toBe(true);
+    expect(patches(calls)[1]).toEqual({ PUBLIC_NEW: null });
+  });
+
+  test('a target retyped to secret_text with the same value during the wait is left alone by the rollback', async () => {
+    const logs = [];
+    const { cf, calls } = fakeCloudflare({ retryFails: true, concurrentEdit: { PUBLIC_NEW: { type: 'secret_text', value: 'v' } } });
+    await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v', PUBLIC_EXISTING: 'new' }, capture(logs))).rejects.toThrow(/retry refused/);
+    expect(patches(calls)[1]).toEqual({ PUBLIC_EXISTING: { type: 'plain_text', value: 'old' } });
+    expect(logs.some((l) => /NOT restored .*PUBLIC_NEW \(now secret_text — retyped by someone else\)/.test(l))).toBe(true);
+  });
+
+  test('a deployment whose commit cannot be resolved is refused (live at planning, the retry after creation); alternate payload shapes resolve', async () => {
+    const noLive = fakeCloudflare({ liveCommit: null });
+    await expect(flip.applyAndDeploy(noLive.cf, 'hub', { PUBLIC_NEW: 'v' }, quiet)).rejects.toThrow(/refused: live deployment dep_live carries no resolvable commit/);
+    expect(patches(noLive.calls)).toEqual([]);
+    const noRetry = fakeCloudflare({ retryCommit: null });
+    await expect(flip.applyAndDeploy(noRetry.cf, 'hub', { PUBLIC_NEW: 'v' }, quiet)).rejects.toThrow(/dep_new carries no resolvable commit/);
+    expect(noRetry.calls.some((c) => c.method === 'DELETE' && c.p.startsWith('/hub/deployments/dep_new'))).toBe(true);
+    expect(patches(noRetry.calls)[1]).toEqual({ PUBLIC_NEW: null });
+    expect(flip.deployCommit({ source: { config: { commit_hash: 'abc' } } })).toBe('abc');
+    expect(flip.deployCommit({ deployment_trigger: { metadata: {} } })).toBeNull();
   });
 
   test('refusal happens before any write', async () => {
