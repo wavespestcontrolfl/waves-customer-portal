@@ -193,6 +193,28 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalled();
   });
 
+  test('an SMS proposal retires the extraction phase\'s pending sibling for the same field', async () => {
+    const sibling = (scope_id, field) => ({ rule_id: `extract.${field}`, rule_version: '1', resource_type: 'property_preferences',
+      scope_type: 'customer', scope_id, field, source: 'message-extraction', proposed_value: JSON.stringify('dogs in the yard'),
+      confidence: 0.82, tier: 'medium', is_sensitive: true, status: 'pending', idempotency_key: randomUUID(),
+      evidence: JSON.stringify({ evidence_source_type: 'message', evidence_source_id: randomUUID() }) });
+    const otherCustomer = randomUUID();
+    await mockPg('customers').insert({ id: otherCustomer, first_name: 'Other', last_name: 'Fixture',
+      phone: '+12025550199', address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236' });
+    await mockPg('data_hygiene_proposals').insert([
+      sibling(message.customer_id, 'pet_details'), sibling(message.customer_id, 'parking_notes'), sibling(otherCustomer, 'pet_details'),
+    ]);
+    const quote = 'Two friendly dogs in the yard.';
+    message.message_body = quote;
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: quote });
+    result.facts = [{ field: 'pet_details', quote, value: quote, property_id: context.properties[0].id, duration: 'durable' }];
+    await recordMessageOperations(mockPg, message, result, context);
+    const rows = await mockPg('data_hygiene_proposals').select('scope_id', 'field', 'status', 'rule_id').orderBy(['field', 'rule_id']);
+    expect(rows.filter((row) => row.scope_id === message.customer_id && row.field === 'pet_details').map((row) => [row.rule_id, row.status]))
+      .toEqual([['extract.pet_details', 'stale'], ['extract.sms_profile', 'pending']]);
+    expect(rows.filter((row) => row.status === 'pending')).toHaveLength(3);
+  });
+
   test('a stated pet becomes a pending proposal instead of a direct write', async () => {
     const quote = 'Two friendly dogs in the yard.';
     message.message_body = quote;

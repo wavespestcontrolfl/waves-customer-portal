@@ -1,4 +1,5 @@
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue, revertPropertyPreferenceCompanions, valuesEqual } = require('../services/data-hygiene/property-preferences');
+const { stalePendingExtractionProposals } = require('../services/data-hygiene/proposal-store');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -336,6 +337,10 @@ router.post('/proposals/:id/approve', async (req, res, next) => {
           ...(companionsBefore ? { evidence: JSON.stringify({ ...(proposal.evidence || {}), companions_before: companionsBefore }) } : {}),
         })
         .returning('*');
+      // A sibling proposal for the same field (the extraction phase and the
+      // SMS lane can each propose one message) would now fail its
+      // before-value check; retire it instead of leaving it pending.
+      await stalePendingExtractionProposals({ trx, scope_id: proposal.scope_id, field: proposal.field });
 
       return updatedProposal;
     });

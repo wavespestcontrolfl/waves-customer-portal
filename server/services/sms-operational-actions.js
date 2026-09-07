@@ -104,6 +104,11 @@ function factVerdict(fact, { properties, current = {}, expectedCurrent = current
 // route the data-hygiene extraction phase uses (create-on-apply when the
 // customer has no preferences row yet).
 async function proposeFact(trx, message, fact, current) {
+  // The same SMS is also dual-written to the unified inbox, where the admin
+  // extraction phase may already have proposed this field from a regex
+  // fragment. The customer's latest whole message supersedes it: retire any
+  // pending sibling first so the queue holds one entry per field.
+  await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field });
   const proposal = await upsertSensitiveProposal({
     rule_id: 'extract.sms_profile', rule_version: VERSION, resource_type: 'property_preferences',
     resource_id: current?.id || null, scope_type: 'customer', scope_id: message.customer_id, field: fact.field,
