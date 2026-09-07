@@ -6,6 +6,7 @@ const timeTracking = require('../services/time-tracking');
 const PushService = require('../services/push-notifications');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { isEmploymentStatus, employmentPatch, isAssignable } = require('../services/technician-eligibility');
+const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const {
   listCapabilities,
   normalizeCapabilityEntries,
@@ -69,7 +70,7 @@ router.use(adminAuthenticate);
 const TECH_ROSTER_RESPONSE_FIELDS = [
   'id', 'name', 'phone', 'email', 'role',
   'active', 'employment_status', 'field_dispatchable', 'auto_flip_enabled',
-  'avatar_url', 'capability_summary',
+  'twilio_number', 'avatar_url', 'capability_summary',
   'created_at', 'updated_at',
 ];
 
@@ -646,6 +647,45 @@ async function deactivationBlocker(trx, target, actorId) {
 // SSN-4, emergency contact). Pre-existing route protection was
 // requireTechOrAdmin; tightening to requireAdmin since we widened
 // the body shape.
+// Team-tab tech line input (Field Team Program, Phase 0 item 3): '' / null
+// clears the line; anything else must be a registry `fieldTech` number. The
+// holder check runs under the technicians table lock; the partial unique
+// index (technicians_twilio_number_unique) is the DB fence behind it.
+const TECH_LINE_TAKEN = { error: 'That tech line is already assigned to another technician', code: 'TECH_LINE_TAKEN' };
+const EMAIL_IN_USE = { error: 'Email already in use' };
+// Transaction outcomes the two writers answer with a 409, in check order.
+const TECH_WRITE_CONFLICTS = { conflict: EMAIL_IN_USE, lineTaken: TECH_LINE_TAKEN };
+
+// Returns { error } or { patch } — patch is {} when the field was omitted,
+// { twilio_number: null } to clear, { twilio_number } for a registry line.
+function normalizeTechLine(raw) {
+  if (raw === undefined) return { patch: {} };
+  if (raw === null || raw === '') return { patch: { twilio_number: null } };
+  if (typeof raw !== 'string' || !TWILIO_NUMBERS.fieldTech.some((t) => t.number === raw)) {
+    return { error: 'twilioNumber must be one of the registered tech lines' };
+  }
+  return { patch: { twilio_number: raw } };
+}
+
+async function techLineHeldByAnother(trx, number, excludeId) {
+  if (!number) return false;
+  const q = trx('technicians').where({ twilio_number: number });
+  if (excludeId) q.whereNot({ id: excludeId });
+  return Boolean(await q.first('id'));
+}
+
+function conflictResponse(res, outcome) {
+  const key = Object.keys(TECH_WRITE_CONFLICTS).find((k) => outcome[k]);
+  return key ? res.status(409).json(TECH_WRITE_CONFLICTS[key]) : null;
+}
+
+// The DB fences behind the in-transaction checks (email canonical index,
+// technicians_twilio_number_unique) map to the same two 409 bodies.
+function uniqueViolationBody(err) {
+  if (err.code !== '23505') return null;
+  return err.constraint === 'technicians_twilio_number_unique' ? TECH_LINE_TAKEN : EMAIL_IN_USE;
+}
+
 async function createTechnician(req, res, next) {
   try {
     const body = req.body || {};
@@ -668,6 +708,8 @@ async function createTechnician(req, res, next) {
     if (!normalizedEmail.value && status === 'active') {
       return res.status(400).json({ error: 'An active technician requires a valid staff email' });
     }
+    const techLine = normalizeTechLine(body.twilioNumber);
+    if (techLine.error) return res.status(400).json({ error: techLine.error });
 
     const insertRow = {
       name: name.trim(),
@@ -685,6 +727,7 @@ async function createTechnician(req, res, next) {
     // the tech out. Falsy explicit value → false; undefined → leave
     // it to the column DEFAULT.
     if (autoFlipEnabled !== undefined) insertRow.auto_flip_enabled = !!autoFlipEnabled;
+    Object.assign(insertRow, techLine.patch);
     applyPayrollProfileFields(insertRow, body);
 
     const outcome = await db.transaction(async (trx) => {
@@ -692,13 +735,15 @@ async function createTechnician(req, res, next) {
       if (insertRow.email && await findTechnicianByCanonicalEmail(trx, insertRow.email)) {
         return { conflict: true };
       }
+      if (await techLineHeldByAnother(trx, insertRow.twilio_number)) return { lineTaken: true };
       const [tech] = await trx('technicians').insert(insertRow).returning('*');
       // Every hire starts able to take every service, pending review — the
       // Team tab's Capabilities editor is where a category becomes Qualified.
       await seedNewHireCapabilities(trx, tech.id);
       return { tech };
     });
-    if (outcome.conflict) return res.status(409).json({ error: 'Email already in use' });
+    const rejected = conflictResponse(res, outcome);
+    if (rejected) return rejected;
 
     const { tech } = outcome;
     // Log id + structural state only; the row now carries payroll/PII
@@ -706,7 +751,8 @@ async function createTechnician(req, res, next) {
     logger.info(`[team] Added technician id=${tech.id} (employment_status=${tech.employment_status}, field_dispatchable=${tech.field_dispatchable}, auto_flip_enabled=${tech.auto_flip_enabled})`);
     return res.json({ success: true, technician: sanitizeTechForAdmin(tech) });
   } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: 'Email already in use' });
+    const dup = uniqueViolationBody(err);
+    if (dup) return res.status(409).json(dup);
     return next(err);
   }
 }
@@ -742,6 +788,8 @@ async function updateTechnician(req, res, next) {
     const active = requestedStatus === undefined ? undefined : requestedStatus === 'active';
     const normalizedEmail = normalizeTechnicianEmail(email);
     if (normalizedEmail.error) return res.status(400).json({ error: normalizedEmail.error });
+    const techLine = normalizeTechLine(body.twilioNumber);
+    if (techLine.error) return res.status(400).json({ error: techLine.error });
 
     const outcome = await db.transaction(async (trx) => {
       // Every Staff identity writer takes the table lock before a row lock.
@@ -752,6 +800,7 @@ async function updateTechnician(req, res, next) {
         .forUpdate()
         .first();
       if (!target) return { notFound: true };
+      if (await techLineHeldByAnother(trx, techLine.patch.twilio_number, target.id)) return { lineTaken: true };
 
       const storedEmail = canonicalStaffEmail(target.email);
       const resultingEmail = email === undefined ? storedEmail : normalizedEmail.value;
@@ -787,6 +836,7 @@ async function updateTechnician(req, res, next) {
       if (email !== undefined) updates.email = normalizedEmail.value;
       if (requestedStatus !== undefined) Object.assign(updates, employmentPatch(requestedStatus));
       if (fieldDispatchable !== undefined) updates.field_dispatchable = fieldDispatchable;
+      Object.assign(updates, techLine.patch);
 
       // Any transition that leaves `active` (→ inactive OR → prospective)
       // revokes sessions; entering active from prospective also rotates so a
@@ -838,7 +888,8 @@ async function updateTechnician(req, res, next) {
         code: 'ACTIVE_TIME_ENTRIES',
       });
     }
-    if (outcome.conflict) return res.status(409).json({ error: 'Email already in use' });
+    const rejected = conflictResponse(res, outcome);
+    if (rejected) return rejected;
     if (outcome.renameLocked) {
       return res.status(409).json({
         error: 'This staff record already has service, time, or payout history and cannot be renamed. Add the new hire as a separate record.',
@@ -857,7 +908,8 @@ async function updateTechnician(req, res, next) {
       futureAssignedVisits: formatFutureAssignedVisits(outcome.futureAssignedVisits),
     });
   } catch (err) {
-    if (err.code === '23505') return res.status(409).json({ error: 'Email already in use' });
+    const dup = uniqueViolationBody(err);
+    if (dup) return res.status(409).json(dup);
     return next(err);
   }
 }

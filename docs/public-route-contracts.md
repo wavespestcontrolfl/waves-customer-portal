@@ -106,6 +106,8 @@ is omitted and that leg stays live. The PDF filename and the canonical lawn
 pin read the same overlaid row. Presentation (technician photo URL, copy
 config) and the deliberately live sections (next visit, review CTA,
 cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`.
+Under `GATE_LAWN_PROPERTY_HISTORY`, lawn trends, initial scores and before/after comparisons use the visit property’s confirmed assessments, one installed result per visit, bounded by the report visit date and applicable baseline-reset window. Mowing and water-gap histories use the same proven visit eligibility. Payload keys stay unchanged; `assessmentDate` and trend dates use visit dates, including the seasonal calculation and water-gap history cutoff. Frozen weather remains keyed to the assessment run date. The PDF signature includes the resolved history identity. The existing opaque `asig` may carry a signed `h1.<history fingerprint>.<HMAC>` envelope: the data route verifies it and refuses a changed history or a disabled gate with the existing generic 409 pin refusal. Legacy signatures remain accepted; token, eligibility, privacy and rate-limit guards remain in force.
+Confirmed assessment property stamps remain eligible after another property is added, subject to ownership and conflicting visit/address checks; unstamped assessment and ancillary histories still require the live sole-property/no-move fallback. Unresolved property scope retains only the report visit’s installed assessment (or its valid signed pin), without prior-property comparisons. An empty same-day baseline reset excludes confirmations preceding the reset from the active window; reports for those earlier confirmations retain their historical window.
 The lawn assessment payload also carries `droughtStress` (`none`, `minor`,
 `moderate`, `severe`, or `null`) from the linked, tech-confirmed assessment's
 stored `composite_scores.drought_stress`. Missing or invalid historical
@@ -394,15 +396,18 @@ models or customer copy. Privacy headers on all responses.)
 tokens and archived/merged customers, 60 req/min per-IP read limit on top of
 the global /api limiter, `Cache-Control: private, no-store`; payload is a
 strict whitelist — customer FIRST NAME + member-since year +
-has_left_google_review flag only, tech name + presigned photo, office
-phone, the tracked /l review short-link, and the customer's referral link
+has_left_google_review flag only, tech name + presigned photo, the
+office phone — or, with GATE_TECH_LINES on and the card's tech holding a
+registry tech line (`technicians.twilio_number`), that tech line —, the
+tracked /l review short-link, and the customer's referral link
 (share never exposes the card token) — no address, email, or phone PII;
 the SPA shell `/card/:token` carries the same noindex/no-referrer/no-store
 headers via sensitive-spa-headers.js),
 `/api/card/:token/contact.vcf` (read-only Save-contact vCard; same 64-hex
 token gate + archived-customer 404 + rate limit + `no-store`; contents are
-COMPANY-ONLY — tech name/title, office line, company email/site/address,
-license line — never customer data),
+COMPANY-ONLY — tech name/title, office line (or the tech's own line under
+the same GATE_TECH_LINES condition as the JSON payload), company
+email/site/address, license line — never customer data),
 `/api/card/:token/wallet.pkpass` (read-only signed Apple Wallet pass; same
 64-hex token gate + archived-customer 404 + per-route rate limit +
 `no-store`; 404s whenever the PASS_* signing env vars are unset (config

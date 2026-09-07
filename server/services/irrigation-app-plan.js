@@ -54,11 +54,15 @@ async function loadCustomerWateringPlan(customerId, { now = new Date(), customer
     sentAt: new Date(snapshot.sentAt).toISOString(),
     action: snapshot.plan.action,
     conditionalOnForecast: snapshot.plan.conditionalOnForecast === true,
+    // Email also carries setup/reconfirmation plans. A watering push needs
+    // the customer's own usable portal numbers for this home.
+    notificationEligible: ['portal', 'portal_derived'].includes(inputs.scheduleSource)
+      && inputs.scheduleUnconfirmed === false,
     title: reportCopy.title,
     notificationBody: reportCopy.detail,
     summary: copy.summary_line,
     instruction: copy.week_plan,
-    note: copy.plan_note || '',
+    note: copy.plan_note,
     restrictionNote: copy.restriction_note || '',
     forecast: copy.forecast_line || '',
     guides: GUIDES,
