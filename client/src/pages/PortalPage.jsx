@@ -5,6 +5,8 @@ import { useAuth, tokenCustomerId } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
 import api from '../utils/api';
+import usePortalRead, { PortalReadProvider } from '../hooks/usePortalRead';
+import { PortalRefreshArea, SavedPortalRead } from '../components/portal/PortalRefresh';
 import { formatAddress } from '../utils/format-address';
 import { fmtMoney } from '../lib/money';
 import { COLORS as B, TIER, FONTS, BUTTON_BASE } from '../theme-brand';
@@ -2603,9 +2605,21 @@ function HomeContentRow({ iconTile, title, posts, compact, ctaLabel }) {
   );
 }
 
+function SavedVisitDetails({ visits }) {
+  if (!visits.length) return <p style={{ fontSize: 16 }}>No saved visits are available.</p>;
+  return <ul style={{ paddingLeft: 20, fontSize: 16, lineHeight: 1.6 }}>
+    {visits.map(visit => <li key={visit.id} style={{ marginBottom: 12 }}>
+      <strong>{visit.serviceType || visit.type || 'Service visit'}</strong>
+      <div>{parseDate(visit.date).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}</div>
+      {visit.windowStart && <div>Arrival {formatTime(visit.windowStart)} – {formatTime(arrivalWindowEnd(visit.windowStart))}</div>}
+    </li>)}
+  </ul>;
+}
+
 function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   const compact = useIsMobile(720);
-  const [nextService, setNextService] = useState(null);
+  const nextRead = usePortalRead('next-visit', () => api.getNextService());
+  const nextService = nextRead.data?.next || null;
   // The Add-to-Calendar button hides itself once the arrival window closes,
   // but an idle dashboard never rerenders to notice. Fire a one-shot timer at
   // the deadline so the button disappears on its own (codex #3249 r4 P2).
@@ -2623,14 +2637,15 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
     // the setTimeout ceiling the timer fires early, and without re-running
     // here it would never be rescheduled toward the real deadline (codex r5).
   }, [nextService, calendarWindowTick]);
-  const [nextServiceStatus, setNextServiceStatus] = useState('loading');
+  const nextServiceStatus = nextRead.error ? 'error' : nextRead.data ? 'ready' : 'loading';
   const [confirmingVisit, setConfirmingVisit] = useState(false);
   const [stats, setStats] = useState(null);
   const [statsStatus, setStatsStatus] = useState('loading');
   const [balance, setBalance] = useState(null);
   const [balanceStatus, setBalanceStatus] = useState('loading');
-  const [lastService, setLastService] = useState(null);
-  const [lastServiceStatus, setLastServiceStatus] = useState('loading');
+  const lastRead = usePortalRead('latest-service', () => api.getServices({ limit: 1 }));
+  const lastService = lastRead.data?.services?.[0] || null;
+  const lastServiceStatus = lastRead.error ? 'error' : lastRead.data ? 'ready' : 'loading';
   const [pendingSatisfaction, setPendingSatisfaction] = useState(null);
   const [pendingSatisfactionStatus, setPendingSatisfactionStatus] = useState('loading');
   const [referralStats, setReferralStats] = useState(null);
@@ -2692,15 +2707,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   const annualPrepayLine = annualPrepayTermLine(annualPrepay);
 
   useEffect(() => {
-    api.getNextService()
-      .then(d => {
-        setNextService(d.next || null);
-        setNextServiceStatus('ready');
-      })
-      .catch(err => {
-        console.error(err);
-        setNextServiceStatus('error');
-      });
     api.getServiceStats()
       .then(d => {
         setStats(d);
@@ -2718,15 +2724,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
       .catch(err => {
         console.error(err);
         setBalanceStatus('error');
-      });
-    api.getServices({ limit: 1 })
-      .then(d => {
-        setLastService(d.services?.[0] || null);
-        setLastServiceStatus('ready');
-      })
-      .catch(err => {
-        console.error(err);
-        setLastServiceStatus('error');
       });
     api.getPendingSatisfaction().then(d => {
       if (d.pending?.length) setPendingSatisfaction(d.pending[0]);
@@ -2871,6 +2868,17 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
     fontSize: 14,
     position: 'relative',
   };
+  if (nextRead.saved || lastRead.saved || nextRead.offline) {
+    return <>
+      <SavedPortalRead title="Saved next visit" titleAs="h1" read={nextRead}>
+        {nextService ? <SavedVisitDetails visits={[nextService]} /> : <p style={{ fontSize: 16 }}>{nextRead.data ? 'No upcoming visit was listed when last checked.' : 'Open Home while connected to load your next visit.'}</p>}
+      </SavedPortalRead>
+      <SavedPortalRead title="Saved completed visit" read={lastRead}>
+        {lastService ? <SavedVisitDetails visits={[lastService]} /> : <p style={{ fontSize: 16 }}>{lastRead.data ? 'No completed visit was listed when last checked.' : 'Open Home while connected to load your latest visit.'}</p>}
+      </SavedPortalRead>
+    </>;
+  }
+
   const balanceReady = balanceStatus === 'ready' && !!balance;
   const balancePending = balanceStatus === 'loading';
   const balanceError = balanceStatus === 'error';
@@ -3134,7 +3142,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                   setConfirmingVisit(true);
                   try {
                     await api.confirmAppointment(nextService.id);
-                    setNextService({ ...nextService, customerConfirmed: true, status: 'confirmed' });
+                    nextRead.update(previous => ({ ...previous, next: { ...previous.next, customerConfirmed: true, status: 'confirmed' } }));
                   } catch (err) {
                     console.error(err);
                     showCustomerAlert('Could not confirm this visit. Please try again.');
@@ -3430,8 +3438,8 @@ function ServicesTab() {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [services, setServices] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState('');
+  const historyRead = usePortalRead('service-history', () => api.getServices({ limit: 100 }));
+  const { loading, error: loadError } = historyRead;
   const [expanded, setExpanded] = useState(null);
   const [typeFilter, setTypeFilter] = useState('All');
   const [yearFilter, setYearFilter] = useState('All');
@@ -3441,6 +3449,7 @@ function ServicesTab() {
   // boundary-row dedupe, so the next page never re-requests a seen row.
   const [servicesOffset, setServicesOffset] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
+  const moreSequence = useRef(0);
   const [lightbox, setLightbox] = useState(null);
   // Dialog contract for the photo lightbox: focus trap, Escape closes, AT
   // announces a modal — it was a click-only overlay keyboard users couldn't
@@ -3453,29 +3462,26 @@ function ServicesTab() {
   );
 
   const SERVICES_PAGE_SIZE = 100;
-  const loadServices = useCallback(() => {
-    setLoading(true);
-    setLoadError('');
-    api.getServices({ limit: SERVICES_PAGE_SIZE })
-      .then(d => {
-        setServices(d.services || []);
-        setServicesOffset((d.services || []).length);
-        setTotalServices(Number.isFinite(d.total) ? d.total : null);
-      })
-      .catch(err => {
-        console.error(err);
-        setLoadError(err?.message || 'Could not load service history.');
-      })
-      .finally(() => setLoading(false));
-  }, []);
+  useEffect(() => {
+    if (!historyRead.data) return;
+    const d = historyRead.data;
+    moreSequence.current += 1;
+    setLoadingMore(false);
+    setServices(d.services || []);
+    setServicesOffset((d.services || []).length);
+    setTotalServices(Number.isFinite(d.total) ? d.total : null);
+    return () => { moreSequence.current += 1; };
+  }, [historyRead.data]);
 
   // The server caps each page at 100 rows — older visits stay reachable
   // through an explicit Load More instead of silently vanishing from history.
   const loadMoreServices = () => {
     if (loadingMore) return;
     setLoadingMore(true);
+    const attempt = ++moreSequence.current;
     api.getServices({ limit: SERVICES_PAGE_SIZE, offset: servicesOffset })
       .then(d => {
+        if (moreSequence.current !== attempt) return;
         // The offset runs against a live newest-first query — a visit
         // completed between pages shifts the boundary and re-sends the last
         // row of the previous page. Dedupe by id so it can't render twice,
@@ -3488,16 +3494,14 @@ function ServicesTab() {
         if (Number.isFinite(d.total)) setTotalServices(d.total);
       })
       .catch(err => {
+        if (moreSequence.current !== attempt) return;
         console.error(err);
         showCustomerAlert(err?.message || 'Could not load more visits. Please try again.');
       })
-      .finally(() => setLoadingMore(false));
+      .finally(() => { if (moreSequence.current === attempt) setLoadingMore(false); });
   };
   const hasMoreServices = totalServices != null && servicesOffset < totalServices;
 
-  useEffect(() => {
-    loadServices();
-  }, [loadServices]);
 
   // Latest-request-per-service: expand → collapse → re-expand can overlap two
   // getService calls, and a stale FAILURE resolving after a newer SUCCESS
@@ -3521,6 +3525,12 @@ function ServicesTab() {
     display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 14, fontWeight: 700, marginLeft: -10,
   };
 
+  if (historyRead.saved || historyRead.offline) {
+    return <SavedPortalRead title="Saved completed visits" read={historyRead}>
+      <SavedVisitDetails visits={historyRead.data?.services || []} />
+    </SavedPortalRead>;
+  }
+
   if (loading) {
     return (
       <PortalStatePanel
@@ -3541,7 +3551,7 @@ function ServicesTab() {
         title="Could not load service history"
         message={loadError}
         actionLabel="Try Again"
-        onAction={loadServices}
+        onAction={historyRead.refresh}
       />
     );
   }
@@ -4256,22 +4266,23 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
   // property-preference control writes through blocked routes, so those
   // sections are hidden rather than shown broken.
   const cancelledAccount = customer?.cancelled === true;
-  const [upcoming, setUpcoming] = useState([]);
+  const scheduleRead = usePortalRead('schedule', () => api.getSchedule(90));
+  const { loading, error: loadError } = scheduleRead;
+  const upcoming = scheduleRead.data?.upcoming || [];
   // Self-serve re-service tie-in: /api/schedule includes { url, lanes } only
   // when GATE_RESERVICE_SELF_SERVE is on AND the customer's live plan grants
   // a lane — absent, the CTA card below simply doesn't render.
-  const [reservice, setReservice] = useState(null);
+  const reservice = scheduleRead.data?.reservice || null;
   // Does this property have a plan at all (recurring series, upcoming rows,
   // monthly billing or a live prepay term — the schedule payload's
   // hasCancellableWork)? A property with none gets no "request a visit"
   // empty state (owner 2026-09-06: only recurring customers see it).
-  const [hasPlanWork, setHasPlanWork] = useState(true);
+  const hasPlanWork = scheduleRead.data?.hasCancellableWork !== false;
   const [prefs, setPrefs] = useState(null);
   const [prefsError, setPrefsError] = useState(false);
   const [propertyPrefs, setPropertyPrefs] = useState([]);
   const [propertyPrefsError, setPropertyPrefsError] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState('');
+
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
   const [confirmingIds, setConfirmingIds] = useState({});
   const [prefsLocked, setPrefsLocked] = useState({});
@@ -4303,49 +4314,22 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
     ? Object.fromEntries(properties.map((p) => [p.id, accountNext.find((row) => row.id === p.id)?.next || null]))
     : null;
 
-  const loadSchedule = useCallback(() => {
-    setLoading(true);
-    setLoadError('');
-    // Notification preferences are presentation data — a transient failure
-    // there must not hide the customer's valid appointments (or the confirm
-    // and reschedule controls) behind a schedule error. Only /schedule
-    // itself can fail the load.
-    Promise.all([
-      api.getSchedule(90),
-      // C4: a cancelled account renders no notification settings, so the
-      // prefs reads are skipped entirely (their routes are not widened).
-      cancelledAccount
-        ? Promise.resolve({ data: null, failed: false })
-        : api.getNotificationPrefs()
-          .then(data => ({ data, failed: false }))
-          .catch(() => ({ data: null, failed: true })),
-      cancelledAccount
-        ? Promise.resolve({ data: null, failed: false })
-        : api.getPropertyNotificationPrefs()
-          .then(data => ({ data, failed: false }))
-          .catch(() => ({ data: null, failed: true })),
-    ]).then(([schedData, prefsResult, propertyPrefsData]) => {
-      setUpcoming(schedData.upcoming || []);
-      setReservice(schedData.reservice || null);
-      setHasPlanWork(schedData.hasCancellableWork !== false);
-      setPrefsError(prefsResult.failed);
-      if (prefsResult.data) setPrefs(prefsResult.data);
-      // A failed refresh must not keep rendering stale interactive settings
-      // from an earlier load — clear them so the failure panel shows.
-      else if (prefsResult.failed) setPrefs(null);
-      setPropertyPrefsError(propertyPrefsData.failed);
-      if (propertyPrefsData.data) {
-        setPropertyPrefs(propertyPrefsData.data.properties || []);
-      }
-    }).catch(err => {
-      console.error(err);
-      setLoadError(err?.message || 'Could not load your schedule.');
-    }).finally(() => setLoading(false));
-  }, [cancelledAccount]);
-
-  useEffect(() => {
-    loadSchedule();
-  }, [loadSchedule]);
+  // Refresh visit data independently: a return to the app must never replace
+  // unsaved service-contact edits or race an in-flight preference save.
+  const loadSchedulePreferences = useCallback(() => Promise.all([
+    cancelledAccount
+      ? Promise.resolve({ data: null, failed: false })
+      : api.getNotificationPrefs().then(data => ({ data, failed: false })).catch(() => ({ data: null, failed: true })),
+    cancelledAccount
+      ? Promise.resolve({ data: null, failed: false })
+      : api.getPropertyNotificationPrefs().then(data => ({ data, failed: false })).catch(() => ({ data: null, failed: true })),
+  ]).then(([prefsResult, propertyPrefsData]) => {
+    setPrefsError(prefsResult.failed);
+    setPrefs(prefsResult.data);
+    setPropertyPrefsError(propertyPrefsData.failed);
+    if (propertyPrefsData.data) setPropertyPrefs(propertyPrefsData.data.properties || []);
+  }), [cancelledAccount]);
+  useEffect(() => { void loadSchedulePreferences(); }, [loadSchedulePreferences]);
 
   const handleToggle = async (key) => {
     if (prefsLocked[key]) return;
@@ -4540,13 +4524,12 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
       await api.confirmAppointment(id);
       const ts = new Date();
       setConfirmTimestamps(prev => ({ ...prev, [id]: ts }));
-      setUpcoming(prev => prev.map(s => s.id === id ? { ...s, status: 'confirmed', customerConfirmed: true } : s));
+      scheduleRead.update(previous => ({ ...previous, upcoming: previous.upcoming.map(s => s.id === id ? { ...s, status: 'confirmed', customerConfirmed: true } : s) }));
     } catch (err) {
       console.error(err);
       showCustomerAlert('Could not confirm this appointment. Refreshing latest status...');
       try {
-        const fresh = await api.getSchedule(90);
-        setUpcoming(fresh.upcoming || []);
+        await scheduleRead.refresh();
       } catch (e) { console.error(e); }
     } finally {
       setConfirmingIds(prev => ({ ...prev, [id]: false }));
@@ -4594,6 +4577,12 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
     fontSize: 14, minHeight: 44,
   };
 
+  if (scheduleRead.saved || scheduleRead.offline) {
+    return <SavedPortalRead title="Saved upcoming visits" read={scheduleRead}>
+      <SavedVisitDetails visits={scheduleRead.data?.upcoming || []} />
+    </SavedPortalRead>;
+  }
+
   if (loading) {
     return (
       <PortalStatePanel
@@ -4614,7 +4603,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
         title="Could not load your schedule"
         message={loadError}
         actionLabel="Try Again"
-        onAction={loadSchedule}
+        onAction={scheduleRead.refresh}
       />
     );
   }
@@ -5048,7 +5037,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
           <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
           <div role="alert" style={{ marginTop: 10, fontSize: 14, color: B.glassNavy, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px' }}>
             Your schedule is up to date, but notification preferences couldn&apos;t be loaded.
-            <button data-glass-accent="" type="button" onClick={loadSchedule} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, display: 'block' }}>Try again</button>
+            <button data-glass-accent="" type="button" onClick={loadSchedulePreferences} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, display: 'block' }}>Try again</button>
           </div>
         </section>
       )}
@@ -5214,7 +5203,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
         <section role="alert" data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Property contacts couldn&rsquo;t be loaded</div>
           <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>Your schedule is still available. Try again to manage notification recipients for each property.</div>
-          <button data-glass-accent="" type="button" onClick={loadSchedule} style={{ ...secondaryButton, marginTop: 10 }}>Try again</button>
+          <button data-glass-accent="" type="button" onClick={loadSchedulePreferences} style={{ ...secondaryButton, marginTop: 10 }}>Try again</button>
         </section>
       )}
 
@@ -12835,10 +12824,10 @@ function DocumentsTab({ customer, onSwitchTab }) {
   }, []);
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
-  const [docs, setDocs] = useState({});
-  const [totalDocs, setTotalDocs] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState('');
+  const documentsRead = usePortalRead('documents', () => api.getDocuments());
+  const { loading, error: loadError } = documentsRead;
+  const docs = documentsRead.data?.documents || {};
+  const totalDocs = Number(documentsRead.data?.total || 0);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
   const [notice, setNotice] = useState(null);
@@ -12882,22 +12871,6 @@ function DocumentsTab({ customer, onSwitchTab }) {
     fontSize: 14, minHeight: 44,
     letterSpacing: 0,
   };
-
-  const loadDocuments = useCallback(() => {
-    setLoading(true);
-    setLoadError('');
-    api.getDocuments()
-      .then(d => {
-        setDocs(d.documents || {});
-        setTotalDocs(Number(d.total || 0));
-      })
-      .catch(err => setLoadError(err?.message || 'Could not load documents.'))
-      .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => {
-    loadDocuments();
-  }, [loadDocuments]);
 
   const flash = (text, type = 'success') => {
     setNotice({ text, type });
@@ -13031,6 +13004,14 @@ function DocumentsTab({ customer, onSwitchTab }) {
     window.open(`mailto:?subject=${subject}&body=${body}`, '_self');
   };
 
+  if (documentsRead.saved || documentsRead.offline) {
+    return <SavedPortalRead title="Saved documents" titleAs="h1" read={documentsRead}>
+      {Object.values(docs).flat().length ? <ul style={{ paddingLeft: 20, fontSize: 16, lineHeight: 1.6 }}>
+        {Object.values(docs).flat().map(doc => <li key={doc.id}>{doc.title || 'Document'}</li>)}
+      </ul> : <p style={{ fontSize: 16 }}>{documentsRead.data ? 'No documents were listed when last checked.' : 'Open Documents while connected to load your document list.'}</p>}
+    </SavedPortalRead>;
+  }
+
   if (loading) {
     return (
       <PortalStatePanel
@@ -13053,7 +13034,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         title="Could not load documents"
         message={loadError}
         actionLabel="Try Again"
-        onAction={loadDocuments}
+        onAction={documentsRead.refresh}
       />
     );
   }
@@ -15407,6 +15388,7 @@ export default function PortalPage() {
   // the read-only allowance — the shell narrows to CANCELLED_TABS, shows the
   // cancelled banner, and hides every action that creates work.
   const cancelledAccount = customer?.cancelled === true;
+  const [refreshEnabled] = useState(() => new URLSearchParams(window.location.search).get('appRefresh') === '1');
   // Honor ?tab=billing etc. so deep-links from SMS (e.g. the "update your
   // card" link in autopay-failure texts) land the customer on the right tab.
   // Returns [tabId, visitsSubTab, openRequest, planService]. Legacy
@@ -15698,6 +15680,7 @@ export default function PortalPage() {
 
   return (
     <PortalGlassContext.Provider value={true}>
+    <PortalReadProvider key={`${propertyRenderKey}:${cancelledAccount}`} enabled={refreshEnabled}>
     <div className="portal-root" style={{
       minHeight: '100vh',
       // Under glass the fixed scene on <html> provides the backdrop; an
@@ -16190,7 +16173,8 @@ export default function PortalPage() {
             {headerNavItems.map(headerNavButton)}
           </nav>
         )}
-        {!cancelledAccount && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}
+        <PortalRefreshArea available={['dashboard', 'visits', 'documents'].includes(activeTab)}
+          onlineContent={!cancelledAccount && <WavesAiBar tab={activeTab} onAsk={(q) => { setChatPrompt(q); setShowChat(true); }} />}>
         {activeTab === 'dashboard' && !cancelledAccount && <DashboardTab key={`dashboard-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} onOpenPlanService={openPlanService} />}
         {activeTab === 'plan' && <MyPlanTab key={`plan-${propertyRenderKey}`} customer={customer} focusService={planFocusService} onOpenRequest={() => setShowReportIssue(true)} refreshCustomer={refreshCustomer} />}
         {activeTab === 'visits' && <VisitsTab key={`visits-${propertyRenderKey}`} customer={customer} properties={portalProperties} subTab={visitsSubTab} onSubTabChange={(sub) => {
@@ -16208,6 +16192,7 @@ export default function PortalPage() {
           onOpenWateringProperty={wateringPlanProperty ? () => selectProperty(wateringPlanProperty.id, { tab: 'property' }) : undefined}
         />}
         {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} />}
+        </PortalRefreshArea>
       </main>
 
       {/* Bottom nav — primary destinations pinned as icons, rest behind "More". */}
@@ -16243,6 +16228,7 @@ export default function PortalPage() {
         customer={customer}
       />
     </div>
+    </PortalReadProvider>
     </PortalGlassContext.Provider>
   );
 }

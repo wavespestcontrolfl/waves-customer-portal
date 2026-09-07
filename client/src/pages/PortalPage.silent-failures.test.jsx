@@ -4,7 +4,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { MemoryRouter } from 'react-router-dom';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Any api method not explicitly mocked returns a forever-pending promise, so
@@ -26,6 +26,8 @@ import api from '../utils/api';
 import { ScheduleTab, PropertyTab, ServiceTracker, DashboardTab } from './PortalPage';
 import NotificationBell from '../components/NotificationBell';
 import InstallPrompt from '../components/InstallPrompt';
+import { PortalReadProvider } from '../hooks/usePortalRead';
+import { PortalRefreshArea } from '../components/portal/PortalRefresh';
 
 const customer = {
   id: 'cust-1', firstName: 'Pat', lastName: 'Customer',
@@ -65,6 +67,20 @@ afterEach(() => {
 });
 
 describe('schedule survives notification-preference failures', () => {
+  it('refreshes visits without replacing an unsaved service-contact edit', async () => {
+    api.getPropertyNotificationPrefs.mockResolvedValue({ properties: [{
+      id: customer.id, label: 'Home', preferences: {},
+      serviceContacts: [{ firstName: 'Fixture', lastName: '', phone: '', email: '' }],
+    }] });
+    render(<PortalReadProvider enabled><PortalRefreshArea><ScheduleTab customer={customer} properties={[]} /></PortalRefreshArea></PortalReadProvider>);
+    const input = await screen.findByLabelText('First name');
+    fireEvent.change(input, { target: { value: 'Unsaved edit' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    await waitFor(() => expect(api.getSchedule).toHaveBeenCalledTimes(2));
+    expect(screen.getByLabelText('First name')).toHaveValue('Unsaved edit');
+    expect(api.getPropertyNotificationPrefs).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps valid appointments visible and offers a prefs retry', async () => {
     api.getSchedule.mockResolvedValue({
       upcoming: [{ id: 'svc-1', date: futureDate, serviceType: 'Pest Control', status: 'confirmed', windowStart: '09:00' }],
