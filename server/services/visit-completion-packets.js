@@ -72,8 +72,9 @@ function recordsResult(packet, items, replayed = false) {
   } };
 }
 
-/** Authenticated actor is supplied by the caller, separately from the forms. */
+/** Owns the commit/rollback boundary; callers must supply a root Knex handle. */
 async function saveVisitCompletionRecords(input, database = db) {
+  if (database.isTransaction) throw new TypeError('Visit completion requires a root database connection');
   const request = packetRequest(input);
   if (request.error) return request.error;
   const actor = input.actor || {};

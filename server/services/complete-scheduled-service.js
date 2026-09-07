@@ -5399,12 +5399,12 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           // permanent report (codex r9 P1). Fallback = the entry read.
           let snapshotCustomer = null;
           try {
-            snapshotCustomer = await trx('customers').where({ id: svc.customer_id }).first(
+            snapshotCustomer = await savepointRead(trx, (k) => k('customers').where({ id: svc.customer_id }).first(
               'waveguard_tier',
               'monthly_rate',
               ...(customerTierSourceColumnExists ? ['waveguard_tier_source'] : []),
               ...(billingModeColumnsExist ? ['billing_mode'] : []),
-            );
+            ));
           } catch { snapshotCustomer = null; }
           Object.assign(recordInsert, completionTierSnapshotFields({
             serviceRecordCols,

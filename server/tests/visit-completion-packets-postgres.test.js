@@ -42,28 +42,32 @@ function submission(overrides = {}) {
 // Inject a REAL failed PostgreSQL statement at a selected read. A rejected
 // JavaScript mock cannot prove that the caller recovers an aborted transaction.
 async function withReadFailure(matches, run) {
-  const trx = await mockPg.transaction();
-  // Intercept the connection, so nested Knex transactions see the same fault.
-  const connection = await trx.client.acquireConnection();
-  const execute = connection.query;
+  const shared = mockPg;
+  // Keep one root connection so the fault reaches the coordinator's OWN
+  // transaction, without wrapping the packet in a caller-owned savepoint.
+  mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 1 } });
+  const pgConnection = await mockPg.client.acquireConnection();
+  const execute = pgConnection.query;
   let failed = false;
-  const querySpy = jest.spyOn(connection, 'query').mockImplementation(function (query, callback) {
+  const querySpy = jest.spyOn(pgConnection, 'query').mockImplementation(function (query, callback) {
     if (!failed && matches({ sql: query.text, bindings: query.values || [] })) {
       failed = true;
       return execute.call(this, { ...query, text: 'SELECT 1 / 0', values: [] }, callback);
     }
     return execute.call(this, query, callback);
   });
+  await mockPg.client.releaseConnection(pgConnection);
   try {
-    await run(trx);
+    await run(mockPg);
     expect(failed).toBe(true);
-    // Both reads AND writes must remain available after the fallback/rethrow.
-    await trx('customers').where({ id: fixture.customerId }).update({ first_name: 'Recovered' });
-    expect(await trx('customers').where({ id: fixture.customerId }).first('first_name'))
+    // The same connection remains usable after the real commit or rollback.
+    await mockPg('customers').where({ id: fixture.customerId }).update({ first_name: 'Recovered' });
+    expect(await mockPg('customers').where({ id: fixture.customerId }).first('first_name'))
       .toEqual({ first_name: 'Recovered' });
   } finally {
     querySpy.mockRestore();
-    await trx.rollback();
+    await mockPg.destroy();
+    mockPg = shared;
   }
 }
 
@@ -108,8 +112,29 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await mockPg('turf_height_readings').where({ customer_id: fixture.customerId }).del();
     await mockPg('customers').where({ id: fixture.customerId }).del();
     await mockPg('technicians').where({ id: fixture.techId }).del();
+    await mockPg('service_completion_profiles').where({ service_key: `fixture_${fixture.catalogId}` }).del();
     await mockPg('services').where({ id: fixture.catalogId }).del();
     await mockPg('products_catalog').where({ id: fixture.productId }).del();
+  });
+
+  test('a caller-owned transaction is rejected before any packet query or upload', async () => {
+    const outer = await mockPg.transaction();
+    const query = jest.fn();
+    outer.on('query', query);
+    const send = jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send').mockResolvedValue({});
+    const input = submission();
+    input.items[0].body.completionPhotos = [{ data: 'data:image/png;base64,Zml4dHVyZQ==', name: 'fixture.png' }];
+    try {
+      await expect(saveVisitCompletionRecords(input, outer))
+        .rejects.toThrow('Visit completion requires a root database connection');
+      expect(query).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      send.mockRestore();
+      await outer.rollback();
+    }
+    expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
   });
 
   test('two canonical records commit together and their effects remain pending', async () => {
@@ -440,7 +465,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await mockPg('property_nutrient_ledger').where({ customer_id: fixture.customerId })).toHaveLength(2);
   });
 
-  test.each(['profile', 'Auto Pay', 'turf profile', 'Pest Pressure table', 'Pest Pressure config'])
+  test.each(['profile', 'Auto Pay', 'turf profile', 'Pest Pressure table', 'Pest Pressure config', 'customer snapshot'])
   ('a packet records every member after a recoverable %s read failure', async (helper) => {
     const matches = {
       profile: (query) => query.sql.includes('information_schema.tables') && query.bindings.includes('service_completion_profiles'),
@@ -448,17 +473,50 @@ postgres('visit completion packet records on PostgreSQL', () => {
       'turf profile': (query) => query.sql.includes('from "customer_turf_profiles"'),
       'Pest Pressure table': (query) => query.sql.includes('information_schema.tables') && query.bindings.includes('pest_pressure_configs'),
       'Pest Pressure config': (query) => query.sql.includes('from "pest_pressure_configs"'),
+      'customer snapshot': (query) => query.sql.startsWith('select "waveguard_tier", "monthly_rate"'),
     };
-    await withReadFailure(matches[helper], async (trx) => {
-      await trx('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true });
+    await withReadFailure(matches[helper], async (database) => {
+      await database('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true, waveguard_tier: 'Bronze' });
       const input = submission();
       for (const item of input.items) item.body.clientPestRating = 3;
-      const result = await saveVisitCompletionRecords(input, trx);
+      const result = await saveVisitCompletionRecords(input, database);
       expect(result).toMatchObject({ status: 202, body: { state: 'records_saved' } });
-      expect(await trx('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
-      expect(await trx('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      const records = await database('service_records').where({ customer_id: fixture.customerId });
+      expect(records).toHaveLength(2);
+      expect(records.every((record) => record.service_tier === 'Bronze')).toBe(true);
+      expect(await database('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    });
+  });
+
+  test.each(['rows', 'catalog', 'profiles'])('add-on %s read failures preserve the packet and per-line snapshot fallback', async (read) => {
+    const key = `fixture_${fixture.catalogId}`;
+    await mockPg('service_completion_profiles').insert({ service_key: key, completion_mode: 'service_report', active: true });
+    await mockPg('scheduled_service_addons').insert([
+      { scheduled_service_id: fixture.serviceIds[0], service_id: fixture.catalogId,
+        service_name: 'Fixture Frozen Add-on', service_key_snapshot: key },
+      { scheduled_service_id: fixture.serviceIds[0], service_id: fixture.catalogId,
+        service_name: 'Fixture Live Add-on', service_key_snapshot: null },
+    ]);
+    const matches = {
+      rows: (query) => query.sql.startsWith('select "service_id", "service_name", "service_key_snapshot" from "scheduled_service_addons"'),
+      catalog: (query) => query.sql.startsWith('select "id", "service_key" from "services"'),
+      profiles: (query) => query.sql.startsWith('select "service_key", "project_type" from "service_completion_profiles"'),
+    };
+    await withReadFailure(matches[read], async (database) => {
+      expect(await saveVisitCompletionRecords(submission(), database)).toMatchObject({ status: 202 });
+      const records = await database('service_records').where({ customer_id: fixture.customerId }).orderBy('scheduled_service_id');
+      expect(records).toHaveLength(2);
+      const lines = records[0].service_data.completedAddonLines;
+      if (read === 'rows') expect(lines).toBeUndefined();
+      else {
+        expect(lines).toHaveLength(2);
+        expect(lines.find((line) => line.serviceName === 'Fixture Live Add-on')).not.toHaveProperty('serviceKey');
+        const frozen = lines.find((line) => line.serviceName === 'Fixture Frozen Add-on');
+        if (read === 'catalog') expect(frozen).toMatchObject({ serviceKey: key, findingsType: null });
+        else expect(frozen).not.toHaveProperty('serviceKey');
+      }
     });
   });
 
@@ -468,17 +526,17 @@ postgres('visit completion packet records on PostgreSQL', () => {
     if (shape === 'recap only') input.items[0].body.oneTimeRecapOnly = true;
     if (shape === 'not performed') input.items[0].body.visitOutcome = 'inspection_only';
     if (shape === 'unpriced') await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ estimated_price: 0 });
-    await withReadFailure((query) => query.sql.includes('select "payer_id", "po_number"'), async (trx) => {
-      const result = saveVisitCompletionRecords(input, trx);
+    await withReadFailure((query) => query.sql.includes('select "payer_id", "po_number"'), async (database) => {
+      const result = saveVisitCompletionRecords(input, database);
       if (shape === 'billable') {
         await expect(result).rejects.toMatchObject({ code: '22012' });
-        expect(await trx('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
-        expect(await trx('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
+        expect(await database('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+        expect(await database('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
       } else {
         expect(await result).toMatchObject({ status: 202, body: { state: 'records_saved' } });
-        expect(await trx('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
+        expect(await database('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
       }
-      expect(await trx('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+      expect(await database('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
