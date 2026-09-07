@@ -25,7 +25,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { techLineContext } = require('../services/tech-line');
-const { placeBridgeCall } = require('../services/call-bridge');
+const { placeBridgeCall, activeBridgeCall } = require('../services/call-bridge');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { isRealProviderSend } = require('../services/sms-auto-send');
 const { reserveHumanReply, settleHumanReply } = require('../services/sms-suggest-mode');
@@ -153,6 +153,16 @@ router.post('/sms', async (req, res, next) => {
         deferred: Boolean(result.deferred),
       });
     }
+    // A tech's real text is a first response to any open lead on this phone —
+    // the same Speed-to-Lead stamp the admin composer makes after a real
+    // provider send; no watcher stamps manual rows later (codex #4072 r8 P2).
+    // Fail-soft: SLA bookkeeping never breaks a send that already left.
+    try {
+      const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
+      await stampFirstResponseByContact({ phone: target.to, performedBy: `tech:${req.technicianId}` });
+    } catch (stampErr) {
+      logger.warn(`[tech-line] first-response stamp failed: ${stampErr.message}`);
+    }
     res.json({ success: true, from: publicLine(ctx) });
   } catch (err) { next(sanitized(err, 'text')); }
 });
@@ -165,6 +175,14 @@ router.post('/call', async (req, res, next) => {
     if (!ctx.cell) return res.status(409).json({ error: 'Your staff profile needs your cell number before calls can bridge to you', code: 'NO_CELL' });
     const target = await visitCustomer(req, req.body?.scheduledServiceId);
     if (target.error) return res.status(target.status).json({ error: target.error });
+    // One bridge at a time to this customer: the panel's Call lock is a
+    // timer, not call state, so a tap after it lapses (or from a reloaded
+    // page) must not ring the tech and dial the customer again while the
+    // first bridge is still ringing or connected (codex #4072 r8 P2).
+    const active = await activeBridgeCall({ source: 'tech-click', customerId: target.customer.id });
+    if (active) {
+      return res.status(409).json({ error: 'A call to this customer from your line is still ringing or connected', code: 'CALL_IN_FLIGHT' });
+    }
 
     let bridged;
     try {

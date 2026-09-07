@@ -10,7 +10,11 @@ jest.mock('../middleware/admin-auth', () => ({
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
 jest.mock('../services/tech-line', () => ({ techLineContext: jest.fn() }));
-jest.mock('../services/call-bridge', () => ({ placeBridgeCall: jest.fn(async () => ({ callSid: 'CA-1', callLogId: 'log-1' })) }));
+jest.mock('../services/call-bridge', () => ({
+  placeBridgeCall: jest.fn(async () => ({ callSid: 'CA-1', callLogId: 'log-1' })),
+  activeBridgeCall: jest.fn(async () => null),
+}));
+jest.mock('../services/lead-estimate-link', () => ({ stampFirstResponseByContact: jest.fn(async () => 1) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true, providerMessageId: 'SM-real' })) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 jest.mock('../services/sms-suggest-mode', () => ({
@@ -21,7 +25,8 @@ jest.mock('../services/twilio-failure-alerts', () => ({ alertTwilioFailure: jest
 
 const db = require('../models/db');
 const { techLineContext } = require('../services/tech-line');
-const { placeBridgeCall } = require('../services/call-bridge');
+const { placeBridgeCall, activeBridgeCall } = require('../services/call-bridge');
+const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { isEnabled } = require('../config/feature-gates');
 const { reserveHumanReply, settleHumanReply } = require('../services/sms-suggest-mode');
@@ -92,6 +97,23 @@ describe('POST /sms', () => {
     }));
     expect(settleHumanReply).toHaveBeenCalledWith(expect.objectContaining({ parkedDecisionIds: ['dec-1'], reservationId: 'resv-1', sent: true, reviewedBy: 'tech-1' }));
     expect(r.body).toEqual({ success: true, from: LINE });
+  });
+
+  test('a delivered text stamps the first response on any open lead with this phone — a suppressed send does not (codex #4072 r8 P2)', async () => {
+    primeVisit();
+    let r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way' } });
+    expect(r.statusCode).toBe(200);
+    expect(stampFirstResponseByContact).toHaveBeenCalledWith({ phone: '+19415550100', performedBy: 'tech:tech-1' });
+    // Fail-soft: a stamp failure never turns a sent text into an error.
+    stampFirstResponseByContact.mockRejectedValueOnce(new Error('leads down'));
+    r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way' } });
+    expect(r.statusCode).toBe(200);
+    // The SMS-gate-off sentinel (sent:true, no provider id) never stamps.
+    stampFirstResponseByContact.mockClear();
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'gate-blocked' });
+    r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way' } });
+    expect(r.statusCode).toBe(409);
+    expect(stampFirstResponseByContact).not.toHaveBeenCalled();
   });
 
   test('an autonomous reply mid-send backs the tech off (409), nothing sent', async () => {
@@ -185,6 +207,16 @@ describe('POST /call', () => {
       metadata: { scheduledServiceId: VISIT }, leadName: 'Pat Sample',
     });
     expect(r.body).toEqual({ success: true, callSid: 'CA-1', callLogId: 'log-1', from: LINE });
+  });
+
+  test('a bridge still ringing or connected → 409 CALL_IN_FLIGHT, no second Twilio call (codex #4072 r8 P2)', async () => {
+    primeVisit();
+    activeBridgeCall.mockResolvedValueOnce({ id: 'log-0', status: 'ringing' });
+    const r = await call('post', '/call', { body: { scheduledServiceId: VISIT } });
+    expect(r.statusCode).toBe(409);
+    expect(r.body.code).toBe('CALL_IN_FLIGHT');
+    expect(activeBridgeCall).toHaveBeenCalledWith({ source: 'tech-click', customerId: 'c1' });
+    expect(placeBridgeCall).not.toHaveBeenCalled();
   });
 
   test('voice gate off, no line, or no usable cell → 409 with a code; another tech\'s visit → 403', async () => {

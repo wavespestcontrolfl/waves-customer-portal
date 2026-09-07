@@ -267,11 +267,12 @@ export default function TechHomePage() {
   const currentRole = getAdminUser()?.role || null;
 
   const fetchSchedule = useCallback(async () => {
-    // Runs alongside the schedule read; `loading` stays true until BOTH
-    // resolve, so the first render never shows the personal-phone links
-    // for a tech whose line answer is still in flight (codex #4072 r4 P2).
-    // Refreshes leave `loading` alone — the last known line stays up.
-    const linePromise = fetchTechLine();
+    // Runs alongside the schedule read but never gates it: the route must
+    // render even when the line lookup hangs on a poor connection (codex
+    // #4072 r8 P2). The first render cannot show the personal-phone links
+    // while the answer is in flight — the initial `{ unknown: true }` hides
+    // every contact link until the lookup succeeds (r4 / r5 P2s).
+    fetchTechLine();
     try {
       setScheduleError('');
       const token = getAdminAuthToken();
@@ -287,7 +288,6 @@ export default function TechHomePage() {
       console.error('Failed to fetch schedule:', err);
       setScheduleError(err.message || 'Your route could not be loaded.');
     } finally {
-      await linePromise;
       setLoading(false);
     }
   }, [fetchTechLine]);

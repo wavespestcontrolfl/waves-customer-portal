@@ -12,7 +12,7 @@ jest.mock('../config', () => ({ twilio: { accountSid: 'AC-test', authToken: 'tok
 
 const db = require('../models/db');
 const { recordTouchpoint } = require('../services/conversations');
-const { placeBridgeCall } = require('../services/call-bridge');
+const { placeBridgeCall, activeBridgeCall } = require('../services/call-bridge');
 
 function primeDb() {
   const inserted = [];
@@ -71,4 +71,32 @@ test('missing Twilio credentials fail before any row is written', async () => {
   await expect(fresh({ to: '+19415550100', bridgePhone: '+19415550101', from: '+19412975749', source: 'admin-click' }))
     .rejects.toMatchObject({ code: 'TWILIO_NOT_CONFIGURED' });
   expect(inserted).toHaveLength(0);
+});
+
+describe('activeBridgeCall', () => {
+  test('finds the newest non-terminal outbound row from the source to the customer inside the window', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.whereNotIn = jest.fn(() => chain);
+    chain.orderBy = jest.fn(() => chain);
+    chain.first = jest.fn(async () => ({ id: 'log-9', status: 'ringing' }));
+    db.mockImplementation((table) => { expect(table).toBe('call_log'); return chain; });
+    const before = Date.now();
+    const row = await activeBridgeCall({ source: 'tech-click', customerId: 'c1' });
+    expect(row).toEqual({ id: 'log-9', status: 'ringing' });
+    expect(chain.where).toHaveBeenCalledWith({ source: 'tech-click', customer_id: 'c1', direction: 'outbound' });
+    // Twilio's terminal set: a completed / failed / unanswered bridge never blocks the next one.
+    expect(chain.whereNotIn).toHaveBeenCalledWith('status', ['completed', 'busy', 'failed', 'no-answer', 'canceled']);
+    const [col, op, since] = chain.where.mock.calls.find((c) => c[0] === 'created_at');
+    expect([col, op]).toEqual(['created_at', '>']);
+    // 15-minute window: a row Twilio never called back on ages out instead of locking the tech out.
+    expect(before - since.getTime()).toBeGreaterThanOrEqual(15 * 60 * 1000 - 50);
+    expect(before - since.getTime()).toBeLessThan(15 * 60 * 1000 + 5000);
+  });
+
+  test('no customer or source → null without a query', async () => {
+    db.mockImplementation(() => { throw new Error('must not query'); });
+    expect(await activeBridgeCall({ source: 'tech-click', customerId: null })).toBeNull();
+    expect(await activeBridgeCall({ source: null, customerId: 'c1' })).toBeNull();
+  });
 });

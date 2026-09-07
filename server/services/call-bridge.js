@@ -93,4 +93,26 @@ async function placeBridgeCall({ to, bridgePhone, from, customer = null, source,
   return { callSid: call.sid, callLogId };
 }
 
-module.exports = { placeBridgeCall };
+// Twilio's terminal call statuses — the same absorbing set /call-status
+// applies. A bridge row outside it may still be ringing the staff phone or
+// connected to the customer.
+const TERMINAL_CALL_STATUSES = ['completed', 'busy', 'failed', 'no-answer', 'canceled'];
+const ACTIVE_BRIDGE_WINDOW_MS = 15 * 60 * 1000;
+
+/**
+ * The newest bridge row from `source` to this customer that has not reached
+ * a terminal status inside the window — a call that may still be ringing or
+ * connected, so a second bridge must not originate. A row Twilio never called
+ * back on ages out of the window rather than locking the caller out for good.
+ */
+async function activeBridgeCall({ source, customerId, withinMs = ACTIVE_BRIDGE_WINDOW_MS }) {
+  if (!source || !customerId) return null;
+  return db('call_log')
+    .where({ source, customer_id: customerId, direction: 'outbound' })
+    .whereNotIn('status', TERMINAL_CALL_STATUSES)
+    .where('created_at', '>', new Date(Date.now() - withinMs))
+    .orderBy('created_at', 'desc')
+    .first('id', 'status', 'created_at');
+}
+
+module.exports = { placeBridgeCall, activeBridgeCall };
