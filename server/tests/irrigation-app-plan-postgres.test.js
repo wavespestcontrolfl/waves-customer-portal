@@ -305,12 +305,12 @@ const SKIP = !process.env.DATABASE_URL;
   }, 30000);
 
   test('an email-disabled customer gets the published plan advisory once through the real bell and alert ledgers', async () => {
-    // Freeze calendar reads for Monday's provider fence, but keep lease
-    // timestamps on the real clock that PostgreSQL uses to check ownership.
-    const realNow = Date.now;
+    // Freeze the plan's calendar week, but keep lease milliseconds on the real
+    // clock: PostgreSQL checks pushLeaseUntil against its own unfrozen now().
+    const realDateNow = Date.now;
     jest.useFakeTimers({ doNotFake: ['hrtime', 'nextTick', 'performance', 'queueMicrotask', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
     jest.setSystemTime(now);
-    Date.now = realNow;
+    Date.now = realDateNow;
     await resetDraft();
     process.env.GATE_PROPERTY_ALERTS = 'true';
     await mockTransaction('notification_prefs').insert({ customer_id: customerId, email_enabled: false, weather_alerts: true });

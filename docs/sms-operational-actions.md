@@ -30,10 +30,19 @@ Commitment extraction, explicit deadlines, guarded delivery witnesses and staff 
 
 `server/tests/sms-operational-actions.test.js` covers grounding, code fidelity, profile authority, concurrent-edit decisions and gate behavior. `server/tests/sms-operations-postgres.test.js` checks atomicity, replay, profile-fact ordering, source relinks, unavailable customers and evidence-preserving rollback in a private schema cloned from a migrated synthetic database. CI supplies its ephemeral PostgreSQL database. Local database execution requires a verified dedicated dev/preview database.
 
-## Deferred P2
+## Explicit replay
 
-Automatic replay of analyzed messages needs reconciliation of previously audited writes and terminal extraction receipts. Changing a model version or correcting a body does not authorize replay. Keep the one-shot marker until receipt-aware reconciliation is implemented.
+Changing a model version or correcting a source body never clears analysis markers or terminal receipts. An operator may request a replay of one already-analyzed inbound SMS with `node ops/agents/replay-sms-profile.js --sms-log-id=<uuid>`. The default runs the extractor and previews actual field dispositions through the shared writer in a transaction that is rolled back. It reports new proposals, preserved pending work, prior applied fields and validation exceptions without exposing private values. Add `--execute --preview-hash=<preview_hash>` to persist only the exact previewed results. The keyed hash binds the source, extractor version, private fact values, locked dispositions and the IDs of pending siblings it retires; any changed extraction or review state rolls back the transaction and requires a fresh preview. No preview payload is stored in a file. Both modes incur normal LLM usage; preview rolls back proposal, vault, receipt, analysis, capture-audit and exception-notification writes. Both the SMS gate and activation timestamp still apply, and messages before activation remain excluded.
 
+Replayed results always require staff review. Prior automatic-write audits and applied or reverted proposals for the same SMS identify fields that must remain untouched, including inbox twins linked by Twilio message id. An identical pending proposal stays pending; an identical terminal proposal keeps its disposition. New eligible facts use the existing vaulted proposal queue and its chronology, authority and before-value checks. The replay has its own extraction receipt per extractor version and source hash, plus a critical audit; it preserves the original analysis and receipts. A failed replay leaves prior work intact and records a bounded retry attempt. No customer communications, scheduling writes or automatic profile changes run during replay.
+
+Replay reconciles the stable message identity, field and vault value hash, so
+an extractor-version change or later creation of a preferences row cannot
+reopen an identical rejected fact. Inbox twins use their linked Twilio identity.
+Contact preferences join the existing sensitive approval/revert path through
+migration `20260907000021_sms_replay_contact_preference.js`; replay itself
+never writes the preference. The migration rollback refuses to remove the
+allowance while a NULL-target contact-preference proposal still exists.
 
 Scheduled outbound SMS has one capture identity: the original queue row.
 The provider delivery row is excluded from capture when `metadata.scheduled_sms_log_id` identifies a scheduled outbound row for
@@ -44,3 +53,5 @@ only in database selection, outside model prompts. Conversation history keeps
 its existing endpoint-based selection so the actual delivered message remains
 available after a send-time phone or location-number refresh. Send/retry writers
 are unchanged. Outbound commitment capture remains a separate gated follow-up.
+
+Replay previews also simulate exception-notification creation or deduplication through the existing notifier inside the rolled-back transaction. The result identifies a new bell or the preserved notification ID, and the preview hash binds that disposition. If it changes before execution, the transaction rolls back with `preview_changed`. Preview sends no pushes or messages and leaves no notification row.
