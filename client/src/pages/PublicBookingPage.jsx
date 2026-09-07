@@ -1066,7 +1066,7 @@ export default function PublicBookingPage() {
               <div>
                 <AddressAutocomplete
                   autoFocus
-                  inputProps={{ 'aria-label': 'Street address' }}
+                  aria-label="Street address"
                   value={address.line1}
                   onChange={(v) => updateAddress(a => ({ ...a, line1: v, line2: '', formatted: '' }))}
                   onSelect={(parts) => {

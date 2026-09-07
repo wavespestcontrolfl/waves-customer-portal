@@ -2943,7 +2943,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 })()}
 
                 {!svc.lineDiscount && (
-                  <div style={{ gridColumn: '1 / -1', position: 'relative', padding: '0 0 2px' }}>
+                  <div
+                    style={{ gridColumn: '1 / -1', position: 'relative', padding: '0 0 2px' }}
+                    // Close only when focus leaves the whole picker: the options are
+                    // real buttons now, so Tab must be able to reach them.
+                    onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setLineDiscountOpenIdx((current) => (current === idx ? null : current)); }}
+                  >
                     {serviceFieldLabel('Discount')}
                     <input
                       value={lineDiscountQueries[svc.lineId || idx] || ''}
@@ -2952,7 +2957,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         if (lineDiscountPresets.length > 0) setLineDiscountOpenIdx(idx);
                       }}
                       onFocus={() => { if (lineDiscountPresets.length > 0) setLineDiscountOpenIdx(idx); }}
-                      onBlur={() => setTimeout(() => setLineDiscountOpenIdx((current) => (current === idx ? null : current)), 150)}
                       placeholder={lineDiscountPresets.length === 0 ? 'No invoice discounts are available' : `Search discounts${svc.name ? ` for ${svc.name}` : ''}...`}
                       disabled={lineDiscountPresets.length === 0}
                       style={{ ...inputStyle, fontSize: isMobile ? 15 : 12, minHeight: isMobile ? 42 : 36, padding: isMobile ? '10px 12px' : '8px 10px', opacity: lineDiscountPresets.length === 0 ? 0.65 : 1 }}
