@@ -40,7 +40,8 @@ const NEGATION_RE = /\b(?:not(?! only)|no(?!-)|never|none|nor|without|except|exc
 // coordinating "and"/"or" that starts a new predicate ("is a franchise and
 // does not offer fumigation"). A bare "or" inside a noun list ("insulation or
 // fumigation") is not a boundary, so a negated list stays negated.
-const CLAUSE_BOUNDARY_RE = /[.!?;\n]|,?\s+(?:but|however|whereas|although|though|yet)\b|,?\s+(?:and|or)\s+(?=(?:\w+\s+){0,2}(?:is|are|was|were|does|do|did|offers?|provides?|has|have|will|can|covers?|includes?|charges?|treats?|serves?|handles?|performs?|operates?|holds?)\b)/i;
+const PREDICATE_VERB = '(?:is|are|was|were|does|do|did|offers?|provides?|has|have|will|can|covers?|includes?|charges?|treats?|serves?|handles?|performs?|operates?|holds?|specializ(?:es|e)|focus(?:es)?|excels?|delivers?|carr(?:ies|y)|sells?|uses?|maintains?|guarantees?|promises?|claims?|states?|says?|remains?|continues?|employs?|runs?|owns?|works?|also)';
+const CLAUSE_BOUNDARY_RE = new RegExp(`[.!?;\\n]|,?\\s+(?:but|however|whereas|although|though|yet)\\b|,?\\s+(?:and|or)\\s+(?=(?:\\w+\\s+){0,2}${PREDICATE_VERB}\\b)`, 'i');
 // "does not offer: fumigation, insulation" — a negated verb right before a
 // colon governs the list that follows; "is not a franchise: it offers …" does not.
 // Active ("does not offer:") and passive ("Services not offered:") intros.
@@ -177,6 +178,9 @@ function asserted(compiled, answer) {
     // Facts and claims alike must be about Waves: "Orkin serves Manatee"
     // earns no footprint credit and "Orkin is a franchise" is no wrong claim.
     if (aboutAnotherEntity(before, answer.slice(0, start))) continue;
+    // Passive attribution after the match: "fumigation is offered by Orkin".
+    const agent = after.match(/^\s*(?:is|are|was|were|gets?|comes)?\s*\w*\s*(?:by|from|through)\s+([A-Z][\w'&-]+(?:\s+[A-Z][\w'&-]+){0,2})/);
+    if (agent && lastIndexOfMatch(OTHER_ENTITY_RE, agent[1]) >= 0 && lastIndexOfMatch(WAVES_NAMED_RE, agent[1]) < 0) continue;
     // A negation INSIDE the match ("bond is not optional") also denies it,
     // unless the pattern deliberately matched a negated phrase from its first
     // word ("not a franchise" as evidence of independence).

@@ -117,6 +117,8 @@ test('a claim about a competitor is not a wrong claim about Waves', () => {
   expect(score('E6', 'Waves offers fumigation-free termite treatments.').forbidden.fumigation_offered).toBe(false);
   expect(score('E8', 'Waves is a non-franchised, independently owned company.')).toMatchObject({ expected: { independent: true }, forbidden: { franchise: false } });
   expect(score('E6', 'Unlike Waves, Orkin offers fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Fumigation is offered by Orkin, not Waves.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Fumigation is offered by Waves.').forbidden.fumigation_offered).toBe(true);
   expect(score('E8', 'Orkin is a national chain and is a franchise.').forbidden.franchise).toBe(false);
   expect(score('E8', 'Waves is a national chain and is a franchise.').forbidden.franchise).toBe(true);
   expect(score('E8', 'Orkin is a franchise, but Waves is a franchise too.').forbidden.franchise).toBe(true);
@@ -142,6 +144,7 @@ test('coordinated predicates and colon lists scope negation to the assertion it 
   expect(score('E6', 'Waves does not offer insulation or fumigation.').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', 'Waves is not a franchise: it offers fumigation.').forbidden.fumigation_offered).toBe(true);
   expect(score('E6', 'Waves is not a franchise and it offers fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves is not a franchise and specializes in fumigation.').forbidden.fumigation_offered).toBe(true);
 });
 
 test('a negation inside the match denies it unless the pattern matched the negated phrase itself, and curly apostrophes count', () => {
@@ -195,6 +198,8 @@ test('termite bond: optional AND annual renewal are separate facts; repair cover
 test('footprint and contact facts read place names and the main line in any common format', () => {
   expect(score('E5', 'Based in Lakewood Ranch, FL, serving Manatee, Sarasota and Charlotte counties.')).toMatchObject({ right: 4, forbidden: { out_of_footprint_hq: false } });
   expect(score('E5', 'Headquartered in Tampa.').forbidden.out_of_footprint_hq).toBe(true);
+  expect(score('E5', 'Waves is based in Bradenton and serves Lakewood Ranch, Manatee, Sarasota and Charlotte counties.')).toMatchObject({ expected: { hq_lakewood_ranch: false }, right: 3 });
+  expect(score('E5', 'Headquarters: Lakewood Ranch, FL.').expected.hq_lakewood_ranch).toBe(true);
   expect(score('E10', 'Call 941.297.5749 or visit https://www.wavespestcontrol.com/.')).toMatchObject({ right: 2 });
   expect(score('E9', 'Yes, Waves Pest Control & Lawn Care is the longer name of the same company.')).toMatchObject({ expected: { alias_same: true }, forbidden: { alias_different: false } });
   expect(score('E9', 'They appear to be two different companies.').forbidden.alias_different).toBe(true);

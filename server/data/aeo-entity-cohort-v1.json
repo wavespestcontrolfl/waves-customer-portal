@@ -25,7 +25,7 @@
     },
     "hq_lakewood_ranch": {
       "label": "Based in Lakewood Ranch",
-      "pattern": "lakewood ranch"
+      "pattern": "(?:based|headquartered|headquarters|home office|located|offices?|hq|operates? (?:out of|from))(?:(?!\\b(?:and|or|serv\\w*|cover\\w*|includ\\w*|also)\\b)[^.\\n;,]){0,25}lakewood ranch|lakewood ranch[^.\\n;]{0,30}(?:headquarters|home office|hq|[- ]based|office)"
     },
     "manatee": {
       "label": "Serves Manatee County",
