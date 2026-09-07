@@ -9,6 +9,7 @@ const root = path.resolve(__dirname, '../..');
 const output = path.join(root, '.tmp/email-browser');
 const a = { id: '00000000-0000-4000-8000-000000000001', gmail_thread_id: 'thread-a', from_address: 'a@example.invalid', subject: 'First fixture message', is_read: true, received_at: new Date().toISOString(), body_text: 'First fixture body' };
 const b = { ...a, id: '00000000-0000-4000-8000-000000000002', gmail_thread_id: 'thread-b', from_address: 'b@example.invalid', subject: 'Second fixture message', body_text: 'Second fixture body' };
+const guideCustomer = { id: '00000000-0000-4000-8000-000000000011', first_name: 'Guide', last_name: 'Fixture', email: 'recipient@example.invalid', phone: '9415550111' };
 
 async function main() {
   fs.mkdirSync(output, { recursive: true });
@@ -28,6 +29,7 @@ async function main() {
   async function openPage(role = 'admin', width = 1440) {
     const page = await browser.newPage({ viewport: { width, height: 1000 }, timezoneId: 'America/New_York', serviceWorkers: 'block' });
     page.setDefaultTimeout(15000);
+    page.setDefaultNavigationTimeout(60000);
     await page.addInitScript(() => {
       localStorage.setItem('waves_admin_token', 'fixture-token');
       localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'fixture-owner', role: 'admin' }));
@@ -51,6 +53,7 @@ async function main() {
       else if (api === '/health') body = { status: 'ok', gates: {} };
       else if (api === '/admin/feature-flags') body = { flags: {} };
       else if (api === '/admin/notifications/unread-count') body = { count: 0 };
+      else if (api === '/admin/communications/unread-count') body = { conversations: 0 };
       else if (api === '/admin/email/oauth/status') body = { connected: gmailConnected };
       else if (api === '/admin/email/inbox') body = { emails: [b], total: 1 };
       else if (api === '/admin/email/stats') body = { total: 1, unread: 0 };
@@ -66,7 +69,16 @@ async function main() {
       else if (api === '/admin/communications/stats') body = {};
       else if (api === '/admin/communications/ai-auto-reply-status') body = { enabled: false };
       else if (api === '/admin/communications/agent-draft') body = { draft: null };
-      else if (api === '/admin/customers') body = { customers: [] };
+      else if (api === '/admin/communications/link-library') body = { links: [
+        { key: 'fixture-quote', name: 'Request a quote', category: 'booking', url: 'https://www.wavespestcontrol.com/quote/' },
+      ] };
+      else if (api === '/admin/communications/send-prep' && request.method() === 'POST') {
+        const submitted = request.postDataJSON();
+        assert.equal(submitted.customerId, guideCustomer.id);
+        report.requests.at(-1).payload = submitted;
+        body = { success: true, message: 'Synthetic guide delivered by ' + submitted.channel + '.' };
+      }
+      else if (api === '/admin/customers') body = { customers: /guide|recipient@example.invalid/i.test(url.searchParams.get('search') || '') ? [guideCustomer] : [] };
       else { report.unmatched.push({ stage, method: request.method(), path: api }); body = { error: 'Unmatched synthetic request' }; status = 500; }
       return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
     });
@@ -84,6 +96,65 @@ async function main() {
   try {
     server = await previewServer(root);
     browser = await launchBrowser();
+    for (const width of [1440, 390]) {
+      await scenario(`Quick Links consolidates SMS guides at ${width}`, async () => {
+        const sms = await openPage('admin', width);
+        await sms.goto(`${server.baseUrl}/admin/communications#tab=sms`);
+        await sms.getByPlaceholder('Type your message…', { exact: true }).fill('Synthetic unsent SMS');
+        assert.equal(await sms.getByRole('button', { name: 'Send', exact: true }).isDisabled(), true);
+        assert.equal(await sms.getByRole('button', { name: 'Send prep guide', exact: true }).count(), 0);
+        await shot(sms, `quick-links-sms-${width}`);
+        await sms.getByRole('button', { name: 'Quick Links', exact: true }).click();
+        const picker = sms.getByRole('dialog', { name: 'Quick Links' });
+        await picker.getByRole('button', { name: 'Prep guides', exact: true }).click();
+        await shot(sms, `quick-links-guides-${width}`);
+        const before = report.requests.filter((request) => request.path === '/admin/communications/send-prep').length;
+        await picker.getByRole('button', { name: /^Flea treatment/ }).click();
+        await picker.getByRole('textbox', { name: 'Search customer' }).fill('Guide Fixture');
+        await picker.getByRole('button', { name: /Guide Fixture/ }).click();
+        assert.equal(await picker.getByRole('radio', { name: 'Email and text', exact: true }).isChecked(), true);
+        await shot(sms, `quick-links-prep-${width}`);
+        assert.equal(report.requests.filter((request) => request.path === '/admin/communications/send-prep').length, before);
+        await picker.getByRole('button', { name: 'Send email and text', exact: true }).click();
+        await picker.getByText('Synthetic guide delivered by both.', { exact: true }).waitFor();
+        assert.equal(report.requests.filter((request) => request.path === '/admin/communications/send-prep').length, before + 1);
+        await picker.getByRole('button', { name: 'Close', exact: true }).click();
+        assert.equal(await sms.getByPlaceholder('Type your message…', { exact: true }).inputValue(), 'Synthetic unsent SMS');
+        await sms.close();
+      });
+      await scenario(`Email Quick Links preserves compose and reply drafts at ${width}`, async () => {
+        const email = await openPage('admin', width);
+        await email.goto(`${server.baseUrl}/admin/communications?id=${a.id}#tab=email`);
+        await email.getByRole('textbox', { name: 'Reply' }).fill('Synthetic reply with a link');
+        await email.getByRole('button', { name: 'Quick Links', exact: true }).click();
+        await email.getByRole('button', { name: /^Portal login/ }).click();
+        assert.ok((await email.getByRole('textbox', { name: 'Reply' }).inputValue()).includes('https://portal.wavespestcontrol.com/login'));
+        await email.getByRole('button', { name: 'New Email', exact: true }).click();
+        const compose = email.getByRole('dialog', { name: 'New email', exact: true });
+        await email.getByLabel('To *', { exact: true }).fill(guideCustomer.email);
+        await email.getByLabel('Subject', { exact: true }).fill('Synthetic guide follow-up');
+        await email.getByLabel('Message *', { exact: true }).fill('Synthetic unsent email');
+        await compose.getByRole('button', { name: 'Quick Links', exact: true }).click();
+        await shot(email, `quick-links-email-picker-${width}`);
+        await email.getByRole('button', { name: /^Request a quote/ }).click();
+        await compose.getByRole('button', { name: 'Quick Links', exact: true }).click();
+        const picker = email.getByRole('dialog', { name: 'Quick Links', exact: true });
+        await picker.getByRole('searchbox').fill('sprinkler');
+        await picker.getByRole('button', { name: /^Sprinkler timer guide/ }).click();
+        assert.equal(await picker.getByRole('textbox', { name: 'Search customer' }).inputValue(), guideCustomer.email);
+        await picker.getByRole('button', { name: /Guide Fixture/ }).click();
+        assert.equal(await picker.getByRole('radio', { name: 'Email only', exact: true }).isChecked(), true);
+        await shot(email, `quick-links-email-guide-${width}`);
+        await picker.getByRole('button', { name: 'Send by email', exact: true }).click();
+        await picker.getByText('Synthetic guide delivered by email.', { exact: true }).waitFor();
+        await email.keyboard.press('Escape');
+        await compose.waitFor();
+        assert.equal(await email.getByRole('dialog', { name: 'Quick Links', exact: true }).count(), 0);
+        assert.equal(await email.getByLabel('Message *', { exact: true }).inputValue(), 'Synthetic unsent email\n\nRequest a quote: https://www.wavespestcontrol.com/quote/');
+        await shot(email, `quick-links-email-compose-${width}`);
+        await email.close();
+      });
+    }
     const page = await openPage();
     await scenario('legacy Email links open off-list messages with all URL context', async () => {
       await page.goto(`${server.baseUrl}/admin/email?id=${a.id}&tag=a&tag=b#source=bell`);
@@ -350,7 +421,9 @@ async function main() {
     assert.deepEqual(report.unmatched, []);
     assert.deepEqual(report.pageErrors, []);
     assert.deepEqual(report.requests.filter((r) => r.method !== 'GET'
-      && r.path !== '/admin/email/send' && r.path !== `/admin/email/message/${a.id}/ai-draft`), []);
+      && r.path !== '/admin/email/send' && r.path !== '/admin/communications/send-prep'
+      && r.path !== `/admin/email/message/${a.id}/ai-draft`), []);
+    assert.equal(report.requests.filter((r) => r.path === '/admin/communications/send-prep').length, 4);
     report.passed = true;
   } catch (error) {
     report.failure = { stage, message: error.message };

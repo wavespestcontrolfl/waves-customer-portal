@@ -67,6 +67,14 @@ test('clearing a saved property label is an explicit approved effect', () => {
   expect(contract.effects).toContainEqual(expect.objectContaining({ label: 'label: (cleared)', before: 'Family home', after: null }));
 });
 
+test.each([['family_home', 'relationship: family home'], [null, 'relationship: (cleared)']])(
+  'property relationship %s is visible in the approval effects', (relationship, label) => {
+    const params = { relationship };
+    const contract = buildContract({ toolName: 'update_customer_property', params, displayParams: params,
+      preview: { before: { relationship: 'own_home' }, changes: params } });
+    expect(contract.effects).toContainEqual(expect.objectContaining({ label, before: 'own_home', after: relationship }));
+  });
+
 test('nested display params flatten one level; arrays join; undefined dropped; null in updates renders as a clear', () => {
   const c = buildContract({
     toolName: 'update_customer',

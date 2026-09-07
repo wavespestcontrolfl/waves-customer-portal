@@ -115,8 +115,8 @@ function checkAutopayCustomerSmsGate(input) {
 
 /**
  * Normalize a phone string to E.164 (best-effort). Mirrors the existing
- * twilio.js normalizePhone — kept private here so the wrapper doesn't
- * depend on a non-exported twilio.js helper.
+ * twilio.js normalizePhone. Exported for delivery claims so reconciliation
+ * uses exactly the same destination as dispatch.
  */
 function normalizeRecipient(phone) {
   if (!phone) return null;
@@ -517,10 +517,10 @@ async function dispatchToProvider(input, hooks = {}) {
 
 module.exports = {
   sendCustomerMessage,
+  normalizeRecipient,
   // Exposed for tests
   _internals: {
     validateContract,
-    normalizeRecipient,
     nextProviderRetryAt,
     isAutopayCustomerSms,
     checkAutopayCustomerSmsGate,

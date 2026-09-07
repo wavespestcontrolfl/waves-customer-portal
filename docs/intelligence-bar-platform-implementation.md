@@ -1,5 +1,9 @@
 # Intelligence Bar platform implementation
 
+> Review split: this is the evidence ledger for the integrated #4019 stack.
+> The catalog-only branch does not yet contain that runtime, UI, or database
+> integration. See [the split boundaries](intelligence-bar-foundation-review-split.md).
+
 ## Objective and authorization
 
 Implement verified parity with supported admin operations, preserving domain
@@ -92,7 +96,7 @@ mocked provider response is not evidence of end-to-end capability.
 ## Transport exceptions
 
 The census records every discovered request/export site, including Intelligence
-Bar transport itself. The ten changed/new query, task, and receipt sites are
+Bar transport itself. The five current query, task, and receipt sites are
 reviewed exceptions: a model must not receive a tool that invokes its own query
 route, chooses another session, or obtains/consumes confirmation credentials.
 These exceptions do not grant coverage to any customer, estimate, inventory,
@@ -135,13 +139,41 @@ source commit and remain **unmapped**. The prior fingerprint and retired sites
 remain recorded. This addresses CI's merged-main census drift without claiming
 support for those new portal actions.
 
-Current foundation census: 1,732 UI sites; ten transport exceptions; 1,722 domain
-sites still unsupported/unverified in the matrix. Registration of existing tools
+Current foundation census: 1,739 retained UI sites; five current transport
+exceptions; 1,734 sites still unsupported/unverified in the matrix. Historical
+transport calls remain recorded after their frontend sites changed. Registration of existing tools
 has deliberately not been relabeled as verified application parity.
 The dependent property branch adds two UI sites and verifies four property
 operations: 1,717 retained sites, ten transport exceptions, and 1,703 unverified.
 
 ## Verification evidence
+
+The split integration at `1a63489ed` imports current main `db70ae441` and the
+reviewed registry, target, and recovery services. Its 28 real PostgreSQL route
+scenarios pass in one run (87.61 seconds); the bulk-preview follow-up adds a
+passing focused database rerun that excludes an unrelated same-status lead.
+The final private cohort field is passed by both execution and confirmation
+recheck. The persisted approval format stays unchanged.
+
+The integrated unit run passes 251 tests across ten suites; the additional
+bulk-preview regression passes with 69 existing confirmation/pinning tests.
+Client bar/card/hook tests pass 26 tests; two separate session-identity tests
+cover the existing UUID fallback. These deterministic tests use the scripted
+model and isolated database, not a live-model evaluation.
+
+Repeated confirmations, an intervening model outage, and pre-model ambiguity
+selection retain the original or latest successfully appended thread cursor.
+An unseen concurrent conversation append is refused without changing its tail.
+Review drafting rejects a foreign customer review before model generation;
+review approval shows the review identity, hides its execution token, and
+refuses changed customer linkage before publishing.
+
+Desktop (1440) and mobile (390) Chrome screenshots verify the review identity
+card and cancel action, with no JS exceptions or horizontal overflow. The
+review reply remains unset in PostgreSQL after cancellation. Earlier runtime
+screenshots verify A-only note persistence and expired approvals without
+executable controls. Native iOS notches/keyboards, voice and live-provider
+delivery remain unverified. Earlier regression evidence is retained below.
 
 - Real Express route + bearer authentication + domain executor + isolated Railway
   development Postgres, scripted model and controlled Gmail: twenty-five tests pass in
@@ -247,3 +279,10 @@ Affected-view refresh for remaining domains is still required. Real iOS keyboard
 voice permission/error states, attachment failure, full live-model behavior,
 and performance checks have not been verified. No full-parity completion claim
 is supported by this foundation checkpoint.
+# Review split
+
+This ledger describes the complete development stack. The registry/coverage
+foundation alone adds the catalog and drift check; runtime discovery, task
+targeting and recovery are introduced by its dependent PRs. Recorded browser
+and database evidence below was obtained against the integrated stack, not
+against the registry-only commit. See `intelligence-bar-foundation-review-split.md`.

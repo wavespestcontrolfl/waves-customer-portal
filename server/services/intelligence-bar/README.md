@@ -2,6 +2,10 @@
 
 ## Platform actions
 
+The catalog-only review split introduces the policy and census first. Runtime
+integration behind `GATE_IB_PLATFORM` is in dependent #4019; the following
+describes that integrated contract. See the foundation review split document.
+
 With `GATE_IB_PLATFORM`, the server-owned `action-registry.js` discovers actions
 across pages. Add the module there and classify every action in
 `action-policy.json`; unknown policies fail closed. Do not add a second business

@@ -259,8 +259,8 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     if (preview?.previous_primary?.address) push('customer', `Previous primary: ${preview.previous_primary.address}`);
     if (preview?.primary_property?.address) push('customer', `New primary: ${preview.primary_property.address}`);
     for (const [field, value] of Object.entries(preview?.changes || {})) {
-      if (!['label', 'occupancy_type'].includes(field)) continue; // complete address is shown above
-      push('customer', `${humanKey(field)}: ${value === null ? '(cleared)' : field === 'occupancy_type' ? humanKey(value) : value}`, {
+      if (!['label', 'occupancy_type', 'relationship'].includes(field)) continue; // complete address is shown above
+      push('customer', `${humanKey(field)}: ${value === null ? '(cleared)' : field === 'label' ? value : humanKey(value)}`, {
         ...(preview?.before ? { before: preview.before[field] ?? null } : {}), after: value,
       });
     }

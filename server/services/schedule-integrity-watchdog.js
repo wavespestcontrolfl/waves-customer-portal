@@ -9,7 +9,7 @@
  * past-dated visits parked in on_site/en_route the same way. Nothing in the
  * portal surfaces either state; both classes silently cost money.
  *
- * Three exception classes, one pager:
+ * Exception classes, one pager:
  *  1. STALE IN-PROGRESS — a visit whose scheduled_date is before today (ET)
  *     still sitting in on_site/en_route. The tech went out; the completion
  *     never happened in the system.
@@ -24,6 +24,9 @@
  *     no coordinates / lead-stage / inactive). The email's audience is
  *     computed at send time via the same predicate this check reuses, so
  *     adds and drops are automatic — only prerequisite failures page.
+ *
+ * Accepted-plan gaps also start from the accepted estimate, covering missing
+ * recurrence, applications, and matching cadence/property evidence.
  *
  * Alerting mirrors call-booking-miss-watchdog: one bell per subject, deduped
  * forever via the notifications metadata dedupeKey, with a per-run cap so
@@ -225,17 +228,16 @@ async function runInner({ now = new Date() } = {}) {
   // complete and invoice at $0 today), while the stale backlog is historic
   // and safely drains across ticks. On first enable the 89-row stale backlog
   // would otherwise consume the whole per-run cap for days and starve these.
-  for (const [root, v] of unpricedByRoot) {
-    if (capped()) break;
+  const alerts = Array.from(unpricedByRoot, ([root, v]) => {
     const d = v.service_date;
-    await ring(
+    return [
       `unpriced-series:${root}`,
       `Recurring ${v.service_type || 'service'} has no price — next visit ${d}`,
       `The recurring ${v.service_type || 'service'} series has no price on any row (parent or child). ` +
       `Its next visit is ${d}; it will complete and invoice at $0 unless the series is priced first.`,
       { scheduled_service_id: v.id, series_root_id: root, customer_id: v.customer_id || null, next_visit_date: d },
-    );
-  }
+    ];
+  });
 
   // Class 3 — recurring-lawn customers invisible to the Monday irrigation
   // email (owner directive 2026-08-05: check daily). The email's audience is
@@ -260,8 +262,7 @@ async function runInner({ now = new Date() } = {}) {
     lawnGapCheckFailed = true;
     logger.error(`[schedule-integrity] lawn-email audience-gap check failed: ${e.message}`);
   }
-  for (const g of lawnGaps) {
-    if (capped()) break;
+  alerts.push(...lawnGaps.map((g) => {
     if (g.kind === 'unstamped_member') {
       // Stamping alone only helps if the sender's other prerequisites hold —
       // the leg validates them too (codex #3341 r1 P2), so one card lists
@@ -271,7 +272,7 @@ async function runInner({ now = new Date() } = {}) {
       // (codex #3341 r3 P2): alreadyAlerted has no expiry, so a customer
       // fixed once and regressed later — new one-time booking after the
       // stamped series was cancelled — must mint a NEW key and page again.
-      await ring(
+      return [
         `lawn-email-gap:${g.customerId}:${[...g.fixable].sort().join('+')}${g.triggerVisitId ? `:${g.triggerVisitId}` : ''}`,
         `${g.name || 'A recurring member'}'s lawn visits aren't stamped as a recurring series`,
         `${g.name || 'This customer'} was enrolled as a recurring member and has lawn service on the ` +
@@ -283,10 +284,9 @@ async function runInner({ now = new Date() } = {}) {
           : ' and they are included automatically next Monday.'),
         { customer_id: g.customerId, fixable: g.fixable },
         { link: `/admin/customers?customerId=${encodeURIComponent(g.customerId)}` },
-      );
-      continue;
+      ];
     }
-    await ring(
+    return [
       `lawn-email-gap:${g.customerId}:${[...g.fixable].sort().join('+')}`,
       `${g.name || 'A recurring-lawn customer'} is missing from the Monday watering email`,
       `${g.name || 'This customer'} has live recurring lawn service but cannot receive the Monday ` +
@@ -299,20 +299,44 @@ async function runInner({ now = new Date() } = {}) {
       // the SPA registers no path route for a bare id — CustomersPageV2
       // opens Customer 360 from the customerId query param (Codex #3215).
       { link: `/admin/customers?customerId=${encodeURIComponent(g.customerId)}` },
-    );
-  }
+    ];
+  }));
 
-  for (const v of stale) {
-    if (capped()) break;
+  // Morning lawn-email gaps must page before any historical acceptance backlog.
+  let acceptedGaps = [];
+  let acceptedScheduleCheckFailed = false;
+  try {
+    acceptedGaps = await require('./recurring-schedule-audit').findAcceptedRecurringScheduleGaps({ now });
+  } catch (err) {
+    acceptedScheduleCheckFailed = true;
+    logger.error(`[schedule-integrity] accepted-plan check failed: ${err.message}`);
+  }
+  alerts.push(...acceptedGaps.map((gap) => [
+      `accepted-schedule:${gap.estimateId}:${gap.serviceFamily}:${gap.evidenceKey}`,
+      'Accepted recurring plan needs schedule review',
+      `The accepted ${gap.serviceFamily.replace(/_/g, ' ')} plan calls for ${gap.pattern.replace(/_/g, ' ')} service (${gap.expectedVisits} applications). ` +
+        `The linked schedule has ${gap.recordedVisits} working/completed applications. Review: ${gap.issues.map((issue) => issue.replace(/_/g, ' ')).join('; ')}. ` +
+        'Check any later amendment or cancellation before changing appointments or prices.',
+      { estimate_id: gap.estimateId, customer_id: gap.customerId, issues: gap.issues,
+        expected_pattern: gap.pattern, expected_visits: gap.expectedVisits, appointment_ids: gap.appointmentIds },
+      { link: `/admin/customers?customerId=${encodeURIComponent(gap.customerId)}` },
+  ]));
+
+  alerts.push(...stale.map((v) => {
     const d = v.service_date;
-    await ring(
+    return [
       `stale-visit:${v.id}`,
       `Visit stuck ${v.status} since ${d} — never completed`,
       `${v.service_type || 'A visit'} on ${d} is still "${v.status}". If it was performed, complete it so the ` +
       'service record, invoice, and report fire; if it never happened, cancel it from admin dispatch ' +
       '(admin path — not the customer app).',
       { scheduled_service_id: v.id, customer_id: v.customer_id || null, stale_status: v.status, service_date: d },
-    );
+    ];
+  }));
+
+  for (const alert of alerts) {
+    if (capped()) break;
+    await ring(...alert);
   }
 
   return {
@@ -322,6 +346,8 @@ async function runInner({ now = new Date() } = {}) {
     unpricedSeries: unpricedByRoot.size,
     lawnEmailGaps: lawnGaps.length,
     lawnGapCheckFailed,
+    acceptedScheduleGaps: acceptedGaps.length,
+    acceptedScheduleCheckFailed,
     alerted,
   };
 }

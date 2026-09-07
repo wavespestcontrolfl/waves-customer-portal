@@ -16,7 +16,7 @@
  * category becomes Qualified only when someone marks it so. verified_by /
  * verified_at record who made that call.
  */
-const { CAPABILITY_CATEGORIES } = require('./auto-dispatch/service-category');
+const { CAPABILITY_CATEGORIES, classifyServiceCategory } = require('./auto-dispatch/service-category');
 
 const CAPABILITY_LEVELS = ['qualified', 'review_required'];
 const CAPABILITY_STATES = ['qualified', 'review_required', 'off'];
@@ -211,7 +211,35 @@ async function writeCapabilities(conn, technicianId, entries, actorId) {
   }
 }
 
+
+async function assertCapabilitiesActive(trx, technicianId, rows, refuse) {
+  if (!technicianId) return;
+  const categories = [...new Set(rows.map((r) => classifyServiceCategory(r.service_type)).filter(Boolean))];
+  if (!categories.length) return;
+  // Serialize with the Team tab's editor, which writes capabilities under
+  // FOR UPDATE on the technician row: a share lock here holds until this move
+  // commits, so an Off cannot land between the read below and the commit (the
+  // same technician-row lock assertAssignableTechnician takes).
+  await trx('technicians').where({ id: technicianId }).forShare().first('id');
+  const caps = await inactiveCapabilitiesForServices(trx, [technicianId], rows);
+  const deactivated = new Set(caps.map((c) => c.service_category));
+  const hit = rows.find((r) => deactivated.has(classifyServiceCategory(r.service_type)));
+  if (hit) throw refuse(hit.id, `cannot be assigned to a technician deactivated for ${classifyServiceCategory(hit.service_type)}`);
+}
+
+
+// The offer filter and transactional save fence read the same category rules.
+async function inactiveCapabilitiesForServices(conn, technicianIds, rows) {
+  const categories = [...new Set(rows.map((row) => classifyServiceCategory(row.service_type)))];
+  const capabilities = await conn('technician_capabilities')
+    .whereIn('technician_id', technicianIds).whereIn('service_category', categories)
+    .select('technician_id', 'service_category', 'active');
+  return capabilities.filter((row) => row.active === false);
+}
+
 module.exports = {
+  assertCapabilitiesActive,
+  inactiveCapabilitiesForServices,
   CAPABILITY_CATEGORIES,
   CAPABILITY_LEVELS,
   CAPABILITY_STATES,
