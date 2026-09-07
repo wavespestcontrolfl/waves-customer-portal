@@ -26,9 +26,19 @@ The backlink overview summarizes the same complete current observation cohort; i
 
 The opportunity miner requires attributable answer days and evaluates absence independently for each engine/model, then combines qualifying evidence into one existing city/service opportunity. A brand mention cannot suppress a citation gap. Publication feedback requires a link to the published page itself; an unrelated owned-domain link cannot mark that page as cited. Legacy feedback is re-evaluated under version 2.
 
+## Entity-accuracy cohort
+
+The citation benchmark asks prospect questions and measures retrieval and linking. The entity cohort in `server/data/aeo-entity-cohort-v1.json`, version `entity-2026-09-v1`, asks the engines about Waves itself: ten owner-approved questions (owner, founder, license and how to verify it, founding year, base and footprint, services, termite bond, franchise status, the longer public name, contact) plus two search-query tests. Each question records its approved answer, supporting source, the facts an answer must state and the claims it must not make.
+
+Scoring is deterministic (`server/services/seo/aeo-entity-facts.js`): regular expressions over the stored answer text, run at insert time and stored in `seo_llm_mentions.entity_facts`. No model call is involved, so a fact check never varies between runs. A score needs an answer; it does not need resolved citations. The global forbidden claims apply to every question: a founding year other than 2024, ownership attributed to someone else, a franchise, fumigation offered, or a headquarters outside Southwest Florida. The termite question adds the owner's rulings: no damage-repair coverage, no free re-treatment or blanket guarantee, and no first-year inclusion inferred from the word bond.
+
+The panel shows the facts-right rate, the share of answers carrying a wrong claim, and the most often missing facts and wrong claims, by engine/model and by question. The cohort rows join the managed query list through the same seed pattern as the benchmark (existing text, metadata and toggles preserved; rollback keeps query rows and observations and removes only the score column). They stay out of the fixed citation benchmark, and the opportunity miner ignores them: an identity miss is not a city/service page gap. The daily attempt window is unchanged; adding 12 questions lengthens the rotation cycle rather than the daily spend.
+
+A baseline for this cohort is recorded before the hub identity changes (author `knowsAbout`, blog byline `sameAs`, About page founder node, Sunbiz `sameAs`) ship, so any later movement can be compared against it.
+
 ## Verification and release
 
-Focused unit checks: `aeo-citations.test.js`, `impact-tracker.test.js`, and `gsc-opportunity-miner.test.js`.
+Focused unit checks: `aeo-citations.test.js`, `aeo-entity-facts.test.js`, `impact-tracker.test.js`, and `gsc-opportunity-miner.test.js`.
 
 `aeo-measurement-db.test.js` runs only when `AEO_TEST_DATABASE_URL` names a dedicated `waves_qa_` database. It creates and removes its own schema, exercises both migration directions and seed preservation, and verifies the miner and impact queries against PostgreSQL. Follow `docs/development.md` to create the verified nonproduction database. Never use production credentials for these checks.
 

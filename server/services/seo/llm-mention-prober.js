@@ -27,6 +27,7 @@ const {
   MEASUREMENT_VERSION, observationDate, asJsonArray, cleanUrls, isOwnedUrl,
   isMeasuredAnswer, ownedCitations, citationMatchesPage, summarizeObservations,
 } = require('./aeo-measurement');
+const { scoreEntityAnswer, isEntityQuestion, buildEntityDashboard } = require('./aeo-entity-facts');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 
 // Trend/share-of-voice window. Fetch by date range rather than a fixed row cap
@@ -78,7 +79,7 @@ function buildDashboard(rows, queries) {
     benchmark_id: questionMap.get(row.query)?.id || null,
     target_cited: ownedCitations(row).some(url => citationMatchesPage(url, questionMap.get(row.query)?.target_path)),
     city: managed.get(row.query)?.city || questionMap.get(row.query)?.city || 'SWFL',
-    intent: questionMap.get(row.query)?.intent || 'custom',
+    intent: questionMap.get(row.query)?.intent || (isEntityQuestion(row.query) ? 'entity' : 'custom'),
   }));
   const fixed = grid.filter(row => row.benchmark_id);
   const pageCites = new Map();
@@ -108,6 +109,9 @@ function buildDashboard(rows, queries) {
       byCity: observationGroups(fixed, row => row.city),
       byIntent: observationGroups(fixed, row => row.intent),
     },
+    // What the engines say ABOUT Waves (owner-approved facts vs forbidden
+    // claims). Separate cohort; never blended into the citation benchmark.
+    entity: buildEntityDashboard(grid, queries),
     byPlatform,
     trend: observationGroups(rows.filter(row => questionMap.has(row.query)), row => `${observationDate(row.check_date)} · ${row.llm_platform} · ${row.model_version || 'legacy'}`),
     grid,
@@ -457,6 +461,8 @@ class LLMMentionProber {
       const sentiment = parsed.wavesMentioned
         ? await this.classifySentiment(parsed.mentionContext)
         : 'neutral';
+      // Deterministic fact score for entity-cohort questions; null elsewhere.
+      const entityFacts = parsed.answerAvailable ? scoreEntityAnswer(qrow.query, probe.text) : null;
       if (parsed.wavesMentioned) wavesHits++;
 
       // onConflict ignore is the race backstop: two overlapping runs (e.g.
@@ -479,6 +485,7 @@ class LLMMentionProber {
         answer_available: parsed.answerAvailable,
         citations_complete: parsed.citationsComplete,
         rank_position: parsed.rankPosition,
+        entity_facts: entityFacts ? JSON.stringify(entityFacts) : null,
         sentiment,
         model_version: probe.model,
         grounded: !!probe.grounded,
