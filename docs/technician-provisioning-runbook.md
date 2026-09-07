@@ -106,6 +106,41 @@ completed through an emailed reset link.
    (the install hint shows on first visit). Push notifications are opt-in
    from the portal once logged in.
 
+## Tech line (their own Twilio number)
+
+Each field technician can hold one Waves Twilio line — the number on the
+customer's digital card and the one customers text and call to reach *that*
+tech. Dark until `GATE_TECH_LINES=true` (Railway; read live, no redeploy);
+while dark the line behaves like an unassigned office number, so nothing sent
+to it is lost.
+
+1. **The number itself** is already ours and already wired — Twilio holds it
+   with the same webhooks as the location lines (`/api/webhooks/twilio/voice`,
+   `/sms`, `/call-status`), on the customer profile / trust products, and in
+   the A2P messaging service. Buying another line later: repeat that Twilio
+   setup, then add the number to `fieldTech` in
+   `server/config/twilio-numbers.js` **and** `client/src/constants/techLines.js`
+   (one PR — the registry is the authority; the client list feeds the pickers).
+2. **Assign it on the Team tab** (Add / Edit Technician → *Tech line*). One
+   holder per line — the API answers `409 TECH_LINE_TAKEN` if another tech
+   already has it. The tech must be *Active* and *Can be assigned field work*
+   for the line to reach them; otherwise it stays an office line.
+3. **What then happens** (gate on): a text to the line rings the office bell
+   and sits in `/admin/communications` as today AND shows on the tech's home
+   screen as a kept card ("Text on your line") with a push; a call rings the
+   tech's cell for 20 s with the press-1 screen, then the office forward list,
+   then voicemail. The customer card / Save-contact vCard carries the line.
+4. **Who-answered attribution**: add the tech's cell to
+   `WAVES_CSR_NUMBER_MAP` (`+1…:Name`) so a call they accept is scored under
+   their name instead of *Unknown*.
+5. **Offboarding**: clear the line on the Team tab (or the deactivation leaves
+   it assigned but inert — an inactive holder never rings). Reassign it to
+   the next hire from the same picker.
+
+Not yet: replying or calling *from* the line out of the tech portal, and
+automated visit texts from it (owner ruling — those stay on the location
+lines).
+
 ## What the account can do
 
 The technician role activates the role-lockdown boundaries shipped in
