@@ -439,6 +439,32 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test('concurrent packet replay and pest recap acquire customer before stop without a lock cycle', async () => {
+    await mockPg('services').where({ id: fixture.catalogId }).update({ category: 'pest_control' });
+    await saveVisitCompletionPacket(submission());
+    const queries = [];
+    const recordQuery = (query) => queries.push(query);
+    mockPg.on('query', recordQuery);
+    try {
+      const [recap, packet] = await Promise.all([
+        require('../services/pest-recap').submitRecap({ serviceId: fixture.serviceIds[0],
+          actorType: 'technician', actorId: fixture.techId, customerRecap: 'Synthetic recap', sendSms: true, knex: mockPg }),
+        saveVisitCompletionPacket(submission()),
+      ]);
+      expect(recap).toMatchObject({ ok: false, reason: 'visit_grouped' });
+      expect(packet).toMatchObject({ status: 202, body: { replayed: true } });
+      const customer = queries.find((query) => query.sql.includes('from "customers"') && query.sql.includes('for share'));
+      expect(customer).toBeDefined();
+      const recapQueries = queries.filter((query) => query.__knexTxId === customer.__knexTxId);
+      const stopIndex = recapQueries.findIndex((query) => query.sql.includes('pg_advisory_xact_lock'));
+      expect(stopIndex).toBeGreaterThan(recapQueries.indexOf(customer));
+      expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    } finally { mockPg.removeListener('query', recordQuery); }
+  });
+
   test.each([false, true])('reviewed packet prices use one connection and preserve estimate lock order (stale=%p)', async (stale) => {
     const pricing = require('../services/completion-pricing');
     const estimateIds = [randomUUID(), randomUUID()];
