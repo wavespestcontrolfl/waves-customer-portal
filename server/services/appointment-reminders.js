@@ -216,6 +216,7 @@ async function alertNoReachableChannel({ customerId, kind, scheduledServiceId = 
 // Normalize a stored channel preference. Anything but 'email' / 'both' (incl.
 // null / legacy rows) means SMS-first.
 function apptChannel(value) {
+  if (value === 'push' && require('../config/feature-gates').gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return 'push';
   return value === 'email' || value === 'both' ? value : 'sms';
 }
 
@@ -291,7 +292,7 @@ function reminderSendWindowHold(channel, { smsEnabled = true } = {}) {
   // would only starve the email fallback (and for a pre-8AM visit, kill
   // the notice entirely) — proceed and let deliverAppointmentNotice's
   // normal opt-out block route to email immediately.
-  if (smsEnabled === false) return false;
+  if (smsEnabled === false && apptChannel(channel) !== 'push') return false;
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('smsSendWindow')) return false;
   const { isWithinSendWindowET } = require('./messaging/send-window');
@@ -472,7 +473,7 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
   // Both hold codes are deferrals with the same contract: no fallback
   // that would deliver the notice anyway, no alert, row left unmarked.
   const smsHeld = () => !!smsOutcome
-    && (smsOutcome.blockedCode === 'QUIET_HOURS_HOLD' || smsOutcome.blockedCode === 'MOVE_HOLD');
+    && ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT'].includes(smsOutcome.blockedCode);
 
   // Run the caller's SMS closure defensively. Some callers (e.g. the estimate
   // accept flow) throw on a blocked/undeliverable send; for email/both that must
@@ -718,7 +719,7 @@ async function deliverConfirmationByChannel({ customerId, scheduledServiceId = n
   // which already enforces the appointment_confirmation opt-out (suppressing it
   // for opted-out customers) — and we must NOT email them, because the email
   // path bypasses that validator.
-  if (channel === 'sms' || !confirmationOn) {
+  if (channel === 'sms' || channel === 'push' || !confirmationOn) {
     if (!(await visitStillLive())) return false;
     const smsOk = await smsAttempt();
     if (smsOk || !smsPermanentlyBlocked || !confirmationOn || !prefsKnown) return smsOk;
@@ -1457,7 +1458,11 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     return false;
   }
 
-  if (await isLandline(customerId, phone)) {
+  const appSelected = await require('./messaging/push-channel-routing').wantsAppFirst({
+    to: phone, channel: 'sms', audience: 'customer', customerId, purpose, operatorInitiated,
+    metadata: { original_message_type: messageType, ...metaExtra, useCustomerChannel: true },
+  });
+  if (!appSelected && await isLandline(customerId, phone)) {
     return false;
   }
 
@@ -1483,7 +1488,7 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     // route through the handler — never defaulted true, and cron/
     // customer-driven callers leave it false so they stay fenced.
     ...(operatorInitiated === true ? { operatorInitiated: true } : {}),
-    metadata: { original_message_type: messageType, ...metaExtra },
+    metadata: { original_message_type: messageType, ...metaExtra, useCustomerChannel: true },
     // Canonical visit linkage for the audit row (messaging_audit_log.
     // appointment_id) — sms_log metadata does NOT survive the provider
     // handoff (twilio-sms.js forwards an allowlist), so the audit record is
@@ -1535,7 +1540,7 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     // (like retryable/providerAccepted): a later opted-out contact's block
     // must not erase the evidence that an eligible contact was held at the
     // boundary — the callers' defer-don't-close decision reads this code.
-    sendOutcome.blockedCode = (sendOutcome.blockedCode === 'QUIET_HOURS_HOLD' || sendOutcome.blockedCode === 'MOVE_HOLD')
+    sendOutcome.blockedCode = ['QUIET_HOURS_HOLD', 'MOVE_HOLD', 'PUSH_IN_FLIGHT'].includes(sendOutcome.blockedCode)
       ? sendOutcome.blockedCode
       : (result.code || null);
     // NON-sticky per-call evidence for safeSendAppointment's fan-out loop:
@@ -4250,7 +4255,7 @@ const AppointmentReminders = {
       const acceptedCancellationAudit = async () => Boolean(await db('messaging_audit_log')
         .where({ appointment_id: String(scheduledServiceId), purpose: 'appointment_cancellation' })
         .whereNotNull('sent_at')
-        .whereRaw("(provider_message_id ~ '^(SM|MM)' OR channel = 'email')")
+        .whereRaw("(provider_message_id ~ '^(SM|MM)' OR channel IN ('email', 'push'))")
         .whereRaw(
           "sent_at >= (SELECT COALESCE(MAX(h.transitioned_at), '-infinity') FROM job_status_history h WHERE h.job_id = ? AND h.to_status = 'cancelled' AND h.from_status <> 'cancelled')",
           [scheduledServiceId],
@@ -4921,7 +4926,7 @@ const AppointmentReminders = {
         const alreadyAccepted = Boolean(await db('messaging_audit_log')
           .where({ purpose: 'appointment_cancellation' })
           .whereNotNull('sent_at')
-          .whereRaw("(provider_message_id ~ '^(SM|MM)' OR channel = 'email')")
+          .whereRaw("(provider_message_id ~ '^(SM|MM)' OR channel IN ('email', 'push'))")
           .where(function linkedOrGroupEra() {
             this.whereIn('appointment_id', serviceIds)
               // A restored representative leaves the pending group but its
@@ -4962,7 +4967,7 @@ const AppointmentReminders = {
           .whereIn('appointment_id', serviceIds)
           .whereIn('purpose', ['appointment_reminder_72h', 'appointment_reminder_24h', 'appointment_confirmation'])
           .whereNotNull('sent_at')
-          .whereRaw("(provider_message_id ~ '^(SM|MM)' OR channel = 'email')")
+          .whereRaw("(provider_message_id ~ '^(SM|MM)' OR channel IN ('email', 'push'))")
           .first('id'));
         if (!delivered) {
           // Appointment EMAILS audit into customer_interactions (r23).

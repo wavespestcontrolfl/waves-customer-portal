@@ -45,7 +45,10 @@ function submission(overrides = {}) {
 postgres('visit completion packet records on PostgreSQL', () => {
   beforeAll(async () => {
     const url = new URL(connection);
-    if (!/^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname)) throw new Error('Use a verified, task-private QA database');
+    const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
+    const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname)
+      && url.pathname === '/waves_test';
+    if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
     mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 8 } });
     if (!(await mockPg.schema.hasTable('visit_completion_packets'))) throw new Error('Run the repository migrations first');
   });
@@ -387,6 +390,48 @@ postgres('visit completion packet records on PostgreSQL', () => {
       context.mockImplementation(async () => '');
       await mockPg.destroy();
       mockPg = normalPool;
+    }
+  });
+
+  test('grouped completion and lawn baseline confirmation keep the same lock order', async () => {
+    const originalGate = process.env.GATE_LAWN_PROPERTY_HISTORY;
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    const baseline = await mockPg.transaction();
+    const { lockCustomerBaseline } = require('../services/lawn-assessment');
+    let pending;
+    let observe;
+    try {
+      await lockCustomerBaseline(fixture.customerId, baseline);
+      let reachedBaseline;
+      const waiting = new Promise((resolve) => { reachedBaseline = resolve; });
+      observe = (query) => {
+        if (query.bindings?.includes('lawn-baseline')) reachedBaseline();
+      };
+      mockPg.on('query', observe);
+      pending = saveVisitCompletionPacket(submission()).then(
+        (value) => ({ value }), (error) => ({ error }),
+      );
+      await Promise.race([waiting, pending.then((result) => {
+        throw result.error || new Error('Completion returned before acquiring the baseline lock');
+      })]);
+      // Confirmation holds the baseline fence before it locks the customer.
+      // A packet waiting for that fence must not already own the customer row.
+      await baseline.raw("SET LOCAL lock_timeout = '2s'");
+      await baseline('customers').where({ id: fixture.customerId }).forNoKeyUpdate().first('id');
+      await baseline.commit();
+      const result = await pending;
+      expect(result.error).toBeUndefined();
+      expect(result.value).toMatchObject({ status: 202, body: { state: 'records_saved' } });
+      expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    } finally {
+      if (observe) mockPg.removeListener('query', observe);
+      if (!baseline.isCompleted()) await baseline.rollback();
+      if (pending) await pending;
+      if (originalGate === undefined) delete process.env.GATE_LAWN_PROPERTY_HISTORY;
+      else process.env.GATE_LAWN_PROPERTY_HISTORY = originalGate;
     }
   });
 

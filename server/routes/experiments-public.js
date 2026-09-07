@@ -1,9 +1,9 @@
 /**
  * Public experiment-exposure intake — POST /api/public/experiments/exposure.
  *
- * The client-side GrowthBook SDK (client/src/lib/growthbook.js) evaluates
- * feature experiments in the browser and reports each assignment here so it
- * lands in `experiment_exposures` — the same warehouse table GrowthBook's
+ * The marketing hub's client-side GrowthBook SDK (wavespestcontrol-astro
+ * src/lib/experiments.ts) evaluates feature experiments in the browser and
+ * reports each assignment here so it lands in `experiment_exposures` — the same warehouse table GrowthBook's
  * analysis reads — keeping Postgres the single source of truth for exposures
  * (no separate event store).
  *

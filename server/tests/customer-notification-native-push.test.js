@@ -48,7 +48,7 @@ test('a durable customer bell event dispatches the matching native push', async 
     category: 'service',
     notificationId: 'notification-1',
     tag: 'customer-notification:notification-1',
-  });
+  }, {});
 });
 
 test('native push failure never turns a stored in-app notification into a failed operation', async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, test, vi, beforeEach, afterEach } from 'vitest';
-import { reportError } from './reportError';
+import { reportError, reportNativeLink } from './reportError';
 
 describe('reportError', () => {
   let sendBeacon;
@@ -56,5 +56,26 @@ describe('reportError', () => {
   test('tolerates a non-Error argument', () => {
     expect(() => reportError('just a string')).not.toThrow();
     expect(sendBeacon).toHaveBeenCalled();
+  });
+
+  test('native diagnostics contain only labels and never read the current tokenized URL', async () => {
+    window.location.pathname = '/estimate/private-test-token';
+    reportNativeLink({
+      platform: 'ios', source: 'launch', outcome: 'replay-skipped', route: 'home', target: 'shortlink',
+      url: 'https://example.invalid/l/private-test-link', error: new Error('private-test-message'),
+    });
+    expect(await beaconBody()).toEqual({
+      context: 'native-links',
+      nativeLink: { platform: 'ios', source: 'launch', outcome: 'replay-skipped', route: 'home', target: 'shortlink' },
+    });
+  });
+
+  test('native diagnostics use the same unload-safe fallback and swallow transport errors', () => {
+    sendBeacon.mockReturnValue(false);
+    const fetchMock = vi.fn(() => Promise.reject(new Error('offline')));
+    vi.stubGlobal('fetch', fetchMock);
+    expect(() => reportNativeLink({ platform: 'ios', source: 'launch', outcome: 'empty', route: 'home', target: 'none' }))
+      .not.toThrow();
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'POST', keepalive: true });
   });
 });

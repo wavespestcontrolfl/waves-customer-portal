@@ -181,6 +181,7 @@ function send(deviceToken, notification) {
       };
       const collapseId = apnsCollapseId(notification?.tag);
       if (collapseId) headers['apns-collapse-id'] = collapseId;
+      if (notification?.ephemeral) headers['apns-expiration'] = '0';
       const req = client.request(headers);
 
       let status = 0;

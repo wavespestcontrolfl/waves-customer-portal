@@ -368,7 +368,7 @@ async function sendDepositReceipt({ estimateId, amountDollars, cardSurcharge = 0
     : leadEmail;
   const emailUsable = !emailOptOut && !!emailRecipient;
   const wantSms = estimate.customer_id
-    ? (channel === 'sms' || channel === 'both' || (channel === 'email' && !emailUsable))
+    ? (['sms', 'both', 'push'].includes(channel) || (channel === 'email' && !emailUsable))
     : true;
   // The receipt-texts opt-outs (the portal "Payment confirmation texts"
   // toggle, and the STOP/sms_enabled master switch) block the SMS leg at the

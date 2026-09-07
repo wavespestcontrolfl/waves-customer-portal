@@ -16,6 +16,16 @@ const { authenticate } = require('../middleware/auth');
 
 router.use(authenticate);
 
+router.get('/status', async (req, res, next) => {
+  try {
+    const { gateEnvValue } = require('../config/feature-gates');
+    res.set('Cache-Control', 'no-store');
+    if (!gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS')) return res.json({ available: false });
+    const status = await require('../services/push-notifications').customerStatus(req.customerId);
+    return res.json({ available: true, ...status });
+  } catch (err) { next(err); }
+});
+
 router.post('/native-subscribe', async (req, res, next) => {
   try {
     const { platform, token, deviceInfo } = req.body || {};

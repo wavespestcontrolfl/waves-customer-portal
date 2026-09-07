@@ -53,6 +53,8 @@ jest.mock('../services/lead-estimate-link', () => ({ markLinkedLeadEstimateSent:
 jest.mock('../services/estimate-manual-acceptance', () => ({ markEstimateManuallyAccepted: jest.fn() }));
 jest.mock('../services/admin-estimate-persistence', () => ({
   createOrReuseAdminEstimate: jest.fn(),
+  estimateEditVersion: jest.fn(() => 'synthetic-edit-version'),
+  estimateOfferVersion: jest.fn(() => 'synthetic-offer-version'),
   estimateExpiresAt: jest.fn(() => new Date('2026-08-04T00:00:00.000Z')),
   estimateViewUrl: jest.fn((token) => `https://portal.wavespestcontrol.com/estimate/${token}`),
 }));
@@ -61,7 +63,12 @@ jest.mock('../routes/estimate-public', () => ({
   buildPricingBundle: jest.fn(async () => ({})),
   bookingServiceFor: jest.fn(),
 }));
-jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
+jest.mock('../services/email-template-library', () => ({
+  sendTemplate: jest.fn(),
+  loadTemplateByKey: jest.fn(async () => ({ template: {}, activeVersion: { id: 'synthetic-email-version' } })),
+  renderTemplate: jest.fn(() => ({ subject: 'Synthetic estimate', text: 'Synthetic estimate message' })),
+  templateContentHash: jest.fn(() => 'synthetic-content-hash'),
+}));
 jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => true) }));
 jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn() }));
 

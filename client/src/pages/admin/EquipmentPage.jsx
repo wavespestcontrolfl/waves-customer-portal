@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import { createPortal } from "react-dom";
 import { useOutletContext, useSearchParams } from "react-router-dom";
@@ -815,27 +815,47 @@ function TankMixTab({ showToast }) {
   const [mixes, setMixes] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    adminFetch("/admin/equipment/tank-mixes")
-      .then((d) => setMixes(d.tank_mixes || d.mixes || []))
-      .catch(() => {})
-      .finally(() => setLoading(false));
+  const [loadError, setLoadError] = useState(false);
+  const loadRequest = useRef(0);
+  const mounted = useRef(false);
+  const loadMixes = useCallback(async () => {
+    const request = ++loadRequest.current;
+    setLoading(true);
+    setLoadError(false);
+    try {
+      const d = await adminFetch("/admin/equipment/tank-mixes");
+      if (mounted.current && request === loadRequest.current)
+        setMixes(d.tank_mixes || d.mixes || []);
+    } catch {
+      if (mounted.current && request === loadRequest.current) setLoadError(true);
+    } finally {
+      if (mounted.current && request === loadRequest.current) setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    mounted.current = true;
+    void loadMixes();
+    return () => {
+      mounted.current = false;
+      loadRequest.current += 1;
+    };
+  }, [loadMixes]);
 
   const recalculate = async (id) => {
     try {
       await adminFetch(`/admin/equipment/tank-mixes/${id}/recalculate`, {
         method: "POST",
       });
+      if (!mounted.current) return;
       showToast("Costs recalculated from current inventory prices");
-      const d = await adminFetch("/admin/equipment/tank-mixes");
-      setMixes(d.tank_mixes || d.mixes || []);
+      await loadMixes();
     } catch (e) {
-      showToast(`Failed: ${e.message}`);
+      if (mounted.current) showToast(`Failed: ${e.message}`);
     }
   };
 
-  if (loading)
+  if (loading && mixes.length === 0)
     return (
       <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
         Loading tank mixes...
@@ -844,14 +864,28 @@ function TankMixTab({ showToast }) {
 
   return (
     <div>
-      {mixes.length === 0 ? (
+      {loadError && (
+        <div role="alert" style={{ ...sCard, color: D.red, fontSize: 14 }}>
+          Could not load tank mixes.
+          {mixes.length > 0 && " Showing previously loaded mixes; costs may be out of date."}
+          <button
+            onClick={loadMixes}
+            aria-label="Retry tank mixes"
+            style={{ ...sBtn(D.teal, "#fff"), marginLeft: 12, fontSize: 14 }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {loading && <div role="status" style={{ color: D.muted }}>Refreshing tank mixes...</div>}
+      {mixes.length === 0 ? (!loadError && (
         <div
           style={{ ...sCard, textAlign: "center", padding: 40, color: D.muted }}
         >
           No tank mixes configured yet. Add your standard mixes to track costs
           per application.
         </div>
-      ) : (
+      )) : (
         mixes.map((m) => {
           const products =
             typeof m.products === "string"

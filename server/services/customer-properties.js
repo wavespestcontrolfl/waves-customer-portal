@@ -32,6 +32,18 @@ function defaultOccupancyForContactRole(contactRole) {
   }
 }
 
+/**
+ * Relationship a lazily-backfilled PRIMARY should carry, from the same
+ * contact_role evidence migration 20260906000020 used for existing rows:
+ * a property-manager profile's default address is a client's
+ * (managed_for_client). Every other role → NULL: ownership is never
+ * inferred (occupancy is not evidence — see 20260906000050), the office
+ * records it on the Properties panel.
+ */
+function defaultRelationshipForContactRole(contactRole) {
+  return String(contactRole || '').trim().toLowerCase() === 'property_manager' ? 'managed_for_client' : null;
+}
+
 /** Case/space/punctuation-insensitive street key — "12338 Amber Creek" ≠ "12398 Amber Creek". */
 const normStreet = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
@@ -185,6 +197,7 @@ async function ensurePrimaryCore(customerOrId, { occupancyType, source } = {}, c
       occupancy_type: occupancyType
         ? normalizeOccupancy(occupancyType)
         : defaultOccupancyForContactRole(customer.contact_role),
+      relationship: defaultRelationshipForContactRole(customer.contact_role),
       is_primary: true,
       address_line1: customer.address_line1,
       address_line2: customer.address_line2 || null,
@@ -232,7 +245,7 @@ async function ensurePrimaryCore(customerOrId, { occupancyType, source } = {}, c
  * customers.address_* (filled only when empty), so the ~310 mirror readers see a
  * service address. Returns { created, propertyId }.
  */
-async function recordCallProperty({ customerId, address_line1, address_line2, city, state, zip, occupancyType, label, source = 'call_pipeline', claimFence = null, conn = null }) {
+async function recordCallProperty({ customerId, address_line1, address_line2, city, state, zip, occupancyType, relationship = null, label, source = 'call_pipeline', claimFence = null, conn = null }) {
   const street = String(address_line1 || '').trim();
   if (!customerId || !street) return { created: false, propertyId: null };
 
@@ -253,7 +266,12 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
   // is then a re-lock of a row the caller already holds (no-op), and the
   // 23505 retry savepoints nest under the caller's transaction as before.
   const run = async (trx) => {
-  await trx('customers').where({ id: customerId }).forUpdate().first('id');
+  // contact_role rides on the locked row: the FIRST primary this path creates
+  // carries the same role-derived relationship default as a lazily created
+  // one (defaultRelationshipForContactRole) so a manager profile's first
+  // address never reads "Not recorded" where the migration and the lazy
+  // path would have said managed_for_client.
+  const customer = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'contact_role');
   // Optional processing-claim fence (#3418 r16): a call-pipeline caller
   // passes { callLogId, procToken } so THIS durable insert is conditioned
   // on the live claim ATOMICALLY — FOR UPDATE on the call_log row holds
@@ -278,6 +296,10 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
     customer_id: customerId,
     label: label || null,
     occupancy_type: normalizeOccupancy(occupancyType),
+    // Written when the caller classified it; otherwise only the first
+    // primary gets the role default (insertRow) — a secondary's NULL reads
+    // as "not recorded" in the admin panel, never as a default.
+    ...(relationship ? { relationship } : {}),
     address_line1: street,
     address_line2: address_line2 || null,
     city: city || null,
@@ -296,7 +318,12 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
     // Nested trx = SAVEPOINT: the 23505 retry below must not poison the
     // outer customer-lock transaction.
     const [r] = await sp('customer_properties')
-      .insert({ ...baseRow, is_primary: isPrimary, label: baseRow.label || (isPrimary ? 'Primary' : null) })
+      .insert({
+        ...baseRow,
+        is_primary: isPrimary,
+        label: baseRow.label || (isPrimary ? 'Primary' : null),
+        ...(isPrimary && !relationship ? { relationship: defaultRelationshipForContactRole(customer?.contact_role) } : {}),
+      })
       .returning('id');
     return r && (r.id || r);
   });
@@ -614,6 +641,7 @@ module.exports = {
   normalizeZip,
   normalizeOccupancy,
   defaultOccupancyForContactRole,
+  defaultRelationshipForContactRole,
   isNewAddress,
   completePrimaryFromCall,
   syncPrimaryAddress,

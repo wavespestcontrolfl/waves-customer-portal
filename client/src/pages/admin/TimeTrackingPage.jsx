@@ -11,6 +11,7 @@ import {
   Users,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { TECH_LINE_NUMBERS } from "../../constants/techLines";
 import {
   etDateString,
   etDatetimeLocalValue,
@@ -2355,6 +2356,9 @@ const EMPTY_TECH_FORM = {
   // Employment: "active" = on staff and can sign in; "prospective" = a
   // hire who has not started (placeholder — no sign-in, no slots).
   employmentStatus: "active",
+  // Per-tech Twilio line ('' = none). Options come from the shared number
+  // list; the server rejects anything outside the registry.
+  twilioNumber: "",
   // Field eligibility is separate from employment: an office admin stays
   // active without ever appearing as a dispatch target.
   fieldDispatchable: false,
@@ -2528,6 +2532,7 @@ export function TeamTab({ showToast }) {
       phone: tech.phone || "",
       email: tech.email || "",
       employmentStatus: tech.employment_status || (tech.active ? "active" : "inactive"),
+      twilioNumber: tech.twilio_number || "",
       fieldDispatchable: tech.field_dispatchable === true,
       autoFlipEnabled: tech.auto_flip_enabled !== false, // default true if undefined
       payRate: tech.pay_rate != null ? String(tech.pay_rate) : "",
@@ -2669,6 +2674,30 @@ export function TeamTab({ showToast }) {
                 <option value="active">Active — on staff</option>
                 <option value="prospective">Prospective — not started</option>
                 {editingId && <option value="inactive">Inactive — offboarded</option>}
+              </select>{" "}
+            </div>{" "}
+            <div>
+              {" "}
+              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+                Tech line
+              </div>{" "}
+              {/* Which Waves Twilio line this tech answers on (Field Team
+                  Program, Phase 0). One line per tech — the server refuses a
+                  line another tech already holds. Texts to it reach the tech
+                  and the office; calls ring the tech's cell first. */}
+              <select
+                value={form.twilioNumber}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, twilioNumber: e.target.value }))
+                }
+                style={sInput}
+              >
+                <option value="">None — office lines only</option>
+                {TECH_LINE_NUMBERS.map((n) => (
+                  <option key={n.number} value={n.number}>
+                    {n.formatted} · {n.label}
+                  </option>
+                ))}
               </select>{" "}
             </div>{" "}
           </div>
@@ -3141,6 +3170,11 @@ export function TeamTab({ showToast }) {
                   }}
                 >
                   {t.phone || "\u2014"}
+                  {t.twilio_number && (
+                    <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+                      Line {TECH_LINE_NUMBERS.find((n) => n.number === t.twilio_number)?.formatted || t.twilio_number}
+                    </div>
+                  )}
                 </td>{" "}
                 <td
                   style={{

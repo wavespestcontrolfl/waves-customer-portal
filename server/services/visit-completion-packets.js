@@ -57,6 +57,11 @@ async function saveVisitCompletionPacket(input, database = db) {
     return await database.transaction(async (trx) => {
       const peek = await trx('service_visits').where({ id: request.visitId }).first();
       if (!peek) return failure(404, 'visit_not_found', 'Visit not found.');
+      // Canonical completion and baseline confirmation take this fence before
+      // customer rows. Acquire it before the packet's estimate/mint/row locks.
+      if (require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY')) {
+        await require('./lawn-assessment').lockCustomerBaseline(peek.customer_id, trx);
+      }
       const { completeScheduledService, completionOwnershipError } = require('./complete-scheduled-service');
       const pricing = require('./completion-pricing');
       const pricingPlans = [];
