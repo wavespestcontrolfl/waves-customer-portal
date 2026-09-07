@@ -53,7 +53,32 @@ test.each(['optional', 'conditional', 'inactive', 'unselected'])('%s products do
   if (reason === 'conditional') Object.assign(plan.protocol.structured.products[0], { defaultInPlan: false, gates: { soil_test: true } });
   if (reason === 'inactive') plan.mixCalculator.items[0].product.active = false;
   if (reason === 'unselected') plan.mixCalculator.items[0].selected = false;
-  expect(buildLawnCompletionDefaults(plan, context).items).toEqual([]);
+  const result = buildLawnCompletionDefaults(plan, context);
+  expect(result.items).toEqual([]);
+  // A selected live recipe the window registers no default for is explained;
+  // a recipe with nothing selected or active is legitimately empty.
+  expect(result.message).toBe(['optional', 'conditional'].includes(reason)
+    ? 'The assigned protocol window lists none of this recipe\'s products as defaults. Enter the actual work.' : null);
+});
+
+test('a live window whose defaults name none of the recipe products explains the empty prefill', () => {
+  const { plan, context } = fixture();
+  // Operating layer seeded with one product (e.g. Liquid SRN) while the field
+  // recipe resolves different catalog rows (e.g. LESCO fertilizer + CarbonPro-L).
+  plan.protocol.structured.products = [{ productId: 'liquid-srn', defaultInPlan: true, gates: {}, applicationMode: 'broadcast' }];
+  plan.mixCalculator.items = [
+    { selected: true, product: { id: 'lesco', name: 'LESCO 24-0-11', active: true, labelVerifiedAt: '2026-01-01' }, mix: { amount: 20, amountUnit: 'lb', treatedSqft: 4000 } },
+    { selected: true, product: { id: 'carbonpro', name: 'CarbonPro-L', active: true, labelVerifiedAt: '2026-01-01' }, mix: { amount: 12, amountUnit: 'fl oz', treatedSqft: 4000 } },
+  ];
+  const result = buildLawnCompletionDefaults(plan, context);
+  expect(result.items).toEqual([]);
+  expect(result.options).toEqual([]);
+  expect(result.message).toBe('The assigned protocol window lists none of this recipe\'s products as defaults. Enter the actual work.');
+  // One registered default is enough: the prefill carries it and the message clears.
+  plan.protocol.structured.products.push({ productId: 'carbonpro', defaultInPlan: true, gates: {}, applicationMode: 'broadcast' });
+  const partial = buildLawnCompletionDefaults(plan, context);
+  expect(partial.items.map(item => item.product.id)).toEqual(['carbonpro']);
+  expect(partial.message).toBeNull();
 });
 
 test.each(['property', 'grass', 'window', 'version', 'archived', 'nonmember', 'nonlawn'])('%s mismatch cannot invent an eligible plan', (reason) => {

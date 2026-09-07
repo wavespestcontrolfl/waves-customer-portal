@@ -157,6 +157,13 @@ function buildLawnCompletionDefaults(plan, context) {
     // the planner's blocks still withhold any unavailable suggested quantity.
     return item.selected === true && item.product?.active !== false && product?.defaultInPlan;
   }).map((item) => completionItem(item, products.find((row) => row.productId === (item.substitution?.originalProductId || item.product?.id)), amountsAllowed)) : [];
+  // The planner's recipe comes from the field reference (protocols.json);
+  // the defaults list is the owner-edited operating layer. When a live
+  // window registers none of the recipe's selected products as defaults,
+  // an unexplained empty prefill would read as "nothing to apply" — say
+  // why instead (Codex P1 #4126 r4). The data alignment is the owner's.
+  const recipeUnregistered = eligible && items.length === 0
+    && plan.mixCalculator.items.some(item => item.selected === true && item.product?.active !== false);
   return {
     enabled: true, serviceId: plan.serviceId, propertyId: context.propertyId,
     lawnSqft: context.propertyMatchesProfile ? plan.mixCalculator.lawnSqft : null,
@@ -168,7 +175,8 @@ function buildLawnCompletionDefaults(plan, context) {
     message: !context.propertyMatchesProfile ? 'The saved turf profile could not be matched to this property. Enter the actual work.'
       : !programApplies ? 'No assigned lawn plan for this visit. Add the products actually applied.'
         : !protocolMatches ? 'The appointment protocol could not be resolved. Enter the actual work.'
-          : plan.propertyGate.blocks.find(block => block.code === 'lawn_archived_recipe_unavailable')?.message || null,
+          : plan.propertyGate.blocks.find(block => block.code === 'lawn_archived_recipe_unavailable')?.message
+            || (recipeUnregistered ? 'The assigned protocol window lists none of this recipe\'s products as defaults. Enter the actual work.' : null),
   };
 }
 
