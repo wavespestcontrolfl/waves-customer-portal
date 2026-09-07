@@ -30,6 +30,8 @@ Commitment extraction, explicit deadlines, guarded delivery witnesses and staff 
 
 `server/tests/sms-operational-actions.test.js` covers grounding, code fidelity, profile authority, concurrent-edit decisions and gate behavior. `server/tests/sms-operations-postgres.test.js` checks atomicity, replay, profile-fact ordering, source relinks, unavailable customers and evidence-preserving rollback in a private schema cloned from a migrated synthetic database. CI supplies its ephemeral PostgreSQL database. Local database execution requires a verified dedicated dev/preview database.
 
-## Deferred P2
+## Explicit replay
 
-Automatic replay of analyzed messages needs reconciliation of previously audited writes and terminal extraction receipts. Changing a model version or correcting a body does not authorize replay. Keep the one-shot marker until receipt-aware reconciliation is implemented.
+Changing a model version or correcting a source body never clears analysis markers or terminal receipts. An operator may request a replay of one already-analyzed inbound SMS with `node ops/agents/replay-sms-profile.js --sms-log-id=<uuid>`. The default is a read-only preview with no provider calls; add `--execute` to use the existing extractor. Both the SMS gate and activation timestamp still apply, and messages before activation remain excluded.
+
+Replayed results always require staff review. Prior automatic-write audits and applied or reverted proposals for the same SMS identify fields that must remain untouched, including inbox twins linked by Twilio message id. An identical pending proposal stays pending; an identical terminal proposal keeps its disposition. New eligible facts use the existing vaulted proposal queue and its chronology, authority and before-value checks. The replay has its own extraction receipt per extractor version and source hash, plus a critical audit; it preserves the original analysis and receipts. A failed replay leaves prior work intact and records a bounded retry attempt. No customer communications, scheduling writes or automatic profile changes run during replay.

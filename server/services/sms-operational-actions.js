@@ -10,8 +10,9 @@ const numbers = require('../config/twilio-numbers');
 const { runExclusive } = require('../utils/cron-lock');
 const { recordAuditEvent } = require('./audit-log');
 const NotificationService = require('./notification-service');
-const { hashExtractionSource, recordExtractionAttempt } = require('./data-hygiene/source-extraction-store');
-const { stalePendingExtractionProposals, findPendingExtractionProposal, upsertSensitiveProposal } = require('./data-hygiene/proposal-store');
+const { validate: isUuid } = require('uuid');
+const { hashExtractionSource, recordExtractionAttempt, shouldSkipExtraction, TERMINAL_STATUSES } = require('./data-hygiene/source-extraction-store');
+const { stalePendingExtractionProposals, findPendingExtractionProposal, upsertSensitiveProposal, findAppliedSmsExtractionFields, buildIdempotencyKey } = require('./data-hygiene/proposal-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
 const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode } = require('./sms-operational-extractor');
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
@@ -19,6 +20,7 @@ const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
 
 const enabled = () => gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS');
+const REPLAY_VERSION = `${VERSION}:replay`;
 const SOURCE_COLUMNS = ['id', 'customer_id', 'direction', 'message_body', 'message_type', 'created_at', 'from_phone', 'to_phone', 'status', 'twilio_sid'];
 const EXCLUDED_TYPES = ['opt_out', 'opt_in', 'sms_reaction', 'help_request'];
 // Owner decision 2026-09-07: only bounded typed fields auto-apply, each behind
@@ -111,9 +113,7 @@ async function proposeFact(trx, message, fact, current) {
   // identifies a twin; a distinct newer correction always outranks this SMS.
   if (await findPendingExtractionProposal({ trx, scope_id: message.customer_id, field: fact.field,
     newerThan: message.created_at, sameMessageSid: message.twilio_sid })) return null;
-  await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field,
-    notNewerThan: message.created_at, sameMessageSid: message.twilio_sid });
-  const proposal = await upsertSensitiveProposal({
+  const input = {
     rule_id: 'extract.sms_profile', rule_version: VERSION, resource_type: 'property_preferences',
     resource_id: current?.id || null, scope_type: 'customer', scope_id: message.customer_id, field: fact.field,
     current_value: current?.[fact.field] ?? null, proposed_value: fact.value,
@@ -124,7 +124,15 @@ async function proposeFact(trx, message, fact, current) {
       channel: 'sms', source_at: new Date(message.created_at).toISOString(), twilio_sid: message.twilio_sid || null,
       property_id: fact.property_id, extractor_version: VERSION,
       source_excerpt: 'Customer SMS; the text is in the vault and the customer conversation.' },
-  }, { trx });
+  };
+  // Re-extraction can return an identical proposal. Preserve its pending or
+  // terminal disposition before retiring siblings; the idempotent insert
+  // would otherwise leave that very proposal stale with no replacement.
+  const existing = await trx('data_hygiene_proposals').where({ idempotency_key: buildIdempotencyKey(input) }).first('id', 'status');
+  if (existing) return existing.status === 'pending' ? existing.id : null;
+  await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field,
+    notNewerThan: message.created_at, sameMessageSid: message.twilio_sid });
+  const proposal = await upsertSensitiveProposal(input, { trx });
   return proposal.id;
 }
 
@@ -135,13 +143,19 @@ async function applyFacts(trx, message, facts, context) {
   // fields in one batch claim the same text for different topics.
   const mixedTopics = new Set(facts.filter((f) => !AUTO_APPLY_FIELDS.has(f.field)).map((f) => f.field)).size > 1;
   for (const fact of facts) {
+    if (context.replayAppliedFields?.has(fact.field)) {
+      outcomes.push({ ...fact, outcome: 'previously_applied' });
+      continue;
+    }
     const duplicateField = facts.filter((f) => f.field === fact.field).length > 1;
     const negatedReview = REVIEW_ON_NEGATION[fact.field];
     const negated = negatedReview && NEGATED_OR_UNCERTAIN.test(message.message_body);
     const verdict = duplicateField ? 'conflicting_facts' : negated ? negatedReview
       : mixedTopics && !AUTO_APPLY_FIELDS.has(fact.field) ? 'mixed_topics' : factVerdict(fact, context);
     if (verdict !== 'apply') { outcomes.push({ ...fact, outcome: verdict }); continue; }
-    if (!AUTO_APPLY_FIELDS.has(fact.field)) {
+    // An explicit replay can offer new facts to staff but cannot refill a
+    // cleared field or repeat an automatic write from an older message.
+    if (context.replayAppliedFields || !AUTO_APPLY_FIELDS.has(fact.field)) {
       const proposalId = await proposeFact(trx, message, fact, persistedCurrent);
       outcomes.push({ ...fact, outcome: proposalId ? 'proposed' : 'superseded', proposal_id: proposalId });
       continue;
@@ -188,6 +202,16 @@ async function loadMessageContext(conn, message) {
   return { message, history: history.reverse(), properties, preferences: preferences || {} };
 }
 
+async function appliedSmsProfileFields(conn, message) {
+  const [audits, proposals] = await Promise.all([
+    conn('audit_log').where({ action: 'sms.property_preference.updated', resource_type: 'property_preferences' })
+      .whereRaw("metadata->>'sms_log_id' = ?", [message.id]).pluck('metadata'),
+    findAppliedSmsExtractionFields({ trx: conn, scope_id: message.customer_id,
+      sms_log_id: message.id, twilio_sid: message.twilio_sid }),
+  ]);
+  return new Set([...audits.map((entry) => entry.field), ...proposals]);
+}
+
 async function recordMessageOperations(conn, message, extracted, matchedContext) {
   return conn.transaction(async (trx) => {
     // Match portal preference saves and merges: preference advisory lock,
@@ -199,7 +223,17 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     const live = await trx('sms_log').where({ id: message.id }).forUpdate().first();
     if (!enabled()) return { skipped: 'gate_off' };
     if (!eligibleMessage(live) || live.customer_id !== message.customer_id || live.message_body !== message.message_body) return { skipped: 'source_changed' };
-    if (live.operational_analysis?.version === VERSION) return { skipped: 'already_processed' };
+    const replay = matchedContext.replay === true;
+    let replayAppliedFields;
+    const receipt = { trx, source_type: 'message', source_id: message.id,
+      extractor_version: replay ? REPLAY_VERSION : VERSION, source_hash: hashExtractionSource(message.message_body) };
+    if (replay) {
+      const since = gateEnvTimestamp('GATE_SMS_OPERATIONAL_ACTIONS_SINCE');
+      if (!since || new Date(live.created_at) < since) return { skipped: 'outside_activation_window' };
+      const prior = await shouldSkipExtraction(receipt);
+      if (prior.skip) return { skipped: 'replay_receipt_terminal', receipt_status: prior.existing.status };
+      replayAppliedFields = await appliedSmsProfileFields(trx, live);
+    } else if (live.operational_analysis?.version === VERSION) return { skipped: 'already_processed' };
     const properties = await trx('customer_properties').where({ customer_id: customer.id, active: true }).select('id');
     const current = await trx('property_preferences').where({ customer_id: customer.id }).forUpdate().first();
     const sender = message.direction === 'inbound' ? message.from_phone : message.to_phone;
@@ -208,12 +242,19 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     const senderIsPrimary = matches.length === 1 && matches[0].id === customer.id;
     const facts = await applyFacts(trx, message, extracted.facts, {
       properties, current: current || {}, expectedCurrent: matchedContext.preferences, senderIsPrimary, messageBody: message.message_body,
+      replayAppliedFields,
     });
-    const analysis = { version: VERSION, processed_at: new Date().toISOString(), facts, dropped: extracted.dropped };
+    let analysis = { version: VERSION, processed_at: new Date().toISOString(), facts, dropped: extracted.dropped };
+    if (replay) {
+      await recordAuditEvent({ trx, critical: true, actor_type: 'system', action: 'sms.profile.replayed',
+        resource_type: 'sms_log', resource_id: message.id,
+        metadata: { initiated_by: 'operator', extractor_version: VERSION,
+          outcomes: facts.map(({ field, outcome, proposal_id }) => ({ field, outcome, proposal_id })) } });
+      analysis = { ...live.operational_analysis, replay: analysis };
+    }
     await trx('sms_log').where({ id: message.id }).update({ operational_analysis: analysis });
-    await recordExtractionAttempt({ trx, source_type: 'message', source_id: message.id, extractor_version: VERSION,
-      source_hash: hashExtractionSource(message.message_body), status: 'ok', proposal_count: facts.length });
-    const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded'].includes(f.outcome));
+    await recordExtractionAttempt({ ...receipt, status: 'ok', proposal_count: facts.length });
+    const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded', 'previously_applied'].includes(f.outcome));
     if (exceptions.length + extracted.dropped) {
       const notif = await NotificationService.notifyAdmin('alert', 'SMS instructions need review',
         'Part of this message needs an evidence, property, or existing-value check. Open the customer profile to review the source conversation.',
@@ -224,7 +265,9 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
             reasons: [...new Set(exceptions.map((f) => f.outcome))] } });
       if (!notif?.id) throw new Error('sms_operations_bell_not_persisted');
     }
-    return { applied: facts.filter((f) => f.outcome === 'applied').length };
+    return { applied: facts.filter((f) => f.outcome === 'applied').length,
+      proposed: facts.filter((f) => f.outcome === 'proposed').length,
+      preserved: facts.filter((f) => f.outcome === 'previously_applied').length };
   });
 }
 
@@ -283,4 +326,42 @@ async function runSmsOperationalActions({ now = new Date(), conn = db, extract =
   });
 }
 
-module.exports = { eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions };
+// Explicit operator action only. The scheduled intake never clears analysis
+// markers or terminal receipts to replay messages after a model/body change.
+async function replaySmsProfile({ smsLogId, execute = false, conn = db, extract = extractSmsOperations } = {}) {
+  if (!isUuid(smsLogId)) return { skipped: 'invalid_sms_log_id' };
+  if (!enabled()) return { skipped: 'gate_off' };
+  const since = gateEnvTimestamp('GATE_SMS_OPERATIONAL_ACTIONS_SINCE');
+  if (!since) return { skipped: 'activation_time_required' };
+  const message = await conn('sms_log as s').where('s.id', smsLogId)
+    .where('s.created_at', '>=', since)
+    .whereExists(function availableCustomer() {
+      this.select(1).from('customers as c').whereRaw('c.id = s.customer_id').whereNull('c.deleted_at');
+    }).first(...SOURCE_COLUMNS.map((column) => `s.${column}`), 's.operational_analysis');
+  if (!eligibleMessage(message)) return { skipped: 'source_unavailable' };
+  const previousReceipt = await conn('data_hygiene_source_extractions')
+    .where({ source_type: 'message', source_id: smsLogId }).whereIn('status', TERMINAL_STATUSES).first('id');
+  if (!message.operational_analysis && !previousReceipt) return { skipped: 'not_previously_analyzed' };
+  const receipt = { trx: conn, source_type: 'message', source_id: smsLogId,
+    extractor_version: REPLAY_VERSION, source_hash: hashExtractionSource(message.message_body) };
+  const prior = await shouldSkipExtraction(receipt);
+  if (prior.skip) return { skipped: 'replay_receipt_terminal', receipt_status: prior.existing.status };
+  if (!execute) {
+    return { dry_run: true, sms_log_id: smsLogId, new_results: 'staff_review',
+      preserved_fields: [...await appliedSmsProfileFields(conn, message)].sort(),
+      analysis_and_prior_receipts: 'preserved' };
+  }
+  return runExclusive('sms-operational-actions', async () => {
+    try {
+      if (!enabled()) return { skipped: 'gate_off' };
+      const context = await loadMessageContext(conn, message);
+      const extracted = await extract(context);
+      return await recordMessageOperations(conn, message, extracted, { ...context, replay: true });
+    } catch {
+      if (enabled()) await recordExtractionAttempt({ ...receipt, status: 'failed', error_message: 'sms_profile_replay_failed' });
+      return { failed: true };
+    }
+  }, { recordHealth: false });
+}
+
+module.exports = { eligibleMessage, factVerdict, loadMessageContext, recordMessageOperations, runSmsOperationalActions, replaySmsProfile };
