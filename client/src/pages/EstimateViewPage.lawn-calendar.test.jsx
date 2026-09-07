@@ -13,7 +13,7 @@ import { LawnProgramCalendar, ServiceSection } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
-const program = (over = {}) => ({ visitsPerYear: 9, cadence: 'about every 42 days', months: [8, 9, 10, 0, 1, 2, 4, 5, 7], ...over });
+const program = (over = {}) => ({ visitsPerYear: 9, ...over });
 
 describe('LawnProgramCalendar', () => {
   it('renders the annual count without the interval, and the four season rows behind the toggle', () => {
