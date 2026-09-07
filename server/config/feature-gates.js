@@ -344,6 +344,10 @@ const gates = {
   // ==='true' in EVERY environment; kill switch: unset.
   visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
 
+  // Creation only: stamped reservations retain their full service capacity
+  // through acceptance even after this gate is disabled. Strict opt-in.
+  visitCombinedCapacity: process.env.GATE_VISIT_COMBINED_CAPACITY === 'true',
+
   // Quote-wizard repeat-run dedupe (#3834 split, PR A′): a tokenless
   // /calculate rerun of an OPEN quote_wizard lead (same email + phone +
   // address + service, 30 days) files as status 'duplicate' carrying
@@ -1433,7 +1437,9 @@ const gates = {
   // unset → 404; revert the caller's host env too, or its SDK keeps posting
   // into the 404. This entry is for logGateStatus; the route reads
   // gateEnvValue('GATE_POSTHOG_INGEST_PROXY') at REQUEST time (the techTips
-  // idiom), so a flip needs no redeploy. See server/routes/posthog-ingest.js.
+  // idiom), so a flip needs no CODE deploy — Railway's automatic redeploy on
+  // the variable change is what restarts the process with the new value;
+  // never set it with --skip-deploys. See server/routes/posthog-ingest.js.
   posthogIngestProxy: gateEnvValue('GATE_POSTHOG_INGEST_PROXY'),
   // The surname rung of that matcher (click_name: the ONE in-window clicker
   // whose complete last name is the reviewer's; see

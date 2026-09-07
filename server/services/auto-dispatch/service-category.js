@@ -25,7 +25,7 @@ const TIME_WINDOWS = {
 
 // Ordered most-specific-first; first regex match wins. General pest is the fallback.
 const CATEGORY_PATTERNS = [
-  ['termite', /termit|wdo|bora\s*care|wood[- ]?destroy|soil\s*(poison|treat)|pre[- ]?slab|preconstruction/i],
+  ['termite', /termit|foam[_\s]*recurring|recurring[_\s]*foam|wdo|bora\s*care|wood[- ]?destroy|soil\s*(poison|treat)|pre[- ]?slab|preconstruction/i],
   ['rodent', /rodent|\brat\b|\brats\b|mice|\bmouse\b|trapping|exclusion/i],
   ['mosquito', /mosquito|no[- ]?see[- ]?um|midge/i],
   ['lawn', /lawn|turf|fertiliz|weed\s*control|fungus|grass|aeration|de[- ]?thatch|tree\s*&?\s*(and\s*)?shrub|\bt\s*&\s*s\b|ornamental|palm\s*(injection|treat)/i],

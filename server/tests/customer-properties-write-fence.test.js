@@ -7,7 +7,7 @@
 // Fixture identities are INVENTED (never copied from live payloads).
 
 jest.mock('../models/db', () => {
-  const state = { ops: [], failFirstPrimaryInsert: false, claimRow: { id: 'call-1' } };
+  const state = { ops: [], failFirstPrimaryInsert: false, claimRow: { id: 'call-1' }, customerRow: { id: 'cust-77', contact_role: 'primary' } };
   const builderFor = (table, runner) => {
     const b = { _table: table };
     for (const m of ['where', 'andWhere', 'whereNull', 'orWhere']) b[m] = jest.fn(() => b);
@@ -15,7 +15,7 @@ jest.mock('../models/db', () => {
     b.first = jest.fn(async () => {
       state.ops.push({ op: 'first', table });
       if (table === 'call_log') return state.claimRow;
-      return { id: 'cust-77' };
+      return state.customerRow;
     });
     b.then = (resolve, reject) => {
       state.ops.push({ op: 'select', table });
@@ -24,7 +24,7 @@ jest.mock('../models/db', () => {
     b.update = jest.fn(async () => { state.ops.push({ op: 'update', table }); return 1; });
     b.insert = jest.fn((row) => ({
       returning: async () => {
-        state.ops.push({ op: 'insert', table, isPrimary: row.is_primary, runner });
+        state.ops.push({ op: 'insert', table, isPrimary: row.is_primary, relationship: row.relationship, runner });
         if (state.failFirstPrimaryInsert && row.is_primary) {
           state.failFirstPrimaryInsert = false;
           const err = new Error('duplicate key');
@@ -61,6 +61,29 @@ beforeEach(() => {
   db._state.ops.length = 0;
   db._state.failFirstPrimaryInsert = false;
   db._state.claimRow = { id: 'call-1' };
+  db._state.customerRow = { id: 'cust-77', contact_role: 'primary' };
+});
+
+describe('recordCallProperty first-primary relationship default', () => {
+  const add = (extra = {}) => recordCallProperty({
+    customerId: 'cust-77', address_line1: '44 Invented Loop', city: 'Parrish', zip: '34219', ...extra,
+  });
+  const insertedRelationship = () => db._state.ops.find((o) => o.op === 'insert' && o.table === 'customer_properties').relationship;
+
+  test("a property-manager profile's first address becomes a managed_for_client primary (same evidence as the migration and the lazy primary)", async () => {
+    db._state.customerRow = { id: 'cust-77', contact_role: 'property_manager' };
+    await add();
+    expect(insertedRelationship()).toBe('managed_for_client');
+  });
+  test('any other role leaves the first primary unrecorded — ownership is never inferred', async () => {
+    await add();
+    expect(insertedRelationship()).toBeNull();
+  });
+  test("the caller's classification wins over the role default", async () => {
+    db._state.customerRow = { id: 'cust-77', contact_role: 'property_manager' };
+    await add({ relationship: 'family_home' });
+    expect(insertedRelationship()).toBe('family_home');
+  });
 });
 
 describe('recordCallProperty customer-lock fence', () => {
