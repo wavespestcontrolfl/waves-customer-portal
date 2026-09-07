@@ -234,22 +234,24 @@ async function v3TemplateSnapshot() {
 // same cap the Custom rung wears, rendered from the v3 row snapshot
 // (v3TemplateSnapshot; null snapshot = uncapped, null here too). The
 // weather lead is the LONGEST composeWeatherLead can produce for the
-// reason (same-day: the "afternoon" part-of-day wording, the longest of
-// the three, whatever the clock says now — the send reads the hour again
-// after the move, and a move spanning noon would grow "morning" by two
-// slots; else the two-digit-chance wording), so the count never
-// understates the send: the real lead is forecast- and clock-dependent
-// and rendered at send time, but it is at most this long.
-const LONGEST_LEAD_HOUR = 13;
+// reason, whatever the clock or calendar says now: for rain that is the
+// same-day "afternoon" part-of-day wording (47 chars — longer than any
+// forecast-chance wording, and "morning"/"evening" are two slots
+// shorter), measured even for a next-day target because the send re-reads
+// the ET date and hour after the move — a move started just before
+// midnight or noon would otherwise grow the lead past the measurement
+// (pre-push P1, codex #4122 r3 P2). The count never understates the send:
+// the real lead is forecast-, clock- and calendar-dependent and rendered
+// at send time, but it is at most this long.
+const LONGEST_LEAD = { isSameDay: true, hour: 13 };
 async function renderPresetMovedNotice({ service, reasonCode, target, note, rescheduleUrl, serviceId, templateBody }) {
   if (!templateBody) return null;
-  const isSameDay = String(target.date) === etDateString();
   const body = await renderV3MovedBody({
     firstName: service.first_name,
     serviceType: service.service_type,
     date: target.date,
     window: service.visit_id ? LONGEST_ARRIVAL_WINDOW : target.window,
-    weatherLead: composeWeatherLead({ reasonCode, isSameDay, hour: LONGEST_LEAD_HOUR, todayChance: 30 }),
+    weatherLead: composeWeatherLead({ reasonCode, ...LONGEST_LEAD }),
     reasonCode,
     rescheduleUrl,
     serviceId,

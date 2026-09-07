@@ -2872,6 +2872,10 @@ describe('rain-out service', () => {
       // The pre-move measurement uses the LONGEST lead the reason can
       // produce, so it never undercounts the forecast-dependent send.
       const [preCheck, send] = renderSmsTemplate.mock.calls.map((c) => c[1]);
+      // …even for a NEXT-day target: the send re-reads the ET date after the
+      // move, so a move begun just before midnight would flip to the longer
+      // same-day wording (r3 P2).
+      expect(preCheck.weather_lead).toBe('rain is moving through your area this afternoon');
       expect(preCheck.weather_lead.length).toBeGreaterThanOrEqual(send.weather_lead.length);
     });
 
