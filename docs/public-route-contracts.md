@@ -503,7 +503,18 @@ authority on any money path).
 `/api/public/quote/calculate` (+ `/api/public/quote/upsell`) (write; public
 instant estimate via the pricing engine — no auth, no token, 10 req/hour rate
 limit. Persists a quote/lead and may text the quote via a Twilio short-link;
-returns pricing only. Request shape: either `services` keyed by the engine
+returns pricing and eligible booking handoffs. Optional `websiteFlow: true`
+opts website estimate pages into `GATE_WEBSITE_QUOTE_BOOKING` (default off).
+Only this run's self-bookable, server-priced `quote_wizard` draft may become
+customer-viewable: estimate then customer row locks, unchanged lead/input/
+totals, new-customer eligibility, existing sendability guards, no uncertain
+engine lines, and cent-exact frozen pricing plus membership-fee agreement.
+No staff approval is required. Successful publication returns the additive
+`website_estimate_url` and uses it for `booking_url` and the existing quote
+invite; no new delivery mechanism is added. A refused website publication
+withholds the booking handoff. Legacy callers keep their current `/book`
+handoff. Ordinary website lead forms do not opt into this route.
+Request shape: either `services` keyed by the engine
 keys in `PUBLIC_QUOTE_SERVICE_KEYS` (`routes/public-quote.js`) or a catalog
 `serviceKey` / `service_key` from the `/api/public/services/menu` payload,
 which expands SERVER-SIDE via `quoteServicesForKey` — the posted body can
@@ -717,6 +728,14 @@ Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+The `/estimate/:token?website=1` SPA uses the website's compact pricing →
+scheduling → Auto Pay presentation over these same APIs. `embed=1` permits
+framing only while `GATE_WEBSITE_QUOTE_BOOKING` is on and only from the
+existing first-party CORS origin allowlist (`server/index.js` CSP); other
+estimate documents retain the strict framing policy. Query markers do not
+grant draft access or change token, payment, consent, or booking eligibility.
+The iframe exchanges only height/step messages with its parent, which checks
+the sender window and exact origin; no customer details or tokens are posted.
 `/accept` fails CLOSED when the accepted plan's money cannot be resolved
 (#3751): 409 `{ error, code }` with nothing booked and call-the-office copy
 — `PER_APPLICATION_ADD_ON_UNPRICED` (an established per-application
@@ -1541,6 +1560,11 @@ customer soft-exit sheet, GATE_ESTIMATE_SOFT_EXIT. `kind:'change'` parks
 ONE `service_requests` row (`requested_service='estimate_change_request'`)
 + an admin bell through the measurement review's shared notify core;
 `kind:'still_deciding'` writes one `activity_log` row and nothing else.
+`kind:'callback'` instead gates on `GATE_WEBSITE_QUOTE_BOOKING`, requires
+the server's `websiteSelfService` stamp on the locked estimate, and parks
+one `estimate_callback_request` through the same office-request writer and
+notification core. Its content is server-authored; no arbitrary phone number
+is accepted. Each request kind dedupes under its own requested-service key.
 The estimate is NEVER mutated and the customer is NEVER auto-messaged.
 Guards mirror measurement-review exactly: gate with a gate-aware limiter
 skip (dark = generic 404), token format gate, 5/hr shared IPv6-safe key,

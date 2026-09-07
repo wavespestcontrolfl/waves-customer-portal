@@ -183,6 +183,12 @@ function ReviewLinkRedirect() {
   return <Navigate to={`/rate/${token}${location.search}`} replace />;
 }
 
+function EstimateRoute() {
+  const { search } = useLocation();
+  const page = <EstimateViewPage />;
+  return new URLSearchParams(search).get('website') === '1' ? page : <WavesShell>{page}</WavesShell>;
+}
+
 // Legacy linked-estimate booking page: its estimate fetch expected JSON from
 // an endpoint that serves the estimate HTML page, so it never loaded (and
 // every hit inflated view_count). Nothing mints these links anymore — send
@@ -523,7 +529,7 @@ export default function App() {
           {Object.entries(ESTIMATE_MARKETING_REDIRECTS).map(([slug, destination]) => (
             <Route key={slug} path={`/estimate/${slug}`} element={<ExternalRedirect to={destination} />} />
           ))}
-          <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><EstimateViewPage /></WavesShell></Suspense>} />
+          <Route path="/estimate/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><EstimateRoute /></Suspense>} />
           {/* #EDF4FA fallbacks = glass-adjacent wash, not the warm legacy
               #FAF8F3 — these pages all mount the glass scene, so a warm
               fallback reads as the old theme flashing before glass. The

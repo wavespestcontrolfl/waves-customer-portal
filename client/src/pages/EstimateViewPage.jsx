@@ -32,6 +32,8 @@ import { useParams } from 'react-router-dom';
 import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
+import WebsiteCallbackButton from '../components/estimate/WebsiteCallbackButton';
+import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimate/WebsiteEstimateFlow';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import { FUNNEL_EVENTS, track } from '../lib/analytics/events';
@@ -575,7 +577,8 @@ function labelAlreadyIncludesService(frequencyLabel, serviceLabel) {
 // Liquid-glass theme — now unconditional on every estimate (the old page was
 // retired at 100% rollout). Only the marketing COPY stays category-scoped via
 // glassCopyActive(); the visual theme mounts for all estimates.
-function Page({ children }) {
+function Page({ children, website = false }) {
+  if (website) return <WebsiteEstimateFrame>{children}</WebsiteEstimateFrame>;
   return (
     <div style={{
       flex: 1, background: ESTIMATE_BG,
@@ -3499,7 +3502,7 @@ function AcceptanceRecordCard({ acceptance }) {
   );
 }
 
-export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false, captureMethodType = 'card' }) {
+export function ReviewPhase({ website = false, slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false, captureMethodType = 'card' }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -3554,8 +3557,8 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
           : 'Your existing appointment stays scheduled. We will collect payment with the tech on-site.'
       : '';
   return (
-    <div style={{ ...estimateCard(), borderTop: `4px solid ${ESTIMATE_BUTTON_BG}` }}>
-      <div style={{ fontSize: 14, fontWeight: 600, color: ESTIMATE_BUTTON_BG, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+    <div data-website-card="" style={{ ...estimateCard(), borderTop: `4px solid ${ESTIMATE_BUTTON_BG}` }}>
+      <div hidden={website} style={{ fontSize: 14, fontWeight: 600, color: ESTIMATE_BUTTON_BG, textTransform: 'uppercase', letterSpacing: 0.5 }}>
         {invoiceOnly
           ? 'Confirm your acceptance'
           : heldForSiteConfirmation
@@ -3579,12 +3582,13 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
                 ? `Visit: ${new Date(`${slotMeta.date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })}${slotMeta.time ? ` · ${slotMeta.time}` : ''}`
                 : `Slot: ${slotId}`}
       </div>
-      {!usingExistingAppointment && !invoiceOnly && !manualScheduling ? <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div> : null}
+      {!website && !usingExistingAppointment && !invoiceOnly && !manualScheduling ? <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div> : null}
       {autoPaySlot}
       {acceptanceTermsSlot}
       <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
         <button
           type="button"
+          data-website-confirm=""
           onClick={onConfirm}
           disabled={submitting || confirmDisabled}
           style={(submitting || confirmDisabled) ? { ...estimateCtaStyle, opacity: 0.65, cursor: submitting ? 'wait' : 'default' } : estimateCtaStyle}
@@ -3595,7 +3599,7 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
             {confirmSub}
           </div>
         ) : null}
-        {depositNote ? (
+        {depositNote && !(website && autoPaySlot && serviceMode !== 'one_time') ? (
           <div style={{ fontSize: 14, color: ESTIMATE_BODY, lineHeight: 1.5, textAlign: 'center' }}>
             {depositNote}
           </div>
@@ -5021,10 +5025,11 @@ export function estimateHasRegulatedCertificateSurface(serviceCategory, services
 
 export default function EstimateViewPage() {
   const { token } = useParams();
-  return <EstimateViewPageInner key={token || 'no-token'} />;
+  const websiteMode = new URLSearchParams(window.location.search).get('website') === '1';
+  return <EstimateViewPageInner key={token || 'no-token'} websiteMode={websiteMode} />;
 }
 
-function EstimateViewPageInner() {
+function EstimateViewPageInner({ websiteMode = false }) {
   const { token } = useParams();
   // Root subscription to the module-global glass-copy flag: a change
   // (setGlassDefault from a /data load) re-renders this tree, so every
@@ -6647,7 +6652,7 @@ function EstimateViewPageInner() {
 
   if (loading) {
     return (
-      <Page>
+      <Page website={websiteMode}>
         <Header customerFirstName={null} address={null} />
         <HeaderTailSkeleton />
         {/* First card ≈ the price card's real height at mobile widths. */}
@@ -6658,7 +6663,7 @@ function EstimateViewPageInner() {
   }
   if (loadError) {
     return (
-      <Page>
+      <Page website={websiteMode}>
         <Header customerFirstName={null} address={null} />
         <PublicLoadError resource="estimate" onRetry={() => loadEstimate().catch(() => {
           setLoadError(true);
@@ -6669,7 +6674,7 @@ function EstimateViewPageInner() {
   }
   if (notFound || !data) {
     return (
-      <Page>
+      <Page website={websiteMode}>
         <NotFoundCard
           token={token}
           extensionEligible={extensionEligible && !readOnlyPreview}
@@ -7391,7 +7396,7 @@ function EstimateViewPageInner() {
       // proof — is deliberately GONE: they already said yes, and the PDF in
       // the action bar carries the what-did-I-agree-to reference.
       return (
-        <Page>
+        <Page website={websiteMode}>
           {readOnlyPreview ? <DraftPreviewBanner draft={adminDraftPreview} estimateId={data?.estimate?.id} /> : null}
           {/* Doc tools ABOVE the hero on every estimate (owner 2026-07-09). */}
           {estimateActionBar}
@@ -7422,7 +7427,7 @@ function EstimateViewPageInner() {
       );
     }
     return (
-      <Page>
+      <Page website={websiteMode}>
         {readOnlyPreview ? <DraftPreviewBanner draft={adminDraftPreview} estimateId={data?.estimate?.id} /> : null}
         {estimateActionBar}
         <Header
@@ -7494,18 +7499,8 @@ function EstimateViewPageInner() {
   }
 
   if (ctaPhase === 'success') {
-    return (
-      <Page>
-        {estimateActionBar}
-        <Header
-          {...headerContactProps}
-          serviceLabel={getServiceLabel(currentFrequency, estimate, pricing, serviceMode)}
-          // Just accepted — the booked hero, not the sales pitch.
-          headline={TERMINAL_HERO.accepted.h1}
-          eyebrowOverride={TERMINAL_HERO.accepted.eyebrow}
-        />
-        {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} preview={readOnlyPreview} /> : null}
-        <SuccessCard
+    const successCard = (
+      <SuccessCard
           acceptResult={acceptResult}
           // First-visit line (owner ask 2026-07-12, re-confirmed): the slot
           // the customer just booked (kept in state through accept) or their
@@ -7517,6 +7512,20 @@ function EstimateViewPageInner() {
               : null)}
           recurring={serviceMode !== 'one_time'}
         />
+    );
+    if (websiteMode) return <WebsiteEstimateFrame>{successCard}</WebsiteEstimateFrame>;
+    return (
+      <Page website={websiteMode}>
+        {estimateActionBar}
+        <Header
+          {...headerContactProps}
+          serviceLabel={getServiceLabel(currentFrequency, estimate, pricing, serviceMode)}
+          // Just accepted — the booked hero, not the sales pitch.
+          headline={TERMINAL_HERO.accepted.h1}
+          eyebrowOverride={TERMINAL_HERO.accepted.eyebrow}
+        />
+        {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} preview={readOnlyPreview} /> : null}
+        {successCard}
         {/* The success screen renders from the accept response without a
             /data refetch, so the referral card rides acceptResult.referral. */}
         {acceptResult?.referral ? <EstimateReferralCard referral={acceptResult.referral} token={token} staffView={readOnlyPreview} /> : null}
@@ -7570,7 +7579,7 @@ function EstimateViewPageInner() {
   // had expired.
   if (reviewBeforeBooking) {
     return (
-      <Page>
+      <Page website={websiteMode}>
         {readOnlyPreview ? <DraftPreviewBanner draft={adminDraftPreview} estimateId={data?.estimate?.id} /> : null}
         {estimateActionBar}
         <Header
@@ -7593,54 +7602,8 @@ function EstimateViewPageInner() {
     );
   }
 
-  return (
-    <Page>
-      {readOnlyPreview ? <DraftPreviewBanner draft={adminDraftPreview} estimateId={data?.estimate?.id} /> : null}
-      {estimateActionBar}
-      <Header
-        {...headerContactProps}
-        serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
-        headline={headline}
-        eyebrowOverride={glassPack?.eyebrow || null}
-        // The booking-forward subline only belongs where booking is still on
-        // the table — terminal and success states keep the plain hero.
-        subline={fillGlassTokens(glassPack?.heroSub) || null}
-      />
-
-      {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} preview={readOnlyPreview} /> : null}
-
-      {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
-
-      {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
-        <SlotIssueBanner
-          kind={ctaPhase === 'reservation_expired' ? 'expired' : 'conflict'}
-          onRetry={() => setSlotsRefreshSignal((v) => v + 1)}
-        />
-      ) : null}
-
-      {measurementReviewBasis ? (
-        <MeasurementReviewSheet
-          token={token}
-          measuredBasis={measurementReviewBasis}
-          onClose={() => setMeasurementReviewBasis(null)}
-        />
-      ) : null}
-      {softExitOpen ? (
-        <SoftExitSheet
-          token={token}
-          expiresAt={estimate.expiresAt || null}
-          changeEligible={data?.softExitChange === true}
-          onClose={() => setSoftExitOpen(false)}
-          // A decline is terminal: reload so the server's terminal state
-          // (declined card, no CTAs) paints from truth, not local state.
-          onDeclined={() => loadEstimate({ preserveSelection: true })}
-        />
-      ) : null}
-
-      {/* Keep the captured payment form mounted during accept/requote so its
-          authorization survives the round trip to the exact-total step. */}
-      {(ctaPhase === 'review' || (ctaPhase === 'submitting' && inlineCardIntent)) && reservation ? (
-        <>
+  const reviewContent = (
+    <>
           {existingAppointment ? (
             <>
               <ExistingAppointmentCard appointment={existingAppointment} />
@@ -7748,6 +7711,7 @@ function EstimateViewPageInner() {
             );
           })() : null}
           <ReviewPhase
+            website={websiteMode}
             slotId={selectedSlotId}
             slotMeta={selectedSlotMeta}
             existingAppointment={existingAppointment}
@@ -7800,7 +7764,10 @@ function EstimateViewPageInner() {
                 ref={inlineCaptureRef}
                 intent={inlineCardIntent}
                 loadStripeSdk={loadStripeSdk}
-                glassActive={!!glassContent}
+                website={websiteMode}
+                glassActive={!websiteMode && !!glassContent}
+                bodyColor={websiteMode ? '#1b2c5b' : undefined}
+                borderColor={websiteMode ? '#e2e8f0' : undefined}
                 busy={ctaPhase === 'submitting' || inlineConfirmBusy}
                 onStateChange={handleInlineCardState}
                 prepay={paymentPreference === 'prepay_annual'}
@@ -7831,6 +7798,7 @@ function EstimateViewPageInner() {
               ? (
                 <button
                   type="button"
+                  className={websiteMode ? 'website-link' : undefined}
                   onClick={() => setPaymentPreference(paymentPreference === 'prepay_annual' ? 'pay_at_visit' : 'prepay_annual')}
                   // Also locked during the inline card confirmation (r3 P2):
                   // the in-flight handleConfirm closure carries the OLD
@@ -7841,7 +7809,7 @@ function EstimateViewPageInner() {
                 >
                   {paymentPreference === 'prepay_annual'
                     ? 'Switch back to pay per application'
-                    : 'Prefer to pay the year up front? Switch to annual prepay'}
+                    : (websiteMode ? 'Switch to annual prepay' : 'Prefer to pay the year up front? Switch to annual prepay')}
                 </button>
               ) : null}
           />
@@ -7870,8 +7838,145 @@ function EstimateViewPageInner() {
               prepay={paymentPreference === 'prepay_annual'}
             />
           ) : null}
-          {aiPanelBlock}
+          {websiteMode ? null : aiPanelBlock}
         </>
+  );
+  const bookingContent = (
+    <div id={BOOKING_SECTION_ID} style={{ scrollMarginTop: 76 }}>
+            {canShowSlotPicker ? (
+              // SlotPicker takes no disabled prop, so freeze it from out here
+              // while a reserve/accept is in flight (ctaPhase 'submitting'
+              // renders this configure layout): pointer-events blocks taps,
+              // the guarded handlers block keyboard selection, and the wrapper
+              // stays mounted either way so the slot fetch doesn't restart.
+              // The handler guards read ctaPhaseRef, NOT ctaPhase — a slot
+              // search started before the submit retains a callback with the
+              // old phase in its closure, and only the ref stays live there.
+              // They reject on every locked phase, not just 'submitting': a
+              // pre-reserve search can also resolve after the page enters
+              // review (or after a failed accept returns to review), where
+              // its selectSlot(null) would clear the slot behind the
+              // still-live reservation.
+              <div
+                aria-disabled={ctaPhase === 'submitting' || undefined}
+                style={ctaPhase === 'submitting' ? { pointerEvents: 'none', opacity: 0.65 } : undefined}
+              >
+                <SlotPicker
+                  website={websiteMode}
+                  preview={readOnlyPreview}
+                  token={token}
+                  askToken={estimate.askToken}
+                  selectedSlotId={selectedSlotId}
+                  onSelect={(slotId) => { if (!SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) setSelectedSlotId(slotId); }}
+                  onSelectMeta={(meta) => { if (!SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) setSelectedSlotMeta(meta); }}
+                  selectedSlotFallbackMeta={selectedSlotMeta}
+                  licenseNumber={estimate.licenseNumber}
+                  refreshSignal={slotsRefreshSignal}
+                  serviceMode={serviceMode}
+                  selectedFrequency={selectedFrequency}
+                  serviceCadences={serviceCadences}
+                  onFirstSlotDate={setFirstSlotDate}
+                  cityLabel={estimateCity}
+                />
+              </div>
+            ) : (
+              <AcceptanceModeCard acceptance={acceptance} />
+            )}
+          </div>
+  );
+  const paymentContent = (
+    (existingAppointment || invoiceOnlyAccept || (canShowSlotPicker && selectedSlotId) || (manualScheduleAccept && serviceMode !== 'one_time')) ? (
+            <div id={PAYMENT_SECTION_ID} style={{ scrollMarginTop: 76 }}>
+              <PaymentPreferenceButtons
+                onSelect={handlePaymentChoice}
+                // Draft preview: dead from first render (Codex rd 1), not just
+                // guarded on click — but rendered, so staff still see the exact
+                // payment options the customer will get. Forcing cta.canAccept
+                // false server-side would fall through to the null-terminal
+                // "expired" card and destroy the preview's purpose.
+                disabled={readOnlyPreview || ctaPhase === 'submitting'}
+                serviceMode={serviceMode}
+                oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
+                extraInvoiceRows={rodentSetupInvoiceRows}
+                setupFee={setupFeeEffective}
+                annualPrepayEligible={annualPrepayEligibleEffective}
+                invoiceMode={!!estimate.billByInvoice}
+                invoiceOnly={invoiceOnlyAccept}
+                siteConfirmationHold={!!estimate.siteConfirmationHold}
+                selectedFrequency={combinedFrequency}
+                cardHold={data?.cardHoldPolicy || null}
+                prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
+                prepayCardCapture={!!data?.recurringCardPolicy?.required}
+              />
+            </div>
+          ) : null
+  );
+
+  if (websiteMode) {
+    return (
+      <WebsiteEstimateFlow
+        services={services} selected={selected} onFrequencyChange={handleFrequencyChange}
+        lockedSection={isLockedMirrorSection} oneTime={serviceMode === 'one_time'}
+        oneTimeBreakdown={pricing.oneTimeBreakdown} combinedFrequency={combinedFrequency}
+        fees={(pricing.firstVisitFees?.length ? pricing.firstVisitFees : (setupFeeEffective ? [setupFeeEffective] : [])).map(tierAwareFee).filter(fee => Number(fee.amount) > 0)}
+        bookingContent={<>{bookingContent}{paymentContent}</>} reviewContent={reviewContent}
+        reviewing={!!reservation && (ctaPhase === 'review' || (ctaPhase === 'submitting' && !!inlineCardIntent))}
+        busy={ctaPhase === 'submitting'} timer={<CountdownLine secondsRemaining={countdownSeconds} />}
+        phone={WAVES_PHONE_DISPLAY} phoneHref={`tel:${WAVES_PHONE_TEL}`}
+        callbackContent={<WebsiteCallbackButton token={token} />}
+        canBook={canShowSlotPicker && cta.canAccept} error={<EstimateErrorBanner error={error} />}
+      />
+    );
+  }
+
+  return (
+    <Page website={websiteMode}>
+      {readOnlyPreview ? <DraftPreviewBanner draft={adminDraftPreview} estimateId={data?.estimate?.id} /> : null}
+      {estimateActionBar}
+      <Header
+        {...headerContactProps}
+        serviceLabel={getServiceLabel(currentFrequency, estimate, pricing)}
+        headline={headline}
+        eyebrowOverride={glassPack?.eyebrow || null}
+        // The booking-forward subline only belongs where booking is still on
+        // the table — terminal and success states keep the plain hero.
+        subline={fillGlassTokens(glassPack?.heroSub) || null}
+      />
+
+      {data.propertyGroup ? <PropertyGroupSwitcher group={data.propertyGroup} preview={readOnlyPreview} /> : null}
+
+      {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
+
+      {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
+        <SlotIssueBanner
+          kind={ctaPhase === 'reservation_expired' ? 'expired' : 'conflict'}
+          onRetry={() => setSlotsRefreshSignal((v) => v + 1)}
+        />
+      ) : null}
+
+      {measurementReviewBasis ? (
+        <MeasurementReviewSheet
+          token={token}
+          measuredBasis={measurementReviewBasis}
+          onClose={() => setMeasurementReviewBasis(null)}
+        />
+      ) : null}
+      {softExitOpen ? (
+        <SoftExitSheet
+          token={token}
+          expiresAt={estimate.expiresAt || null}
+          changeEligible={data?.softExitChange === true}
+          onClose={() => setSoftExitOpen(false)}
+          // A decline is terminal: reload so the server's terminal state
+          // (declined card, no CTAs) paints from truth, not local state.
+          onDeclined={() => loadEstimate({ preserveSelection: true })}
+        />
+      ) : null}
+
+      {/* Keep the captured payment form mounted during accept/requote so its
+          authorization survives the round trip to the exact-total step. */}
+      {(ctaPhase === 'review' || (ctaPhase === 'submitting' && inlineCardIntent)) && reservation ? (
+        reviewContent
       ) : (
         <>
           {/* One-time mode toggle — only rendered when admin opted this
@@ -7925,46 +8030,7 @@ function EstimateViewPageInner() {
               itemized in the price block itself). */}
           {glassContent ? null : aiPanelBlock}
 
-          <div id={BOOKING_SECTION_ID} style={{ scrollMarginTop: 76 }}>
-            {canShowSlotPicker ? (
-              // SlotPicker takes no disabled prop, so freeze it from out here
-              // while a reserve/accept is in flight (ctaPhase 'submitting'
-              // renders this configure layout): pointer-events blocks taps,
-              // the guarded handlers block keyboard selection, and the wrapper
-              // stays mounted either way so the slot fetch doesn't restart.
-              // The handler guards read ctaPhaseRef, NOT ctaPhase — a slot
-              // search started before the submit retains a callback with the
-              // old phase in its closure, and only the ref stays live there.
-              // They reject on every locked phase, not just 'submitting': a
-              // pre-reserve search can also resolve after the page enters
-              // review (or after a failed accept returns to review), where
-              // its selectSlot(null) would clear the slot behind the
-              // still-live reservation.
-              <div
-                aria-disabled={ctaPhase === 'submitting' || undefined}
-                style={ctaPhase === 'submitting' ? { pointerEvents: 'none', opacity: 0.65 } : undefined}
-              >
-                <SlotPicker
-                  preview={readOnlyPreview}
-                  token={token}
-                  askToken={estimate.askToken}
-                  selectedSlotId={selectedSlotId}
-                  onSelect={(slotId) => { if (!SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) setSelectedSlotId(slotId); }}
-                  onSelectMeta={(meta) => { if (!SLOT_SELECTION_LOCKED_PHASES.has(ctaPhaseRef.current)) setSelectedSlotMeta(meta); }}
-                  selectedSlotFallbackMeta={selectedSlotMeta}
-                  licenseNumber={estimate.licenseNumber}
-                  refreshSignal={slotsRefreshSignal}
-                  serviceMode={serviceMode}
-                  selectedFrequency={selectedFrequency}
-                  serviceCadences={serviceCadences}
-                  onFirstSlotDate={setFirstSlotDate}
-                  cityLabel={estimateCity}
-                />
-              </div>
-            ) : (
-              <AcceptanceModeCard acceptance={acceptance} />
-            )}
-          </div>
+          {bookingContent}
 
           {/* Pest visit-preference toggles ("Skip parts you don't need")
               live BELOW the schedule card (owner directive). Glass removes
@@ -7993,31 +8059,7 @@ function EstimateViewPageInner() {
             <ExistingAppointmentCard appointment={existingAppointment} />
           ) : null}
 
-          {(existingAppointment || invoiceOnlyAccept || (canShowSlotPicker && selectedSlotId) || (manualScheduleAccept && serviceMode !== 'one_time')) ? (
-            <div id={PAYMENT_SECTION_ID} style={{ scrollMarginTop: 76 }}>
-              <PaymentPreferenceButtons
-                onSelect={handlePaymentChoice}
-                // Draft preview: dead from first render (Codex rd 1), not just
-                // guarded on click — but rendered, so staff still see the exact
-                // payment options the customer will get. Forcing cta.canAccept
-                // false server-side would fall through to the null-terminal
-                // "expired" card and destroy the preview's purpose.
-                disabled={readOnlyPreview || ctaPhase === 'submitting'}
-                serviceMode={serviceMode}
-                oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
-                extraInvoiceRows={rodentSetupInvoiceRows}
-                setupFee={setupFeeEffective}
-                annualPrepayEligible={annualPrepayEligibleEffective}
-                invoiceMode={!!estimate.billByInvoice}
-                invoiceOnly={invoiceOnlyAccept}
-                siteConfirmationHold={!!estimate.siteConfirmationHold}
-                selectedFrequency={combinedFrequency}
-                cardHold={data?.cardHoldPolicy || null}
-                prepayInLane={!!data?.recurringCardPolicy?.prepayInLane}
-                prepayCardCapture={!!data?.recurringCardPolicy?.required}
-              />
-            </div>
-          ) : null}
+          {paymentContent}
 
           <EstimateErrorBanner error={error} />
 
