@@ -97,6 +97,16 @@ describe('the decision on the draft (§6.3 2c)', () => {
 });
 
 describe('sendOutreach under the contract', () => {
+  test('a typed uncertain Gmail outcome keeps outreach non-sendable until explicit reconciliation', async () => {
+    const s = scenario({ policy: AUTO_POLICY });
+    await nightly(s.db);
+    gmail.sendMessage.mockRejectedValueOnce(Object.assign(new Error('Synthetic uncertain send'), { providerOutcome: { outcomeUnknown: true } }));
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'auto-outreach', mode: 'auto' })).toMatchObject({ ok: false, code: 'send_failed' });
+    expect(placement(s.db).outreach_status).toBe('send_error');
+    expect(await Outreach.sendOutreach({ prospectId: s.row.id, approvedBy: 'auto-outreach', mode: 'auto' })).toMatchObject({ ok: false });
+    expect(placement(s.db).outreach_status).toBe('send_error');
+    expect(gmail.sendMessage).toHaveBeenCalledTimes(1);
+  });
   test('a lifecycle the admin advanced while Gmail was being called stays: the finalize lands the send stamp on it and satisfies the instance, never overwriting it with contacted', async () => {
     const s = scenario({ policy: AUTO_POLICY });
     await nightly(s.db);
