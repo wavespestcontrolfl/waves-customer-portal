@@ -376,7 +376,7 @@ describe('rain-out service', () => {
       // Moved-first: nothing to confirm by reply — the message carries only
       // the same tokenized self-serve link the 72h/24h reminders send.
       expect(vars.alt_clause).toBe(' Need a different time? Reschedule online: https://waves.test/r/tok123');
-      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: false });
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1' });
       expect(vars.forecast_clause).toContain('forecast.weather.gov/zipcity.php?inputstring=34202');
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     });
@@ -2916,12 +2916,13 @@ describe('rain-out service', () => {
       expect(result.ok).toBe(true);
       // Measured through the link builder (grouped / frozen refusals apply,
       // the pending row judged on its landed state) with the existing code
-      // preferred; the send REBUILDS with the same existing code so the
-      // builder's checks run on the post-move state (r2 P2) — never a fresh
-      // mint or a LONG-url fallback that could exceed the measurement.
+      // preferred; the send RE-VALIDATES that same url (pinnedUrl) so the
+      // builder's checks run on the post-move state (r2 P2) — never a
+      // lookup, a fresh mint or a LONG-url fallback that could exceed the
+      // measurement (pre-push P1).
       expect(buildRescheduleLink).toHaveBeenCalledTimes(2);
       expect(buildRescheduleLink).toHaveBeenNthCalledWith(1, 'svc-1', { customerId: 'cust-1', reuseExisting: true, assumeConfirmed: true });
-      expect(buildRescheduleLink).toHaveBeenNthCalledWith(2, 'svc-1', { customerId: 'cust-1', reuseExisting: true });
+      expect(buildRescheduleLink).toHaveBeenNthCalledWith(2, 'svc-1', { customerId: 'cust-1', pinnedUrl: 'https://waves.test/r/tok123' });
       expect(sendCustomerMessage.mock.calls[0][0].body).toContain('https://waves.test/r/tok123');
       const v3Calls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_v3');
       expect(v3Calls).toHaveLength(2);
@@ -3010,6 +3011,32 @@ describe('rain-out service', () => {
       expect(preCheck.weather_lead.length).toBeGreaterThanOrEqual(send.weather_lead.length);
     });
 
+    test('gate on: a pre-move link build FAILURE refuses the move — measuring "no link" and sending one later would grow the body', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: null, line: '', failed: true });
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
+
+      expect(result).toMatchObject({ ok: false, reason: 'note_cap_unavailable' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate on: a measured "no link" (plain refusal) stays no link at send — never rebuilt', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: null, line: '' });
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
+
+      expect(result.ok).toBe(true);
+      expect(buildRescheduleLink).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain(' Need a different time? Reply to this message.');
+    });
+
     test('gate on: a disabled v3 row is uncapped here and PINNED — the send honours the kill switch even if the row is enabled in between', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
@@ -3042,8 +3069,9 @@ describe('rain-out service', () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
       wireSingle();
-      // Pre-check: eligible, existing code. Send: the builder now refuses
-      // (grouped / frozen in between) — the body shrinks, never grows.
+      // Pre-check: eligible, existing code. Send: the builder re-validates
+      // the pinned url and now refuses (grouped / frozen in between) — the
+      // body shrinks, never grows.
       buildRescheduleLink
         .mockResolvedValueOnce({ url: 'https://waves.test/r/tok123', line: '' })
         .mockResolvedValueOnce({ url: null, line: '' });

@@ -566,6 +566,27 @@ describe('codex #3429 r2 P1 — dispatch-owned unreviewed bookings', () => {
     await expect(buildRescheduleLink('svc-1', { reuseExisting: true })).resolves.toEqual({ url: null, line: '' });
     expect(existingShortUrlFor).not.toHaveBeenCalled();
 
+    // pinnedUrl: after the checks, hand back the measured url untouched —
+    // no lookup, no mint — or null once the visit is no longer eligible.
+    existingShortUrlFor.mockClear(); shortenOrPassthrough.mockClear();
+    await expect(buildRescheduleLink('svc-1', { pinnedUrl: 'https://portal.test/l/measured', assumeConfirmed: true }))
+      .resolves.toEqual({ url: 'https://portal.test/l/measured', line: 'Reschedule here: https://portal.test/l/measured\n\n' });
+    expect(existingShortUrlFor).not.toHaveBeenCalled();
+    expect(shortenOrPassthrough).not.toHaveBeenCalled();
+    await expect(buildRescheduleLink('svc-1', { pinnedUrl: 'https://portal.test/l/measured' })).resolves.toEqual({ url: null, line: '' });
+
+    // A thrown read is reported as failed (Quick Move fails closed on it);
+    // the url/line contract is unchanged for every other caller.
+    mockDb.mockImplementation(() => ({ where: jest.fn().mockReturnThis(), first: jest.fn().mockRejectedValue(new Error('connection reset')) }));
+    await expect(buildRescheduleLink('svc-1', { reuseExisting: true })).resolves.toEqual({ url: null, line: '', failed: true });
+    mockDb.mockImplementation(() => ({
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({
+        id: 'svc-1', customer_id: 'cust-1', reschedule_token: 'a'.repeat(64),
+        source_action: 'ai_call_pipeline_followup', status: 'pending', customer_confirmed: false,
+      }),
+    }));
+
     // assumeConfirmed: the SAME pending row judged on its landed state —
     // the Quick Move pre-check is about to confirm it through the
     // rebooker, so the link the post-move send would build is what gets

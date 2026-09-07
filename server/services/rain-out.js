@@ -270,12 +270,17 @@ async function renderPresetMovedNotice({ service, reasonCode, target, note, resc
 // as it moves it, so the post-move send WOULD build a link — measuring
 // (and pinning) none here would text reply-only copy on a move with a
 // note and a link on the same move without one (codex #4122 P2).
+// A build FAILURE (not a refusal) throws: measuring "no link" and then
+// sending one once the read recovers would grow the body past the
+// measurement, so the caller fails the move closed (pre-push P1).
 async function preMoveRescheduleUrl(serviceId, service) {
-  return (await buildRescheduleLink(serviceId, {
+  const built = await buildRescheduleLink(serviceId, {
     customerId: service.cust_id || service.customer_id,
     reuseExisting: true,
     assumeConfirmed: true,
-  })).url;
+  });
+  if (built.failed) throw new Error('reschedule link build failed');
+  return built.url;
 }
 
 // A grouped stop's moved-SMS quotes the STOP's landed arrival start (the
@@ -1403,14 +1408,21 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
   // { url, body } — templates are admin-editable and the shortener can
   // fall back to the LONG url, so rebuilding either here could exceed the
   // cap the check passed (codex pre-push P1). Preset with a note: the
-  // link is REBUILT here with the same existing code (reuseExisting — the
-  // check minted or reused it, so it is the oldest code on the visit) so
-  // the builder's grouped / frozen checks run on the POST-move state (a
-  // visit grouped in between must not get a link the page refuses — r2
-  // P2); the body can only shrink against the measurement.
-  const { url: rescheduleUrl } = prebuiltSms?.body
-    ? { url: prebuiltSms.url }
-    : await buildRescheduleLink(serviceId, { customerId: customer.id, reuseExisting: !!prebuiltSms });
+  // MEASURED url is re-validated here (pinnedUrl — the builder's grouped /
+  // frozen checks run on the POST-move state and hand back that same url
+  // or none; never a lookup or a mint), so a visit grouped in between gets
+  // no link the page refuses (r2 P2) and the body can only shrink against
+  // the measurement (pre-push P1). A measured "no link" stays no link.
+  let rescheduleUrl;
+  if (prebuiltSms?.body) {
+    rescheduleUrl = prebuiltSms.url;
+  } else if (prebuiltSms && 'url' in prebuiltSms) {
+    rescheduleUrl = prebuiltSms.url
+      ? (await buildRescheduleLink(serviceId, { customerId: customer.id, pinnedUrl: prebuiltSms.url })).url
+      : null;
+  } else {
+    rescheduleUrl = (await buildRescheduleLink(serviceId, { customerId: customer.id })).url;
+  }
   // gate_locked carries the portal fix-it nudge ahead of the reschedule
   // clause on whichever rung renders — the customer must hear how to fix
   // next time's access even when v3 is absent and v2 falls in.
@@ -1771,7 +1783,13 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   if (reasonCode === CUSTOM_REASON) {
     if (scope === 'route') return { ok: false, reason: 'custom_route_scope' };
     if (notifyCustomer) {
-      const url = await preMoveRescheduleUrl(serviceId, service);
+      let url;
+      try {
+        url = await preMoveRescheduleUrl(serviceId, service);
+      } catch (err) {
+        logger.warn(`[rain-out] pre-move link build failed for ${serviceId} — move refused: ${err.message}`);
+        return { ok: false, reason: 'note_cap_unavailable' };
+      }
       const body = await renderCustomMovedBody({
         firstName: service.first_name,
         serviceType: service.service_type,
@@ -1831,10 +1849,16 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     if (snap) {
       prebuiltSms = { v3: snap.state };
       if (snap.state === 'live') {
+        let url;
+        try {
+          url = await preMoveRescheduleUrl(serviceId, service);
+        } catch (err) {
+          logger.warn(`[rain-out] pre-move link build failed for ${serviceId} — move refused: ${err.message}`);
+          return { ok: false, reason: 'note_cap_unavailable' };
+        }
+        prebuiltSms.url = url;
         const body = await renderPresetMovedNotice({
-          service, reasonCode, target, note, serviceId,
-          rescheduleUrl: await preMoveRescheduleUrl(serviceId, service),
-          templateBody: snap.body,
+          service, reasonCode, target, note, serviceId, rescheduleUrl: url, templateBody: snap.body,
         });
         // A live snapshot that fails to render (a transient renderer error —
         // getTemplate swallows its own) is not an uncapped rung either.

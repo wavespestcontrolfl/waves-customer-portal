@@ -39,6 +39,16 @@
  * the dispatch-owned-pending refusal does not apply (the link would be
  * minted moments later by the post-move send anyway). Grouped / frozen
  * refusals still apply. For the Quick Move pre-move measurement only.
+ * opts.pinnedUrl: the URL a pre-move check measured — after the same
+ * eligibility checks, return THIS url (no lookup, no mint) or null when
+ * the visit is no longer eligible, so a post-move send can only shrink
+ * the measured body, never grow it.
+ *
+ * A thrown error inside the build (the service-row read, most likely)
+ * still resolves to { url: null, line: '' } but carries `failed: true`,
+ * so a caller that must fail closed on a read failure can tell it apart
+ * from a plain "not eligible" (Quick Move's segment cap); every other
+ * caller keeps treating the null url as "send without the link".
  */
 
 // What a fresh mint looks like, length-wise (short-url createShortCode:
@@ -55,7 +65,7 @@ function smsLineFor(url) {
   return url ? `Reschedule here: ${url}\n\n` : '';
 }
 
-async function buildRescheduleLink(scheduledServiceId, { customerId = null, reuseExisting = false, previewOnly = false, assumeConfirmed = false } = {}) {
+async function buildRescheduleLink(scheduledServiceId, { customerId = null, reuseExisting = false, previewOnly = false, assumeConfirmed = false, pinnedUrl = undefined } = {}) {
   try {
     if (!scheduledServiceId) return { url: null, line: '' };
     const svc = await db('scheduled_services')
@@ -91,6 +101,7 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null, reus
       return { url: null, line: '' };
     }
 
+    if (pinnedUrl !== undefined) return { url: pinnedUrl, line: smsLineFor(pinnedUrl) };
     if (reuseExisting || previewOnly) {
       const existing = await existingShortUrlFor({
         kind: 'reschedule', entityType: 'scheduled_services', entityId: svc.id,
@@ -115,7 +126,7 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null, reus
     return { url, line: smsLineFor(url) };
   } catch (err) {
     logger.warn(`[reschedule-link] build failed for ${scheduledServiceId}: ${err.message}`);
-    return { url: null, line: '' };
+    return { url: null, line: '', failed: true };
   }
 }
 
