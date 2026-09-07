@@ -8,6 +8,9 @@ const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
 const { enrichFromCall, _test } = require('../services/call-profile-enrichment');
 const { extractCodes, appendWithProvenance } = _test;
+// The preference write runs under the customer advisory lock inside a
+// transaction; the mock hands the same builder factory back as trx.
+db.transaction = jest.fn(async (work) => work(Object.assign((table) => db(table), { raw: jest.fn() })));
 
 describe('extractCodes (conservative keyword+digits only)', () => {
   test('pulls explicit gate/lockbox/garage codes', () => {
@@ -51,6 +54,7 @@ describe('enrichFromCall', () => {
     db.mockImplementation((table) => {
       const builder = {
         where: () => builder,
+        forUpdate: () => builder,
         first: async () => (table === 'property_preferences'
           ? { customer_id: 'c1', property_gate_code: '9999', lockbox_code: null, access_notes: null, pet_details: null }
           : { internal_notes: null }),
@@ -76,6 +80,7 @@ describe('enrichFromCall', () => {
     db.mockImplementation((table) => {
       const builder = {
         where: () => builder,
+        forUpdate: () => builder,
         first: async () => null,
         insert: async (row) => { inserts.push({ table, row }); },
         update: async () => 1,
@@ -93,7 +98,7 @@ describe('enrichFromCall', () => {
 
   test('a write failure never throws out of the call path', async () => {
     isEnabled.mockReturnValue(true);
-    db.mockImplementation(() => ({ where() { return this; }, first: async () => { throw new Error('boom'); } }));
+    db.mockImplementation(() => ({ where() { return this; }, forUpdate() { return this; }, first: async () => { throw new Error('boom'); } }));
     const res = await enrichFromCall({ customerId: 'c1', extraction: { property: { access_notes: 'gate code is 4545' } } });
     expect(res.applied).toEqual([]);
   });

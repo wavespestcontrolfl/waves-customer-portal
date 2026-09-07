@@ -195,11 +195,7 @@ async function customerQualifiesForLawnInches(customer = {}) {
 // irrigation_system = true. The report and weekly email still read the
 // column and would otherwise keep suppressing a derived figure behind a
 // false the old toggle left in the row (the migration rewrites no rows).
-const IRRIGATION_INPUT_FIELDS = [
-  'irrigation_controller_location', 'irrigation_zones', 'irrigation_inches_per_week',
-  'irrigation_run_minutes', 'irrigation_schedule_notes', 'watering_days',
-  'irrigation_system_type', 'rain_sensor', 'irrigation_issues',
-];
+const { IRRIGATION_INPUT_FIELDS } = require('../services/irrigation-schedule-confirmation');
 // The subset the weekly watering plan / lawn report size controller
 // instructions from, and the confirmation-set parser — shared with both.
 const { IRRIGATION_SIZING_FIELDS } = require('../services/irrigation-schedule-confirmation');

@@ -1,6 +1,8 @@
 import { D } from "./emailStyles";
+import EmailQuickLinks from "../../../components/admin/EmailQuickLinks";
+import { appendStaticLinkClause } from "../../../lib/composerLinks";
 
-export default function EmailReply({ sender, mailbox, editor }) {
+export default function EmailReply({ active, sender, mailbox, editor }) {
   const { selectedEmail } = mailbox;
   const { drafts, setReplyDraft, sending, drafting, draftResult } = editor;
   const replyText = drafts.replies[selectedEmail.id] || "";
@@ -78,12 +80,15 @@ export default function EmailReply({ sender, mailbox, editor }) {
       <div
         style={{
           display: "flex",
+          flexWrap: "wrap",
           gap: 8,
           marginTop: 8,
           justifyContent: "flex-end",
         }}
       >
         {" "}
+        <EmailQuickLinks key={selectedEmail.id} active={active} recipient={selectedEmail.from_address}
+          disabled={sending} onInsert={(link) => setReplyDraft(selectedEmail.id, appendStaticLinkClause(replyText, link))} />
         <button
           onClick={() =>
             editor.handleAiDraft(selectedEmail, mailbox.isSelected)

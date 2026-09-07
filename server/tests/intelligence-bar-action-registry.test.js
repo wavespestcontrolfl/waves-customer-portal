@@ -158,3 +158,17 @@ test('registry cannot directly execute owner-endpoint actions even with confirma
     } finally { action.executor = original; }
   }
 });
+
+
+test('discovery requires meaningful whole-word matches instead of stopword substrings', () => {
+  const scope = { role: 'admin', context: 'customers' };
+  for (const query of ['do a frobnicate', 'I would like to frobnicate', 'a I the', 'frobnicate']) {
+    expect(registry.discover({ query }, scope)).toMatchObject({ definitions: [], result: { status: 'capability_unimplemented' } });
+  }
+  expect(registry.discover({ query: 'please create a restock request', domain: 'procurement' }, scope).definitions
+    .some(tool => tool.name === 'create_restock_request')).toBe(true);
+});
+
+test('appointment cancellation declares its possible Stripe follow-through effect', () => {
+  expect(registry.actions.get('cancel_appointment')).toMatchObject({ kind: 'external_action', approval: 'ui_confirm' });
+});

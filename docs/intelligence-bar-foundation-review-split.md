@@ -115,3 +115,9 @@ preloads its own authorized estimate tools. Broader payload/helper dependency
 fingerprinting remains deferred alongside backend drift enforcement. Current
 fingerprints describe call expressions; changes outside those expressions still
 require manual review until final capability reconciliation.
+
+Main integration at `db70ae441` adds the three new prep-guide/Quick Links
+request sites, retaining 1,739 cumulative sites as unsupported/unverified in A.
+Their baseline fingerprints are proved against that already-merged main
+revision. The former Communications handlers remain recorded as historical
+sites; moving the UI does not remove work from the capability denominator.

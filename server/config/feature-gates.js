@@ -730,6 +730,11 @@ const gates = {
   // customer SMS, so prod requires explicit opt-in.
   smsShadowDrafts: isProd ? process.env.GATE_SMS_SHADOW_DRAFTS === 'true' : true,
 
+  // SMS private-profile capture + existing admin exception bells. Runtime reads the gate again before writes. Activation
+  // also requires GATE_SMS_OPERATIONAL_ACTIONS_SINCE (an offset ISO instant)
+  // so enabling this lane never applies the historical training corpus.
+  smsOperationalActions: gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS'),
+
   // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
   // human-authored SMS replies + consent-gated call transcripts into
   // voice_corpus_examples (redacted text only, reader-not-ingestor).
@@ -1437,7 +1442,9 @@ const gates = {
   // unset → 404; revert the caller's host env too, or its SDK keeps posting
   // into the 404. This entry is for logGateStatus; the route reads
   // gateEnvValue('GATE_POSTHOG_INGEST_PROXY') at REQUEST time (the techTips
-  // idiom), so a flip needs no redeploy. See server/routes/posthog-ingest.js.
+  // idiom), so a flip needs no CODE deploy — Railway's automatic redeploy on
+  // the variable change is what restarts the process with the new value;
+  // never set it with --skip-deploys. See server/routes/posthog-ingest.js.
   posthogIngestProxy: gateEnvValue('GATE_POSTHOG_INGEST_PROXY'),
   // The surname rung of that matcher (click_name: the ONE in-window clicker
   // whose complete last name is the reviewer's; see
