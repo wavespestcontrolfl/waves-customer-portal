@@ -253,6 +253,7 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   // Only the leading recipient expression establishes a raw contact. A later
   // "text <number>" inside a note or an unresolved person's message is data.
   const recipient = targetClause(prompt).match(/^(?:(?:please|can you|could you|would you|will you|i need you to|i'd like you to)\s+)*(?:text|message|sms|email|reply\s+to|respond\s+to|send(?:\s+(?:a|an))?(?:\s+(?:text|sms|message|reminder|email|reply))?\s+to)\s+(?:to\s+)?(.+)/i)?.[1] || '';
+  const readRecipient = targetClause(prompt).match(/^(?:(?:please|can you|could you|would you|will you)\s+)*(?:(?:show|read|get|find|look up|check|summarize)\s+(?:(?:the|our)\s+)?(?:customer\s+)?(?:conversation|thread|messages|texts|sms|calls|call history|details|history)\s+(?:with|for|from|to|on)|what\s+(?:did|have)\s+we\s+(?:say|send|said|sent)\s+to(?:\s+(?:the\s+)?customer\s+on)?)\s+(.+)/i)?.[1] || '';
   const reviewClause = targetClause(prompt);
   const explicitReview = reviewClause.match(/\breview\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b/i)?.[1];
   const reviewReference = explicitReview || (!namesRequested(prompt)
@@ -280,6 +281,8 @@ async function resolve({ prompt, pageData, selectedTarget }) {
     explicitEmails: [...recipient.matchAll(/^([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi)]
       .map(match => normalizeEmail(match[1])),
     explicitPhones: [...recipient.matchAll(/^((?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4})(?!\d)/g)]
+      .map(match => match[1].replace(/\D/g, '').slice(-10)),
+    explicitReadPhones: [...readRecipient.matchAll(/^((?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4})(?!\d)/g)]
       .map(match => match[1].replace(/\D/g, '').slice(-10)) };
 }
 
@@ -391,6 +394,7 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
 // broad. No fuzzy result or model-selected alternate contact becomes authority.
 async function prepareReadInput(params, context, { toolName, schema }) {
   const input = { ...params };
+  let readContext = context;
   if (schema.properties?.customer_id && (params.customer_name || params.phone)) {
     const permitted = new Set(context.targets.map(target => target.customer_id));
     const named = params.customer_name ? await namedCustomers(`for ${params.customer_name}`) : null;
@@ -398,13 +402,18 @@ async function prepareReadInput(params, context, { toolName, schema }) {
     const matches = named ? named.matches : await db('customers').whereNull('deleted_at')
         .whereRaw("RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = ?", [String(params.phone).replace(/\D/g, '').slice(-10)])
         .select(CUSTOMER_FIELDS);
-    const selected = matches.filter(customer => permitted.has(customer.id));
+    // A current-request phone may establish a unique read target only. Keep
+    // it out of the task's write authority and never accept a model substitute.
+    const explicitRead = !permitted.size && params.phone && !params.customer_name
+      && context.explicitReadPhones?.includes(String(params.phone).replace(/\D/g, '').slice(-10));
+    const selected = explicitRead ? matches : matches.filter(customer => permitted.has(customer.id));
     const customer = selected.length === 1 ? await customerById(selected[0].id) : null;
     const phoneMatches = !params.phone || (customer && String(customer.phone || '').replace(/\D/g, '').slice(-10) === String(params.phone).replace(/\D/g, '').slice(-10));
     if (!customer || !phoneMatches || (params.customer_id && String(params.customer_id).toLowerCase() !== customer.id)) {
       return { error: 'Use the resolved task customer for this record lookup', code: 'target_clarification_required' };
     }
     input.customer_id = customer.id;
+    if (explicitRead) readContext = { ...context, targets: [customerTarget(customer, 'current_request_read_lookup')] };
     delete input.customer_name;
     if (params.phone && schema.properties.phone && customer.phone) input.phone = customer.phone;
     else delete input.phone;
@@ -415,7 +424,7 @@ async function prepareReadInput(params, context, { toolName, schema }) {
     }
     input.customer_id = context.targets[0].customer_id;
   }
-  const invalid = await validateRecordTarget(input, context, { toolName });
+  const invalid = await validateRecordTarget(input, readContext, { toolName });
   return invalid || { input };
 }
 

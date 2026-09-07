@@ -156,6 +156,110 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     } finally { process.env.GATE_IB_PLATFORM = 'true'; }
   }, 30000);
 
+  test('record reads without a customer target still require a current-request record selection', async () => {
+    const callId = crypto.randomUUID();
+    await db('call_log').insert({ id: callId, customer_id: null, transcription: 'Synthetic unlinked private call', status: 'completed' });
+    for (const prompt of ['Look up inventory', 'Read this call']) {
+      mockModel.mockReset().mockResolvedValueOnce(tools('discover_capabilities', { query: 'call log' }, 'discover'))
+        .mockResolvedValueOnce(tools('get_call_log', { call_id: callId }, 'call'))
+        .mockResolvedValueOnce(answer('The call lookup is checked.'));
+      const response = await api('/query', request(prompt, { pageData: { call_id: callId } }));
+      expect(response.status).toBe(200);
+      const result = mockModel.mock.calls.at(-1)[0].messages.flatMap(message => Array.isArray(message.content) ? message.content : [])
+        .find(block => block.type === 'tool_result' && block.tool_use_id === 'call');
+      if (prompt === 'Read this call') expect(result.content).toContain('Synthetic unlinked private call');
+      else {
+        expect(JSON.parse(result.content)).toMatchObject({ code: 'target_clarification_required' });
+        expect(result.content).not.toContain('Synthetic unlinked private call');
+      }
+    }
+  }, 30000);
+
+  test('a misspelled current customer name cannot fall through to the customer open behind the bar', async () => {
+    mockModel.mockResolvedValueOnce(tools('get_customer_detail', { customer_id: customerB }, 'read'))
+      .mockResolvedValueOnce(answer('Choose the intended customer.'));
+    const response = await api('/query', request(`Show Unmatched${crypto.randomUUID().slice(0, 8)}'s details`));
+    expect(response.status).toBe(200);
+    expect(response.body.taskTarget).toBeFalsy();
+    const result = mockModel.mock.calls.at(-1)[0].messages.flatMap(message => Array.isArray(message.content) ? message.content : [])
+      .find(block => block.type === 'tool_result' && block.tool_use_id === 'read');
+    expect(JSON.parse(result.content)).toMatchObject({ code: 'target_clarification_required' });
+    expect(result.content).not.toContain('200 Example Grove');
+  }, 30000);
+
+  test('a unique phone explicitly requested for a read permits that thread, without authorizing writes', async () => {
+    const a = await db('customers').where('id', customerA).first();
+    const b = await db('customers').where('id', customerB).first();
+    await db('sms_log').insert({ customer_id: customerA, direction: 'inbound', from_phone: a.phone,
+      to_phone: '+15555550199', message_body: 'Synthetic explicit-phone conversation' });
+    for (const [prompt, phone, permitted] of [
+      [`Show the conversation with ${a.phone}`, a.phone, true],
+      [`What did we say to the customer on ${a.phone}?`, a.phone, true],
+      [`Show the conversation with ${a.phone}`, b.phone, false],
+      [`Show inventory with a note containing show the conversation with ${a.phone}`, a.phone, false],
+    ]) {
+      mockModel.mockReset().mockResolvedValueOnce({ content: [
+        { type: 'tool_use', name: 'discover_capabilities', input: { query: 'conversation thread' }, id: 'discover-read' },
+        { type: 'tool_use', name: 'discover_capabilities', input: { query: 'update customer fields' }, id: 'discover-write' },
+      ], usage: {} })
+        .mockResolvedValueOnce(tools('get_conversation_thread', { phone }, 'thread'))
+        .mockResolvedValueOnce(tools('update_customer', { customer_id: customerA, updates: { notes: 'Must not be saved by a read' } }, 'write'))
+        .mockResolvedValueOnce(answer('The requested conversation was checked.'));
+      const response = await api('/query', request(prompt));
+      expect(response.status).toBe(200);
+      expect(response.body.taskTarget).toBeFalsy();
+      expect(response.body.pendingActions || []).toHaveLength(0);
+      const results = mockModel.mock.calls.at(-1)[0].messages.flatMap(message => Array.isArray(message.content) ? message.content : []);
+      const result = results.find(block => block.type === 'tool_result' && block.tool_use_id === 'thread');
+      if (permitted) expect(result.content).toContain('Synthetic explicit-phone conversation');
+      else expect(JSON.parse(result.content)).toMatchObject({ code: 'target_clarification_required' });
+      expect(JSON.parse(results.find(block => block.type === 'tool_result' && block.tool_use_id === 'write').content))
+        .toMatchObject({ code: 'target_clarification_required' });
+    }
+  }, 60000);
+
+  test.each(['toggle_estimate_v2_view', 'toggle_show_one_time_option', 'set_estimate_presentation'])(
+    '%s canonicalizes token and phone selectors before approval and preserves that ID', async toolName => {
+      for (const selector of ['token', 'phone']) {
+        const estimateId = crypto.randomUUID(), newerId = crypto.randomUUID(), estimateToken = crypto.randomBytes(32).toString('hex');
+        const phone = `+15553${Math.floor(Math.random() * 1000000).toString().padStart(6, '0')}`;
+        const estimateData = { engineResult: { lineItems: [{ service: 'pest_control', name: 'Pest Control', annual: 400, frequency: 4, perApp: 100 }] } };
+        await db('estimates').insert({ id: estimateId, token: estimateToken, customer_id: customerA,
+          customer_name: nameA, customer_phone: phone, status: 'draft', use_v2_view: false, show_one_time_option: false,
+          annual_total: 400, estimate_data: JSON.stringify(estimateData) });
+        const input = { estimate_identifier: selector === 'token' ? estimateToken : phone,
+          ...(toolName === 'set_estimate_presentation'
+            ? { service: 'pest_control', display_name: 'General Pest Control', reason: 'Synthetic operator label correction' }
+            : { enabled: true }) };
+        mockModel.mockReset().mockResolvedValueOnce(tools('discover_capabilities', { query: toolName.replaceAll('_', ' ') }, 'discover'))
+          .mockResolvedValueOnce(tools(toolName, input, 'estimate'))
+          .mockResolvedValueOnce(answer('Review the estimate change.'));
+        const proposed = await api('/query', request(`Update the estimate for ${nameA}`));
+        expect(proposed.body.pendingActions).toHaveLength(1);
+        const card = proposed.body.pendingActions[0];
+        const stored = await db('ib_pending_actions').where({ id: card.id }).first();
+        expect(stored.params.estimate_identifier).toBe(estimateId);
+        expect(stored.params._ib_step_key_version).toBe(2);
+        expect(JSON.stringify(mockModel.mock.calls)).not.toContain('_ib_step_key_version');
+        await db('estimates').insert({ id: newerId, token: crypto.randomUUID(), customer_id: customerA, customer_name: nameA,
+          customer_phone: phone, status: 'draft', use_v2_view: false, show_one_time_option: false, annual_total: 400, estimate_data: JSON.stringify(estimateData),
+          created_at: new Date(Date.now() + 60000) });
+        const confirmed = await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash });
+        expect(confirmed.body).toMatchObject({ success: true, outcome: 'completed' });
+        const saved = await db('estimates').where({ id: estimateId }).first();
+        const untouched = await db('estimates').where({ id: newerId }).first();
+        if (toolName === 'set_estimate_presentation') {
+          expect(saved.estimate_data.engineResult.lineItems[0].displayName).toBe(input.display_name);
+          expect(untouched.estimate_data).toEqual(estimateData);
+        } else {
+          const flag = toolName === 'toggle_estimate_v2_view' ? 'use_v2_view' : 'show_one_time_option';
+          expect(saved[flag]).toBe(true);
+          expect(untouched[flag]).toBe(false);
+        }
+        expect((await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash })).status).toBe(409);
+      }
+    }, 60000);
+
   test('a customer task cannot propose moving an unrelated customerless reservation hold', async () => {
     const hold = crypto.randomUUID();
     const date = require('../utils/datetime-et').etDateString(new Date(Date.now() + 7 * 86400000));
@@ -436,15 +540,16 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
 
   test('an explicitly addressed inbox sender can receive a reply preview without a customer link', async () => {
     const vendorEmail = crypto.randomUUID(), otherEmail = crypto.randomUUID();
+    const vendorAddress = `fixture-${vendorEmail}@vendor.example`;
     await db('emails').insert([
-      { id: vendorEmail, gmail_id: vendorEmail, gmail_thread_id: vendorEmail, from_address: 'fixture-supplier@vendor.example', received_at: new Date(), subject: 'Synthetic supply inquiry' },
+      { id: vendorEmail, gmail_id: vendorEmail, gmail_thread_id: vendorEmail, from_address: vendorAddress, received_at: new Date(), subject: 'Synthetic supply inquiry' },
       { id: otherEmail, gmail_id: otherEmail, gmail_thread_id: otherEmail, from_address: 'another-supplier@vendor.example', received_at: new Date(), subject: 'Unrelated inquiry' },
     ]);
     const propose = emailId => {
       mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'send email reply' }, 'discover'))
         .mockResolvedValueOnce(tools('send_email_reply', { email_id: emailId, body: 'Thank you for the information.' }, 'reply'))
         .mockResolvedValueOnce(answer('The reply is awaiting confirmation.'));
-      return api('/query', request('Reply to fixture-supplier@vendor.example with thanks'));
+      return api('/query', request(`Reply to ${vendorAddress} with thanks`));
     };
     expect((await propose(otherEmail)).body.pendingActions).toHaveLength(0);
     const valid = await propose(vendorEmail);

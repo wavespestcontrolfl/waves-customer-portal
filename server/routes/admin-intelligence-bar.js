@@ -2376,8 +2376,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         const toolStartedAt = Date.now();
         let executionInput = toolUse.input;
         let validationFailure = platformEnabled ? ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope) : null;
-        if (!validationFailure && platformEnabled && (taskContext.targets?.length || toolUse.name === 'draft_review_reply')
-          && ActionRegistry.actions.get(toolUse.name)?.kind === 'read') {
+        if (!validationFailure && platformEnabled && ActionRegistry.actions.get(toolUse.name)?.kind === 'read') {
           const readTarget = await TaskContext.prepareReadInput(toolUse.input, taskContext, {
             toolName: toolUse.name, schema: ActionRegistry.actions.get(toolUse.name).schema,
           });

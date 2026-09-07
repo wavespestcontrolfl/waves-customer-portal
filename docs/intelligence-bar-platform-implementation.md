@@ -303,3 +303,18 @@ covering single/bulk proof validation and actual query → discovery → move
 proposal refusal. The route test asserts `target_clarification_required`, no
 approval row, and an unchanged hold. Focused DB runs exclude unrelated cases
 whose prior evidence remains recorded above.
+
+Read validation now runs for every platform read, including tasks with no
+resolved customer. A misspelled current name or model-selected unlinked call
+cannot expose an unrelated record. A phone at the start of an explicit
+conversation/history lookup may establish one fresh read target; ambiguous or
+substituted phones refuse, and that lookup never grants authority to write.
+
+The affected route/target PostgreSQL suites pass all 60 cases (36 route and
+24 target cases); the unchanged parent recovery suite passes 14. The route
+proof covers token and phone canonicalization for all three flexible estimate
+actions, then inserts a newer phone-matched estimate before confirmation and
+verifies the original estimate changes once while the newer row stays untouched.
+Server unit/contract checks pass 252 cases; four affected client suites pass
+38 cases. The production build, brand, domain and coverage checks pass. The
+controlled browser evidence above remains applicable to the unchanged UI.
