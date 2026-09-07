@@ -2,6 +2,7 @@
 // fixture transaction so the production reader executes its actual queries.
 let mockTransaction;
 let mockFailedPlanReads = 0;
+let mockFailedSentWrites = 0;
 jest.mock('../models/db', () => {
   const query = (...args) => {
     const builder = mockTransaction(...args);
@@ -12,6 +13,14 @@ jest.mock('../models/db', () => {
         return Promise.reject(new Error('Synthetic transport failure before query'));
       }
       return first.apply(this, fields);
+    };
+    const update = builder.update;
+    builder.update = function (patch, ...rest) {
+      if (args[0] === 'irrigation_week_plans' && patch?.sent_at && mockFailedSentWrites > 0) {
+        mockFailedSentWrites -= 1;
+        return Promise.reject(new Error('Synthetic transport failure before stamp'));
+      }
+      return update.call(this, patch, ...rest);
     };
     return builder;
   };
@@ -60,6 +69,7 @@ const SKIP = !process.env.DATABASE_URL;
   beforeEach(async () => {
     jest.clearAllMocks();
     mockFailedPlanReads = 0;
+    mockFailedSentWrites = 0;
     delete process.env.GATE_PROPERTY_ALERTS;
     gates.irrigationWeeklyEmail = true;
     process.env.GATE_IRRIGATION_APP_PLAN = 'true';
@@ -255,6 +265,43 @@ const SKIP = !process.env.DATABASE_URL;
     expect((await loadCurrentWeekPlan(customerId, { now, pinnedAvailableAt: now.toISOString(), strict: true })).availableAt).toEqual(now);
     expect((await runWeeklyIrrigationEmailSweep({ now })).deduped).toBe(1);
     expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(2);
+  }, 30000);
+
+  test('reads repair a published plan email stamp after both post-send writes fail, preserving its availability pin', async () => {
+    await resetDraft();
+    mockFailedSentWrites = 2;
+    EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async (options) => {
+      expect(await options.onQueued()).toBe(true);
+      await mockTransaction('email_messages').insert({
+        trigger_event_id: options.triggerEventId, recipient_email_snapshot: 'sample@example.invalid',
+        status: 'sent', categories: JSON.stringify(options.categories), provider_message_id: 'synthetic-mail',
+      });
+      return { sent: true, providerAttempted: true, message: { sent_at: now, provider_message_id: 'synthetic-mail' } };
+    });
+    expect(await runWeeklyIrrigationEmailSweep({ now })).toMatchObject({ published: 1, sent: 1, failed: 0 });
+    expect(mockFailedSentWrites).toBe(0);
+    const published = await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).first();
+    expect(published).toMatchObject({ published_at: now, sent_at: null });
+
+    const plan = await loadCustomerWateringPlan(customerId, { now });
+    expect(plan.sentAt).not.toBeNull();
+    expect(plan.availableAt).toBe(now.toISOString());
+    const pinned = await loadCurrentWeekPlan(customerId, { now, pinnedAvailableAt: now.toISOString(), strict: true });
+    expect(pinned.sentAt).not.toBeNull();
+    expect(pinned.availableAt).toEqual(now);
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+  }, 30000);
+
+  test('a different delivered decision does not stamp or hide an app publication', async () => {
+    await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).update({ published_at: now });
+    await mockTransaction('email_messages').insert({
+      trigger_event_id: `irrigation.weekly:${customerId}:2026-09-06`, recipient_email_snapshot: 'sample@example.invalid',
+      status: 'sent', categories: JSON.stringify(['plan:different-decision']),
+    });
+    const pinned = await loadCurrentWeekPlan(customerId, { now, pinnedAvailableAt: now.toISOString(), strict: true });
+    expect(pinned).toMatchObject({ sentAt: null, availableAt: now });
+    expect((await loadCustomerWateringPlan(customerId, { now })).sentAt).toBeNull();
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
   }, 30000);
 
   test('an email-disabled customer gets the published plan advisory once through the real bell and alert ledgers', async () => {

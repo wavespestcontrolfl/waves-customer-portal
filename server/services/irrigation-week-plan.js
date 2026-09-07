@@ -866,11 +866,11 @@ async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedAvailab
       .where({ customer_id: customerId, week_ending: weekEnding })
       .first();
     if (!row) return absent('missing');
-    if (!row.sent_at && !row.published_at) {
+    if (!row.sent_at) {
       // The provider may have accepted the email while the post-send stamp
-      // failed (a once-a-week cron would otherwise leave the report plan-less
-      // all week): reconcile from the customer-week delivery record, stamp,
-      // and re-read — served only once actually stamped (codex gh-r26).
+      // failed: reconcile the exact decision even if already published, so
+      // sentAt reflects the durable delivery. Publication keeps an undelivered
+      // plan readable without manufacturing an email stamp (codex gh-r26).
       const delivery = await weekPlanDeliveryState({ triggerEventId: `irrigation.weekly:${customerId}:${weekEnding}` });
       if (delivery.state === 'sent' && delivery.decisionHash && delivery.decisionHash === row.decision_hash) {
         await markWeekPlanSent({ customerId, weekEnding, decisionHash: row.decision_hash });
