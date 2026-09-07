@@ -5278,7 +5278,7 @@ export default function EstimateToolViewV2({
             <div>
               {" "}
               <PanelTitle>Property Features</PanelTitle>{" "}
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 {" "}
                 <FieldV2 label="Pool">
                   <SelectV2
@@ -5313,7 +5313,7 @@ export default function EstimateToolViewV2({
                   />{" "}
                 </FieldV2>
               )}
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 {" "}
                 <FieldV2 label="Shrub Density">
                   <SelectV2
@@ -5972,7 +5972,7 @@ export default function EstimateToolViewV2({
                     </FieldV2>
                   </div>
                   <CheckboxV2 k="dethatchingDebrisRemovalIncluded" label="Debris removal included" />
-                  <div className="grid grid-cols-3 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <FieldV2 label="Thatch Probe #1">
                       <InputV2 k="thatchProbe1Inches" type="number" min="0" placeholder="inches" />
                     </FieldV2>
@@ -6056,7 +6056,7 @@ export default function EstimateToolViewV2({
                           />
                         </FieldV2>
                       </div>
-                      <div className="grid grid-cols-3 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         <FieldV2 label="Layout">
                           <SelectV2
                             k="termiteBaitComplexity"
@@ -6140,7 +6140,7 @@ export default function EstimateToolViewV2({
                           options={TRENCHING_PRODUCT_OPTIONS}
                         />
                       </FieldV2>
-                      <div className="grid grid-cols-3 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                         <FieldV2 label="Application Rate">
                           <SelectV2
                             k="trenchingApplicationRate"
@@ -6661,7 +6661,7 @@ export default function EstimateToolViewV2({
                       />
                     </FieldV2>{" "}
                   </div>{" "}
-                  <div className="grid grid-cols-3 gap-3 mt-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
                     <FieldV2 label="Severity">
                       <SelectV2
                         k="bedbugSeverity"
@@ -6697,7 +6697,7 @@ export default function EstimateToolViewV2({
                     </FieldV2>
                   </div>
                   {form.bedbugMethod !== "CHEMICAL" && (
-                    <div className="grid grid-cols-3 gap-3 mt-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
                       <FieldV2 label="Equipment">
                         <SelectV2
                           k="bedbugEquipment"
@@ -6827,7 +6827,7 @@ export default function EstimateToolViewV2({
                     </FieldV2>
                   </div>
                   <p className="text-14 tracking-label uppercase text-zinc-400 font-medium">Bird Boxes</p>
-                  <div className="grid grid-cols-3 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <FieldV2 label="Standard — $150">
                       <InputV2 k="exclStandardBirdBox" type="number" min="0" />
                     </FieldV2>

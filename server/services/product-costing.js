@@ -159,10 +159,13 @@ function parsePackSize(quantity) {
 
 // Measurement family of a unit. Plain "oz"/"ounce" is dimensionally ambiguous
 // (dry weight vs fluid ounce); only call it volume on a positive liquid signal,
-// never assume weight — return 'ambiguous' so callers show a single $/oz.
+// explicit weight evidence is also accepted; otherwise retain 'ambiguous'.
 function unitFamily(unit, opts = {}) {
   if (!unit) return null;
-  if (unit === 'oz' || unit === 'ounce') return opts.isLiquid ? 'volume' : 'ambiguous';
+  if (unit === 'oz' || unit === 'ounce') {
+    if (Boolean(opts.isLiquid) === Boolean(opts.isWeight)) return 'ambiguous';
+    return opts.isLiquid ? 'volume' : 'weight';
+  }
   if (WEIGHT_TO_GRAM[unit] != null) return 'weight';
   if (VOLUME_TO_ML[unit] != null) return 'volume';
   return null;

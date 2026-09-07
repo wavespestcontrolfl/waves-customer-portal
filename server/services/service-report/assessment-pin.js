@@ -39,20 +39,29 @@ function pinKey() {
 // the previous version keep verifying on new pods during a rolling deploy
 // (in-flight report renders must not 409); a plan pin uses the extended
 // format. New→old only fails for the deploy window and the render retries.
-function computeSignature(key, token, assessmentId, expiresAt, plan = '') {
+function computeSignature(key, token, assessmentId, expiresAt, plan = '', history = '') {
   const payload = plan ? `${token}:${assessmentId}:${expiresAt}:${plan}` : `${token}:${assessmentId}:${expiresAt}`;
-  return crypto.createHmac('sha256', key).update(payload).digest('hex');
+  return crypto.createHmac('sha256', key).update(history ? `${payload}:history:${history}` : payload).digest('hex');
+}
+
+// The existing asig parameter is opaque to the web/native clients. Carry the
+// signed history fingerprint inside it so old bundles need no new query key.
+// Legacy signatures remain valid during rollout and for in-flight renders.
+function assessmentPinHistory(signature) {
+  return typeof signature === 'string' ? /^h1\.([a-f0-9]{40})\.[a-f0-9]{64}$/.exec(signature)?.[1] || null : null;
 }
 
 // Returns { signature, expiresAt } or null when this server cannot sign.
 // A null return is NOT an error the caller should surface — see the renderer:
 // unable to sign means render UNPINNED rather than emit a pin that will be
 // refused, which would fail every lawn delivery until retry exhaustion.
-function signAssessmentPin(token, assessmentId, { nowSeconds = Math.floor(Date.now() / 1000), plan = '' } = {}) {
+function signAssessmentPin(token, assessmentId, { nowSeconds = Math.floor(Date.now() / 1000), plan = '', history = '' } = {}) {
   const key = pinKey();
   if (!key || !token || !assessmentId) return null;
   const expiresAt = nowSeconds + PIN_TTL_SECONDS;
-  return { signature: computeSignature(key, token, assessmentId, expiresAt, plan), expiresAt };
+  if (history && !/^[a-f0-9]{40}$/.test(history)) return null;
+  const signature = computeSignature(key, token, assessmentId, expiresAt, plan, history);
+  return { signature: history ? `h1.${history}.${signature}` : signature, expiresAt };
 }
 
 // Constant-time verification. Returns false rather than throwing so a caller
@@ -66,13 +75,15 @@ function verifyAssessmentPin(token, assessmentId, signature, expiresAt, { nowSec
   const exp = Number(expiresAt);
   if (!Number.isFinite(exp) || exp <= nowSeconds) return false;
 
-  const expected = computeSignature(key, token, assessmentId, String(expiresAt), plan);
-  if (signature.length !== expected.length) return false;
+  const history = assessmentPinHistory(signature);
+  const signed = history ? signature.split('.')[2] : signature;
+  const expected = computeSignature(key, token, assessmentId, String(expiresAt), plan, history || '');
+  if (signed.length !== expected.length) return false;
   try {
-    return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(signature, 'hex'));
+    return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(signed, 'hex'));
   } catch {
     return false;
   }
 }
 
-module.exports = { signAssessmentPin, verifyAssessmentPin, PIN_TTL_SECONDS };
+module.exports = { signAssessmentPin, verifyAssessmentPin, assessmentPinHistory, PIN_TTL_SECONDS };

@@ -36,9 +36,10 @@ test('buckets: fresh prompts (0) → fresh storms (1) → visit notices AND stal
 
   expect(calls.orderByRaw).toHaveLength(1);
   const sql = calls.orderByRaw[0];
-  // visit rows → 2; storms → 1; fresh other prompts → 0; stale others → 2
-  // (stale legacy rows compete with visits on recency, never ahead of them).
-  expect(sql).toMatch(/WHEN type LIKE 'visit\\_%' THEN 2/);
+  // visit rows + tech-line texts → 2; storms → 1; fresh other prompts → 0;
+  // stale others → 2 (stale legacy rows compete with visits on recency,
+  // never ahead of them).
+  expect(sql).toMatch(/WHEN type LIKE 'visit\\_%' OR type = 'tech_line_sms' THEN 2/);
   expect(sql).toMatch(/WHEN type = 'storm_watch_alert' THEN 1/);
   expect(sql).toMatch(/interval '6 hours' THEN 0 ELSE 2 END/);
   expect(calls.orderBy).toEqual([['created_at', 'desc']]);

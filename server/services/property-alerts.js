@@ -194,7 +194,7 @@ async function reassuranceRuleCandidates({ now = new Date(), knex = db } = {}) {
 async function weeklyPlanCandidates({ now = new Date() } = {}) {
   if (!appPlanEnabled()) return [];
   const { findEligibleCustomers } = require('./irrigation-weekly-email');
-  const customers = await findEligibleCustomers({ now });
+  const customers = await findEligibleCustomers({ now, includeApp: true });
   const candidates = [];
   for (const customer of customers) {
     const plan = await loadCustomerWateringPlan(customer.id, { now, customer });
@@ -206,7 +206,7 @@ async function weeklyPlanCandidates({ now = new Date() } = {}) {
       title: plan.title,
       body: plan.notificationBody,
       link: `/?tab=property&wateringPlanCustomer=${encodeURIComponent(customer.id)}`,
-      payload: { weekEnding: plan.weekEnding, sentAt: plan.sentAt, validThrough: plan.validThrough },
+      payload: { weekEnding: plan.weekEnding, availableAt: plan.availableAt, validThrough: plan.validThrough },
       cooldownDays: 7,
     });
   }
@@ -225,7 +225,8 @@ async function weeklyPlanStillCurrent(candidate, { now = new Date(), knex = db }
     .first('weather_alerts', 'quiet_hours_start', 'quiet_hours_end');
   if (prefs && (prefs.weather_alerts === false || inCustomerQuietHours(prefs, now))) return false;
   const plan = await loadCustomerWateringPlan(candidate.customerId, { now });
-  return !!plan && plan.weekEnding === candidate.payload.weekEnding && plan.sentAt === candidate.payload.sentAt;
+  return plan?.notificationEligible === true
+    && plan.weekEnding === candidate.payload.weekEnding && plan.availableAt === candidate.payload.availableAt;
 }
 
 // ---------------------------------------------------------------------------

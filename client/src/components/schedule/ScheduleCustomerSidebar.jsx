@@ -315,7 +315,7 @@ export default function ScheduleCustomerSidebar({
         </div>
 
         <div className="px-6 py-5">
-          <h1 className="text-24 font-medium tracking-tight text-zinc-900 mb-4">
+          <h1 className="text-22 font-medium tracking-tight text-zinc-900 mb-4">
             {service.customerName || `${c.firstName || ''} ${c.lastName || ''}`.trim() || 'Customer'}
           </h1>
 
@@ -326,7 +326,7 @@ export default function ScheduleCustomerSidebar({
             {phone && (
               <div>
                 <div className="u-label text-ink-tertiary mb-1">Phone</div>
-                <CallBridgeLink phone={phone} customerName={service.customerName} className="text-15 text-zinc-900 hover:underline">
+                <CallBridgeLink phone={phone} customerName={service.customerName} className="text-14 text-zinc-900 hover:underline">
                   {phone}
                 </CallBridgeLink>
               </div>
@@ -334,7 +334,7 @@ export default function ScheduleCustomerSidebar({
             {email && (
               <div>
                 <div className="u-label text-ink-tertiary mb-1">Email</div>
-                <a href={`mailto:${email}`} className="text-15 text-zinc-900 hover:underline break-words">{email}</a>
+                <a href={`mailto:${email}`} className="text-14 text-zinc-900 hover:underline break-words">{email}</a>
               </div>
             )}
             {phone && (
@@ -348,7 +348,7 @@ export default function ScheduleCustomerSidebar({
           </div>
 
           <Section title="Appointment">
-            <div className="text-15 text-zinc-900">{timeWindow}{duration ? ` (${duration})` : ''}</div>
+            <div className="text-14 text-zinc-900">{timeWindow}{duration ? ` (${duration})` : ''}</div>
             <div className="text-13 text-ink-secondary mt-1">{fmtDateLong(service.scheduledDate)}</div>
             {address && (
               <div className="mt-4">
@@ -374,7 +374,7 @@ export default function ScheduleCustomerSidebar({
           <Section title="Services and items">
             <div className="flex items-start justify-between gap-3 pb-3 border-b border-hairline border-zinc-100">
               <div className="min-w-0">
-                <div className="text-15 text-zinc-900">{baseServiceLabel}</div>
+                <div className="text-14 text-zinc-900">{baseServiceLabel}</div>
                 <div className="text-13 text-ink-secondary mt-1">{[fmtTime(service.windowStart), duration].filter(Boolean).join(' · ')}</div>
               </div>
               <div className="u-nums text-14 text-zinc-900">{money(baseServicePrice)}</div>
@@ -389,8 +389,8 @@ export default function ScheduleCustomerSidebar({
               </div>
             ))}
             <div className="flex items-center justify-between gap-3 pt-3">
-              <div className="text-15 font-medium text-zinc-900">Total</div>
-              <div className="u-nums text-15 font-medium text-zinc-900">{money(total)}</div>
+              <div className="text-14 font-medium text-zinc-900">Total</div>
+              <div className="u-nums text-14 font-medium text-zinc-900">{money(total)}</div>
             </div>
             <a
               href={`/admin/invoices?customer=${encodeURIComponent(service.customerId)}`}
@@ -480,7 +480,7 @@ export default function ScheduleCustomerSidebar({
             className="w-full h-full sm:h-auto max-w-none sm:max-w-[520px] max-h-none sm:max-h-[calc(100vh-48px)] overflow-y-auto rounded-none sm:rounded-sm bg-white shadow-2xl box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
           >
             <div className="border-b border-hairline border-zinc-200 px-6 py-4 flex items-center justify-between gap-3">
-              <h2 id="cancel-appointment-title" className="text-20 font-medium text-zinc-900">
+              <h2 id="cancel-appointment-title" className="text-18 font-medium text-zinc-900">
                 Cancel appointment
               </h2>
               <button
@@ -494,7 +494,7 @@ export default function ScheduleCustomerSidebar({
             </div>
 
             <div className="px-6 py-5">
-              <p className="text-15 font-medium text-zinc-900">
+              <p className="text-14 font-medium text-zinc-900">
                 Are you sure you want to cancel {customerFirstName}'s appointment?
               </p>
               <p className="mt-3 text-14 leading-6 text-ink-secondary">

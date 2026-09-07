@@ -1,9 +1,9 @@
 'use strict';
 
 /**
- * The record phase of grouped closeout (visit-closeout-phase2.md, stage 3).
- * No route or worker invokes this prerequisite yet. Billing and delivery must
- * own the saved packet before a production entry point is connected.
+ * The durable phase of grouped closeout (visit-closeout-phase2.md, stages 3–4).
+ * No route or worker invokes this prerequisite yet. Shared effects and delivery
+ * must be complete before a production entry point is connected.
  *
  * The existing stop lock serializes membership, legacy claims and packets.
  * Every member uses the canonical completion validator/writer on one outer
@@ -65,15 +65,15 @@ function packetSnapshot(request, actor, members, existing) {
   return { items, actor, retainedMembers };
 }
 
-function recordsResult(packet, items, replayed = false) {
+function recordsResult(packet, items, billing, replayed = false) {
   return { status: 202, body: {
-    visitId: packet.visit_id, packetId: packet.id, state: 'records_saved', replayed,
+    visitId: packet.visit_id, packetId: packet.id, state: 'records_saved', replayed, billing,
     items: items.map((item) => ({ serviceId: item.scheduled_service_id, serviceRecordId: item.service_record_id })),
   } };
 }
 
 /** Owns the commit/rollback boundary; callers must supply a root Knex handle. */
-async function saveVisitCompletionRecords(input, database = db) {
+async function saveVisitCompletionPacket(input, database = db) {
   if (database.isTransaction) throw new TypeError('Visit completion requires a root database connection');
   const request = packetRequest(input);
   if (request.error) return request.error;
@@ -84,6 +84,11 @@ async function saveVisitCompletionRecords(input, database = db) {
     return await database.transaction(async (trx) => {
       const peek = await trx('service_visits').where({ id: request.visitId }).first();
       if (!peek) return failure(404, 'visit_not_found', 'Visit not found.');
+      // Baseline confirmation and canonical completion take this fence before
+      // estimate, invoice-mint and customer locks.
+      if (require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY')) {
+        await require('./lawn-assessment').lockCustomerBaseline(peek.customer_id, trx);
+      }
       const { completeScheduledService, completionOwnershipError } = require('./complete-scheduled-service');
       const pricing = require('./completion-pricing');
       const pricingPlans = [];
@@ -105,6 +110,9 @@ async function saveVisitCompletionRecords(input, database = db) {
         pricingPlans.sort((a, b) => (a.source.estimate?.id || '').localeCompare(b.source.estimate?.id || ''));
         for (const plan of pricingPlans) await pricing.lockCompletionPricingEstimate(trx, plan);
       }
+      // Use the canonical invoice-mint identities before customer/stop locks.
+      const { acquireScheduledInvoiceMintLock } = require('./scheduled-invoice-mint');
+      for (const item of request.items) await acquireScheduledInvoiceMintLock(trx, item.serviceId);
       // Same customer -> stop -> visit/member order as grouping. Customer
       // identity and assignment cannot change while the records are written.
       await trx('customers').where({ id: peek.customer_id }).forNoKeyUpdate().first('id');
@@ -150,9 +158,12 @@ async function saveVisitCompletionRecords(input, database = db) {
         if (saved.map((item) => item.scheduled_service_id).join() !== formMemberIds.join()) {
           return failure(409, 'visit_closeout_pending', 'The saved closeout has not finished recording its services.');
         }
-        return recordsResult(existing, saved, true);
+        const billing = await require('./visit-completion-invoice').createVisitCompletionInvoice(existing.id, trx);
+        return recordsResult(existing, saved, billing, true);
       }
       if (visit.status !== 'open') return failure(409, 'visit_not_open', 'This visit is no longer open for closeout.');
+      const keyOwner = await trx('visit_completion_packets').where({ idempotency_key: request.key }).first('id');
+      if (keyOwner) return failure(409, 'visit_closeout_key_reused', 'The idempotency key belongs to another visit.');
       const [packet] = await trx('visit_completion_packets').insert({
         visit_id: visit.id, idempotency_key: request.key, request_hash: request.hash,
         payload: JSON.stringify(snapshot), status: 'processing',
@@ -181,8 +192,9 @@ async function saveVisitCompletionRecords(input, database = db) {
         }).returning('*');
         recorded.push(saved);
       }
+      const billing = await require('./visit-completion-invoice').createVisitCompletionInvoice(packet.id, trx);
       readyToCommit = true;
-      return recordsResult(packet, recorded);
+      return recordsResult(packet, recorded, billing);
     });
   } catch (err) {
     // S3 objects are external to PostgreSQL. Earlier successful members must
@@ -199,4 +211,4 @@ async function saveVisitCompletionRecords(input, database = db) {
   }
 }
 
-module.exports = { saveVisitCompletionRecords };
+module.exports = { saveVisitCompletionPacket };

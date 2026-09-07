@@ -178,3 +178,36 @@ test('the legacy visit comparison scales both sides to the requested lawn size a
   expect(missing.legacyMaterialCost).toBeNull();
   expect(missing.variance).toBeNull();
 });
+
+test.each([
+  ['Celsius WG', 0.085, 'oz', 'lb', '0.625 lb', 10, 133.20, 5.10],
+  ['Acelepryn Xtra', 0.46, 'fl_oz', 'fl_oz', '30 fl oz', 30, 150, 10.35],
+])('supplier package cost preserves the catalog dose for %s',
+  (name, rate, rateUnit, inventoryUnit, container, ounces, price, cost) => {
+    const result = analyzeVisit({ trackKey: 'st_augustine', track: { name: 'St. Augustine' },
+      visit: { ...visit, primary: name }, products: [{ ...product, name, default_rate_per_1000: rate,
+        rate_unit: rateUnit, inventory_unit: inventoryUnit, cost_per_unit: null,
+        cost_unit: null, container_size: container, unit_size_oz: ounces, best_price: price }], options: { weedPressure: 'broadcast' }, lawnSqft: 4500 });
+    expect(result.inventoryMaterialCost).toBe(cost);
+    expect(result.selectedUnverifiedUnits).toHaveLength(0);
+  });
+
+test.each([
+  ['lb', 'fl_oz', 'fl_oz'],
+  ['fl_oz', 'oz', 'lb'],
+  ['each', 'oz', 'oz'],
+  ['oz', 'oz', 'oz'],
+])('contradictory or ambiguous inventory evidence stays incomplete: %s/%s/%s',
+  (inventoryUnit, rateUnit, costUnit) => {
+    const row = reportFor([visit], [{ ...product, inventory_unit: inventoryUnit,
+      rate_unit: rateUnit, cost_unit: costUnit }]).rows[0];
+    expect(row.catalogCalculationComplete).toBe(false);
+    expect(row.issues).toContainEqual(expect.objectContaining({ reason: 'unverified_cost_units' }));
+  });
+
+test('conflicting dry and liquid evidence does not resolve plain ounces', () => {
+  const { unitPriceBreakdown } = require('../services/product-costing');
+  expect(unitPriceBreakdown(133.20, '10 oz', { isWeight: true }).family).toBe('weight');
+  expect(unitPriceBreakdown(133.20, '10 oz', { isWeight: true, isLiquid: true }).family).toBe('ambiguous');
+  expect(unitPriceBreakdown(133.20, '10 oz').family).toBe('ambiguous');
+});
