@@ -56,7 +56,7 @@ export function PortalReadProvider({ enabled, children }) {
 
   const wasLocked = useRef(locked);
   useEffect(() => {
-    if (wasLocked.current && !locked && Date.now() - lastRefresh.current >= 30000) void refresh();
+    if (wasLocked.current && !locked) void refresh();
     wasLocked.current = locked;
   }, [locked, refresh]);
 

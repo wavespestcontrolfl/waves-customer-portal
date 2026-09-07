@@ -88,6 +88,21 @@ describe('dashboard appointment confirmation', () => {
 });
 
 describe('schedule survives notification-preference failures', () => {
+  it('refreshes the next-visit summaries for the other properties on the account', async () => {
+    const properties = [{ id: customer.id, profileLabel: 'Home' }, { id: 'cust-2', profileLabel: 'Second property' }];
+    api.getAccountUpcoming.mockResolvedValueOnce({ properties: [{ id: 'cust-2', next: {
+      date: futureDate, serviceType: 'Original other-property service',
+    } }] }).mockResolvedValue({ properties: [{ id: 'cust-2', next: {
+      date: futureDate, serviceType: 'Updated other-property service',
+    } }] });
+    render(<PortalReadProvider enabled><PortalRefreshArea><ScheduleTab customer={customer} properties={properties} /></PortalRefreshArea></PortalReadProvider>);
+    expect(await screen.findByText('Original other-property service')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    expect(await screen.findByText('Updated other-property service')).toBeInTheDocument();
+    expect(screen.queryByText('Original other-property service')).not.toBeInTheDocument();
+    expect(api.getAccountUpcoming).toHaveBeenCalledTimes(2);
+  });
+
   it('refreshes visits without replacing an unsaved service-contact edit', async () => {
     api.getPropertyNotificationPrefs.mockResolvedValue({ properties: [{
       id: customer.id, label: 'Home', preferences: {},

@@ -39,6 +39,24 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('customer portal reads', () => {
+  it('revalidates after a reconnect during a biometric lock even within the focus throttle', async () => {
+    const load = vi.fn().mockResolvedValue({ title: 'Visit' });
+    const { rerender } = render(<App load={load} />);
+    await screen.findByText('Visit');
+    biometric.locked = true;
+    rerender(<App load={load} />);
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+    fireEvent(window, new Event('online'));
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('state')).toHaveTextContent('saved');
+    biometric.locked = false;
+    rerender(<App load={load} />);
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId('state')).toHaveTextContent('ready');
+  });
+
   it('keeps a loaded visit read-only until a deferred reconnect read succeeds', async () => {
     const pending = deferred();
     const load = vi.fn().mockResolvedValueOnce({ title: 'Saved visit' }).mockReturnValueOnce(pending.promise);

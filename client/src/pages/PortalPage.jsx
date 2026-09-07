@@ -4294,22 +4294,12 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
   // the "next visit at each property" chips. Independent of the schedule
   // load so a failure here never blanks the tab; null = still loading.
   const multiProperty = properties.length > 1;
-  // null = loading, [] / rows = loaded; a failed read is tracked separately
-  // so it renders as "unavailable + retry", never as "Checking…" forever or
-  // as "no visit scheduled" (pre-push codex P1).
-  const [accountNext, setAccountNext] = useState(null);
-  const [accountNextFailed, setAccountNextFailed] = useState(false);
-  const [accountNextAttempt, setAccountNextAttempt] = useState(0);
-  useEffect(() => {
-    if (!multiProperty) { setAccountNext(null); setAccountNextFailed(false); return undefined; }
-    let alive = true;
-    setAccountNext(null);
-    setAccountNextFailed(false);
-    api.getAccountUpcoming()
-      .then((res) => { if (alive) setAccountNext(Array.isArray(res?.properties) ? res.properties : []); })
-      .catch((err) => { console.error(err); if (alive) setAccountNextFailed(true); });
-    return () => { alive = false; };
-  }, [multiProperty, customer?.id, accountNextAttempt]);
+  const accountNextRead = usePortalRead(`account-next:${customer?.id}:${multiProperty}`, () => multiProperty
+    ? api.getAccountUpcoming().then(res => Array.isArray(res?.properties) ? res.properties : [])
+    : Promise.resolve(null));
+  // A summary awaiting revalidation must not look like a current appointment.
+  const accountNextFailed = Boolean(accountNextRead.error);
+  const accountNext = accountNextRead.pending || accountNextFailed ? null : accountNextRead.data;
   const nextById = multiProperty && accountNext
     ? Object.fromEntries(properties.map((p) => [p.id, accountNext.find((row) => row.id === p.id)?.next || null]))
     : null;
@@ -4897,7 +4887,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
                 {accountNextFailed && (
                   <span role="alert" style={{ display: 'inline-flex', alignItems: 'center', gap: 10, fontSize: 14, color: muted }}>
                     Next visits couldn&rsquo;t be loaded.
-                    <button type="button" onClick={() => setAccountNextAttempt((n) => n + 1)} className="waves-focus-ring" style={{ border: 'none', background: 'none', color: B.wavesBlue, fontWeight: 700, fontSize: 14, cursor: 'pointer', padding: '8px 4px', fontFamily: 'inherit' }}>Try again</button>
+                    <button type="button" onClick={accountNextRead.refresh} className="waves-focus-ring" style={{ border: 'none', background: 'none', color: B.wavesBlue, fontWeight: 700, fontSize: 14, cursor: 'pointer', padding: '8px 4px', fontFamily: 'inherit' }}>Try again</button>
                   </span>
                 )}
               </div>
