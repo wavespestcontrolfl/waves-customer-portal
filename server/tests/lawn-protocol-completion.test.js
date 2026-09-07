@@ -245,7 +245,7 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
       applicationMethod: 'spot_spray', areaValue: 2500, areaUnit: 'sqft', applicationArea: 'Front yard, Side yards', zoneIds: ['zone-a'],
     });
     expect(actuals[1]).toMatchObject({ status: 'skipped', product_id: 'prod-2', product_name: 'Fixture pre-emergent', skip_reason: 'Not applied' });
-    expect(JSON.parse(actuals[1].metadata)).toEqual({ source: 'tech_closeout', reasonSupplied: false });
+    expect(JSON.parse(actuals[1].metadata)).toEqual({ source: 'tech_closeout', reasonSupplied: false, substitution: null });
   });
 
   test('gate on: a removed substitute resolves to its original protocol product', async () => {

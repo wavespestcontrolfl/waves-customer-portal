@@ -272,7 +272,7 @@ describeDb('appointment completion defaults through PostgreSQL', () => {
       expect(first.map(row => row.status)).toEqual(['applied', 'skipped']);
       expect(first[0]).toMatchObject({ service_product_id: applied.id, protocol_product_id: null });
       expect(first[0].metadata).toMatchObject({ areaValue: 1500, areaUnit: 'sqft', applicationArea: 'Front yard', applicationMethod: 'spot_spray' });
-      expect(first[1].metadata).toEqual({ source: 'tech_closeout', reasonSupplied: false });
+      expect(first[1].metadata).toEqual({ source: 'tech_closeout', reasonSupplied: false, substitution: null });
       // A retry re-runs the same writer: one completion row, the same two actual rows.
       const again = await recordLawnProtocolCompletion(knex, args);
       expect(again.id).toBe(completion.id);
