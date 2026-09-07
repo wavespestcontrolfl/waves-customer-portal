@@ -33,6 +33,9 @@ let admin;
 let message;
 let result;
 let context;
+async function replayPreviewHash(extract = async () => result) {
+  return (await replaySmsProfile({ conn: mockPg, smsLogId: message.id, extract })).preview_hash;
+}
 jest.setTimeout(60000);
 
 postgres('SMS operations on PostgreSQL', () => {
@@ -186,7 +189,8 @@ postgres('SMS operations on PostgreSQL', () => {
     const extract = jest.fn(async () => ({ dropped: 0, facts: [{ field: 'lockbox_code', value: '#0123',
       quote: message.message_body, duration: 'durable', property_id: context.properties[0].id }] }));
     const args = { conn: mockPg, smsLogId: message.id, extract };
-    expect(await replaySmsProfile(args)).toEqual({ dry_run: true, sms_log_id: message.id,
+    const preview = await replaySmsProfile(args);
+    expect(preview).toEqual({ dry_run: true, sms_log_id: message.id, preview_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
       recorded: 0, applied: 0, proposed: 1, preserved: 0, unverified_count: 0, outcomes: [{ field: 'lockbox_code', action: 'create_proposal' }] });
     expect(extract).toHaveBeenCalledTimes(1);
     expect((await mockPg('sms_log').first()).operational_analysis).toEqual(original.operational_analysis);
@@ -196,7 +200,7 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await mockPg('data_hygiene_source_extractions')).toHaveLength(1);
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(0);
 
-    expect(await replaySmsProfile({ ...args, execute: true })).toEqual({ recorded: 0, applied: 0, proposed: 1, preserved: 0 });
+    expect(await replaySmsProfile({ ...args, execute: true, previewHash: preview.preview_hash })).toEqual({ recorded: 0, applied: 0, proposed: 1, preserved: 0 });
     expect(await mockPg('property_preferences')).toHaveLength(0);
     expect(await mockPg('data_hygiene_proposals').first()).toMatchObject({ field: 'lockbox_code', status: 'pending' });
     const { replay, ...analysis } = (await mockPg('sms_log').first()).operational_analysis;
@@ -206,17 +210,50 @@ postgres('SMS operations on PostgreSQL', () => {
     const audit = await mockPg('audit_log').where({ action: 'sms.profile.replayed' }).first();
     expect(audit).toMatchObject({ resource_id: message.id, actor_type: 'system' });
     expect(JSON.stringify(audit.metadata)).not.toContain('#0123');
-    expect(await replaySmsProfile({ ...args, execute: true })).toEqual({ skipped: 'replay_receipt_terminal', receipt_status: 'ok' });
+    expect(await replaySmsProfile({ ...args, execute: true, previewHash: preview.preview_hash })).toEqual({ skipped: 'replay_receipt_terminal', receipt_status: 'ok' });
     expect(extract).toHaveBeenCalledTimes(2);
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
     // A corrected body is a different explicitly requested replay. An
     // identical proposed value must still leave the existing review intact.
     message.message_body += '.';
     await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
-    expect(await replaySmsProfile({ ...args, execute: true })).toEqual({ recorded: 0, applied: 0, proposed: 1, preserved: 0 });
+    expect(await replaySmsProfile({ ...args, execute: true, previewHash: await replayPreviewHash(extract) })).toEqual({ recorded: 0, applied: 0, proposed: 1, preserved: 0 });
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
     expect((await mockPg('data_hygiene_proposals').first()).status).toBe('pending');
     expect(await mockPg('data_hygiene_source_extractions')).toHaveLength(3);
+  });
+
+  test('execution requires a preview and rolls back a different model result before persisting anything', async () => {
+    await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const extract = jest.fn(async () => result);
+    const args = { conn: mockPg, smsLogId: message.id, execute: true, extract };
+    expect(await replaySmsProfile(args)).toEqual({ skipped: 'preview_required' });
+    expect(await replaySmsProfile({ ...args, previewHash: 'malformed' })).toEqual({ skipped: 'preview_required' });
+    expect(extract).not.toHaveBeenCalled();
+    const previewHash = await replayPreviewHash();
+    const original = await mockPg('sms_log').first();
+    const changed = { ...result, facts: [{ ...result.facts[0], value: 'A different proposed value' }] };
+    expect(await replaySmsProfile({ ...args, previewHash, extract: async () => changed }))
+      .toEqual({ skipped: 'preview_changed' });
+    expect(await mockPg('sms_log').first()).toEqual(original);
+    expect(await mockPg('data_hygiene_proposals')).toHaveLength(0);
+    expect(await mockPg('data_hygiene_sensitive_vault')).toHaveLength(0);
+    expect(await mockPg('data_hygiene_source_extractions')).toHaveLength(1);
+    expect(await mockPg('audit_log')).toHaveLength(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(await replaySmsProfile({ ...args, previewHash })).toMatchObject({ proposed: 1 });
+  });
+
+  test('a changed staff disposition invalidates execution even when extracted facts stay identical', async () => {
+    await recordMessageOperations(mockPg, message, result, context);
+    const previewHash = await replayPreviewHash();
+    const proposal = await mockPg('data_hygiene_proposals').first();
+    await mockPg('data_hygiene_proposals').where({ id: proposal.id }).update({ status: 'rejected' });
+    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, previewHash, extract: async () => result }))
+      .toEqual({ skipped: 'preview_changed' });
+    expect(await mockPg('data_hygiene_proposals').first()).toMatchObject({ id: proposal.id, status: 'rejected' });
+    expect(await mockPg('data_hygiene_source_extractions')).toHaveLength(1);
+    expect((await mockPg('sms_log').first()).operational_analysis).not.toHaveProperty('replay');
   });
 
   test('replay does not refill an automatically applied field that was subsequently cleared', async () => {
@@ -228,7 +265,7 @@ postgres('SMS operations on PostgreSQL', () => {
     await mockPg('property_preferences').where({ customer_id: message.customer_id }).update({ lockbox_code: null });
     const extract = jest.fn(async () => extracted);
     expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, extract })).toMatchObject({ preserved: 1, outcomes: [{ field: 'lockbox_code', action: 'previously_applied' }] });
-    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, extract }))
+    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, previewHash: await replayPreviewHash(extract), extract }))
       .toEqual({ recorded: 0, applied: 0, proposed: 0, preserved: 1 });
     expect((await mockPg('property_preferences').first()).lockbox_code).toBeNull();
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(0);
@@ -270,7 +307,7 @@ postgres('SMS operations on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, result, context);
     const proposal = await mockPg('data_hygiene_proposals').first();
     await mockPg('data_hygiene_proposals').where({ id: proposal.id }).update({ status });
-    const replay = await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, extract: async () => result });
+    const replay = await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, previewHash: await replayPreviewHash(), extract: async () => result });
     expect(replay).toMatchObject({ applied: 0, proposed: status === 'pending' ? 1 : 0 });
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
     expect(await mockPg('data_hygiene_proposals').first()).toMatchObject({ id: proposal.id, status });
@@ -290,7 +327,7 @@ postgres('SMS operations on PostgreSQL', () => {
         patch.evidence = JSON.stringify({ message_id: inbox.id, after_hash: proposal.evidence.after_hash });
       }
       await mockPg('data_hygiene_proposals').where({ id: proposal.id }).update(patch);
-      expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, extract: async () => result }))
+      expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, previewHash: await replayPreviewHash(), extract: async () => result }))
         .toMatchObject({ applied: 0, proposed: status === 'pending' ? 1 : 0 });
       expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
       expect(await mockPg('data_hygiene_proposals').first()).toMatchObject({ id: proposal.id, status });
@@ -303,7 +340,7 @@ postgres('SMS operations on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
     const extract = async () => ({ facts: [{ field: 'contact_preference', value: 'call', quote: message.message_body,
       duration: 'durable', property_id: context.properties[0].id }], dropped: 0 });
-    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, extract }))
+    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, previewHash: await replayPreviewHash(extract), extract }))
       .toMatchObject({ applied: 0, proposed: 1 });
     const proposal = await mockPg('data_hygiene_proposals').first();
     expect(proposal).toMatchObject({ field: 'contact_preference', resource_id: null, status: 'pending' });
@@ -330,10 +367,10 @@ postgres('SMS operations on PostgreSQL', () => {
     message.message_body = 'I prefer call';
     await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
-    await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, extract: async () => ({
-      facts: [{ field: 'contact_preference', value: 'call', quote: message.message_body,
-        duration: 'durable', property_id: context.properties[0].id }], dropped: 0,
-    }) });
+    const extract = async () => ({ facts: [{ field: 'contact_preference', value: 'call', quote: message.message_body,
+      duration: 'durable', property_id: context.properties[0].id }], dropped: 0 });
+    await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true,
+      previewHash: await replayPreviewHash(extract), extract });
     await expect(mockPg.transaction((trx) => replayMigration.down(trx))).rejects.toThrow('check constraint');
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
     await mockPg('data_hygiene_sensitive_vault').delete();
@@ -351,7 +388,7 @@ postgres('SMS operations on PostgreSQL', () => {
       resource_type: 'property_preferences', scope_type: 'customer', scope_id: message.customer_id,
       field: 'irrigation_controller_location', source: 'message-extraction', confidence: 0.9, tier: 'medium',
       status, idempotency_key: randomUUID(), evidence: JSON.stringify({ message_id: inbox.id }) });
-    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, extract: async () => result }))
+    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, previewHash: await replayPreviewHash(), extract: async () => result }))
       .toMatchObject({ applied: 0, proposed: 0, preserved: 1 });
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
     expect(await mockPg('property_preferences')).toHaveLength(0);
@@ -361,9 +398,10 @@ postgres('SMS operations on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
     const original = (await mockPg('sms_log').first()).operational_analysis;
     const receipt = await mockPg('data_hygiene_source_extractions').first();
+    const approvedHash = await replayPreviewHash();
     await mockPg.raw("ALTER TABLE audit_log ADD CONSTRAINT synthetic_replay_failure CHECK (action <> 'sms.profile.replayed')");
     try {
-      expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, extract: async () => result }))
+      expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, previewHash: approvedHash, extract: async () => result }))
         .toEqual({ failed: true });
     } finally {
       await mockPg.raw('ALTER TABLE audit_log DROP CONSTRAINT synthetic_replay_failure');
@@ -377,13 +415,14 @@ postgres('SMS operations on PostgreSQL', () => {
 
   test('a replay completed while another waits for its lease skips the later provider call', async () => {
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const approvedHash = await replayPreviewHash();
     const { runExclusive } = require('../utils/cron-lock');
     runExclusive.mockImplementationOnce(async (_name, work) => {
-      await recordMessageOperations(mockPg, message, result, { ...context, replay: true });
+      await recordMessageOperations(mockPg, message, result, { ...context, replay: true, previewHash: approvedHash });
       return work();
     });
     const extract = jest.fn().mockRejectedValue(new Error('provider unavailable'));
-    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, extract }))
+    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, previewHash: approvedHash, extract }))
       .toEqual({ skipped: 'replay_receipt_terminal', receipt_status: 'ok' });
     expect(extract).not.toHaveBeenCalled();
     const receipt = await mockPg('data_hygiene_source_extractions').where('extractor_version', 'like', '%:replay').first();
@@ -392,11 +431,12 @@ postgres('SMS operations on PostgreSQL', () => {
 
   test('a delayed replay failure cannot downgrade a committed receipt or erase its proposals', async () => {
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const approvedHash = await replayPreviewHash();
     const extract = async () => {
-      await recordMessageOperations(mockPg, message, result, { ...context, replay: true });
+      await recordMessageOperations(mockPg, message, result, { ...context, replay: true, previewHash: approvedHash });
       throw new Error('delayed provider failure');
     };
-    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, extract }))
+    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, previewHash: approvedHash, extract }))
       .toEqual({ skipped: 'replay_receipt_terminal', receipt_status: 'ok' });
     const receipt = await mockPg('data_hygiene_source_extractions').where('extractor_version', 'like', '%:replay').first();
     expect(receipt).toMatchObject({ status: 'ok', attempt_count: 1 });
@@ -417,7 +457,7 @@ postgres('SMS operations on PostgreSQL', () => {
 
   test('replay rechecks source changes and activation changes after extraction', async () => {
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
-    const args = { conn: mockPg, smsLogId: message.id, execute: true };
+    const args = { conn: mockPg, smsLogId: message.id, execute: true, previewHash: await replayPreviewHash() };
     expect(await replaySmsProfile({ ...args, extract: async () => {
       await mockPg('sms_log').where({ id: message.id }).update({ message_body: 'Changed source.' });
       return result;
@@ -433,7 +473,7 @@ postgres('SMS operations on PostgreSQL', () => {
 
   test('concurrent explicit replays commit one proposal, replay audit and receipt', async () => {
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
-    const args = { conn: mockPg, smsLogId: message.id, execute: true, extract: async () => result };
+    const args = { conn: mockPg, smsLogId: message.id, execute: true, previewHash: await replayPreviewHash(), extract: async () => result };
     const outcomes = await Promise.all([replaySmsProfile(args), replaySmsProfile(args)]);
     expect(outcomes.filter((row) => row.proposed === 1)).toHaveLength(1);
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
@@ -444,7 +484,7 @@ postgres('SMS operations on PostgreSQL', () => {
   test('failed replay attempts stop at the existing receipt retry limit without clearing prior work', async () => {
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
     const extract = jest.fn(async () => { throw new Error('synthetic provider failure'); });
-    const args = { conn: mockPg, smsLogId: message.id, execute: true, extract };
+    const args = { conn: mockPg, smsLogId: message.id, execute: true, previewHash: await replayPreviewHash(), extract };
     for (let attempt = 0; attempt < 3; attempt++) expect(await replaySmsProfile(args)).toEqual({ failed: true });
     expect(await replaySmsProfile(args)).toEqual({ skipped: 'replay_receipt_terminal', receipt_status: 'failed_max_retries' });
     expect(extract).toHaveBeenCalledTimes(3);
@@ -457,7 +497,7 @@ postgres('SMS operations on PostgreSQL', () => {
 
   test('replay gates reject unprocessed, out-of-window and disabled sources before calling a provider', async () => {
     const extract = jest.fn();
-    const args = { conn: mockPg, smsLogId: message.id, execute: true, extract };
+    const args = { conn: mockPg, smsLogId: message.id, execute: true, previewHash: await replayPreviewHash(), extract };
     expect(await replaySmsProfile(args)).toEqual({ skipped: 'not_previously_analyzed' });
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
     process.env.GATE_SMS_OPERATIONAL_ACTIONS_SINCE = new Date(message.created_at.getTime() + 1000).toISOString();

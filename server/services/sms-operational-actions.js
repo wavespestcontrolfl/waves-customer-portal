@@ -279,9 +279,11 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     const live = await scheduledSourceMessage(trx, source);
     const gatesPermitWrite = [enabled(), replay || matchedContext.captureCommitments === smsCommitmentsEnabled()].every(Boolean);
     if (!gatesPermitWrite) return { skipped: 'gate_changed' };
-    if (!eligibleMessage(live) || ['customer_id', 'message_body', 'direction', 'message_type', 'from_phone', 'to_phone']
-      .some((field) => (live[field] ?? null) !== (message[field] ?? null))) return { skipped: 'source_changed' };
-    if (new Date(live.created_at).getTime() !== new Date(message.created_at).getTime()) return { skipped: 'source_changed' };
+    if (!eligibleMessage(live) || ['customer_id', 'message_body', 'direction', 'message_type', 'from_phone', 'to_phone', 'created_at']
+      .some((field) => {
+        if (field === 'created_at') return new Date(live[field]).getTime() !== new Date(message[field]).getTime();
+        return (live[field] ?? null) !== (message[field] ?? null);
+      })) return { skipped: 'source_changed' };
     const since = gateEnvTimestamp('GATE_SMS_OPERATIONAL_ACTIONS_SINCE');
     if (!since || new Date(live.created_at) < since) return { skipped: 'outside_activation_window' };
     let replayAppliedFields;
@@ -316,9 +318,20 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     })).onConflict(['sms_log_id', 'commitment_key']).ignore();
     let analysis = { version: VERSION, processed_at: new Date().toISOString(), facts, dropped: extracted.dropped };
     if (replay) {
+      // Bind the actual locked decisions, including private values, to the
+      // operator's preview without exposing them. Fresh proposal UUIDs vary
+      // across rollback; preserved proposal identities must still match.
+      analysis.preview_hash = hashSensitiveValue({ purpose: 'sms-profile-replay', version: VERSION,
+        source: SOURCE_COLUMNS.map((column) => [column, live[column] ?? null]),
+        facts: facts.map(({ proposal_id, ...fact }) => ({ ...fact,
+          proposal_id: fact.proposal_created ? null : proposal_id ?? null })), dropped: extracted.dropped });
+      const previewAuthorized = [matchedContext.dryRun, matchedContext.previewHash === analysis.preview_hash].some(Boolean);
+      if (!previewAuthorized) {
+        throw Object.assign(new Error('sms_profile_replay_preview_changed'), { code: 'SMS_REPLAY_PREVIEW_CHANGED' });
+      }
       await recordAuditEvent({ trx, critical: true, actor_type: 'system', action: 'sms.profile.replayed',
         resource_type: 'sms_log', resource_id: message.id,
-        metadata: { initiated_by: 'operator', extractor_version: VERSION,
+        metadata: { initiated_by: 'operator', extractor_version: VERSION, preview_hash: analysis.preview_hash,
           outcomes: facts.map(({ field, outcome, proposal_id }) => ({ field, outcome, proposal_id })) } });
       analysis = { ...live.operational_analysis, replay: analysis };
     }
@@ -539,7 +552,7 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
 
 // Explicit operator action only. The scheduled intake never clears analysis
 // markers or terminal receipts to replay messages after a model/body change.
-async function replaySmsProfile({ smsLogId, execute = false, conn = db, extract = extractSmsOperations } = {}) {
+async function replaySmsProfile({ smsLogId, execute = false, previewHash, conn = db, extract = extractSmsOperations } = {}) {
   if (!isUuid(smsLogId)) return { skipped: 'invalid_sms_log_id' };
   if (!enabled()) return { skipped: 'gate_off' };
   const since = gateEnvTimestamp('GATE_SMS_OPERATIONAL_ACTIONS_SINCE');
@@ -557,6 +570,7 @@ async function replaySmsProfile({ smsLogId, execute = false, conn = db, extract 
     extractor_version: REPLAY_VERSION, source_hash: hashExtractionSource(message.message_body) };
   const prior = await shouldSkipExtraction(receipt);
   if (prior.skip) return { skipped: 'replay_receipt_terminal', receipt_status: prior.existing.status };
+  if (execute && !/^[a-f0-9]{64}$/.test(previewHash || '')) return { skipped: 'preview_required' };
   return runExclusive('sms-operational-actions', async () => {
     try {
       if (!enabled()) return { skipped: 'gate_off' };
@@ -564,7 +578,7 @@ async function replaySmsProfile({ smsLogId, execute = false, conn = db, extract 
       if (lockedReceipt.skip) return { skipped: 'replay_receipt_terminal', receipt_status: lockedReceipt.existing.status };
       const context = { ...await loadMessageContext(conn, message), captureCommitments: false };
       const extracted = await extract(context);
-      if (execute) return await recordMessageOperations(conn, message, extracted, { ...context, replay: true });
+      if (execute) return await recordMessageOperations(conn, message, extracted, { ...context, replay: true, previewHash });
       const preview = await conn.transaction();
       try {
         const outcome = await recordMessageOperations(preview, message, extracted, { ...context, replay: true, dryRun: true });
@@ -574,12 +588,13 @@ async function replaySmsProfile({ smsLogId, execute = false, conn = db, extract 
           field: fact.field, action: fact.outcome === 'proposed'
             ? (fact.proposal_created ? 'create_proposal' : 'preserve_pending') : fact.outcome,
         }));
-        return { dry_run: true, sms_log_id: smsLogId, ...outcome,
+        return { dry_run: true, sms_log_id: smsLogId, preview_hash: simulated.operational_analysis.replay.preview_hash, ...outcome,
           unverified_count: simulated.operational_analysis.replay.dropped, outcomes };
       } finally {
         await preview.rollback();
       }
-    } catch {
+    } catch (error) {
+      if (error.code === 'SMS_REPLAY_PREVIEW_CHANGED') return { skipped: 'preview_changed' };
       if (!execute) return { dry_run: true, failed: true };
       return conn.transaction(async (trx) => {
         // Success locks this same source before recording its receipt. A

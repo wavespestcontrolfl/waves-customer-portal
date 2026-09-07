@@ -95,9 +95,11 @@ postgres('SMS commitments on PostgreSQL', () => {
       expect(input.captureCommitments).toBe(false);
       return result; // Even a provider returning obligations cannot extend replay's scope.
     });
-    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute, extract }))
+    const args = { conn: mockPg, smsLogId: message.id, extract };
+    const preview = await replaySmsProfile(args);
+    expect(execute ? await replaySmsProfile({ ...args, execute: true, previewHash: preview.preview_hash }) : preview)
       .toMatchObject({ recorded: 0, applied: 0, proposed: 1 });
-    expect(extract).toHaveBeenCalledTimes(1);
+    expect(extract).toHaveBeenCalledTimes(execute ? 2 : 1);
     expect(await mockPg('call_commitments')).toHaveLength(0);
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(execute ? 1 : 0);
     expect(await mockPg('property_preferences')).toHaveLength(0);
