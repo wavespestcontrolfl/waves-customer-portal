@@ -9,6 +9,7 @@
 
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { geminiText } = require('./llm/call');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -222,7 +223,7 @@ class SatelliteAnalyzer {
     }
 
     const data = await response.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    const text = geminiText(data);
     if (!text) return null;
 
     return JSON.parse(text.replace(/```json|```/g, '').trim());

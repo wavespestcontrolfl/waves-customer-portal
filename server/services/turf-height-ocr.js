@@ -9,7 +9,7 @@
  * visit commits; a failure just leaves verification_status at its prior value.
  */
 const MODELS = require('../config/models');
-const { anthropicText } = require('./llm/call');
+const { anthropicText, geminiText } = require('./llm/call');
 const logger = require('./logger');
 const db = require('../models/db');
 const photos = require('./photos');
@@ -91,7 +91,7 @@ async function callGeminiGaugeOcr(base64Image, mimeType) {
     });
     if (!response.ok) return null;
     const data = await response.json();
-    const parsed = parseGaugeJson(data.candidates?.[0]?.content?.parts?.[0]?.text);
+    const parsed = parseGaugeJson(geminiText(data));
     return { model: 'gemini', ...(parsed || { height_in: null, confidence: 0, readable: false }) };
   } catch (err) {
     logger.warn(`[turf-ocr] Gemini gauge read failed: ${err.message}`);

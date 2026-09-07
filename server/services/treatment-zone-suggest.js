@@ -12,7 +12,7 @@
  * the tech's adjusted trace goes through the existing save route.
  */
 const MODELS = require('../config/models');
-const { anthropicText } = require('./llm/call');
+const { anthropicText, geminiText } = require('./llm/call');
 const logger = require('./logger');
 
 let Anthropic = null;
@@ -242,7 +242,7 @@ async function geminiSuggest(model, base64Png, prompt) {
     return null;
   }
   const data = await response.json();
-  return parseModelJson(data.candidates?.[0]?.content?.parts?.[0]?.text);
+  return parseModelJson(geminiText(data));
 }
 
 async function claudeSuggest(base64Png, prompt) {

@@ -23,7 +23,7 @@
 
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { anthropicText } = require('./llm/call');
+const { anthropicText, geminiText } = require('./llm/call');
 const {
   safePublicFirstName,
   safePublicCity,
@@ -411,7 +411,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType) {
     return null;
   }
   const data = await response.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  const text = geminiText(data);
   if (!text) return null;
   return JSON.parse(text.replace(/```json|```/g, '').trim());
 }

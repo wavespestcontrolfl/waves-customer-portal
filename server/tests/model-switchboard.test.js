@@ -192,21 +192,46 @@ describe('model-switchboard', () => {
     }
   });
 
-  it('photo lanes carry the shared Gemini retry leg and the fan-outs their OpenAI arm', () => {
+  it('photo lanes hide the Gemini retry leg while it resolves to the same model, and the fan-outs carry their OpenAI arm', () => {
+    // Registry default: GEMINI_VISION_FALLBACK equals GEMINI_VISION_BEST, and every
+    // ladder skips the retry rung when the two ids match — the card must not
+    // show Gemini 3.8 as its own retry.
+    expect(MODELS.GEMINI_VISION_FALLBACK).toBe(MODELS.GEMINI_VISION_BEST);
     const { lanes } = sb.getSwitchboard();
     const pest = lanes.find((l) => l.id === 'pest_id');
-    expect(pest.retry.model).toBe(MODELS.GEMINI_VISION_FALLBACK);
-    expect(pest.retry.selector).toBe('GEMINI_VISION_FALLBACK');
+    expect(pest.fallback.selector).toBe('GEMINI_VISION_BEST');
+    expect(pest.retry).toBeNull();
     const sat = lanes.find((l) => l.id === 'satellite');
+    expect(sat.retry).toBeNull();
     expect(sat.also.map((a) => a.pinEnv)).toEqual(['OPENAI_VISION_MODEL']);
     expect(sat.also[0].provider).toBe('openai');
     expect(lanes.find((l) => l.id === 'property_trio').also[0].pinEnv).toBe('OPENAI_PROPERTY_MODEL');
     // The caption read and the treatment-zone map are sequential ladders in
-    // execution order (Gemini → prior Gemini → Claude), not fan-outs.
+    // execution order (Gemini → Claude with the retry skipped), not fan-outs.
     for (const id of ['tech_caption_vision', 'treatment_zone']) {
       const ladder = lanes.find((l) => l.id === id);
-      expect({ id, fanout: ladder.fanout, primary: ladder.primary.provider, fallback: ladder.fallback.selector, retry: ladder.retry.selector })
-        .toEqual({ id, fanout: false, primary: 'gemini', fallback: 'GEMINI_VISION_FALLBACK', retry: 'VISION' });
+      expect({ id, fanout: ladder.fanout, primary: ladder.primary.provider, fallback: ladder.fallback.selector, retry: ladder.retry })
+        .toEqual({ id, fanout: false, primary: 'gemini', fallback: 'VISION', retry: null });
+    }
+  });
+
+  it('a split GEMINI_VISION_FALLBACK_MODEL re-arms the retry leg on every photo ladder', () => {
+    const prev = process.env.GEMINI_VISION_FALLBACK_MODEL;
+    try {
+      process.env.GEMINI_VISION_FALLBACK_MODEL = 'gemini-9.9-prior';
+      jest.resetModules();
+      const { lanes } = require('../services/model-switchboard').getSwitchboard();
+      const pest = lanes.find((l) => l.id === 'pest_id');
+      expect(pest.retry.model).toBe('gemini-9.9-prior');
+      expect(pest.retry.selector).toBe('GEMINI_VISION_FALLBACK');
+      for (const id of ['tech_caption_vision', 'treatment_zone']) {
+        const ladder = lanes.find((l) => l.id === id);
+        expect({ id, fallback: ladder.fallback.selector, retry: ladder.retry.selector })
+          .toEqual({ id, fallback: 'GEMINI_VISION_FALLBACK', retry: 'VISION' });
+      }
+    } finally {
+      if (prev === undefined) delete process.env.GEMINI_VISION_FALLBACK_MODEL; else process.env.GEMINI_VISION_FALLBACK_MODEL = prev;
+      jest.resetModules();
     }
   });
 

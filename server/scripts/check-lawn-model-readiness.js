@@ -157,7 +157,7 @@ async function main() {
   const m = LAWN_PIPELINE_MODELS;
 
   const checks = [
-    { provider: 'gemini', role: 'perception', env: 'LAWN_VISION_MODEL', model: m.vision, fromEnv: !!process.env.LAWN_VISION_MODEL, run: checkGemini },
+    { provider: 'gemini', role: 'perception', env: process.env.LAWN_VISION_MODEL ? 'LAWN_VISION_MODEL' : 'MODEL_GEMINI_VISION', model: m.vision, fromEnv: !!(process.env.LAWN_VISION_MODEL || process.env.MODEL_GEMINI_VISION), run: checkGemini },
     { provider: 'anthropic', role: 'challenge', env: 'LAWN_CHALLENGE_MODEL', model: m.challenge, fromEnv: !!process.env.LAWN_CHALLENGE_MODEL, run: checkAnthropic },
     { provider: 'openai', role: 'writer', env: 'LAWN_WRITER_MODEL', model: m.writer, fromEnv: !!process.env.LAWN_WRITER_MODEL, run: checkOpenAI },
   ];

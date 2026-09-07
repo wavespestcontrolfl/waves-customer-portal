@@ -757,8 +757,14 @@ function getSwitchboard() {
       ? resolveSwitch(lane.primary)
       : { primary: resolveRef(lane.primary), fallback: resolveRef(lane.fallback) };
     const primary = withProvider(legs.primary);
-    const fallback = withProvider(legs.fallback);
-    const retry = withProvider(resolveRef(lane.retry));
+    let fallback = withProvider(legs.fallback);
+    let retry = withProvider(resolveRef(lane.retry));
+    // A leg that resolves to the same model as the leg before it is skipped at
+    // runtime (every photo ladder guards `FALLBACK !== MODEL`), so the card
+    // shows the executed chain: drop it and promote what follows.
+    const sameLeg = (a, b) => !!(a && b && a.model === b.model && a.provider === b.provider);
+    if (sameLeg(fallback, retry)) retry = null;
+    if (sameLeg(primary, fallback)) { fallback = retry; retry = null; }
     const also = (lane.also || []).map((ref) => withProvider(resolveRef(ref)));
     const registration = lane.lock?.kind === 'registration';
     if (primary.selector && byKey[primary.selector] && !primary.pinned && !registration) byKey[primary.selector].laneCount += 1;

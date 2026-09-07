@@ -82,7 +82,7 @@ Currently live:
   `GEMINI_VISION_MODEL`): every Gemini image-analysis leg — the photo lanes
   (`lawn-assessment.js`, `pest-identification.js`, `tree-shrub-assessment.js`,
   `treatment-zone-suggest.js`, `tech-social-caption.js`, `satellite-analyzer.js`,
-  `property-lookup-v2.js`) plus the per-service-env lanes that default to the
+  `property-lookup-v2.js`, `ai-chart-builder.js` image intent) plus the per-service-env lanes that default to the
   same registry selector (`GEMINI_TURF_OCR_MODEL`, `LAWN_VISION_MODEL`,
   `GEMINI_PROPERTY_MODEL`). Owner ruling 2026-09-06: one model for all of them.
 

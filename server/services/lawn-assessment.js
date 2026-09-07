@@ -9,7 +9,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { anthropicText } = require('./llm/call');
+const { anthropicText, geminiText } = require('./llm/call');
 const { normalizeGrassType } = require('./lawn-grass-context');
 
 // Coerce a model's grass_type to a canonical key, or null when it can't tell
@@ -196,7 +196,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType, context = {}) {
   }
 
   const data = await response.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  const text = geminiText(data);
   if (!text) return null;
 
   const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());

@@ -77,7 +77,7 @@ Examples (input → exact JSON output):
 }
 
 // ── Two-step image path ───────────────────────────────────────────────────
-// A reference image is read by the VISION model (Gemini 3.5 Flash, Claude
+// A reference image is read by the Gemini vision model (GEMINI_VISION_BEST, Claude
 // fallback) to extract INTENT ONLY — it never sees the schema and never writes
 // SQL, so it can't hallucinate a column or lock in a wrong predicate. The SQL is
 // then always written by FLAGSHIP (the strongest SQL model) from that intent,
@@ -90,7 +90,7 @@ Set confidence "low" if the image is ambiguous or isn't a chart.`;
 }
 
 /**
- * Extract chart intent from reference image(s) via the vision model (Gemini 3.5
+ * Extract chart intent from reference image(s) via the vision model (GEMINI_VISION_BEST
  * Flash → Claude fallback). Returns a normalized intent object or null.
  */
 async function extractImageIntent(images) {
