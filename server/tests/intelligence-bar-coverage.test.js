@@ -55,7 +55,7 @@ test('verified coverage requires actual policy and evidence for the reviewed imp
   expect(checkCoverage([action], { actions: [record] }, { save: {} })).toEqual([]);
   expect(checkCoverage([action], { actions: [{ ...record, evidence: [] }] }, { save: {} })).toHaveLength(1);
   for (const key of ['permission', 'approval', 'inputsAndEffects']) {
-    for (const value of [undefined, '', ' ', 'requires_action_review']) {
+    for (const value of [undefined, '', ' ', 'requires_action_review', ' requires_action_review ']) {
       expect(checkCoverage([action], { actions: [{ ...record, [key]: value }] }, { save: {} })).toHaveLength(1);
     }
   }
