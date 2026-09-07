@@ -19,6 +19,7 @@ const { loadSmsFulfillmentEvidence, admissibleWitness, verifySmsFulfillment, rev
 const NotificationService = require('../services/notification-service');
 const { etDateString } = require('../utils/datetime-et');
 const migration = require('../models/migrations/20260906000001_sms_operational_actions');
+const irrigationRevisionMigration = require('../models/migrations/20260907000020_property_irrigation_revision');
 const { listOpenCommitments } = require('../services/call-commitments');
 const connection = process.env.SMS_OPERATIONS_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -50,6 +51,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     for (const table of TABLES) {
       await admin.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
     }
+    await irrigationRevisionMigration.up(mockPg);
   });
   beforeEach(async () => {
     jest.clearAllMocks();
