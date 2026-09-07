@@ -3452,6 +3452,21 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           // has a resumable single-service attempt, whose legacy side effects
           // would otherwise invoice and message the customer independently.
           const member = await lockTrx('scheduled_services').where({ id: svc.id }).first('visit_id');
+          // Invoice-issued closeout: the grouped-stop refusal ran unlocked
+          // in invoice-issued-closeout.js; a createOrJoinVisit that grouped
+          // this row since would otherwise let a packet-less open group
+          // complete this member alone and dissolve (pre-push r8 P1). The
+          // whole stop closes together — re-checked HERE under the stop
+          // lock, before the claim.
+          if (issuedInvoiceCloseout && member?.visit_id) {
+            const open = await require('../services/visit-groups').openMembers(lockTrx, member.visit_id);
+            if (open.length >= 2) {
+              return { action: 'conflict', status: 409, payload: {
+                error: 'This visit is part of a grouped stop — the whole stop closes together, so the invoice-issued closeout leaves it open.',
+                code: 'visit_grouped', visitId: member.visit_id,
+              } };
+            }
+          }
           const packet = member?.visit_id
             ? await lockTrx('visit_completion_packets').where({ visit_id: member.visit_id }).first('id', 'status')
             : null;

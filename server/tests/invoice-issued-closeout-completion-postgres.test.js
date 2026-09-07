@@ -244,6 +244,31 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     await expectQuietCompletion(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg }));
   });
 
+  test('a visit grouped into a stop AFTER the unlocked resolve is refused under the claim lock — never completed alone', async () => {
+    await fixture({ serviceType: 'Quarterly Pest Control Service' });
+    // The grouping lands between resolveVisitForIssuedInvoice and the
+    // completion's claim: drive the completion exactly as the closeout does,
+    // with the row already a member of a two-visit open stop.
+    const visitId = randomUUID();
+    await mockPg('service_visits').insert({ id: visitId, customer_id: f.customerId, scheduled_date: etDateString(), stop_base_key: `stop-${visitId.slice(0, 8)}`, created_by: 'test' });
+    await mockPg('scheduled_services').insert({ id: randomUUID(), customer_id: f.customerId, technician_id: f.techId, service_type: 'Mosquito Barrier Treatment',
+      scheduled_date: etDateString(), window_start: '09:00', window_end: '10:00', status: 'confirmed', visit_id: visitId });
+    await mockPg('scheduled_services').where({ id: f.serviceId }).update({ visit_id: visitId });
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    const idempotencyKey = `invoice-issued:${f.invoiceId}`;
+    const out = await completeScheduledService({
+      serviceId: f.serviceId,
+      body: { visitOutcome: 'completed', backfill: true, sendCompletionSms: false, requestReview: false, invoiceAlreadySent: true, idempotencyKey },
+      actor: { techRole: 'admin', technicianId: null, technician: null },
+      idempotencyKey,
+      issuedInvoiceCloseout: { invoiceId: f.invoiceId, trigger: 'sent' },
+    });
+    expect(out).toMatchObject({ status: 409, body: { code: 'visit_grouped', visitId } });
+    expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('confirmed');
+    expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(0);
+    expect(await mockPg('service_completion_attempts').where({ service_id: f.serviceId })).toHaveLength(0);
+  });
+
   test('a second send is idempotent — the visit is already completed, nothing else changes', async () => {
     await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
     await expectQuietCompletion(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg }));
