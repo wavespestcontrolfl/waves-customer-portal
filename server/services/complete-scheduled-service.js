@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const db = require('../models/db');
+const { savepointRead, failSoftRead } = require('../utils/savepoint-read');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const logger = require('../services/logger');
 const StripeService = require('../services/stripe');
@@ -1127,33 +1128,6 @@ function frozenResumeCompletionState(frozenStructuredNotes, { requestBackfill = 
     backfillMintPayerId,
     bodyDisagreed: Boolean(requestBackfill) !== isBackfillCompletion,
   };
-}
-
-// Recoverable reads that inherit a packet member's OUTER transaction: a
-// failed statement aborts that transaction (25P02) whatever JavaScript
-// catches it. On a transaction handle the read runs between an explicit
-// SAVEPOINT and RELEASE / ROLLBACK TO — explicit rather than a knex nested
-// transaction because helpers that catch their own query error resolve
-// normally, RELEASE of an aborted savepoint then fails, and only ROLLBACK TO
-// restores the outer transaction. On the root connection it is the plain
-// query. savepointRead rethrows for callers with their own catch;
-// failSoftRead applies the fallback.
-async function savepointRead(database, query) {
-  if (!database.isTransaction) return query(database);
-  const name = `fail_soft_${crypto.randomBytes(6).toString('hex')}`;
-  await database.raw(`SAVEPOINT ${name}`);
-  try {
-    const result = await query(database);
-    await database.raw(`RELEASE SAVEPOINT ${name}`);
-    return result;
-  } catch (err) {
-    await database.raw(`ROLLBACK TO SAVEPOINT ${name}`);
-    throw err;
-  }
-}
-
-function failSoftRead(database, query, fallback) {
-  return savepointRead(database, query).catch(() => fallback);
 }
 
 async function loadSubmittedCatalogProducts(submittedProducts = [], database = db) {
