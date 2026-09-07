@@ -114,7 +114,11 @@ older cached PDFs to match this evidence rule),
 the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
-`/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound),
+`/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound; the SMS
+operational extension runs after acknowledgment under
+`GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
+it reuses persisted SMS evidence for private profile updates and admin
+notifications, with no additional response fields or customer sends),
 `/api/webhooks/twilio/collections-vestibule[-key|-noinput]` +
 `/api/webhooks/twilio/collections-relay-complete` +
 `/api/webhooks/twilio/collections-transfer-complete` +
