@@ -11,13 +11,13 @@ function executionOutcome(result) {
     return 'outcome_unknown';
   }
   if (result.outcome_unknown === true) return 'outcome_unknown';
-  if (result.pending_confirmation === true || result.preview === true || result.proposal === true) return 'awaiting_approval';
+  if (result.pending_confirmation === true || result.preview === true || result.proposal === true || result.dry_run === true) return 'awaiting_approval';
   if (result.blocked === true) return 'blocked';
   if (isToolFailure(result)) return 'failed';
   if (result.partial === true) return 'partially_completed';
   if (result.state === 'provider_accepted') return 'provider_accepted';
-  if (result.warning) return 'partially_completed';
-  return 'completed';
+  if (result.success === true) return result.warning ? 'partially_completed' : 'completed';
+  return 'outcome_unknown';
 }
 
 module.exports = { isToolFailure, executionOutcome };

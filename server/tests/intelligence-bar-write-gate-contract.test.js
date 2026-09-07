@@ -390,6 +390,26 @@ function makeRecordingDb(seed = {}) {
   return { db, mutations };
 }
 
+test.each([
+  ['optimize_all_routes', []],
+  ['optimize_all_routes', [{ id: 'stop-1' }, { id: 'stop-2' }]],
+  ['optimize_tech_route', []],
+  ['optimize_tech_route', [{ id: 'stop-1' }, { id: 'stop-2' }]],
+])('%s reports an unavailable route as blocked without a mutation', async (name, stops) => {
+  const { db: recordingDb, mutations } = makeRecordingDb({
+    technicians: [{ id: 'tech-fixture', name: 'Synthetic Technician' }], scheduled_services: stops,
+  });
+  const dbMock = require('../models/db');
+  dbMock.mockImplementation(recordingDb);
+  dbMock.raw.mockImplementation(recordingDb.raw);
+  const result = await require('../services/intelligence-bar/schedule-tools').executeScheduleTool(name, {
+    date: '2026-09-01', technician_name: 'Synthetic Technician', confirmed: true,
+  });
+  expect(result).toMatchObject({ blocked: true });
+  expect(require('../services/intelligence-bar/outcomes').executionOutcome(result)).toBe('blocked');
+  expect(mutations).toEqual([]);
+});
+
 describe('two-step writes do not mutate without confirmed (behavioral)', () => {
   const dbMock = require('../models/db');
 

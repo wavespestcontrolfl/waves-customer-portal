@@ -3558,13 +3558,14 @@ async function toggleEstimateV2View({ estimate_identifier, enabled, _expected_fl
     .where({ id: estimate.id })
     .modify((q) => { if (expected !== undefined) q.whereRaw('COALESCE(use_v2_view, false) = ?', [expected]); })
     .update({ use_v2_view: next });
-  if (expected !== undefined && !updated) {
+  if (!updated) {
     return { error: 'This estimate\'s view flag changed after the card was shown — nothing was toggled. Ask again for a fresh confirmation card.', preview_changed: true };
   }
 
   logger.info(`[estimate-v2] Toggled use_v2_view for estimate ${estimate.id} → ${next}`);
 
   return {
+    success: true,
     estimateId: estimate.id,
     customerName: estimate.customer_name,
     token: estimate.token,
@@ -3602,13 +3603,14 @@ async function toggleShowOneTimeOption({ estimate_identifier, enabled, _expected
     .where({ id: estimate.id })
     .modify((q) => { if (expected !== undefined) q.whereRaw('COALESCE(show_one_time_option, false) = ?', [expected]); })
     .update({ show_one_time_option: next });
-  if (expected !== undefined && !updated) {
+  if (!updated) {
     return { error: 'This estimate\'s one-time-option flag changed after the card was shown — nothing was toggled. Ask again for a fresh confirmation card.', preview_changed: true };
   }
 
   logger.info(`[estimate-v2] Toggled show_one_time_option for estimate ${estimate.id} → ${next}`);
 
   return {
+    success: true,
     estimateId: estimate.id,
     customerName: estimate.customer_name,
     token: estimate.token,

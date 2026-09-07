@@ -103,3 +103,36 @@ proof remains in D. No real communication or publication is authorized for QA.
   bulk-cohort, and recipient checks remain together; moving them into one-use
   helpers would only relocate the decisions. Further simplification must
   preserve every independently tested authorization path.
+
+Part A review remediation validates arguments again inside registry execution.
+Trusted confirmation and private version pins use the server action context;
+model-supplied approval or private fields fail schema validation. Discovery is
+not offered on the technician surface. The coverage gate now proves baseline
+IDs and fingerprints against source at a commit already merged on main and
+retains dynamic admin verb-wrapper calls. All 1,736 recorded sites remain
+unsupported/unverified. Backend registrations remain a manual inventory in
+this split; automated backend drift enforcement is deferred to the final
+capability reconciliation, so this gate currently enforces frontend sites only.
+
+Part B review remediation resolves prepositional and overlapping customer
+selectors before considering page fallback. Target versions use PostgreSQL
+`updated_at::text` throughout fresh page, operator, full-name and single-name
+lookups. Two isolated Postgres tests verify microsecond preservation and
+misspelling refusal with actual synthetic rows, rolled back after each test.
+The affected six service/confirmation suites pass 165 tests.
+
+The shared outcome classifier now requires affirmative success. Optimizer
+no-op, unavailable tax-advisor, and empty bulk-update paths explicitly block;
+dry runs remain previews. Estimate flag toggles report success only after an
+affected row. Message-only, warning-only and unnormalized legacy output stays
+unknown. Legacy payout, SEO enqueue and SEO approval results still need
+individual lifecycle adapters before those capabilities can be verified; no
+platform coverage is claimed for them by this split.
+
+Part A integrates merged main `e7c4e9eb4` and records its changed property-editor
+request as unsupported. Optional request calls now join the census; registry
+tests detect omitted tool modules, and the dedicated agent-estimate workflow
+preloads its own authorized estimate tools. Broader payload/helper dependency
+fingerprinting remains deferred alongside backend drift enforcement. Current
+fingerprints describe call expressions; changes outside those expressions still
+require manual review until final capability reconciliation.
