@@ -1136,10 +1136,14 @@ async function recheckDeferredReplay(entryPoint, claimMeta = {}) {
   }
 }
 
-// The canonical sender catches thrown checks and refuses provider dispatch.
+// Failed reads prove no handoff occurred and stay on the bounded retry rail.
 async function preDispatchDeferredReplay(entryPoint, claimMeta = {}) {
   const entry = entryFor(entryPoint);
-  return entry?.preDispatch ? entry.preDispatch(claimMeta) : { ok: true };
+  try {
+    return entry?.preDispatch ? await entry.preDispatch(claimMeta) : { ok: true };
+  } catch {
+    return { ok: false, code: 'DEFERRED_RECHECK_FAILED', retryable: true };
+  }
 }
 
 // null = no finalize registered. { ok:false } rides the durable

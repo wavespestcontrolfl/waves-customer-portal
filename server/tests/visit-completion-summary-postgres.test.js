@@ -210,6 +210,81 @@ postgres('visit summary recipient recovery', () => {
     expect(await replay.preDispatchDeferredReplay('visit_summary_deferred', heldMeta)).toMatchObject({ ok: false });
   });
 
+  test('an initial consent lookup failure retries the requested SMS instead of suppressing it', async () => {
+    fixture.payload.items[0].body.sendCompletionSms = true;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'CONSENT_LOOKUP_FAILED' });
+    expect(await deliver()).toEqual({ state: 'delivery_pending' });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
+      .toMatchObject({ status: 'failed' });
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+    expect(sendOne).toHaveBeenCalledTimes(2);
+  });
+
+  test('omitting the optional SMS field preserves the canonical no-SMS default', async () => {
+    for (const item of fixture.payload.items) delete item.body.sendCompletionSms;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an issued summary with no effects is distinguished from a legacy group with no summary', async () => {
+    const { loadCloseoutInputs } = require('../services/closeout-status');
+    const pending = await loadCloseoutInputs(fixture.serviceIds[0]);
+    expect(pending.visitSummaryLookupFailed).toBe(false);
+    expect(pending.visitSummaryEffects).toEqual([]);
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ summary_token_issued_at: null });
+    const legacy = await loadCloseoutInputs(fixture.serviceIds[0]);
+    expect(legacy.visitSummaryLookupFailed).toBe(false);
+    expect(legacy.visitSummaryEffects).toBeUndefined();
+  });
+
+  test('a transient final scheduled recheck remains retryable until the summary sends', async () => {
+    const queued = await heldSummary();
+    const cron = require('../utils/scheduled-cron');
+    cron.schedule.mockClear();
+    const gates = require('../config/feature-gates');
+    const isEnabled = gates.isEnabled;
+    jest.spyOn(gates, 'logGateStatus').mockImplementation(() => {});
+    jest.spyOn(gates, 'isEnabled').mockImplementation((gate) => gate === 'cronJobs' || isEnabled(gate));
+    require('../services/scheduler').initScheduledJobs();
+    const tick = cron.schedule.mock.calls.find(([, callback]) => String(callback).includes('claimDueScheduledSms'))[1];
+    const execute = mockPg.client._query;
+    let checkingFinal = false;
+    let interrupted = false;
+    jest.spyOn(mockPg.client, '_query').mockImplementation(function failFinalRead(connection, query) {
+      if (checkingFinal && !interrupted && query.sql.startsWith('select "id" from "service_visits"')) {
+        interrupted = true;
+        return Promise.reject(new Error('Synthetic final recheck outage'));
+      }
+      return execute.call(this, connection, query);
+    });
+    let providerCalls = 0;
+    sendCustomerMessage.mockImplementation(async ({ preDispatchCheck }) => {
+      checkingFinal = true;
+      const verdict = await preDispatchCheck();
+      checkingFinal = false;
+      if (!verdict.ok) return { sent: false, blocked: true, code: verdict.code, retryable: verdict.retryable };
+      providerCalls += 1;
+      return { sent: true, providerMessageId: 'fixture-scheduled-provider-id' };
+    });
+    await mockPg('sms_log').where({ id: queued.id }).update({ scheduled_for: new Date(0) });
+    require('../services/logger').error.mockClear();
+    await tick();
+    expect(providerCalls).toBe(0);
+    expect(require('../services/logger').error.mock.calls).toEqual([]);
+    expect(await mockPg('sms_log').where({ id: queued.id }).first()).toMatchObject({
+      status: 'scheduled', metadata: { provider_retry_code: 'DEFERRED_RECHECK_FAILED' },
+    });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
+      .toMatchObject({ status: 'pending' });
+    await mockPg('sms_log').where({ id: queued.id }).update({ scheduled_for: new Date(0) });
+    await tick();
+    expect(providerCalls).toBe(1);
+    expect(await deliver()).toEqual({ state: 'delivered' });
+  });
+
   test('an interrupted first delivery resumes only the missing recipient and fully dedupes replay', async () => {
     await priorEmail(fixture.serviceEmail, { status: 'sent', provider_message_id: 'fixture-provider-id', sent_at: new Date() });
     await priorClaim('completion_email', { status: 'unknown_delivery' });
@@ -350,6 +425,17 @@ postgres('visit summary recipient recovery', () => {
     expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'office_required' } });
     expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' })).toHaveLength(1);
     expect(sendOne).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([undefined, false])('the canonical review default preserves an omitted field but honors %s', async (requested) => {
+    for (const item of fixture.payload.items) item.body.requestReview = requested;
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    await mockPg('service_records').whereIn('id', fixture.recordIds).update({
+      structured_notes: JSON.stringify({ visitOutcome: 'completed', typedReportDelivery: 'auto_send', requestReview: true }),
+    });
+    const reviews = jest.spyOn(require('../services/review-request'), 'enrollPostService').mockResolvedValue({ started: true });
+    expect(await enrollVisitCompletionReview(fixture.packetId)).toMatchObject({ enrolled: requested !== false });
+    expect(reviews).toHaveBeenCalledTimes(requested === false ? 0 : 1);
   });
 
   test('a thrown legacy review enrollment reopens a done packet for recovery', async () => {
