@@ -99,6 +99,8 @@ Everything else — architecture, the context→tools mapping, design decisions,
 
 ## Environment Variables (Railway)
 
+Lawn property history: `GATE_LAWN_PROPERTY_HISTORY` — dark in every environment; read with `gateEnvValue` once per operation. On, confirmed history resolves per property and visit, with reset windows, transactionally installed baselines, and history-bound PDF pins. Unset restores legacy readers and the insert-time baseline rule; baseline flags written while enabled remain. The property columns and proven visit-link stamping are additive and ungated.
+
 Core: `DATABASE_URL`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN`, `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`, `JWT_SECRET`.
 
 Optional model overrides: `MODEL_DEEP` / `MODEL_EXTREME` / `MODEL_FLAGSHIP` / `MODEL_WORKHORSE` / `MODEL_FAST` / `MODEL_VOICE` / `MODEL_VISION` (global), `INTELLIGENCE_BAR_MODEL` / `INTELLIGENCE_BAR_TECH_MODEL` (IB-specific), `MODEL_GEMINI_IMAGE_PRO` (Nano Banana Pro, second leg of the blog image chain; `BLOG_IMAGE_TIMEOUT_MS` per request, `BLOG_IMAGE_CHAIN_BUDGET_MS` for the whole chain incl. the screen retry). Fable is never automatic; opt in explicitly through `MODEL_EXTREME` or a deliberate feature route.

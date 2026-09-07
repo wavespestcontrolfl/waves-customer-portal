@@ -127,6 +127,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // URL; also pinned on this function's own data build so the storage-key
   // signature describes the same render.
   pinnedLawnAssessmentId = null,
+  propertyHistoryEnabled = require('../../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'),
 } = {}) {
   const service = await loadServiceRecordForPdf(recordId, knex);
   if (!service) throw new Error('Service record not found');
@@ -171,7 +172,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // (#3172 r1). Two lookups can straddle a selection change, pinning the
   // render to B while caching it under A's key — the race this closes,
   // reintroduced by resolving twice.
-  const canonical = await resolveCanonicalLawnRender(service, knex);
+  const canonical = await resolveCanonicalLawnRender(service, knex, { propertyHistoryEnabled });
   const laSignature = canonical.signature;
   // DELIVERY pin vs CANONICAL pin (#3172).
   //
@@ -184,6 +185,12 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // describe the same assessment.
   const isDeliveryPin = !!pinnedLawnAssessmentId;
   const effectivePin = pinnedLawnAssessmentId || canonical.pin;
+  const lawnHistory = propertyHistoryEnabled && isDeliveryPin && effectivePin !== canonical.pin
+    ? await require('../lawn-assessment-history').historyForReport(service, {
+      assessment: effectivePin === 'none' ? null : await require('./report-data').loadPinnedLawnAssessment(service, effectivePin, knex),
+      pinned: true,
+    }, knex) : canonical.lawnHistory;
+  const pinnedLawnHistoryIdentity = lawnHistory?.identity;
   let pdf;
   // The page's own image-load failure count (null = unknown provider).
   let renderImageFailures = null;
@@ -211,7 +218,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   const reserviceTrendsBefore = await reserviceTrendsPdfSignature(service, knex);
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
-    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanSentAt: canonical.weekPlanSentAt });
+    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanSentAt: canonical.weekPlanSentAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
     cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
     reserviceRenderedSignature = reserviceReportRenderedSignature(data, service);
@@ -245,6 +252,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       serviceRecordId: recordId,
       pinnedLawnAssessmentId: effectivePin,
       pinnedWeekPlanSentAt: canonical.weekPlanSentAt,
+      pinnedLawnHistoryIdentity,
     });
     pdf = rendered.pdf;
     renderImageFailures = rendered.imageFailures ?? null;
@@ -303,7 +311,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
     await knex('service_records')
       .where({ id: recordId })
       .update({ pdf_storage_key: null });
-    return { key: null, pdf, rendered: true, token: reportToken, pinned: true };
+    return { key: null, pdf, rendered: true, token: reportToken, pinned: true, ...(propertyHistoryEnabled ? { pinnedLawnHistoryIdentity } : {}) };
   }
   try {
     // An UNPINNED cache render opens the report page without a pin, so the
@@ -331,7 +339,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
         uncachedReason: reason,
       };
     }
-    const laAfter = await lawnAssessmentPdfSignature(service, knex);
+    const laAfter = await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled });
     if (laAfter !== laSignature) {
       logger.warn(`[service-report-pdf] lawn assessment changed during render for ${recordId} — not caching this render`);
       return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
@@ -407,7 +415,13 @@ async function lawnRecommendationVersion(assessmentId, knex = db) {
     .digest('hex');
 }
 
-async function lawnAssessmentIdForRecord(recordId, knex = db) {
+async function lawnAssessmentIdForRecord(recordId, knex = db, { propertyHistoryEnabled = require('../../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
+  if (propertyHistoryEnabled) {
+    const record = await knex('service_records').where({ id: recordId }).first('id', 'customer_id', 'scheduled_service_id');
+    if (!record) return null;
+    const row = await require('../lawn-assessment-history').installedForVisit({ customerId: record.customer_id, serviceRecordId: record.id, serviceId: record.scheduled_service_id }, knex);
+    return row?.id || null;
+  }
   // Deterministic newest-row selection matching loadLinkedLawnAssessment
   // (codex P1 r36): the back-link index is non-unique, and an unordered
   // .first() could fence against an OLDER assessment while the actual one
@@ -452,6 +466,7 @@ async function clearLawnPdfCorrectionMarker(recordId, knex = db) {
 // synchronously without a job row — codex P1 #3093 r23).
 async function getOrRenderServiceReportPdf(recordId, {
   token, req, knex = db, forceFresh = false, pinnedLawnAssessmentId = null,
+  propertyHistoryEnabled = require('../../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'),
 } = {}) {
   // technician_notes + service_data ride along for the summary-copy key
   // component, service_type/service_line for the mosquito-V2 component —
@@ -505,7 +520,7 @@ async function getOrRenderServiceReportPdf(recordId, {
   let fenceReadOk = true;
   if (correctionPending) {
     try {
-      lawnAssessmentId = await lawnAssessmentIdForRecord(recordId, knex);
+      lawnAssessmentId = await lawnAssessmentIdForRecord(recordId, knex, { propertyHistoryEnabled });
       recVersionBefore = lawnAssessmentId ? await lawnRecommendationVersion(lawnAssessmentId, knex) : null;
     } catch (fenceErr) {
       fenceReadOk = false;
@@ -516,7 +531,7 @@ async function getOrRenderServiceReportPdf(recordId, {
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
     ? reportPdfStorageKey(service.id, {
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + termiteReportV2PdfSignature(service) + await cockroachReportV2PdfSignature(service, knex) + await reserviceReportPdfSignature(service, { knex }) + await reserviceTrendsPdfSignature(service, knex) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex) + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + termiteReportV2PdfSignature(service) + await cockroachReportV2PdfSignature(service, knex) + await reserviceReportPdfSignature(service, { knex }) + await reserviceTrendsPdfSignature(service, knex) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled }) + photoMarksPdfSignature() + publicOriginPdfSignature(),
     })
     : null;
   const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)
@@ -531,6 +546,7 @@ async function getOrRenderServiceReportPdf(recordId, {
     allowUnstoredPdf: true,
     pestPressureConfig,
     pinnedLawnAssessmentId,
+    propertyHistoryEnabled,
   });
   // A completed fresh render satisfies the pending correction — but only
   // once the copy can no longer change (no generation in flight).
@@ -595,6 +611,7 @@ async function getOrRenderServiceReportPdf(recordId, {
     // Pinned renders are deliberately unstored (#3168) — surfaced so a caller
     // can tell "no key because storage failed" from "no key by design".
     pinned: !!rendered.pinned,
+    ...(propertyHistoryEnabled ? { pinnedLawnHistoryIdentity: rendered.pinnedLawnHistoryIdentity } : {}),
     // Likewise for a render that completed but was not cacheable (unfrozen
     // week, or a selection that moved during the render).
     uncached: !!rendered.uncached,
