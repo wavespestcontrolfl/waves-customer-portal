@@ -9,7 +9,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { anthropicText } = require('./llm/call');
+const { anthropicText, geminiText } = require('./llm/call');
 const { normalizeGrassType } = require('./lawn-grass-context');
 
 // Coerce a model's grass_type to a canonical key, or null when it can't tell
@@ -24,11 +24,10 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 
-// Gemini vision scorer model — live default is the registry's best
-// (gemini-3.5-flash); override via GEMINI_VISION_MODEL / MODEL_GEMINI_VISION.
-// On any miss (HTTP/parse/empty) callGeminiVision retries the registry's
-// GEMINI_VISION_FALLBACK so a live-model entitlement/availability issue never
-// costs us the Gemini scorer. Fan-out/averaging logic is unchanged.
+// Gemini vision scorer model — live default is the registry's best; override
+// via GEMINI_VISION_MODEL / MODEL_GEMINI_VISION. On any miss (HTTP/parse/empty)
+// callGeminiVision retries the registry's GEMINI_VISION_FALLBACK when it names
+// a different model (by default it does not). Fan-out/averaging is unchanged.
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
 const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 
@@ -187,7 +186,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType, context = {}) {
           { text: buildVisionPrompt(context) },
         ],
       }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 500 },
+      generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
     }),
   });
 
@@ -197,7 +196,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType, context = {}) {
   }
 
   const data = await response.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+  const text = geminiText(data);
   if (!text) return null;
 
   const parsed = JSON.parse(text.replace(/```json|```/g, '').trim());
@@ -346,11 +345,18 @@ function averageScores(claudeResult, geminiResult) {
   // are AI-only with no tech tile, so we don't emit a stress_damage divergence
   // flag — it would count in the summary with no tile to highlight, giving the
   // tech nothing to act on before confirming.
-  for (const field of ['insect_damage', 'drought_stress', 'mechanical_damage']) {
+  for (const field of ['insect_damage', 'mechanical_damage']) {
     const c = FUNGAL_MAP[claudeResult[field]] ?? 0;
     const g = FUNGAL_MAP[geminiResult[field]] ?? 0;
     composite[field] = FUNGAL_REVERSE[Math.round((c + g) / 2)];
   }
+  // Missing provider evidence is unknown, not a no-drought vote.
+  const droughtRanks = [claudeResult.drought_stress, geminiResult.drought_stress]
+    .filter(value => Object.keys(FUNGAL_MAP).includes(value))
+    .map(value => FUNGAL_MAP[value]);
+  composite.drought_stress = droughtRanks.length
+    ? FUNGAL_REVERSE[Math.round(droughtRanks.reduce((sum, rank) => sum + rank, 0) / droughtRanks.length)]
+    : null;
 
   // Observations: the customer-facing narrative is a SINGLE voice — the primary
   // VISION model (Claude), falling back to Gemini — never the two glued together
@@ -392,6 +398,10 @@ function mapToDisplayScores(composite) {
     // above so the Lawn Diagnostic tool, trends, and snapshot are untouched.
     stress_damage: computeStressDamageDisplay(composite),
     overwatering_signal: !!composite.overwatering_signal,
+    // Keep the moisture cause alongside the combined Stress/Damage score.
+    // /assess persists this object; absent/invalid evidence must stay unknown.
+    drought_stress: ['none', 'minor', 'moderate', 'severe'].includes(composite.drought_stress)
+      ? composite.drought_stress : null,
     observations: composite.observations || '',
   };
 }

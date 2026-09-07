@@ -9,6 +9,7 @@
 
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { geminiText } = require('./llm/call');
 
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
@@ -17,10 +18,10 @@ const GOOGLE_KEY = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
 const OPENAI_RESPONSES_API = 'https://api.openai.com/v1/responses';
 const OPENAI_VISION_MODEL = process.env.OPENAI_VISION_MODEL || process.env.OPENAI_MODEL || 'gpt-5-mini';
-// Live default is the registry's best Gemini vision model (gemini-3.5-flash);
-// override via GEMINI_VISION_MODEL / MODEL_GEMINI_VISION. On any miss
-// analyzeWithGemini retries the prior model (gemini-2.5-flash) so a live-model
-// entitlement/availability issue never costs us the Gemini analyzer.
+// Live default is the registry's best Gemini vision model; override via
+// GEMINI_VISION_MODEL / MODEL_GEMINI_VISION. analyzeWithGemini retries the
+// registry's GEMINI_VISION_FALLBACK only when it names a different model (one
+// Gemini model by default — owner ruling 2026-09-02).
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
 const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 
@@ -212,7 +213,7 @@ class SatelliteAnalyzer {
             { text: VISION_PROMPT },
           ],
         }],
-        generationConfig: { temperature: 0.2, maxOutputTokens: 1000 },
+        generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
       }),
     });
 
@@ -222,7 +223,7 @@ class SatelliteAnalyzer {
     }
 
     const data = await response.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    const text = geminiText(data);
     if (!text) return null;
 
     return JSON.parse(text.replace(/```json|```/g, '').trim());

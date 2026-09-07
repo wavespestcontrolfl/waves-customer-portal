@@ -65,9 +65,9 @@ const FREEZE_HOURS = 72;
 // reminder ROW whose appointment_time is inside this band is CLAIMABLE by the
 // sender — it can be mid-send (SMS out, sent-flag not yet written), so the
 // sent-flag alone cannot prove "no reminder went out". Freezing every visit
-// whose row sits inside the band makes the freeze check and the sender
-// mutually exclusive without a shared lock: outside the band the sender never
-// touches the row, inside the band the visit is frozen regardless of flag.
+// whose row sits inside the band covers the send-before-flag interval.
+// Recurring-series deferral also shares the customer-comms lock with delivery:
+// its freeze read cannot race a sender as the clock enters this band.
 const REMINDER_SENDABLE_HOURS = 72.25;
 
 /** Whole calendar days from `fromStr` to `toStr` (YYYY-MM-DD each), UTC-noon
@@ -199,8 +199,7 @@ async function loadReminderFreeze(db, serviceIds, now = new Date()) {
     // load-bearing still: this arithmetic deliberately MIRRORS the sender's
     // own boundary math (appointment-reminders reminder72hStillReachable /
     // reminderFlagsCoveredByNotice: `new Date(appointment_time).getTime() -
-    // now`), bit for bit — mutual exclusion with the sender only holds if
-    // both sides draw the band in the same frame.
+    // now`), bit for bit — both sides must draw the band in the same frame.
     const inSendableBand = (apptTime) => {
       const t = new Date(apptTime).getTime();
       if (Number.isNaN(t)) return true;

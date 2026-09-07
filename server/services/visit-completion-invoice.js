@@ -36,6 +36,9 @@ async function buildMemberLines(member, customer, trx) {
     excludeScheduledServiceId: member.id, visitPlanRow: member,
   }, trx);
   if (obligation.owed) return office('setup_fee_requires_review', member.id);
+  // The canonical review freezes an intentional zero after its discount.
+  // Customer-level dues must not replace that performed application's price.
+  if (price === 0 && notes.completionPricing?.amountCents === 0) return { lineItems: [] };
   const amount = completionInvoiceAmount({
     estimatedPrice: member.estimated_price, isCallback: member.is_callback,
     perApplicationBilling: customer.billing_mode === 'per_application',

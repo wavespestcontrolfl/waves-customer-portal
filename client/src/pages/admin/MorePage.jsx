@@ -12,6 +12,7 @@ import useIsMobile from "../../hooks/useIsMobile";
 import { markUsageSource } from "../../lib/adminUsage";
 import { ADMIN_MOBILE_MORE_SECTIONS, ADMIN_MOBILE_TABS } from "../../config/adminNavigation";
 import { MOBILE_SETTINGS_SECTIONS } from "../../config/mobileSettingsSections";
+import { clearEmailDrafts } from "../../lib/emailDrafts";
 
 // The Settings leaves this page lists inline: every entry of the former
 // mobile Settings index whose destination is NOT already a nav row or tab
@@ -43,6 +44,7 @@ export default function MorePage() {
   if (!isMobile) return <Navigate to="/admin" replace />;
 
   const handleLogout = () => {
+    clearEmailDrafts();
     localStorage.removeItem("waves_admin_token");
     localStorage.removeItem("waves_admin_user");
     refetchFlags();

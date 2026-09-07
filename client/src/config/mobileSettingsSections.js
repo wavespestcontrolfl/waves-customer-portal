@@ -8,18 +8,10 @@ export const MOBILE_SETTINGS_SECTIONS = [
   { key: "invoices", label: "Invoices", to: "/admin/invoices", adminOnly: true },
   { key: "payments", label: "Payments", to: "/admin/banking", adminOnly: true },
   {
-    key: "tap-to-pay",
-    label: "Tap to Pay",
-    to: "/admin/settings?tab=integrations",
-    // IntegrationsTab renders "Admin access required" for other roles.
-    adminOnly: true,
-  },
-  {
     key: "communications",
     label: "Communications",
     to: "/admin/communications",
   },
-  { key: "team", label: "Team", to: "/admin/settings?tab=team" },
   {
     key: "service-reports",
     label: "Service Reports",

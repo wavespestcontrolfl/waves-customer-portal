@@ -49,7 +49,7 @@ async function run(path, query = {}) {
   const layer = layerFor(path);
   if (!layer) throw new Error(`route not found: GET ${path}`);
   const handler = layer.route.stack[layer.route.stack.length - 1].handle;
-  const res = { statusCode: 200, body: null, status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
+  const res = { statusCode: 200, body: null, set: jest.fn(), status(c) { this.statusCode = c; return this; }, json(b) { this.body = b; return this; } };
   const params = path.includes(':serviceId') ? { serviceId: query.serviceId } : {};
   await handler({ params, query, ...(query.__tech ? { techRole: 'technician', technicianId: 'tech-1' } : {}) }, res, (err) => { throw err; });
   return res;
@@ -59,8 +59,56 @@ const db = require('../models/db');
 describe('job-card routes', () => {
   beforeEach(() => {
     delete process.env.GATE_JOB_CARD;
+    delete process.env.GATE_DISPATCH_READINESS;
     jobCard.buildJobCard.mockReset();
     jobCard.mixForProduct.mockReset();
+  });
+
+  test('schedule readiness requires both gates and validates the bounded batch before reading', async () => {
+    expect((await run('/job-card/readiness', { serviceIds: SERVICE_ID })).body).toEqual({ enabled: false });
+    process.env.GATE_JOB_CARD = 'true';
+    expect((await run('/job-card/readiness', { serviceIds: SERVICE_ID })).body).toEqual({ enabled: false });
+    process.env.GATE_DISPATCH_READINESS = 'true';
+    for (const serviceIds of ['', 'invalid', [SERVICE_ID], Array(7).fill(SERVICE_ID).join(',')]) {
+      expect((await run('/job-card/readiness', { serviceIds })).statusCode).toBe(400);
+    }
+    expect(jobCard.buildJobCard).not.toHaveBeenCalled();
+  });
+
+  test('readiness deduplicates ids and uses the view without paragraph generation', async () => {
+    process.env.GATE_JOB_CARD = 'true';
+    process.env.GATE_DISPATCH_READINESS = 'true';
+    const summary = { serviceId: SERVICE_ID, issues: [{ kind: 'weather', status: 'hold', label: 'Weather hold' }] };
+    jobCard.buildJobCard.mockResolvedValue(summary);
+    const response = await run('/job-card/readiness', { serviceIds: `${SERVICE_ID},${SERVICE_ID}` });
+    expect(response.body).toEqual({ enabled: true, visits: [summary] });
+    expect(jobCard.buildJobCard).toHaveBeenCalledTimes(1);
+    expect(jobCard.buildJobCard).toHaveBeenCalledWith(SERVICE_ID, { readinessOnly: true });
+    expect(response.set).toHaveBeenCalledWith('Cache-Control', 'private, no-store');
+  });
+
+  test('readiness withholds another technician’s visit and a visit reassigned while building', async () => {
+    process.env.GATE_JOB_CARD = 'true';
+    process.env.GATE_DISPATCH_READINESS = 'true';
+    db.ownedRow = null;
+    const query = { serviceIds: SERVICE_ID, __tech: true };
+    expect((await run('/job-card/readiness', query)).body.visits[0].issues[0].label).toBe('Check unavailable');
+    expect(jobCard.buildJobCard).not.toHaveBeenCalled();
+    db.ownedRow = { id: SERVICE_ID };
+    jobCard.buildJobCard.mockImplementation(async () => { db.ownedRow = null; return { serviceId: SERVICE_ID, issues: [] }; });
+    expect((await run('/job-card/readiness', query)).body.visits[0].issues[0].label).toBe('Check unavailable');
+  });
+
+  test('a failed readiness read stays unknown and a live kill withdraws the batch', async () => {
+    process.env.GATE_JOB_CARD = 'true';
+    process.env.GATE_DISPATCH_READINESS = 'true';
+    jobCard.buildJobCard.mockRejectedValue(new Error('Source unavailable'));
+    expect((await run('/job-card/readiness', { serviceIds: SERVICE_ID })).body.visits[0].issues[0].status).toBe('unknown');
+    jobCard.buildJobCard.mockImplementation(async () => {
+      delete process.env.GATE_DISPATCH_READINESS;
+      return { serviceId: SERVICE_ID, issues: [] };
+    });
+    expect((await run('/job-card/readiness', { serviceIds: SERVICE_ID })).body).toEqual({ enabled: false });
   });
 
   test('the Tank search route: gate-off answers enabled:false; a 2+ char term returns id/name/category only (Codex r13 P1)', async () => {

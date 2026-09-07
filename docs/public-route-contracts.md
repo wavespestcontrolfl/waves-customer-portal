@@ -90,7 +90,27 @@ snapshot leg that could not be frozen (missing customer or technician row)
 is omitted and that leg stays live. The PDF filename and the canonical lawn
 pin read the same overlaid row. Presentation (technician photo URL, copy
 config) and the deliberately live sections (next visit, review CTA,
-cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`),
+cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`.
+The lawn assessment payload also carries `droughtStress` (`none`, `minor`,
+`moderate`, `severe`, or `null`) from the linked, tech-confirmed assessment's
+stored `composite_scores.drought_stress`. Missing or invalid historical
+values yield `null`; raw model responses and the full composite are never
+projected. The existing customer/visit linkage and signed assessment pin
+requirements apply to this field too. Localized watering advice uses this
+structured severity, overridden by an explicit boolean
+`scores.stressFlags.drought_stress` from the same confirmed assessment.
+The resolved boolean-or-null state travels as `reportV2.water.droughtSignal`
+through the final public/PDF reconciliation; only `true` permits a drought
+hypothesis to be rewritten into a coverage finding. Localized-drought cards
+label an explicit technician finding `tech_confirmed`; automated coverage
+advice retains its `area_estimated` label.
+Without either signal, observation/summary wording cannot trigger sprinkler
+advice or an unqualified "no action needed" reassurance. Measured water
+deficits/surpluses and eligible stored water snapshots
+retain their existing behavior. The optional whole-report AI narrative runs
+only when `droughtSignal` is `true`; otherwise all deterministic report copy
+is retained before narrative cache/model access. Lawn PDF render strategy `p4` regenerates
+older cached PDFs to match this evidence rule),
 the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
@@ -716,18 +736,16 @@ OFFERS an unlinked same-family row stays behind
 `GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE`.
 `/data` carries an optional `lawnCalendar` block behind
 `GATE_ESTIMATE_LAWN_CALENDAR` (dev-open, prod dark): `{ programs: {
-[frequencyKey]: { visitsPerYear, cadence, months } } }` for the recurring
-lawn section's frequencies, where `cadence` is the customer-facing interval
-line and `months` the 0-based ET month indices of the program's projected
-applications from the current month — both derived server-side by
-`describeLawnProgramCadence` (self-booking-plan-sync.js) from the catalog
-plan matching the frequency's visitsPerYear through the scheduler's own
-`buildRecurringOccurrenceDates`; no customer data, no dates. A frequency
-with no catalog plan is omitted; the key is ABSENT when the gate is off or
-nothing resolves (it was boolean `true` from 2026-08 until #3755). The page
-renders the count and fixed season copy from it and never derives an
-interval itself; since 2026-09-05 it shows neither `cadence` nor `months`
-(owner: education, not a schedule).
+[frequencyKey]: { visitsPerYear } } }` for each of the recurring lawn
+section's frequencies whose count matches a catalog lawn plan
+(`resolveLawnCareRecurringPlanByCount`, self-booking-plan-sync.js); no
+customer data, no dates. A frequency with no catalog plan is omitted; the
+key is ABSENT when the gate is off or nothing resolves (it was boolean
+`true` from 2026-08 until #3755). The page renders the count and fixed
+season copy from it and never derives an interval itself. The `cadence`
+interval line and projected `months` the entry carried from #3755 were
+dropped on 2026-09-06 once the page stopped reading them (owner
+2026-09-05: education, not a schedule).
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and a one-time-ONLY estimate whose billable rows all resolve to one copy
@@ -905,9 +923,34 @@ server-side):
     "only this visit moves" note for the series-shift warning before
     Confirm (the GET's threshold drives it; the POST decides
     authoritatively). The anchor keeps the offered tech under the same
-    advisory-lock overlap guard; shifted siblings that would double-book
-    a route are committed UNASSIGNED inside the trx and parked as a
-    `schedule_conflict` admin notification. Treat any widening of this
+    advisory-lock overlap guard. With `GATE_CUSTOMER_RECURRING_DISPATCH`
+    and the existing `cronJobs`/`autoDispatch` scheduler gates active plus
+    effective `AUTO_DISPATCH_MODE=apply` (`AUTO_DISPATCH_ALLOW_APPLY=true`)
+    with `AUTO_DISPATCH_MAX_CHANGES_PER_RUN > 0` and
+    `AUTO_DISPATCH_REQUIRE_PORTAL_PREFERENCES=false`,
+    only the selected appointment must fit: later cadence visits keep their
+    projected due dates with NULL time/display windows and a durable
+    `recurring_dispatch_due_date`. Future overlap, blackout, and same-plan
+    date collisions cannot reject that selection. Auto-dispatch places these
+    visits within ±3 calendar days of the due date, honoring preferences;
+    initial placement bypasses improvement thresholds, with unresolved
+    visits escalated through `schedule_conflict`. Future staff-locked,
+    customer-confirmed, reschedule-held, reminder-frozen or committed/grouped visits stay
+    unchanged and are flagged for staff review instead of blocking the
+    selected appointment. GET/POST add optional `futurePlacementDays: 3`
+    for disclosure. Web POST echoes `disclosed_future_placement_days`
+    (`3` or `null`); a mismatch with the effective mode returns 409
+    `SCOPE_CHANGED` before writing, including a rebooker recheck. Older
+    pages omitting it retain legacy behavior only while deferral is off;
+    otherwise they refresh and re-disclose. SMS retains its existing
+    series policy until it has a placement disclosure. Success copy keeps
+    the unchanged-commitment caveat. The confirmation SMS uses the separate
+    `appointment_recurring_placement_confirmed` template when the recorded
+    operation has deferred placement, including on retries; it states the
+    ±3-day placement and unchanged-commitment caveat. Authentication is unchanged. Untimed
+    reminder windows are preclosed atomically until placement. Gate off
+    preserves legacy conflict checks; already-recorded due dates remain
+    dispatchable and bounded. Treat any widening of this
     scope (other customers' rows, live visits, non-cadence rows) as P0.
 A pending/confirmed visit whose time already passed is MISSED (rebookable
 via the same link — eligibility `missed:true`); terminal/live/no_show

@@ -50,7 +50,7 @@ async function revalidatePlacement(service) {
   const fresh = await db('scheduled_services')
     .where({ id: service.id })
     .first('scheduled_date', 'window_start', 'window_end', 'technician_id', 'status',
-      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', ...LOCATION_FIELDS);
+      'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', 'recurring_dispatch_due_date', 'customer_confirmed', ...LOCATION_FIELDS);
   if (!fresh) {
     return { ok: false, fresh: null, code: 'STALE_PLACEMENT', reason: 'Service no longer exists' };
   }
@@ -63,7 +63,11 @@ async function revalidatePlacement(service) {
   if (!['pending', 'confirmed'].includes(String(fresh.status))) {
     return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: `Visit status changed to '${fresh.status}' after scoring` };
   }
-  const changed = toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
+  if (fresh.recurring_dispatch_due_date && fresh.customer_confirmed === true) {
+    return { ok: false, fresh, code: 'STALE_PLACEMENT', reason: 'Customer confirmed this recurring occurrence after scoring' };
+  }
+  const changed = toDateStr(fresh.recurring_dispatch_due_date) !== toDateStr(service.recurring_dispatch_due_date)
+    || toDateStr(fresh.scheduled_date) !== toDateStr(service.scheduled_date)
     || norm(fresh.window_start) !== norm(service.window_start)
     || norm(fresh.window_end) !== norm(service.window_end)
     || String(fresh.technician_id || '') !== String(service.technician_id || '');
@@ -180,6 +184,9 @@ function makeMoveGuard({ service, best }) {
   );
   return async ({ trx, technicianId, service: movingRow }) => {
     const row = movingRow || service;
+    if (row.recurring_dispatch_due_date && row.customer_confirmed === true) {
+      throw refuse(row.id, 'was confirmed by the customer');
+    }
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     await assertCapabilitiesActive(trx, receiving, [row], refuse);
   };
@@ -217,6 +224,10 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       ...(config.routeTiersEnabled === true ? { routeTiers: { enabled: true, today } } : {}),
     };
     for (const r of rows) {
+      if (r.recurring_dispatch_due_date) {
+        const drift = routeTiers.daysBetween(toDateStr(r.recurring_dispatch_due_date), best.date);
+        if (drift == null || Math.abs(drift) > 3) throw refuse(r.id, 'would leave its recurring due date ±3 days');
+      }
       if (r.customer_deleted_at) throw refuse(r.id, 'belongs to an archived customer');
       const elig = isEligibleForAutoDispatch(r, eligCtx);
       if (!elig.eligible) throw refuse(r.id, `is not auto-dispatchable (${elig.reason_code}: ${elig.reason_description})`);
@@ -253,11 +264,12 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       if (!r.recurring_parent_id && r.is_recurring !== true) continue;
       const parentId = r.recurring_parent_id || r.id;
       // Mirrors candidate-slots' sibling-date exclusion: every non-cancelled,
-      // non-request row of the series except the members moving together.
+      // non-request row (including reschedule holds for due placement),
+      // except the members moving together.
       const clash = await trx('scheduled_services')
         .where(function () { this.where('id', parentId).orWhere('recurring_parent_id', parentId); })
         .whereNotIn('id', memberIds)
-        .whereNotIn('status', ['cancelled', 'rescheduled'])
+        .whereNotIn('status', r.recurring_dispatch_due_date ? ['cancelled'] : ['cancelled', 'rescheduled'])
         .where('scheduled_date', best.date)
         .first('id');
       if (clash) throw refuse(r.id, `already has another visit of its series on ${best.date}`);
@@ -294,6 +306,12 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     throw Object.assign(new Error(check.reason), { code: check.code });
   }
   const fresh = check.fresh;
+  if (fresh.recurring_dispatch_due_date) {
+    const drift = routeTiers.daysBetween(toDateStr(fresh.recurring_dispatch_due_date), best.date);
+    if (drift == null || Math.abs(drift) > 3) {
+      throw Object.assign(new Error('Placement is outside the recurring due date ±3 days'), { code: 'RECURRING_DUE_DATE_LIMIT' });
+    }
+  }
 
   // Re-assert the operator opt-out flags + original date INSIDE the rebooker's
   // move transaction so a lock/reschedule landing between the read above and the
@@ -309,6 +327,8 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     window_start: fresh.window_start,
     window_end: fresh.window_end,
     technician_id: fresh.technician_id,
+    recurring_dispatch_due_date: fresh.recurring_dispatch_due_date ?? null,
+    ...(fresh.recurring_dispatch_due_date ? { customer_confirmed: fresh.customer_confirmed ?? null } : {}),
     ...Object.fromEntries(LOCATION_FIELDS.map((field) => [field, fresh[field] ?? null])),
   };
 

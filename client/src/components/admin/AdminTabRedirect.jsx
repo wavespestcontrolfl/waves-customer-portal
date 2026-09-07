@@ -7,8 +7,14 @@ export default function AdminTabRedirect({
   preserveTabs = [],
   queryKey = "tab",
   remapQuery,
+  tabInHash = false,
 }) {
   const location = useLocation();
+  if (tabInHash) {
+    const hash = new URLSearchParams(location.hash.replace(/^#/, ""));
+    hash.set(queryKey, tab);
+    return <Navigate to={{ pathname: to, search: location.search, hash: `#${hash}` }} replace />;
+  }
   const params = new URLSearchParams(location.search);
   if (remapQuery?.from && remapQuery?.to) {
     const remappedValue = params.get(remapQuery.from);

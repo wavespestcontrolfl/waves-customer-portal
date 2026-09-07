@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
+import { Link } from "react-router-dom";
 import { Activity, CalendarDays, Clock, RefreshCw, Timer } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import IntegrationHealthSection from "../../components/admin/IntegrationHealthSection";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal folded to zinc-900. Semantic green/amber/red preserved.
@@ -213,14 +213,14 @@ export default function ToolHealthPage() {
         </div>{" "}
       </div>
       {adminUser?.role === "admin" && (
-        <div style={{ marginBottom: 24 }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: D.heading, marginBottom: 10 }}>
-            Integration Configuration
-          </div>
-          <IntegrationHealthSection
-            intro="Credential health, environment readiness, and feature gates. Runtime tool success is tracked separately below."
-            showRefresh={false}
-          />
+        <div style={{ marginBottom: 24, fontSize: 14, color: D.muted }}>
+          Credential health and provider configuration are in{" "}
+          <Link
+            to="/admin/settings?tab=integrations"
+            style={{ color: D.heading, textDecoration: "underline", display: "inline-flex", alignItems: "center", minHeight: 44 }}
+          >
+            Settings → Integrations
+          </Link>.
         </div>
       )}
       {pdfRenderer && (

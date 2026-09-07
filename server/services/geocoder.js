@@ -60,13 +60,16 @@ function buildAddress(c) {
  * to retry. Not exported: every caller goes through the guard decision in
  * geocodeAddressWithStatus.
  */
-async function fetchGeocodeResult(address) {
+async function fetchGeocodeResult(address, cacheOnly = false) {
   if (!address) return { result: null, permanent: true };
   if (memo.has(address)) {
     const cached = memo.get(address);
     // memo stores null only for ZERO_RESULTS, so a cached null is permanent.
     return { result: cached, permanent: cached === null };
   }
+  // Scheduling writers may read a preloaded result while holding locks,
+  // but must never start a provider request from that transaction.
+  if (cacheOnly) return { result: null, permanent: false };
   if (!GOOGLE_KEY) {
     logger.warn('[geocoder] GOOGLE_API_KEY not set');
     return { result: null, permanent: false };
@@ -119,8 +122,8 @@ async function fetchGeocodeResult(address) {
  * point-of-interest hit outside the customer footprint is the right answer
  * and must not be thrown away.
  */
-async function geocodeAddressWithStatus(address, { serviceAddress = true } = {}) {
-  const { result, permanent } = await fetchGeocodeResult(address);
+async function geocodeAddressWithStatus(address, { serviceAddress = true, cacheOnly = false } = {}) {
+  const { result, permanent } = await fetchGeocodeResult(address, cacheOnly);
   if (!result) return { location: null, permanent };
   if (serviceAddress) {
     const rejected = rejectGeocodeResult(result);

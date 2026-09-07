@@ -4411,7 +4411,7 @@ const LAWN_SEASONS = [
 ];
 const LAWN_SEASONS_INTRO = 'We inspect your lawn at each application and select treatments for your grass type, current conditions, and local fertilizer rules. What we apply changes throughout the year.';
 
-// `program` = { visitsPerYear, ... } from the /data payload.
+// `program` = { visitsPerYear } from the /data payload.
 export function LawnProgramCalendar({ program }) {
   const [open, setOpen] = useState(false);
   // The browser print path keeps whatever is on screen: open the seasons
@@ -4520,8 +4520,8 @@ export function ServiceSection({
   // server payload flags measurementReviewEnabled (gate-on, non-preview).
   onMeasurementChallenge = null,
   // Lawn program calendar under the lawn price card — the payload's
-  // lawnCalendar block ({ programs: { [frequencyKey]: { visitsPerYear,
-  // cadence, months } } }, gate on) when the plan is recurring, else null.
+  // lawnCalendar block ({ programs: { [frequencyKey]: { visitsPerYear } } },
+  // gate on) when the plan is recurring, else null.
   lawnCalendar = null,
 }) {
   // On phones the corner-pinned WaveGuard badge's 170px heading clearance
