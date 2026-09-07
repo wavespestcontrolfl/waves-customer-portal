@@ -65,6 +65,8 @@ test.each([
   [{ cost_per_unit: 0, best_price: 30, container_size: '10 lb' }, 'missing_cost'],
   [{ cost_unit: null }, 'unverified_cost_units'],
   [{ cost_unit: 'gal' }, 'unverified_cost_units'],
+  [{ rate_unit: 'g', cost_unit: 'lb bag' }, 'unverified_cost_units'],
+  [{ rate_unit: 'lb bag', cost_unit: 'lb' }, 'unverified_cost_units'],
   [{ rate_unit: 'oz', cost_unit: 'oz' }, 'unverified_cost_units'],
 ])('does not turn missing rate or price evidence into a complete $0 budget: %j', (patch, reason) => {
   const row = reportFor([visit], [{ ...product, ...patch }]).rows[0];

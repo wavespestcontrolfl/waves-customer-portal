@@ -52,6 +52,9 @@ resolved; numeric annotations such as `(FRAC 11+3)` do not trigger that issue.
 
 Plain `oz` stays ambiguous. Explicit `fl_oz` is recognized as volume; weight and
 volume families must agree between the application and its selected cost source.
+Application and per-unit cost strings must also be supported by the cost engine's
+unit converter; a recognizable package description such as `lb bag` is not a
+convertible per-unit cost string.
 This check does not establish purchased-package identity or supplier freshness.
 The report always states `supplierCostsVerified: false`.
 

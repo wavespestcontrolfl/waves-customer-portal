@@ -7,7 +7,7 @@ const { parseArgs } = require('node:util');
 const db = require('../models/db');
 const protocols = require('../config/protocols.json');
 const { LAWN_MATERIAL_BUDGETS, MATERIAL_REFERENCE_SQFT } = require('@waves/lawn-cost-floor');
-const { unitPriceBreakdown } = require('../services/product-costing');
+const { convertToOz, unitPriceBreakdown } = require('../services/product-costing');
 const {
   calculateProductAmount,
   effectiveAreaFactor,
@@ -144,6 +144,11 @@ function analyzeVisit({ trackKey, track, visit, products, options, lawnSqft = DE
   ));
   const selectedUnverifiedUnits = selectedItems.filter((item) => {
     if (!item.mix?.amount) return false;
+    // The package parser tolerates descriptors ("lb bag") that the cost
+    // engine's unit converter cannot use and would price without conversion.
+    if (convertToOz(1, item.mix.amountUnit) == null) return true;
+    if (item.mix.materialCostSource === 'inventory_cost_per_unit'
+      && convertToOz(1, item.product.cost_unit) == null) return true;
     const amountUnit = String(item.mix.amountUnit || '').replaceAll('_', ' ');
     const amountFamily = unitPriceBreakdown(1, `1 ${amountUnit}`)?.family;
     const costQuantity = item.mix.materialCostSource === 'inventory_cost_per_unit'
