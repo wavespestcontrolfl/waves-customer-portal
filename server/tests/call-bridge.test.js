@@ -45,7 +45,8 @@ test('rings the staff phone from the chosen line; the customer rides the prompt 
   expect(args.to).toBe('+19415550101');
   expect(args.from).toBe('+19413529161');
   expect(args.url).toBe('https://portal.example.com/api/webhooks/twilio/outbound-admin-prompt?customerNumber=%2B19415550100&callerIdNumber=%2B19413529161&callLogId=log-1&leadName=Pat+Sample');
-  expect(args.statusCallback).toBe('https://portal.example.com/api/webhooks/twilio/call-status');
+  // The row id rides the status callback too (codex #4072 r18 P2).
+  expect(args.statusCallback).toBe('https://portal.example.com/api/webhooks/twilio/call-status?callLogId=log-1');
   expect(updates[0]).toMatchObject({ twilio_call_sid: 'CA-bridge' });
   expect(recordTouchpoint).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c1', channel: 'voice', ourEndpointId: '+19413529161', direction: 'outbound', adminUserId: 'tech-1', twilioSid: 'CA-bridge' }));
 });

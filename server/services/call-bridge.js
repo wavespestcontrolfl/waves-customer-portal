@@ -58,7 +58,11 @@ async function placeBridgeCall({ to, bridgePhone, from, customer = null, source,
       to: bridgePhone,
       from,
       url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?${promptParams.toString()}`,
-      statusCallback: `https://${domain}/api/webhooks/twilio/call-status`,
+      // The row id rides the status callback too: a parent leg that ends
+      // busy / no-answer / canceled never requests the prompt URL, so the
+      // callback is the only place a sidless row (ambiguous create) can
+      // still adopt its CallSid (codex #4072 r18 P2).
+      statusCallback: `https://${domain}/api/webhooks/twilio/call-status${callLogId ? `?callLogId=${encodeURIComponent(callLogId)}` : ''}`,
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
     });
   } catch (err) {

@@ -3187,7 +3187,19 @@ router.post('/call-status', async (req, res) => {
       // miss `existing` and double-insert. Released at commit/rollback.
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [CallSid]);
 
-      const existing = await trx('call_log').where('twilio_call_sid', CallSid).first();
+      let existing = await trx('call_log').where('twilio_call_sid', CallSid).first();
+
+      // A bridge row left sidless by an ambiguous create (call-bridge.js)
+      // names itself on the callback URL. A parent leg that ends busy /
+      // no-answer / canceled never requests the prompt URL, so this is the
+      // only place such a row can still adopt its CallSid: bind it iff
+      // still unset, then carry on as the matched row (codex #4072 r18
+      // P2). Outbound only — an inbound call never carries the parameter.
+      if (!existing && isOutbound && CALL_LOG_ID_SHAPE.test(String(req.query?.callLogId || ''))) {
+        const adopted = await trx('call_log').where({ id: req.query.callLogId }).whereNull('twilio_call_sid')
+          .update({ twilio_call_sid: CallSid, updated_at: new Date() });
+        if (adopted) existing = await trx('call_log').where('twilio_call_sid', CallSid).first();
+      }
 
       if (existing) {
         // Never roll a finished call back to an in-flight status on a late
