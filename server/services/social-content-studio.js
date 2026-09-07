@@ -208,56 +208,106 @@ const AUTONOMOUS_SOURCE = 'autonomous_studio';
 // reshuffles which card lands on which date and must not be done casually.
 const VERSUS_SEQ_EPOCH_YEAR = 2020;
 
+// Six topics per month (owner ask 2026-09-06: "low on content") so the
+// campaign lane's `day % topics.length` pick stops repeating within a month.
+// Value-first, seasonal, grounded in SWFL — pest AND lawn AND the
+// tree/shrub, mosquito, and rodent lines each month they matter.
 const SEASONAL_AUTONOMOUS_TOPICS = {
   1: [
     { topic: 'winter pest pressure indoors', service: 'general pest', angle: 'signs to check', cta: 'book inspection' },
     { topic: 'winter weeds in St. Augustine lawns', service: 'lawn care', angle: 'what we are seeing', cta: 'request estimate' },
+    { topic: 'rodents nesting in attics on cool nights', service: 'rodent', angle: 'signs to check', cta: 'book inspection' },
+    { topic: 'dry-season irrigation and brown spots', service: 'lawn care', angle: 'myth/fact', cta: 'read guide' },
+    { topic: 'ghost ants in the kitchen during dry weather', service: 'general pest', angle: 'new Florida homeowner', cta: 'book inspection' },
+    { topic: 'cold snaps and palm fronds browning', service: 'tree & shrub', angle: 'what we are seeing', cta: 'read guide' },
   ],
   2: [
     { topic: 'early termite swarm season', service: 'termite', angle: 'new Florida homeowner', cta: 'book inspection' },
     { topic: 'spring lawn green-up problems', service: 'lawn care', angle: 'signs to check', cta: 'request estimate' },
+    { topic: 'large patch fungus in cool, wet turf', service: 'lawn care', angle: 'what we are seeing', cta: 'read guide' },
+    { topic: 'discarded termite wings on windowsills', service: 'termite', angle: 'signs to check', cta: 'book inspection' },
+    { topic: 'spring cleanup: ants and roaches in mulch against the house', service: 'general pest', angle: 'myth/fact', cta: 'book inspection' },
+    { topic: 'hibiscus and ixora pests waking up', service: 'tree & shrub', angle: 'signs to check', cta: 'request estimate' },
   ],
   3: [
     { topic: 'peak termite swarm month', service: 'termite', angle: 'do not ignore this', cta: 'book inspection' },
     { topic: 'chinch bug pressure starting early', service: 'lawn care', angle: 'myth/fact', cta: 'read guide' },
+    { topic: 'spring weeds before the rains', service: 'lawn care', angle: 'what we are seeing', cta: 'request estimate' },
+    { topic: 'paper wasps building under eaves', service: 'general pest', angle: 'signs to check', cta: 'book inspection' },
+    { topic: 'mosquito activity climbing as March warms up', service: 'mosquito', angle: 'new Florida homeowner', cta: 'request estimate' },
+    { topic: 'whitefly on gumbo limbo and ficus', service: 'tree & shrub', angle: 'signs to check', cta: 'request estimate' },
   ],
   4: [
     { topic: 'mosquito season starting after rain', service: 'mosquito', angle: 'what we are seeing', cta: 'request estimate' },
     { topic: 'Formosan termite swarmers', service: 'termite', angle: 'signs to check', cta: 'book inspection' },
+    { topic: 'ants trailing indoors as temperatures climb', service: 'general pest', angle: 'signs to check', cta: 'book inspection' },
+    { topic: 'sod webworm moths at dusk', service: 'lawn care', angle: 'what we are seeing', cta: 'read guide' },
+    { topic: 'standing water in bromeliads and saucers', service: 'mosquito', angle: 'myth/fact', cta: 'read guide' },
+    { topic: 'roof rats and ripening fruit trees', service: 'rodent', angle: 'signs to check', cta: 'book inspection' },
   ],
   5: [
     { topic: 'rainy season mosquito pressure', service: 'mosquito', angle: 'what we are seeing', cta: 'request estimate' },
     { topic: 'ants moving around lanais', service: 'general pest', angle: 'signs to check', cta: 'book inspection' },
+    { topic: 'chinch bugs along hot sunny edges', service: 'lawn care', angle: 'signs to check', cta: 'read guide' },
+    { topic: 'drywood termite pellets in the garage', service: 'termite', angle: 'signs to check', cta: 'book inspection' },
+    { topic: 'millipedes crowding the lanai after rain', service: 'general pest', angle: 'myth/fact', cta: 'read guide' },
+    { topic: 'sooty mold on shrubs after aphids', service: 'tree & shrub', angle: 'what we are seeing', cta: 'request estimate' },
   ],
   6: [
     { topic: 'mosquito surge after afternoon storms', service: 'mosquito', angle: 'what we are seeing', cta: 'request estimate' },
     { topic: 'summer roaches moving indoors', service: 'general pest', angle: 'new Florida homeowner', cta: 'book inspection' },
     { topic: 'lawn fungus after rain', service: 'lawn care', angle: 'signs to check', cta: 'read guide' },
+    { topic: 'no-see-ums at the coast at dusk', service: 'general pest', angle: 'myth/fact', cta: 'request estimate' },
+    { topic: 'earwigs and springtails after downpours', service: 'general pest', angle: 'signs to check', cta: 'book inspection' },
+    { topic: 'gutters, downspouts, and mosquito breeding', service: 'mosquito', angle: 'signs to check', cta: 'request estimate' },
   ],
   7: [
     { topic: 'peak summer pest pressure', service: 'general pest', angle: 'what we are seeing', cta: 'book inspection' },
     { topic: 'chinch bug damage that looks like drought', service: 'lawn care', angle: 'myth/fact', cta: 'read guide' },
     { topic: 'mosquito pressure at maximum', service: 'mosquito', angle: 'do not ignore this', cta: 'request estimate' },
+    { topic: 'flying termites in July: drywood swarms', service: 'termite', angle: 'signs to check', cta: 'book inspection' },
+    { topic: 'nutsedge taking over soggy spots', service: 'lawn care', angle: 'what we are seeing', cta: 'request estimate' },
+    { topic: 'huntsman spiders on warm walls at night', service: 'general pest', angle: 'myth/fact', cta: 'read guide' },
   ],
   8: [
     { topic: 'late-summer mosquito pressure', service: 'mosquito', angle: 'what we are seeing', cta: 'request estimate' },
     { topic: 'ants and roaches after heavy rain', service: 'general pest', angle: 'signs to check', cta: 'book inspection' },
+    { topic: 'fall armyworms moving across lawns', service: 'lawn care', angle: 'do not ignore this', cta: 'read guide' },
+    { topic: 'mud daubers on the lanai ceiling', service: 'general pest', angle: 'myth/fact', cta: 'read guide' },
+    { topic: 'mole crickets tunneling in wet turf', service: 'lawn care', angle: 'signs to check', cta: 'request estimate' },
+    { topic: 'mealybugs on hibiscus in the heat', service: 'tree & shrub', angle: 'signs to check', cta: 'request estimate' },
   ],
   9: [
     { topic: 'last stretch of peak mosquito season', service: 'mosquito', angle: 'what we are seeing', cta: 'request estimate' },
     { topic: 'fall lawn recovery after summer stress', service: 'lawn care', angle: 'signs to check', cta: 'request estimate' },
+    { topic: 'sod webworm damage in September', service: 'lawn care', angle: 'what we are seeing', cta: 'read guide' },
+    { topic: 'yellowjackets at fall cookouts', service: 'general pest', angle: 'myth/fact', cta: 'read guide' },
+    { topic: 'roof rats scouting the roofline early', service: 'rodent', angle: 'signs to check', cta: 'book inspection' },
+    { topic: 'storm cleanup and standing water', service: 'mosquito', angle: 'signs to check', cta: 'request estimate' },
   ],
   10: [
     { topic: 'fall lawn recovery season', service: 'lawn care', angle: 'what we are seeing', cta: 'request estimate' },
     { topic: 'rodent entry points before cooler weather', service: 'rodent', angle: 'signs to check', cta: 'book inspection' },
+    { topic: 'brown widows in patio furniture and grills', service: 'general pest', angle: 'signs to check', cta: 'book inspection' },
+    { topic: 'large patch season starts as nights cool', service: 'lawn care', angle: 'do not ignore this', cta: 'read guide' },
+    { topic: 'snowbird return: opening up the house', service: 'general pest', angle: 'new Florida homeowner', cta: 'book inspection' },
+    { topic: 'palm trimming and pests hiding in the boots', service: 'tree & shrub', angle: 'myth/fact', cta: 'read guide' },
   ],
   11: [
     { topic: 'holiday guest pest prevention', service: 'general pest', angle: 'signs to check', cta: 'book inspection' },
     { topic: 'winter weed prevention', service: 'lawn care', angle: 'what we are seeing', cta: 'read guide' },
+    { topic: 'attic noises at night in November', service: 'rodent', angle: 'signs to check', cta: 'book inspection' },
+    { topic: 'dry-season watering and dollarweed', service: 'lawn care', angle: 'myth/fact', cta: 'read guide' },
+    { topic: 'firewood, boxes, and the roaches that ride in', service: 'general pest', angle: 'new Florida homeowner', cta: 'book inspection' },
+    { topic: 'mosquitoes on warm winter evenings', service: 'mosquito', angle: 'what we are seeing', cta: 'request estimate' },
   ],
   12: [
     { topic: 'holiday-ready pest control', service: 'general pest', angle: 'new Florida homeowner', cta: 'book inspection' },
     { topic: 'winter lawn weed pressure', service: 'lawn care', angle: 'myth/fact', cta: 'request estimate' },
+    { topic: 'holiday wreaths and garlands: the spiders and ants that ride in', service: 'general pest', angle: 'signs to check', cta: 'book inspection' },
+    { topic: 'rodents in garages and storage over the holidays', service: 'rodent', angle: 'signs to check', cta: 'book inspection' },
+    { topic: 'cool-season fungus rings on St. Augustine', service: 'lawn care', angle: 'what we are seeing', cta: 'read guide' },
+    { topic: 'year-end lanai and screen check for pest entry', service: 'general pest', angle: 'what we are seeing', cta: 'book inspection' },
   ],
 };
 
@@ -320,7 +370,300 @@ const PEST_VERSUS_PAIRS = [
     right: { name: 'Norway Rat', points: ['Heavier build, shorter tail', 'Burrows at ground level', 'Less common in Florida'] },
     verdict: 'In Southwest Florida, think up, not down.',
   },
+  // ── Bank refill (owner ask 2026-09-06: "low on content") ─────────────────
+  // Appended AFTER the original six so the rotation's relative order is
+  // stable; the modulus change reshuffles dates once (accepted). Same rules
+  // as above: visible ID facts only, cautious diagnostics, no safety /
+  // timing / pricing words (SAFETY_OVERCLAIMS + TARGET_CLAIM_WORD_RE in
+  // social-media.js reject them; the all-pairs validator test proves it).
+  {
+    key: 'bigheaded_ant_vs_fire_ant',
+    service: 'general pest',
+    left: { name: 'Bigheaded Ant', points: ['Two worker sizes; big square heads', 'Loose dirt piles along pavers', 'Trails follow walls and edges'] },
+    right: { name: 'Fire Ant', points: ['Workers vary in size; no giant heads', 'Dome mounds in open sun', 'Swarms up anything that disturbs the mound'] },
+    verdict: 'Dirt piles by the pavers usually mean bigheaded ants, not fire ants.',
+  },
+  {
+    key: 'german_roach_vs_american_roach',
+    service: 'general pest',
+    left: { name: 'German Roach', points: ['Small: about half an inch', 'Two dark stripes behind the head', 'Lives indoors near kitchens and baths'] },
+    right: { name: 'American Roach', points: ['Large: 1.5 inches or more', 'Reddish-brown with a pale band', 'Comes in from outside and drains'] },
+    verdict: 'Size and stripes tell you which roach you have.',
+  },
+  {
+    key: 'asian_roach_vs_german_roach',
+    service: 'general pest',
+    left: { name: 'Asian Roach', points: ['Flies to porch lights at night', 'Lives outdoors in mulch and leaf litter', 'Wanders in through open doors'] },
+    right: { name: 'German Roach', points: ['Does not fly', 'Stays hidden in warm indoor gaps', 'Egg cases carried until they hatch'] },
+    verdict: 'Flew in at the porch light? That is the Asian roach.',
+  },
+  {
+    key: 'black_widow_vs_brown_widow',
+    service: 'general pest',
+    left: { name: 'Black Widow', points: ['Glossy black body', 'Red hourglass underneath', 'Smooth, round egg sac'] },
+    right: { name: 'Brown Widow', points: ['Tan and mottled brown', 'Orange hourglass underneath', 'Spiky, golf-ball egg sacs'] },
+    verdict: 'Spiky egg sacs point to the brown widow, the one you will usually find here.',
+  },
+  {
+    key: 'wolf_spider_vs_huntsman',
+    service: 'general pest',
+    left: { name: 'Wolf Spider', points: ['Hairy, stout body', 'Hunts on the ground and floors', 'Mother carries the egg sac behind her'] },
+    right: { name: 'Huntsman Spider', points: ['Flat body, long crab-like legs', 'Sits on walls and ceilings', 'Scoots sideways when startled'] },
+    verdict: 'Floor runner or wall sitter? That is your answer.',
+  },
+  {
+    // Caterpillar season on St. Augustine runs late spring through fall.
+    key: 'sod_webworm_vs_armyworm',
+    service: 'lawn care',
+    months: [5, 6, 7, 8, 9, 10],
+    left: { name: 'Sod Webworm', points: ['Small tan moths zigzag at dusk', 'Blades look notched or chewed', 'Damage shows as ragged patches'] },
+    right: { name: 'Fall Armyworm', points: ['Striped caterpillar with a Y on its head', 'Blades chewed down to the stem', 'Damage moves across the lawn in a front'] },
+    verdict: 'Notched blades or mowed-down turf tells the caterpillars apart.',
+  },
+  {
+    key: 'large_patch_vs_dollar_spot',
+    service: 'lawn care',
+    left: { name: 'Large Patch', points: ['Circles that can span several feet', 'Yellow to orange ring at the edge', 'Shows up in cool, wet months'] },
+    right: { name: 'Dollar Spot', points: ['Small straw-colored spots', 'Hourglass lesions on the blades', 'Favors warm days and dewy nights'] },
+    verdict: 'Patch size tells the two lawn fungi apart.',
+  },
+  {
+    key: 'grubs_vs_mole_crickets',
+    service: 'lawn care',
+    left: { name: 'White Grubs', points: ['C-shaped larvae under the sod', 'Turf peels back like carpet', 'Roots chewed away underneath'] },
+    right: { name: 'Mole Crickets', points: ['Raised, spongy tunnels in the turf', 'Small mounds of loose soil', 'Soapy water flush brings them up'] },
+    verdict: 'Peels back or feels spongy? Different pest underground.',
+  },
+  {
+    key: 'termite_frass_vs_carpenter_ant_frass',
+    service: 'termite',
+    left: { name: 'Drywood Pellets', points: ['Six-sided pellets, all one size', 'Tiny piles below a pinhole', 'Looks like coarse sand or coffee grounds'] },
+    right: { name: 'Carpenter Ant Frass', points: ['Fibrous wood shavings', 'Mixed with insect parts', 'Pushed out of nest openings'] },
+    verdict: 'Pellets or shavings? The pile is your first clue; an inspection confirms it.',
+  },
+  {
+    key: 'mosquito_vs_crane_fly',
+    service: 'mosquito',
+    left: { name: 'Mosquito', points: ['Small, with a needle-like mouth', 'High whine near your ears', 'Active at dawn and dusk'] },
+    right: { name: 'Crane Fly', points: ['Big and gangly, legs that fall off', 'Does not bite', 'Bounces off the lanai screen'] },
+    verdict: 'The giant one on the screen is a crane fly, not a mega-mosquito.',
+  },
+  {
+    key: 'no_see_um_vs_mosquito',
+    service: 'mosquito',
+    // No-see-ums are separate scope, covered only when named (estimate-service-
+    // details), so the card must not read as "the mosquito program covers both".
+    label: 'Pest ID',
+    left: { name: 'No-See-Um', points: ['Tiny enough to pass through screens', 'Bites near water at dawn and dusk', 'Welts show up before you see the bug'] },
+    right: { name: 'Mosquito', points: ['Visible, with a distinct whine', 'Breeds in standing water', 'Rests on walls and under eaves'] },
+    verdict: 'Bites alone do not tell. Bitten through the screen at dusk? Think no-see-ums.',
+  },
+  {
+    key: 'honey_bee_vs_yellowjacket',
+    service: 'general pest',
+    left: { name: 'Honey Bee', points: ['Fuzzy, golden-brown body', 'Visits flowers, ignores your food', 'Leave it: a pollinator at work'] },
+    right: { name: 'Yellowjacket', points: ['Smooth, bright yellow and black', 'Nests in the ground or wall voids', 'Drawn to drinks and cookouts'] },
+    verdict: 'Fuzzy means bee. Shiny and bold means yellowjacket.',
+  },
+  {
+    key: 'silverfish_vs_earwig',
+    service: 'general pest',
+    left: { name: 'Silverfish', points: ['Teardrop shape, silvery scales', 'Three bristles at the tail', 'Damp closets, baths, and paper'] },
+    right: { name: 'Earwig', points: ['Dark brown with pincers at the tail', 'Lives in mulch and damp beds', 'Wanders in after rain'] },
+    verdict: 'Bristles or pincers at the tail end.',
+  },
+  {
+    key: 'flea_vs_springtail',
+    service: 'general pest',
+    left: { name: 'Flea', points: ['Reddish-brown, flattened side to side', 'Jumps from pets and carpet', 'Bites at the ankles'] },
+    right: { name: 'Springtail', points: ['Tiny grey or white specks', 'Jumps using a tail spring', 'Crowds damp sinks and drains after rain'] },
+    verdict: 'Jumpers by the drain are usually springtails, not fleas.',
+  },
+  {
+    key: 'millipede_vs_centipede',
+    service: 'general pest',
+    left: { name: 'Millipede', points: ['Round body, many short legs', 'Curls into a coil when touched', 'Shows up indoors after heavy rain'] },
+    right: { name: 'Centipede', points: ['Flat body, fewer longer legs', 'Fast runner with long antennae', 'Hunts other bugs in damp spots'] },
+    verdict: 'Coils up or runs off? That is how you tell.',
+  },
+  {
+    key: 'whitefly_vs_mealybug',
+    service: 'tree & shrub',
+    left: { name: 'Spiraling Whitefly', points: ['Cloud of tiny white flyers when leaves shake', 'White spiral egg patterns under leaves', 'Sticky leaves and sooty mold below'] },
+    right: { name: 'Mealybug', points: ['White cottony clumps in leaf joints', 'Barely moves', 'Sticky residue on stems'] },
+    verdict: 'Flies off or stays cottony? Different shrub pest.',
+  },
+  {
+    key: 'dollarweed_vs_dichondra',
+    service: 'lawn care',
+    left: { name: 'Dollarweed', points: ['Round, coin-shaped leaves', 'Stem attaches at the leaf center', 'Thrives where the soil stays wet'] },
+    right: { name: 'Dichondra', points: ['Kidney-shaped leaves', 'Stem attaches at the notch', 'Low mat in shady, thin turf'] },
+    verdict: 'Dollarweed means the spot stays wet. Check drainage and irrigation first.',
+  },
+  {
+    key: 'nutsedge_vs_crabgrass',
+    service: 'lawn care',
+    left: { name: 'Nutsedge', points: ['Triangular stem you can roll', 'Outgrows the lawn in days', 'Loves soggy, low spots'] },
+    right: { name: 'Crabgrass', points: ['Flat, wide blades in a rosette', 'Spreads along the ground', 'Fills thin, bare areas'] },
+    verdict: 'Roll the stem: a triangle means sedge.',
+  },
 ];
+
+// "Myth vs fact" — one everyday belief, one plain correction. Same rules as
+// the pairs: visible facts only, no safety / timing / pricing language, and
+// nothing framed as a field observation. Myth and fact each ≤ ~90 chars so
+// both tiles hold them without eliding (the renderer copy-budget test walks
+// the whole bank). Every entry carries `grounding`: the verified facts-bank
+// ids (content-ops/facts-bank/services/*.md in the Astro repo) the claim
+// traces to, and/or the public reference it was checked against — surfaced
+// in the run's Source Facts so a reviewer can trace a claim before it posts.
+// Spring-only advice carries `months` like the season-gated pairs.
+const PEST_MYTHS = [
+  { key: 'myth_bug_zappers_mosquitoes', service: 'mosquito', format: 'myth', title: 'Bug zappers and mosquitoes',
+    myth: 'A bug zapper on the lanai clears out the mosquitoes.',
+    fact: 'Zappers mostly catch moths and beetles; mosquitoes follow your breath and body heat.',
+    verdict: 'Skip the zapper. Dump standing water and run a fan instead.',
+    grounding: { refs: ['UF/IFAS Florida Medical Entomology Laboratory: mosquito control around the home'] } },
+  { key: 'myth_citronella_plants', service: 'mosquito', format: 'myth', title: 'Citronella plants',
+    myth: 'A citronella plant by the door keeps mosquitoes away.',
+    fact: 'The living plant releases very little oil; the scent only works when leaves are crushed.',
+    verdict: 'Pretty plant, weak repellent. Water management does the heavy lifting.',
+    grounding: { refs: ['UF/IFAS Florida Medical Entomology Laboratory: mosquito repellents'] } },
+  { key: 'myth_clean_house_no_roaches', service: 'general pest', format: 'myth', title: 'Clean homes and roaches',
+    myth: 'Roaches only show up in dirty homes.',
+    fact: 'Florida roaches come in from outside for water and shelter; a spotless kitchen can still see them.',
+    verdict: 'Roaches follow moisture and gaps, not just crumbs.',
+    grounding: { facts: ['service_pest_control_species_american_roach_01', 'service_pest_control_species_palmetto_bug_01'], refs: ['UF/IFAS Featured Creatures: American cockroach'] } },
+  { key: 'myth_termites_only_old_homes', service: 'termite', format: 'myth', title: 'Termites and new construction',
+    myth: 'A newer home does not need to think about termites.',
+    fact: 'Subterranean termites reach wood through soil; the age of the house does not matter to them.',
+    verdict: 'New build or old, termites follow the moisture and the wood.',
+    grounding: { facts: ['service_termite_subterranean_eastern_01', 'service_termite_new_construction_pretreat_01'], refs: ['UF/IFAS Featured Creatures: eastern subterranean termite'] } },
+  { key: 'myth_brown_lawn_more_water', service: 'lawn care', format: 'myth', title: 'Brown spots and watering',
+    myth: 'A brown patch always means the lawn needs more water.',
+    fact: 'Chinch bugs, fungus, and mower stress all brown turf; overwatering feeds the fungus.',
+    verdict: 'Check the edge of the patch before you turn up the sprinklers.',
+    grounding: { facts: ['service_lawn_care_chinch_bug_01', 'service_lawn_care_disease_large_patch_01', 'service_lawn_care_irrigation_01'] } },
+  { key: 'myth_palmetto_bug_not_roach', service: 'general pest', format: 'myth', title: 'The palmetto bug',
+    myth: 'A palmetto bug is a different insect from a roach.',
+    fact: 'Palmetto bug is the Florida nickname for the American cockroach and its big outdoor cousins.',
+    verdict: 'Same insect, friendlier name.',
+    grounding: { facts: ['service_pest_control_species_palmetto_bug_01', 'service_pest_control_species_american_roach_01'] } },
+  { key: 'myth_daddy_longlegs', service: 'general pest', format: 'myth', title: 'Daddy longlegs',
+    myth: 'Daddy longlegs are the most venomous spiders around.',
+    fact: 'The nickname covers harvestmen (not spiders) and cellar spiders; neither one bites people.',
+    verdict: 'A lanai regular that earns its keep eating small insects.',
+    grounding: { refs: ['UC Riverside Entomology: daddy-longlegs myth', 'UF/IFAS Featured Creatures: long-bodied cellar spider'] } },
+  { key: 'myth_rats_only_dirty', service: 'rodent', format: 'myth', title: 'Roof rats and tidy homes',
+    myth: 'Roof rats only bother homes with clutter and trash.',
+    fact: 'Roof rats climb palms, fruit trees, and utility lines into any attic with a gap.',
+    verdict: 'Trim branches off the roof and seal the gaps; tidiness alone does not stop them.',
+    grounding: { facts: ['service_rodent_roof_rat_01', 'service_rodent_seasonal_canopy_01'] } },
+  { key: 'myth_mowing_short', service: 'lawn care', format: 'myth', title: 'Mowing height',
+    myth: 'Cutting the lawn short means mowing less often.',
+    fact: 'St. Augustine scalped short loses shade on the soil, dries faster, and invites weeds.',
+    verdict: 'Keep St. Augustine tall; it shades out most weeds on its own.',
+    grounding: { refs: ['UF/IFAS EDIS: Mowing Your Florida Lawn'] } },
+  { key: 'myth_dryer_sheets_wasps', service: 'general pest', format: 'myth', title: 'Dryer sheets and wasps',
+    myth: 'Dryer sheets under the patio table keep wasps off.',
+    fact: 'Paper wasps choose nest sites by shelter and sun, not by the smell of laundry.',
+    verdict: 'Knock down starter nests early in spring while they are the size of a quarter.',
+    months: [2, 3, 4, 5], grounding: { facts: ['service_pest_control_species_wasps_01', 'service_pest_control_seasonal_spring_01'], refs: ['UF/IFAS Featured Creatures: paper wasps'] } },
+];
+
+// "Three signs of …" — the checklist format. Every sign is something a
+// homeowner can see from the lanai or the driveway; the verdict says what to
+// do with it. Three signs, each ≤ ~60 chars.
+const PEST_SIGNS = [
+  { key: 'signs_roof_rats_attic', service: 'rodent', format: 'signs', title: 'Three signs of roof rats in the attic',
+    signs: ['Scratching or scurrying overhead after dark', 'Hollowed-out oranges or avocados under the tree', 'Greasy rub marks along a beam or pipe'],
+    verdict: 'Two of the three? Time to check the roofline for gaps.',
+    grounding: { facts: ['service_rodent_roof_rat_01', 'service_rodent_qa_attic_noise_01', 'service_rodent_seasonal_canopy_01'] } },
+  { key: 'signs_subterranean_termites', service: 'termite', format: 'signs', title: 'Three signs of subterranean termites',
+    signs: ['Pencil-width mud tubes on the foundation', 'Paint that bubbles or looks water-stained', 'Discarded wings on a windowsill in spring'],
+    verdict: 'Mud tubes are the giveaway. Do not knock them down before someone looks.',
+    grounding: { facts: ['service_termite_subterranean_eastern_01', 'service_termite_seasonal_spring_01', 'service_termite_conducive_conditions_01'] } },
+  { key: 'signs_chinch_bugs', service: 'lawn care', format: 'signs', title: 'Three signs of chinch bugs',
+    signs: ['Yellow-to-brown patches along hot, sunny edges', 'Patches grow outward week over week', 'Tiny black bugs with white wings at the patch edge'],
+    verdict: 'Float-test the green edge of the patch to confirm.',
+    grounding: { facts: ['service_lawn_care_chinch_bug_01'] } },
+  { key: 'signs_drywood_termites', service: 'termite', format: 'signs', title: 'Three signs of drywood termites',
+    signs: ['Small piles of sand-like pellets under a pinhole', 'Wood trim that sounds hollow when tapped', 'Swarmers at a window on a warm evening'],
+    verdict: 'Pellet piles that return after you sweep them mean an active gallery.',
+    grounding: { facts: ['service_termite_drywood_west_indian_01', 'service_termite_seasonal_summer_01'] } },
+  { key: 'signs_german_roaches', service: 'general pest', format: 'signs', title: 'Three signs of German roaches',
+    signs: ['Pepper-like specks inside cabinet corners', 'Small tan roaches near the fridge motor or dishwasher', 'Tiny brown egg cases tucked in cracks'],
+    verdict: 'They stay close to warmth and water. Check the appliances first.',
+    grounding: { facts: ['service_pest_control_species_german_roach_01'], refs: ['UF/IFAS Featured Creatures: German cockroach'] } },
+  { key: 'signs_large_patch', service: 'lawn care', format: 'signs', title: 'Three signs of large patch fungus',
+    signs: ['Round yellow-orange rings that widen', 'Blades pull free easily at the base', 'Shows up in cool, wet stretches'],
+    verdict: 'Water in the morning only and let the turf dry between cycles.',
+    grounding: { facts: ['service_lawn_care_disease_large_patch_01', 'service_lawn_care_irrigation_01'] } },
+  { key: 'signs_ghost_ants', service: 'general pest', format: 'signs', title: 'Three signs of ghost ants',
+    signs: ['Barely visible ants that appear to float', 'Trails along the counter to the sink', 'Numbers spike after a dry spell'],
+    verdict: 'They are chasing water. Fix the drip and the trail thins out.',
+    grounding: { facts: ['service_pest_control_species_ghost_ant_01', 'service_pest_control_seasonal_summer_01'] } },
+  { key: 'signs_mosquito_breeding', service: 'mosquito', format: 'signs', title: 'Three signs mosquitoes are breeding at home',
+    signs: ['Wrigglers in a plant saucer or bird bath', 'Bites in the shade in the middle of the day', 'Water sitting in gutters or a tarp after rain'],
+    verdict: 'Tip and toss every container once a week.',
+    grounding: { refs: ['UF/IFAS Florida Medical Entomology Laboratory: container-breeding mosquitoes'] } },
+  { key: 'signs_whitefly', service: 'tree & shrub', format: 'signs', title: 'Three signs of whitefly on ficus and gumbo limbo',
+    signs: ['A white cloud rises when you shake a branch', 'Sticky leaves and black sooty mold below', 'Leaves yellowing and dropping from the inside out'],
+    verdict: 'Check the underside of the leaves for spiral egg patterns.',
+    grounding: { refs: ['UF/IFAS EDIS: Rugose Spiraling Whitefly'] } },
+  { key: 'signs_paper_wasps', service: 'general pest', format: 'signs', title: 'Three signs paper wasps are settling in',
+    signs: ['A grey comb the size of a coin under an eave', 'Wasps hovering at the same corner every morning', 'Wasps chewing on a wooden fence or deck rail'],
+    verdict: 'Starter nests are easiest to deal with in early spring.',
+    months: [2, 3, 4, 5], grounding: { facts: ['service_pest_control_species_wasps_01', 'service_pest_control_seasonal_spring_01'], refs: ['UF/IFAS Featured Creatures: paper wasps'] } },
+];
+
+// The showdown lane's fire bank. Pairs are the backbone; myth and signs cards
+// (alternating) are spread evenly between them so a follower sees a format
+// change every second or third fire instead of a run of one format. Order is
+// part of the contract: the lane indexes this bank with a fixed modulus (see
+// selectAutonomousVersusPlan), so lists only ever grow at their END — a new
+// entry in the middle would remap every card that follows it.
+const SHOWDOWN_BANK = (() => {
+  const formats = [];
+  for (let i = 0; i < Math.max(PEST_MYTHS.length, PEST_SIGNS.length); i += 1) {
+    if (PEST_MYTHS[i]) formats.push(PEST_MYTHS[i]);
+    if (PEST_SIGNS[i]) formats.push(PEST_SIGNS[i]);
+  }
+  const bank = [];
+  let p = 0;
+  let q = 0;
+  while (p < PEST_VERSUS_PAIRS.length || q < formats.length) {
+    const pairIsBehind = q >= formats.length
+      || (p < PEST_VERSUS_PAIRS.length && p * formats.length <= q * PEST_VERSUS_PAIRS.length);
+    bank.push(pairIsBehind ? PEST_VERSUS_PAIRS[p++] : formats[q++]);
+  }
+  return bank;
+})();
+
+// What a showdown entry is called in the run record, the caption hook, and
+// the hashtag picker.
+function showdownTopic(entry = {}) {
+  if (entry.format === 'myth') return `Myth vs fact: ${entry.title}`;
+  if (entry.format === 'signs') return entry.title;
+  return `${entry.left?.name} vs ${entry.right?.name}`;
+}
+
+// The reviewer-facing grounding line for a showdown entry (null for the
+// pairs, which cite standard ID diagnostics inline).
+function showdownGrounding(entry = {}) {
+  const g = entry.grounding;
+  if (!g) return null;
+  const parts = [];
+  if (Array.isArray(g.facts) && g.facts.length) parts.push(`facts-bank: ${g.facts.join(', ')}`);
+  if (Array.isArray(g.refs) && g.refs.length) parts.push(g.refs.join(' · '));
+  return parts.length ? parts.join(' · ') : null;
+}
+
+function showdownSourceDetail(entry = {}) {
+  if (entry.format === 'myth') return `Myth: ${entry.myth} Fact: ${entry.fact} ${entry.verdict}`;
+  if (entry.format === 'signs') return `${entry.signs.join('. ')}. ${entry.verdict}`;
+  return `${entry.verdict} ${entry.left.name}: ${entry.left.points.join('; ')}. ${entry.right.name}: ${entry.right.points.join('; ')}.`;
+}
 
 function toJson(value, fallback) {
   if (value == null) return fallback;
@@ -954,7 +1297,15 @@ function buildVersusCardInput(pair = {}, input = {}) {
   return {
     variant: 'versus',
     city: input.city,
-    service: titleCase(input.service || pair.service || 'Pest ID'),
+    // General-pest comparisons carry a neutral ID label: several pairs (German
+    // roach, flea, honey bee) belong to specialty services, and stamping
+    // "General Pest" on them would imply the recurring program covers them.
+    service: pair.label || ((input.service || pair.service) === 'general pest' ? 'Pest ID' : titleCase(input.service || pair.service || 'Pest ID')),
+    format: pair.format,
+    title: pair.title,
+    myth: pair.myth,
+    fact: pair.fact,
+    signs: pair.signs,
     left: pair.left,
     right: pair.right,
     verdict: pair.verdict,
@@ -1194,16 +1545,110 @@ async function creativeVariantsForRun(plan, preview, { kind, wantsGbp, effective
   }
 }
 
-function selectAutonomousCampaign(now = new Date()) {
+// Campaign slot days: the ET days the campaign lane owns outright — not a
+// review day (day % 4 === 0) and, while the versus lane is on, not a versus
+// day (day % 4 === 2). Flipping SOCIAL_AUTONOMOUS_INCLUDE_VERSUS changes the
+// slot set and so reshuffles the walk once (accepted; same posture as a bank
+// size change in the versus lane).
+function isCampaignSlotDay(day) {
+  return day % 4 !== 0 && (day % 4 !== 2 || !AUTONOMOUS_FLAGS.includeVersus);
+}
+
+// Slot days from the sequence epoch up to (not including) the given ET date.
+// A few thousand iterations at most — pure, no DB, deterministic per day.
+function campaignSlotsBefore(year, month, day) {
+  let count = 0;
+  for (let y = VERSUS_SEQ_EPOCH_YEAR; y <= year; y += 1) {
+    const lastMonth = y === year ? month : 12;
+    for (let m = 1; m <= lastMonth; m += 1) {
+      const lastDay = (y === year && m === month) ? day - 1 : new Date(Date.UTC(y, m, 0)).getUTCDate();
+      for (let d = 1; d <= lastDay; d += 1) if (isCampaignSlotDay(d)) count += 1;
+    }
+  }
+  return count;
+}
+
+// Cards the campaign lane ACTUALLY published recently — topic|city of the
+// last `limit` autonomous campaign runs, whichever lane's day they landed on.
+// The static slot walk cannot see a fire that happened because another lane
+// yielded (no review candidate, pair out of season), so the walk skips any
+// state still inside this window instead of repeating it weeks later.
+// Fail-open: no table / query error → empty set → the plain walk.
+async function recentCampaignCards(limit = 24) {
+  if (!(await hasTable('social_content_studio_runs'))) return new Set();
+  try {
+    const rows = await db('social_content_studio_runs')
+      .where({ run_type: 'autonomous' })
+      // dry_run posts nothing, so it is not history — a publisher check must
+      // not reserve a topic/city the audience never saw.
+      .whereIn('status', ['published', 'draft_created'])
+      .orderBy('started_at', 'desc')
+      .limit(Math.max(1, Math.min(120, Number(limit) * 3 || 72)))
+      .select('topic', 'city', 'input');
+    const cards = [];
+    for (const row of rows) {
+      const input = toJson(row.input, {}) || {};
+      if (input.versusPair || input.reviewGraphic || input.milestone) continue; // other lanes
+      if (row.topic && row.city) cards.push(`${row.topic}|${row.city}`);
+      if (cards.length >= limit) break;
+    }
+    return new Set(cards);
+  } catch {
+    return new Set();
+  }
+}
+
+// The campaign card at walk position `slot` for a month's bank: topic index
+// walks the bank, the city is phase-shifted one step per topic cycle, so
+// every topic×city combination (6 × 4 = 24 positions) occurs before any
+// repeat.
+function campaignCardAt(seasonal, slot) {
+  const topic = seasonal[slot % seasonal.length];
+  const topicCycle = Math.floor(slot / seasonal.length);
+  const city = WAVES_LOCATIONS[(slot + topicCycle) % WAVES_LOCATIONS.length]?.name || 'Sarasota';
+  return { topic, city };
+}
+
+// `recent` = recentCampaignCards(): states already published inside the
+// last full cycle are skipped, so a fire on a day another lane yielded can
+// neither repeat a recent card nor be repeated by the next owned slot.
+function selectAutonomousCampaign(now = new Date(), { recent = new Set() } = {}) {
   // Anchor seasonal topic + city rotation to Eastern business dates, not UTC
   // (Railway runs TZ=UTC, which would flip topics a few hours early each day).
-  const { month, day } = etParts(now);
-  const city = WAVES_LOCATIONS[day % WAVES_LOCATIONS.length]?.name || 'Sarasota';
+  const { year, month, day } = etParts(now);
   const seasonal = SEASONAL_AUTONOMOUS_TOPICS[month] || SEASONAL_AUTONOMOUS_TOPICS[6];
-  const topic = seasonal[day % seasonal.length];
+  // The walk advances one step per campaign SLOT (the days this lane owns
+  // outright — see isCampaignSlotDay), never from the raw day: indexing by
+  // day aliased to the lanes' parity (day % 6 reached topics 1/3/5, day % 4
+  // cities 1/3), the same defect #3651 fixed in the versus lane. A yielded
+  // day is not a slot: it takes the state half a cycle ahead PLUS ONE
+  // (farthest from its neighbours by city, and — since half a cycle is a
+  // whole number of topic cycles — one topic over, so a yielded day never
+  // posts the same subject as the owned slot before or after it). The
+  // recent-cards skip below keeps that state from being replayed when the
+  // walk reaches it.
+  const cycle = seasonal.length * WAVES_LOCATIONS.length;
+  const slotsBefore = campaignSlotsBefore(year, month, day);
+  const start = isCampaignSlotDay(day) ? slotsBefore : slotsBefore + Math.floor(cycle / 2) + 1;
+  let card = null;
+  for (let step = 0; step < cycle && !card; step += 1) {
+    const candidate = campaignCardAt(seasonal, start + step);
+    if (!recent.has(`${candidate.topic.topic}|${candidate.city}`)) card = candidate;
+  }
+  // Every state sits inside the recent window (daily fires with the other
+  // lanes dark fill all 24 in 24 days): walk again, but never repeat the
+  // subject that posted last. `recent` is newest-first (recentCampaignCards),
+  // so its first entry is that card.
+  const [latest] = recent;
+  const lastTopic = latest ? latest.slice(0, latest.lastIndexOf('|')) : null;
+  for (let step = 0; step < cycle && !card; step += 1) {
+    const candidate = campaignCardAt(seasonal, start + step);
+    if (candidate.topic.topic !== lastTopic) card = candidate;
+  }
+  if (!card) card = campaignCardAt(seasonal, start);
   return {
-    ...topic,
-    city,
+    ...card.topic,
+    city: card.city,
     channels: AUTONOMOUS_FLAGS.channels,
   };
 }
@@ -1256,7 +1701,33 @@ async function selectAutonomousReviewPlan(now = new Date()) {
   };
 }
 
+function buildMythDrafts(entry, city) {
+  const hook = `Myth or fact? "${entry.myth}"`;
+  const fact = `Fact: ${entry.fact}`;
+  return {
+    facebook: `${hook}\n\n${fact}\n\n${entry.verdict} ${city} homeowners: not sure what you are seeing? A quick inspection settles it.`,
+    instagram: `${hook}\n\n${fact}\n\n${entry.verdict} Heard this one before?\n\n${hashtags({ topic: entry.title, city, service: entry.service })}`,
+    linkedin: `Pest myth, corrected. "${entry.myth}" ${entry.fact} ${entry.verdict} Waves turns local pest pressure and service data into practical homeowner guidance.`,
+    // GBP can publish text-only (media retry path), so the post carries the
+    // myth AND the fact without the card.
+    gbp: `${city} homeowners, myth or fact? "${entry.myth}" ${fact} ${entry.verdict} ${ctaText('book inspection')}.`,
+  };
+}
+
+function buildSignsDrafts(entry, city) {
+  const numbered = entry.signs.map((sign, i) => `${i + 1}. ${sign}`);
+  const sentence = `${entry.signs.join('. ')}.`;
+  return {
+    facebook: `${entry.title}, ${city} edition:\n\n${numbered.join('\n')}\n\n${entry.verdict} Seeing one of these? A quick inspection settles it.`,
+    instagram: `${entry.title}:\n\n${numbered.join('\n')}\n\n${entry.verdict} Which one have you noticed?\n\n${hashtags({ topic: entry.title, city, service: entry.service })}`,
+    linkedin: `${entry.title}. ${sentence} ${entry.verdict} Waves turns local pest pressure and service data into practical homeowner guidance.`,
+    gbp: `${city} homeowners: ${entry.title.toLowerCase()}. ${sentence} ${entry.verdict} ${ctaText('book inspection')}.`,
+  };
+}
+
 function buildVersusDrafts(pair, city) {
+  if (pair.format === 'myth') return buildMythDrafts(pair, city);
+  if (pair.format === 'signs') return buildSignsDrafts(pair, city);
   const leftName = pair.left.name;
   const rightName = pair.right.name;
   // Neutral comparison hook — never assert the two LOOK similar (some pairs
@@ -1275,10 +1746,42 @@ function buildVersusDrafts(pair, city) {
   };
 }
 
+// Showdown keys the lane ACTUALLY published recently — the last `limit`
+// autonomous showdown runs, any city. The static sequence cannot know that
+// the bank grew (6 → 24 → 44) and remapped every position under it, so a
+// grown bank would replay last month's subjects; the walk below steps past
+// any key still inside this window. Fail-open: no table / error → empty set
+// → the plain sequence. dry_run posts nothing, so it is not history.
+async function recentShowdownKeys(limit = 22) {
+  if (!(await hasTable('social_content_studio_runs'))) return new Set();
+  try {
+    const rows = await db('social_content_studio_runs')
+      .where({ run_type: 'autonomous' })
+      .whereIn('status', ['published', 'draft_created'])
+      // Recency is when the card reached the audience: a queued draft
+      // approved weeks later keeps its started_at, so order by completion.
+      .orderByRaw('COALESCE(finished_at, updated_at, started_at) DESC')
+      // Showdown runs are one autonomous run in four (day % 4 === 2), so
+      // five rows per requested key recovers the full window.
+      .limit(Math.max(1, Math.min(200, Number(limit) * 5 || 110)))
+      .select('input');
+    const keys = [];
+    for (const row of rows) {
+      const key = (toJson(row.input, {}) || {}).versusPair?.key;
+      if (key) keys.push(key);
+      if (keys.length >= limit) break;
+    }
+    return new Set(keys);
+  } catch {
+    return new Set();
+  }
+}
+
 // The "pest showdown" lane: a deterministic X-vs-Y pest ID comparison every 4th
 // ET day (offset 2, so it never collides with the review lane's offset 0).
-// Pure — no DB — so a selection failure can never block the campaign fallback.
-function selectAutonomousVersusPlan(now = new Date()) {
+// Pure — no DB — so a selection failure can never block the campaign fallback;
+// `recent` = recentShowdownKeys(), fetched by the caller.
+function selectAutonomousVersusPlan(now = new Date(), { recent = new Set() } = {}) {
   if (!AUTONOMOUS_FLAGS.includeVersus) return null;
   const { year, month, day } = etParts(now); // Eastern business date (see selectAutonomousCampaign)
   if (day % 4 !== 2) return null;
@@ -1302,16 +1805,29 @@ function selectAutonomousVersusPlan(now = new Date()) {
   // yield to the (already seasonal) campaign lane. Filtering the bank first
   // would shrink the modulus and shift the survivors' indices at every season
   // boundary, replaying the prior month's cards within days.
-  const pair = PEST_VERSUS_PAIRS[seq % PEST_VERSUS_PAIRS.length];
+  // Step past keys published inside the recent window (a grown bank remaps
+  // the sequence; see recentShowdownKeys). With every key recent, or none,
+  // this is the plain sequence. The natural slot keeps its yield-when-out-
+  // of-season behaviour below; once the walk has moved past it, an out-of-
+  // season candidate is skipped too — otherwise a spring-only card would
+  // stall the lane all fall, since a yield records no key.
+  let pair = null;
+  for (let step = 0; step < SHOWDOWN_BANK.length && !pair; step += 1) {
+    const candidate = SHOWDOWN_BANK[(seq + step) % SHOWDOWN_BANK.length];
+    if (recent.has(candidate.key)) continue;
+    if (step > 0 && candidate.months && !candidate.months.includes(month)) continue;
+    pair = candidate;
+  }
+  if (!pair) pair = SHOWDOWN_BANK[seq % SHOWDOWN_BANK.length];
   if (pair.months && !pair.months.includes(month)) return null;
   // The city also advances every fire, phase-shifted one slot per full pair
-  // cycle: bare seq % 4 shares a factor of 2 with the 6-pair bank, so half
-  // the pair+city combinations could never occur and identical cards would
-  // recur every 12 fires; the shift walks all 24 combinations before any
-  // repeat.
-  const pairCycle = Math.floor(seq / PEST_VERSUS_PAIRS.length);
+  // cycle: bare seq % 4 shares a factor with the pair bank (6 then, 24 now),
+  // so most pair+city combinations could never occur and identical cards
+  // would recur early; the shift walks every pair×city combination (24 pairs
+  // × 4 cities = 96 fires, about a year) before any repeat.
+  const pairCycle = Math.floor(seq / SHOWDOWN_BANK.length);
   const city = WAVES_LOCATIONS[(seq + pairCycle) % WAVES_LOCATIONS.length]?.name || 'Sarasota';
-  const topic = `${pair.left.name} vs ${pair.right.name}`;
+  const topic = showdownTopic(pair);
   const drafts = buildVersusDrafts(pair, city);
   const channels = AUTONOMOUS_FLAGS.channels;
   return {
@@ -1329,11 +1845,10 @@ function selectAutonomousVersusPlan(now = new Date()) {
       suggestedLink: 'https://www.wavespestcontrol.com/book/',
       drafts: Object.fromEntries(channels.map((channel) => [channel, drafts[channel]]).filter(([, text]) => text)),
       validation: validateDrafts(drafts),
-      sources: [{
-        type: 'versus_pair',
-        label: topic,
-        detail: `${pair.verdict} ${pair.left.name}: ${pair.left.points.join('; ')}. ${pair.right.name}: ${pair.right.points.join('; ')}.`,
-      }],
+      sources: [
+        { type: 'versus_pair', label: topic, detail: showdownSourceDetail(pair) },
+        ...(showdownGrounding(pair) ? [{ type: 'reference', label: 'Grounding', detail: showdownGrounding(pair) }] : []),
+      ],
       fastestRisers: FASTEST_RISER_PROFILES.slice(0, 8),
     },
   };
@@ -1353,7 +1868,7 @@ function selectAutonomousVersusPlan(now = new Date()) {
 function versusPublishBlocker(input, now = new Date()) {
   const key = input?.versusPair?.key;
   if (!key) return null;
-  const months = PEST_VERSUS_PAIRS.find((p) => p.key === key)?.months;
+  const months = SHOWDOWN_BANK.find((p) => p.key === key)?.months;
   if (!Array.isArray(months) || !months.length) return null;
   if (months.includes(etParts(now).month)) return null;
   return 'versus pair is out of season — reject this draft so the lane can regenerate';
@@ -1618,10 +2133,10 @@ async function selectAutonomousPlan(now = new Date()) {
   const reviewPlan = await selectAutonomousReviewPlan(now);
   if (reviewPlan) return reviewPlan;
 
-  const versusPlan = selectAutonomousVersusPlan(now);
+  const versusPlan = selectAutonomousVersusPlan(now, { recent: await recentShowdownKeys() });
   if (versusPlan) return versusPlan;
 
-  const input = selectAutonomousCampaign(now);
+  const input = selectAutonomousCampaign(now, { recent: await recentCampaignCards() });
   const preview = await previewCampaign(input);
   return {
     ...input,
@@ -1670,6 +2185,9 @@ const SERVICE_INTENT_KEYWORDS = [
   { match: ['lawn', 'turf', 'grass', 'weed', 'fungus', 'fertilizer', 'fertilize', 'fertilizing', 'fertilization', 'chinch', 'st. augustine'] },
   { match: ['termite', 'swarm', 'swarming', 'wdo', 'wood destroying'] },
   { match: ['mosquito', 'standing water'] },
+  // No-see-ums are a separate service contract (covered only when named —
+  // estimate-service-details.js), so their intent never pulls mosquito pages.
+  { match: ['no-see-um', 'no-see-ums', 'biting midge', 'biting midges'] },
   { match: ['rodent', 'rat', 'rats', 'mouse', 'mice'] },
   { match: ['roach', 'cockroach', 'palmetto bug'] },
   { match: ['ant', 'ants'] },
@@ -1677,8 +2195,16 @@ const SERVICE_INTENT_KEYWORDS = [
   { match: ['bed bug', 'bedbug'] },
   { match: ['spider', 'spiders', 'black widow', 'brown widow'] },
   { match: ['wasp', 'hornet', 'yellow jacket', 'yellowjacket', 'bee', 'bees'] },
-  { match: ['silverfish', 'earwig', 'millipede', 'centipede'] },
-  { match: ['tree', 'shrub', 'ornamental', 'palm', 'tree and shrub', 'tree & shrub', 'whitefly', 'scale insect'] },
+  // Mud daubers stand alone: the August "mud daubers on the lanai ceiling"
+  // topic asks for a guide, and a yellowjacket or bee page is not that guide.
+  { match: ['mud dauber', 'dirt dauber'] },
+  // Damp-area arthropods are not interchangeable: a silverfish page is not
+  // an earwig guide, so each keeps its own intent.
+  { match: ['silverfish'] },
+  { match: ['earwig'] },
+  { match: ['springtail'] },
+  { match: ['millipede', 'centipede'] },
+  { match: ['tree', 'shrub', 'ornamental', 'palm', 'tree and shrub', 'tree & shrub', 'whitefly', 'scale insect', 'mealybug', 'sooty mold'] },
 ];
 
 // Boundary-aware keyword test shared by the requested topic/service and the
@@ -3572,6 +4098,12 @@ module.exports = {
   DEFAULT_COMPETITOR_PATTERNS,
   FASTEST_RISER_PROFILES,
   PEST_VERSUS_PAIRS,
+  PEST_MYTHS,
+  PEST_SIGNS,
+  SHOWDOWN_BANK,
+  showdownTopic,
+  showdownGrounding,
+  recentShowdownKeys,
   SEASONAL_AUTONOMOUS_TOPICS,
   buildVersusCardInput,
   buildVersusDrafts,
@@ -3629,5 +4161,6 @@ module.exports = {
   saveCampaignDraft,
   serializeAutonomousRun,
   selectAutonomousCampaign,
+  campaignCardAt,
   validateDrafts,
 };

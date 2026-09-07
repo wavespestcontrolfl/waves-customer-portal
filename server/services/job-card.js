@@ -1306,7 +1306,14 @@ function describeLine(raw) {
     .trim();
 }
 
-async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = false, tankReason = null, includePricing = false, dbh = db }) {
+function stockForLine(line) {
+  const demandMix = line.selected !== false && line.planMix?.amount > 0 ? line.planMix : null;
+  const inventory = buildProductInventorySnapshot(line.product, demandMix);
+  const short = Boolean(inventory && inventory.plannedAmountInventoryUnit != null && inventory.onHand != null && inventory.plannedAmountInventoryUnit > inventory.onHand);
+  return { demandMix, inventory, short };
+}
+
+function mergeProductLines(lines) {
   // One card per catalog product: two protocol lines can resolve to the same
   // row (a base line plus a conditional). The selected line wins the card;
   // the other line's text rides along.
@@ -1320,8 +1327,12 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       existing.extraLines.push(line.raw);
     }
   }
+  return [...byProduct.values()];
+}
+
+async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = false, tankReason = null, includePricing = false, dbh = db }) {
   const cards = [];
-  for (const line of byProduct.values()) {
+  for (const line of mergeProductLines(lines)) {
     const p = line.product;
     const verdict = verdicts.find((v) => v.productId === p.id) || { verdict: 'unknown', reason: 'No limit on file' };
     // The appointment plan's own mix (lawn only) — never recomputed here.
@@ -1330,7 +1341,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
     const unverified = line.planMix?.amount > 0 && !p.label_verified_at;
     // No usable rig (none on file, ambiguous) withholds every planned
     // amount here too, with the Tank section's own reason.
-    const demandMix = line.selected !== false && line.planMix?.amount > 0 ? line.planMix : null;
+    const { demandMix, inventory, short } = stockForLine(line);
     // A spray-check Hold withholds the amount on the card exactly as it does
     // in the tank search — a held product is not dosed anywhere.
     const held = verdict.verdict === 'hold';
@@ -1342,9 +1353,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
     // that conversion. Unconvertible pairs are not "short", they are flagged.
     // Demand is the plan's selected mix even while the display amount is
     // withheld: a stock block must not erase the shortage it is about.
-    const inventory = buildProductInventorySnapshot(p, demandMix);
     const onHand = inventory?.onHand ?? null;
-    const short = Boolean(inventory && inventory.plannedAmountInventoryUnit != null && onHand != null && inventory.plannedAmountInventoryUnit > onHand);
     // Untracked stock is the catalog's normal state, not a warning worth a line.
     const stockNote = inventory?.warning && !short && inventory.status !== 'not_tracked' ? inventory.warning : null;
     const rotation = await rotationNote(dbh, facts, p);
@@ -1449,7 +1458,37 @@ async function forecastAt({ coords, scheduledDate, now = new Date(), deps = {} }
   return { isToday, hourly };
 }
 
-async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), includePricing = false } = {}) {
+// A schedule strip reports exceptions from the card's existing evidence. No
+// amounts, access information, customer text, or vendor prices leave this view.
+function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, now }) {
+  const issues = [];
+  if (!lines.length) issues.push({ kind: 'protocol', status: 'unknown', label: 'No products resolved' });
+  else if (sprayCheck.hold) issues.push({ kind: 'weather', status: 'hold', label: 'Weather hold' });
+  else if (!isToday) issues.push({ kind: 'weather', status: 'unknown', label: 'Weather on visit day' });
+  else if (sprayCheck.verdicts.some(v => v.verdict !== 'ok')) issues.push({ kind: 'weather', status: 'unknown', label: 'Weather unknown' });
+
+  const selected = mergeProductLines(lines).filter(line => line.selected !== false);
+  const stock = selected.map(stockForLine);
+  if (stock.some(item => item.short || item.inventory?.status === 'depleted')) {
+    issues.push({ kind: 'stock', status: 'hold', label: 'Company stock short' });
+  } else if (stock.some(item => item.inventory?.status === 'low')) {
+    issues.push({ kind: 'stock', status: 'hold', label: 'Company stock low' });
+  } else if (stock.some(item => item.inventory?.plannedAmountInventoryUnit == null || item.inventory?.onHand == null)) {
+    issues.push({ kind: 'stock', status: 'unknown', label: 'Stock unverified' });
+  }
+  const needsCarrier = selected.some(line => {
+    if (!isTankMixable(line.product)) return false;
+    const areaRate = line.planMix?.ratePer1000 ?? line.product.default_rate_per_1000;
+    return areaRate != null || !perGallonRate(line.product);
+  });
+  if (!tank.calibrated && needsCarrier) {
+    issues.push({ kind: 'equipment', status: tank.unavailable ? 'unknown' : 'hold', label: tank.unavailable ? 'Rig check unavailable' : 'Rig needed' });
+  }
+  if (blocks.length) issues.push({ kind: 'plan', status: 'hold', label: 'Plan blocked' });
+  return { serviceId: facts.serviceId, checkedAt: now.toISOString(), issues };
+}
+
+async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), includePricing = false, readinessOnly = false } = {}) {
   const facts = await loadJobCardFacts(serviceId, dbh, deps);
   if (!facts) return null;
   const protocols = deps.protocols || require('../config/protocols.json');
@@ -1457,7 +1496,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   // The spray-check limits are judged from the appointment start.
   const serviceInstant = serviceDayInstant(facts.scheduledDate, now, facts.windowStart);
   const [paragraph, catalog, calibrations, { isToday, hourly }] = await Promise.all([
-    paragraphForVisit(facts, { dbh, deps }),
+    readinessOnly ? null : paragraphForVisit(facts, { dbh, deps }),
     loadCatalog(dbh),
     loadRigCalibrations(dbh, facts.rig),
     forecastAt({ coords: facts.coords, scheduledDate: facts.scheduledDate, now, deps }),
@@ -1469,6 +1508,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   // begun): a 3 pm stop opened at 8 am is checked against the 3 pm hours.
   const labelSources = await checkReviewedWeatherSources(products);
   const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources });
+  if (readinessOnly) return dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, now });
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
   const cards = await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, blocked: blocks.length > 0, tankReason: tank.calibrated ? null : tank.reason, includePricing, dbh });
 
@@ -1749,5 +1789,5 @@ module.exports = {
   resolveVisitLines,
   PROMPT_VERSION,
   SYSTEM_PROMPT,
-  _test: { accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, tankFromCalibrations },
+  _test: { dispatchReadiness, accessCodes, petLine, loadRain7d, wateringLine, precautionText, groundingHash, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, criticalFacts, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, clauseMismatch, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, tankFromCalibrations },
 };

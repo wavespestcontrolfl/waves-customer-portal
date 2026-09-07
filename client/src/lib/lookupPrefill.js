@@ -24,3 +24,25 @@ export function palmPrefillAllowed(enrichedProfile) {
   if (!Number.isFinite(count) || count <= 0) return false;
   return enrichedProfile.palmCountTrusted !== false;
 }
+
+// Measurements belong to the property, regardless of whether its address
+// changes through typing, Places, a customer selection, or an incoming lead.
+// Service selections and contact/linkage fields belong to the estimate.
+export const EMPTY_PROPERTY_MEASUREMENTS = {
+  homeSqFt: "", lotSqFt: "", stories: "1", unitCount: "",
+  propertyType: "Single Family", isCommercial: "NO", commercialSubtype: "",
+  commercialRiskType: "", commercialPestCadence: "", commercialInteriorService: "",
+  commercialLawnCadence: "", treeShrubDensity: "", mosquitoPressure: "",
+  hasPool: "NO", hasPoolCage: "NO", poolCageSize: "MEDIUM", nearWater: "NO",
+  shrubDensity: "MODERATE", treeDensity: "MODERATE", landscapeComplexity: "MODERATE",
+  bedArea: "", measuredTurfSf: "", palmCount: "", palmTreatmentCount: "", treeCount: "",
+  termiteFootprintSqFt: "", termitePerimeterLF: "", boracareSqft: "",
+  boracareSurfaceLinearFt: "", boracareSurfaceHeightFt: "", preslabSqft: "",
+  trenchingPerimeterLF: "", trenchingConcreteLF: "", trenchingDirtLF: "", trenchingConcretePct: "",
+  trenchingEstimateFromFootprint: false, topDressArea: "", plugArea: "",
+  fleaExteriorAreaSqFt: "0", fleaExteriorAreaSource: "UNKNOWN", fleaExteriorZones: [],
+  _termiteFootprintAuto: false, _footprintUnknownLookup: false,
+  _trenchingPerimeterAuto: false, _boracareSqftAuto: false, _preslabSqftAuto: false,
+  _palmCountAuto: false, _homeSqFtEdited: false, _lotSqFtEdited: false,
+  _storiesEdited: false, _poolCageSizeEdited: false, _unitCountEdited: false,
+};

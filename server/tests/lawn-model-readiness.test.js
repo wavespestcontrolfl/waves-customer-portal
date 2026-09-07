@@ -17,7 +17,7 @@ const { LAWN_CHALLENGE } = require('../config/models'); // registry = single sou
 
 describe('lawn model readiness check', () => {
   test('exports the RESOLVED pipeline models (env override or default)', () => {
-    expect(LAWN_PIPELINE_MODELS.vision).toBe(process.env.LAWN_VISION_MODEL || 'gemini-3.5-flash');
+    expect(LAWN_PIPELINE_MODELS.vision).toBe(process.env.LAWN_VISION_MODEL || require('../config/models').GEMINI_VISION_BEST);
     // Challenge id is derived from the central registry — never spelled here.
     expect(LAWN_PIPELINE_MODELS.challenge).toBe(LAWN_CHALLENGE);
     // Writer is decoupled from the global OPENAI_MODEL on purpose.

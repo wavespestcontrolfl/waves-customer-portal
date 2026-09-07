@@ -76,9 +76,9 @@ const DEFAULTS = Object.freeze({
   OPENAI_BALANCED: 'gpt-5.6-terra',
   OPENAI_FAST: 'gpt-5.6-luna',
   OPENAI_REPORT_WRITER: 'gpt-5.6-sol',
-  GEMINI_VISION_BEST: 'gemini-3.5-flash',
+  GEMINI_VISION_BEST: 'gemini-3.8-flash',
   GEMINI_TEXT_BEST: 'gemini-3.5-flash',
-  GEMINI_VISION_FALLBACK: 'gemini-2.5-flash',
+  GEMINI_VISION_FALLBACK: 'gemini-3.8-flash',
   OPENAI_EMBEDDING: 'text-embedding-3-small',
   SMS_SONNET: 'claude-sonnet-5',
   GEMINI_IMAGE_PRO: 'gemini-3-pro-image',
@@ -147,11 +147,12 @@ const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.
 // promoting it would be a deliberate registry change, not a fallback edit.
 const GEMINI_TEXT_BEST = process.env.MODEL_GEMINI_TEXT || DEFAULTS.GEMINI_TEXT_BEST;
 
-// Gemini vision FALLBACK — the prior GA model the customer vision services
-// (pest-identification.js, lawn-assessment.js) retry when GEMINI_VISION_BEST
-// misses, so a live-model entitlement/availability issue never costs the
-// Gemini scorer. Lives here (not in the services) so every model ID stays
-// discoverable in the central registry.
+// Gemini vision FALLBACK — the model the photo lanes (pest-identification.js,
+// lawn-assessment.js, …) retry when GEMINI_VISION_BEST misses. Owner ruling
+// 2026-09-06: every image-analysis leg runs gemini-3.8-flash, so the default
+// equals BEST and every ladder skips the retry rung; set
+// GEMINI_VISION_FALLBACK_MODEL to a different id to re-arm it. Lives here
+// (not in the services) so every model ID stays discoverable in the registry.
 const GEMINI_VISION_FALLBACK = process.env.GEMINI_VISION_FALLBACK_MODEL || DEFAULTS.GEMINI_VISION_FALLBACK;
 
 // Knowledge-index embedding model (hybrid knowledge search, lane A2).

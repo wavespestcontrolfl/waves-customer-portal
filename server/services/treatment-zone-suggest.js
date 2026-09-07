@@ -12,7 +12,7 @@
  * the tech's adjusted trace goes through the existing save route.
  */
 const MODELS = require('../config/models');
-const { anthropicText } = require('./llm/call');
+const { anthropicText, geminiText } = require('./llm/call');
 const logger = require('./logger');
 
 let Anthropic = null;
@@ -234,7 +234,7 @@ async function geminiSuggest(model, base64Png, prompt) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ parts: [{ inline_data: { mime_type: 'image/png', data: base64Png } }, { text: prompt }] }],
-      generationConfig: { temperature: 0.1, maxOutputTokens: 900 },
+      generationConfig: { temperature: 0.1, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
     }),
   });
   if (!response.ok) {
@@ -242,7 +242,7 @@ async function geminiSuggest(model, base64Png, prompt) {
     return null;
   }
   const data = await response.json();
-  return parseModelJson(data.candidates?.[0]?.content?.parts?.[0]?.text);
+  return parseModelJson(geminiText(data));
 }
 
 async function claudeSuggest(base64Png, prompt) {

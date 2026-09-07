@@ -107,6 +107,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await mockPg('activity_log').where({ customer_id: fixture.customerId }).del();
     await mockPg('customers').where({ id: fixture.customerId }).del();
     if (fixture.formTemplateId) await mockPg('job_form_templates').where({ id: fixture.formTemplateId }).del();
+    if (fixture.discountId) await mockPg('discounts').where({ id: fixture.discountId }).del();
     if (fixture.payerId) await mockPg('payers').where({ id: fixture.payerId }).del();
     await mockPg('technicians').where({ id: fixture.techId }).del();
     await mockPg('services').where({ id: fixture.catalogId }).del();
@@ -438,6 +439,49 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test.each([false, true])('reviewed packet prices use one connection and preserve estimate lock order (stale=%p)', async (stale) => {
+    const pricing = require('../services/completion-pricing');
+    const estimateIds = [randomUUID(), randomUUID()];
+    const input = submission();
+    for (const [index, item] of input.items.entries()) {
+      await mockPg('estimates').insert({ id: estimateIds[index], customer_id: fixture.customerId,
+        status: 'accepted', address: '100 Synthetic Test Lane, Bradenton, FL 34201', estimate_data: {} });
+      await mockPg('scheduled_services').where({ id: item.serviceId }).update({ source_estimate_id: estimateIds[index],
+        service_address_line1: '100 Synthetic Test Lane', service_address_city: 'Bradenton', service_address_zip: '34201' });
+      const plan = await pricing.loadCompletionPricing(item.serviceId, { database: mockPg, role: 'technician' });
+      expect(plan.source.estimate.id).toBe(estimateIds[index]);
+      item.body.pricingReview = { witness: plan.view.witness, applyDiscounts: false };
+    }
+    if (stale) input.items[1].body.pricingReview.witness = '0'.repeat(64);
+    const { gates } = require('../config/feature-gates');
+    const priorPricingGate = gates.completionServicePricing;
+    gates.completionServicePricing = true;
+    const shared = mockPg;
+    mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 1 }, acquireConnectionTimeout: 2000 });
+    const queries = [];
+    mockPg.on('query', (query) => queries.push(query));
+    try {
+      if (stale) {
+        await expect(saveVisitCompletionPacket(input)).rejects.toMatchObject({ code: 'completion_pricing_changed' });
+        expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+        expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
+      } else {
+        expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 202, body: { state: 'records_saved' } });
+        const customerLock = queries.findIndex((query) => query.sql.includes('from "customers"') && query.sql.includes('for no key update'));
+        const earlyEstimates = queries.slice(0, customerLock).filter((query) => query.sql.includes('from "estimates"') && query.sql.includes('for share'));
+        expect(earlyEstimates.map((query) => query.bindings[0])).toEqual([...estimateIds].sort());
+        expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 202, body: { replayed: true } });
+        expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
+      }
+    } finally {
+      gates.completionServicePricing = priorPricingGate;
+      await mockPg.destroy();
+      mockPg = shared;
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ source_estimate_id: null });
+      await mockPg('estimates').whereIn('id', estimateIds).del();
+    }
+  });
+
   test('a rejected second form rolls back the first record, status and claim', async () => {
     const input = submission();
     const photoKey = `fixture/${fixture.serviceIds[0]}/before.png`;
@@ -559,6 +603,49 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect((await createVisitCompletionInvoice(result.body.packetId)).invoiceId).toBe(invoice.id);
   });
 
+  test.each([0, 102])('a reviewed application discount reaches the shared invoice with a %s fixed adjustment', async (adjustment) => {
+    const estimateId = randomUUID();
+    fixture.estimateIds.push(estimateId);
+    const key = `fixture_${fixture.catalogId}`;
+    await mockPg('customers').where({ id: fixture.customerId }).update({ per_application_fee: 120 });
+    await mockPg('services').where({ id: fixture.catalogId }).update({ frequency: 'quarterly', billing_type: 'recurring', visits_per_year: 4 });
+    await mockPg('estimates').insert({ id: estimateId, customer_id: fixture.customerId, status: 'accepted',
+      address: '100 Synthetic Test Lane, Bradenton, FL 34201', estimate_data: { result: { recurring: { services: [{
+        service: 'pest_control', serviceKey: key, name: 'Fixture General Pest Control', perTreatment: 120,
+        priceAfterDiscount: 102, visitsPerYear: 4, frequency: 'quarterly', discount: { effectiveDiscount: 0.15 },
+      }] } } } });
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ source_estimate_id: estimateId,
+      service_address_line1: '100 Synthetic Test Lane', service_address_city: 'Bradenton', service_address_zip: '34201' });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({
+      is_recurring: true, recurring_pattern: 'quarterly', primary_line_price: 120, estimated_price: 120 - adjustment,
+    });
+    if (adjustment) {
+      fixture.discountId = randomUUID();
+      await mockPg('discounts').insert({ id: fixture.discountId, discount_key: `fixture_${fixture.discountId}`,
+        name: 'Synthetic fixed adjustment', discount_type: 'fixed_amount', amount: adjustment, is_stackable: true });
+      await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ discount_id: fixture.discountId,
+        discount_name: 'Synthetic fixed adjustment', discount_type: 'fixed_amount', discount_amount: adjustment, discount_dollars: adjustment });
+    }
+    const { gates } = require('../config/feature-gates');
+    const prior = [gates.completionServicePricing, gates.editApptPriceServiceScope];
+    gates.completionServicePricing = true;
+    gates.editApptPriceServiceScope = true;
+    try {
+      const plan = await require('../services/completion-pricing').loadCompletionPricing(fixture.serviceIds[0], { database: mockPg, role: 'admin' });
+      expect(plan.view).toMatchObject({ canApply: true, proposedAmount: 102 - adjustment });
+      const input = submission({ actor: { techRole: 'admin', technicianId: fixture.techId } });
+      input.items[0].body.pricingReview = { witness: plan.view.witness, applyDiscounts: true };
+      const result = await saveVisitCompletionPacket(input);
+      expect(result.body.billing).toMatchObject({ state: 'invoice_ready', total: 222 - adjustment });
+      const record = await mockPg('service_records').where({ scheduled_service_id: fixture.serviceIds[0] }).first();
+      expect(record.structured_notes.completionPricing.amountCents).toBe((102 - adjustment) * 100);
+      expect((await saveVisitCompletionPacket(input)).body.billing.invoiceId).toBe(result.body.billing.invoiceId);
+      expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    } finally {
+      [gates.completionServicePricing, gates.editApptPriceServiceScope] = prior;
+    }
+  });
+
   test.each(['per_application', 'per_visit', 'one_time'])('an unflagged callback stays free in the %s lane', async (billingMode) => {
     await mockPg('customers').where({ id: fixture.customerId }).update({ billing_mode: billingMode });
     await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ is_callback: true });
@@ -601,7 +688,6 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(res.json.mock.calls[0][0].needs_review)
       .toEqual(expect.arrayContaining([expect.objectContaining({ scheduled_service_id: fixture.serviceIds[1] })]));
   });
-
   test.each(['pest', 'lawn'])('concurrent submissions need only their transaction connection for %s helpers', async (lane) => {
     if (lane === 'lawn') {
       await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ service_type: 'WaveGuard Lawn Care' });
@@ -793,7 +879,6 @@ postgres('visit completion packet records on PostgreSQL', () => {
     }, { packetId: result.body.packetId }))).rejects.toMatchObject({ code: '23505', constraint: 'invoices_visit_packet_owner_unique' });
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
   });
-
   test('a second lawn member sees the first member’s uncommitted nitrogen and inventory use', async () => {
     await mockPg('customers').where({ id: fixture.customerId }).update({ waveguard_tier: 'Bronze' });
     await mockPg('services').where({ id: fixture.catalogId }).update({ name: 'Fixture Lawn Care' });
