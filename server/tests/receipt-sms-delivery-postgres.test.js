@@ -6,7 +6,10 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: (gate) => gate === 'composerReceiptLinks' }));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: (gate) => gate === 'composerReceiptLinks',
+  gateEnvValue: () => false,
+}));
 jest.mock('../services/messaging/validators/consent', () => ({
   loadContactState: jest.fn(async () => ({})),
   checkConsentForPurpose: jest.fn(() => ({ ok: true })),
