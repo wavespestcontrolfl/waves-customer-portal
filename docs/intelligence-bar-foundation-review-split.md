@@ -209,3 +209,18 @@ explicit estimate IDs, while message-body commands grant no record authority.
 Validation passes 179 unit/catalog/write-boundary tests and 23 isolated
 PostgreSQL tests. Independent review closed both additional edge cases before
 the fifth remote review. No provider, customer message or production write ran.
+
+Scoped email history now resolves effective ownership through converted leads
+for search candidates, owned/foreign Gmail thread sets and complete-thread
+read/draft validation. Missing/deleted lead links or conflicting direct and
+lead owners refuse before model egress. The controlled PostgreSQL suite covers
+lead-only success, mixed-thread isolation, contradictory links, ownership
+changes and deletion. Its eight cases pass; the affected email-outcome and
+operational-read units add 16 passes. No live model/provider was called.
+
+The shared outcome classifier now also replaces the older route-local failure
+predicate in B2, so a blocked optimizer preview cannot create an approval card
+and blocked commit/execute results cannot return success. The existing route
+confirmation suite passes 49 cases, including both new outcome regressions.
+This brings the adapter's blocked-result contract forward from D so the smaller
+B2 review unit has the same behavior before downstream route integration.
