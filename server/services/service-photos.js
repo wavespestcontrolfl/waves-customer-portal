@@ -6,7 +6,7 @@ const logger = require('./logger');
 const {
   hashBuffer,
   hashPhotoChainPayload,
-  latestPhotoHash,
+  latestPhotoChainEntry,
 } = require('./service-report/photo-chain');
 const { findBannedCustomerCopy } = require('./service-report/activity-indicators');
 
@@ -224,9 +224,19 @@ async function uploadServicePhotoBuffer({
   }));
 
   let row;
+  let reusedExisting = false;
 
   try {
     await withPhotoDbTransaction(knex, async (trx) => {
+      // Lock the completion record even when the photo collection is empty.
+      // Promotion takes the same lock, so every chain append is serialized.
+      await trx('service_records').where({ id: serviceRecordId }).forUpdate().first('id');
+      if (imageHash) {
+        row = await trx('service_photos')
+          .where({ service_record_id: serviceRecordId, image_sha256: imageHash })
+          .select(returning).first();
+        if (row) { reusedExisting = true; return; }
+      }
       const insert = {
         service_record_id: serviceRecordId,
         photo_type: photoType,
@@ -234,25 +244,29 @@ async function uploadServicePhotoBuffer({
         caption: nullIfEmpty(caption),
         sort_order: parseInt(sortOrder, 10) || 0,
       };
-      if (servicePhotoCols.storage_key) insert.storage_key = key;
-      if (servicePhotoCols.thumbnail_key) insert.thumbnail_key = nullIfEmpty(thumbnailKey);
-      if (servicePhotoCols.state_badge) insert.state_badge = nullIfEmpty(stateBadge);
-      if (servicePhotoCols.zone_id) insert.zone_id = nullIfEmpty(zoneId);
-      if (servicePhotoCols.finding_id) insert.finding_id = nullIfEmpty(findingId);
-      if (servicePhotoCols.gps_lat) insert.gps_lat = numberOrNull(gpsLat);
-      if (servicePhotoCols.gps_lng) insert.gps_lng = numberOrNull(gpsLng);
-      if (servicePhotoCols.captured_at) insert.captured_at = captured;
-      if (servicePhotoCols.device) insert.device = nullIfEmpty(device);
-      if (servicePhotoCols.app_version) insert.app_version = nullIfEmpty(appVersion);
-      if (servicePhotoCols.ai_tags) insert.ai_tags = parseJsonOrNull(aiTags);
-      if (servicePhotoCols.annotation) insert.annotation = parseJsonOrNull(annotation);
-      if (servicePhotoCols.image_sha256) insert.image_sha256 = imageHash;
+      const optionalValues = {
+        storage_key: key, thumbnail_key: nullIfEmpty(thumbnailKey), state_badge: nullIfEmpty(stateBadge),
+        zone_id: nullIfEmpty(zoneId), finding_id: nullIfEmpty(findingId),
+        gps_lat: numberOrNull(gpsLat), gps_lng: numberOrNull(gpsLng), captured_at: captured,
+        device: nullIfEmpty(device), app_version: nullIfEmpty(appVersion), ai_tags: parseJsonOrNull(aiTags),
+        annotation: parseJsonOrNull(annotation), image_sha256: imageHash,
+      };
+      for (const [column, value] of Object.entries(optionalValues)) {
+        if (servicePhotoCols[column]) insert[column] = value;
+      }
 
       const canHashChain = servicePhotoCols.hash_sha256
         && servicePhotoCols.prev_hash_sha256
         && servicePhotoCols.captured_at;
-      const prevHash = canHashChain ? await latestPhotoHash(trx, serviceRecordId) : null;
-      if (canHashChain) insert.prev_hash_sha256 = prevHash;
+      const tail = canHashChain ? await latestPhotoChainEntry(trx, serviceRecordId) : null;
+      const prevHash = tail?.hash_sha256 || null;
+      if (canHashChain) {
+        insert.prev_hash_sha256 = prevHash;
+        // A delayed request or camera-roll timestamp must append after the
+        // committed tail, matching the chronological chain validator.
+        const tailTime = new Date(tail?.captured_at || tail?.created_at || 0).getTime();
+        insert.captured_at = new Date(Math.max(captured.getTime(), tailTime + 1));
+      }
 
       [row] = await trx('service_photos').insert(insert).returning(returning);
       if (canHashChain) {
@@ -266,6 +280,7 @@ async function uploadServicePhotoBuffer({
     throw err;
   }
 
+  if (reusedExisting) await deleteUploadedObject(key);
   return row;
 }
 
@@ -352,6 +367,7 @@ async function uploadStagedServicePhotoBuffer({
 async function promoteStagedServicePhotos({ scheduledServiceId, serviceRecordId, knex = db }) {
   if (!scheduledServiceId || !serviceRecordId) return [];
   return withPhotoDbTransaction(knex, async (trx) => {
+    await trx('service_records').where({ id: serviceRecordId }).forUpdate().first('id');
     const staged = await trx('scheduled_service_photo_staging')
       .where({ scheduled_service_id: scheduledServiceId })
       .orderBy('captured_at', 'asc')
@@ -366,11 +382,12 @@ async function promoteStagedServicePhotos({ scheduledServiceId, serviceRecordId,
       'caption', 'sort_order', 'gps_lat', 'gps_lng', 'captured_at',
       'image_sha256', 'hash_sha256', 'prev_hash_sha256', 'created_at',
     ].filter((column) => column === 'id' || cols[column]);
-    let prevHash = cols.hash_sha256 && cols.prev_hash_sha256
-      ? await latestPhotoHash(trx, serviceRecordId)
+    const tail = cols.hash_sha256 && cols.prev_hash_sha256
+      ? await latestPhotoChainEntry(trx, serviceRecordId)
       : null;
+    let prevHash = tail?.hash_sha256 || null;
     const appendingToExistingChain = !!prevHash;
-    const promotedAt = Date.now();
+    const promotedAt = Math.max(Date.now(), new Date(tail?.captured_at || tail?.created_at || 0).getTime() + 1);
     const promoted = [];
 
     for (let index = 0; index < staged.length; index += 1) {
@@ -382,9 +399,9 @@ async function promoteStagedServicePhotos({ scheduledServiceId, serviceRecordId,
         caption: sanitizeCustomerFacingPhotoCaption(photo.caption),
         sort_order: photo.sort_order || 0,
       };
-      if (cols.storage_key) insert.storage_key = photo.s3_key;
-      if (cols.gps_lat) insert.gps_lat = photo.gps_lat;
-      if (cols.gps_lng) insert.gps_lng = photo.gps_lng;
+      for (const [column, value] of Object.entries({ storage_key: photo.s3_key, gps_lat: photo.gps_lat, gps_lng: photo.gps_lng, image_sha256: photo.image_sha256, prev_hash_sha256: prevHash })) {
+        if (cols[column]) insert[column] = value;
+      }
       if (cols.captured_at) {
         // A completion/upload race can promote a true before photo after the
         // completion photos have already formed a chain. Keep late recovery
@@ -394,8 +411,6 @@ async function promoteStagedServicePhotos({ scheduledServiceId, serviceRecordId,
           ? new Date(promotedAt + index)
           : photo.captured_at;
       }
-      if (cols.image_sha256) insert.image_sha256 = photo.image_sha256;
-      if (cols.prev_hash_sha256) insert.prev_hash_sha256 = prevHash;
 
       const [row] = await trx('service_photos').insert(insert).returning(returning);
       if (cols.hash_sha256 && cols.prev_hash_sha256) {
