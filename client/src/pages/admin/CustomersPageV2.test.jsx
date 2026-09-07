@@ -2,7 +2,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, useNavigate } from 'react-router-dom';
+import { MemoryRouter, useNavigate, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CustomersPageV2 from './CustomersPageV2';
 
@@ -52,6 +52,16 @@ function NavigateToCustomerButton() {
   );
 }
 
+function RemountableDirectory() {
+  const location = useLocation();
+  const [version, setVersion] = React.useState(0);
+  return <>
+    <output data-testid="directory-url">{location.search}</output>
+    <button onClick={() => setVersion((value) => value + 1)}>Remount directory</button>
+    <CustomersPageV2 key={version} />
+  </>;
+}
+
 describe('CustomersPageV2 workflow state', () => {
   it('opens the churn alert with the at-risk filter and preserves manual changes on profile return', async () => {
     const requests = [];
@@ -61,7 +71,7 @@ describe('CustomersPageV2 workflow state', () => {
       requests.push(parsed.searchParams);
       return response(list);
     }));
-    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace&healthRisk=at_risk']}><CustomersPageV2 /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace&healthRisk=at_risk']}><RemountableDirectory /></MemoryRouter>);
     await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
     expect(requests.every((params) => params.get('healthRisk') === 'at_risk')).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: /^Filter/ }));
@@ -75,6 +85,13 @@ describe('CustomersPageV2 workflow state', () => {
     expect(screen.getByLabelText('Health / churn risk')).toHaveValue('low');
     fireEvent.click(screen.getByRole('button', { name: 'Clear all' }));
     await waitFor(() => expect(requests.at(-1).has('healthRisk')).toBe(false));
+    expect(screen.getByTestId('directory-url')).toHaveTextContent('?customer360=workspace');
+    expect(screen.getByTestId('directory-url')).not.toHaveTextContent('healthRisk');
+    fireEvent.click(screen.getByRole('button', { name: 'Remount directory' }));
+    await screen.findByRole('button', { name: 'Open Avery Customer customer profile' });
+    fireEvent.click(screen.getByRole('button', { name: /^Filter/ }));
+    expect(screen.getByLabelText('Health / churn risk')).toHaveValue('');
+    expect(requests.at(-1).has('healthRisk')).toBe(false);
   });
 
   it('shows recorded circular scores beside names and composes server filters with search and pagination', async () => {

@@ -10,7 +10,8 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ markInboundSmsReadAdmin: jest.fn().mockResolvedValue(0) }));
 const { randomUUID, randomBytes } = require('node:crypto');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { invoiceOverdueSql, invoiceDaysOverdue } = require('../services/collections/account-anchor');
 const router = require('../routes/admin-customers');
 const { countUnreadInboundSms, markInboundSmsRead } = require('../services/inbound-sms-read');
 const { openBalanceSummary } = require('../services/open-balance');
@@ -137,6 +138,36 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     expect(await countUnreadInboundSms({ customerId: ids[0] })).toEqual({ conversations: 1, messages: 1 });
     expect(await countUnreadInboundSms({ customerId: ids[3] })).toEqual({ conversations: 0, messages: 0 });
     expect(await openBalanceSummary(ids[0], { displayLimit: 0 })).toMatchObject({ total: 150, overdueTotal: 100, overdueCount: 1, count: 2, complete: true, invoices: [] });
+  }, 30000);
+
+  test('legacy due-date fallbacks agree in the directory, profile and collections clock', async () => {
+    const now = new Date();
+    const today = etDateString(now);
+    const midnight = parseETDateTime(`${today}T00:00`);
+    const old = new Date(now.getTime() - 15 * 86400000);
+    const tomorrow = etDateString(new Date(now.getTime() + 86400000));
+    const cases = [
+      { status: 'sent', due_date: null, created_at: old, total: 125, credit_applied: 25 },
+      { status: 'viewed', due_date: null, created_at: new Date(midnight.getTime() - 1), total: 50, credit_applied: 0 },
+      { status: 'sent', due_date: tomorrow, created_at: old, total: 30, credit_applied: 0 },
+      { status: 'viewed', due_date: today, created_at: old, total: 20, credit_applied: 0 },
+      { status: 'sent', due_date: null, created_at: midnight, total: 10, credit_applied: 0 },
+      { status: 'overdue', due_date: tomorrow, created_at: old, total: 5, credit_applied: 0 },
+      { status: 'sent', due_date: null, created_at: old, total: 25, credit_applied: 25 },
+    ].map((row, index) => ({ ...row, id: randomUUID(), customer_id: ids[3], invoice_number: `${prefix}-legacy-${index}`, token: randomBytes(24).toString('hex') }));
+    await mockPg('invoices').insert(cases);
+    try {
+      const rows = await mockPg('invoices').where('customer_id', ids[3])
+        .select('invoices.*', mockPg.raw('? AS is_overdue', [invoiceOverdueSql(mockPg, now)]));
+      for (const row of rows) expect(row.is_overdue).toBe(row.status === 'overdue' || invoiceDaysOverdue(now, row) > 0);
+      const directory = await read('/', { search: prefix });
+      expect(directory.customers.find(row => row.id === ids[3]).overdueInvoiceCount).toBe(3);
+      const profile = await read('/:id', {}, { params: { id: ids[3] } });
+      expect(profile.billingSummary).toMatchObject({ openBalance: 215, overdueBalance: 155, overdueCount: 3, complete: true });
+      expect(await openBalanceSummary(ids[3])).toMatchObject({ total: 215, overdueTotal: 155, overdueCount: 3, count: 6, complete: true });
+    } finally {
+      await mockPg('invoices').whereIn('id', cases.map(row => row.id)).delete();
+    }
   }, 30000);
 
   test('customer thread read scope covers older unread history while preserving later arrivals and other customers', async () => {

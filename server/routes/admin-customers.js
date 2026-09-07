@@ -10,6 +10,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const logger = require('../services/logger');
 const { stageLifecycleStamps } = require('../services/customer-stages');
 const { etDateString } = require('../utils/datetime-et');
+const { invoiceOverdueSql } = require('../services/collections/account-anchor');
 const { openBalanceSummary } = require('../services/open-balance');
 const { formatAddress, normalizeUnitLine } = require('../utils/address-normalizer');
 const { findCustomersAtAddress, rankByContact } = require('../services/customer-address-match');
@@ -2339,7 +2340,7 @@ router.get('/', async (req, res, next) => {
       db.raw("(SELECT COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue')) as balance_owed"),
       // Invoice exception only, including third-party bills on the record.
       // This is not an assertion that the homeowner owes a self-pay balance.
-      db.raw("(SELECT COUNT(*) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue') AND GREATEST(total - COALESCE(credit_applied, 0), 0) > 0 AND (status = 'overdue' OR due_date < ?)) as overdue_invoice_count", [etDateString()]),
+      db.raw("(SELECT COUNT(*) FROM invoices WHERE invoices.customer_id = customers.id AND status IN ('sent', 'viewed', 'overdue') AND GREATEST(total - COALESCE(credit_applied, 0), 0) > 0 AND ?) as overdue_invoice_count", [invoiceOverdueSql(db)]),
       db.raw('? as health_score', [latestHealthValueRaw(healthColumns, 'score')]),
       db.raw('? as health_grade', [latestHealthValueRaw(healthColumns, 'grade')]),
       db.raw("(SELECT COUNT(*) FROM payment_methods WHERE payment_methods.customer_id = customers.id) as cards_on_file"),

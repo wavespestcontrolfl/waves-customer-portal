@@ -2176,6 +2176,11 @@ export default function CustomersPageV2() {
                 variant="secondary"
                 onClick={() => {
                   setHealthFilters({});
+                  setSearchParams((current) => {
+                    const next = new URLSearchParams(current);
+                    next.delete("healthRisk");
+                    return next;
+                  }, { replace: true });
                   setFilterTier("all");
                   setFilterStage("all");
                   setFilterLastVisited("all");

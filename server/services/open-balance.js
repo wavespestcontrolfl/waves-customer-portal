@@ -29,6 +29,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const { etDateString } = require('../utils/datetime-et');
+const { invoiceOverdueSql } = require('./collections/account-anchor');
 
 // Safety valve, not display pagination: high enough that every real
 // customer's full balance fits (prod max open invoices per customer is
@@ -71,7 +72,7 @@ function openInvoiceQuery(customerId, { excludeInvoiceId = null, database = db }
       'id', 'invoice_number', 'status', 'service_type', 'service_date',
       'due_date', 'created_at', 'subtotal', 'discount_amount', 'total',
       'credit_applied', 'scheduled_service_id', 'stripe_payment_intent_id',
-      database.raw("(status = 'overdue' OR due_date < ?) AS is_overdue", [etDateString()]),
+      database.raw("? AS is_overdue", [invoiceOverdueSql(database)]),
     );
   if (excludeInvoiceId) query.whereNot('id', excludeInvoiceId);
   return query;

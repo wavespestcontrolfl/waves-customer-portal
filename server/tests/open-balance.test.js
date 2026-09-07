@@ -136,7 +136,6 @@ describe('open-balance selection', () => {
     ];
     const summary = await openBalanceSummary('cust-1', { displayLimit: 0 });
     expect(summary).toMatchObject({ total: 1100, overdueTotal: 100, overdueCount: 1, count: 2, complete: true, invoices: [] });
-    expect(tableResults.lastCalls.find(([method]) => method === 'select')[1]).toContain("(status = 'overdue' OR due_date < ?) AS is_overdue");
   });
 
   test('marks survivor totals incomplete after payer lookup failures or truncation', async () => {
