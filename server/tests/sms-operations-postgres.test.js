@@ -512,12 +512,12 @@ postgres('SMS operations on PostgreSQL', () => {
     await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_zones: 6 });
     expect(await revert()).toEqual({ reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } });
     expect((await mockPg('property_preferences').first()).irrigation_system).toBe(true);
-    // Existing approvals also preserve edits made since the migration.
+    // Revision-less approvals keep their original value-based semantics.
     recorded = { irrigation_system: false, irrigation_baseline: {
       inputs: { irrigation_zones: 6, irrigation_schedule_notes: 'Private watering instructions.' }, confirmed: [],
     } };
     await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_system: true });
-    expect(await revert()).toEqual({ reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } });
+    expect(await revert()).toEqual({ reverted: ['irrigation_system'] });
   });
 
   test.each([
@@ -569,11 +569,20 @@ postgres('SMS operations on PostgreSQL', () => {
     expect((await mockPg('property_preferences').first()).irrigation_system).toBe(true);
   });
 
-  test('a legacy approval can restore its companion while no post-migration irrigation edit exists', async () => {
+  test.each([false, true])('a legacy approval can restore its companion (approved during deployment: %s)', async (duringDeploy) => {
     const writer = require('../services/data-hygiene/property-preferences');
-    const [target] = await mockPg('property_preferences').insert({ customer_id: message.customer_id,
-      irrigation_system: true, irrigation_controller_location: 'Beside the garage.', irrigation_zones: 6 }).returning('*');
-    const proposal = { scope_id: message.customer_id, field: 'irrigation_controller_location', resource_id: target.id };
+    const [row] = await mockPg('property_preferences').insert({ customer_id: message.customer_id,
+      irrigation_system: !duringDeploy, irrigation_controller_location: duringDeploy ? null : 'Beside the garage.',
+      irrigation_zones: 6 }).returning('*');
+    if (duringDeploy) {
+      // Pre-deploy migrations install the trigger while the old application
+      // still writes approvals without recording a revision in the baseline.
+      await mockPg('property_preferences').where({ id: row.id })
+        .update({ irrigation_system: true, irrigation_controller_location: 'Beside the garage.' });
+    }
+    const target = await mockPg('property_preferences').where({ id: row.id }).first();
+    expect(target.irrigation_revision).toBe(duringDeploy ? '1' : '0');
+    const proposal = { scope_id: message.customer_id, field: 'irrigation_controller_location', resource_id: row.id };
     const companions = { irrigation_system: false, irrigation_baseline: { inputs: { irrigation_zones: 6 }, confirmed: [] } };
     await mockPg.transaction(async (trx) => {
       expect(await writer.revertPropertyPreferenceCompanions({ trx, proposal, target, companions }))

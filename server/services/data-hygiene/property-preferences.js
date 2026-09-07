@@ -83,10 +83,11 @@ async function revertPropertyPreferenceCompanions({ trx, proposal, target, compa
   if (!('irrigation_system' in companions) || target.irrigation_system !== true) return { reverted: [] };
   const now = irrigationEvidence(target, proposal.field);
   const baseline = companions.irrigation_baseline || { input_hashes: {}, confirmed: [] };
-  // Existing approvals start at the migration's zero revision. Any later
-  // irrigation edit, including an edit followed by a restore, preserves the
-  // active flag. The caller supplies the row locked BEFORE its own revert.
-  if (String(target.irrigation_revision) !== String(baseline.revision ?? 0)) {
+  // The old release can still approve after the pre-deploy trigger exists.
+  // Only an approval that recorded its revision can use that history; older
+  // approvals retain their value/confirmation checks below. The caller
+  // supplies the row locked BEFORE its own revert.
+  if (baseline.revision != null && String(target.irrigation_revision) !== String(baseline.revision)) {
     return { reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } };
   }
   // Approvals already persisted by previews may carry the earlier value map.
