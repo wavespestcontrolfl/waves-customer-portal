@@ -3,7 +3,7 @@
 Run top to bottom before merging any portal/astro PR. Every unchecked item is a blocked merge.
 
 ## Before the PR opens
-- [ ] Review tier chosen (Light / Full per waves-ship §4) and named in the PR body; any touched file on the Full list makes the PR Full
+- [ ] Review tier named in the PR body (waves-ship §4): Full by default; Light only when every touched file qualifies
 - [ ] Under ~600 changed lines excluding mechanical bulk — otherwise split now, not after round 4
 - [ ] Review map in the PR body: requirement → files → invariant at risk → proving command (Full: every requirement; Light: one line each)
 
