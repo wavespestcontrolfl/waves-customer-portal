@@ -5886,9 +5886,9 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           }
         }
 
-        const turfProfile = await trx('customer_turf_profiles')
+        const turfProfile = await savepointRead(trx, (k) => k('customer_turf_profiles')
           .where({ customer_id: svc.customer_id, active: true })
-          .first()
+          .first())
           .catch(() => null);
 
         // 2. service_products — children of the service_record.

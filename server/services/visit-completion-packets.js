@@ -54,6 +54,7 @@ function packetSnapshot(request, actor, members, existing) {
     .map((member) => ({ serviceId: member.id, status: member.status }));
   const items = structuredClone(request.items);
   for (const item of items) {
+    if (item.body.gaugePhoto && typeof item.body.gaugePhoto === 'object') delete item.body.gaugePhoto.data;
     if (!Array.isArray(item.body.completionPhotos)) continue;
     for (const photo of item.body.completionPhotos) {
       if (photo && typeof photo === 'object') delete photo.data;

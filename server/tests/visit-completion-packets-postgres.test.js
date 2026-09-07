@@ -264,33 +264,42 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await saveVisitCompletionRecords(input)).toMatchObject({ status: 202, body: { replayed: true, items: first.body.items } });
   });
 
-  test('photo bytes are uploaded once and hashed for retry without remaining in the packet snapshot', async () => {
+  test.each(['completionPhotos', 'gaugePhoto'])('%s bytes are uploaded once and hashed without remaining in the packet snapshot', async (field) => {
     const config = require('../config');
     const priorBucket = config.s3.bucket;
     config.s3.bucket = 'fixture-photo-bucket';
     const send = jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send').mockResolvedValue({});
     const input = submission();
     const data = `data:image/png;base64,${Buffer.from('synthetic photo bytes').toString('base64')}`;
-    for (const item of input.items) item.body.completionPhotos = [{ data, name: 'fixture.png', caption: 'Work area' }];
+    const photo = { data, name: 'fixture.png', caption: 'Work area' };
+    const metadata = { name: 'fixture.png', caption: 'Work area' };
+    const flags = require('../services/feature-flags').isUserFeatureEnabled;
+    if (field === 'gaugePhoto') {
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ service_type: 'WaveGuard Lawn Care' });
+      flags.mockImplementation(async (_id, flag) => flag === 'turf-height-capture');
+    }
+    for (const item of input.items) item.body[field] = field === 'completionPhotos' ? [{ ...photo }] : { ...photo };
     try {
       const first = await saveVisitCompletionRecords(input);
       expect(first.status).toBe(202);
       const packet = await mockPg('visit_completion_packets').where({ id: first.body.packetId }).first();
       for (const item of packet.payload.items) {
-        expect(item.body.completionPhotos).toEqual([{ name: 'fixture.png', caption: 'Work area' }]);
+        expect(item.body[field]).toEqual(field === 'completionPhotos' ? [metadata] : metadata);
       }
       expect(JSON.stringify(packet.payload)).not.toContain(data);
-      expect(input.items[0].body.completionPhotos[0].data).toBe(data);
+      const submittedPhoto = field === 'completionPhotos' ? input.items[0].body[field][0] : input.items[0].body[field];
+      expect(submittedPhoto.data).toBe(data);
       expect(await mockPg('service_photos').whereIn('service_record_id', first.body.items.map((item) => item.serviceRecordId)))
         .toHaveLength(2);
       expect(send).toHaveBeenCalledTimes(2);
       expect(await saveVisitCompletionRecords(input)).toMatchObject({ status: 202, body: { replayed: true } });
       expect(send).toHaveBeenCalledTimes(2);
-      input.items[0].body.completionPhotos[0].data = `data:image/png;base64,${Buffer.from('changed photo').toString('base64')}`;
+      submittedPhoto.data = `data:image/png;base64,${Buffer.from('changed photo').toString('base64')}`;
       expect(await saveVisitCompletionRecords(input)).toMatchObject({ status: 409, body: { code: 'visit_closeout_payload_mismatch' } });
     } finally {
       send.mockRestore();
       config.s3.bucket = priorBucket;
+      flags.mockImplementation(async () => false);
     }
   });
 
@@ -430,13 +439,20 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await mockPg('property_nutrient_ledger').where({ customer_id: fixture.customerId })).toHaveLength(2);
   });
 
-  test.each(['profile', 'Auto Pay'])('a packet records every member after a recoverable %s read failure', async (helper) => {
-    const matches = helper === 'profile'
-      ? (query) => query.sql.includes('information_schema.tables') && query.bindings.includes('service_completion_profiles')
-      : (query) => query.sql.includes('from "payment_methods"');
-    await withReadFailure(matches, async (trx) => {
+  test.each(['profile', 'Auto Pay', 'turf profile', 'Pest Pressure table', 'Pest Pressure config'])
+  ('a packet records every member after a recoverable %s read failure', async (helper) => {
+    const matches = {
+      profile: (query) => query.sql.includes('information_schema.tables') && query.bindings.includes('service_completion_profiles'),
+      'Auto Pay': (query) => query.sql.includes('from "payment_methods"'),
+      'turf profile': (query) => query.sql.includes('from "customer_turf_profiles"'),
+      'Pest Pressure table': (query) => query.sql.includes('information_schema.tables') && query.bindings.includes('pest_pressure_configs'),
+      'Pest Pressure config': (query) => query.sql.includes('from "pest_pressure_configs"'),
+    };
+    await withReadFailure(matches[helper], async (trx) => {
       await trx('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true });
-      const result = await saveVisitCompletionRecords(submission(), trx);
+      const input = submission();
+      for (const item of input.items) item.body.clientPestRating = 3;
+      const result = await saveVisitCompletionRecords(input, trx);
       expect(result).toMatchObject({ status: 202, body: { state: 'records_saved' } });
       expect(await trx('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
       expect(await trx('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
