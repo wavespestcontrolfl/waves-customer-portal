@@ -3,6 +3,8 @@ jest.mock('../models/db', () => {
   const conn = (...args) => mockPg(...args);
   conn.transaction = (...args) => mockPg.transaction(...args);
   conn.raw = (...args) => mockPg.raw(...args);
+  // Writers that run outside a transaction (the extraction phase's receipts) use db.fn.now().
+  Object.defineProperty(conn, 'fn', { get: () => mockPg.fn });
   return conn;
 });
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
@@ -22,7 +24,7 @@ const postgres = connection ? describe : describe.skip;
 const schema = `sms_operations_${randomUUID().replaceAll('-', '')}`;
 const TABLES = ['customers', 'customer_properties', 'property_preferences', 'sms_log', 'call_log',
   'call_commitments', 'data_hygiene_source_extractions', 'data_hygiene_proposals', 'data_hygiene_sensitive_vault',
-  'notifications', 'audit_log',
+  'conversations', 'messages', 'notifications', 'audit_log',
   'emails', 'email_messages', 'estimates', 'invoices', 'scheduled_services', 'job_status_history', 'system_settings'];
 let mockPg;
 let admin;
@@ -213,6 +215,23 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(rows.filter((row) => row.scope_id === message.customer_id && row.field === 'pet_details').map((row) => [row.rule_id, row.status]))
       .toEqual([['extract.pet_details', 'stale'], ['extract.sms_profile', 'pending']]);
     expect(rows.filter((row) => row.status === 'pending')).toHaveLength(3);
+  });
+
+  test('the extraction phase does not stack a second proposal on a pending SMS proposal', async () => {
+    const { runMessageExtractionPhase } = require('../services/data-hygiene/message-extractor');
+    const quote = 'Two friendly dogs in the yard.';
+    message.message_body = quote;
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: quote });
+    result.facts = [{ field: 'pet_details', quote, value: quote, property_id: context.properties[0].id, duration: 'durable' }];
+    await recordMessageOperations(mockPg, message, result, context);
+    const [conversation] = await mockPg('conversations').insert({ customer_id: message.customer_id, channel: 'sms' }).returning('id');
+    await mockPg('messages').insert({ conversation_id: conversation.id, channel: 'sms', direction: 'inbound',
+      author_type: 'customer', body: quote, twilio_sid: 'SM_dual_written' });
+    const counts = await runMessageExtractionPhase({ lookbackDays: 1, limit: 10 });
+    expect(counts).toMatchObject({ created: 0, duplicates: 1, errors: 0 });
+    const pending = await mockPg('data_hygiene_proposals').where({ status: 'pending', field: 'pet_details' });
+    expect(pending).toHaveLength(1);
+    expect(pending[0].rule_id).toBe('extract.sms_profile');
   });
 
   test('a stated pet becomes a pending proposal instead of a direct write', async () => {

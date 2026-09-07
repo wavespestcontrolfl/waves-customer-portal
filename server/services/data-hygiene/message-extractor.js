@@ -5,7 +5,7 @@ const {
   recordExtractionAttempt,
   shouldSkipExtraction,
 } = require('./source-extraction-store');
-const { upsertSensitiveProposal } = require('./proposal-store');
+const { upsertSensitiveProposal, findPendingExtractionProposal } = require('./proposal-store');
 
 const EXTRACTOR_VERSION = 'message-property-preferences-v3';
 const DEFAULT_LOOKBACK_DAYS = 180;
@@ -117,6 +117,13 @@ async function runMessageExtractionPhase({
       for (const proposal of proposals) {
         increment(counts.by_rule, proposal.rule_id);
         increment(counts.by_field, proposal.field);
+        // The SMS profile lane may already hold a pending proposal for this
+        // field from the same dual-written message, or a newer message was
+        // processed earlier in this newest-first pass: never stack a second.
+        if (await findPendingExtractionProposal({ scope_id: proposal.scope_id, field: proposal.field })) {
+          counts.duplicates += 1;
+          continue;
+        }
         if (dryRun) {
           counts.would_create += 1;
           proposalCount += 1;

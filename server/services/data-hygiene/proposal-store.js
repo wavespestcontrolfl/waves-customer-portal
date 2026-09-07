@@ -209,6 +209,14 @@ async function stalePendingExtractionProposals({ trx = null, scope_id, field, so
   return Number(updated) || 0;
 }
 
+// The pending sibling an extraction writer must not stack a second entry on.
+async function findPendingExtractionProposal({ trx = null, scope_id, field, source = 'message-extraction' }) {
+  const client = trx || db;
+  return client('data_hygiene_proposals')
+    .where({ resource_type: 'property_preferences', scope_type: 'customer', scope_id, field, source, status: 'pending' })
+    .first('id');
+}
+
 module.exports = {
   buildIdempotencyKey,
   stableJson,
@@ -216,5 +224,6 @@ module.exports = {
   upsertSensitiveProposal,
   stalePendingNormalizationForResource,
   stalePendingExtractionProposals,
+  findPendingExtractionProposal,
   isSensitiveProposal,
 };
