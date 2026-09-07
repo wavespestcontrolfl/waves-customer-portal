@@ -51,6 +51,13 @@ Part A local checks: catalog/coverage unit suites (9 tests) passed. The coverage
 and domain-rule gates must pass before push. It has no DB or UI change, so no
 migration or browser run is claimed for this split.
 
+Part A main integration at `801b4fbf303ece9fc58f7340f10b33a29b5cfcf2`
+adds four commercial-proposal request sites to the retained census, all
+unmapped, for 1,736 cumulative unsupported/unverified sites. The existing
+write-gate scanner now recognizes `action-registry.js` as a non-tool helper;
+catalog, coverage, and write-gate suites pass all 46 tests. These resolve the
+first CI run's exact failures (new upstream sites and the helper allowlist).
+
 Part B introduces the target-context reader for integration in D. Review IDs
 participate in the same parent/customer checks as other records; an unlinked
 review needs its native deep link or an explicit UUID, and cannot be substituted

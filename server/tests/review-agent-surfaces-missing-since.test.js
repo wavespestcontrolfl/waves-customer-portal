@@ -285,6 +285,8 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
       jest.doMock('../services/review-reply/publisher', () => {
         const actual = jest.requireActual('../services/review-reply/publisher');
         return { ...actual, publishReviewReply: async ({ guard }) => {
+          // Canonical lookup may fill a missing resource before acquiring the claim.
+          row.gbp_review_name = 'locations/fixture/reviews/resolved';
           expect(await guard({ ...row })).toBeNull();
           guarded++;
           // A click-auto relink does not affect the separate draft grounding token.
