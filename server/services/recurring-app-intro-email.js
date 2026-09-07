@@ -12,7 +12,8 @@
  *     plus a waveguard_tier read from the customers table — loadService() does
  *     NOT join customers, so svc.waveguard_tier is always undefined and must not
  *     be trusted here. Mirrors the welcome-SMS guard in appointment-tagger.
- *   - First visit only: no completed service_records yet. The email itself is
+ *   - First service day only: no earlier reports or completed/on-site visits.
+ *     The email itself is
  *     idempotent per customer (idempotencyKey app_intro:<customerId>), but this
  *     check also keeps the existing customer base from receiving it on their
  *     next en-route after launch.
@@ -21,17 +22,10 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const AccountMembershipEmail = require('./account-membership-email');
+const { isFirstServiceVisit } = require('./customer-visit-history');
 
 function isEnabled() {
   return String(process.env.GATE_APP_INTRO_EMAIL || '').toLowerCase() === 'true';
-}
-
-async function isFirstVisit(customerId) {
-  const row = await db('service_records')
-    .where({ customer_id: customerId })
-    .count('* as count')
-    .first();
-  return parseInt(row?.count || 0, 10) === 0;
 }
 
 /**
@@ -63,14 +57,18 @@ async function maybeSendOnEnRoute(svc) {
     if ((await tierLabelStatus(svc.customer_id)) !== 'not_label') {
       return { sent: false, skipped: true, reason: 'label_only_tier' };
     }
-    if (!(await isFirstVisit(svc.customer_id))) {
+    if (!(await isFirstServiceVisit(svc.customer_id, svc.scheduled_date))) {
       return { sent: false, skipped: true, reason: 'not_first_visit' };
     }
-    return await AccountMembershipEmail.sendAppIntro({ customerId: svc.customer_id, sourceId: svc.id });
+    return await AccountMembershipEmail.sendAppIntro({
+      customerId: svc.customer_id,
+      sourceId: svc.id,
+      trackToken: svc.track_view_token,
+    });
   } catch (err) {
     logger.error(`[recurring-app-intro] send failed for customer ${svc?.customer_id}: ${err.message}`);
     return { sent: false, error: err.message };
   }
 }
 
-module.exports = { maybeSendOnEnRoute, isEnabled, isFirstVisit };
+module.exports = { maybeSendOnEnRoute, isEnabled };

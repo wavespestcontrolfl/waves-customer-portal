@@ -694,9 +694,12 @@ async function sendMembershipStarted({
 const APP_STORE_URL = 'https://apps.apple.com/us/app/waves-pest-control/id6782775654';
 const PLAY_STORE_URL = 'https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal';
 
-async function sendAppIntro({ customerId, sourceId = null } = {}) {
+async function sendAppIntro({ customerId, sourceId = null, trackToken = null } = {}) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
+  const trackUrl = /^[a-f0-9]{64}$/.test(String(trackToken || ''))
+    ? buildPortalUrl(`/track/${encodeURIComponent(trackToken)}`)
+    : '';
   return sendTemplate({
     customerId,
     templateKey: 'app_intro',
@@ -704,6 +707,10 @@ async function sendAppIntro({ customerId, sourceId = null } = {}) {
     payload: {
       app_store_url: APP_STORE_URL,
       play_store_url: PLAY_STORE_URL,
+      track_url: trackUrl,
+      // The template renders exactly one button. Old senders still supply
+      // customer_portal_url, so a pre-deploy template update retains a CTA.
+      customer_portal_url: trackUrl ? '' : buildPortalUrl('/login'),
     },
     idempotencyKey: `app_intro:${customerId}`,
     categories: ['app_intro', 'onboarding'],

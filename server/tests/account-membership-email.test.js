@@ -399,3 +399,23 @@ describe('account and membership email sender', () => {
     }));
   });
 });
+
+
+describe('app intro tracker destination', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  test.each([['a'.repeat(64), true], [null, false], ['bad/token', false]])('uses a valid tracker or login fallback (%s)', async (trackToken, valid) => {
+    setDbQueues({
+      customers: [chain({ first: customer() }), chain({ first: customer() })],
+      customer_interactions: [chain()],
+    });
+    await AccountMembershipEmail.sendAppIntro({ customerId: 'cust-1', sourceId: 'visit-1', trackToken });
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'app_intro', to: 'taylor@example.com', idempotencyKey: 'app_intro:cust-1',
+      payload: expect.objectContaining({
+        track_url: valid ? `https://portal.wavespestcontrol.com/track/${trackToken}` : '',
+        customer_portal_url: valid ? '' : 'https://portal.wavespestcontrol.com/login',
+      }),
+    }));
+  });
+});
