@@ -488,6 +488,7 @@ export function SmsTemplatesTabV2() {
                 <div className="flex items-center gap-2">
                   {" "}
                   <Switch
+                    aria-label={`${t.is_active ? 'Disable' : 'Enable'} ${t.name}`}
                     checked={t.is_active}
                     onChange={() => toggleActive(t)}
                   />

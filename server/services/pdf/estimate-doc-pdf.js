@@ -93,12 +93,12 @@ function estimateDocumentUrl(token, { validThrough = null } = {}) {
   return `${base}/estimate/${encodeURIComponent(token)}?mode=pdf&dpin=${encodeURIComponent(pin)}`;
 }
 
-// Bounded render concurrency — every render launches a Chromium process,
+// Shared estimate/staff capacity — every render launches a Chromium process,
 // and the public /:token/pdf route is reachable by any token holder. The
 // per-IP route limiter can be bypassed by distributed callers, so this
 // in-process semaphore is the real backstop: past the cap, renders throw
-// `estimate_doc_render_busy` and every caller serves its pdfkit fallback
-// instead of stacking browsers until Railway runs out of memory.
+// `estimate_doc_render_busy`; estimate callers use their pdfkit fallback and
+// staff callers return a retryable 503 instead of stacking browsers.
 // Parsed as a finite positive integer — a nonnumeric/Infinity value would
 // make the >= cap check never fire and silently disarm the memory-safety
 // backstop (codex #3281 r2). Bad values fall back to the default.
@@ -108,22 +108,26 @@ const MAX_CONCURRENT_DOC_RENDERS = (() => {
 })();
 let activeDocRenders = 0;
 
-// Renders the document → Buffer. Throws on any failure; callers fall back
-// to the pdfkit generator. Mirrors renderReportPdfWithBrowser's settings
-// (Letter, print media, 0.5in margins, page-number footer).
-async function renderEstimateDocumentPdf(estimate, { validThrough = null } = {}) {
-  if (!estimate?.token) throw new Error('estimate token required for document render');
+// Keep both renderers inside the existing capacity budget, including browser
+// cleanup on success or failure. Estimate callers retain their pdfkit fallback.
+async function withDocumentPdfCapacity(render) {
   if (activeDocRenders >= MAX_CONCURRENT_DOC_RENDERS) {
-    const busy = new Error(`estimate document render capacity reached (${MAX_CONCURRENT_DOC_RENDERS} concurrent)`);
+    const busy = new Error('Document PDF exports are busy. Try again shortly.');
     busy.code = 'estimate_doc_render_busy';
+    busy.status = 503;
     throw busy;
   }
   activeDocRenders += 1;
   try {
-    return await renderEstimateDocumentPdfInner(estimate, { validThrough });
+    return await render();
   } finally {
     activeDocRenders -= 1;
   }
+}
+
+async function renderEstimateDocumentPdf(estimate, { validThrough = null } = {}) {
+  if (!estimate?.token) throw new Error('estimate token required for document render');
+  return withDocumentPdfCapacity(() => renderEstimateDocumentPdfInner(estimate, { validThrough }));
 }
 
 async function renderEstimateDocumentPdfInner(estimate, { validThrough = null } = {}) {
@@ -202,6 +206,7 @@ async function buildEstimateProposalEmailAttachmentPreferred(estimate, { validTh
 }
 
 module.exports = {
+  withDocumentPdfCapacity,
   signEstimateDocPin,
   verifyEstimateDocPin,
   estimateDocumentUrl,

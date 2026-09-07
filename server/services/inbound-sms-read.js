@@ -109,13 +109,14 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
 // Count that same identity across every conversation. Internal
 // admin-phone traffic is excluded exactly as the inbox log excludes it
 // (`excludePhones` = the router's ADMIN_PHONES).
-async function countUnreadInboundSms({ excludePhones = [] } = {}) {
+async function countUnreadInboundSms({ excludePhones = [], customerId = null } = {}) {
   let q = db('messages')
     .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
     .leftJoin('customers', 'conversations.customer_id', 'customers.id')
     .where('messages.channel', 'sms')
     .where('messages.direction', 'inbound')
     .andWhere(function unread() { this.where({ 'messages.is_read': false }).orWhereNull('messages.is_read'); });
+  if (customerId) q = q.where('conversations.customer_id', customerId);
   for (const phone of excludePhones) {
     q = q
       .whereNot('conversations.our_endpoint_id', phone)

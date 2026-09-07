@@ -2518,6 +2518,8 @@ const gates = {
   labelPipeline: gateEnvValue('GATE_LABEL_PIPELINE'),
 
   closeoutMoneyCommsAlerts: gateEnvValue('GATE_CLOSEOUT_MONEY_COMMS_ALERTS'),
+  // Staff source/version UI and APIs. Default off; every request rechecks.
+  controlledStaffDocuments: gateEnvValue('GATE_CONTROLLED_STAFF_DOCUMENTS'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

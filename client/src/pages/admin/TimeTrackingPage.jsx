@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import { createPortal } from "react-dom";
+import { useSearchParams } from "react-router-dom";
+import StaffDocumentLibrary from "../../components/staffDocuments/Library";
+import useStaffDocumentsAvailable from "../../hooks/useStaffDocumentsAvailable";
 import {
   BarChart3,
   CheckCircle2,
@@ -172,7 +175,15 @@ const STAFF_LEAF_BY_KEY = Object.fromEntries(
 );
 
 export default function TimeTrackingPage() {
-  const [tab, setTab] = useState("dashboard");
+  const controlledDocumentsAvailable = useStaffDocumentsAvailable();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
+  const setTab = (value) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", value);
+    if (value !== "documents") { next.delete("document"); next.delete("version"); }
+    setSearchParams(next);
+  };
   const activeGroup =
     TIMETRACKING_TAB_GROUPS.find((g) => g.tabs.includes(tab)) ||
     TIMETRACKING_TAB_GROUPS[0];
@@ -254,7 +265,13 @@ export default function TimeTrackingPage() {
       {tab === "entries" && <EntriesTab showToast={showToast} />}
       {tab === "analytics" && <AnalyticsTab />}
       {tab === "team" && <TeamTab showToast={showToast} />}
-      {tab === "documents" && <DocumentsTab showToast={showToast} />}
+      {tab === "documents" && (controlledDocumentsAvailable ? <>
+        <StaffDocumentLibrary manage />
+        <details style={{ marginTop: 24 }}>
+          <summary style={{ fontSize: 16, fontWeight: 700, padding: "16px 0", cursor: "pointer" }}>Uploaded files and historical attachments</summary>
+          <DocumentsTab showToast={showToast} />
+        </details>
+      </> : <DocumentsTab showToast={showToast} />)}
       <div
         style={{
           position: "fixed",
@@ -1028,6 +1045,7 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
           {cellEntries.length === 0 ? (
             <div style={{ color: D.muted, fontSize: 12 }}>No entries</div>
           ) : (
+            <div style={{ overflowX: "auto" }}>
             <table
               style={{
                 width: "100%",
@@ -1098,6 +1116,7 @@ function TimesheetTab({ showToast, onOpenApprovals }) {
                 ))}
               </tbody>{" "}
             </table>
+            </div>
           )}
         </div>
       )}
@@ -1905,6 +1924,7 @@ function AnalyticsTab() {
             No job data in this period
           </div>
         ) : (
+          <div style={{ overflowX: "auto" }}>
           <table
             style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}
           >
@@ -1980,6 +2000,7 @@ function AnalyticsTab() {
               })}
             </tbody>{" "}
           </table>
+          </div>
         )}
       </div>
       {/* Per-tech comparison */}
@@ -1997,6 +2018,7 @@ function AnalyticsTab() {
         {comparison.length === 0 ? (
           <div style={{ color: D.muted, fontSize: 12 }}>No comparison data</div>
         ) : (
+          <div style={{ overflowX: "auto" }}>
           <table
             style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}
           >
@@ -2052,6 +2074,7 @@ function AnalyticsTab() {
               })}
             </tbody>{" "}
           </table>
+          </div>
         )}
       </div>
       {/* RPMH by Tech */}
@@ -2069,6 +2092,7 @@ function AnalyticsTab() {
         {Object.keys(rpmhMap).length === 0 ? (
           <div style={{ color: D.muted, fontSize: 12 }}>No RPMH data yet</div>
         ) : (
+          <div style={{ overflowX: "auto" }}>
           <table
             style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}
           >
@@ -2129,6 +2153,7 @@ function AnalyticsTab() {
               })}
             </tbody>{" "}
           </table>
+          </div>
         )}
       </div>
       {/* Utilization Trend - SVG Line Chart */}
@@ -2279,6 +2304,7 @@ function OvertimeTable({ data }) {
   });
 
   return (
+    <div style={{ overflowX: "auto" }}>
     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
       {" "}
       <thead>
@@ -2339,6 +2365,7 @@ function OvertimeTable({ data }) {
         )}
       </tbody>{" "}
     </table>
+    </div>
   );
 }
 
@@ -3056,6 +3083,7 @@ export function TeamTab({ showToast }) {
       {/* Tech list */}
       <div style={sCard}>
         {" "}
+        <div style={{ overflowX: "auto" }}>
         <table
           style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}
         >
@@ -3326,7 +3354,7 @@ export function TeamTab({ showToast }) {
               </tr>
             )}
           </tbody>{" "}
-        </table>{" "}
+        </table></div>{" "}
       </div>
       {earningsTech && (
         <EarningsModal

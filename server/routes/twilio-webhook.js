@@ -782,7 +782,7 @@ router.post('/sms', async (req, res) => {
         customer.lead_intake_status !== 'estimate_drafted' && !rescheduleAsk) {
       try {
         const LeadIntake = require('../services/lead-intake');
-        const intakeResult = await LeadIntake.handleIntakeReply(customer, Body);
+        const intakeResult = await LeadIntake.handleIntakeReply(customer, Body, { triggerSmsLogId: smsLogEntry.id });
         const outcome = intakeOutcome(intakeResult);
         if (outcome === 'continue_without_quote') {
           logger.info(`[lead-intake] Scope-vetoed (no draft) for ${customer.first_name}: ${customer.lead_intake_status} — continuing to normal inbound handling`);
@@ -896,11 +896,11 @@ router.post('/sms', async (req, res) => {
       // message continues into normal inbox handling either way.
       const { handleClarifyReply } = require('../services/estimate-clarify-asks');
       const clarifyReply = (!intakeScopeVetoed && Body && String(Body).trim())
-        ? await handleClarifyReply({ phone: From, body: Body })
+        ? await handleClarifyReply({ phone: From, body: Body, triggerSmsLogId: smsLogEntry.id })
         : { handled: false };
       const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
       if (!intakeScopeVetoed && !clarifyReply.handled && smsThreadDraftsEnabled() && Body && String(Body).trim()) {
-        await startSmsThreadDraft({ phone: From, triggerBody: Body });
+        await startSmsThreadDraft({ phone: From, triggerBody: Body, triggerSmsLogId: smsLogEntry.id });
       }
     } catch (e) { logger.warn(`[estimator-sms] trigger failed: ${e.message}`); }
 
