@@ -1,6 +1,6 @@
 # Approved lawn supplier costs — September 7, 2026
 
-The owner supplied two SiteOne listings and authorized applying their package prices. This change was applied and verified in an isolated, repository-seeded Railway development database. It is not evidence of deployed catalog values or an actual purchase. No production database was accessed.
+The owner supplied two SiteOne listings and authorized applying their package prices, then authorized the remaining unit, treatment-rate and calendar reconciliation. This change was applied and verified in an isolated, repository-seeded Railway development database. It is not evidence of deployed catalog values or an actual purchase. No production database was accessed.
 
 | Product / supplier SKU | Supplied package | Sticker price | Unit cost |
 | --- | --- | ---: | ---: |
@@ -42,12 +42,33 @@ All selected missing-cost, needs-pricing and missing-inventory-price flags are c
 
 The deltas are not pure price substitutions. The existing price-sensitive matcher previously resolved `Acelepryn Xtra liquid preventive` to Hydretain Liquid; with the new quote it resolves to Acelepryn Xtra. It also changes the heat-substitution reference line from SpeedZone Southern to Celsius WG. No matcher code was changed. These observations reinforce why this reference audit cannot certify actual selected treatments or supplier-verified annual costs.
 
-## Remaining cost, calendar and timing review
+## Reconciliation after the six unit corrections
 
-Six distinct selected products still have unresolved cost-unit evidence: Armada 50 WDG, Prodiamine 65 WDG, LESCO K-Flow 0-0-25, LESCO 12-0-0 Chelated Iron Plus, Primo Maxx and SpeedZone Southern. Their existing seeded prices are not newly verified supplier quotes. Match each supplier package and price to its exact product and unit basis before correcting it.
+Six distinct selected products had unresolved cost-unit evidence: Armada 50 WDG, Prodiamine 65 WDG, LESCO K-Flow 0-0-25, LESCO 12-0-0 Chelated Iron Plus, Primo Maxx and SpeedZone Southern. Their existing seeded prices are not newly verified supplier quotes. Migration `20260907000021_lawn_cost_inventory_dimensions.js` now resolves their missing inventory dimensions from the existing explicit pound/gallon packages. For the four liquids it checks that the stored per-ounce cost matches package price divided by fluid ounces to four-decimal precision; the original derivation is `costPerUnit()` in `20260528000007_protocol_canonical_price_mappings.js`. Prices, rates and all other catalog fields remain unchanged. It refuses stock quantities with missing units or changed package/cost evidence, and preserves explicit admin unit choices.
 
 Combined lines still require independent ingredient quantities and costs: Celsius + NIS; SpeedZone + NIS; Hydretain + Chelated AM; and Primo Maxx + Anuew EZ. Pricing the first matched product does not price the entire combination.
 
 The active operating tables were read separately in development. Their eight Celsius rows use 0.057 weight oz per 1,000 sqft and are conditional (`default_in_plan=false`), while the catalog/reference calculation uses 0.085 oz per 1,000 sqft. Four active Acelepryn rows use 0.46 fluid oz per 1,000 sqft and are default inclusions. The cost update preserves all of these existing rates and gates; it does not select a replacement dose. The reference checker still reports `operatingLayerVerified=false`. Reconcile exact operating windows, grass restrictions, conditional selection and per-window rates before adopting a cost budget.
 
-The reference calendar's flagged windows are not proof of the actual sold service calendar. Measured travel, setup and on-site production time remain needed; synthetic development fixtures cannot establish them. Customer rate grids, material budgets, floors, protocols, billing and retainer terms were not edited.
+The established cadence mapping in `public-services-menu.js` and `estimate-converter.js` is standard = bimonthly (6), enhanced = every_6_weeks (9), premium = monthly (12). These are rolling schedules anchored to the initial service, not one universal set of treatment months; the reference calendar's flagged windows are not proof of an actual sold service calendar. Measured travel, setup and on-site production time remain needed; synthetic development fixtures cannot establish them. Customer rate grids, material budgets, floors, protocols, billing and retainer terms were not edited.
+
+
+The six-dimension migration passed a real PostgreSQL rollback test proving every catalog field except `inventory_unit` and `updated_at` was unchanged. Repeat execution produced no extra audit rows; three contradictory stock/package/cost cases rolled back. The migration then applied, and the same 12-combination audit returned **zero unit warnings and 41 combined-product warnings**. All selected-material subtotals in the table above are unchanged; all annual-completeness fields remain false/null. This supersedes the earlier 140-unit-warning count.
+
+### Celsius rate meaning
+
+The [manufacturer label](https://bynder.envu.com/m/65d25e1e68990f59/original/Digital_TO_Celsius-WG_label_NA_US_EN.pdf), PDF page 5, identifies 0.057 oz/1,000 sqft as low and 0.085 as medium; selection depends on the target weeds. They are different treatment rates, not an ounce-conversion error. The operating plan's selected rate must control its cost; the catalog's medium default does not establish every operating application's rate. Neither rate was rewritten. The cost engine's existing three-decimal quantity rounding produces $3.42 at the low rate versus $5.10 at the medium rate for a hypothetical full 4,500-sqft treated area. These are cost comparisons, not instructions to select a rate or treat an entire lawn.
+
+### Separate ingredient costing
+
+The existing `calculateProductAmount` helper was run separately for each catalog product with a 4,500-sqft treated area. Rates and prices here are the existing development catalog inputs, not newly confirmed supplier costs or prescribed treatment choices. Optional/premium gates and actual treated area still apply.
+
+| Ingredient | Modeled amount | Selected-material cost |
+| --- | ---: | ---: |
+| Hydretain Liquid | 40.5 fl oz | $23.39 |
+| LESCO Chelated AM + Micros | 9 fl oz | $1.03 |
+| Primo Maxx | 1.575 fl oz | $3.94 |
+| Anuew EZ | 2.7 fl oz | $6.41 |
+| Non-ionic Surfactant | Missing rate and exact product | Unknown |
+
+NIS has no package, price or rate in the development catalog. No exact surfactant was inferred from the generic name. Its product/package cost and applicable mix-rate evidence were requested, as were measured travel/setup/treatment times. Until those inputs and actual conditional selections are available, combined treatments and a complete annual operating-cost model remain unverified.
