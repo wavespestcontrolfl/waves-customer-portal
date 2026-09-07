@@ -4,6 +4,8 @@ const {
   stampSeriesPrepaid,
   TERMINAL_STATUSES,
 } = require('../services/prepaid-series');
+jest.mock('../services/logger', () => ({ error: jest.fn() }));
+const { errorHandler } = require('../middleware/errors');
 
 describe('prepaid-series helpers', () => {
   describe('splitTotalAcrossVisits', () => {
@@ -60,15 +62,28 @@ describe('prepaid-series helpers', () => {
     test.each([null, undefined, '', ' ', false, true, [], [100], {}, NaN, Infinity, -1, 0])('refuses invalid payment %p before any database work', async (totalAmount) => {
       const db = jest.fn();
       await expect(stampSeriesPrepaid(db, { anchorServiceId: 's-1', totalAmount, method: 'cash' }))
-        .rejects.toMatchObject({ status: 400 });
+        .rejects.toMatchObject({ status: 400, statusCode: 400, isOperational: true });
       expect(db).not.toHaveBeenCalled();
     });
 
     test('manual input cannot create an annual coverage stamp', async () => {
       const db = jest.fn();
       await expect(stampSeriesPrepaid(db, { anchorServiceId: 's-1', totalAmount: 400, method: 'annual_prepay_invoice' }))
-        .rejects.toMatchObject({ status: 409 });
+        .rejects.toMatchObject({ status: 409, statusCode: 409, isOperational: true });
       expect(db).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      [true, 'cash', 400],
+      [[100], 'cash', 400],
+      [100, 'annual_prepay_invoice', 409],
+    ])('validation reaches the HTTP boundary with its intended status (%p, %s)', async (totalAmount, method, status) => {
+      const error = await stampSeriesPrepaid(jest.fn(), { anchorServiceId: 's-1', totalAmount, method })
+        .catch((err) => err);
+      const response = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+      errorHandler(error, { method: 'POST', originalUrl: '/api/admin/schedule', body: {} }, response, jest.fn());
+      expect(response.status).toHaveBeenCalledWith(status);
+      expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ error: error.message }));
     });
 
     test.each([
@@ -86,7 +101,7 @@ describe('prepaid-series helpers', () => {
         then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject) };
       const conn = Object.assign(jest.fn(() => query), { transaction: async (fn) => fn(conn) });
       await expect(stampSeriesPrepaid(conn, { anchorServiceId: anchor.id, totalAmount: amount, method: 'cash' }))
-        .rejects.toMatchObject({ status });
+        .rejects.toMatchObject({ status, statusCode: status, isOperational: true });
       expect(query.forUpdate).toHaveBeenCalled();
       expect(update).not.toHaveBeenCalled();
     });

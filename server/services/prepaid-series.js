@@ -73,6 +73,8 @@ async function stampSeriesPrepaid(db, {
   if (!Number.isFinite(amount) || amount <= 0) {
     const err = new Error('Series prepayment must be a positive amount');
     err.status = 400;
+    err.statusCode = 400;
+    err.isOperational = true;
     throw err;
   }
   // Annual coverage is applied by annual-prepay-renewals after its funding
@@ -80,6 +82,8 @@ async function stampSeriesPrepaid(db, {
   if (method === 'annual_prepay_invoice') {
     const err = new Error('Use the annual prepay workflow to apply annual coverage');
     err.status = 409;
+    err.statusCode = 409;
+    err.isOperational = true;
     throw err;
   }
   const anchor = await db('scheduled_services')
@@ -88,6 +92,8 @@ async function stampSeriesPrepaid(db, {
   if (!anchor) {
     const err = new Error('Scheduled service not found');
     err.status = 404;
+    err.statusCode = 404;
+    err.isOperational = true;
     throw err;
   }
   const parentId = resolveSeriesParentId(anchor);
@@ -111,11 +117,15 @@ async function stampSeriesPrepaid(db, {
     if (!eligible.length) {
       const err = new Error('No eligible visits in this series to mark prepaid');
       err.status = 400;
+      err.statusCode = 400;
+      err.isOperational = true;
       throw err;
     }
     if (eligible.some((row) => row.customer_id !== anchor.customer_id)) {
       const err = new Error('Series contains visits for another customer; reconcile the series before recording prepayment');
       err.status = 409;
+      err.statusCode = 409;
+      err.isOperational = true;
       throw err;
     }
     // Never replace even pending/stale annual linkage with a cash stamp:
@@ -123,11 +133,15 @@ async function stampSeriesPrepaid(db, {
     if (eligible.some((row) => row.annual_prepay_term_id || row.prepaid_method === 'annual_prepay_invoice')) {
       const err = new Error('Series has annual prepay coverage; reconcile that term before recording a manual prepayment');
       err.status = 409;
+      err.statusCode = 409;
+      err.isOperational = true;
       throw err;
     }
     if (Math.round(amount * 100) < eligible.length) {
       const err = new Error('Series prepayment must allocate at least one cent to every covered visit');
       err.status = 400;
+      err.statusCode = 400;
+      err.isOperational = true;
       throw err;
     }
     slices = splitTotalAcrossVisits(amount, eligible.length);
