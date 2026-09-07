@@ -11350,6 +11350,9 @@ export function CompletionPanel({
   // are bypassed for the replay — the stored body already passed them when
   // it committed (Codex r1 P1).
   const [committedReplayReady, setCommittedReplayReady] = useState(false);
+  const [photoRetrying, setPhotoRetrying] = useState(false);
+  const [photoRetryError, setPhotoRetryError] = useState("");
+  const photoRetryLockRef = useRef(false);
   // Synchronous lock for the restore await in handleSubmit: `submitting` is
   // state and may not have re-rendered between two quick taps, so without
   // it both could pass the guard, await the same restore, and issue
@@ -12444,8 +12447,16 @@ export function CompletionPanel({
         && (!stored || String(metadata.savedAt || "") >= String(stored.savedAt || ""))
         ? metadata : stored || metadata;
       if (draft?.serviceId === service.id) {
-        setSavedDraft(draft);
-        setShowDraftPrompt(true);
+        if (draft.pendingPhotoCompletion && draft.servicePhotos?.length) {
+          // Closeout already succeeded. Reopen only the outstanding photo
+          // uploads; never submit completion or collect payment again.
+          draftSnapshotRef.current = draft;
+          setCompletionResult(draft.pendingPhotoCompletion);
+          setSuccess(true);
+        } else {
+          setSavedDraft(draft);
+          setShowDraftPrompt(true);
+        }
         if (draft.generationPhotoCount > 0 && !draft.servicePhotos?.length) {
           setDraftStorageNotice("The saved photos could not be restored. Reattach them before completing this visit.");
         }
@@ -14037,53 +14048,58 @@ export function CompletionPanel({
   // POST and a status-poll replay of the stored response. Returns "closed"
   // when the panel unmounted mid-flight (caller stops without touching
   // submitting state on the stale mount), else "done".
-  function finishCompletionSuccess(result) {
-    clearSavedDraft();
+  async function finishCompletionSuccess(result) {
+    const completion = result || {};
+    const photosOwed = completion.completionPhotoUpload?.failed > 0;
+    if (photosOwed) {
+      const photos = lastSubmitBodyRef.current?.completionPhotos || servicePhotos;
+      const draft = {
+        serviceId: service.id,
+        draftId: crypto.randomUUID(),
+        savedAt: new Date().toISOString(),
+        servicePhotos: photos,
+        generationPhotoCount: photos.length,
+        pendingPhotoCompletion: result,
+      };
+      draftSnapshotRef.current = draft;
+      await saveDraftSnapshot(draft);
+      await persistCompletionResumeOwed(service.id, lastSubmitBodyRef.current);
+    } else {
+      clearSavedDraft();
+      clearCompletionResumeOwed(service.id);
+      lastSubmitBodyRef.current = null;
+    }
     sideEffectsRetryRef.current = 0;
-    sideEffectsCommittedRef.current = false;
-    lastSubmitBodyRef.current = null;
-    setCommittedReplayReady(false);
+    sideEffectsCommittedRef.current = photosOwed;
     // Panel closed while the request was in flight (codex P2 r10): unmount
     // can't abort a fetch. The completion is durable server-side and the
     // parent's bookkeeping already ran (onSubmit / onCompletionResult) —
-    // clear the local artifacts, but never alert or onClose from a stale
+    // settle the local artifacts, but never alert or onClose from a stale
     // mount (they'd target whichever visit the operator opened next).
     if (completionPanelClosedRef.current) {
-      clearCompletionResumeOwed(service.id);
       return "closed";
     }
-    const photoResult = result?.completionPhotoUpload;
-    if (photoResult?.failed > 0) {
-      alert(
-        `Service completed, but ${photoResult.failed} photo${photoResult.failed === 1 ? "" : "s"} failed to upload.`,
-      );
-    }
+    setCommittedReplayReady(photosOwed);
     // A live time-on-site override syncs the technician's linked job
     // timer server-side; when that sync is blocked the inflated span
     // survives in Timesheets/utilization — say so, since the corrected
     // value seeds the edit modal and no later save will retry it.
-    if (result?.timeEntryCorrected === false) {
-      const timerReason =
-        result?.timeEntryCorrectionBlocked === "exceeds_elapsed"
-          ? "the corrected minutes exceed the time elapsed since its clock-in"
-          : result?.timeEntryCorrectionBlocked === "entry_conflict"
-            ? "it was edited by someone else at the same moment"
-          : result?.timeEntryCorrectionBlocked === "entry_open"
-            ? "its timer is still running"
-          : result?.timeEntryCorrectionBlocked === "approved_week"
-            ? "its week is already approved"
-            : result?.timeEntryCorrectionBlocked === "multiple_job_entries"
-              ? "several timer entries are linked to this visit"
-              : "it could not be edited automatically";
+    if (completion.timeEntryCorrected === false) {
+      const timerReason = {
+        exceeds_elapsed: "the corrected minutes exceed the time elapsed since its clock-in",
+        entry_conflict: "it was edited by someone else at the same moment",
+        entry_open: "its timer is still running",
+        approved_week: "its week is already approved",
+        multiple_job_entries: "several timer entries are linked to this visit",
+      }[completion.timeEntryCorrectionBlocked] || "it could not be edited automatically";
       alert(
         `Service completed with the corrected duration, but the technician's linked job timer was NOT changed (${timerReason}) — it still shows the old span in Timesheets until corrected there.`,
       );
     }
-    clearCompletionResumeOwed(service.id);
     setCompletionResult(result || null);
     setSuccess(true);
     const smsNeedsAttention = ["blocked", "failed"].includes(
-      result?.completionSmsStatus,
+      completion.completionSmsStatus,
     );
     // A required follow-up suggestion keeps the success overlay open so
     // the tech can act on the CTA — it dismisses via the Done button.
@@ -14094,16 +14110,67 @@ export function CompletionPanel({
     // #3179): the 1.2s auto-dismiss isn't enough to read even one
     // shortfall message — the tech dismisses via the Done button instead.
     const advisoriesNeedReading =
-      Array.isArray(result?.completionAdvisories) &&
-      result.completionAdvisories.length > 0;
+      Array.isArray(completion.completionAdvisories) &&
+      completion.completionAdvisories.length > 0;
     if (
-      !result?.followupSuggestion?.required &&
+      !completion.followupSuggestion?.required &&
       !recapEligible &&
-      !advisoriesNeedReading
+      !advisoriesNeedReading &&
+      !photosOwed
     ) {
       setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
     }
     return "done";
+  }
+
+  async function retryCompletionPhotos() {
+    if (photoRetryLockRef.current) return;
+    const draft = draftSnapshotRef.current;
+    if (!draft?.servicePhotos?.length) return;
+    photoRetryLockRef.current = true;
+    setPhotoRetrying(true);
+    setPhotoRetryError("");
+    const failedPhotos = [];
+    try {
+      for (const photo of draft.servicePhotos) {
+        try {
+          const [header, encoded] = photo.data.split(",");
+          const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
+          const form = new FormData();
+          form.append("photo", new Blob([bytes], { type: header.slice(5, header.indexOf(";")) }), photo.name || "service-photo.jpg");
+          form.append("photoType", photo.photoType || "after");
+          form.append("sortOrder", String(photo.sortOrder ?? 0));
+          if (photo.caption) form.append("caption", photo.caption);
+          if (photo.aiTags) form.append("aiTags", JSON.stringify(photo.aiTags));
+          // Existing attachment route dedupes by image hash. A lost response
+          // can safely retry the same bytes without repeating closeout.
+          await adminFetch(`/tech/services/${service.id}/photos`, {
+            method: "POST", body: form,
+            headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
+          });
+        } catch {
+          failedPhotos.push(photo);
+        }
+      }
+      const result = {
+        ...draft.pendingPhotoCompletion,
+        completionPhotoUpload: { failed: failedPhotos.length },
+      };
+      if (!failedPhotos.length) {
+        await finishCompletionSuccess(result);
+      } else {
+        const remaining = { ...draft, servicePhotos: failedPhotos, pendingPhotoCompletion: result };
+        draftSnapshotRef.current = remaining;
+        await saveDraftSnapshot(remaining);
+        if (!completionPanelClosedRef.current) {
+          setCompletionResult(result);
+          setPhotoRetryError("Some photos still could not upload. Your copies are retained on this device; retry when connected.");
+        }
+      }
+    } finally {
+      photoRetryLockRef.current = false;
+      if (!completionPanelClosedRef.current) setPhotoRetrying(false);
+    }
   }
 
   // Terminal SUCCESS for a committed chain resolved under ANOTHER key (see
@@ -14167,7 +14234,7 @@ export function CompletionPanel({
         const result = onCompletionResult
           ? await onCompletionResult(service.id, status.response)
           : status.response;
-        if (finishCompletionSuccess(result || status.response) === "closed") return;
+        if (await finishCompletionSuccess(result || status.response) === "closed") return;
         setSubmitting(false);
         return;
       }
@@ -14995,7 +15062,7 @@ export function CompletionPanel({
       // reaching here becomes the candidate snapshot.
       lastSubmitBodyRef.current = body;
       const result = await onSubmit(service.id, body);
-      if (finishCompletionSuccess(result) === "closed") return;
+      if (await finishCompletionSuccess(result) === "closed") return;
     } catch (e) {
       return settleCompletionSubmitError(e, reconcileConfirmed);
     }
@@ -15010,7 +15077,7 @@ export function CompletionPanel({
     setSubmitting(true);
     try {
       const result = await onSubmit(service.id, lastSubmitBodyRef.current);
-      if (finishCompletionSuccess(result) === "closed") return;
+      if (await finishCompletionSuccess(result) === "closed") return;
     } catch (e) {
       return settleCompletionSubmitError(e, reconcileConfirmed);
     }
@@ -15580,6 +15647,21 @@ export function CompletionPanel({
       {draftLoading ? "Loading saved draft…" : draftStorageNotice}
     </div>
   );
+  const photoRecoveryNotice = completionResult?.completionPhotoUpload?.failed > 0 && (
+    <div role="status" style={{ marginTop: 16, padding: 16, width: "100%", maxWidth: 360, boxSizing: "border-box",
+      color: "#111111", background: "#FFFFFF", border: "1px solid #E5E5E5", borderRadius: 12, fontSize: 14, lineHeight: 1.5 }}>
+      <p style={{ margin: "0 0 12px" }}>The visit is saved. {completionResult.completionPhotoUpload.failed} {completionResult.completionPhotoUpload.failed === 1 ? "photo still needs" : "photos still need"} uploading.</p>
+      {photoRetryError && <p>{photoRetryError}</p>}
+      {draftStorageStatus}
+      <button type="button" onClick={retryCompletionPhotos} disabled={photoRetrying}
+        style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
+        {photoRetrying ? "Uploading photos…" : "Retry photo uploads"}
+      </button>
+      <button type="button" onClick={() => onClose(true)} style={{ marginLeft: 8, padding: 12, border: "none", background: "transparent", color: "#111111", fontSize: 14 }}>
+        Later
+      </button>
+    </div>
+  );
   if (draftLoading) return createPortal(
     <div role="dialog" aria-label="Complete service" style={{ position: "fixed", inset: 0, zIndex: 10000,
       padding: "calc(24px + env(safe-area-inset-top, 0px)) 24px", background: "#FAFAFA", color: "#111111" }}>
@@ -15802,6 +15884,7 @@ export function CompletionPanel({
                   blackout, annual-N, …) — surfaced here per owner 2026-08-03,
                   reversing the 2026-07-29 minimal-success-screen call; they
                   are also recorded server-side and surface in Customer 360. */}
+              {photoRecoveryNotice}
               {Array.isArray(completionResult?.completionAdvisories) &&
                 completionResult.completionAdvisories.length > 0 && (
                   <div
@@ -18193,6 +18276,7 @@ export function CompletionPanel({
             )}
             {/* Completion advisories (inventory shortfall, blackout, annual-N,
                 …) — surfaced per owner 2026-08-03; also in Customer 360. */}
+            {photoRecoveryNotice}
             {Array.isArray(completionResult?.completionAdvisories) &&
               completionResult.completionAdvisories.length > 0 && (
                 <div

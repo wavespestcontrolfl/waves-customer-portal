@@ -60,6 +60,51 @@ describe('completion photos in an unsubmitted draft', () => {
     view.unmount();
     expect(await getCompletionDraft(service.id)).toBeNull();
   });
+
+  it('retains failed uploads across reloads and retries only photos, with one request per double tap', async () => {
+    await seed();
+    const completion = vi.fn().mockResolvedValue({ serviceRecordId: 'record-1', completionPhotoUpload: { failed: 1 } });
+    const first = await mount(completion);
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    await act(async () => fireEvent.click(submitButton()));
+    await screen.findByRole('button', { name: 'Retry photo uploads' });
+    expect(completionResumeOwed(service.id)).toBe(true);
+    first.unmount();
+    expect(await getCompletionDraft(service.id)).toMatchObject({
+      pendingPhotoCompletion: { serviceRecordId: 'record-1' }, servicePhotos: [{ data: photos[0].data }],
+    });
+
+    const originalFetch = fetch.getMockImplementation();
+    let failUpload = true;
+    const uploads = [];
+    fetch.mockImplementation(async (url, options) => {
+      if (url === `/api/tech/services/${service.id}/photos`) {
+        uploads.push(options);
+        return { ok: !failUpload, status: 503, json: async () => failUpload ? { error: 'Upload unavailable' } : { photo: { id: 'photo-1' } } };
+      }
+      return originalFetch(url, options);
+    });
+    const resubmit = vi.fn();
+    const second = await mount(resubmit);
+    await act(async () => fireEvent.click(await screen.findByRole('button', { name: 'Retry photo uploads' })));
+    expect(resubmit).not.toHaveBeenCalled();
+    expect(completionResumeOwed(service.id)).toBe(true);
+    expect(await getCompletionDraft(service.id)).toMatchObject({ servicePhotos: [{ data: photos[0].data }] });
+    second.unmount();
+
+    failUpload = false;
+    const third = await mount(resubmit);
+    const retry = await screen.findByRole('button', { name: 'Retry photo uploads' });
+    await act(async () => { fireEvent.click(retry); fireEvent.click(retry); });
+    expect(uploads).toHaveLength(2);
+    expect(uploads[1].body.get('caption')).toBe(photos[0].caption);
+    expect(uploads[1].headers['Content-Type']).toBeUndefined();
+    expect(resubmit).not.toHaveBeenCalled();
+    expect(completion).toHaveBeenCalledTimes(1);
+    expect(completionResumeOwed(service.id)).toBe(false);
+    third.unmount();
+    expect(await getCompletionDraft(service.id)).toBeNull();
+  });
 });
 
 describe('committed completion failures survive closing and reopening', () => {
