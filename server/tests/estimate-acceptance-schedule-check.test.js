@@ -41,3 +41,16 @@ test('retained coverage excludes prior-term visits using the selected Eastern ac
   expect(result.ok).toBe(false);
   expect(insert).toHaveBeenCalledWith(expect.objectContaining({ action: 'recurring_schedule_missing_followups' }));
 });
+
+test('an audit exception returns an explicit failure without aborting conversion', async () => {
+  const checkStart = source.indexOf('    let recurringScheduleCheck =');
+  const checkEnd = source.indexOf('    logger.info(', checkStart);
+  const result = await vm.runInNewContext(`(async () => { ${source.slice(checkStart, checkEnd)} return recurringScheduleCheck; })()`, {
+    verifyAcceptedRecurringSchedule: async () => { throw new Error('query unavailable'); },
+    database: {},
+    estimateId: 'estimate-new',
+    customerId: 'customer-1',
+    logger: { warn: jest.fn() },
+  });
+  expect(result).toEqual({ ok: false, gaps: [], error: 'verification_failed' });
+});

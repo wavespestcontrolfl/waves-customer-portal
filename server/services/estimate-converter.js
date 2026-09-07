@@ -7077,6 +7077,7 @@ const EstimateConverter = {
     try {
       recurringScheduleCheck = await verifyAcceptedRecurringSchedule(database, { estimateId, customerId });
     } catch (err) {
+      recurringScheduleCheck = { ok: false, gaps: [], error: 'verification_failed' };
       logger.warn(`[estimate-converter] recurring schedule verification failed for estimate ${estimateId}: ${err.message}`);
     }
     logger.info(`[estimate-converter] Estimate ${estimateId} converted: customer ${customerId} → ${tier} tier, $${convertedMonthlyRate}/mo customer rate ($${monthlyRate}/mo from this estimate), ${scheduledCount} services scheduled, recurringScheduleOk=${recurringScheduleCheck.ok}, billingTerm=${billingTerm}, draftInvoiceId=${draftInvoiceId || 'none'}`);
