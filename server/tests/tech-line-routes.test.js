@@ -121,7 +121,8 @@ describe('POST /sms', () => {
     expect(r.statusCode).toBe(409);
     expect(r.body.code).toBe('DUPLICATE_TEXT');
     const [claimSql, claimBindings] = db.raw.mock.calls.find((c) => CLAIM_SQL.test(String(c[0])));
-    expect(claimSql).toContain("interval '1 minute'");
+    // The provider's retry horizon for an ambiguous outcome (codex r19 P2).
+    expect(claimSql).toContain("interval '5 minutes'");
     expect(claimBindings[0]).toMatch(/^tech-line-text:c1:[0-9a-f]{64}$/);
     expect(reserveHumanReply).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();

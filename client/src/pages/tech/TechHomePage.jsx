@@ -492,7 +492,18 @@ export default function TechHomePage() {
       [key]: { status: fulfilled === 0 ? 'error' : 'ready', byService },
     }));
   }, []);
+  // Which stop's brief has an own-line text or bridge in flight. Tracked
+  // at the list level, not per row: the accordion shows ONE stop, so a
+  // sibling header would otherwise swap the expanded stop and unmount the
+  // busy panel — letting the action go out twice, and clearing the bridge
+  // lock timer before it could release (codex #4072 r19 P2). No header
+  // moves the accordion until the action settles.
+  const [busyStopId, setBusyStopId] = useState(null);
+  const onStopBusyChange = useCallback((stop, busy) => {
+    setBusyStopId((cur) => (busy ? stop.primary.id : (cur === stop.primary.id ? null : cur)));
+  }, []);
   const toggleStop = useCallback((stop) => {
+    if (busyStopId) return;
     const id = stop.primary.id;
     const expanding = expandedStopId !== id;
     setExpandedStopId(expanding ? id : null);
@@ -500,7 +511,7 @@ export default function TechHomePage() {
     // settled payment, or a billing-posture change mid-day must show on
     // reopen — the previous data stays rendered while the refresh loads.
     if (expanding) loadStopDetail(stop);
-  }, [expandedStopId, loadStopDetail]);
+  }, [busyStopId, expandedStopId, loadStopDetail]);
   const openProjectForService = useCallback((service) => {
     setProjectDefaults(service ? {
       customerId: service.customer_id || service.customerId || '',
@@ -849,6 +860,7 @@ export default function TechHomePage() {
                 expanded={expandedStopId === stop.primary.id}
                 detail={stopDetail[stop.primary.id]}
                 onToggle={() => toggleStop(stop)}
+                onBusyChange={(busy) => onStopBusyChange(stop, busy)}
                 onRetryDetail={() => loadStopDetail(stop)}
                 onProject={(s) => (
                   isTypedFindingsService(s)
@@ -1265,11 +1277,10 @@ function TimecardSignoffCard({ techName }) {
 // name, status·window, service label + short address, exception chips
 // (access alerts / collect-needed). Tap anywhere expands the Visit Brief
 // — the per-service action buttons (the old ServiceRow's) live inside it.
-function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, onProject, onZone, onLead, techLine }) {
-  // The header cannot collapse the brief while its own-line text or bridge
-  // is in flight — unmounting the panel would let the tech resend it.
-  const [panelBusy, setPanelBusy] = useState(false);
-  const toggle = () => { if (!panelBusy) onToggle(); };
+function StopRow({ stop, expanded, detail, onToggle, onBusyChange, onRetryDetail, onPhotos, onProject, onZone, onLead, techLine }) {
+  // The busy guard lives in the list's toggleStop (any header, not only
+  // this row's, must leave a panel with a text or bridge in flight mounted).
+  const toggle = () => onToggle();
   const service = stop.primary;
   const status = service.status || 'pending';
   // A grouped transition that only partially fanned out leaves live
@@ -1363,7 +1374,7 @@ function StopRow({ stop, expanded, detail, onToggle, onRetryDetail, onPhotos, on
           onZone={onZone}
           onLead={onLead}
           techLine={techLine}
-          onBusyChange={setPanelBusy}
+          onBusyChange={onBusyChange}
           request={techRequest}
         />
       )}

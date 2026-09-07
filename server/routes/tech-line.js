@@ -40,8 +40,12 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 
 const MAX_TEXT_CHARS = 600;
 // An identical tech-line text that already went out to the customer inside
-// this window is a double submit (two open PWAs), not a second message.
-const DUPLICATE_TEXT_WINDOW = '1 minute';
+// this window is a double submit (two open PWAs), not a second message. The
+// window matches the provider's own retry horizon for an ambiguous outcome
+// (classifyProviderFailure's retryAfterMs, 5 minutes): a claim kept for a
+// text Twilio may still hold must outlive every retry that horizon allows
+// (codex #4072 r19 P2).
+const DUPLICATE_TEXT_WINDOW = '5 minutes';
 // The claim key hashes the body AS SENT — sendCustomerMessage GSM-normalizes
 // a plain customer SMS — so two submits of the same text share one key.
 function sentBodyHash(body) {
