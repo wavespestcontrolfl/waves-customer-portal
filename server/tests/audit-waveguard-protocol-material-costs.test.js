@@ -42,14 +42,33 @@ test('unmatched treatment without a dollar annotation makes the annual calculati
 
 test('a track without shared budget entries cannot report a complete reconciliation', () => {
   const result = buildCadenceReport([product], { synthetic_track: { name: 'Synthetic Track', visits: [visit] } });
-  expect(result.rows).toHaveLength(3);
-  for (const row of result.rows) {
+  const rows = result.rows.filter((row) => row.track === 'synthetic_track');
+  expect(rows).toHaveLength(3);
+  for (const row of rows) {
     expect(row.currentAnnualBudget).toBeNull();
     expect(row.catalogSelectedSubtotal).toBeGreaterThan(0);
     expect(row.catalogSelectedAnnual).toBeNull();
     expect(row.catalogCalculationComplete).toBe(false);
     expect(row.issues).toContainEqual({ reason: 'missing_budget' });
   }
+});
+
+test('missing sold tracks remain present with incomplete calendar evidence', () => {
+  const result = buildCadenceReport([product], {});
+  expect(result.rows).toHaveLength(Object.keys(LAWN_MATERIAL_BUDGETS).length * 3);
+  for (const row of result.rows) {
+    expect(row.catalogSelectedAnnual).toBeNull();
+    expect(row.catalogCalculationComplete).toBe(false);
+    expect(row.issues).toContainEqual({ reason: 'missing_calendar' });
+  }
+});
+
+test('selected OR alternatives cannot become a complete summed annual cost', () => {
+  const row = reportFor([{ ...visit, primary: 'Synthetic Fertilizer\nOR Secondary Blend' }],
+    [product, { ...product, id: 'synthetic-secondary', name: 'Secondary Blend' }]).rows[0];
+  expect(row.catalogSelectedSubtotal).toBeGreaterThan(0);
+  expect(row.catalogSelectedAnnual).toBeNull();
+  expect(row.issues).toContainEqual(expect.objectContaining({ reason: 'unresolved_alternatives' }));
 });
 
 test.each([
@@ -124,7 +143,7 @@ test('explicit fluid-ounce catalog units remain verified when stored with unders
 
 test('premium-only work is excluded from standard/enhanced and included only in premium', () => {
   const result = reportFor([{ ...visit, primary: 'Premium only Synthetic Fertilizer ($60)' }]);
-  expect(result.rows.map((row) => row.catalogSelectedAnnual)).toEqual([0, 0, 324]);
+  expect(result.rows.filter((row) => row.track === 'st_augustine').map((row) => row.catalogSelectedAnnual)).toEqual([0, 0, 324]);
 });
 
 test('unselected rescue products are not silently included in the annual selected subtotal', () => {

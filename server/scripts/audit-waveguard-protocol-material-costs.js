@@ -64,7 +64,6 @@ async function getProtocolProducts() {
     ? await db('product_aliases')
       .whereIn('product_id', productIds)
       .select('product_id', 'alias_name')
-      .catch(() => [])
     : [];
   const aliasesByProduct = aliases.reduce((acc, row) => {
     if (!acc[row.product_id]) acc[row.product_id] = [];
@@ -195,7 +194,8 @@ function analyzeVisit({ trackKey, track, visit, products, options, lawnSqft = DE
 // Keep the catalog-selected subtotal separate from unselected conditional work.
 function buildCadenceReport(products, lawn = protocols.lawn) {
   const rows = [];
-  for (const [trackKey, track] of Object.entries(lawn)) {
+  for (const trackKey of new Set([...Object.keys(lawn), ...Object.keys(LAWN_MATERIAL_BUDGETS)])) {
+    const track = lawn[trackKey] || {};
     for (const [tier, protocolTier, applications] of [
       ['standard', 'bronze', 6], ['enhanced', 'enhanced', 9], ['premium', 'premium', 12],
     ]) {
@@ -205,6 +205,8 @@ function buildCadenceReport(products, lawn = protocols.lawn) {
         options: { plan: tier, includePremiumOnly: tier === 'premium', isFirstYear: true, weedPressure: 'normal' },
       }));
       const issues = results.flatMap((result) => [
+        ...result.items.filter((item) => isMaterialIntentLine(item) && /\bOR\b/i.test(item.raw))
+          .map((item) => ({ visit: result.visit, reason: 'unresolved_alternatives', line: item.raw })),
         ...result.unmatched.map((item) => ({ visit: result.visit, reason: 'unmatched_product', line: item.raw })),
         ...result.selectedCombinedProducts.map((item) => ({ visit: result.visit, reason: 'combined_products_unresolved', line: item.raw })),
         ...result.selectedMissingRate.map((item) => ({ visit: result.visit, reason: 'missing_rate', line: item.raw })),
