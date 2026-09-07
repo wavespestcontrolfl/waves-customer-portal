@@ -2657,6 +2657,10 @@ async function refreshTermSnapshot(termOrId, conn = db) {
   // beyond the original end would never be linked or stamped prepaid and
   // completion would invoice the customer again for visits they prepaid.
   let windowEnd = termEnd;
+  // Every refreshed term, not only ACTIVE ones (GH Codex #4105 r4 P1): a
+  // renewed / switch_plan / decided-lapse term can still be paid coverage
+  // (coveredTermsAsOf), and its legacy callback stamp would otherwise stay.
+  await detachCallbacksFromTerm(term, conn);
   if (ACTIVE_STATUSES.includes(term.status)) {
     const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn);
     if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
@@ -2669,7 +2673,6 @@ async function refreshTermSnapshot(termOrId, conn = db) {
     // quarantined by the deferral's durable coverage exception until the
     // next refresh restores the catalog identity and re-runs this
     // sequence idempotently.
-    await detachCallbacksFromTerm(term, conn);
     await attachScheduledServices({ ...term, term_start: termStart, term_end: windowEnd }, conn);
     await applyPrepaidCoverageForTerm({ ...term, term_start: termStart, term_end: windowEnd }, conn);
     // Callers sync customers.waveguard_renewal_date from the PRE-slide end
@@ -3015,6 +3018,9 @@ async function syncTermForInvoicePayment(invoiceOrId, conn = db) {
         if (coveredToday) {
           await stampAnnualPrepayBillingMode(decidedTerm.customer_id, conn, decidedTerm.id);
           const normalized = { ...decidedTerm, term_start: termStart, term_end: termEnd };
+          // Same cleanup refreshTermSnapshot runs — this path stamps
+          // directly, so it must detach legacy callbacks first (r4 P1).
+          await detachCallbacksFromTerm(normalized, conn);
           await applyPrepaidCoverageForTerm(normalized, conn);
           await reconcilePendingWindowCompletions(normalized, conn);
         }
@@ -3366,6 +3372,8 @@ async function reconcileCoveredTermsSweep({ today = etDateString(), conn = db } 
     if (term.dispute_suspended_at) {
       try {
         const normalized = { ...term, term_start: dateOnly(term.term_start), term_end: dateOnly(term.term_end) };
+        // Direct stamping path — detach legacy callbacks first (r4 P1).
+        await detachCallbacksFromTerm(normalized, conn);
         await applyPrepaidCoverageForTerm(normalized, conn);
         await stampAnnualPrepayBillingMode(term.customer_id, conn, term.id);
         const recovery = await finishDisputeRecoveryForTerm(term, conn);
