@@ -17,11 +17,7 @@ require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.e
 
 const twilio = require('twilio');
 const TWILIO_NUMBERS = require('../../server/config/twilio-numbers');
-
-const FLOW_SID = process.env.TWILIO_INBOUND_FLOW_SID || 'FW5fdc2e44700c6e786ed27de94e0cbace';
-const APP_VOICE_URL =
-  process.env.TWILIO_EXPECTED_APP_VOICE_URL ||
-  'https://waves-customer-portal-production.up.railway.app/api/webhooks/twilio/voice';
+const { APP_VOICE_URL, studioVoiceUrl } = require('./routing-contract');
 
 function argValue(name, fallback) {
   const prefix = `--${name}=`;
@@ -39,7 +35,7 @@ function maskPhone(value) {
 
 function targetVoiceUrl(mode, accountSid) {
   if (mode === 'app') return APP_VOICE_URL;
-  if (mode === 'studio') return `https://webhooks.twilio.com/v1/Accounts/${accountSid}/Flows/${FLOW_SID}`;
+  if (mode === 'studio') return studioVoiceUrl(accountSid);
   throw new Error(`Unsupported --mode=${mode}. Expected "app" or "studio".`);
 }
 

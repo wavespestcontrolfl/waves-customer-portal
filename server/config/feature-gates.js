@@ -6,8 +6,10 @@
  * Adam manually enables them after verifying each one works.
  *
  * Set these as environment variables on Railway:
+ *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
+ *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
@@ -86,6 +88,8 @@
  *     invoice-and-pay-link behavior. isPrepayCardAndChargeEnabled() enforces
  *     the conjunction; the flip checklist is all three vars.)
  *
+ *   GATE_LAWN_PROPERTY_HISTORY=true (property-scoped confirmed lawn history, one installed row per visit, report-date/reset windows and confirm-time baseline; dark in dev AND prod; consumers read at call time)
+ *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
  */
@@ -93,6 +97,11 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // Staff Quick Links receipt picker; delivery evidence is recorded even while dark.
+  composerReceiptLinks: process.env.GATE_COMPOSER_RECEIPT_LINKS === 'true',
+  // GATE_LAWN_PROPERTY_HISTORY: opt-in in every environment. Registered for
+  // logGateStatus only; consumers use gateEnvValue at CALL time.
+  lawnPropertyHistory: gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'),
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
@@ -1781,6 +1790,10 @@ const gates = {
   // Enable with GATE_PUBLIC_QUOTE_LAWN_AREA=true.
   publicQuoteLawnArea: isProd ? process.env.GATE_PUBLIC_QUOTE_LAWN_AREA === 'true' : true,
 
+  // Website estimate pages publish eligible engine quotes directly into the
+  // existing estimate booking/Auto Pay flow. Ordinary lead forms never opt in.
+  websiteQuoteBooking: process.env.GATE_WEBSITE_QUOTE_BOOKING === 'true',
+
   // Commercial estimate glass parity — the customer estimate page renders an
   // authored commercial proposal's line items INSIDE the glass layout (plus
   // the commercial copy pack + inclusions) instead of the bare "formal
@@ -2065,7 +2078,7 @@ const gates = {
   // (minutes per turf zone, hold, conditional-on-rain) from
   // @waves/irrigation-runtime buildWeekPlan. Off = today's copy exactly.
   // Kill = unset GATE_IRRIGATION_WEEK_PLAN.
-  irrigationWeekPlan: process.env.GATE_IRRIGATION_WEEK_PLAN === 'true',
+  irrigationWeekPlan: gateEnvValue('GATE_IRRIGATION_WEEK_PLAN'),
 
   // Saved Monday plan in My Property + the existing property-alerts sweep.
   // Explicit opt-in everywhere; email plan and property-alert gates still apply.
@@ -2474,6 +2487,16 @@ const gates = {
   // gateEnvValue at CALL time, so a flip needs no redeploy; this entry is for
   // logGateStatus.
   techVisitNotifications: gateEnvValue('GATE_TECH_VISIT_NOTIFICATIONS'),
+
+  // Per-tech Twilio lines (Field Team Program Phase 0 item 3,
+  // config/twilio-numbers.js `fieldTech` + services/tech-line.js). ON: a text
+  // to a tech line also lands as a tech-home card + push for the technician
+  // holding it, a call rings that tech's cell before the office list, and the
+  // customer card carries the line. OFF (unset is the kill switch, dev AND
+  // prod): the registry reports the line as an unassigned office number —
+  // nothing dropped, nothing tech-specific. Read at CALL time by the
+  // registry; this entry is for logGateStatus.
+  techLines: gateEnvValue('GATE_TECH_LINES'),
 
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 

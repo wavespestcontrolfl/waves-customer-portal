@@ -14,7 +14,7 @@ const { buildWeeklyEmailDecision, weeklyInputsForCustomer, findEligibleCustomers
 const { loadCustomerWateringPlan } = require('../services/irrigation-app-plan');
 const now = new Date('2026-09-07T14:05:00Z');
 
-function fixture({ forecast = 0.3, rain = 0.6 } = {}) {
+function fixture({ forecast = 0.3, rain = 0.6, customerInputs = {} } = {}) {
   const customer = {
     id: 'fixture-customer', first_name: 'Sample', email: 'sample@example.invalid',
     address_line1: '100 Fixture Lane', address_line2: 'Unit 1', city: 'Sarasota', zip: '34236',
@@ -22,6 +22,7 @@ function fixture({ forecast = 0.3, rain = 0.6 } = {}) {
     irrigation_run_minutes: 20, watering_days: ['Mon', 'Wed', 'Fri', 'Sun'],
     irrigation_system_type: ['spray'], irrigation_system: true,
     irrigation_inches_per_week: null, rain_sensor: false,
+    ...customerInputs,
   };
   const decision = buildWeeklyEmailDecision({
     ...weeklyInputsForCustomer(customer, {
@@ -32,7 +33,7 @@ function fixture({ forecast = 0.3, rain = 0.6 } = {}) {
   });
   if (!decision.weekPlan) throw new Error(`Fixture produced no plan: ${decision.reason}`);
   const snapshot = JSON.parse(JSON.stringify({
-    weekEnding: '2026-09-06', planAsOf: now, sentAt: now,
+    weekEnding: '2026-09-06', planAsOf: now, sentAt: now, availableAt: now,
     decisionInputs: decision.decisionInputs, plan: decision.weekPlan, restriction: decision.restriction,
   }));
   findEligibleCustomers.mockResolvedValue([customer]);
@@ -60,9 +61,36 @@ test.each([{ forecast: 0.3 }, { forecast: 1.4 }, { rain: 4, forecast: 3 }])('ser
   expect(result.note).toBe(decision.payload.plan_note || '');
   expect(result.summary).toBe(decision.payload.summary_line);
   expect(result.conditionalOnForecast).toBe(decision.weekPlan.conditionalOnForecast === true);
+  expect(result.notificationEligible).toBe(true);
   expect(result.guides).toHaveLength(4);
   expect(result).not.toHaveProperty('decisionInputs');
   expect(result).not.toHaveProperty('home');
+});
+
+test('a positive weekly inches entry qualifies without runtime-derived numbers', async () => {
+  fixture({ customerInputs: { irrigation_inches_per_week: 1, irrigation_run_minutes: null,
+    watering_days: null, irrigation_system_type: null } });
+  expect((await loadCustomerWateringPlan('fixture-customer', { now })).notificationEligible).toBe(true);
+});
+
+test.each([
+  { irrigation_inches_per_week: 1 },
+  { irrigation_inches_per_week: null, irrigation_run_minutes: null, watering_days: null,
+    irrigation_system_type: null, turf_irrigation_inches_per_week: 1 },
+])('an emailed move-reconfirmation plan cannot notify before portal numbers are confirmed (%j)', async (customerInputs) => {
+  const { decision } = fixture({ customerInputs: { ...customerInputs,
+    irrigation_home_changed_at: '2026-09-01T14:00:00Z', irrigation_confirmed_fields: [] } });
+  expect(decision.shouldSend).toBe(true);
+  expect(decision.weekPlan).toBeTruthy();
+  const plan = await loadCustomerWateringPlan('fixture-customer', { now });
+  expect(plan).not.toBeNull();
+  expect(plan.notificationEligible).toBe(false);
+});
+
+test('a complete portal schedule re-confirmed for the new home qualifies', async () => {
+  fixture({ customerInputs: { irrigation_home_changed_at: '2026-09-01T14:00:00Z',
+    irrigation_confirmed_fields: ['irrigation_run_minutes', 'watering_days', 'irrigation_system_type'] } });
+  expect((await loadCustomerWateringPlan('fixture-customer', { now })).notificationEligible).toBe(true);
 });
 
 test.each(['GATE_IRRIGATION_APP_PLAN', 'GATE_IRRIGATION_WEEK_PLAN'])('fails closed before data access when %s is disabled', async (gate) => {

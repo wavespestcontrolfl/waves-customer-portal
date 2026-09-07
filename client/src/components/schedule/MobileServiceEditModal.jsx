@@ -7,7 +7,7 @@
 // field sent here). Parent refetches the schedule on success so the
 // checkout sheet's totals reflect the change.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, ChevronRight, Check } from 'lucide-react';
 import { apiErrorMessage } from './seriesMove';
 
@@ -64,6 +64,9 @@ export default function MobileServiceEditModal({
   onSaved,
 }) {
   const [tier, setTier] = useState(() => detectTier(service?.serviceType));
+  // The tier the sheet opened with — only a tier the tech actually changes
+  // may rewrite the stored service type (see handleSave).
+  const initialTier = useRef(detectTier(service?.serviceType));
   const [price, setPrice] = useState(() => {
     const p = service?.estimatedPrice;
     return p != null ? String(p) : '';
@@ -98,7 +101,12 @@ export default function MobileServiceEditModal({
     setSaving(true);
     setError(null);
     const tierOpt = TIER_OPTIONS.find((o) => o.key === tier);
-    const nextServiceType = tierOpt ? `${baseName} — ${tierOpt.label}` : service.serviceType;
+    // A plain price/notes/staff edit used to re-label the visit as
+    // "<base> — Billed Monthly" (the default tier) on every save. The stored
+    // service type is only rewritten when the tech picked a different tier;
+    // otherwise the key is omitted and the server keeps what it has.
+    const tierChanged = tier !== initialTier.current;
+    const nextServiceType = tierChanged && tierOpt ? `${baseName} — ${tierOpt.label}` : undefined;
     const parsedPrice = price !== '' && !isNaN(parseFloat(price)) ? parseFloat(price) : undefined;
     try {
       const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
