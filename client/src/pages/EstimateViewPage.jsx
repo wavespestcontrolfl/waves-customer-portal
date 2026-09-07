@@ -7513,7 +7513,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
           recurring={serviceMode !== 'one_time'}
         />
     );
-    if (websiteMode) return <WebsiteEstimateFrame>{successCard}</WebsiteEstimateFrame>;
+    if (websiteMode) return <WebsiteEstimateFrame stage="booked">{successCard}</WebsiteEstimateFrame>;
     return (
       <Page website={websiteMode}>
         {estimateActionBar}
