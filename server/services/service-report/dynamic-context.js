@@ -237,6 +237,12 @@ function attachProtocolOperationalContext(protocol, { completion, assignment } =
 
 async function buildLawnProtocolReportContext(record, knex, now) {
   const completion = await loadLawnProtocolCompletion(record, knex);
+  // An actuals row recorded without a lawn plan (GATE_LAWN_ACTUALS_LEDGER,
+  // metadata.attribution 'none': one-time / commercial / unresolved
+  // assignment) is authoritative — the closeout said no protocol applied, so
+  // the report shows no protocol card rather than the seasonal default
+  // labelled as a completed protocol visit.
+  if (completion && parseJson(completion.metadata, {}).attribution === 'none') return null;
   const assignment = completion ? null : await loadAssignedLawnProtocol(record, knex);
   const serviceDate = record.service_date
     ? new Date(`${String(record.service_date).slice(0, 10)}T12:00:00`)
