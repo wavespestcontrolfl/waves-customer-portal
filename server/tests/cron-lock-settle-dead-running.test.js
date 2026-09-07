@@ -66,6 +66,7 @@ describe('settleDeadRunningJobs', () => {
     expect(where).toEqual({ job_name: 'price-scan-weekly', last_status: 'running', last_started_at: t });
     expect(patch.last_status).toBe('failed');
     expect(patch.last_error).toMatch(/process exited mid-run/);
+    expect(patch.last_duration_ms).toBeNull(); // exit time unknown: never the previous run's duration
     expect(patch.consecutive_failures).toEqual({ __raw: 'consecutive_failures + 1' });
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('price-scan-weekly'));
     // The probe reads pg_locks; it never acquires the job's advisory lock.

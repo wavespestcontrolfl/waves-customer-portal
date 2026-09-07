@@ -617,6 +617,9 @@ async function settleDeadRunningJobs() {
         .update({
           last_status: 'failed',
           last_finished_at: now,
+          // The exit time is unknown — a stale duration from the previous
+          // run must not read as this run's (codex P1 on #4103).
+          last_duration_ms: null,
           updated_at: now,
           last_error: 'process exited mid-run (advisory lock not held at boot)',
           consecutive_failures: db.raw('consecutive_failures + 1'),
