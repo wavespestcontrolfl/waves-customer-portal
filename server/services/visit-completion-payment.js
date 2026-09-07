@@ -113,14 +113,16 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
   let outcome = 'suppressed';
   let reason = 'payment_needed';
   try {
-    if (invoiceAmountDue(invoice) === 0) {
-      const settlement = await database.transaction(async (trx) => {
-        const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
-        if (!locked) refuse('invoice_missing');
-        await trx('customers').where({ id: locked.customer_id }).forUpdate().first('id');
-        await assertVisitCompletionCharge(trx, locked, packet.id);
-        return require('./invoice').settleZeroBalance(invoice.id, trx);
-      });
+    const settlement = await database.transaction(async (trx) => {
+      const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+      if (!locked) refuse('invoice_missing');
+      if (invoiceAmountDue(locked) > 0) return { reason: 'balance_due' };
+      await trx('customers').where({ id: locked.customer_id }).forUpdate().first('id');
+      await assertVisitCompletionCharge(trx, locked, packet.id);
+      return require('./invoice').settleZeroBalance(invoice.id, trx);
+    });
+    if (settlement.reason !== 'balance_due') {
+      if (settlement.retryable) throw new Error('Visit invoice settlement is waiting for its reminder claim');
       if (!settlement.settled && !['paid', 'prepaid'].includes(settlement.invoice?.status)) {
         refuse(settlement.reason);
       }

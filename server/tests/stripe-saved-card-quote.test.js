@@ -116,7 +116,8 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
-  test('a saved visit billing refusal happens before account credit or the Stripe handoff', async () => {
+  test.each(['VISIT_PAYMENT_REVIEW_REQUIRED', 'VISIT_PAYMENT_ZERO_BALANCE'])(
+    'a saved visit %s refusal happens before account credit or the Stripe handoff', async (expectedCode) => {
     const invoice = {
       id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'draft',
       total: '250.00', credit_applied: '0.00', payer_id: null,
@@ -176,14 +177,19 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     jest.doMock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: true } }));
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-    const guard = jest.fn(async () => {
-      throw Object.assign(new Error('Visit billing changed'), { code: 'VISIT_PAYMENT_REVIEW_REQUIRED' });
+    const guard = jest.fn(async (_trx, locked) => {
+      if (expectedCode === 'VISIT_PAYMENT_ZERO_BALANCE') {
+        // The unlocked read was positive. A final discount won the lock race.
+        locked.total = '0.00';
+        return;
+      }
+      throw Object.assign(new Error('Visit billing changed'), { code: expectedCode });
     });
     jest.doMock('../services/visit-completion-payment', () => ({ assertVisitCompletionCharge: guard }));
     const StripeService = require('../services/stripe');
     try {
       await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { requireVisitCompletionPacketId: 'packet-1' }))
-        .rejects.toMatchObject({ code: 'VISIT_PAYMENT_REVIEW_REQUIRED' });
+        .rejects.toMatchObject({ code: expectedCode });
       expect(guard).toHaveBeenCalledWith(db, invoice, 'packet-1');
       expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
       expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
