@@ -17,6 +17,7 @@ import SaveCardConsent from '../components/billing/SaveCardConsent';
 import Icon from '../components/Icon';
 import { StationMapCard, STATION_CARD_PROGRAM_META } from '../components/StationMapCard';
 import CancelFlow from '../components/portal/CancelFlow';
+import WeeklyWateringPlanCard from '../components/portal/WeeklyWateringPlanCard';
 import CancelledPlanPanel, { CancelledBanner } from '../components/portal/CancelledPlan';
 import { etDateString, formatETDateTime } from '../lib/timezone';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
@@ -3998,9 +3999,7 @@ const APPOINTMENT_CHANNEL_KEYS = [
   'serviceReminder72hChannel',
   'serviceReminder24hChannel',
   'enRouteChannel',
-  // techArrivedChannel intentionally absent: the arrival alert is SMS-only
-  // (the appointment.tech_arrived email twin was retired 2026-08-06), so the
-  // bulk "updates by email" shortcut must not claim to route it to email.
+  'techArrivedChannel',
 ];
 
 // Gold on/off switch — the ONE toggle idiom for customer notification rows
@@ -5026,10 +5025,9 @@ function ScheduleTab({ customer, properties = [], onRequestVisit, onSelectProper
                 // Arrival alert — fires when the tracker flips to on-site, the
                 // moment the tech reaches the property. Independent of the
                 // en-route text so a customer can keep one and mute the other.
-                // SMS-only (no channelKey): the arrival email twin was
-                // retired 2026-08-06 — offering Email/Both here would show a
-                // choice the server no longer honors.
-                { key: 'techArrived', label: 'Tech Arrived Alert', desc: 'A text the moment your tech reaches your property', icon: 'door', locked: false, defaultOn: true },
+                // Text / Email / Both: the arrival email twin (retired
+                // 2026-08-06) is back on the owner's 2026-09-06 go.
+                { key: 'techArrived', channelKey: 'techArrivedChannel', label: 'Tech Arrived Alert', desc: 'The moment your tech reaches your property', icon: 'door', locked: false, defaultOn: true },
                 // Weather & property advisories (portal roadmap bet 6, owner
                 // ruling 2026-08-13: push + bell). A NEW alert type must ship
                 // with its self-service opt-out on the live settings surface
@@ -7456,7 +7454,7 @@ const IRRIGATION_EDIT_FIELDS = new Set([
   'irrigationScheduleNotes', 'wateringDays', 'irrigationSystemType', 'rainSensor', 'irrigationIssues',
 ]);
 
-function PropertyTab({ customer }) {
+function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [prefs, setPrefs] = useState(null);
@@ -7475,6 +7473,9 @@ function PropertyTab({ customer }) {
   // email suppress derivation until the customer's next irrigation edit
   // stamps it on, so the card must not claim a figure they aren't counting.
   const [irrigationSuppressed, setIrrigationSuppressed] = useState(false);
+  const irrigationEditRevision = useRef(0);
+  const [wateringPlanRevision, setWateringPlanRevision] = useState(0);
+  const [savedWateringRevision, setSavedWateringRevision] = useState(0);
 
   const loadPropertyPreferences = useCallback(() => {
     setLoading(true);
@@ -7540,6 +7541,7 @@ function PropertyTab({ customer }) {
         // home's settings. lastSavedRef tracks the server's latest view
         // (load + every save response).
         toSave.confirmed_as_of = lastSavedRef.current?.irrigationHomeChangedAt ?? null;
+        const savingIrrigationRevision = irrigationEditRevision.current;
         try {
           const result = await api.updatePropertyPreferences(toSave);
           if (result && result.preferences) lastSavedRef.current = result.preferences;
@@ -7547,7 +7549,10 @@ function PropertyTab({ customer }) {
           // write, so suppression ends when THIS batch — the one that
           // actually carried an irrigation field — succeeds. Never a shared
           // flag: an older non-irrigation PUT resolving must not clear it.
-          if (Object.keys(toSave).some((k) => IRRIGATION_EDIT_FIELDS.has(k))) setIrrigationSuppressed(false);
+          if (Object.keys(toSave).some((k) => IRRIGATION_EDIT_FIELDS.has(k))) {
+            setIrrigationSuppressed(false);
+            setSavedWateringRevision(savingIrrigationRevision);
+          }
         } catch (err) {
           // Re-queue UNDER newer edits (a field re-edited since this PUT left
           // wins) so the next flush retries these without clobbering fresher
@@ -7565,6 +7570,10 @@ function PropertyTab({ customer }) {
 
   const updateField = useCallback((field, value) => {
     setPrefs(prev => ({ ...prev, [field]: value }));
+    if (IRRIGATION_EDIT_FIELDS.has(field)) {
+      irrigationEditRevision.current += 1;
+      setWateringPlanRevision(irrigationEditRevision.current);
+    }
     // Merge into pending so earlier-edited fields aren't lost when the
     // debounce timer resets for a later field.
     pendingRef.current = { ...pendingRef.current, [field]: value };
@@ -8022,6 +8031,14 @@ function PropertyTab({ customer }) {
           </div>
         </div>
       </section>
+
+      {(hasLawnCare || (wateringPlanCustomerId && wateringPlanCustomerId !== String(customer.id))) && <WeeklyWateringPlanCard
+        customerId={customer.id}
+        targetCustomerId={wateringPlanCustomerId}
+        onOpenProperty={onOpenWateringProperty}
+        pending={wateringPlanRevision !== savedWateringRevision}
+        refreshKey={savedWateringRevision}
+      />}
 
       <ServicePrefsSection />
 
@@ -15515,11 +15532,12 @@ export default function PortalPage() {
 
   const initials = `${customer.firstName?.[0] || ''}${customer.lastName?.[0] || ''}` || 'W';
   const portalProperties = Array.isArray(properties) ? properties : [];
+  const wateringPlanCustomerId = new URLSearchParams(location.search).get('wateringPlanCustomer');
+  const wateringPlanProperty = portalProperties.find((property) => String(property.id) === wateringPlanCustomerId);
   const canSwitchProperties = portalProperties.length > 1;
   const propertyRenderKey = `${customer.id}:${requestRefreshKey}`;
-  // `stayOnVisits`: the Visits-tab picker keeps the customer on Visits after
-  // the switch instead of the default hop to Home.
-  const selectProperty = async (propertyId, { stayOnVisits = false } = {}) => {
+  // Keep the destination explicit for Visits and watering-plan deep links.
+  const selectProperty = async (propertyId, { tab = 'dashboard' } = {}) => {
     if (!propertyId || propertyId === customer.id || switchingPropertyId) return;
     setSwitchingPropertyId(propertyId);
     // Flush PropertyTab's debounced edits BEFORE switchProperty replaces the
@@ -15538,11 +15556,11 @@ export default function PortalPage() {
     const switched = await switchProperty(propertyId);
     setSwitchingPropertyId(null);
     if (switched) {
-      setActiveTab(stayOnVisits ? 'visits' : 'dashboard');
+      setActiveTab(tab);
       // Replace, not push: the prior tab history belongs to the PREVIOUS
       // property's session — Back must not restore a stale tab context
       // against the newly selected property.
-      const target = stayOnVisits ? '/?tab=schedule' : '/';
+      const target = tab === 'visits' ? '/?tab=schedule' : (tab === 'property' ? `/?tab=property&wateringPlanCustomer=${encodeURIComponent(propertyId)}` : '/');
       if (window.location.pathname + window.location.search !== target) navigate(target, { replace: true });
       setVisitsSubTab('upcoming');
       setShowMenu(false);
@@ -16097,11 +16115,14 @@ export default function PortalPage() {
           // same sub-tab; replace (not push) so pill toggles don't stack
           // history entries.
           navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
-        }} onRequestVisit={cancelledAccount ? null : () => setShowReportIssue(true)} onSelectProperty={(id) => selectProperty(id, { stayOnVisits: true })} switchingPropertyId={switchingPropertyId} />}
+        }} onRequestVisit={cancelledAccount ? null : () => setShowReportIssue(true)} onSelectProperty={(id) => selectProperty(id, { tab: 'visits' })} switchingPropertyId={switchingPropertyId} />}
         {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
-        {activeTab === 'property' && <PropertyTab key={`property-${propertyRenderKey}`} customer={customer} />}
+        {activeTab === 'property' && <PropertyTab key={`property-${propertyRenderKey}`} customer={customer}
+          wateringPlanCustomerId={wateringPlanCustomerId}
+          onOpenWateringProperty={wateringPlanProperty ? () => selectProperty(wateringPlanProperty.id, { tab: 'property' }) : undefined}
+        />}
         {activeTab === 'learn' && <LearnTab key={`learn-${propertyRenderKey}`} customer={customer} />}
       </main>
 

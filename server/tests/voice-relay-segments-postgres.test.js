@@ -164,6 +164,24 @@ postgres('atomic relay segment append and composition', () => {
     expect(row.metadata.relay_segments).toHaveLength(2);
   });
 
+  test.each([20000, 70000])('out-of-order closes reserve the whole %s-character recording before AI text', async (length) => {
+    const { composeRelayTranscript, MAX_TRANSCRIPT_CHARS } = require('../services/voice-agent/relay-transcript');
+    const recorded = '🌊'.repeat(length);
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture',
+      transcription: recorded, transcription_provider: 'fixture-recording', call_outcome: 'voicemail',
+      metadata: { relay_reconnects: 1, relay_reconnect_ms: 3 } });
+    for (const generation of [2, 1]) {
+      await appendSegment(db, 'CA-fixture', buildSegment({ generation, sessionKey: `session-${generation}`,
+        text: Array(20).fill('Caller: ' + '🌊'.repeat(2000)).join('\n') }));
+      const row = await db('call_log').first();
+      const section = '\n\n[Voicemail segment]\n' + recorded;
+      expect(row.transcription).toBe(composeRelayTranscript(segmentsText(row.metadata.relay_segments), section));
+      expect(row.transcription.endsWith(section)).toBe(true);
+      expect(row.transcription_provider).toBe('fixture-recording');
+      if (length < MAX_TRANSCRIPT_CHARS) expect(Array.from(row.transcription)).toHaveLength(MAX_TRANSCRIPT_CHARS);
+    }
+  });
+
   test('an uncommitted predecessor defers the seal; a completed set forbids later claims and appends', async () => {
     const { beginRelaySessionClaim } = require('../services/voice-agent/relay-context');
     const { sealSegmentsForExtraction } = require('../services/voice-agent/relay-segments');

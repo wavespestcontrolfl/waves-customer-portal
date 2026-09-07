@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { ringTargetForLine } = require('../services/tech-line');
 const twilio = require('twilio');
 const VoiceResponse = twilio.twiml.VoiceResponse;
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
@@ -156,15 +157,25 @@ function connectingAnnouncement(row) {
  * and /call-complete as the action. Shared by /voice and the PR 2A transfer
  * in /relay-complete — one shape, so the screen URLs never diverge.
  */
-function appendStaffRingDial(twiml, forwardNumbers, ringTimeoutSec, { language = null } = {}) {
+// Tech line (GATE_TECH_LINES): the holder's cell rings alone for this long
+// before the office list takes over — shorter than the office ring so a caller
+// who reaches voicemail waited ~50s at most, not a full minute.
+const TECH_LINE_RING_SEC = 20;
+
+function appendStaffRingDial(twiml, forwardNumbers, ringTimeoutSec, { language = null, stage = null } = {}) {
+  // A Spanish caller's selection rides the action (the ?lang=es the relay
+  // leg already uses), so an unanswered ring's voicemail stays Spanish.
+  // `stage=tech_line` marks the tech-first leg: /call-complete continues
+  // into the office list instead of voicemail when nobody accepted.
+  const params = [];
+  if (stage) params.push(`stage=${stage}`);
+  if (/^es/i.test(String(language || ''))) params.push('lang=es');
   const dial = twiml.dial({
     record: 'record-from-answer-dual',
     recordingStatusCallback: '/api/webhooks/twilio/recording-status',
     recordingStatusCallbackEvent: 'completed',
     timeout: ringTimeoutSec,
-    // A Spanish caller's selection rides the action (the ?lang=es the relay
-    // leg already uses), so an unanswered ring's voicemail stays Spanish.
-    action: /^es/i.test(String(language || '')) ? '/api/webhooks/twilio/call-complete?lang=es' : '/api/webhooks/twilio/call-complete',
+    action: `/api/webhooks/twilio/call-complete${params.length ? `?${params.join('&')}` : ''}`,
     answerOnBridge: true,
   });
   for (const number of forwardNumbers) {
@@ -253,6 +264,13 @@ function listedRecordingReason(metadata, sid) {
     if (has('superseded_recordings')) return 'already_superseded';
     if (has('additional_recordings')) return 'already_parked';
     return null;
+  } catch { return null; }
+}
+
+function techLineUnacceptedLegSid(metadata) {
+  try {
+    const m = typeof metadata === 'string' ? JSON.parse(metadata) : (metadata || {});
+    return typeof m.tech_line_unaccepted_leg === 'string' ? m.tech_line_unaccepted_leg : null;
   } catch { return null; }
 }
 
@@ -1376,6 +1394,26 @@ router.post('/voice', async (req, res) => {
       return res.type('text/xml').send(buildPreconnectChallengeTwiML());
     }
 
+    // ── Tech line (GATE_TECH_LINES): the holder rings before anything else ──
+    // The technician holding the line rings first, alone, with the same
+    // press-1 screen; an unaccepted leg continues into the office list from
+    // /call-complete?stage=tech_line, and voicemail — or the AI after-dial
+    // backstop, unchanged — only after both (owner ruling: tech cell → office
+    // → voicemail). Sits BEFORE the answers-first block so Sandy never fronts
+    // a call to a tech's own number (codex #4053 r1 P1); no Spanish vestibule
+    // on this leg — the greeting alone carries the FL §934.03 disclosure. No
+    // assignable holder or no cell on file → the ordinary flow below.
+    if (numberConfig?.type === 'tech_line') {
+      const techCell = await ringTargetForLine(To).catch(() => null);
+      if (techCell) {
+        logger.info(`[voice] tech line ${maskPhone(To)}: ringing the holder first for ${maskSid(CallSid)}`);
+        const techTwiml = new VoiceResponse();
+        appendLanguageVestibule(techTwiml, { greetingUrl, vestibule: null });
+        appendStaffRingDial(techTwiml, [techCell], TECH_LINE_RING_SEC, { stage: 'tech_line' });
+        return res.type('text/xml').send(techTwiml.toString());
+      }
+    }
+
     // ── AI voice agent routing (opt-in; default path untouched) ──
     // The agent NEVER fronts a call unless GATE_VOICE_AI_AGENT is on AND the
     // owner enabled "answers first" (manual toggle or active nightly schedule)
@@ -1532,6 +1570,32 @@ router.post('/call-complete', async (req, res) => {
       duration,
       forwardAccepted,
     });
+
+    // Tech line, stage 1 over without an accept (no answer, busy, or carrier
+    // voicemail picked up and nobody pressed 1): ring the office list now —
+    // the same TwiML an office line gets. The caller is still live, so no
+    // outcome is stamped here; the office leg's own /call-complete does that
+    // (voicemail / AI backstop / human, unchanged). An empty office list
+    // falls through to voicemail below exactly as an office line would.
+    if (req.query.stage === 'tech_line' && shouldRecordVoicemail) {
+      const officeNumbers = getFallbackForwardNumbers();
+      if (officeNumbers.length) {
+        logger.info(`[call-complete] tech line leg ${status} for ${maskSid(CallSid)} — ringing the office list`);
+        // Remember the leg that ended without a press-1: <Dial record> may
+        // still deliver ITS recording (carrier voicemail answered the screen)
+        // and /recording-status must not let that clip become the row's
+        // recording ahead of the office conversation (codex #4053 r2 P1).
+        // Best-effort: Twilio fires this action before the recording callback,
+        // so the stamp is in place when that clip arrives.
+        await db('call_log').where('twilio_call_sid', CallSid).update({
+          metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{tech_line_unaccepted_leg}', ?::jsonb, true)", [JSON.stringify(DialCallSid || null)]),
+          updated_at: new Date(),
+        }).catch((err) => logger.warn(`[call-complete] tech line leg stamp failed for ${maskSid(CallSid)}: ${err.message}`));
+        const twiml = new VoiceResponse();
+        appendStaffRingDial(twiml, officeNumbers, 30, { language: req.query.lang === 'es' ? 'es' : null });
+        return res.type('text/xml').send(twiml.toString());
+      }
+    }
 
     const callUpdate = {
       status,
@@ -2358,6 +2422,28 @@ router.post('/recording-status', async (req, res) => {
       }
       if (!targetRow) {
         targetRow = await db('call_log').where('twilio_call_sid', CallSid).first(...ATTACH_COLUMNS);
+      }
+      // Tech line (GATE_TECH_LINES): the holder's leg ended without a press-1
+      // (/call-complete?stage=tech_line stamped its SID), so this recording is
+      // the screen prompt / the holder's carrier voicemail — not a
+      // conversation. The office leg that follows may run past the early
+      // processing timer, and attaching this clip would let it get
+      // processed first and PARK the real recording (codex #4053 r2 P1).
+      // Kept as evidence under superseded_recordings (a redelivery dedupes
+      // there), never attached, never scheduled.
+      if (targetRow && ParentCallSid && techLineUnacceptedLegSid(targetRow.metadata) === CallSid) {
+        if (!listedRecordingReason(targetRow.metadata, RecordingSid)) {
+          await db('call_log').where({ id: targetRow.id }).update({
+            metadata: db.raw(
+              "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{superseded_recordings}',"
+              + " COALESCE(metadata -> 'superseded_recordings', '[]'::jsonb) || ?::jsonb, true)",
+              [JSON.stringify([{ recording_sid: RecordingSid, recording_url: recordingData.recording_url, recording_duration_seconds: recordingData.recording_duration_seconds, superseded_at: new Date().toISOString(), reason: 'tech_line_unaccepted_leg' }])],
+            ),
+            updated_at: new Date(),
+          });
+        }
+        logger.info(`[recording-status] recording ${maskSid(RecordingSid)} is the unaccepted tech-line leg of ${maskSid(targetRow.twilio_call_sid)} — kept as evidence, not attached`);
+        return res.sendStatus(200);
       }
       let updated = 0;
       let matchedSid = null;
@@ -3266,6 +3352,7 @@ router._test = {
   rememberForwardAccept,
   resolveCsrName,
   resolveInboundDialCompletion,
+  techLineUnacceptedLegSid,
   sanitizeVoiceProviderError,
   shouldAlertInboundDialFailure,
   wasForwardAccepted,

@@ -77,7 +77,7 @@ async function sendSubscription(sub, notification) {
     await webpush.sendNotification(
       JSON.parse(sub.subscription_data),
       JSON.stringify(notification),
-      { timeout: 8000, urgency: URGENCY_BY_PRIORITY[notification.priority] || 'normal' },
+      { timeout: 8000, urgency: URGENCY_BY_PRIORITY[notification.priority] || 'normal', ...(notification.ephemeral ? { TTL: 0 } : {}) },
     );
     return { sent: true };
   } catch (err) {

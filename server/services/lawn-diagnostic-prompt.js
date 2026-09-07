@@ -25,7 +25,7 @@
 
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { anthropicText } = require('./llm/call');
+const { anthropicText, geminiText } = require('./llm/call');
 // Shared egress sanitizers: reduce names to allowlisted labels and scrub free text
 // BEFORE the narrative LLM sees them, so no raw/injected finding text can echo into
 // the published customer_summary (the output is scrubbed again at the public route).
@@ -43,7 +43,7 @@ const MAX_PROMPT_IMAGES = 5;
 // Writer = GPT-5.5 (OpenAI Responses API). Each is reached by direct REST / SDK,
 // mirroring the existing property-lookup / lawn-assessment integrations.
 const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
-const LAWN_VISION_MODEL = process.env.LAWN_VISION_MODEL || 'gemini-3.5-flash';
+const LAWN_VISION_MODEL = process.env.LAWN_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
 const geminiUrl = (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_KEY}`;
 // Anthropic challenge model comes from the central registry (server/config/models.js),
 // never a hardcoded ID here — shares the app-wide model swap/check workflow.
@@ -466,9 +466,8 @@ async function runPerception(context = {}) {
       return { ok: false, reason: `gemini_${resp.status}` };
     }
     const data = await resp.json();
-    // Join ALL text parts — a thinking model can return a thought part before the answer
-    // part, so parts[0] alone would miss the JSON.
-    const text = (data?.candidates?.[0]?.content?.parts || []).map((part) => part && part.text).filter(Boolean).join('');
+    // The shared parser joins every answer part and skips thought parts.
+    const text = geminiText(data);
     const parsed = parseLooseJson(text);
     const observations = Array.isArray(parsed?.observations)
       ? parsed.observations.filter((obs) => obs && typeof obs === 'object')

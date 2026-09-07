@@ -681,7 +681,7 @@ describe('reconcileLawnReport — relevance pass integration', () => {
       },
     },
     reportV2: {
-      water: { rainInches: 2.96, targetInches: 0.75 },
+      water: { rainInches: 2.96, targetInches: 0.75, droughtSignal: true },
       insights: [{
         status: 'watch',
         headline: 'Early stress showing near the sidewalk',

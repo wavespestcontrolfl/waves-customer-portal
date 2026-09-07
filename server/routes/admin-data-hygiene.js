@@ -1,4 +1,5 @@
-const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue, valuesEqual } = require('../services/data-hygiene/property-preferences');
+const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue, revertPropertyPreferenceCompanions, valuesEqual } = require('../services/data-hygiene/property-preferences');
+const { stalePendingExtractionProposals } = require('../services/data-hygiene/proposal-store');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -36,6 +37,11 @@ const PROPERTY_PREF_APPLY_FIELDS = new Set([
   'parking_notes',
   'access_notes',
   'pet_details',
+  // Free-form fields the SMS profile lane proposes for review.
+  'special_instructions',
+  'irrigation_controller_location',
+  'irrigation_schedule_notes',
+  'irrigation_issues',
 ]);
 
 router.get('/proposals', async (req, res, next) => {
@@ -285,12 +291,13 @@ router.post('/proposals/:id/approve', async (req, res, next) => {
         currentRaw,
       });
 
-      await applyPropertyPreferenceValue({
+      const { companions } = await applyPropertyPreferenceValue({
         trx,
         proposal,
         target,
         proposedRaw,
       });
+      const companionsBefore = Object.keys(companions).length ? companions : null;
 
       const auditId = await auditHygieneProposalApply({
         trx,
@@ -311,6 +318,7 @@ router.post('/proposals/:id/approve', async (req, res, next) => {
         reviewer_id: req.technicianId,
         reviewed_via: 'ui',
         is_sensitive: true,
+        companions_before: companionsBefore,
       });
 
       await vaultAttachAuditLog({ trx, vault_id: vault.id, audit_log_id: auditId });
@@ -325,8 +333,14 @@ router.post('/proposals/:id/approve', async (req, res, next) => {
           applied_at: db.fn.now(),
           resource_id: target.id,
           updated_at: db.fn.now(),
+          // Revert reads the companion's before value from here.
+          ...(companionsBefore ? { evidence: JSON.stringify({ ...(proposal.evidence || {}), companions_before: companionsBefore }) } : {}),
         })
         .returning('*');
+      // A sibling proposal for the same field (the extraction phase and the
+      // SMS lane can each propose one message) would now fail its
+      // before-value check; retire it instead of leaving it pending.
+      await stalePendingExtractionProposals({ trx, scope_id: proposal.scope_id, field: proposal.field });
 
       return updatedProposal;
     });
@@ -414,6 +428,9 @@ router.post('/proposals/:id/revert', requireAdmin, async (req, res, next) => {
           [proposal.field]: beforeRaw,
           updated_at: db.fn.now(),
         });
+      const { reverted: companionsReverted } = await revertPropertyPreferenceCompanions({
+        trx, proposal, target, companions: proposal.evidence?.companions_before || {},
+      });
 
       const auditId = await auditHygieneProposalRevert({
         trx,
@@ -435,6 +452,7 @@ router.post('/proposals/:id/revert', requireAdmin, async (req, res, next) => {
         reverted_by: req.technicianId,
         is_sensitive: true,
         reviewed_via: 'ui',
+        companions_reverted: companionsReverted,
       });
       await vaultAttachAuditLog({ trx, vault_id: vault.id, audit_log_id: auditId });
 

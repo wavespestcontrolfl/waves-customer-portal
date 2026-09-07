@@ -1,3 +1,4 @@
+const { recurringDispatchDuePatch } = require('../scheduling/recurring-dispatch-due');
 /**
  * Intelligence Bar — Claude Tool Definitions & Execution
  * server/services/intelligence-bar/tools.js
@@ -2512,6 +2513,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
       )
         .update({
           scheduled_date: dateStr,
+          ...recurringDispatchDuePatch(appt, { scheduled_date: dateStr, window_start: newStart }),
           window_start: newStart,
           window_end: newWindowEnd,
           // A DATE move carries the stop into another tech-day: clear its

@@ -24,6 +24,7 @@
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
 
 const { LAWN_PIPELINE_MODELS } = require('../services/lawn-diagnostic-prompt');
+const { geminiText } = require('../services/llm/call');
 
 // ── Pure helpers (exported for unit tests; no network) ────────────────────────
 function looseJson(text) {
@@ -90,8 +91,7 @@ async function checkGemini(model) {
     const latencyMs = Date.now() - started;
     if (!resp.ok) return { ok: false, status: resp.status, latencyMs, failureType: classifyGemini(resp.status), detail: (await resp.text()).slice(0, 200) };
     const data = await resp.json();
-    // Join ALL text parts — a thinking model returns a thought part before the answer.
-    const text = (data?.candidates?.[0]?.content?.parts || []).map((part) => part && part.text).filter(Boolean).join('');
+    const text = geminiText(data); // joins answer parts, skips thought parts
     const parsed = looseJson(text);
     return parsed?.ok === true
       ? { ok: true, status: 200, latencyMs }
@@ -157,7 +157,7 @@ async function main() {
   const m = LAWN_PIPELINE_MODELS;
 
   const checks = [
-    { provider: 'gemini', role: 'perception', env: 'LAWN_VISION_MODEL', model: m.vision, fromEnv: !!process.env.LAWN_VISION_MODEL, run: checkGemini },
+    { provider: 'gemini', role: 'perception', env: process.env.LAWN_VISION_MODEL ? 'LAWN_VISION_MODEL' : 'MODEL_GEMINI_VISION', model: m.vision, fromEnv: !!(process.env.LAWN_VISION_MODEL || process.env.MODEL_GEMINI_VISION), run: checkGemini },
     { provider: 'anthropic', role: 'challenge', env: 'LAWN_CHALLENGE_MODEL', model: m.challenge, fromEnv: !!process.env.LAWN_CHALLENGE_MODEL, run: checkAnthropic },
     { provider: 'openai', role: 'writer', env: 'LAWN_WRITER_MODEL', model: m.writer, fromEnv: !!process.env.LAWN_WRITER_MODEL, run: checkOpenAI },
   ];

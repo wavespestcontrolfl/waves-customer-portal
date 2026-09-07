@@ -10,7 +10,7 @@ const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/
 const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isEnabled, gateEnvValue } = require('../config/feature-gates');
-const { runExclusive } = require('../utils/cron-lock');
+const { runExclusive, recordMissedTick } = require('../utils/cron-lock');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
@@ -598,10 +598,46 @@ function initScheduledJobs() {
     ).catch((err) => logger.warn(`[scheduler] cancel-notice disable stamp failed: ${err.message}`));
   }
 
+  // =========================================================================
+  // DAILY 4:10AM — Auto-Dispatch: optimize FUTURE recurring visits more than
+  // 14 days out (route proximity + customer scheduling preferences). Double-
+  // gated (cronJobs AND autoDispatch). Existing handoff alert maintenance is
+  // recovery work: it remains registered when either gate is off and cannot
+  // move appointments. Placement runs in the configured mode — dry_run by
+  // default; it only applies moves when AUTO_DISPATCH_MODE=apply.
+  // =========================================================================
+  cron.schedule('10 4 * * *', async () => {
+    logger.info('Running: Auto-Dispatch scheduling maintenance');
+    try {
+      // runExclusive: read-then-act job — a Railway deploy overlap or a slow
+      // prior tick must not double-run and bypass the per-run change cap.
+      await runExclusive('auto-dispatch-recurring', async () => {
+        if (!isEnabled('cronJobs') || !isEnabled('autoDispatch')) {
+          const { flagUnplacedVisits } = require('./auto-dispatch/audit');
+          const { getAutoDispatchConfig } = require('./auto-dispatch/config');
+          await flagUnplacedVisits(getAutoDispatchConfig());
+          return;
+        }
+        const { runAutoDispatch } = require('./auto-dispatch');
+        const result = await runAutoDispatch({ triggeredBy: 'cron' });
+        logger.info(`[auto-dispatch] cron run ${result.runId} ${result.status}: evaluated=${result.evaluated} recommended=${result.recommended} changed=${result.changed} skipped=${result.skipped} failed=${result.failed}`);
+        // completed_with_errors (guard-read outage or failed applies) and
+        // failed must FAIL job health — the run row already records the
+        // detail; a degraded night must not read as a green
+        // auto-dispatch-recurring (same guard as the 4:20 reorder cron).
+        if (result.status !== 'completed') {
+          throw new Error(`auto-dispatch run ${result.runId} unhealthy: status=${result.status} failed=${result.failed}`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Auto-Dispatch run failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Boundary maintenance runs BEFORE this early return (codex r40):
   // disabling scheduled tasks must not preserve a stale feature interval.
   if (!isEnabled('cronJobs')) {
-    logger.info('[feature-gates] Cron jobs DISABLED — skipping all scheduled tasks');
+    logger.info('[feature-gates] Cron jobs DISABLED — retaining handoff alert recovery only');
     return;
   }
 
@@ -1079,35 +1115,6 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 4:10AM — Auto-Dispatch: optimize FUTURE recurring visits more than
-  // 14 days out (route proximity + customer scheduling preferences). Double-
-  // gated (cronJobs AND autoDispatch). Runs in the configured mode — dry_run
-  // by default; it only applies moves when AUTO_DISPATCH_MODE=apply.
-  // =========================================================================
-  cron.schedule('10 4 * * *', async () => {
-    if (!isEnabled('autoDispatch')) return;
-    logger.info('Running: Auto-Dispatch recurring optimizer');
-    try {
-      // runExclusive: read-then-act job — a Railway deploy overlap or a slow
-      // prior tick must not double-run and bypass the per-run change cap.
-      await runExclusive('auto-dispatch-recurring', async () => {
-        const { runAutoDispatch } = require('./auto-dispatch');
-        const result = await runAutoDispatch({ triggeredBy: 'cron' });
-        logger.info(`[auto-dispatch] cron run ${result.runId} ${result.status}: evaluated=${result.evaluated} recommended=${result.recommended} changed=${result.changed} skipped=${result.skipped} failed=${result.failed}`);
-        // completed_with_errors (guard-read outage or failed applies) and
-        // failed must FAIL job health — the run row already records the
-        // detail; a degraded night must not read as a green
-        // auto-dispatch-recurring (same guard as the 4:20 reorder cron).
-        if (result.status !== 'completed') {
-          throw new Error(`auto-dispatch run ${result.runId} unhealthy: status=${result.status} failed=${result.failed}`);
-        }
-      });
-    } catch (err) {
-      logger.error(`Auto-Dispatch run failed: ${err.message}`);
-    }
-  }, { timezone: 'America/New_York' });
-
-  // =========================================================================
   // DAILY 4:20AM — ROUTE-TIERS nightly intra-day reorder (tier 3: 72h–7d
   // band). Rewrites route_order per tech-day via the shared optimizer when
   // savings clear the floor; NEVER moves a visit's date/window/tech, skips any
@@ -1388,8 +1395,7 @@ function initScheduledJobs() {
   cron.schedule('0 */5 * * * *', async () => {
     if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;
     try {
-      const { runSmsOperationalActions } = require('./sms-operational-actions');
-      await runSmsOperationalActions();
+      await runSmsRecoveryTick();
     } catch {
       logger.error('[sms-operations] intake did not complete');
     }
@@ -4183,8 +4189,15 @@ function initScheduledJobs() {
           // the attempts ran out; parked as send_failed with no due time it
           // is inert, as the sibling release leaves a held row (pre-push
           // codex P1 on #3750; codex r18 P2 on #3804).
-          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING'].includes(e.code));
-          await markScheduledEstimateSendFailure(est, e.message, { retry: !deterministicRefusal, now });
+          const deterministicRefusal = !!(e && ['CLIENT_FALLBACK_PRICING', 'PRICING_AUTHORITY_NOT_SERVER', 'REPRICE_PENDING', 'ESTIMATE_REVIEW_STALE', 'SEND_OUTCOME_UNCERTAIN'].includes(e.code));
+          // A reviewed attempt cannot be retimed: its receipt and pinned
+          // offer belong to the original schedule. Even a bookkeeping throw
+          // can follow provider acceptance, so stop for explicit staff review.
+          let sendData = est.estimate_data;
+          try { if (typeof sendData === 'string') sendData = JSON.parse(sendData); } catch { sendData = null; }
+          const scheduledAt = est.scheduled_at ? new Date(est.scheduled_at).toISOString() : null;
+          const reviewedSchedule = scheduledAt && (sendData?.manualSendAttempts || []).some((entry) => entry.scheduleReview?.scheduledAt === scheduledAt);
+          await markScheduledEstimateSendFailure(est, e.message, { retry: !deterministicRefusal && !reviewedSchedule, now });
         }
       }
       logger.info(`Scheduled estimates processed: ${scheduled.length}`);
@@ -6555,11 +6568,12 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 6:40 AM ET — Schedule-integrity watchdog. Pages three silent-loss
+  // DAILY 6:40 AM ET — Schedule-integrity watchdog. Pages silent-loss
   // classes: past-dated visits stuck in on_site/en_route (performed but
   // never completed → no service record / invoice / report / SMS), upcoming
   // recurring series with no price on any row, and recurring-lawn customers
-  // invisible to the Monday irrigation email. 6:40, NOT later (Codex #3209
+  // invisible to the Monday irrigation email, and accepted-plan schedule
+  // gaps. 6:40, NOT later (Codex #3209
   // post-merge P2): the Monday irrigation send fires at 7:00 ET, so a
   // lawn-email gap alert after that is unactionable for the very send it
   // warns about — this tick must precede it. Still before the day's route
@@ -6571,8 +6585,8 @@ function initScheduledJobs() {
     try {
       const { runScheduleIntegrityWatchdog } = require('./schedule-integrity-watchdog');
       const result = await runScheduleIntegrityWatchdog();
-      if (!result.skipped && (result.stale > 0 || result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed)) {
-        logger.warn(`[schedule-integrity] stale=${result.stale} unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} alerted=${result.alerted}`);
+      if (!result.skipped && (result.stale > 0 || result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.acceptedScheduleGaps > 0 || result.acceptedScheduleCheckFailed)) {
+        logger.warn(`[schedule-integrity] stale=${result.stale} unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} acceptedScheduleGaps=${result.acceptedScheduleGaps}${result.acceptedScheduleCheckFailed ? ' ACCEPTED-SCHEDULE-CHECK-FAILED' : ''} alerted=${result.alerted}`);
       }
     } catch (err) {
       logger.error(`Schedule-integrity watchdog tick failed: ${err.message}`);
@@ -6636,8 +6650,23 @@ function initBankingSync() {
   }, { timezone: 'America/New_York' });
 }
 
+// One SMS profile-capture recovery tick. runExclusive returns
+// { skipped: true, reason } WITHOUT running the sweep when it cannot acquire
+// a DB connection; lease_held is a normal overlap. A lost tick is ledgered
+// through the missed-tick path so job health never reads as quiet.
+async function runSmsRecoveryTick({ now = Date.now() } = {}) {
+  const { runSmsOperationalActions } = require('./sms-operational-actions');
+  const res = await runSmsOperationalActions();
+  if (res && res.skipped === true && res.reason !== 'lease_held') {
+    logger.error(`[sms-operations] profile capture tick skipped (${res.reason})`);
+    await recordMissedTick('sms-operational-actions', now, `tick skipped: ${res.reason}`);
+  }
+  return res;
+}
+
 module.exports = {
   initScheduledJobs,
+  runSmsRecoveryTick,
   initBankingSync,
   purposeForScheduledMessageType,
   resolveScheduledRecipient,

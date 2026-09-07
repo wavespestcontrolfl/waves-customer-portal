@@ -182,7 +182,11 @@ function firstImageChainModel(value) {
 // that run IN PARALLEL with the primary (the fan-outs' OpenAI arm). Both
 // resolve like any ref and count in the Models-in-use view and the change
 // preview. Without `fanout`, primary → fallback → retry IS the execution order.
-const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by six photo lanes';
+// `skipsEqualLeg` = the implementation guards FALLBACK !== MODEL, so a leg that
+// resolves to the same model as the one before it is not called: it is emitted
+// with `skipped: true` (kept for dependency math, hidden by the card); ladders
+// without the flag call every leg.
+const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by seven photo lanes';
 // `inbound: true` = the lane's prompt carries customer or third-party content
 // (SMS, email, call transcripts, uploaded photos/PDFs, web forms). The Gemini
 // adapter (llm/call.js) folds the system prompt into the user turn, so moving
@@ -219,23 +223,23 @@ const LANES = [
   L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'routine categories on the flagship tier' }),
 
   // ── Multimodal ──
-  L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
-  L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
-  L('tree_shrub', 'Tree & shrub assessment', 'tree-shrub-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
+  L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { skipsEqualLeg: true, inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
+  L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { skipsEqualLeg: true, inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
+  L('tree_shrub', 'Tree & shrub assessment', 'tree-shrub-assessment.js', 'multimodal', T('VISION'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { skipsEqualLeg: true, inbound: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), note: `Claude + Gemini in parallel · ${SHARED_GEMINI_PIN}` }),
   // Sequential ladder like the caption read: Gemini, then the prior Gemini,
   // then Claude VISION only when both miss (treatment-zone-suggest.js attempts).
-  L('treatment_zone', 'Treatment-zone suggestion (map)', 'treatment-zone-suggest.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { inbound: true, retry: T('VISION'), note: SHARED_GEMINI_PIN }),
+  L('treatment_zone', 'Treatment-zone suggestion (map)', 'treatment-zone-suggest.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: T('VISION'), note: SHARED_GEMINI_PIN }),
   // Sequential ladder, not a fan-out: analyzePhoto tries Gemini, then the
   // prior Gemini, and reaches Claude VISION only when both miss.
-  L('tech_caption_vision', 'Tech social caption · photo read', 'tech-social-caption.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { retry: T('VISION'), note: SHARED_GEMINI_PIN }),
-  L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, retry: T('GEMINI_VISION_FALLBACK'), also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'three legs in parallel · owner ruling 2026-09-02: one Gemini model — not yet coded' }),
-  L('property_trio', 'Property lookup trio (stories, roof)', 'property-lookup/ai-property-lookup.js', 'multimodal', T('WORKHORSE'), D('GEMINI_PROPERTY_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), { fanout: true, also: [D(['OPENAI_PROPERTY_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'consensus of the three legs' }),
-  L('property_v2_vision', 'Property lookup v2 · vision legs', 'routes/property-lookup-v2.js', 'multimodal', T('FLAGSHIP'), D('GEMINI_VISION_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), { fanout: true, also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })] }),
-  L('turf_ocr', 'Turf-height gauge OCR', 'turf-height-ocr.js', 'multimodal', D('GEMINI_TURF_OCR_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), null, { fanout: true, inbound: true, also: [T('VISION')], note: 'Claude + Gemini in parallel; consensus of both readings' }),
+  L('tech_caption_vision', 'Tech social caption · photo read', 'tech-social-caption.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, retry: T('VISION'), note: SHARED_GEMINI_PIN }),
+  L('satellite', 'Satellite / aerial property analysis', 'satellite-analyzer.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { skipsEqualLeg: true, fanout: true, retry: T('GEMINI_VISION_FALLBACK'), also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'three legs in parallel · one Gemini model (owner 2026-09-02): the retry leg resolves to the same id unless GEMINI_VISION_FALLBACK_MODEL splits them' }),
+  L('property_trio', 'Property lookup trio (stories, roof)', 'property-lookup/ai-property-lookup.js', 'multimodal', T('WORKHORSE'), E('GEMINI_PROPERTY_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, also: [D(['OPENAI_PROPERTY_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'consensus of the three legs' }),
+  L('property_v2_vision', 'Property lookup v2 · vision legs', 'routes/property-lookup-v2.js', 'multimodal', T('FLAGSHIP'), E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, also: [D(['OPENAI_VISION_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: SHARED_GEMINI_PIN }),
+  L('turf_ocr', 'Turf-height gauge OCR', 'turf-height-ocr.js', 'multimodal', E('GEMINI_TURF_OCR_MODEL', T('GEMINI_VISION_BEST')), null, { fanout: true, inbound: true, also: [T('VISION')], note: 'Claude + Gemini in parallel; consensus of both readings' }),
   L('photo_scoring', 'Completion photo scoring', 'routes/admin-dispatch.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback'), { note: 'drives customer-facing health scores (owner 2026-07-21)' }),
   L('vision_delta', 'Before / after vision delta', 'vision-delta.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
   L('lawn_quality_gate', 'Lawn photo-quality gate', 'lawn-intelligence.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
-  L('lawn_diag_vision', 'Lawn diagnostic · vision leg', 'lawn-diagnostic-prompt.js', 'multimodal', D('LAWN_VISION_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'vision' } }), T('VISION')),
+  L('lawn_diag_vision', 'Lawn diagnostic · vision leg', 'lawn-diagnostic-prompt.js', 'multimodal', E('LAWN_VISION_MODEL', T('GEMINI_VISION_BEST')), T('VISION')),
   L('lawn_challenge', 'Lawn diagnostic · adversarial challenge', 'lawn-diagnostic-prompt.js', 'multimodal', T('LAWN_CHALLENGE')),
   L('hero_alt', 'Hero image alt-text', 'content/hero-alt-vision.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
   L('wdo_project_brief', 'WDO project brief + treatment-photo read', 'routes/admin-projects.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback'), { note: 'text-only briefs ride contentDraft' }),
@@ -763,8 +767,20 @@ function getSwitchboard() {
       ? resolveSwitch(lane.primary)
       : { primary: resolveRef(lane.primary), fallback: resolveRef(lane.fallback) };
     const primary = withProvider(legs.primary);
-    const fallback = withProvider(legs.fallback);
-    const retry = withProvider(resolveRef(lane.retry));
+    let fallback = withProvider(legs.fallback);
+    let retry = withProvider(resolveRef(lane.retry));
+    // On a `skipsEqualLeg` lane the implementation guards `FALLBACK !== MODEL`
+    // and never calls a leg that resolves to the same model as the one before
+    // it. The leg is MARKED, not dropped: its selector still moves the lane (a
+    // split GEMINI_VISION_FALLBACK_MODEL re-arms six photo ladders), so the
+    // change composer and previews keep the dependency; the card hides
+    // `skipped` legs from the chain sentence. Ladders without the flag (e.g.
+    // video_gen) call every leg regardless, so nothing is marked there.
+    const sameLeg = (a, b) => !!(a && b && a.model === b.model && a.provider === b.provider);
+    if (lane.skipsEqualLeg) {
+      if (sameLeg(fallback, retry)) retry = { ...retry, skipped: true };
+      if (sameLeg(primary, fallback)) fallback = { ...fallback, skipped: true };
+    }
     const also = (lane.also || []).map((ref) => withProvider(resolveRef(ref)));
     const registration = lane.lock?.kind === 'registration';
     if (primary.selector && byKey[primary.selector] && !primary.pinned && !registration) byKey[primary.selector].laneCount += 1;
@@ -784,6 +800,7 @@ function getSwitchboard() {
       lock: lane.lock || null,
       fanout: !!lane.fanout,
       inbound: !!lane.inbound,
+      skipsEqualLeg: !!lane.skipsEqualLeg,
       note: lane.note || null,
     };
   });

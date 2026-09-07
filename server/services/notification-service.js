@@ -272,6 +272,9 @@ const NotificationService = {
 
   async revertRelayFailureCallback({ callSid, callbackStamp, notificationId }) {
     return db.transaction(async (trx) => {
+      // The conversation bounds its own wait. Let this detached compensation
+      // finish after a transient row lock rather than abandoning its receipt.
+      await trx.raw("SET LOCAL idle_in_transaction_session_timeout = '5s'");
       const call = await trx('call_log').where('twilio_call_sid', callSid).forUpdate().first('id');
       if (!call) return;
       const cleared = await trx('call_log').where('id', call.id)
@@ -283,7 +286,7 @@ const NotificationService = {
 
   // Create customer notification
   async notifyCustomer(customerId, category, title, body, opts = {}) {
-    const { preferenceKey, dedupeKey, ...createOpts } = opts;
+    const { preferenceKey, dedupeKey, awaitPush = false, pushOptions, ...createOpts } = opts;
 
     if (!(await customerPreferenceEnabled(customerId, preferenceKey))) {
       return { id: null, suppressed: true, reason: 'preference_disabled' };
@@ -340,8 +343,22 @@ const NotificationService = {
         category,
         notificationId: String(notification.id),
         tag: dedupeKey || `customer-notification:${notification.id}`,
-      });
+        ...(pushOptions?.ephemeral ? { ephemeral: true } : {}),
+      }, ...(pushOptions ? [pushOptions] : []));
       pushQueued = true;
+      // Scheduled advisories can record provider acceptance separately from
+      // bell creation. Request-path callers retain the asynchronous dispatch.
+      if (awaitPush) {
+        const outcome = await dispatch;
+        return { ...notification, push: {
+          queued: true,
+          subscriptions: outcome.subscriptions,
+          accepted: outcome.sent,
+          failed: outcome.failed,
+          expired: outcome.expired,
+          skipped: outcome.skipped,
+        } };
+      }
       // The bell is already durable, and request paths such as status changes
       // and estimate acceptance must not wait on external push providers.
       void Promise.resolve(dispatch).catch((err) => {
@@ -351,7 +368,7 @@ const NotificationService = {
       // Preserve the successful bell even if dispatch fails synchronously.
       logger.warn(`[notifications] Customer push dispatch failed: ${err.message}`);
     }
-    return { ...notification, push: { queued: pushQueued } };
+    return { ...notification, push: { queued: pushQueued, ...(awaitPush ? { error: 'dispatch_failed' } : {}) } };
   },
 
   // Get notifications for admin

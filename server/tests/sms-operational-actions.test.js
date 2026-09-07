@@ -183,6 +183,10 @@ describe('SMS operational evidence and ownership', () => {
     'The controller is outside\nIs it beside the garage',
     'May we park in the driveway', 'Please can we park in the driveway',
     'Ok to park in the driveway', 'Mind if we park in the driveway',
+    'I was wondering if you could leave the side gate open', 'Just wondering if we can park in the driveway',
+    'We wanted to ask whether the dogs can stay out', 'Any chance you could use the side door',
+    'Just checking if you can leave the side gate open', 'Wanted to see if you could use the side door',
+    'Curious whether the gate can stay open', 'Trying to find out when you arrive',
   ])('unpunctuated and Unicode questions require review: %s', (quote) => {
     expect(groundExtraction(extracted([], [fact({ field: 'pet_details', quote, value: quote })]), {
       message: source(quote), properties,
@@ -453,6 +457,37 @@ describe('SMS operational evidence and ownership', () => {
     await expect(extractSmsOperations({ message: source('Please send the estimate'), properties }))
       .rejects.toThrow('provider_failed');
   });
+
+  test('outbound statements cannot fill a customer profile', () => {
+    const message = source(fact().quote, 'outbound');
+    expect(groundExtraction(extracted([], [fact()]), { message, properties }).facts).toEqual([]);
+  });
+
+  test.each(['unknown', 'none', 'not known', 'not available', 'unsure', 'N A', 'same as last time', 'the usual',
+    'on the fridge', '1234 or 5678', '1234 I think', '1234 probably', '1234 for the side gate', '#', '*', '-',
+    '#-*', 'broken', 'disabled', 'reset', 'expired'])('missing, relational or ambiguous access code remains empty: %s', (value) => {
+    const quote = `Lockbox code is ${value}`;
+    const item = fact({ field: 'lockbox_code', quote, value });
+    expect(groundExtraction(extracted([], [item]), { message: source(quote), properties }))
+      .toEqual({ obligations: [], facts: [], dropped: 1 });
+    expect(factVerdict(item, { properties, senderIsPrimary: true })).toBe('code_uncertain');
+  });
+
+  test.each(['ABCD', '1234 5678', '12-34', '#1234 then press 5', '*9'])('a bounded credential is still a code: %s', (value) => {
+    const message = source(`Lockbox code is ${value}`);
+    expect(groundExtraction(extracted([], [fact({ field: 'lockbox_code', quote: message.message_body, value })]),
+      { message, properties }).facts.map((f) => f.value)).toEqual([value]);
+  });
+
+  test('the prompt carries text, direction, time and opaque property ids only', () => {
+    const prompt = buildPrompt({ message: source('The controller is beside the garage.'), history: [source('Hi there', 'outbound')],
+      properties: [{ id: PROPERTY_ID, address_line1: '100 Example Lane', city: 'Sarasota', zip: '34236' }] });
+    expect(prompt).toContain(PROPERTY_ID);
+    expect(prompt).toContain('"direction":"outbound"');
+    for (const leak of [CUSTOMER_ID, '+12025550101', numbers.locations.parrish.number, '100 Example Lane', 'Sarasota', '34236', '"id":"00000000-0000-4000-8000-000000000103"']) {
+      expect(prompt).not.toContain(leak);
+    }
+  });
 });
 
 describe('profile safeguards independent of model labels', () => {
@@ -510,21 +545,25 @@ describe('profile safeguards independent of model labels', () => {
 
 describe('private profile writes', () => {
   const context = { properties, current: {}, senderIsPrimary: true };
+
   test('allows a clear empty-field update but preserves conflicts and temporary instructions', () => {
     expect(factVerdict(fact(), context)).toBe('apply');
     expect(factVerdict(fact(), { ...context, current: { irrigation_controller_location: 'garage' } }))
       .toBe('existing_value_conflict');
     expect(factVerdict(fact({ duration: 'visit_only' }), context)).toBe('temporary_instruction');
   });
+
   test('never guesses a property or a service contact’s authority', () => {
     expect(factVerdict(fact(), { ...context, properties: [...properties, { id: 'second' }] })).toBe('property_ambiguous');
     expect(factVerdict(fact({ property_id: null }), context)).toBe('property_ambiguous');
     expect(factVerdict(fact(), { ...context, senderIsPrimary: false })).toBe('contact_authority');
   });
+
   test('an edit made while extraction ran is preserved, including clearing an old value', () => {
     expect(factVerdict(fact(), { ...context, current: {}, expectedCurrent: { irrigation_controller_location: 'garage' } }))
       .toBe('changed_during_extraction');
   });
+
   test('does not turn a one-off request to text into a permanent preference', () => {
     expect(factVerdict(fact({ field: 'contact_preference', value: 'text', quote: 'Text me when you get here' }), context))
       .toBe('preference_uncertain');
@@ -701,6 +740,7 @@ describe('activation and intake', () => {
     delete process.env.GATE_SMS_OPERATIONAL_ACTIONS_SINCE;
     delete process.env.GATE_SMS_COMMITMENT_FOLLOWUP;
   });
+
   test('gate off and missing activation epoch perform no database work', async () => {
     const conn = jest.fn();
     expect(await runSmsOperationalActions({ conn })).toEqual({ skipped: 'gate_off' });
@@ -708,14 +748,17 @@ describe('activation and intake', () => {
     expect(await runSmsOperationalActions({ conn })).toEqual({ skipped: 'activation_time_required' });
     expect(conn).not.toHaveBeenCalled();
   });
+
   test('keeps mixed-content reschedule replies eligible for profile capture', () => {
     expect(eligibleMessage({ ...source('Yes. The controller is outside.'), message_type: 'reschedule_reply' })).toBe(true);
   });
+
   test('profile-only intake skips even human outbound messages before extraction', () => {
     delete process.env.GATE_SMS_COMMITMENT_FOLLOWUP;
     expect(eligibleMessage({ ...source('The controller is outside.', 'outbound'),
       from_phone: numbers.locations.parrish.number, message_type: 'manual', status: 'delivered' })).toBe(false);
   });
+
   test.each(['failed', 'undelivered'])('only captured promises retain eligibility after %s', (status) => {
     process.env.GATE_SMS_OPERATIONAL_ACTIONS = 'true';
     process.env.GATE_SMS_COMMITMENT_FOLLOWUP = 'true';
@@ -731,6 +774,7 @@ describe('activation and intake', () => {
     expect(eligibleMessage({ ...source('Reacted ❤️ to “Park in the driveway”'), message_type: 'inbound' })).toBe(false);
     expect(eligibleMessage({ ...source('Park in the driveway'), message_type: 'inbound' })).toBe(true);
   });
+
   test('excludes automated outbound messages, reactions and the AI number', () => {
     expect(eligibleMessage(source('Please send the estimate'))).toBe(true);
     expect(eligibleMessage({ ...source('Reminder', 'outbound'), from_phone: numbers.locations.parrish.number,

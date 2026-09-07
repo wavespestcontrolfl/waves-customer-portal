@@ -1,7 +1,7 @@
 'use strict';
 
-// The action half of the SMS agent. Reuses the extraction receipt store,
-// commitment ledger, private profile writer, cron lock and admin bell.
+// Profile capture and separately gated SMS follow-up share extraction receipts,
+// the audited profile writer, commitment ledger, cron lock and exception bell.
 // No customer communications, scheduling writes, account merges or money movement.
 const db = require('../models/db');
 const logger = require('./logger');
@@ -11,19 +11,24 @@ const { runExclusive } = require('../utils/cron-lock');
 const { recordAuditEvent } = require('./audit-log');
 const NotificationService = require('./notification-service');
 const { hashExtractionSource, recordExtractionAttempt } = require('./data-hygiene/source-extraction-store');
-const { stalePendingExtractionProposals } = require('./data-hygiene/proposal-store');
+const { stalePendingExtractionProposals, findPendingExtractionProposal, upsertSensitiveProposal } = require('./data-hygiene/proposal-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
 const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode } = require('./sms-operational-extractor');
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment } = require('./sms-commitment-fulfillment');
 const { isSmsReaction } = require('./sms-intent');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment } = require('./sms-commitment-fulfillment');
 
 const enabled = () => gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS');
 const smsCommitmentsEnabled = () => enabled() && gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP');
-const SOURCE_COLUMNS = ['id', 'customer_id', 'direction', 'message_body', 'message_type', 'created_at', 'from_phone', 'to_phone', 'status'];
 const HUMAN_TYPES = ['manual', 'ai_approved', 'ai_revised'];
+const SOURCE_COLUMNS = ['id', 'customer_id', 'direction', 'message_body', 'message_type', 'created_at', 'from_phone', 'to_phone', 'status', 'twilio_sid'];
 const EXCLUDED_TYPES = ['opt_out', 'opt_in', 'sms_reaction', 'help_request'];
+// Owner decision 2026-09-07: only bounded typed fields auto-apply, each behind
+// its strict validator. Free-form text becomes a pending proposal in the
+// existing data-hygiene queue (vault, audit and revert included), so a missed
+// backstop can at most propose, never write.
+const AUTO_APPLY_FIELDS = new Set(['contact_preference', 'neighborhood_gate_code', 'property_gate_code', 'lockbox_code', 'garage_code']);
 const tail = (v) => String(v || '').replace(/\D/g, '').slice(-10);
 // A sentence can request the same kind of work for two properties or two
 // recipients/deliverables. Keep that scope in identity. Source-row locking
@@ -107,15 +112,60 @@ function factVerdict(fact, { properties, current = {}, expectedCurrent = current
   return 'apply';
 }
 
+// A grounded free-form fact for an empty field is offered to staff through the
+// existing sensitive-proposal path: the same row shape, vault and approve
+// route the data-hygiene extraction phase uses (create-on-apply when the
+// customer has no preferences row yet).
+async function proposeFact(trx, message, fact, current) {
+  // The same SMS is also dual-written to the unified inbox, where the admin
+  // extraction phase may already have proposed this field from a regex
+  // fragment, and an older SMS can be retried after a newer one succeeded.
+  // The customer's newest statement wins. Only a matching Twilio identity
+  // identifies a twin; a distinct newer correction always outranks this SMS.
+  if (await findPendingExtractionProposal({ trx, scope_id: message.customer_id, field: fact.field,
+    newerThan: message.created_at, sameMessageSid: message.twilio_sid })) return null;
+  await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field,
+    notNewerThan: message.created_at, sameMessageSid: message.twilio_sid });
+  const proposal = await upsertSensitiveProposal({
+    rule_id: 'extract.sms_profile', rule_version: VERSION, resource_type: 'property_preferences',
+    resource_id: current?.id || null, scope_type: 'customer', scope_id: message.customer_id, field: fact.field,
+    current_value: current?.[fact.field] ?? null, proposed_value: fact.value,
+    source: 'message-extraction', confidence: 0.9, tier: 'medium', is_sensitive: true,
+    // The proposals API returns evidence without the audited reveal step, so
+    // the text itself stays in the vault and the customer conversation.
+    evidence: { evidence_source_type: 'message', evidence_source_id: message.id, sms_log_id: message.id,
+      channel: 'sms', source_at: new Date(message.created_at).toISOString(), twilio_sid: message.twilio_sid || null,
+      property_id: fact.property_id, extractor_version: VERSION,
+      source_excerpt: 'Customer SMS; the text is in the vault and the customer conversation.' },
+  }, { trx });
+  return proposal.id;
+}
+
 async function applyFacts(trx, message, facts, context) {
   const outcomes = [];
   let persistedCurrent = context.current;
+  // Every free-form value is the whole message, so two distinct free-form
+  // fields in one batch claim the same text for different topics.
+  const mixedTopics = new Set(facts.filter((f) => !AUTO_APPLY_FIELDS.has(f.field)).map((f) => f.field)).size > 1;
   for (const fact of facts) {
     const duplicateField = facts.filter((f) => f.field === fact.field).length > 1;
     const negatedReview = REVIEW_ON_NEGATION[fact.field];
     const negated = negatedReview && NEGATED_OR_UNCERTAIN.test(message.message_body);
-    const verdict = duplicateField ? 'conflicting_facts' : negated ? negatedReview : factVerdict(fact, context);
+    const verdict = duplicateField ? 'conflicting_facts' : negated ? negatedReview
+      : mixedTopics && !AUTO_APPLY_FIELDS.has(fact.field) ? 'mixed_topics' : factVerdict(fact, context);
     if (verdict !== 'apply') { outcomes.push({ ...fact, outcome: verdict }); continue; }
+    if (!AUTO_APPLY_FIELDS.has(fact.field)) {
+      const proposalId = await proposeFact(trx, message, fact, persistedCurrent);
+      outcomes.push({ ...fact, outcome: proposalId ? 'proposed' : 'superseded', proposal_id: proposalId });
+      continue;
+    }
+    // A newer distinct pending proposal for this typed field (the extraction
+    // phase saw a later message) outranks an older retried SMS: leave it to staff.
+    if (await findPendingExtractionProposal({ trx, scope_id: message.customer_id, field: fact.field,
+      newerThan: message.created_at, sameMessageSid: message.twilio_sid })) {
+      outcomes.push({ ...fact, outcome: 'superseded' });
+      continue;
+    }
     const proposal = { scope_id: message.customer_id, field: fact.field, resource_id: persistedCurrent?.id || null };
     const target = await resolvePropertyPreferencesTarget({ trx, proposal, currentRaw: persistedCurrent?.[fact.field] ?? null });
     await applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw: fact.value });
@@ -190,14 +240,14 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     await trx('sms_log').where({ id: message.id }).update({ operational_analysis: analysis });
     await recordExtractionAttempt({ trx, source_type: 'message', source_id: message.id, extractor_version: VERSION,
       source_hash: hashExtractionSource(message.message_body), status: 'ok', proposal_count: facts.length + obligations.length });
-    const exceptions = facts.filter((f) => !['applied', 'unchanged'].includes(f.outcome));
-    if (exceptions.length + dropped) {
+    const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed', 'superseded'].includes(f.outcome));
+    if (exceptions.length + extracted.dropped) {
       const notif = await NotificationService.notifyAdmin('alert', 'SMS instructions need review',
         'Part of this message needs an evidence, property, timing, or existing-value check. Open the customer profile to review the source conversation.',
         { trx, bell: true, dedupeKey: `sms-property-instructions:${message.id}`,
           link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}&tab=comms`,
           metadata: { triggerKey: 'sms_operational_exception', customerId: customer.id, sms_log_id: message.id,
-            fields: exceptions.map((f) => f.field), unverified_count: dropped,
+            fields: exceptions.map((f) => f.field), unverified_count: extracted.dropped,
             reasons: [...new Set(exceptions.map((f) => f.outcome))] } });
       if (!notif?.id) throw new Error('sms_operations_bell_not_persisted');
     }

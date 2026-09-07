@@ -520,4 +520,32 @@ describe('resolveOrCreateProjectInvoice mint serialization (source contract)', (
     const completion = fs.readFileSync(require.resolve('../services/project-completion.js'), 'utf8');
     expect(completion).toMatch(/const project = await trx\('projects'\)\.where\(\{ id: projectId \}\)\.forUpdate\(\)\.first\(\);/);
   });
+
+  // Every termite service (WDO inspection, pre-treat, trenching, liquid)
+  // completes through this path, so the per-completion consumables hook
+  // must run here too — after the commit, with the profile's projectType so
+  // the WDO inspection clears the inspection skip (GH codex #3996 P1).
+  test('completeProjectBackedService consumes completion supplies after the transaction commits', () => {
+    const completion = fs.readFileSync(require.resolve('../services/project-completion.js'), 'utf8');
+    const trxEnd = completion.indexOf('if (postCommitTrackServiceId) {');
+    const consumeAt = completion.indexOf('settleOwedCompletionSupplies(knex, {');
+    expect(trxEnd).toBeGreaterThan(-1);
+    expect(consumeAt).toBeGreaterThan(trxEnd);
+    expect(completion.slice(consumeAt, completion.indexOf('});', consumeAt))).toContain('projectType: project.project_type');
+    // Scheduled only inside the fresh status flip, and never for a replaced
+    // `rescheduled` row (r2 P2s: historical re-close replay, phantom visit).
+    const flipAt = completion.indexOf("if (scheduledService.status !== 'completed') {");
+    const scheduleAt = completion.indexOf('postCommitConsumption = {');
+    const flipEnd = completion.indexOf('const projectUpdate = {', flipAt);
+    expect(scheduleAt).toBeGreaterThan(flipAt);
+    expect(scheduleAt).toBeLessThan(flipEnd);
+    expect(completion.slice(flipAt, scheduleAt)).toContain("!== 'rescheduled'");
+    // The transition writes the recap flow's durable owed marker inside the
+    // transaction, an unsettled re-close retries on it, and the hook clears
+    // it after commit unless the hand-off bell was lost (pre-push P1).
+    expect(completion.slice(flipAt, scheduleAt)).toContain('completionSuppliesOwedMarker(trx)');
+    expect(completion.slice(flipEnd - 400, flipEnd)).toContain('else if (completionSuppliesOwed(serviceRecord))');
+    // Settle + clear is the SHARED lifecycle, not a local copy (r3 P1).
+    expect(completion).not.toMatch(/- 'completion_supplies_owed'/);
+  });
 });

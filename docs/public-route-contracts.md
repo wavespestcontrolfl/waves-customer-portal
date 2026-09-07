@@ -74,8 +74,23 @@ Generated or saved tier selections replace the listed service cadences and
 retain omitted companion programs; choosing a tier is not a service removal.
 The existing pest-only recurring choice on eligible one-time-toggle estimates
 retains its intentional companion exclusion, using the acceptance predicate.
-Existing request fields, token/signature guards, rate limits, privacy headers,
-and booking duration policy apply), `/api/reports/:token/*` (the
+Existing request fields, token/signature guards, rate limits and privacy headers
+apply. With strict opt-in `GATE_VISIT_COMBINED_CAPACITY` and prerequisite
+`GATE_SEPARATE_COMBO_VISITS`, multi-service recurring selections reserve 60 minutes
+per physical service program. Termite rental and bond billing riders fold into
+bait service; legacy supplements use the converter's physical-program rules.
+Unsupported families/cadences, recurring foam and commercial programs return
+409 `COMBINED_VISIT_UNAVAILABLE` before offering or holding combined work.
+`durationMinutes` and `windowEnd` describe the whole work block; arrival copy
+remains start plus 120 minutes. One assignable technician must have no selected
+service capability explicitly disabled. The allocation stamp is server-owned
+and excluded from public slot metadata. `/api/estimates/:token/accept` rechecks
+the selection, technician and full occupancy under existing locks, then converts
+the hold into separate sequential 60-minute service windows with independent
+cadences. Missing or unmatched members abort the transaction. A stamped hold
+retains its capacity policy when the creation gate turns off. Shared-arrival
+reminder consumers use the persisted allocation, including with grouping off
+or Auto Pay enabled; invoice and Auto Pay policies remain unchanged), `/api/reports/:token/*` (the
 service-report V1 payload — `/data`, the PDF at `/:token`, `/map.svg`, and
 the queued PDF / report-email renders that share `buildReportV1Data` —
 renders the report's IDENTITY facts from the completion-time snapshot on
@@ -90,7 +105,29 @@ snapshot leg that could not be frozen (missing customer or technician row)
 is omitted and that leg stays live. The PDF filename and the canonical lawn
 pin read the same overlaid row. Presentation (technician photo URL, copy
 config) and the deliberately live sections (next visit, review CTA,
-cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`),
+cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`.
+Under `GATE_LAWN_PROPERTY_HISTORY`, lawn trends, initial scores and before/after comparisons use the visit property’s confirmed assessments, one installed result per visit, bounded by the report visit date and applicable baseline-reset window. Mowing and water-gap histories use the same proven visit eligibility. Payload keys stay unchanged; `assessmentDate` and trend dates use visit dates, including the seasonal calculation and water-gap history cutoff. Frozen weather remains keyed to the assessment run date. The PDF signature includes the resolved history identity. The existing opaque `asig` may carry a signed `h1.<history fingerprint>.<HMAC>` envelope: the data route verifies it and refuses a changed history or a disabled gate with the existing generic 409 pin refusal. Legacy signatures remain accepted; token, eligibility, privacy and rate-limit guards remain in force.
+Confirmed assessment property stamps remain eligible after another property is added, subject to ownership and conflicting visit/address checks; unstamped assessment and ancillary histories still require the live sole-property/no-move fallback. Unresolved property scope retains only the report visit’s installed assessment (or its valid signed pin), without prior-property comparisons. An empty same-day baseline reset excludes confirmations preceding the reset from the active window; reports for those earlier confirmations retain their historical window.
+The lawn assessment payload also carries `droughtStress` (`none`, `minor`,
+`moderate`, `severe`, or `null`) from the linked, tech-confirmed assessment's
+stored `composite_scores.drought_stress`. Missing or invalid historical
+values yield `null`; raw model responses and the full composite are never
+projected. The existing customer/visit linkage and signed assessment pin
+requirements apply to this field too. Localized watering advice uses this
+structured severity, overridden by an explicit boolean
+`scores.stressFlags.drought_stress` from the same confirmed assessment.
+The resolved boolean-or-null state travels as `reportV2.water.droughtSignal`
+through the final public/PDF reconciliation; only `true` permits a drought
+hypothesis to be rewritten into a coverage finding. Localized-drought cards
+label an explicit technician finding `tech_confirmed`; automated coverage
+advice retains its `area_estimated` label.
+Without either signal, observation/summary wording cannot trigger sprinkler
+advice or an unqualified "no action needed" reassurance. Measured water
+deficits/surpluses and eligible stored water snapshots
+retain their existing behavior. The optional whole-report AI narrative runs
+only when `droughtSignal` is `true`; otherwise all deterministic report copy
+is retained before narrative cache/model access. Lawn PDF render strategy `p4` regenerates
+older cached PDFs to match this evidence rule),
 the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
@@ -359,15 +396,18 @@ models or customer copy. Privacy headers on all responses.)
 tokens and archived/merged customers, 60 req/min per-IP read limit on top of
 the global /api limiter, `Cache-Control: private, no-store`; payload is a
 strict whitelist — customer FIRST NAME + member-since year +
-has_left_google_review flag only, tech name + presigned photo, office
-phone, the tracked /l review short-link, and the customer's referral link
+has_left_google_review flag only, tech name + presigned photo, the
+office phone — or, with GATE_TECH_LINES on and the card's tech holding a
+registry tech line (`technicians.twilio_number`), that tech line —, the
+tracked /l review short-link, and the customer's referral link
 (share never exposes the card token) — no address, email, or phone PII;
 the SPA shell `/card/:token` carries the same noindex/no-referrer/no-store
 headers via sensitive-spa-headers.js),
 `/api/card/:token/contact.vcf` (read-only Save-contact vCard; same 64-hex
 token gate + archived-customer 404 + rate limit + `no-store`; contents are
-COMPANY-ONLY — tech name/title, office line, company email/site/address,
-license line — never customer data),
+COMPANY-ONLY — tech name/title, office line (or the tech's own line under
+the same GATE_TECH_LINES condition as the JSON payload), company
+email/site/address, license line — never customer data),
 `/api/card/:token/wallet.pkpass` (read-only signed Apple Wallet pass; same
 64-hex token gate + archived-customer 404 + per-route rate limit +
 `no-store`; 404s whenever the PASS_* signing env vars are unset (config
@@ -586,6 +626,57 @@ AND server feature-cache warm — the client SDK fetches feature definitions
 only after it says enabled, which is what makes unsetting GATE_GROWTHBOOK a
 real rollback for client experiments too (and keeps clients dark while the
 server can't validate exposure keys)).
+`/ingest/*` (first-party PostHog ingest proxy — no auth, no token; the
+browser SDK on the hub and on `/book` posts here instead of `*.posthog.com`
+so ad blockers stop dropping funnel events. **Gated behind
+GATE_POSTHOG_INGEST_PROXY** (generic 404 when off, no upstream call; read at
+REQUEST time via `gateEnvValue` — `1`/`true`/`on` — so a flip needs no code
+deploy; Railway restarts the process on the variable change, which is what
+makes it take effect — never set it with `--skip-deploys`).
+Mounted in `server/index.js` ABOVE helmet, the CORS allowlist and the body
+parsers → `routes/posthog-ingest.js`. Invariants: the upstream origins are
+FIXED constants (`https://us.i.posthog.com`; `/static/*` and `/array/*` →
+`https://us-assets.i.posthog.com`, PostHog's own proxy split) and the resolved URL's origin is asserted
+against them (400 otherwise) — leading `/` and `\` runs are collapsed to one
+`/` first, so a protocol-relative (`//evil.com/e/`) or backslash tail can
+never resolve off-host (SSRF, Codex r1 on #4027); GET/POST/OPTIONS only
+(405); a per-IP limiter (`POSTHOG_INGEST_RATE_MAX`/min, default 300; 429;
+keyed by the shared `unauthenticatedAuthLimitKey`, so IPv6 collapses to /64)
+sits AFTER the gate so gate-off probes stay an unobservable 404 and never
+spend budget; a process-wide in-flight cap (`POSTHOG_INGEST_MAX_IN_FLIGHT`,
+default 32; fast 503 + `Retry-After`) with a per-IP share of it
+(`POSTHOG_INGEST_MAX_IN_FLIGHT_PER_IP`, default 4, same /64 key as the
+limiter) is checked BEFORE the body is buffered so concurrent bytes are
+bounded (32 × 2 MB) and one caller cannot park on every slot —
+a client disconnect aborts the upstream call and the slot is held until
+that call settles, so upload-and-hang-up loops cannot exceed the cap, and an
+upload deadline (`POSTHOG_INGEST_UPLOAD_TIMEOUT_MS`, default 15 s) tears down
+a body that has not fully arrived so stalled uploads cannot sit on the slots;
+2 MB raw body cap (413); 10 s upstream timeout (502); the upstream response
+is STREAMED to the client with backpressure — never buffered — under a size
+cap (`POSTHOG_INGEST_MAX_RESPONSE_BYTES`, default 8 MB; over it the response
+is cut off and upstream cancelled) and a downstream write deadline
+(`POSTHOG_INGEST_RESPONSE_TIMEOUT_MS`, default 15 s), and the in-flight slot
+is held until the downstream write has finished or the connection closed.
+Inbound request headers are ALLOWLISTED — only `content-type`, `accept`,
+`accept-language`, `origin`, `user-agent` and the preflight
+`access-control-request-*` pair cross — so cookies, authorization, referer,
+content-encoding (the raw body parser has already inflated the bytes) and
+every proxy-chain / client-IP header of any spelling (RFC 7239 `Forwarded`,
+`X-Forwarded-*`, `X-Real-IP`, mesh / CDN variants) never reach PostHog;
+`X-Forwarded-For` is set to `req.ip` (trust-proxy aware) so PostHog GeoIP
+survives, and `origin` passing through lets PostHog's own CORS reflection
+answer the browser (spoke origins never touch the portal allowlist). Outbound `set-cookie`,
+`content-encoding`, `content-length` and HSTS are dropped and
+`Cross-Origin-Resource-Policy: cross-origin` is set so the hub can load
+`array.js` cross-origin. Nothing from the request is logged — not the body
+and not the path (caller-controlled free text; an upstream failure logs the
+method, a fixed `static`/`ingest` category and the error kind only). The
+global `/api/` limiter does not apply (different prefix, mounted above it),
+hence the route limiter; abuse is bounded to forwarding to PostHog's public
+ingest, which the public project key already permits directly. Kill = unset the gate AND
+revert the caller's host env (hub `PUBLIC_POSTHOG_HOST`, portal
+`VITE_POSTHOG_HOST`) — an SDK pointed at a 404 just drops events.)
 `/api/public/services/menu` (read-only catalog-derived product menu the
 website quote form renders from — no auth, no token, no params, no PII.
 Mounted at `server/index.js` → `routes/public-services-menu.js`; payload is
@@ -622,6 +713,13 @@ OUTSIDE the `/api/` limiter — carries its own 30/min limiter and a
 url-safe 4-32 code format gate before any DB read; every hit below the
 gate writes a `referral_clicks` row, malformed/unknown codes redirect
 home without touching the DB).
+The estimate `/data` response includes `verifiedStaffPreview: true` only
+when `adminPreview=1` is accompanied by a valid staff bearer token. The
+customer SPA uses that verified field (or the existing verified
+`adminDraftPreview` flag) to disable customer actions in previews; a copied
+query marker alone does not change a published customer's actions. The
+field is absent from ordinary customer responses.
+
 `/api/estimates/:token` core family (GET view + `/data`, PUT `/accept`,
 `/decline`, `/select-tier`, `/preferences`, POST `/bundle-inquiry`, GET
 `/pdf` — the customer estimate surface behind every estimate link.
@@ -720,18 +818,16 @@ OFFERS an unlinked same-family row stays behind
 `GATE_ESTIMATE_EXISTING_APPT_CUSTOMER_WIDE`.
 `/data` carries an optional `lawnCalendar` block behind
 `GATE_ESTIMATE_LAWN_CALENDAR` (dev-open, prod dark): `{ programs: {
-[frequencyKey]: { visitsPerYear, cadence, months } } }` for the recurring
-lawn section's frequencies, where `cadence` is the customer-facing interval
-line and `months` the 0-based ET month indices of the program's projected
-applications from the current month — both derived server-side by
-`describeLawnProgramCadence` (self-booking-plan-sync.js) from the catalog
-plan matching the frequency's visitsPerYear through the scheduler's own
-`buildRecurringOccurrenceDates`; no customer data, no dates. A frequency
-with no catalog plan is omitted; the key is ABSENT when the gate is off or
-nothing resolves (it was boolean `true` from 2026-08 until #3755). The page
-renders the count and fixed season copy from it and never derives an
-interval itself; since 2026-09-05 it shows neither `cadence` nor `months`
-(owner: education, not a schedule).
+[frequencyKey]: { visitsPerYear } } }` for each of the recurring lawn
+section's frequencies whose count matches a catalog lawn plan
+(`resolveLawnCareRecurringPlanByCount`, self-booking-plan-sync.js); no
+customer data, no dates. A frequency with no catalog plan is omitted; the
+key is ABSENT when the gate is off or nothing resolves (it was boolean
+`true` from 2026-08 until #3755). The page renders the count and fixed
+season copy from it and never derives an interval itself. The `cadence`
+interval line and projected `months` the entry carried from #3755 were
+dropped on 2026-09-06 once the page stopped reading them (owner
+2026-09-05: education, not a schedule).
 `/data` breakdown rows (`pricing.oneTimeBreakdown.items[]`) may carry a
 `copy` object — `{ key, outcome, includes[], assurance|null, terms }` —
 and a one-time-ONLY estimate whose billable rows all resolve to one copy
@@ -909,9 +1005,34 @@ server-side):
     "only this visit moves" note for the series-shift warning before
     Confirm (the GET's threshold drives it; the POST decides
     authoritatively). The anchor keeps the offered tech under the same
-    advisory-lock overlap guard; shifted siblings that would double-book
-    a route are committed UNASSIGNED inside the trx and parked as a
-    `schedule_conflict` admin notification. Treat any widening of this
+    advisory-lock overlap guard. With `GATE_CUSTOMER_RECURRING_DISPATCH`
+    and the existing `cronJobs`/`autoDispatch` scheduler gates active plus
+    effective `AUTO_DISPATCH_MODE=apply` (`AUTO_DISPATCH_ALLOW_APPLY=true`)
+    with `AUTO_DISPATCH_MAX_CHANGES_PER_RUN > 0` and
+    `AUTO_DISPATCH_REQUIRE_PORTAL_PREFERENCES=false`,
+    only the selected appointment must fit: later cadence visits keep their
+    projected due dates with NULL time/display windows and a durable
+    `recurring_dispatch_due_date`. Future overlap, blackout, and same-plan
+    date collisions cannot reject that selection. Auto-dispatch places these
+    visits within ±3 calendar days of the due date, honoring preferences;
+    initial placement bypasses improvement thresholds, with unresolved
+    visits escalated through `schedule_conflict`. Future staff-locked,
+    customer-confirmed, reschedule-held, reminder-frozen or committed/grouped visits stay
+    unchanged and are flagged for staff review instead of blocking the
+    selected appointment. GET/POST add optional `futurePlacementDays: 3`
+    for disclosure. Web POST echoes `disclosed_future_placement_days`
+    (`3` or `null`); a mismatch with the effective mode returns 409
+    `SCOPE_CHANGED` before writing, including a rebooker recheck. Older
+    pages omitting it retain legacy behavior only while deferral is off;
+    otherwise they refresh and re-disclose. SMS retains its existing
+    series policy until it has a placement disclosure. Success copy keeps
+    the unchanged-commitment caveat. The confirmation SMS uses the separate
+    `appointment_recurring_placement_confirmed` template when the recorded
+    operation has deferred placement, including on retries; it states the
+    ±3-day placement and unchanged-commitment caveat. Authentication is unchanged. Untimed
+    reminder windows are preclosed atomically until placement. Gate off
+    preserves legacy conflict checks; already-recorded due dates remain
+    dispatchable and bounded. Treat any widening of this
     scope (other customers' rows, live visits, non-cadence rows) as P0.
 A pending/confirmed visit whose time already passed is MISSED (rebookable
 via the same link — eligibility `missed:true`); terminal/live/no_show
@@ -1357,11 +1478,23 @@ server, no SSE). Treat the auth ordering and the read-only tool surface as
 security-critical).
 `/api/client-errors` (POST; unauthenticated client error telemetry. An
 anonymous surface — /admin/login, a public token route, or any page — can
-crash in the browser, so the reporter cannot require auth. Hardened: per-IP
-rate limit (30/min), every field truncated server-side before it reaches
-Sentry (tagged `source=client`), and the client scrubs token-like path
-segments out of the reported URL. No reads, no PII persistence, no writes to
-app data — it only forwards to Sentry).
+crash in the browser, so the reporter cannot require auth. Error reports
+retain a per-IP limit (30/min) followed by a global error ceiling (60/min).
+The same limiters reserve separate keys for routine native diagnostics:
+10/min per IP, then 20/min globally; normal app activity cannot debit the
+error budgets. IP keys use the shared unauthenticated /64-collapsing helper.
+Legacy reports accept
+`name/context/route`: error names and contexts are allowlisted; the server
+reduces routes to known roots and allowlisted admin/tech page segments before
+forwarding to Sentry, tagged `source=client`. Optional native-link diagnostics
+use `{ context: 'native-links', nativeLink: { platform, source, outcome,
+route, target } }`. Every native field is an exact allowlisted label; route
+and target are only `home/shortlink/estimate/other/none`, never a URL, token,
+query, error message, stack or device identifier. Invalid native reports are
+discarded with 204; extra fields are ignored. Native failures report at error
+severity under the error budgets and normal handoff stages at info severity
+under the routine budgets. Existing reporters remain compatible. No reads, no PII persistence,
+no writes to app data — it only forwards to Sentry).
 `/api/public/mcp` (POST; ANONYMOUS read-only MCP JSON-RPC server for
 third-party AI agents — the surface the hub's /.well-known agent-readiness
 cards point at. No token BY DESIGN (the audience is anonymous agents);

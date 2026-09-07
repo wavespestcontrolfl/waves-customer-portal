@@ -75,8 +75,8 @@ function worstByRank(values, rank, fallback = null) {
   let worst = fallback;
   let worstRank = -1;
   for (const v of (Array.isArray(values) ? values : [])) {
+    if (typeof v !== 'string' || !Object.hasOwn(rank, v)) continue;
     const r = rank[v];
-    if (r == null) continue;
     if (r > worstRank) { worstRank = r; worst = v; }
   }
   return worst;

@@ -62,10 +62,7 @@ function groupByCategory(integrations) {
   }, {});
 }
 
-export default function IntegrationHealthSection({
-  intro = "Live credential health and integration configuration. Status reflects cached token-health checks plus config readiness.",
-  showRefresh = true,
-}) {
+export default function IntegrationHealthSection() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
@@ -114,9 +111,8 @@ export default function IntegrationHealthSection({
         }}
       >
         <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.45 }}>
-          {intro}
+          Live credential health and integration configuration. Status reflects cached token-health checks plus config readiness.
         </div>
-        {showRefresh && (
           <button
             onClick={runCheck}
             disabled={checking}
@@ -134,7 +130,6 @@ export default function IntegrationHealthSection({
           >
             {checking ? "Checking..." : "Refresh checks"}
           </button>
-        )}
       </div>
 
       {Object.entries(groups).map(([category, integrations]) => (

@@ -137,6 +137,7 @@ async function loadCustomer(customerId, knex) {
 async function loadLawnAssessments({ customerId, scheduledServiceId, lawnAssessmentId, serviceYmd, knex }) {
   if (!customerId || !serviceYmd) return { today: null, prior: null };
   try {
+    const propertyHistoryEnabled = require('../../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
     // The closeout's confirmation state is authoritative when provided: an
     // id grounds exactly that row, explicit null means a retake is pending
     // (the previously confirmed row is superseded and must NOT be labeled
@@ -159,7 +160,12 @@ async function loadLawnAssessments({ customerId, scheduledServiceId, lawnAssessm
       today = await loadLinkedLawnAssessment(
         { customer_id: customerId, service_id: scheduledServiceId },
         knex,
+        { propertyHistoryEnabled },
       );
+    }
+    if (propertyHistoryEnabled && today) {
+      const installed = await require('../lawn-assessment-history').installedForVisit({ customerId, serviceId: scheduledServiceId }, knex);
+      today = installed?.id === today.id ? installed : null;
     }
     if (today && scheduledServiceId) {
       // Supersession check for BOTH resolution branches: ANY newer row on the
@@ -180,6 +186,19 @@ async function loadLawnAssessments({ customerId, scheduledServiceId, lawnAssessm
         .first('id')
         .catch(() => null);
       if (newerAssessment) today = null;
+    }
+    if (propertyHistoryEnabled) {
+      const history = require('../lawn-assessment-history');
+      if (today) {
+        const resolved = await history.historyForAssessment(today, { knex });
+        return {
+          today: { ...resolved.current, service_date: resolved.current.visit_date, is_baseline: resolved.isBaseline },
+          prior: resolved.previous ? { ...resolved.previous, service_date: resolved.previous.visit_date } : null,
+        };
+      }
+      const scheduledService = scheduledServiceId ? await knex('scheduled_services').where({ id: scheduledServiceId, customer_id: customerId }).first() : null;
+      const resolved = await history.historyBeforeVisit({ customerId, scheduledService, throughVisitDate: serviceYmd }, knex);
+      return { today: null, prior: resolved.previous ? { ...resolved.previous, service_date: resolved.previous.visit_date } : null };
     }
     // The prior row is bounded by the linked VISIT's scheduled_date, not the
     // assessment run date — lawn_assessments.service_date is when the photos

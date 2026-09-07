@@ -8,6 +8,7 @@
  * Set these as environment variables on Railway:
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
+ *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
  *   GATE_TWILIO_VOICE=true      (enable voice call handling)
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
@@ -86,6 +87,8 @@
  *     invoice-and-pay-link behavior. isPrepayCardAndChargeEnabled() enforces
  *     the conjunction; the flip checklist is all three vars.)
  *
+ *   GATE_LAWN_PROPERTY_HISTORY=true (property-scoped confirmed lawn history, one installed row per visit, report-date/reset windows and confirm-time baseline; dark in dev AND prod; consumers read at call time)
+ *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
  */
@@ -93,6 +96,13 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // GATE_LAWN_PROPERTY_HISTORY: opt-in in every environment. Registered for
+  // logGateStatus only; consumers use gateEnvValue at CALL time.
+  lawnPropertyHistory: gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'),
+  // Complete Service: job-matched estimate evidence and reviewed discounts.
+  completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
+  // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
+  customerRecurringDispatch: gateEnvValue('GATE_CUSTOMER_RECURRING_DISPATCH'),
   // Payer Phase 2 — NET-terms consolidated statements (accrual core).
   // OFF unless explicitly enabled, in dev AND prod (unlike the dev-open gates
   // below): flipping it on changes invoice behaviour for net15/net30 payers
@@ -340,6 +350,10 @@ const gates = {
   // ==='true' in EVERY environment; kill switch: unset.
   visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
 
+  // Creation only: stamped reservations retain their full service capacity
+  // through acceptance even after this gate is disabled. Strict opt-in.
+  visitCombinedCapacity: process.env.GATE_VISIT_COMBINED_CAPACITY === 'true',
+
   // Quote-wizard repeat-run dedupe (#3834 split, PR A′): a tokenless
   // /calculate rerun of an OPEN quote_wizard lead (same email + phone +
   // address + service, 30 days) files as status 'duplicate' carrying
@@ -462,6 +476,12 @@ const gates = {
   // silently ignoring one (an ignored count reads to the office as a plan they
   // capped). Kill switch: unset or any non-'true' value; visits already added
   // or cancelled are not reversed when it flips.
+  // GATE_EDIT_APPT_ADDRESS also admits the New Appointment "Service address"
+  // picker (POST / with propertyId) — one flag for "the office chooses which
+  // of a multi-property customer's addresses a visit lands on". Off: the
+  // properties read answers canChangeAppointmentAddress:false, the modal
+  // hides the picker, and a propertyId on create is refused (409), so a
+  // stale tab cannot book to a secondary address while the lane is dark.
   editApptAddress: process.env.GATE_EDIT_APPT_ADDRESS === 'true',
   editApptVisitCount: process.env.GATE_EDIT_APPT_VISIT_COUNT === 'true',
 
@@ -1422,6 +1442,18 @@ const gates = {
   // the office's manual match flow; already-made links keep their
   // link_source='click_auto' stamp for audit.
   reviewClickAutoLink: process.env.GATE_REVIEW_CLICK_AUTOLINK === 'true',
+
+  // First-party PostHog ingest proxy: /ingest/* on the portal origin forwards
+  // to PostHog Cloud so ad blockers stop dropping the hub's and /book's funnel
+  // events (10–25% by PostHog's figure). Inert until a caller points its SDK
+  // host at it (hub PUBLIC_POSTHOG_HOST / portal VITE_POSTHOG_HOST). Kill:
+  // unset → 404; revert the caller's host env too, or its SDK keeps posting
+  // into the 404. This entry is for logGateStatus; the route reads
+  // gateEnvValue('GATE_POSTHOG_INGEST_PROXY') at REQUEST time (the techTips
+  // idiom), so a flip needs no CODE deploy — Railway's automatic redeploy on
+  // the variable change is what restarts the process with the new value;
+  // never set it with --skip-deploys. See server/routes/posthog-ingest.js.
+  posthogIngestProxy: gateEnvValue('GATE_POSTHOG_INGEST_PROXY'),
   // The surname rung of that matcher (click_name: the ONE in-window clicker
   // whose complete last name is the reviewer's; see
   // findConfidentClickMatch). Ships DARK on its own switch because its
@@ -1712,8 +1744,8 @@ const gates = {
   // (what each SWFL turf season is for) behind a toggle — education, not a
   // schedule (owner 2026-09-05: no per-season counts, month ranges, or
   // interval line). Gates the /data `lawnCalendar` block ({ programs: {
-  // [frequencyKey]: { visitsPerYear, cadence, months } } }, projected by
-  // describeLawnProgramCadence). No product, step, or fertilizer names
+  // [frequencyKey]: { visitsPerYear } } }, one entry per lawn frequency
+  // that is a catalog lawn plan). No product, step, or fertilizer names
   // (owner-owned business logic). Dev-open, prod dark.
   // Enable with GATE_ESTIMATE_LAWN_CALENDAR=true.
   estimateLawnCalendar: isProd ? process.env.GATE_ESTIMATE_LAWN_CALENDAR === 'true' : true,
@@ -1924,6 +1956,9 @@ const gates = {
   // Current-visit procedure and readable SOP sheet inside the Job Card drawer.
   // Uses the same visit resolver; unset restores the legacy protocol tabs.
   protocolSop: gateEnvValue('GATE_PROTOCOL_SOP'),
+  // Schedule day-view exceptions from the Job Card; no paragraph generation
+  // or cache writes. Requires GATE_JOB_CARD too; unset removes the strips.
+  dispatchReadiness: gateEnvValue('GATE_DISPATCH_READINESS'),
   // The wrapped-van scene on the appointment page + booking step 4 (owner
   // 2026-09-03). Rides the existing page payloads (appointment `vanScene`,
   // booking config `van_scene`) — no extra client fetch. Kill switch: unset
@@ -2040,6 +2075,10 @@ const gates = {
   // Kill = unset GATE_IRRIGATION_WEEK_PLAN.
   irrigationWeekPlan: process.env.GATE_IRRIGATION_WEEK_PLAN === 'true',
 
+  // Saved Monday plan in My Property + the existing property-alerts sweep.
+  // Explicit opt-in everywhere; email plan and property-alert gates still apply.
+  irrigationAppPlan: process.env.GATE_IRRIGATION_APP_PLAN === 'true',
+
   // Existing-customer campaign drafts (V1) — the seasonal-reactivation cron and
   // the daily upsell generator write message_drafts status='pending' rows
   // (campaign_type reactivation/upsell) for OWNER APPROVAL in the drafts queue.
@@ -2072,6 +2111,11 @@ const gates = {
   // or sent. The mint/credit/send building blocks (Charge-now, send-receipt)
   // stay individually available regardless of this gate.
   prepaidInvoiceReceipt: isProd ? process.env.GATE_PREPAID_INVOICE === 'true' : true,
+
+  // Record collected annual prepay: commit a receipt job with the payment,
+  // then deliver through the standard receipt queue. Customer communications
+  // stay off in every environment until explicitly enabled.
+  recordedAnnualPrepayReceipt: process.env.GATE_RECORDED_ANNUAL_PREPAY_RECEIPT === 'true',
 
   // Zelle payment-notice reconciler — the Gmail sync recognises Capital One
   // "Someone sent you money with Zelle" notices (forwarded from the owner's
@@ -2438,6 +2482,16 @@ const gates = {
   // gateEnvValue at CALL time, so a flip needs no redeploy; this entry is for
   // logGateStatus.
   techVisitNotifications: gateEnvValue('GATE_TECH_VISIT_NOTIFICATIONS'),
+
+  // Per-tech Twilio lines (Field Team Program Phase 0 item 3,
+  // config/twilio-numbers.js `fieldTech` + services/tech-line.js). ON: a text
+  // to a tech line also lands as a tech-home card + push for the technician
+  // holding it, a call rings that tech's cell before the office list, and the
+  // customer card carries the line. OFF (unset is the kill switch, dev AND
+  // prod): the registry reports the line as an unassigned office number —
+  // nothing dropped, nothing tech-specific. Read at CALL time by the
+  // registry; this entry is for logGateStatus.
+  techLines: gateEnvValue('GATE_TECH_LINES'),
 
   opsDigestsInApp: gateEnvValue('GATE_OPS_DIGESTS_IN_APP'),
 

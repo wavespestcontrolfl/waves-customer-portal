@@ -1,6 +1,7 @@
 'use strict';
 
-const { IRRIGATION_INPUT_FIELDS } = require('../irrigation-schedule-confirmation');
+const { IRRIGATION_INPUT_FIELDS, parseConfirmedFields } = require('../irrigation-schedule-confirmation');
+const { hashSensitiveValue } = require('./sensitive-vault');
 
 // Shared compare-and-set writer for private property preferences.
 // Callers own authorization, field allowlists, the transaction and audit.
@@ -37,12 +38,31 @@ async function resolvePropertyPreferencesTarget({ trx, proposal, currentRaw }) {
   return created;
 }
 
+// An irrigation input implies an active system. The flip is reported back so
+// the apply audit can record it and a revert can restore it.
+const hasValue = (value) => !(value === null || value === undefined || value === '' || value === false
+  || (Array.isArray(value) && value.length === 0));
+
+// Compare keyed hashes: companion metadata is returned without a vault reveal,
+// while an edit to a pre-existing input still counts as later evidence.
+const irrigationEvidence = (target, field) => ({
+  input_hashes: Object.fromEntries(IRRIGATION_INPUT_FIELDS
+    .filter((candidate) => candidate !== field && hasValue(target[candidate]))
+    .map((candidate) => [candidate, hashSensitiveValue(target[candidate])])),
+  confirmed: parseConfirmedFields(target.irrigation_confirmed_fields),
+});
+
 async function applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw }) {
+  const irrigation = IRRIGATION_INPUT_FIELDS.includes(proposal.field);
+  // The baseline lets a revert tell evidence that already existed (a legacy
+  // row can hold inputs with the flag off) from evidence added afterwards.
+  const companions = irrigation && target.irrigation_system !== true
+    ? { irrigation_system: target.irrigation_system ?? null, irrigation_baseline: irrigationEvidence(target, proposal.field) } : {};
   const updated = await trx('property_preferences')
     .where({ id: target.id, customer_id: proposal.scope_id })
     .update({
       [proposal.field]: proposedRaw,
-      ...(IRRIGATION_INPUT_FIELDS.includes(proposal.field) ? { irrigation_system: true } : {}),
+      ...(irrigation ? { irrigation_system: true } : {}),
       updated_at: trx.fn.now(),
     });
   if (!updated) {
@@ -50,10 +70,31 @@ async function applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw
     err.status = 409;
     throw err;
   }
+  return { companions };
+}
+
+// Undo a companion flip recorded at apply time, only while the flag still
+// holds the value apply set and nothing later confirmed irrigation: another
+// irrigation input on the row or a portal confirmation keeps the system on.
+async function revertPropertyPreferenceCompanions({ trx, proposal, target, companions = {} }) {
+  if (!('irrigation_system' in companions) || target.irrigation_system !== true) return { reverted: [] };
+  const now = irrigationEvidence(target, proposal.field);
+  const baseline = companions.irrigation_baseline || { input_hashes: {}, confirmed: [] };
+  // Approvals already persisted by previews may carry the earlier value map.
+  const baselineHashes = baseline.input_hashes || Object.fromEntries(
+    Object.entries(baseline.inputs || {}).map(([field, value]) => [field, hashSensitiveValue(value)]));
+  const laterEvidence = Object.keys({ ...baselineHashes, ...now.input_hashes })
+    .some((field) => now.input_hashes[field] !== baselineHashes[field])
+    || now.confirmed.some((field) => !baseline.confirmed.includes(field));
+  if (laterEvidence) return { reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } };
+  await trx('property_preferences')
+    .where({ id: target.id, customer_id: proposal.scope_id })
+    .update({ irrigation_system: companions.irrigation_system, updated_at: trx.fn.now() });
+  return { reverted: ['irrigation_system'] };
 }
 
 function valuesEqual(a, b) {
   return JSON.stringify(a === undefined ? null : a) === JSON.stringify(b === undefined ? null : b);
 }
 
-module.exports = { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue, valuesEqual };
+module.exports = { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue, revertPropertyPreferenceCompanions, valuesEqual };

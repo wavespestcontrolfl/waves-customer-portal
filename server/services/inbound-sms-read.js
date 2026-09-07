@@ -103,6 +103,34 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
   return { updated, notificationsCleared };
 }
 
+// The Messages badge's number: contact-phone threads holding an unread inbound
+// SMS. CommunicationsPageV2.smsThreadKey groups across business numbers using
+// the last 10 digits (or "unknown"); /log prefers contact_phone to customer.phone.
+// Count that same identity across every conversation. Internal
+// admin-phone traffic is excluded exactly as the inbox log excludes it
+// (`excludePhones` = the router's ADMIN_PHONES).
+async function countUnreadInboundSms({ excludePhones = [] } = {}) {
+  let q = db('messages')
+    .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
+    .leftJoin('customers', 'conversations.customer_id', 'customers.id')
+    .where('messages.channel', 'sms')
+    .where('messages.direction', 'inbound')
+    .andWhere(function unread() { this.where({ 'messages.is_read': false }).orWhereNull('messages.is_read'); });
+  for (const phone of excludePhones) {
+    q = q
+      .whereNot('conversations.our_endpoint_id', phone)
+      .where((b) => b.whereNot('conversations.contact_phone', phone).orWhereNull('conversations.contact_phone'))
+      .where((b) => b.whereNot('customers.phone', phone).orWhereNull('customers.phone'));
+  }
+  const row = await q.first(
+    db.raw(`COUNT(DISTINCT COALESCE(NULLIF(RIGHT(
+      regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g'),
+      10), ''), 'unknown'))::int AS conversations`),
+    db.raw('COUNT(*)::int AS messages'),
+  );
+  return { conversations: Number(row?.conversations || 0), messages: Number(row?.messages || 0) };
+}
+
 async function customerIdsInScope(ids, convs) {
   const convIds = new Set(convs);
   if (ids.length) {
@@ -112,4 +140,4 @@ async function customerIdsInScope(ids, convs) {
   return db('conversations').whereIn('id', [...convIds]).whereNotNull('customer_id').distinct('customer_id').pluck('customer_id');
 }
 
-module.exports = { markInboundSmsRead };
+module.exports = { markInboundSmsRead, countUnreadInboundSms };

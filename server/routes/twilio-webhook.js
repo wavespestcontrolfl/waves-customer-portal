@@ -662,7 +662,7 @@ router.post('/sms', async (req, res) => {
         // customers on any customer-facing number, legacy owner forward when
         // the bell didn't land — then stop: no reschedule/lead/estimator
         // automation ever sees a tapback (codex r2/r3).
-        const notifyTypes = ['location', 'gbp_tracking', 'domain_tracking', 'van_tracking'];
+        const notifyTypes = ['location', 'gbp_tracking', 'domain_tracking', 'van_tracking', 'tech_line'];
         let landed = false;
         if (customer && notifyTypes.includes(numberConfig.type)) {
           try {
@@ -678,6 +678,13 @@ router.post('/sms', async (req, res) => {
             const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
             await TwilioService.sendSMS(process.env.ADAM_PHONE, `📩 New SMS\nFrom: ${senderName}\n"${(Body || '').slice(0, 120)}"`, { messageType: 'internal_alert' });
           } catch (e) { logger.error(`SMS notification failed: ${e.message}`); }
+        }
+        // A loud tapback on a tech line reaches the holder too (same card as a
+        // text — codex #4053 r2 P2); quiet ones stay silent everywhere.
+        if (numberConfig.type === 'tech_line') {
+          await require('../services/tech-line').notifyTechLineText({
+            lineNumber: To, from: From, body: Body, customer, mediaCount: inboundMedia.length,
+          }).catch((e) => logger.warn(`[tech-line] reaction notify failed: ${e.message}`));
         }
       }
       return res.type('text/xml').send('<Response></Response>');
@@ -1007,7 +1014,9 @@ router.post('/sms', async (req, res) => {
     // sms_reply thread bell entirely and surface only as the legacy
     // "📩 New SMS" dashboard forward — the thread in /admin/communications
     // never rang (observed 2026-07-17, customer texting three Waves numbers).
-    const shouldNotifyKnownInbound = numberConfig.type === 'location' || numberConfig.type === 'gbp_tracking' || isTrackingLeadInbound;
+    // tech_line: the office keeps full visibility of a tech line's thread; the
+    // technician holding the line gets their own card below.
+    const shouldNotifyKnownInbound = numberConfig.type === 'location' || numberConfig.type === 'gbp_tracking' || numberConfig.type === 'tech_line' || isTrackingLeadInbound;
 
     // Reschedule/away flag — customer texts asking to move or miss a visit
     // are invisible to the reminder/en-route automation (2026-08-05: a
@@ -1041,6 +1050,17 @@ router.post('/sms', async (req, res) => {
         if (e.alreadyRead) { knownInboundNotified = true; logger.info('[notifications] sms_reply skipped — thread read before the bell'); }
         else logger.error(`[notifications] sms_reply trigger failed: ${e.message}`);
       }
+    }
+
+    // Tech line (GATE_TECH_LINES): the technician holding the line gets the
+    // text as a tech-home card + push (services/tech-line.js) in ADDITION to
+    // the office bell above / owner forward below — the office never loses
+    // sight of a tech line's thread. No auto-reply ever fires from a tech
+    // line (owner ruling: automated texts stay on the location lines).
+    if (numberConfig.type === 'tech_line' && (Body || inboundMedia.length) && !smsReaction && !courtesyOnly) {
+      await require('../services/tech-line').notifyTechLineText({
+        lineNumber: To, from: From, body: Body, customer, mediaCount: inboundMedia.length,
+      }).catch((e) => logger.warn(`[tech-line] text notify failed: ${e.message}`));
     }
 
     // Notify Adam of regular inbound SMS. Domain/van tracking leads use the

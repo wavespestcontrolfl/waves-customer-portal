@@ -45,7 +45,7 @@ jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async (url, opts = {}) => `https://short.test/${opts.channel}`),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
-  sendCustomerMessage: jest.fn(async () => ({ sent: true })),
+  sendCustomerMessage: jest.fn(async () => ({ sent: true, providerMessageId: 'SM-synthetic-accepted' })),
 }));
 jest.mock('../routes/admin-sms-templates', () => ({
   getTemplate: jest.fn(async (_key, vars) => `SMS: ${vars.estimate_url}`),
@@ -83,7 +83,10 @@ jest.mock('../routes/estimate-public', () => ({
   bookingServiceFor: jest.fn(),
 }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
-jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => true) }));
+jest.mock('../services/sendgrid-mail', () => ({
+  isConfigured: jest.fn(() => true),
+  isDefiniteRejection: jest.requireActual('../services/sendgrid-mail').isDefiniteRejection,
+}));
 jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn() }));
 
 const db = require('../models/db');
@@ -134,7 +137,7 @@ beforeEach(() => {
   db.raw = jest.fn((expr) => expr);
   db.fn = { now: jest.fn(() => 'NOW()') };
   db.transaction = jest.fn(async (fn) => fn(db));
-  sendCustomerMessage.mockResolvedValue({ sent: true });
+  sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM-synthetic-accepted' });
   smsTemplates.getTemplate.mockImplementation(async (_key, vars) => `SMS: ${vars.estimate_url}`);
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'sg-1' } });
 });
@@ -171,8 +174,8 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
 
   test('a real delivery advances lastDeliveredAt; a suppressed-SMS-only attempt carries BOTH witnesses forward unchanged (audit on 573ee332e)', async () => {
     // The watchers compare lastDeliveredAt against their call/task
-    // boundary — a suppressed attempt advances sent_at but must never
-    // advance the witness, or a pre-promise delivery plus a suppressed
+    // boundary — a suppressed attempt must advance neither sent_at nor
+    // the witness, or a pre-promise delivery plus a suppressed
     // later attempt would falsely keep the promise.
     const first = '2026-07-02T09:00:00.000Z';
     const last = '2026-07-03T09:00:00.000Z';
@@ -181,14 +184,16 @@ describe('sendEstimateNow — durable first-delivery witness (#3391 round)', () 
       estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: first, lastDeliveredAt: last } }),
     });
     db.mockImplementation(() => makeBuilder(row));
-    // {sent:true} with no providerMessageId = a suppression path, not a
-    // real provider send (isRealProviderSend contract).
-    sendCustomerMessage.mockResolvedValue({ sent: true });
-    await router.sendEstimateNow(row, 'sms');
-    const patches = deliveryPatches();
-    expect(patches.length).toBeGreaterThan(0);
-    expect(patches[0].deliveryState.firstDeliveredAt).toBe(first);
-    expect(patches[0].deliveryState.lastDeliveredAt).toBe(last);
+    // A sentinel is an acknowledged suppression, not a provider handoff.
+    sendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'gate-blocked' });
+    const result = await router.sendEstimateNow(row, 'sms');
+    expect(result.sent).toBe(false);
+    expect(result.channels.sms).toMatchObject({ ok: false, real: false, suppressed: true });
+    // No publication write at all: both existing witnesses survive, and a
+    // suppressed attempt cannot advance the linked lead or fulfill its ask.
+    expect(deliveryPatches()).toHaveLength(0);
+    expect(JSON.parse(row.estimate_data).deliveryState).toMatchObject({ firstDeliveredAt: first, lastDeliveredAt: last });
+    expect(require('../services/lead-estimate-link').markLinkedLeadEstimateSent).not.toHaveBeenCalled();
   });
 
   test('a REAL group handoff appends each already-published sibling\'s frozen scope at the GROUP instant, pricing snapshot untouched (codex #3811 r34 P2)', async () => {
@@ -523,7 +528,7 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
     sendCustomerMessage.mockImplementation(async () => {
       injectPendingMarker(state);
       state.liveLead = 'lead-C';
-      return { sent: true };
+      return { sent: true, providerMessageId: 'SM-synthetic-accepted' };
     });
 
     const result = await router.sendEstimateNow(engineRow(), 'sms');
@@ -571,7 +576,7 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
     // would kill a VALID linkage, so the marker is dropped instead.
     sendCustomerMessage.mockImplementation(async () => {
       injectPendingMarker(state);
-      return { sent: true };
+      return { sent: true, providerMessageId: 'SM-synthetic-accepted' };
     });
 
     const result = await router.sendEstimateNow(engineRow(), 'sms');
@@ -597,7 +602,7 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
     sendCustomerMessage.mockImplementation(async () => {
       injectPendingMarker(state, { status: 'accepted' });
       state.liveLead = 'lead-C';
-      return { sent: true };
+      return { sent: true, providerMessageId: 'SM-synthetic-accepted' };
     });
 
     const result = await router.sendEstimateNow(engineRow(), 'sms');

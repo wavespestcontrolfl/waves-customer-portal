@@ -112,6 +112,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
   db.fn = { now: jest.fn(() => 'now()') };
+  db.transaction = jest.fn(async (run) => run(db));
   jest.spyOn(AppointmentReminders, 'selfHealMissingReminderRows').mockResolvedValue({ healed: 0 });
 });
 
@@ -248,6 +249,7 @@ describe('appointment_time-guarded flag updates', () => {
       appointment_reminders: [
         chain(), // stranded sweep
         chain({ select: jest.fn().mockResolvedValue([reminderRow]) }),
+        chain({ first: jest.fn().mockResolvedValue({ id: reminderRow.id }) }), // current reminder under comms lock
         chain({ first: jest.fn().mockResolvedValue(holdRow || undefined) }), // deliverAppointmentNotice unit-move hold check
         chain({ first: jest.fn().mockResolvedValue(holdRow || undefined) }), // email-handoff hold recheck (sendAppointmentNoticeEmail)
         flagUpdate,
@@ -299,6 +301,7 @@ test('a row under an active move_hold_until leaves its sent flags UNMARKED — M
     appointment_reminders: [
       chain(), // stranded sweep
       chain({ select: jest.fn().mockResolvedValue([reminderRow]) }),
+      chain({ first: jest.fn().mockResolvedValue({ id: reminderRow.id }) }), // current reminder under comms lock
       chain({ first: jest.fn().mockResolvedValue({ move_hold_until: new Date(Date.now() + 3600000) }) }), // held
       flagUpdate,
     ],

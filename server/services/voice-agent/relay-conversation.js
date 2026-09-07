@@ -109,7 +109,6 @@ const WRITE_DRAIN_TIMEOUT_MS = 10000;
 // The capture floor's summary when the caller said nothing this session could
 // see — the exact text the late-segment refresh below replaces (hook r22 P1).
 const FLOOR_NO_TRANSCRIPT = 'No transcript captured.';
-const RESUME_RELOAD_ATTEMPTS = 3; // PR 2B: turns on which a resumed session re-reads a not-yet-appended earlier segment
 
 /** Resolve `promise`, or `fallback` after `ms`. The loser is never awaited. */
 // Bound on the detached preferred_language stamp (read + write) — never on
@@ -1411,7 +1410,7 @@ class RelayConversation {
       // Per-call lookup budget: true while the caller still has lookups left.
       consumeLookup: () => {
         const { LOOKUP_SESSION_BUDGET } = require('./relay-context');
-        if (this._resumedHint && require('./relay-recovery').isRecoveryGateOn() && !this._resume?.segmentsText) return false;
+        if (this._resumedHint && require('./relay-recovery').isRecoveryGateOn() && !this._resume?.predecessorsComplete) return false;
         if (this._lookupsUsed + this._priorLookupsUsed >= LOOKUP_SESSION_BUDGET) return false;
         this._lookupsUsed += 1;
         return true;
@@ -1642,12 +1641,15 @@ class RelayConversation {
     if (!retainCallback) {
       if (this._failureCallbackReceipt) {
         const { revertRelayFailureCallback } = require('../notification-service');
-        try {
-          await revertRelayFailureCallback(this._failureCallbackReceipt);
-          this._failureCallbackReceipt = null;
-        } catch (err) {
+        const receipt = this._failureCallbackReceipt;
+        const compensation = Promise.resolve().then(() => revertRelayFailureCallback(receipt)).then(() => {
+          if (this._failureCallbackReceipt === receipt) this._failureCallbackReceipt = null;
+        }).catch((err) => {
           logger.error(`[voice-relay] abandoned callback revert failed callSid=${maskSid(this.callSid)}: ${err.message}`);
-        }
+        });
+        // Pool checkout or a row lock can outlive the caller's deadline.
+        // Observe the actual result without holding the conversation open.
+        await withTimeout(compensation, 2000);
       }
     }
     return true;
@@ -1739,14 +1741,14 @@ class RelayConversation {
     // The provider-failure streak continues across the drop (codex r1 P2):
     // a second consecutive failure on the resumed leg hands off at the
     // documented threshold instead of counting from zero again.
-    // Restore each provider independently. Add only newly observed inherited
-    // failures, preserving failures here without counting repeated reloads twice.
+    // Replace each provider's inherited contribution independently; a newer
+    // predecessor snapshot may clear a previously observed failure streak.
     // A success clears only its own provider's inherited streak for this leg.
     for (const kind of ['model', 'tool']) {
       if (this._clearedFailures[kind]) continue;
       const inherited = Math.max(0, Number(state[`${kind}Failures`]) || 0);
-      this[`_${kind}Failures`] += Math.max(0, inherited - this._inheritedFailures[kind]);
-      this._inheritedFailures[kind] = Math.max(this._inheritedFailures[kind], inherited);
+      this[`_${kind}Failures`] += inherited - this._inheritedFailures[kind];
+      this._inheritedFailures[kind] = inherited;
     }
     for (const p of state.promises || []) {
       if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
@@ -1815,7 +1817,7 @@ class RelayConversation {
     if (this._callerVerified !== true || !recovery.isRecoveryGateOn()) return;
     try {
       const fresh = await recovery.loadResumeState(db, this.callSid, { sessionKey: this.sessionKey });
-      if (fresh && (fresh.segmentsText || !this._resume)) await this._applyResumeState(fresh);
+      if (fresh) await this._applyResumeState(fresh);
     } catch { /* fail-soft: a later turn or close may retry */ }
   }
 
@@ -1886,15 +1888,12 @@ class RelayConversation {
     // PR 2B: the earlier segment(s) of a reconnected call ride the USER role
     // the same way, ONCE, as played text — the model resumes instead of
     // starting over. Only when the row proved the reconnect.
-    if (this._callerVerified === true && !this._resumeSeeded && this._resumedHint && (!this._resume || !this._resume.segmentsText) && (this._resumeReloads || 0) < RESUME_RELOAD_ATTEMPTS && require('./relay-recovery').isRecoveryGateOn()) {
-      // The previous socket appends its segment only after draining its turn
-      // chain and in-flight writes; a reconnect that wins that race read an
-      // empty list. Reload (bounded) on each of the first turns until the
-      // segment is there — the seed then lands on that turn (hook P1).
-      this._resumeReloads = (this._resumeReloads || 0) + 1;
+    if (this._resumedHint && !this._resume?.predecessorsComplete) {
+      // One bounded owner-verified read per turn until every predecessor
+      // closed, including silent sockets and closes delayed beyond turn three.
       await this._reloadResumeState();
     }
-    if (!this._resumeSeeded && this._resume && this._resume.segmentsText) {
+    if (!this._resumeSeeded && this._resume?.predecessorsComplete && this._resume.segmentsText) {
       this._resumeSeeded = true;
       const { formatSmsTime } = require('../../utils/sms-time-format');
       const offeredSlots = [...this._slotRefs].map(([ref, slot]) => {
@@ -2185,7 +2184,7 @@ class RelayConversation {
     if (this._resumeReady) {
       try { await this._resumeReady; } catch { /* unproven ⇒ fresh session */ }
     }
-    if (this._resumedHint && !this._resume?.segmentsText) await this._reloadResumeState();
+    if (this._resumedHint && !this._resume?.predecessorsComplete) await this._reloadResumeState();
 
     // …and then drain the writes the chain does NOT cover. A tool that blew its
     // WRITE timeout was detached from the turn loop deliberately (the caller
@@ -2202,24 +2201,13 @@ class RelayConversation {
         WRITE_DRAIN_TIMEOUT_MS,
       );
     }
+    const detachedWrites = [...this._inFlightWrites.values()];
 
-    // THE CAPTURE FLOOR RUNS BEFORE THE REPORTING STAMP. The transcript update
-    // below records `lead_captured` and composes its summary from it, so
-    // stamping first meant a call whose floor lead then landed carried a
-    // call_log row saying no lead was captured — the audit trail permanently
-    // contradicting the lead it produced. Bounded so a slow lead write cannot
-    // hold the finalization (a late write still lands; only the flag is
-    // conservative), and never throws — the floor is best-effort by contract.
-    // ⭐ CLOSE-TIME WRITES BELONG TO THE SESSION THAT OWNS THE CALL. A
-    // superseded socket's end() must not run the capture floor (a duplicate
-    // lead the replacement will also mint) or the reporting reconcile
-    // (overwriting the replacement's transcript/outcome with this socket's
-    // partial view). The replacement session owns the record now.
-    // PR 2B: EVERY socket's turns land as a SEGMENT first (metadata-only
-    // append, fenced on the CallSid alone — an append never overwrites, so
-    // ownership does not matter here). The column write below then composes
-    // the whole call from all segments and is fenced by generation, so an
-    // older socket closing after a reconnect never replaces the record.
+    // Finish this owner's bounded capture before sealing its close record so
+    // persisted capture flags describe the artifact that actually committed.
+    // Every authenticated socket still appends, including a superseded one.
+    const floorDeferred = await this._sessionSuperseded().catch(() => false);
+    if (!floorDeferred) await this._runCaptureFloor(reason);
     const recovery = require('./relay-recovery');
     const recoveryOn = recovery.isRecoveryGateOn();
     let segmentAppended = false;
@@ -2234,7 +2222,7 @@ class RelayConversation {
     // grants no account access or permission to load prior dialogue.
     if (recoveryOn && this.callSid && (this._callerVerified === true || this._callTokenVerified)) {
       try {
-        const { buildTranscriptText, summarizeTurnStats } = require('./relay-transcript');
+        const { buildTranscriptText, summarizeTurnStats, storedTurnStats } = require('./relay-transcript');
         segment = segmentStore.buildSegment({
           generation: this.sessionGeneration,
           sessionKey: this.sessionKey,
@@ -2242,7 +2230,11 @@ class RelayConversation {
           text: buildTranscriptText(this._transcript),
           turns: this._transcript.length,
           latency: summarizeTurnStats(this._turnStats),
+          turnCounts: Object.fromEntries([['caller_turns', 'caller'], ['agent_turns', 'agent'], ['tool_calls', 'tool']]
+            .map(([key, role]) => [key, this._transcript.filter((turn) => turn.role === role).length])),
+          turnStats: storedTurnStats(this._turnStats),
           versions: this._versionStamps(),
+          model: MODEL,
           leadId: this._leadId,
           leadCaptured: this.leadCaptured && !this._noLeadCreated,
           reserviceFiled: this._reserviceFiled === true,
@@ -2285,7 +2277,10 @@ class RelayConversation {
         return;
       }
 
-      await this._runCaptureFloor(reason);
+      // A slow registration/owner read fails closed in the first probe. The
+      // append wait may resolve it, so retry the floor once ownership is now
+      // proven. Its committed linkage supplies truthful capture reporting.
+      if (floorDeferred) await this._runCaptureFloor(reason);
       if (!this.callSid) return;
 
     // Reconcile call reporting: this call was handled by the AI agent, not
@@ -2318,7 +2313,7 @@ class RelayConversation {
         // there was nothing said worth recording.
         // Turns still waiting on a speaker event log now (firstAudio=n/a).
         for (const s of this._turnStats) this._finishTurn(s);
-        const { buildTranscriptUpdate, buildCallSummary, summarizeTurnStats } = require('./relay-transcript');
+        const { buildTranscriptUpdate, buildCallSummary, summarizeTurnStats, composeRelayTranscriptSql } = require('./relay-transcript');
         const capturedLead = this.leadCaptured && !this._noLeadCreated;
         const transcriptUpdate = deferTranscript ? null : buildTranscriptUpdate({
           turns: this._transcript,
@@ -2467,13 +2462,14 @@ class RelayConversation {
           // the processor's own composite has (codex r6 P1). A composite or
           // an empty column is left alone; a composite has no structured form.
           const RECORDED_ONLY = "(transcription IS NOT NULL AND transcription <> '' AND transcription NOT LIKE '[AI segment]%' AND transcription_provider IS DISTINCT FROM 'conversation_relay')";
-          const aiSegment = composedTranscription ? db.raw("'[AI segment]' || E'\\n' || ?", [composedTranscription]) : `[AI segment]\n${transcriptUpdate.transcription}`;
+          const aiText = composedTranscription || transcriptUpdate.transcription;
+          const recorded = db.raw("E'\\n\\n[' || CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END || E' segment]\\n' || transcription");
           salvaged = await fenceOwner(db('call_log').where('twilio_call_sid', this.callSid).whereIn('call_outcome', ['voicemail', 'ai_transferred']).whereRaw("((metadata->'relay_handoff') IS NOT NULL OR COALESCE((metadata->>'relay_reconnects')::int, 0) > 0)"))
             .update({
               metadata: relayStashSql,
               transcription: db.raw(
-                `CASE WHEN ${RECORDED_ONLY} THEN ? || E'\\n\\n[' || CASE WHEN call_outcome = 'voicemail' THEN 'Voicemail' ELSE 'Staff' END || E' segment]\\n' || transcription ELSE transcription END`,
-                [aiSegment],
+                `CASE WHEN ${RECORDED_ONLY} THEN ? ELSE transcription END`,
+                [composeRelayTranscriptSql(db, aiText, recorded)],
               ),
               transcript_structured: db.raw(`CASE WHEN ${RECORDED_ONLY} THEN NULL ELSE transcript_structured END`),
               updated_at: new Date(),
@@ -2535,7 +2531,17 @@ class RelayConversation {
     } catch (err) {
       logger.warn(`[voice-relay] outcome reconcile failed callSid=${this.callSid}: ${err.message}`);
     } finally {
+      if (recoveryOn) {
+        // Observe each write independently after finalization, including one
+        // that settled during close. Repair reads durable evidence, so failed
+        // writes cannot claim success and another wedged write cannot delay it.
+        for (const write of [...detachedWrites, this._captureFloorWrite].filter(Boolean)) {
+          void write.then(() => this._reconcileLateSegment())
+            .catch((err) => logger.warn(`[voice-relay] late artifact repair failed callSid=${maskSid(this.callSid)}: ${err.message}`));
+        }
+      }
       if (recoveryOn && !deferTranscript) {
+        await this._refreshFloorLeadSummary();
         // The resume snapshot may predate an older socket's append. Refresh
         // after finalization from durable segments with the existing CAS fence.
         try {
@@ -2589,7 +2595,7 @@ class RelayConversation {
       const promises = new Map(segmentStore.latestPromises(meta.relay_segments).map((p) => [p.kind, p]));
       await this._recordCommitments({ transcript: segmentStore.segmentsText(meta.relay_segments) || row.transcription,
         sessionKey: owner || this.sessionKey, promises });
-      await this._refreshFloorLeadSummary(meta);
+      await this._refreshFloorLeadSummary();
       await this._refreshCallSummary(meta);
     } catch (err) {
       logger.warn(`[voice-relay] late segment reconciliation failed callSid=${maskSid(this.callSid)}: ${err.message}`);
@@ -2615,20 +2621,35 @@ class RelayConversation {
       const legs = Array.isArray(meta?.relay_segments) ? meta.relay_segments : [];
       const starts = legs.map((leg) => Date.parse(leg.started_at)).filter(Number.isFinite);
       const ends = legs.map((leg) => Date.parse(leg.ended_at)).filter(Number.isFinite);
-      if (ends.length) await withTimeout(
-        db('call_log').where('twilio_call_sid', this.callSid).update({
-          duration_seconds: db.raw("GREATEST(COALESCE(duration_seconds, 0), FLOOR(EXTRACT(EPOCH FROM (?::timestamptz - COALESCE(?::timestamptz, created_at))))::integer, 0)",
+      const metrics = segmentStore.summarizeSegments(meta);
+      if (metrics) await withTimeout(
+        db('call_log').where('twilio_call_sid', this.callSid)
+          .whereRaw("COALESCE(metadata->'relay_segments', '[]'::jsonb) = ?::jsonb", [JSON.stringify(legs)])
+          .whereRaw("metadata->'relay_segment_owners' IS NOT DISTINCT FROM ?::jsonb", [JSON.stringify(meta.relay_segment_owners) || null])
+          .whereRaw("metadata->'relay_lead_id' IS NOT DISTINCT FROM ?::jsonb", [JSON.stringify(meta.relay_lead_id) || null])
+          .whereRaw("metadata->'relay_reservice_filed' IS NOT DISTINCT FROM ?::jsonb", [JSON.stringify(meta.relay_reservice_filed) || null])
+          .update({
+          ...(ends.length ? { duration_seconds: db.raw("GREATEST(COALESCE(duration_seconds, 0), FLOOR(EXTRACT(EPOCH FROM (?::timestamptz - COALESCE(?::timestamptz, created_at))))::integer, 0)",
             [new Date(Math.max(...ends)), starts.length ? new Date(Math.min(...starts)) : null]),
+          } : {}),
+          ...(metrics.model ? { transcription_model: db.raw('CASE WHEN transcription_provider = ? THEN ? ELSE transcription_model END',
+            ['conversation_relay', metrics.model]) } : {}),
+          // A recording owns its top-level provenance and counters. Relay
+          // metrics stay in its existing nested relay record.
+          transcription_metadata: db.raw("CASE WHEN transcription_provider = ? THEN COALESCE(transcription_metadata, '{}'::jsonb) || ?::jsonb ELSE jsonb_set(COALESCE(transcription_metadata, '{}'::jsonb), '{relay}', COALESCE(transcription_metadata->'relay', '{}'::jsonb) || ?::jsonb, true) END",
+            ['conversation_relay', JSON.stringify(metrics), JSON.stringify(metrics)]),
+          metadata: db.raw("CASE WHEN metadata->'relay_transcript'->'metadata' IS NOT NULL THEN jsonb_set(metadata, '{relay_transcript,metadata}', (metadata->'relay_transcript'->'metadata') || ?::jsonb, false) ELSE metadata END", [JSON.stringify(metrics)]),
         }), WRITE_DRAIN_TIMEOUT_MS, 0,
       );
       if (!callerTurns.length) return false;
       const { buildCallSummary } = require('./relay-transcript');
-      const leadCaptured = Boolean(meta.relay_lead_id) || legs.some((seg) => seg && seg.lead_captured === true);
+      const leadCaptured = metrics.lead_captured;
       const summary = buildCallSummary({ turns: callerTurns.map((text) => ({ role: 'caller', text })), leadCaptured });
       const rows = await withTimeout(
         db('call_log').where('twilio_call_sid', this.callSid)
           .whereRaw("COALESCE(metadata->'relay_segments', '[]'::jsonb) = ?::jsonb", [JSON.stringify(legs)])
           .where((q) => q.whereNull('call_summary').orWhereRaw("transcription_metadata->>'summary_source' = ?", ['deterministic']))
+          .whereRaw("metadata->'relay_lead_id' IS NOT DISTINCT FROM ?::jsonb", [JSON.stringify(meta.relay_lead_id) || null])
           .update({ call_summary: summary,
             transcription_metadata: db.raw("COALESCE(transcription_metadata, '{}'::jsonb) || jsonb_build_object('summary_source', 'deterministic')"),
             updated_at: new Date() }),
@@ -2647,35 +2668,41 @@ class RelayConversation {
     }
   }
 
-  /**
-   * PR 2B (hook r22 P1) — the late segment's lead refresh. The resumed socket
-   * can close (silently) before this superseded socket's segment lands — its
-   * capture floor then saw no earlier caller turns and wrote this call's lead
-   * with the no-transcript summary. Now that the segment IS on the row, the
-   * whole call's caller lines are known: the floor lead of THIS call whose
-   * summary is still that placeholder gets the real summary, in one
-   * compare-and-set UPDATE (a lead capture_lead wrote, or a floor that saw
-   * the turns, matches nothing). Bounded, best-effort, never on the sandbox.
-   */
-  async _refreshFloorLeadSummary(meta) {
+  /** Refresh only a floor-owned summary, from the current complete transcript. */
+  async _refreshFloorLeadSummary() {
     if (this.sandbox || !this.callSid) return false;
-    const callerTurns = segmentStore.callerTurnsFromText(segmentStore.segmentsText(meta && meta.relay_segments));
-    if (!callerTurns.length) return false;
     try {
       const { scrubForStorage } = require('./relay-transcript');
-      // This call's lead: the persisted linkage (a reused lead keeps another
-      // call's twilio_call_sid — codex r3 P2) or the lead inserted by this call.
-      const linkedId = meta && meta.relay_lead_id ? String(meta.relay_lead_id) : null;
-      const rows = await withTimeout(
-        db('leads')
-          .where((q) => (linkedId ? q.where({ twilio_call_sid: this.callSid }).orWhere({ id: linkedId }) : q.where({ twilio_call_sid: this.callSid })))
-          .where('transcript_summary', 'like', `%${FLOOR_NO_TRANSCRIPT}`)
-          .update({ transcript_summary: floorSummary(callerTurns, scrubForStorage), updated_at: new Date() }),
-        WRITE_DRAIN_TIMEOUT_MS,
-        0,
-      );
-      if (Number(rows) > 0) logger.info(`[voice-relay] floor lead summary refreshed from the late segment callSid=${maskSid(this.callSid)}`);
-      return Number(rows) > 0;
+      return await withTimeout(db.transaction(async (trx) => {
+        await trx.raw("SET LOCAL statement_timeout = '2s'");
+        await trx.raw("SET LOCAL idle_in_transaction_session_timeout = '5s'");
+        // Serialize against capture with its existing per-call lock, then use
+        // the recording reconciler's leads -> call_log row-lock order.
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['voice-lead-capture', String(this.callSid)]);
+        const initial = await trx('call_log').where('twilio_call_sid', this.callSid).first(trx.raw("metadata->>'relay_lead_id' AS relay_lead_id"));
+        const linkedId = initial?.relay_lead_id || null;
+        const lead = await trx('leads').where(linkedId
+          ? { id: String(linkedId) } : { twilio_call_sid: this.callSid }).forUpdate().first('id', 'transcript_summary');
+        if (!lead) return false;
+        const call = await trx('call_log').where('twilio_call_sid', this.callSid).forUpdate().first('id', 'metadata');
+        if (!call) return false;
+        const meta = typeof call.metadata === 'string' ? JSON.parse(call.metadata) : (call.metadata || {});
+        if ((meta.relay_lead_id || null) !== linkedId) return false;
+        if (Array.isArray(meta.relay_segment_owners) && !segmentStore.hasCompleteSegments(meta)) return false;
+        const callerTurns = segmentStore.callerTurnsFromText(segmentStore.segmentsText(meta.relay_segments));
+        if (!callerTurns.length) return false;
+        const marker = meta.relay_floor_summary;
+        const owned = marker ? marker.lead_id === String(lead.id) && marker.sha256 === sha256(lead.transcript_summary)
+          : lead.transcript_summary === floorSummary([], scrubForStorage);
+        if (!owned) return false;
+        const summary = floorSummary(callerTurns, scrubForStorage);
+        await trx('leads').where('id', lead.id).update({ transcript_summary: summary, updated_at: new Date() });
+        await trx('call_log').where('id', call.id).update({ metadata: trx.raw(
+          "COALESCE(metadata, '{}'::jsonb) || ?::jsonb",
+          [JSON.stringify({ relay_floor_summary: { lead_id: String(lead.id), sha256: sha256(summary) } })],
+        ) });
+        return true;
+      }), WRITE_DRAIN_TIMEOUT_MS, false);
     } catch (err) {
       logger.warn(`[voice-relay] floor lead summary refresh failed callSid=${maskSid(this.callSid)}: ${err.message}`);
       return false;
@@ -2749,6 +2776,7 @@ class RelayConversation {
         requested_service: null,
       },
       {
+        summarySource: 'capture_floor',
         phone: callerPhone,
         toPhone: this.to,
         callSid: this.callSid,
@@ -2809,11 +2837,9 @@ class RelayConversation {
         return false;
       },
     );
-    // Bounded: a slow lead write must not hold the close open now that it runs
-    // FIRST. A late write still lands (and still sets the flag) — only this
-    // call's transcript flag stays conservatively false, which is the same
-    // answer the old ordering always gave.
+    // Keep the eventual outcome observable after the close deadline.
     const landed = await withTimeout(write, WRITE_DRAIN_TIMEOUT_MS, null);
+    this._captureFloorWrite = landed === null ? write : null;
     if (landed === null) {
       logger.warn(`[voice-relay] capture-floor still writing past ${WRITE_DRAIN_TIMEOUT_MS}ms callSid=${this.callSid} — finalizing the call_log without waiting`);
     }

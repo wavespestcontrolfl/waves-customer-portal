@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import AddressAutocomplete, { sameAutocompleteAddress } from "../AddressAutocomplete";
 import { Button, Card, CardBody } from "../ui";
-import { OCCUPANCY_OPTIONS } from "../../lib/contact-roles";
+import { OCCUPANCY_OPTIONS, RELATIONSHIP_OPTIONS } from "../../lib/contact-roles";
 import { adminFetch } from "../../utils/admin-fetch";
 
 // customer_properties column widths (server PROPERTY_FIELD_LIMITS mirrors
@@ -15,6 +16,7 @@ const EMPTY_FORM = {
   state: "FL",
   zip: "",
   occupancy_type: "unknown",
+  relationship: "",
   label: "",
 };
 
@@ -59,6 +61,7 @@ export default function CustomerPropertiesPanelV2({
   const [loadErr, setLoadErr] = useState("");
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState(EMPTY_FORM);
+  const selectedAddressRef = useRef(null);
   const [saving, setSaving] = useState(false);
   const [saveErr, setSaveErr] = useState("");
   const [rowBusy, setRowBusy] = useState(null);
@@ -116,6 +119,7 @@ export default function CustomerPropertiesPanelV2({
           state: stateCode,
           zip: form.zip.trim(),
           occupancy_type: form.occupancy_type || "unknown",
+          relationship: form.relationship || null,
           label: form.label.trim() || null,
         }),
       });
@@ -178,7 +182,7 @@ export default function CustomerPropertiesPanelV2({
             Service addresses ({properties.length})
           </div>
           {canEdit && !adding && (
-            <Button variant="secondary" size="sm" onClick={() => setAdding(true)}>
+            <Button variant="secondary" size="sm" onClick={() => { selectedAddressRef.current = null; setAdding(true); }}>
               Add service address
             </Button>
           )}
@@ -255,19 +259,34 @@ export default function CustomerPropertiesPanelV2({
                     )
                   )}
                 </div>
-                <select
-                  aria-label={`Occupancy for ${p.address_line1}`}
-                  value={p.occupancy_type || "unknown"}
-                  disabled={!canEdit || writeBusy}
-                  onChange={(e) => patchRow(p.id, { occupancy_type: e.target.value })}
-                  className="text-12 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1 bg-white"
-                >
-                  {OCCUPANCY_OPTIONS.map((o) => (
-                    <option key={o.value} value={o.value}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
+                <div className="flex flex-wrap gap-2">
+                  <select
+                    aria-label={`Relationship for ${p.address_line1}`}
+                    value={p.relationship || ""}
+                    disabled={!canEdit || writeBusy}
+                    onChange={(e) => patchRow(p.id, { relationship: e.target.value || null })}
+                    className="text-14 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1 bg-white"
+                  >
+                    {RELATIONSHIP_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    aria-label={`Occupancy for ${p.address_line1}`}
+                    value={p.occupancy_type || "unknown"}
+                    disabled={!canEdit || writeBusy}
+                    onChange={(e) => patchRow(p.id, { occupancy_type: e.target.value })}
+                    className="text-14 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1 bg-white"
+                  >
+                    {OCCUPANCY_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
             ))}
             {properties.length === 0 && (
@@ -285,12 +304,34 @@ export default function CustomerPropertiesPanelV2({
               <label className="u-label text-ink-secondary block mb-1" htmlFor="cp-line1">
                 Street address
               </label>
-              <input
+              <AddressAutocomplete
+                enabled={import.meta.env.VITE_GATE_ADMIN_ADDRESS_AUTOCOMPLETE === "true"}
+                appearance="admin"
+                geocodeOnBlur={false}
+                placeholder="Start typing an address…"
                 id="cp-line1"
-                className={inputCls}
+                className={`${inputCls} text-16`}
                 maxLength={LIMITS.address_line1}
                 value={form.address_line1}
-                onChange={(e) => setForm((f) => ({ ...f, address_line1: e.target.value }))}
+                onChange={(value) => setForm((f) => ({ ...f, address_line1: value }))}
+                onSelect={(parts) => {
+                  const previous = selectedAddressRef.current;
+                  selectedAddressRef.current = {
+                    line1: parts.line1 || form.address_line1,
+                    city: parts.city || form.city,
+                    state: parts.state || form.state,
+                    zip: parts.zip || form.zip,
+                  };
+                  setForm((f) => ({
+                    ...f,
+                    address_line1: parts.line1 || f.address_line1,
+                    address_line2: parts.line2 || (!previous || sameAutocompleteAddress(previous, parts) ? f.address_line2 : ""),
+                    city: parts.city || f.city,
+                    state: parts.state || f.state,
+                    zip: parts.zip || f.zip,
+                  }));
+                  document.getElementById("cp-line2")?.focus();
+                }}
               />
             </div>
             <div className="sm:col-span-2">
@@ -350,12 +391,29 @@ export default function CustomerPropertiesPanelV2({
               </div>
             </div>
             <div>
+              <label className="u-label text-ink-secondary block mb-1" htmlFor="cp-rel">
+                Relationship
+              </label>
+              <select
+                id="cp-rel"
+                className={`${inputCls} text-14`}
+                value={form.relationship}
+                onChange={(e) => setForm((f) => ({ ...f, relationship: e.target.value }))}
+              >
+                {RELATIONSHIP_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
               <label className="u-label text-ink-secondary block mb-1" htmlFor="cp-occ">
                 Occupancy
               </label>
               <select
                 id="cp-occ"
-                className={inputCls}
+                className={`${inputCls} text-14`}
                 value={form.occupancy_type}
                 onChange={(e) => setForm((f) => ({ ...f, occupancy_type: e.target.value }))}
               >
