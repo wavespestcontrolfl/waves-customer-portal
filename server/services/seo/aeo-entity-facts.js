@@ -156,6 +156,9 @@ function asserted(compiled, answer) {
     let end = start + match[0].length;
     // A pattern may stop mid-word ("fumigat"); the assertion is the whole word.
     while (end < answer.length && /[\w-]/.test(answer[end])) end++;
+    // Hyphenated negation: "non-fumigation", "non-franchised", "fumigation-free".
+    if (/\bnon-?$/i.test(answer.slice(Math.max(0, start - 4), start))) continue;
+    if (/-(?:free|less)$/i.test(answer.slice(start, end))) continue;
     // Clause boundaries are found on the full text, never a fixed window: a
     // governed list can run well past 80 characters before its last item.
     // A standalone "Yes," / "No," opener answers the question; it does not

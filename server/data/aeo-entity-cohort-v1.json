@@ -9,7 +9,7 @@
     },
     "founded_2024": {
       "label": "Founded 2024",
-      "pattern": "(?:founded|established|started|opened|founding|since|in business|operating|launched|incorporated|formed|filed|began|est\\.?|year)(?:(?!\\b(?:19|20)\\d\\d\\b)(?!,\\s*(?:and|but|or|while)\\b)[^.\\n;]){0,80}\\b2024\\b|\\b2024\\b[^.\\n;]{0,30}(?:founding|founded|established|incorporat|filing|launch)|(?:^|\\n)\\s*(?:in\\s+)?(?:\\w+\\s+\\d{1,2},?\\s+)?2024\\b"
+      "pattern": "\\b(?:founded|established|started|opened|founding|since|in business|operating|launched|incorporated|formed|filed|began|est\\.?(?=\\s*\\d)|year founded|founding year)(?:(?!\\b(?:19|20)\\d\\d\\b)(?!,\\s*(?:and|but|or|while)\\b)[^.\\n;]){0,80}\\b2024\\b|\\b2024\\b[^.\\n;]{0,30}(?:founding|founded|established|incorporat|filing|launch)|(?:^|\\n)\\s*(?:in\\s+)?(?:\\w+\\s+\\d{1,2},?\\s+)?2024\\b"
     },
     "fdacs_license": {
       "label": "License JB351547",
@@ -89,7 +89,7 @@
   "claims": {
     "wrong_founding_year": {
       "label": "Founding year other than 2024",
-      "pattern": "(?:founded|established|started|opened|founding|since|in business|operating|launched|incorporated|formed|began|est\\.?|year founded|founding year)(?:(?!\\b(?:19|20)\\d\\d\\b)(?!,\\s*(?:and|but|or|while)\\b)[^.\\n;]){0,80}?\\b((?:19|20)\\d\\d)\\b|(?:^|\\n)\\s*(?:in\\s+)?(?:\\w+\\s+\\d{1,2},?\\s+)?((?:19|20)\\d\\d)\\b",
+      "pattern": "\\b(?:founded|established|started|opened|founding|since|in business|operating|launched|incorporated|formed|began|est\\.?(?=\\s*\\d)|year founded|founding year)(?:(?!\\b(?:19|20)\\d\\d\\b)(?!,\\s*(?:and|but|or|while)\\b)[^.\\n;]){0,80}?\\b((?:19|20)\\d\\d)\\b|(?:^|\\n)\\s*(?:in\\s+)?(?:\\w+\\s+\\d{1,2},?\\s+)?((?:19|20)\\d\\d)\\b",
       "reject_value": "2024"
     },
     "wrong_founder": {

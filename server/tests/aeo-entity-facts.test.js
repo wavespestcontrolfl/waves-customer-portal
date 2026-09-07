@@ -46,6 +46,8 @@ test('founding year: 2024 is right; any other asserted year, earlier or later, i
   expect(score('E4', '2014.').forbidden.wrong_founding_year).toBe(true);
   expect(score('E4', 'Waves was incorporated in 2014.').forbidden.wrong_founding_year).toBe(true);
   expect(score('E4', '2024.').forbidden.wrong_founding_year).toBe(false);
+  expect(score('E4', 'Waves Pest Control holds FDACS license JB351547, renewed in 2026.')).toMatchObject({ expected: { founded_2024: false }, forbidden: { wrong_founding_year: false } });
+  expect(score('E4', 'The license was renewed in 2024.').expected.founded_2024).toBe(false);
   expect(score('E4', 'Waves Pest Control was founded on February 6, 2024.')).toMatchObject({ expected: { founded_2024: true }, forbidden: { wrong_founding_year: false } });
   expect(score('E4', 'It was not founded in 2019; it was founded in 2024.').forbidden.wrong_founding_year).toBe(false);
 });
@@ -106,6 +108,9 @@ test('a claim about a competitor is not a wrong claim about Waves', () => {
   expect(score('E8', 'Waves is a franchise like Orkin.').forbidden.franchise).toBe(true);
   expect(score('E6', 'Terminix provides fumigation; Waves does not.').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', 'Like Terminix, Waves provides fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves offers non-fumigation termite treatments.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves offers fumigation-free termite treatments.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E8', 'Waves is a non-franchised, independently owned company.')).toMatchObject({ expected: { independent: true }, forbidden: { franchise: false } });
   expect(score('E6', 'Unlike Waves, Orkin offers fumigation.').forbidden.fumigation_offered).toBe(false);
   expect(score('E8', 'Orkin is a national chain and is a franchise.').forbidden.franchise).toBe(false);
   expect(score('E8', 'Waves is a national chain and is a franchise.').forbidden.franchise).toBe(true);
