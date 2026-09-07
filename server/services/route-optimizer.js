@@ -10,7 +10,11 @@
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
 
-const HQ = { lat: 27.3946, lng: -82.3984 }; // Lakewood Ranch office
+// Start/end of every modeled day — the van's home base (13649 Luxe Ave,
+// Bradenton 34211; owner ruling 2026-09-07). Geocoded through the app's
+// geocoder; every route/find-time/auto-dispatch consumer reads this one
+// constant, so a move is a one-line change here.
+const HQ = { lat: 27.4330885, lng: -82.4056801 };
 
 const ROUTES_API_URL = 'https://routes.googleapis.com/directions/v2:computeRoutes';
 
