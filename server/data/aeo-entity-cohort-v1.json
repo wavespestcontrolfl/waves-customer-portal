@@ -89,7 +89,7 @@
   "claims": {
     "wrong_founding_year": {
       "label": "Founding year other than 2024",
-      "pattern": "(?:founded|established|started|opened|operating|in business|serving|founding year|founded in|year founded)\\s*(?:in|since|on|:)?\\s*(?:\\w+\\s+\\d{1,2},?\\s+)?((?:19|20)\\d\\d)",
+      "pattern": "(?:founded|established|started|opened|founding|since|in business|operating|launched|incorporated|formed|began|est\\.?|year founded|founding year)(?:(?!\\b(?:19|20)\\d\\d\\b)(?!,\\s*(?:and|but|or|while)\\b)[^.\\n;]){0,80}?\\b((?:19|20)\\d\\d)\\b|(?:^|\\n)\\s*(?:in\\s+)?(?:\\w+\\s+\\d{1,2},?\\s+)?((?:19|20)\\d\\d)\\b",
       "reject_value": "2024"
     },
     "wrong_founder": {

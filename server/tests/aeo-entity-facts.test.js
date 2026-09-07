@@ -43,6 +43,9 @@ test('founding year: 2024 is right; any other asserted year, earlier or later, i
   expect(score('E4', 'The company has been serving since 2014.')).toMatchObject({ expected: { founded_2024: false }, forbidden: { wrong_founding_year: true }, right: 0, missing: 1, wrong: 1 });
   expect(score('E4', 'Waves was founded in 2025.').forbidden.wrong_founding_year).toBe(true);
   expect(score('E4', 'Waves Pest Control was founded on February 6, 2014.').forbidden.wrong_founding_year).toBe(true);
+  expect(score('E4', '2014.').forbidden.wrong_founding_year).toBe(true);
+  expect(score('E4', 'Waves was incorporated in 2014.').forbidden.wrong_founding_year).toBe(true);
+  expect(score('E4', '2024.').forbidden.wrong_founding_year).toBe(false);
   expect(score('E4', 'Waves Pest Control was founded on February 6, 2024.')).toMatchObject({ expected: { founded_2024: true }, forbidden: { wrong_founding_year: false } });
   expect(score('E4', 'It was not founded in 2019; it was founded in 2024.').forbidden.wrong_founding_year).toBe(false);
 });
@@ -68,6 +71,8 @@ test('markdown, bulleted lists and label-value answers score like plain prose', 
   expect(score('E6', 'Services include:\n1. Pest control\n2. Fumigation').forbidden.fumigation_offered).toBe(true);
   expect(score('E6', 'Fumigation: not offered by Waves Pest Control.').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', 'Waves does not offer:\n* Insulation\n* Fumigation').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves does not offer the following:\n- Fumigation\n- Insulation').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves offers the following:\n- Pest control\n- Fumigation').forbidden.fumigation_offered).toBe(true);
   expect(score('E6', 'Waves does not offer:\n- wildlife trapping or removal\n- attic insulation installation or replacement\n- tent fumigation for drywood termite colonies').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', '- Fumigation: not offered.\n- Termite: offered.').forbidden.fumigation_offered).toBe(false);
   expect(score('E6', 'Waves does not offer [fumigation](https://example.com/fumigation/).').forbidden.fumigation_offered).toBe(false);
