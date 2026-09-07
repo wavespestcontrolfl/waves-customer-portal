@@ -55,7 +55,8 @@ function roleLabel(role) {
 
 // Alert red (owner ruling 2026-09-07, DECISIONS.md): an unread inbound text is
 // a genuine alert — a customer is waiting on a reply — so the Messages badge
-// takes `alert-fg`, not the inbox row's dark dot (§5.7). Hidden at zero;
+// takes the `alert-fg` token class (Tailwind `alert.fg`, the same class the
+// Button / Badge primitives use), not the inbox row's dark dot (§5.7). Hidden at zero;
 // capped so a backlog never widens the tab.
 function UnreadBadge({ count, style }) {
   if (!(count > 0)) return null;
@@ -63,6 +64,7 @@ function UnreadBadge({ count, style }) {
   return (
       <span
         aria-hidden="true"
+        className="bg-alert-fg text-white"
         style={{
           display: "inline-flex",
           alignItems: "center",
@@ -71,8 +73,6 @@ function UnreadBadge({ count, style }) {
           height: 18,
           padding: "0 5px",
           borderRadius: 9,
-          background: "#C8312F", // tailwind `alert.fg`
-          color: "#FFFFFF",
           fontSize: 11,
           fontWeight: 500,
           lineHeight: 1,
