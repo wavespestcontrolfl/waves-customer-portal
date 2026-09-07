@@ -1787,6 +1787,10 @@ const gates = {
   // Enable with GATE_PUBLIC_QUOTE_LAWN_AREA=true.
   publicQuoteLawnArea: isProd ? process.env.GATE_PUBLIC_QUOTE_LAWN_AREA === 'true' : true,
 
+  // Website estimate pages publish eligible engine quotes directly into the
+  // existing estimate booking/Auto Pay flow. Ordinary lead forms never opt in.
+  websiteQuoteBooking: process.env.GATE_WEBSITE_QUOTE_BOOKING === 'true',
+
   // Commercial estimate glass parity — the customer estimate page renders an
   // authored commercial proposal's line items INSIDE the glass layout (plus
   // the commercial copy pack + inclusions) instead of the bare "formal

@@ -3022,6 +3022,30 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       }
     }
 
+    // Owner-approved website self-service: publish this run's eligible quote
+    // using the same frozen send snapshot as other customer-visible estimates.
+    // The legacy booking handoff is unchanged for deployed fleet consumers.
+    let websiteEstimateUrl = null;
+    if (req.body.websiteFlow === true && require('../config/feature-gates').isEnabled('websiteQuoteBooking')) {
+      const selfBookable = !!bookingUrl && !!draftEstimateId;
+      bookingUrl = null;
+      if (selfBookable) {
+        try {
+          const { publishWebsiteQuote } = require('../services/website-quote-publication');
+          const published = await publishWebsiteQuote({
+            estimateId: draftEstimateId, leadId: lead.id, engineInput, engineResult: estimate,
+            totals: { monthly_total: monthly, annual_total: annual, onetime_total: oneTimeTotal },
+          });
+          if (published) {
+            websiteEstimateUrl = `${PORTAL_BASE_URL}/estimate/${published.token}?website=1`;
+            bookingUrl = websiteEstimateUrl;
+          }
+        } catch (publishError) {
+          logger.warn('[public-quote] Website publication unavailable', { estimateId: draftEstimateId, code: publishError.code || 'publication_failed' });
+        }
+      }
+    }
+
     // Per-application phrasing when the quote resolves to one (owner
     // 2026-07-11: recurring emails lead per-application, never /mo where a
     // per-application figure exists; every amount shows cents). Multi-service
@@ -3316,6 +3340,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // office schedules this shape — the client must then show reach-out copy,
     // never a book link (same rule as nextStepSummary).
     if (bookingUrl) response.booking_url = bookingUrl;
+    if (websiteEstimateUrl) response.website_estimate_url = websiteEstimateUrl;
     res.json(response);
   } catch (err) {
     logger.error(`[public-quote] calculate failed: ${err.message}`, { stack: err.stack });
