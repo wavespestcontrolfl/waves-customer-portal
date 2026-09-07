@@ -3416,7 +3416,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               </div>{" "}
             </div>{" "}
           </aside>{" "}
-          <main className="order-1 md:order-2 min-w-0 flex flex-col">
+          <div className="order-1 md:order-2 min-w-0 flex flex-col">
             {" "}
             <section style={{ ...sectionStyle, order: 2 }}>
               {" "}
@@ -4523,7 +4523,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 </div>
               )}
             </section>{" "}
-          </main>{" "}
+          </div>{" "}
         </div>{" "}
       </div>{" "}
       {cancelOpen && (
