@@ -4,7 +4,7 @@
 `RelayConversation` loop: Sandy's prompt, model, registered tools and turn handling.
 It evaluates deterministic checks and prints the recorded conversation for review.
 By default only deterministic checks run. Select `--judge` for the optional transcript
-judge. This stage has no scheduler or notification channel.
+judge. The weekly schedule is opt-in; manual runs do not notify unless `--notify` is given.
 
 ## Run it
 
@@ -19,9 +19,10 @@ npm run eval:voice-relay -- --fixture=path/to/scenarios.json
 
 The npm command prints JSON. Running `node server/scripts/run-voice-relay-eval.js`
 without `--json` prints a compact report. Exit codes: 0 for passing checks, 1 for
-failed checks or replay errors, 2 when the replay cannot run. A provider outage
+repeated failed checks or replay errors, 3 when the eval is inconclusive, and 2
+when the runner crashes before producing a result. A provider outage
 that prevents every scenario from completing a model round is inconclusive and
-exits 2. Manual execution calls Sandy's model and incurs normal provider usage.
+exits 3. Manual execution calls Sandy's model and incurs normal provider usage.
 
 ## Fixture contracts
 
@@ -68,7 +69,8 @@ cannot support that promise. Conditional callback offers do not promise an actio
 
 The harness replaces tool execution and refuses database access during a conversation.
 It never calls `end()`, writes a lead or booking, reconciles a call log, saves a
-transcript, sends a notification or starts a cron. Capture-floor and callback writers
+transcript, writes business records. Manual runs suppress every notification channel unless
+`--notify` is present. The scheduler runs the harness in a child process. Capture-floor and callback writers
 are stubbed to refuse. Each scenario restores its gate environment after running.
 An unfixtured tool, database attempt or real provider error is a replay error.
 
@@ -93,10 +95,36 @@ an agent claim. Only new agent speech is graded after a reconnect. The pinned ju
 forbidden claims are critical failures; action/fact checks use the scenario's major
 severity and adjudication setting, while empathy, brevity and tone affect quality.
 
-If no scenario receives a verdict, the run is inconclusive (exit 2). If some verdicts
+If no scenario receives a verdict, the run is inconclusive (exit 3). If some verdicts
 are unavailable, the run fails verification (exit 1), even when deterministic checks
 pass. Running without `--judge` makes no judge calls. Judge calls use the ordinary
 LLM dispatcher and may write ledger/trace rows when those gates are enabled; the
 conversation still refuses database access. No live judge calibration was run for
 this split. Tests inject verdicts and exercise dispatch, fallback, grounding and
 aggregation without calling model providers or a database.
+
+## Scheduled runs and notification delivery
+
+`GATE_VOICE_RELAY_EVAL=true` opts in to Monday at 03:50 America/New_York. It is
+off by default in every environment. The scheduler uses the existing `runExclusive`
+lock and launches `--json --judge --notify` in a child process, keeping the scenario
+gates and relay-module patches out of the server handling calls. Unset the gate or
+set it to `false` to stop future runs. No gate was enabled for this implementation.
+
+The wrapper retries a failed run once. A pass on retry is marked flaky and emits
+no alert. Repeated failure preserves the result and produces one admin
+`eval_regression` bell plus the existing ops digest/email channel. An inconclusive
+retry retains the first observed failure; an initial inconclusive attempt is reported
+without a retry. The same notification path reports a crashed or timed-out child.
+The three-hour child ceiling covers the bounded conversation and judge budgets
+plus one retry; a hung child is killed before releasing its exclusive lock.
+
+Operational delivery reuses the call-extraction eval helpers and `deliverOpsDigest`.
+`EVAL_REGRESSION_EMAIL=off` disables the email/digest channel. A failed bell insert
+is recorded as `notificationError` after the other channel is attempted; it does
+not turn a finished evaluation into a crash. `--notify` gates the bell, email and
+in-app digest together. The call-extraction manual CLI now uses that same explicit
+notification suppression, including when in-app digest delivery is enabled.
+
+Tests inject the child runner, replay outcomes and notification senders; no live
+cron, provider call, notification or database write was used for verification.

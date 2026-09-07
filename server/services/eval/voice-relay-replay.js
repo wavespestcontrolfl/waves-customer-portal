@@ -29,20 +29,39 @@
  *     the module registry. It throws on the wrong order rather than running
  *     against the live resolvers.
  *   - Per-scenario gates mutate process.env. Run this only in its dedicated
- *     CLI process, never inside a running application server.
+ *     CLI process. The scheduled entry point spawns that process; its relay
+ *     environment and module patches never touch the application server.
+ *   - Notifications run after the conversation guard is disarmed and reuse
+ *     the call-extraction eval notification and ops-digest mechanisms.
  */
 
 const fs = require('fs');
 const path = require('path');
+const { execFile } = require('child_process');
 const Joi = require('joi');
 const Ajv = require('ajv');
 const logger = require('../logger');
+const { attemptReplay, emailFailure, defaultNotify, defaultSendEmail } = require('./call-extraction-replay');
 
 const SCHEMA_VERSION = 'voice-relay-scenarios.v1';
 const DEFAULT_FIXTURE_PATH = path.join(__dirname, '..', '..', 'fixtures', 'voice-relay-eval', 'scenarios.json');
 // The number the synthetic caller "dialled" (555 = fictional). Only a label
 // on the tool ctx: the fixture tools never resolve it.
 const EVAL_CALLER_TO = '+19415550100';
+const SCRIPT_PATH = path.join(__dirname, '..', '..', 'scripts', 'run-voice-relay-eval.js');
+const MANUAL_RERUN = 'node server/scripts/run-voice-relay-eval.js --json --judge';
+const OPS_KEY = 'voice-relay-eval';
+const OPS_HEADING = 'Voice relay conversation eval';
+// The child ceiling covers the bounded WORST case, not the typical run — a
+// primary-provider outage is exactly what the two-leg judge exists for, so
+// the ceiling must outlast it: conversations run one at a time (a stalled
+// Sandy model costs the relay's 20 s stream bound per turn, ≈ 80 s for a
+// four-turn scenario, ≈ 45 min over 34), verdicts run JUDGE_CONCURRENCY at a
+// time (each chain ≤ the dispatcher's 4-minute split budget, ≈ 34 min for
+// 34 scenarios four-wide), and the wrapper retries a failed run once. Three
+// hours holds twice that with margin; a wedged run still cannot hold the
+// runExclusive lock past it.
+const CHILD_TIMEOUT_MS = 3 * 60 * 60 * 1000;
 const JUDGE_CONCURRENCY = 4;
 // scenario.gates key → the env var the relay reads at call time. Every one of
 // these is read per call (no module-top reads), so a scenario may flip them
@@ -1152,9 +1171,177 @@ async function runVoiceRelayReplay({ fixturePath = DEFAULT_FIXTURE_PATH, only = 
   return { failed: isFailedVoiceRun({ summary }), fixturePath, schemaVersion: fixture.schemaVersion, runDate: runDate.toISOString(), judge, summary, results };
 }
 
+// ── Retry-once / notify wrapper (the call-replay shape) ───────────────────
+
+function failureLines(run) {
+  const lines = [];
+  for (const r of (run && run.results) || []) {
+    if (r.status === 'error') lines.push(`${r.id}: replay error (${r.error && r.error.message ? r.error.message : 'unknown error'})`);
+    if (r.judge && !r.judge.ok) lines.push(`${r.id}: unjudged — judge unavailable (${r.judge.reason || 'unknown'})`);
+    for (const c of r.checks || []) {
+      if (c.status === 'fail' && blocking(c)) lines.push(`${r.id}: ${c.severity}${c.adjudicated ? '*' : ''} ${c.check} — ${c.detail}`);
+    }
+  }
+  if (!lines.length && run && run.summary) lines.push(`summary: ${summaryLine(run.summary)}`);
+  return lines;
+}
+
+function compactAttempt(attempt) {
+  return { status: attempt.status, summary: attempt.run ? attempt.run.summary : null, error: attempt.error || null };
+}
+
+async function notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath }) {
+  const run = finalAttempt.run || null;
+  const lines = failureLines(run).slice(0, 20);
+  const summary = (run && run.summary) || {};
+  const retry = attempts[1] || null;
+  const retryNote = retry
+    ? (retry.status === 'inconclusive'
+        ? `\n\nRetry was inconclusive: ${retry.error && retry.error.message ? retry.error.message : 'unknown error'}. Keeping the first observed failure.`
+        : '\n\nThe retry did not clear the failure.')
+    : '';
+  const failing = (summary.failed || 0) + (summary.replayErrors || 0);
+  const unjudged = summary.judgeErrors || 0;
+  const title = failing
+    ? `Voice relay eval: ${failing} failing scenario(s)${unjudged ? `, ${unjudged} unjudged` : ''}`
+    : `Voice relay eval: ${unjudged} scenario(s) unjudged — judge unavailable`;
+  const body = `${lines.join('\n').slice(0, 1400)}\n\n${summaryLine(summary)}${retryNote}\n\nRe-run manually: ${MANUAL_RERUN}`;
+  let notifyError = null;
+  try {
+    await notify({
+      recipient_type: 'admin',
+      category: 'eval_regression',
+      title,
+      body,
+      icon: '\u{1F9EA}',
+      link: '/admin/dashboard',
+      metadata: JSON.stringify({ fixturePath, summary, failures: lines, attempts: attempts.map(compactAttempt) }),
+    });
+  } catch (err) {
+    notifyError = err;
+  }
+  await emailFailure({ sendEmail, subject: `FIX: ${title}`, textBody: body, key: OPS_KEY, heading: OPS_HEADING });
+  logger.warn(`[voice-relay-eval] failed: ${summaryLine(summary)}`);
+  return notifyError;
+}
+
+async function notifyInconclusive({ notify, sendEmail, attempt, fixturePath }) {
+  const title = 'Voice relay eval could not run';
+  const body = `${attempt.error && attempt.error.message ? attempt.error.message : 'Unknown replay error'}\n\nThe voice relay scenario fixture was NOT verified.\n\nRe-run manually: ${MANUAL_RERUN}`;
+  let notifyError = null;
+  try {
+    await notify({
+      recipient_type: 'admin',
+      category: 'eval_regression',
+      title,
+      body,
+      icon: '\u{1F9EA}',
+      link: '/admin/dashboard',
+      metadata: JSON.stringify({ fixturePath, error: attempt.error || null }),
+    });
+  } catch (err) {
+    notifyError = err;
+  }
+  await emailFailure({ sendEmail, subject: `FIX: ${title}`, textBody: body, key: OPS_KEY, heading: OPS_HEADING });
+  logger.warn(`[voice-relay-eval] inconclusive: ${attempt.error && attempt.error.message ? attempt.error.message : 'unknown error'}`);
+  return notifyError;
+}
+
+/** The wrapper's retry-once shape: a second attempt only after a failed first one; pass-on-retry is flaky. */
+async function attemptWithRetry(runReplay, replayOptions, attemptOptions) {
+  const first = await attemptReplay(runReplay, replayOptions, attemptOptions);
+  if (first.status !== 'fail') return { finalAttempt: first, attempts: [first], flaky: false };
+  const retry = await attemptReplay(runReplay, replayOptions, attemptOptions);
+  const flaky = retry.status === 'pass';
+  if (flaky) logger.warn('[voice-relay-eval] pass-on-retry; treating as flaky, not failing');
+  return { finalAttempt: retry.status === 'inconclusive' ? first : retry, attempts: [first, retry], flaky };
+}
+
+/** The outcome's notification, if any. Returns the bell's insert error (the email channel has already fired) or null. */
+async function notifyOutcome({ notifyOnFailure, notify, sendEmail, finalAttempt, attempts, fixturePath }) {
+  if (!notifyOnFailure) {
+    logger.info(`[voice-relay-eval] manual run — ${finalAttempt.status}, no notification`);
+    return null;
+  }
+  if (finalAttempt.status === 'fail') return notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath });
+  if (finalAttempt.status === 'inconclusive') return notifyInconclusive({ notify, sendEmail, attempt: finalAttempt, fixturePath });
+  return null;
+}
+
+/**
+ * The scheduled shape: one attempt, retry once on failure (pass-on-retry is
+ * flaky, not a failure), one admin bell + ops email on repeated failure or
+ * when the eval could not run. Never throws for a failed eval, and never for
+ * a bell that failed to insert either: the email channel has fired
+ * independently, and a FINISHED evaluation must still return its result
+ * (with `notificationError`) rather than read as a crash to the cron.
+ */
+async function runVoiceRelayEval(opts = {}) {
+  const runReplay = opts.runReplay || runVoiceRelayReplay;
+  const notify = opts.notify || defaultNotify;
+  const sendEmail = opts.sendEmail || defaultSendEmail;
+  // notifyOnFailure: false = a manual run — no bell, no email AND no ops
+  // digest (emailFailure's deliverOpsDigest writes an in-app notification
+  // under GATE_OPS_DIGESTS_IN_APP even with the email sender stubbed).
+  const notifyOnFailure = opts.notifyOnFailure !== false;
+  const fixturePath = opts.fixturePath || DEFAULT_FIXTURE_PATH;
+  const replayOptions = { fixturePath, only: opts.only || null, judge: opts.judge !== false, judgeFn: opts.judgeFn || null };
+  const { finalAttempt, attempts, flaky } = await attemptWithRetry(runReplay, replayOptions, { isFailed: isFailedVoiceRun, lane: 'voice_relay' });
+  const notificationError = await notifyOutcome({ notifyOnFailure, notify, sendEmail, finalAttempt, attempts, fixturePath });
+  if (notificationError) logger.error(`[voice-relay-eval] notification insert failed (email channel already attempted): ${notificationError.message}`);
+  const run = finalAttempt.run || null;
+  const result = {
+    status: finalAttempt.status,
+    flaky,
+    fixturePath,
+    judge: run ? run.judge : replayOptions.judge,
+    summary: run ? run.summary : null,
+    attempts: attempts.map(compactAttempt),
+    results: run ? run.results : [],
+    error: finalAttempt.error || null,
+    notificationError: notificationError ? notificationError.message : null,
+  };
+  logger.info(`[voice-relay-eval] done: status=${result.status}${flaky ? ' flaky=true' : ''} | ${summaryLine(result.summary || {})}`);
+  return result;
+}
+
+/**
+ * The cron's crash path: the child died (timeout, signal, startup failure,
+ * no JSON) before it could send its own notification, so the parent sends
+ * the inconclusive alert — a dead weekly monitor must never be silent.
+ */
+async function notifyEvalCrash(err, { notify = defaultNotify, sendEmail = defaultSendEmail, fixturePath = DEFAULT_FIXTURE_PATH } = {}) {
+  const notifyError = await notifyInconclusive({ notify, sendEmail, fixturePath, attempt: { status: 'inconclusive', error: { name: (err && err.name) || 'Error', message: err && err.message ? err.message : String(err) } } });
+  if (notifyError) throw notifyError;
+}
+
+/**
+ * The cron entry point: the whole eval in a child process (its per-scenario
+ * gate env and its patched relay modules never touch the server). Resolves
+ * with the child's JSON result; rejects when the child crashed or produced
+ * nothing parseable. The child notifies on its own (--notify).
+ */
+function runVoiceRelayEvalProcess({ timeoutMs = CHILD_TIMEOUT_MS, scriptPath = SCRIPT_PATH, execFileImpl = execFile } = {}) {
+  return new Promise((resolve, reject) => {
+    execFileImpl(process.execPath, [scriptPath, '--json', '--judge', '--notify'], {
+      env: process.env, timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, killSignal: 'SIGKILL',
+    }, (err, stdout, stderr) => {
+      const code = err && typeof err.code === 'number' ? err.code : (err ? null : 0);
+      let parsed = null;
+      try { parsed = JSON.parse(String(stdout || '').trim()); } catch { parsed = null; }
+      // Exit 1 (failed) / 3 (inconclusive) still carry a JSON result — the
+      // child has already notified; only a crash (2, a signal, no JSON) throws.
+      if (parsed && parsed.status && (code === 0 || code === 1 || code === 3)) { resolve({ ...parsed, exitCode: code }); return; }
+      const tail = String(stderr || '').trim().slice(-400);
+      reject(new Error(`voice relay eval child ${err && err.killed ? 'timed out' : `exited ${code === null ? 'abnormally' : code}`}${tail ? `: ${tail}` : ''}`));
+    });
+  });
+}
+
 module.exports = {
   SCHEMA_VERSION,
   DEFAULT_FIXTURE_PATH,
+  MANUAL_RERUN,
   GATE_ENV,
   CHECKS,
   SEVERITIES,
@@ -1166,9 +1353,13 @@ module.exports = {
   installHarness,
   runScenario,
   runVoiceRelayReplay,
+  runVoiceRelayEval,
+  runVoiceRelayEvalProcess,
+  notifyEvalCrash,
   summaryLine,
   isFailedVoiceRun,
   _internals: {
+    CHILD_TIMEOUT_MS, attemptWithRetry, notifyOutcome, failureLines, notifyFailure, notifyInconclusive,
     JUDGE_CONCURRENCY, judgeChecks, judgeRecord, mapPool, PROMISE_RE, DEFAULT_TOOL_TEXT, LOOKUP_BUDGET_TEXT, EVAL_CALLER_TO, allowedToolsCheck, validCallNames,
     makeDbGuard, officeHoursFixture, pickToolResponse, inputMatches, MISMATCH_TEXT, runFixtureTool, applyToolSideEffects, validateToolInput, offeredRefs, applyGates, applyResumeFixture, injectInterrupt, driveTurns, selectScenarios, assertRunConclusive,
     renderTranscript, evaluateChecks, runCheck, CHECK_RUNNERS, lintScenario, scenarioStatus, qualityScore, summarize,

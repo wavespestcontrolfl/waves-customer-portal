@@ -8,6 +8,7 @@
  * runs, the db is never touched — are pinned here.
  */
 
+jest.mock('../services/ops-digest', () => ({ deliverOpsDigest: jest.fn(async ({ sendEmail }) => sendEmail()) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => {
   const fn = jest.fn(() => { throw new Error('db called'); });
@@ -1336,4 +1337,114 @@ describe('voice relay eval — the harness', () => {
   // The load-order guard (installHarness throws when relay-conversation is
   // already in require.cache) is a Node require.cache property jest's
   // registry does not model; it is exercised by the runner script under Node.
+});
+
+describe('voice relay eval — scheduled wrapper and child process', () => {
+  const replay = require('../services/eval/voice-relay-replay');
+  const failIfRealEmail = async () => { throw new Error('test fell through to default email sender'); };
+  const run = (overrides = {}) => ({ failed: false, summary: { scenarios: 3, passed: 3, failed: 0, replayErrors: 0, failedIds: [], replayErrorIds: [], criticalMisses: 0, majorMisses: 0, qualityMisses: 0, adjudicatedMajorMisses: 0, judged: 3, judgeFallbacks: 0, judgeErrors: 0, qualityScore: 1 }, results: [], ...overrides });
+  const failing = () => run({ failed: true, summary: { ...run().summary, passed: 2, failed: 1, failedIds: ['card-number-spoken'], criticalMisses: 1 }, results: [{ id: 'card-number-spoken', status: 'fail', checks: [{ check: 'spoken_never_matches', severity: 'critical', adjudicated: false, status: 'fail', detail: '/4111/ matched' }] }] });
+
+  test('green run: no notification, no email', async () => {
+    const notify = jest.fn();
+    const out = await replay.runVoiceRelayEval({ runReplay: async () => run(), notify, sendEmail: failIfRealEmail });
+    expect(out.status).toBe('pass');
+    expect(out.flaky).toBe(false);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  test('pass-on-retry is flaky, not a failure', async () => {
+    const notify = jest.fn();
+    let calls = 0;
+    const out = await replay.runVoiceRelayEval({ runReplay: async () => (calls++ === 0 ? failing() : run()), notify, sendEmail: failIfRealEmail });
+    expect(out).toMatchObject({ status: 'pass', flaky: true });
+    expect(out.attempts.map((a) => a.status)).toEqual(['fail', 'pass']);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  test('repeated failure: one eval_regression bell naming the scenario and the critical miss, plus the FIX: email', async () => {
+    const notify = jest.fn();
+    const sendEmail = jest.fn(async () => ({ ok: true }));
+    const out = await replay.runVoiceRelayEval({ runReplay: async () => failing(), notify, sendEmail });
+    expect(out.status).toBe('fail');
+    expect(notify).toHaveBeenCalledTimes(1);
+    const bell = notify.mock.calls[0][0];
+    expect(bell).toMatchObject({ recipient_type: 'admin', category: 'eval_regression', title: 'Voice relay eval: 1 failing scenario(s)' });
+    expect(bell.body).toMatch(/card-number-spoken: critical spoken_never_matches — \/4111\/ matched/);
+    expect(bell.body).toMatch(/Re-run manually: node server\/scripts\/run-voice-relay-eval.js --json/);
+    expect(sendEmail).toHaveBeenCalledWith(expect.objectContaining({ subject: 'FIX: Voice relay eval: 1 failing scenario(s)', heading: 'Voice relay conversation eval' }));
+  });
+
+  test('unjudged scenarios page as unverified, with the judge reason in the body', async () => {
+    const notify = jest.fn();
+    const sendEmail = jest.fn(async () => ({ ok: true }));
+    const unjudged = () => run({ failed: true, summary: { ...run().summary, judged: 2, judgeErrors: 1 }, results: [{ id: 'pet-safety-bait', status: 'pass', checks: [], judge: { ok: false, reason: 'all_providers_failed' } }] });
+    const out = await replay.runVoiceRelayEval({ runReplay: async () => unjudged(), notify, sendEmail });
+    expect(out.status).toBe('fail');
+    const bell = notify.mock.calls[0][0];
+    expect(bell.title).toBe('Voice relay eval: 1 scenario(s) unjudged — judge unavailable');
+    expect(bell.body).toMatch(/pet-safety-bait: unjudged — judge unavailable \(all_providers_failed\)/);
+  });
+
+  test('a manual run (notifyOnFailure: false) touches no channel at all — no bell, no email, no ops digest', async () => {
+    const digest = require('../services/ops-digest').deliverOpsDigest;
+    digest.mockClear();
+    const notify = jest.fn();
+    const sendEmail = jest.fn(async () => ({ ok: true }));
+    const out = await replay.runVoiceRelayEval({ runReplay: async () => failing(), notify, sendEmail, notifyOnFailure: false });
+    expect(out.status).toBe('fail');
+    expect(notify).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(digest).not.toHaveBeenCalled();
+    const bad = await replay.runVoiceRelayEval({ runReplay: async () => { throw new Error('no model'); }, notify, sendEmail, notifyOnFailure: false });
+    expect(bad.status).toBe('inconclusive');
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  test('a replay that throws is inconclusive and says the fixture was NOT verified', async () => {
+    const notify = jest.fn();
+    const sendEmail = jest.fn(async () => ({ ok: true }));
+    const out = await replay.runVoiceRelayEval({ runReplay: async () => { throw new Error('no scenario completed a model round — model unavailable'); }, notify, sendEmail });
+    expect(out.status).toBe('inconclusive');
+    expect(notify.mock.calls[0][0]).toMatchObject({ title: 'Voice relay eval could not run' });
+    expect(notify.mock.calls[0][0].body).toMatch(/NOT verified/);
+  });
+
+  test('runVoiceRelayEvalProcess parses the child JSON on exit 0/1/3 and rejects on a crash or garbage', async () => {
+    const child = (code, stdout, stderr = '') => (file, args, opts, cb) => {
+      expect(file).toBe(process.execPath);
+      expect(args).toEqual([expect.stringMatching(/run-voice-relay-eval\.js$/), '--json', '--judge', '--notify']);
+      expect(opts.timeout).toBeGreaterThan(0);
+      const err = code === 0 ? null : Object.assign(new Error(`exit ${code}`), { code });
+      cb(err, stdout, stderr);
+    };
+    await expect(replay.runVoiceRelayEvalProcess({ execFileImpl: child(0, JSON.stringify({ status: 'pass', summary: { scenarios: 34 } })) })).resolves.toMatchObject({ status: 'pass', exitCode: 0 });
+    await expect(replay.runVoiceRelayEvalProcess({ execFileImpl: child(1, JSON.stringify({ status: 'fail', summary: {} })) })).resolves.toMatchObject({ status: 'fail', exitCode: 1 });
+    await expect(replay.runVoiceRelayEvalProcess({ execFileImpl: child(3, JSON.stringify({ status: 'inconclusive' })) })).resolves.toMatchObject({ status: 'inconclusive' });
+    await expect(replay.runVoiceRelayEvalProcess({ execFileImpl: child(2, '', 'Voice relay eval failed to run: boom') })).rejects.toThrow(/exited 2: Voice relay eval failed to run: boom/);
+    await expect(replay.runVoiceRelayEvalProcess({ execFileImpl: child(0, 'not json') })).rejects.toThrow(/exited 0/);
+  });
+
+  test('a bell that fails to insert leaves a FINISHED result with notificationError, never a throw', async () => {
+    const notify = jest.fn(async () => { throw new Error('notification insert failed'); });
+    const sendEmail = jest.fn(async () => ({ ok: true }));
+    const out = await replay.runVoiceRelayEval({ runReplay: async () => failing(), notify, sendEmail });
+    expect(out.status).toBe('fail');
+    expect(out.notificationError).toMatch(/notification insert failed/);
+    expect(out.summary.failed).toBe(1);
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test('a crashed eval child pages through the inconclusive path', async () => {
+    const notify = jest.fn();
+    const sendEmail = jest.fn(async () => ({ ok: true }));
+    await replay.notifyEvalCrash(new Error('voice relay eval child timed out'), { notify, sendEmail });
+    expect(notify.mock.calls[0][0]).toMatchObject({ category: 'eval_regression', title: 'Voice relay eval could not run' });
+    expect(notify.mock.calls[0][0].body).toMatch(/child timed out/);
+    expect(sendEmail).toHaveBeenCalledWith(expect.objectContaining({ subject: 'FIX: Voice relay eval could not run' }));
+  });
+
+  test('summaryLine names the failed and errored scenarios', () => {
+    expect(replay.summaryLine({ scenarios: 2, passed: 1, failed: 1, failedIds: ['a'], replayErrorIds: ['b'], qualityScore: 0.5, modelRounds: 4 })).toMatch(/scenarios=2 passed=1 failed=1 .*qualityScore=50\.0% modelRounds=4 failed=\[a\] errors=\[b\]/);
+  });
 });
