@@ -133,16 +133,14 @@ const LIVE_OFFER_DEADLINE_TEXT = new Date(new Date(LIVE_OFFER_EXPIRES_AT).getTim
   .toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York' });
 
 
-// Offer-creation and sweep paths spawn a fire-and-forget receipt-resend
-// chain (queueCreditReceiptResend's async IIFE). With the live-offer
-// fixtures above (expiry now genuinely in the future) that chain can still
-// be mid-flight when the last test ends — drain pending turns so it never
-// imports after the Jest environment is torn down.
-afterAll(async () => {
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
-  await new Promise((resolve) => setImmediate(resolve));
+// Keep queued receipt work out of these credit-math fixtures: draining
+// immediates still leaves the two-minute
+// receipt recheck alive after this Jest environment has been torn down.
+beforeAll(() => {
+  jest.useFakeTimers({ doNotFake: ['Date', 'hrtime', 'performance', 'nextTick'] });
 });
+afterEach(() => jest.clearAllTimers());
+afterAll(() => jest.useRealTimers());
 
 
 describe('recordInspectionCreditOffer — the promise, not the money', () => {
