@@ -44,7 +44,7 @@ const {
   isUnpricedSeriesVisit,
   seriesRootId,
   MAX_ALERTS_PER_RUN,
-  hasMissingManualSeriesStamp,
+  manualSeriesStampIssue,
 } = require('../services/schedule-integrity-watchdog');
 
 // 2026-08-04 noon ET.
@@ -72,13 +72,13 @@ function unpricedChild(over = {}) {
 
 // Thenable knex-chain stub: every builder method returns the chain; awaiting
 // it resolves the row list; .first() resolves per-dedupe-key presence.
-function makeDbMock({ staleRows = [], upcomingRows = [], coveredTerms = [], alertedKeys = new Set() } = {}) {
+function makeDbMock({ staleRows = [], coverageRows = [], coveredTerms = [], alertedKeys = new Set() } = {}) {
   db.mockImplementation((table) => {
     const rows = table === 'scheduled_services' ? staleRows
-      : table === 'scheduled_services as ss' ? upcomingRows
+      : table === 'scheduled_services as ss' ? coverageRows
         : table === 'annual_prepay_terms' ? coveredTerms : null;
     const c = {};
-    for (const m of ['whereIn', 'where', 'whereNull', 'whereNotIn', 'leftJoin', 'select', 'orderBy']) {
+    for (const m of ['whereIn', 'where', 'whereNull', 'whereNotIn', 'leftJoin', 'select', 'orderBy', 'orderByRaw']) {
       c[m] = jest.fn(() => c);
     }
     c.whereRaw = jest.fn((sql, params) => { c._dedupeKey = params && params[0]; return c; });
@@ -112,6 +112,7 @@ describe('classifiers', () => {
 
   test('isUnpricedSeriesVisit: a price ANYWHERE in the series suppresses', () => {
     expect(isUnpricedSeriesVisit(unpricedChild())).toBe(true);
+    expect(isUnpricedSeriesVisit(unpricedChild({ status: null }))).toBe(false);
     // Child carries its own price (pest model).
     expect(isUnpricedSeriesVisit(unpricedChild({ estimated_price: '99.45' }))).toBe(false);
     // Parent priced, child inherits at invoice time (lawn model) — fine.
@@ -200,7 +201,7 @@ describe('runInner alerting', () => {
 
   test('an unpriced series rings ONE bell for many child visits', async () => {
     makeDbMock({
-      upcomingRows: [
+      coverageRows: [
         unpricedChild({ id: 'ss-child-1', service_date: '2026-08-10' }),
         unpricedChild({ id: 'ss-child-2', service_date: '2026-08-12' }),
       ],
@@ -214,7 +215,7 @@ describe('runInner alerting', () => {
   });
 
   test('a priced series never pages, even when children carry NULL', async () => {
-    makeDbMock({ upcomingRows: [unpricedChild({ parent_primary_line_price: '84.17' })] });
+    makeDbMock({ coverageRows: [unpricedChild({ parent_primary_line_price: '84.17' })] });
     const result = await runInner({ now: NOW });
     expect(result).toMatchObject({ unpricedSeries: 0, alerted: 0 });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
@@ -224,13 +225,13 @@ describe('runInner alerting', () => {
     const stamped = unpricedChild({ prepaid_amount: '559.20', prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 'term-1' });
     // Validator confirms → no page.
     annualPrepayCoversVisit.mockResolvedValueOnce(true);
-    makeDbMock({ upcomingRows: [stamped] });
+    makeDbMock({ coverageRows: [stamped] });
     let result = await runInner({ now: NOW });
     expect(result).toMatchObject({ unpricedSeries: 0, alerted: 0 });
     expect(annualPrepayCoversVisit).toHaveBeenCalledWith(expect.objectContaining({ id: 'ss-child-1' }), expect.anything());
     // Validator refutes (stale stamp, dead term) → fail-closed, page rings.
     annualPrepayCoversVisit.mockResolvedValueOnce(false);
-    makeDbMock({ upcomingRows: [stamped] });
+    makeDbMock({ coverageRows: [stamped] });
     result = await runInner({ now: NOW });
     expect(result).toMatchObject({ unpricedSeries: 1, prepayCoverageGaps: 1, alerted: 2 });
   });
@@ -248,7 +249,7 @@ describe('runInner alerting', () => {
     // plus one same-day money-loss series. The series must still page today —
     // it can invoice at $0 while the backlog drains over days.
     const staleRows = Array.from({ length: MAX_ALERTS_PER_RUN + 5 }, (_, i) => staleVisit({ id: `sv-${i}` }));
-    makeDbMock({ staleRows, upcomingRows: [unpricedChild()] });
+    makeDbMock({ staleRows, coverageRows: [unpricedChild()] });
     const result = await runInner({ now: NOW });
     expect(result.alerted).toBe(MAX_ALERTS_PER_RUN);
     const keys = NotificationService.notifyAdmin.mock.calls.map(([, , , opts]) => opts.metadata.dedupeKey);
@@ -336,7 +337,7 @@ describe('prepay coverage detection', () => {
       estimateId: `e-${i}`, customerId: `c-${i}`, serviceFamily: 'pest_control', pattern: 'monthly',
       expectedVisits: 12, recordedVisits: 0, issues: ['missing_schedule'], evidenceKey: 'missing', appointmentIds: [],
     })));
-    makeDbMock({ upcomingRows: Array.from({ length: MAX_ALERTS_PER_RUN + 5 }, (_, i) => unpricedChild({
+    makeDbMock({ coverageRows: Array.from({ length: MAX_ALERTS_PER_RUN + 5 }, (_, i) => unpricedChild({
       id: `prepay-${i}`, estimated_price: 100, prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100,
     })) });
     expect(await runInner({ now: NOW })).toMatchObject({ alerted: MAX_ALERTS_PER_RUN });
@@ -347,7 +348,7 @@ describe('prepay coverage detection', () => {
   });
 
   test('a priced annual stamp still requires valid coverage', async () => {
-    makeDbMock({ upcomingRows: [unpricedChild({ estimated_price: 100, prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100 })] });
+    makeDbMock({ coverageRows: [unpricedChild({ estimated_price: 100, prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100 })] });
     const result = await runInner({ now: NOW });
     expect(result).toMatchObject({ unpricedSeries: 0, prepayCoverageGaps: 1, alerted: 1 });
     expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata.issue).toBe('annual_coverage_unverified');
@@ -356,45 +357,52 @@ describe('prepay coverage detection', () => {
   test('unchanged prepay evidence dedupes but a later funding regression rings again', async () => {
     const row = unpricedChild({ estimated_price: 100, prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100,
       annual_prepay_term_id: 'term-1', prepay_payment_evidence: [['payment-1', 'refunded', 'full', '2040-01-01T12:00:00Z']] });
-    makeDbMock({ upcomingRows: [row] });
+    makeDbMock({ coverageRows: [row] });
     expect(await runInner({ now: NOW })).toMatchObject({ alerted: 1 });
     const key = NotificationService.notifyAdmin.mock.calls[0][3].metadata.dedupeKey;
     const alertedKeys = new Set([key]);
-    makeDbMock({ upcomingRows: [row], alertedKeys });
+    makeDbMock({ coverageRows: [row], alertedKeys });
     expect(await runInner({ now: NOW })).toMatchObject({ alerted: 0 });
     annualPrepayCoversVisit.mockResolvedValueOnce(true);
     expect(await runInner({ now: NOW })).toMatchObject({ alerted: 0, prepayCoverageGaps: 0 });
-    makeDbMock({ upcomingRows: [{ ...row, prepay_payment_evidence: [['payment-1', 'refunded', 'full', '2040-01-03T12:00:00Z']] }], alertedKeys });
+    makeDbMock({ coverageRows: [{ ...row, prepay_payment_evidence: [['payment-1', 'refunded', 'full', '2040-01-03T12:00:00Z']] }], alertedKeys });
     expect(await runInner({ now: NOW })).toMatchObject({ alerted: 1, prepayCoverageGaps: 1 });
     expect(NotificationService.notifyAdmin.mock.calls.at(-1)[3].metadata.dedupeKey).not.toBe(key);
   });
 
-  test('missing manual stamps need positive shared-family evidence and no existing allocation', () => {
+  test('manual allocations must retain their original payment timestamp and method', () => {
     const row = unpricedChild({ manual_series_payment_evidence: [['2040-01-05T16:00:00Z', 'check', [['parent', '101'], ['sibling', '102']]]] });
-    expect(hasMissingManualSeriesStamp(row)).toBe(true);
-    expect(hasMissingManualSeriesStamp({ ...row, prepaid_amount: 100 })).toBe(false);
-    expect(hasMissingManualSeriesStamp({ ...row, recurring_parent_id: null })).toBe(true);
-    expect(hasMissingManualSeriesStamp({ ...row, manual_series_payment_evidence: [] })).toBe(false);
-    expect(hasMissingManualSeriesStamp({ ...row, manual_series_payment_evidence: null })).toBe(false);
+    expect(manualSeriesStampIssue(row)).toBe('manual_series_stamp_missing');
+    const paid = { ...row, prepaid_amount: 100, prepaid_method: 'check', prepaid_at: new Date('2040-01-05T11:00:00-05:00') };
+    expect(manualSeriesStampIssue(paid)).toBeNull();
+    expect(manualSeriesStampIssue({ ...paid, prepaid_method: 'annual_prepay_invoice' })).toBe('manual_series_stamp_conflict');
+    expect(manualSeriesStampIssue({ ...paid, prepaid_at: new Date('2040-01-06T16:00:00Z') })).toBe('manual_series_stamp_conflict');
+    expect(manualSeriesStampIssue({ ...paid, prepaid_at: null })).toBe('manual_series_stamp_conflict');
+    expect(manualSeriesStampIssue({ ...paid, manual_series_payment_evidence: [
+      ...row.manual_series_payment_evidence, ['2040-01-06T16:00:00Z', 'check', [['other-1', '103'], ['other-2', '104']]],
+    ] })).toBe('manual_series_stamp_conflict');
+    expect(manualSeriesStampIssue({ ...row, recurring_parent_id: null })).toBe('manual_series_stamp_missing');
+    expect(manualSeriesStampIssue({ ...row, manual_series_payment_evidence: [] })).toBeNull();
+    expect(manualSeriesStampIssue({ ...row, manual_series_payment_evidence: null })).toBeNull();
   });
 
   test('a priced unstamped visit with live linked service coverage gets a review alert', async () => {
     const row = unpricedChild({ estimated_price: 100, annual_prepay_term_id: 'term-1' });
-    makeDbMock({ upcomingRows: [row], coveredTerms: [{ id: 'term-1', customer_id: row.customer_id, coverage_service_type: row.service_type }] });
+    makeDbMock({ coverageRows: [row], coveredTerms: [{ id: 'term-1', customer_id: row.customer_id, coverage_service_type: row.service_type }] });
     expect(await runInner({ now: NOW })).toMatchObject({ unpricedSeries: 0, prepayCoverageGaps: 1 });
     expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata.issue).toBe('annual_coverage_unverified');
     // A positive manual override does not resolve the linked annual allocation.
     // The partial stamp in particular would not suppress completion billing.
     for (const amount of [10, 100]) {
-      makeDbMock({ upcomingRows: [{ ...row, prepaid_method: 'cash', prepaid_amount: amount }],
+      makeDbMock({ coverageRows: [{ ...row, prepaid_method: 'cash', prepaid_amount: amount }],
         coveredTerms: [{ id: 'term-1', customer_id: row.customer_id, coverage_service_type: row.service_type }] });
       expect(await runInner({ now: NOW })).toMatchObject({ prepayCoverageGaps: 1 });
     }
-    makeDbMock({ upcomingRows: [row], coveredTerms: [] });
+    makeDbMock({ coverageRows: [row], coveredTerms: [] });
     expect(await runInner({ now: NOW })).toMatchObject({ prepayCoverageGaps: 0 });
-    makeDbMock({ upcomingRows: [row], coveredTerms: [{ id: 'term-1', customer_id: 'other-customer' }] });
+    makeDbMock({ coverageRows: [row], coveredTerms: [{ id: 'term-1', customer_id: 'other-customer' }] });
     expect(await runInner({ now: NOW })).toMatchObject({ prepayCoverageGaps: 0 });
-    makeDbMock({ upcomingRows: [row], coveredTerms: [{ id: 'term-1', customer_id: row.customer_id, coverage_service_type: 'Different Service' }] });
+    makeDbMock({ coverageRows: [row], coveredTerms: [{ id: 'term-1', customer_id: row.customer_id, coverage_service_type: 'Different Service' }] });
     expect(await runInner({ now: NOW })).toMatchObject({ prepayCoverageGaps: 0 });
   });
 });

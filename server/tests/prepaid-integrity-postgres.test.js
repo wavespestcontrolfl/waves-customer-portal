@@ -103,6 +103,86 @@ postgres('prepaid series integrity against migrated PostgreSQL', () => {
       expect.objectContaining({ metadata: expect.objectContaining({ scheduled_service_id: root.id, issue: 'manual_series_stamp_missing' }) }));
   });
 
+  test.each([
+    ['2040-01-09', 'pending'],
+    ['2040-01-09', null],
+    ['2040-01-15', null],
+  ])('coverage includes live visits on %s with status %s while pricing keeps its existing window', async (scheduled_date, status) => {
+    const manual = await visit({ scheduled_date, status, estimated_price: 100 });
+    const paidAt = new Date('2040-01-05T16:00:00Z');
+    for (const date of ['2040-02-15', '2040-03-15']) {
+      await visit({ recurring_parent_id: manual.id, scheduled_date: date, prepaid_method: 'check', prepaid_amount: 100, prepaid_at: paidAt });
+    }
+    const termId = randomUUID();
+    await trx('annual_prepay_terms').insert({ id: termId, customer_id: customerId,
+      status: 'active', term_start: '2040-01-01', term_end: '2041-01-01', prepay_amount: 400,
+      coverage_service_type: 'Monthly Pest Control Service' });
+    const annual = await visit({ scheduled_date, status, annual_prepay_term_id: termId, estimated_price: 100 });
+    await visit({ scheduled_date: '2040-01-09' });
+    await visit({ scheduled_date: '2040-01-15', status: null });
+    await visit({ scheduled_date: '2040-01-25' });
+    const { runInner } = require('../services/schedule-integrity-watchdog');
+    expect(await runInner({ now })).toMatchObject({ prepayCoverageGaps: 2, unpricedSeries: 0 });
+    const notifications = require('../services/notification-service');
+    for (const [id, issue] of [[manual.id, 'manual_series_stamp_missing'], [annual.id, 'annual_coverage_unverified']]) {
+      expect(notifications.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.any(String),
+        expect.objectContaining({ metadata: expect.objectContaining({ scheduled_service_id: id, issue }) }));
+    }
+    for (const terminalStatus of ['completed', 'cancelled', 'rescheduled', 'skipped']) {
+      await trx('scheduled_services').whereIn('id', [manual.id, annual.id]).update({ status: terminalStatus });
+      expect(await runInner({ now })).toMatchObject({ prepayCoverageGaps: 0, unpricedSeries: 0 });
+    }
+  });
+
+  test('a valid annual replacement still exposes the original manual allocation conflict', async () => {
+    const paidAt = new Date('2040-01-05T16:00:00Z');
+    const root = await visit({ prepaid_method: 'check', prepaid_amount: 100, prepaid_at: paidAt });
+    for (const date of ['2040-02-15', '2040-03-15']) {
+      await visit({ recurring_parent_id: root.id, scheduled_date: date, prepaid_method: 'check', prepaid_amount: 100, prepaid_at: paidAt });
+    }
+    const { runInner } = require('../services/schedule-integrity-watchdog');
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
+    const termId = randomUUID();
+    const invoiceId = randomUUID();
+    await trx('invoices').insert({ id: invoiceId, customer_id: customerId, invoice_number: `fixture-${invoiceId.slice(0, 20)}`,
+      token: randomBytes(32).toString('hex'), total: 400, subtotal: 400, status: 'paid' });
+    await trx('annual_prepay_terms').insert({ id: termId, customer_id: customerId, prepay_invoice_id: invoiceId,
+      status: 'active', term_start: '2040-01-01', term_end: '2041-01-01', prepay_amount: 400 });
+    await trx('scheduled_services').where({ id: root.id }).update({ annual_prepay_term_id: termId,
+      prepaid_method: 'annual_prepay_invoice', prepaid_at: new Date('2040-01-06T16:00:00Z') });
+    const notifications = require('../services/notification-service');
+    notifications.notifyAdmin.mockClear();
+    expect(await runInner({ now })).toMatchObject({ prepayCoverageGaps: 1, unpricedSeries: 0 });
+    expect(notifications.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.any(String),
+      expect.objectContaining({ metadata: expect.objectContaining({ scheduled_service_id: root.id, issue: 'manual_series_stamp_conflict' }) }));
+    await trx('scheduled_services').where({ id: root.id }).update({ annual_prepay_term_id: null, prepaid_method: 'check' });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
+    const laterRows = [];
+    for (const date of ['2040-04-15', '2040-05-15']) {
+      laterRows.push(await visit({ recurring_parent_id: root.id, scheduled_date: date,
+        created_at: new Date('2040-01-06T16:00:00Z'), prepaid_method: 'check', prepaid_amount: 100,
+        prepaid_at: new Date('2040-01-06T16:00:00Z') }));
+    }
+    // Matching the newer payment does not account for the older allocation.
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
+    await trx('scheduled_services').whereIn('id', laterRows.map((row) => row.id))
+      .update({ prepaid_amount: null, prepaid_method: null, prepaid_at: null });
+    await trx('scheduled_services').where({ id: root.id }).update({ prepaid_at: paidAt });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
+  });
+
+  test('upcoming coverage gaps retain priority when overdue coverage exceeds the alert cap', async () => {
+    const { runInner, MAX_ALERTS_PER_RUN } = require('../services/schedule-integrity-watchdog');
+    for (let i = 0; i <= MAX_ALERTS_PER_RUN; i++) {
+      await visit({ scheduled_date: '2040-01-09', estimated_price: 100, prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100 });
+    }
+    const upcoming = await visit({ estimated_price: 100, prepaid_method: 'annual_prepay_invoice', prepaid_amount: 100 });
+    const notifications = require('../services/notification-service');
+    notifications.notifyAdmin.mockClear();
+    expect(await runInner({ now })).toMatchObject({ prepayCoverageGaps: MAX_ALERTS_PER_RUN + 2, alerted: MAX_ALERTS_PER_RUN });
+    expect(notifications.notifyAdmin.mock.calls[0][3].metadata.scheduled_service_id).toBe(upcoming.id);
+  });
+
   test('linked unstamped priced visits alert only while their matching term has paid coverage', async () => {
     const invoiceId = randomUUID();
     const termId = randomUUID();
