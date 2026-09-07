@@ -37,12 +37,17 @@ async function resolvePropertyPreferencesTarget({ trx, proposal, currentRaw }) {
   return created;
 }
 
+// An irrigation input implies an active system. The flip is reported back so
+// the apply audit can record it and a revert can restore it.
 async function applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw }) {
+  const irrigation = IRRIGATION_INPUT_FIELDS.includes(proposal.field);
+  const companions = irrigation && target.irrigation_system !== true
+    ? { irrigation_system: target.irrigation_system ?? null } : {};
   const updated = await trx('property_preferences')
     .where({ id: target.id, customer_id: proposal.scope_id })
     .update({
       [proposal.field]: proposedRaw,
-      ...(IRRIGATION_INPUT_FIELDS.includes(proposal.field) ? { irrigation_system: true } : {}),
+      ...(irrigation ? { irrigation_system: true } : {}),
       updated_at: trx.fn.now(),
     });
   if (!updated) {
@@ -50,10 +55,21 @@ async function applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw
     err.status = 409;
     throw err;
   }
+  return { companions };
+}
+
+// Undo a companion flip recorded at apply time, only while the flag still
+// holds the value apply set: a later deliberate change survives the revert.
+async function revertPropertyPreferenceCompanions({ trx, proposal, target, companions = {} }) {
+  if (!('irrigation_system' in companions) || target.irrigation_system !== true) return { reverted: [] };
+  await trx('property_preferences')
+    .where({ id: target.id, customer_id: proposal.scope_id })
+    .update({ irrigation_system: companions.irrigation_system, updated_at: trx.fn.now() });
+  return { reverted: ['irrigation_system'] };
 }
 
 function valuesEqual(a, b) {
   return JSON.stringify(a === undefined ? null : a) === JSON.stringify(b === undefined ? null : b);
 }
 
-module.exports = { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue, valuesEqual };
+module.exports = { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue, revertPropertyPreferenceCompanions, valuesEqual };

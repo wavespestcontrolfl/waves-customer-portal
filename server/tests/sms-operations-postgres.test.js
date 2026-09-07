@@ -295,6 +295,28 @@ postgres('SMS operations on PostgreSQL', () => {
     }
   });
 
+  test('the irrigation companion flip is reported on apply and restored on revert only while it holds', async () => {
+    const writer = require('../services/data-hygiene/property-preferences');
+    const [row] = await mockPg('property_preferences').insert({ customer_id: message.customer_id, irrigation_system: false }).returning('*');
+    const proposal = { scope_id: message.customer_id, field: 'irrigation_issues', resource_id: row.id };
+    await mockPg.transaction(async (trx) => {
+      const target = await writer.resolvePropertyPreferencesTarget({ trx, proposal, currentRaw: null });
+      const { companions } = await writer.applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw: 'Zone 3 head is broken.' });
+      expect(companions).toEqual({ irrigation_system: false });
+    });
+    expect(await mockPg('property_preferences').first()).toMatchObject({ irrigation_system: true, irrigation_issues: 'Zone 3 head is broken.' });
+    const revert = () => mockPg.transaction(async (trx) => {
+      const target = await trx('property_preferences').where({ id: row.id }).forUpdate().first();
+      return writer.revertPropertyPreferenceCompanions({ trx, proposal, target, companions: { irrigation_system: false } });
+    });
+    // A deliberate change after approval is not clobbered by the revert.
+    await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_system: false });
+    expect(await revert()).toEqual({ reverted: [] });
+    await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_system: true });
+    expect(await revert()).toEqual({ reverted: ['irrigation_system'] });
+    expect((await mockPg('property_preferences').first()).irrigation_system).toBe(false);
+  });
+
   test('a failed critical audit rolls back profile and processed marker together', async () => {
     message.message_body = 'Lockbox code is #0123';
     await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });

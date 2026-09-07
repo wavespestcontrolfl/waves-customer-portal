@@ -1,4 +1,4 @@
-const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue, valuesEqual } = require('../services/data-hygiene/property-preferences');
+const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue, revertPropertyPreferenceCompanions, valuesEqual } = require('../services/data-hygiene/property-preferences');
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
@@ -290,12 +290,13 @@ router.post('/proposals/:id/approve', async (req, res, next) => {
         currentRaw,
       });
 
-      await applyPropertyPreferenceValue({
+      const { companions } = await applyPropertyPreferenceValue({
         trx,
         proposal,
         target,
         proposedRaw,
       });
+      const companionsBefore = Object.keys(companions).length ? companions : null;
 
       const auditId = await auditHygieneProposalApply({
         trx,
@@ -316,6 +317,7 @@ router.post('/proposals/:id/approve', async (req, res, next) => {
         reviewer_id: req.technicianId,
         reviewed_via: 'ui',
         is_sensitive: true,
+        companions_before: companionsBefore,
       });
 
       await vaultAttachAuditLog({ trx, vault_id: vault.id, audit_log_id: auditId });
@@ -330,6 +332,8 @@ router.post('/proposals/:id/approve', async (req, res, next) => {
           applied_at: db.fn.now(),
           resource_id: target.id,
           updated_at: db.fn.now(),
+          // Revert reads the companion's before value from here.
+          ...(companionsBefore ? { evidence: JSON.stringify({ ...(proposal.evidence || {}), companions_before: companionsBefore }) } : {}),
         })
         .returning('*');
 
@@ -419,6 +423,9 @@ router.post('/proposals/:id/revert', requireAdmin, async (req, res, next) => {
           [proposal.field]: beforeRaw,
           updated_at: db.fn.now(),
         });
+      const { reverted: companionsReverted } = await revertPropertyPreferenceCompanions({
+        trx, proposal, target, companions: proposal.evidence?.companions_before || {},
+      });
 
       const auditId = await auditHygieneProposalRevert({
         trx,
@@ -440,6 +447,7 @@ router.post('/proposals/:id/revert', requireAdmin, async (req, res, next) => {
         reverted_by: req.technicianId,
         is_sensitive: true,
         reviewed_via: 'ui',
+        companions_reverted: companionsReverted,
       });
       await vaultAttachAuditLog({ trx, vault_id: vault.id, audit_log_id: auditId });
 
