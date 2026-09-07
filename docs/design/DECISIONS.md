@@ -2186,3 +2186,12 @@ property currently converts its scoped reset to a legacy/global reset. The
 approved P6 rollback retains per-property flags and the unordered legacy
 customer-wide baseline lookup; rollback does not collapse those flags. Both
 limitations are explicit in the PR review, and the gate remains off.
+
+Delivery verification carries the signed PDF history identity through the existing
+email/send fence and re-resolves it after rendering, before dispatch. Missing,
+changed or unreadable history defers through the existing retry path, including
+reports pinned to no assessment. The operation carries one gate decision through
+selection, rendering and the final check. Live portal/context/score history is
+capped at the current Eastern date. The unconfirmed-inclusive admin inventory
+remains available; its completion-card client must adopt target-property scope
+in the later UI PR, which is a documented P2 deferral here.

@@ -126,4 +126,13 @@ describeDb('property lawn history through PostgreSQL', () => {
     await f.assessment(await f.visit(-1, { property_id: secondary.id }));
     expect((await history.latestForCustomer(f.customerId, {}, knex)).map((row) => row.id)).toEqual([expected.id]);
   });
+
+  test('live history excludes a confirmed assessment whose appointment moved into the future', async () => {
+    const f = await fixture(knex);
+    const earlier = await f.assessment(await f.visit(-5));
+    const current = await f.assessment(await f.visit(0));
+    await f.assessment(await f.visit(2));
+    expect((await history.latestForCustomer(f.customerId, {}, knex)).map((row) => row.id)).toEqual([earlier.id, current.id]);
+    expect((await history.latestForCustomer(f.customerId, { limit: 1 }, knex)).map((row) => row.id)).toEqual([current.id]);
+  });
 });

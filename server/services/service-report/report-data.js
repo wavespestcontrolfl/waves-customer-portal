@@ -2299,9 +2299,9 @@ async function loadServicePremise(service, knex = db) {
   return applyReportIdentitySnapshot({ ...service, ...row });
 }
 
-async function lawnAssessmentPdfSignature(service, knex = db) {
+async function lawnAssessmentPdfSignature(service, knex = db, options = {}) {
   try {
-    return (await resolveCanonicalLawnRender(service, knex)).signature;
+    return (await resolveCanonicalLawnRender(service, knex, options)).signature;
   } catch {
     return `-laerr${crypto.randomBytes(6).toString('hex')}`;
   }

@@ -275,8 +275,9 @@ async function historyBeforeVisit({ customerId, scheduledService, throughVisitDa
 
 async function latestForCustomer(customerId, { limit, propertyId } = {}, knex = db) {
   const scope = await visitEligibility({ customerId, propertyId }, knex);
-  const reset = await applicableReset({ customerId, propertyId: scope.propertyId, throughVisitDate: etDateString() }, knex);
-  const rows = await propertyHistory({ customerId, scope, reset }, knex);
+  const throughVisitDate = etDateString();
+  const reset = await applicableReset({ customerId, propertyId: scope.propertyId, throughVisitDate }, knex);
+  const rows = await propertyHistory({ customerId, scope, reset, throughVisitDate }, knex);
   const decorated = rows.map((row, index) => ({ ...row, is_baseline: index === 0 }));
   return limit ? decorated.slice(-limit) : decorated;
 }
