@@ -234,3 +234,12 @@ screenshots were inspected; no JavaScript errors or horizontal overflow appeared
 The provider was stubbed in browser QA. Actual native-route tests and the real
 Google SDK with a controlled transporter separately cover outcome classification.
 The parent-integrated database suites pass 26 rollback-only cases.
+
+C normalizes UUID identity in scalar selectors, nested product fields and bulk
+sets while preserving exact approval parameters and hashes. Legacy keys must
+prove their original canonical input before semantic replay; preview-only
+bindings that cannot be reconstructed require reconciliation. New task actions
+record a hash-bound step-key version so a legitimate distinct successor is
+still possible. The final checks pass 155 unit cases and 33 isolated PostgreSQL
+cases, including pending, accepted and unknown legacy replay. Independent
+review found no actionable issue; no provider or domain send ran.
