@@ -85,10 +85,8 @@ const CHECKS = Object.freeze([
   'commitment_requires_receipt',
 ]);
 // The tools whose PERFORMED write is a receipt for a spoken promise, and the
-// default set no model text may precede. commit_follow_up is the PR 6
-// commitments tool — listed so the check is ready for it, never registered
-// as a known tool until it ships.
-const WRITE_TOOLS = Object.freeze(['capture_lead', 'request_booking', 'request_reservice', 'transfer_to_office', 'commit_follow_up']);
+// default set no model text may precede — the registered write tools only.
+const WRITE_TOOLS = Object.freeze(['capture_lead', 'request_booking', 'request_reservice', 'transfer_to_office']);
 // Follow-up promises, EN + ES, over what Sandy actually said.
 const PROMISE_RE = /\b(?:(?:will|going to|gonna) (?:call|text|email|reach out|follow up|send|get back)|someone (?:will|is going to)|(?:i'?ll|i will) (?:have|make sure|note|let|pass)|(?:you'?ll|you will) (?:hear|get|receive)|(?:a |the )?(?:waves )?team member will|le (?:llamar|devolver|enviar|contactar|dar)|se comunicar|(?:un|una) (?:miembro|persona) del equipo)\b/i;
 const DEFAULT_TOOL_TEXT = 'That information is not available on this call. Tell the caller a Waves team member will follow up with the details.';
@@ -194,7 +192,7 @@ function lintScenario(s, knownTools) {
     [!['en', 'es'].includes(s.language), 'language must be en or es'],
     [!s.caller || typeof s.caller.from !== 'string' || !/^\+1\d{10}$/.test(s.caller.from), 'caller.from must be an E.164 US number'],
     [s.caller && s.caller.context != null && (typeof s.caller.context !== 'object' || !s.caller.context.customer || !s.caller.context.tier), 'caller.context needs customer + tier'],
-    ...Object.keys(s.gates || {}).map((key) => [!GATE_ENV[key], `unknown gate "${key}"`]),
+    ...Object.entries(s.gates || {}).map(([key, v]) => [!GATE_ENV[key] || typeof v !== 'boolean', GATE_ENV[key] ? `gate "${key}" must be boolean` : `unknown gate "${key}"`]),
     [!turns.some((t) => t && typeof t.caller === 'string' && t.caller.trim()), 'needs at least one caller turn'],
     [!spec, 'spec is required'],
     ...['required_facts', 'prohibited_facts', 'acceptable_actions'].map((k) => [spec && spec[k] != null && !Array.isArray(spec[k]), `spec.${k} must be an array`]),
@@ -300,6 +298,60 @@ function normalizeToolResponse(raw) {
   return null;
 }
 
+// The registered input schema of every tool Sandy can be given (name → schema).
+let toolSchemas = null;
+function toolSchema(name) {
+  if (!toolSchemas) {
+    const { TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS } = require('../voice-agent/relay-tools');
+    const { TRANSFER_TOOLS } = require('../voice-agent/relay-transfer');
+    toolSchemas = new Map([...TOOLS, ...CONTEXT_TOOLS, ...BOOKING_TOOLS, ...TRANSFER_TOOLS].map((t) => [t.name, t.input_schema || {}]));
+  }
+  return toolSchemas.get(name) || null;
+}
+
+const SLOT_REF_RE = /\(slot_ref: (S\d+)\)/g;
+const CUSTOMER_REF_RE = /customer_ref: (C\d+)/g;
+
+/** The opaque refs earlier fixture results handed the model on THIS call. */
+function offeredRefs(record, re) {
+  const refs = new Set();
+  for (const e of record.events) {
+    if (e.kind !== 'tool' || !e.text) continue;
+    for (const m of String(e.text).matchAll(re)) refs.add(m[1]);
+  }
+  return refs;
+}
+
+/**
+ * What the real tool would refuse before doing anything: a missing required
+ * argument, a value outside its enum, a slot_ref the availability tools never
+ * offered on this call, a customer_ref no lookup returned. Returns the refusal
+ * text or null. A fixture answer is only ever handed to a VALID call — the
+ * point of the fixed world is that an invented ref cannot "succeed".
+ */
+function validateToolInput(name, input = {}, record) {
+  const schema = toolSchema(name);
+  if (!schema) return null;
+  const props = schema.properties || {};
+  for (const field of schema.required || []) {
+    if (input[field] === undefined || input[field] === null || String(input[field]).trim() === '') {
+      return `Missing required argument "${field}" — nothing was done. Ask the caller for it and call ${name} again.`;
+    }
+  }
+  for (const [field, def] of Object.entries(props)) {
+    if (Array.isArray(def.enum) && input[field] !== undefined && !def.enum.includes(input[field])) {
+      return `"${input[field]}" is not a valid ${field} (one of: ${def.enum.join(', ')}) — nothing was done.`;
+    }
+  }
+  if (name === 'request_booking' && !offeredRefs(record, SLOT_REF_RE).has(String(input.slot_ref))) {
+    return `slot_ref "${input.slot_ref}" was not offered on this call — NOTHING was booked. Call find_slots and pass back a slot_ref it printed.`;
+  }
+  if (input.customer_ref !== undefined && input.customer_ref !== null && String(input.customer_ref) !== '' && !offeredRefs(record, CUSTOMER_REF_RE).has(String(input.customer_ref))) {
+    return `customer_ref "${input.customer_ref}" was not returned by lookup_customer on this call — nothing was read. Look the account up first.`;
+  }
+  return null;
+}
+
 /** The fixture's answer for the n-th call of `name` (arrays step, the last entry repeats). */
 function pickToolResponse(scenario, name, n) {
   const raw = scenario?.fixtures?.toolResponses?.[name];
@@ -342,7 +394,7 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
   const { scenario, record } = state;
   if (!scenario || !record) throw new Error('voice-relay eval: tool called outside a scenario');
   record.toolUse[name] = (record.toolUse[name] || 0) + 1;
-  const event = { kind: 'tool', name, input: safeInput(input), text: '', turn: record.turn, ok: null, receipt: false, unexpected: false, index: record.events.length };
+  const event = { kind: 'tool', name, input: safeInput(input), text: '', turn: record.turn, ok: null, receipt: false, unexpected: false, invalid: false, index: record.events.length };
   record.events.push(event);
   record.toolCalls.push(event);
   const response = pickToolResponse(scenario, name, record.toolUse[name]);
@@ -357,6 +409,8 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
     return new Promise(() => {}); // the live bound (_executeToolBounded) degrades it
   }
   if (name === 'lookup_customer' && typeof ctx.consumeLookup === 'function' && ctx.consumeLookup() !== true) return answer(LOOKUP_BUDGET_TEXT, false);
+  const invalid = validateToolInput(name, input, record);
+  if (invalid) { event.invalid = true; return answer(invalid, false); }
   const { text, receipt } = applyToolSideEffects(response, { input, ctx, scenario });
   event.receipt = receipt === true;
   return answer(String(text), response.ok !== false);
@@ -506,6 +560,13 @@ function injectInterrupt(convo, record, spec) {
     heard = words.slice(0, n).join(' ');
   }
   convo.interrupt({ utteranceUntilInterrupt: heard, durationUntilInterruptMs: 1200 });
+  // The conversation rewrote its own record to what was played ("<heard>
+  // [interrupted]"); the harness grades that, never the words the caller
+  // did not hear. The full model text survives on the event as `planned`.
+  const played = [...(convo._transcript || [])].reverse().find((e) => e.role === 'agent');
+  last.planned = last.text;
+  last.text = played && played.text ? played.text : `${heard} [interrupted]`;
+  last.interrupted = true;
   record.events.push({ kind: 'interrupt', text: heard, turn: record.turn, index: record.events.length });
 }
 
@@ -655,6 +716,10 @@ function judgeChecks(scenario, judge) {
     check, severity: sev, adjudicated, status: advisory ? 'advisory' : (failed ? 'fail' : 'pass'), detail: advisory ? `(fallback-leg verdict, advisory) ${detail}` : detail,
   });
   const out = [];
+  // The verdict itself: a judge that says "fail" with otherwise clean detail
+  // fields is still a fail (parseVerdict derives pass from the findings AND
+  // the judge's own call), so it is graded on its own line.
+  out.push(mk('judge:verdict', !v.pass, v.pass ? 'pass' : (v.rationale ? clip(v.rationale, 200) : 'the judge failed the call')));
   for (const c of v.forbidden_claims) out.push(mk(`judge:forbidden_claim:${c.category}`, true, c.quote ? `"${clip(c.quote, 160)}"` : 'no quote'));
   out.push(mk('judge:required_facts', v.required_facts_missing.length > 0, v.required_facts_missing.length ? `missing: ${v.required_facts_missing.join('; ')}` : 'all required facts conveyed'));
   out.push(mk('judge:prohibited_facts', v.prohibited_facts_stated.length > 0, v.prohibited_facts_stated.length ? `stated: ${v.prohibited_facts_stated.join('; ')}` : 'none stated'));
@@ -714,6 +779,18 @@ function newConversation(h, scenario, record) {
   });
 }
 
+/** 'open' | 'closed' | 'unknown' for the judge — an hours object resolves through the relay's own isOfficeOpenAt. */
+function officeStatusForJudge(scenario) {
+  const v = scenario.fixtures && scenario.fixtures.officeHours;
+  if (v === 'open' || v === 'closed') return v;
+  if (v && typeof v === 'object') {
+    const { isOfficeOpenAt } = require('../voice-agent/relay-context');
+    const open = isOfficeOpenAt(v, new Date());
+    return open === true ? 'open' : (open === false ? 'closed' : 'unknown');
+  }
+  return 'unknown';
+}
+
 function errorRecord(err) {
   return { name: (err && err.name) || 'Error', message: err && err.message ? err.message : String(err), code: (err && err.code) || null };
 }
@@ -748,6 +825,13 @@ async function runScenario(scenario, { judge = true, judgeFn = null } = {}) {
     if (record.modelCalls === 0 && record.turn > 0) {
       throw Object.assign(new Error('model unavailable: the relay never called the model (no SDK client — is ANTHROPIC_API_KEY set?)'), { code: 'EVAL_MODEL_UNAVAILABLE' });
     }
+    // The world was not fixed: the conversation reached for a tool the
+    // fixture does not answer (a generic answer graded nothing real) or for
+    // the database (refused, but the relay may have degraded silently).
+    // Either is a replay error, never a green scenario.
+    const unfixtured = [...new Set(record.toolCalls.filter((t) => t.unexpected).map((t) => t.name))];
+    if (unfixtured.length) throw Object.assign(new Error(`unfixtured tool call: ${unfixtured.join(', ')} — add toolResponses for it`), { code: 'EVAL_UNFIXTURED_TOOL' });
+    if (h.guard.attempts.length) throw Object.assign(new Error(`database reached during the conversation: ${[...new Set(h.guard.attempts)].join(', ')}`), { code: 'EVAL_DB_REFUSED' });
   } catch (err) {
     record.error = errorRecord(err);
   } finally {
@@ -768,7 +852,7 @@ async function runScenario(scenario, { judge = true, judgeFn = null } = {}) {
     // llm_call_traces rows under the ledger gates (replay-labelled). Sandy's
     // own turns above ran with the guard armed.
     const run = judgeFn || require('./voice-relay-judge').judgeTranscript;
-    const officeHours = scenario.fixtures && typeof scenario.fixtures.officeHours === 'string' ? scenario.fixtures.officeHours : (scenario.fixtures && scenario.fixtures.officeHours ? 'open' : 'unknown');
+    const officeHours = officeStatusForJudge(scenario);
     const callerBlock = scenario.caller && scenario.caller.context ? scenario.caller.context.block : null;
     record.judge = await run({ spec: scenario.spec || {}, transcript: record.transcript, language: record.language, toolsAvailable: record.toolsAvailable, officeHours, callerBlock })
       .catch((err) => ({ ok: false, reason: `judge_error:${err && err.message ? err.message : err}` }));
@@ -1005,6 +1089,15 @@ async function runVoiceRelayEval(opts = {}) {
 }
 
 /**
+ * The cron's crash path: the child died (timeout, signal, startup failure,
+ * no JSON) before it could send its own notification, so the parent sends
+ * the inconclusive alert — a dead weekly monitor must never be silent.
+ */
+async function notifyEvalCrash(err, { notify = defaultNotify, sendEmail = defaultSendEmail, fixturePath = DEFAULT_FIXTURE_PATH } = {}) {
+  await notifyInconclusive({ notify, sendEmail, fixturePath, attempt: { status: 'inconclusive', error: { name: (err && err.name) || 'Error', message: err && err.message ? err.message : String(err) } } });
+}
+
+/**
  * The cron entry point: the whole eval in a child process (its per-scenario
  * gate env and its patched relay modules never touch the server). Resolves
  * with the child's JSON result; rejects when the child crashed or produced
@@ -1044,11 +1137,12 @@ module.exports = {
   runVoiceRelayReplay,
   runVoiceRelayEval,
   runVoiceRelayEvalProcess,
+  notifyEvalCrash,
   summaryLine,
   isFailedVoiceRun,
   _internals: {
     PROMISE_RE, DEFAULT_TOOL_TEXT, LOOKUP_BUDGET_TEXT, EVAL_CALLER_TO, CHILD_TIMEOUT_MS,
-    makeDbGuard, officeHoursFixture, pickToolResponse, runFixtureTool, applyToolSideEffects, applyGates, applyResumeFixture, injectInterrupt, driveTurns,
+    makeDbGuard, officeHoursFixture, officeStatusForJudge, pickToolResponse, runFixtureTool, applyToolSideEffects, validateToolInput, offeredRefs, applyGates, applyResumeFixture, injectInterrupt, driveTurns,
     renderTranscript, evaluateChecks, runCheck, CHECK_RUNNERS, lintScenario, judgeChecks, scenarioStatus, qualityScore, summarize, failureLines,
     notifyFailure, notifyInconclusive,
   },

@@ -254,6 +254,11 @@ async function judgeTranscript({ spec = {}, transcript = '', language = 'en', to
       jsonMode: true,
       jsonSchema: JUDGE_SCHEMA,
       maxTokens: JUDGE_MAX_TOKENS,
+    }, {
+      // A leg that answers with JSON that is not a complete verdict is a
+      // failed leg: the dispatcher then tries the backup provider instead of
+      // handing the malformed answer back as a success.
+      validate: (result) => (parseVerdict(result.json || result.text) ? null : 'unparseable_verdict'),
     });
   } catch (err) {
     logger.warn(`[voice-relay-judge] dispatch threw: ${err.message}`);

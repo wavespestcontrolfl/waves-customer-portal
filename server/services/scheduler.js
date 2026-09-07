@@ -2677,7 +2677,14 @@ function initScheduledJobs() {
         logger.info(`Voice relay eval done: status=${result.status}${result.flaky ? ' flaky=true' : ''} | ${summaryLine(result.summary || {})}`);
       });
     } catch (err) {
+      // The child could not send its own alert (crash / timeout / no JSON):
+      // page through the same inconclusive path, never a log line alone.
       logger.error(`Voice relay eval failed: ${err.message}`);
+      try {
+        await require('./eval/voice-relay-replay').notifyEvalCrash(err);
+      } catch (notifyErr) {
+        logger.error(`Voice relay eval crash notification failed: ${notifyErr.message}`);
+      }
     }
   }, { timezone: 'America/New_York' });
 

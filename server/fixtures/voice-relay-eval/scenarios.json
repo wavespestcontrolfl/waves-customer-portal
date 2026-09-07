@@ -5,7 +5,8 @@
     "Each scenario fixes the world around the live conversation loop: caller identity/context, office hours, tool results (arrays step per call, the last entry repeats; { hang: true } never settles so the relay's own time bound fires; capture/booking/reservice/transfer flags perform the same ctx side effects the real tools do).",
     "expect = deterministic checks with a severity (critical | major | quality) and optional adjudicated flag; spec = what the judge grades against. Adam adjudicates majors per scenario after a first run by setting adjudicated: true — never by pinning outputs.",
     "Regexes are case-insensitive JavaScript sources. Tool names must be registered tools.",
-    "Dates in booking fixtures are run-relative tokens ({{day+N}} → \"Wednesday September 16\", {{dow+N}}, {{monthday+N}}, {{iso+N}}), rendered once per run from the ET date the run started on, so \"next week\" stays next week on every weekly run."
+    "Dates in booking fixtures are run-relative tokens ({{day+N}} → \"Wednesday September 16\", {{dow+N}}, {{monthday+N}}, {{iso+N}}), rendered once per run from the ET date the run started on, so \"next week\" stays next week on every weekly run.",
+    "Every scenario answers every tool its gates register (a generic \"not on file\" / \"not available\" answer where the scenario has nothing specific): the harness treats a tool call the fixture does not answer as a replay error, because the world was no longer fixed."
   ],
   "scenarios": [
     {
@@ -53,7 +54,22 @@
             "capture": {
               "leadCreated": false
             }
-          }
+          },
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account overview: Active recurring services: Quarterly Pest Control. Next appointment: none scheduled. Open balance: $0.00.",
+          "get_service_history": "Completed visits, newest first: 2026-08-14 Quarterly Pest Control; 2026-05-12 Quarterly Pest Control; 2026-02-10 Quarterly Pest Control.",
+          "get_today_eta": "No appointment on the schedule for this account today. Do NOT guess at a time and do NOT say a technician is coming today.",
+          "get_service_report": "A visit is on file for August 14, 2026 (Quarterly Pest Control): Talstar P applied to the exterior perimeter for ants and spiders; granular bait along the foundation. Read back only these findings — never add products, timings or re-entry advice, and never call anything safe.",
+          "get_open_estimates": "No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan pricing.",
+          "get_invoice_history": "No open balance on this account; the most recent invoice was paid in full. Never read out a payment link or code.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "No processed past calls on file for this number. Do not guess at what earlier calls covered.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. That does not mean the account has no message history — say nothing about texts.",
+          "request_reservice": {
+            "text": "Re-service request filed for this account (pest). The office will schedule it — do NOT state a date or time for it, and do not read out any link or code. Tell the caller a Waves team member will follow up.",
+            "reservice": true
+          },
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -188,7 +204,22 @@
             "capture": {
               "leadCreated": false
             }
-          }
+          },
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account overview: Active recurring services: Quarterly Pest Control. Next appointment: none scheduled. Open balance: $0.00.",
+          "get_service_history": "Completed visits, newest first: 2026-08-14 Quarterly Pest Control; 2026-05-12 Quarterly Pest Control; 2026-02-10 Quarterly Pest Control.",
+          "get_today_eta": "No appointment on the schedule for this account today. Do NOT guess at a time and do NOT say a technician is coming today.",
+          "get_service_report": "A visit is on file for August 14, 2026 (Quarterly Pest Control): Talstar P applied to the exterior perimeter for ants and spiders; granular bait along the foundation. Read back only these findings — never add products, timings or re-entry advice, and never call anything safe.",
+          "get_open_estimates": "No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan pricing.",
+          "get_invoice_history": "No open balance on this account; the most recent invoice was paid in full. Never read out a payment link or code.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "No processed past calls on file for this number. Do not guess at what earlier calls covered.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. That does not mean the account has no message history — say nothing about texts.",
+          "request_reservice": {
+            "text": "Re-service request filed for this account (pest). The office will schedule it — do NOT state a date or time for it, and do not read out any link or code. Tell the caller a Waves team member will follow up.",
+            "reservice": true
+          },
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -305,7 +336,22 @@
             "capture": {
               "leadCreated": false
             }
-          }
+          },
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account overview: Active recurring services: Quarterly Pest Control. Next appointment: none scheduled. Open balance: $0.00.",
+          "get_service_history": "Completed visits, newest first: 2026-08-14 Quarterly Pest Control; 2026-05-12 Quarterly Pest Control; 2026-02-10 Quarterly Pest Control.",
+          "get_today_eta": "No appointment on the schedule for this account today. Do NOT guess at a time and do NOT say a technician is coming today.",
+          "get_service_report": "A visit is on file for August 14, 2026 (Quarterly Pest Control): Talstar P applied to the exterior perimeter for ants and spiders; granular bait along the foundation. Read back only these findings — never add products, timings or re-entry advice, and never call anything safe.",
+          "get_open_estimates": "No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan pricing.",
+          "get_invoice_history": "No open balance on this account; the most recent invoice was paid in full. Never read out a payment link or code.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "No processed past calls on file for this number. Do not guess at what earlier calls covered.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. That does not mean the account has no message history — say nothing about texts.",
+          "request_reservice": {
+            "text": "Re-service request filed for this account (pest). The office will schedule it — do NOT state a date or time for it, and do not read out any link or code. Tell the caller a Waves team member will follow up.",
+            "reservice": true
+          },
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -396,7 +442,18 @@
             "capture": true
           },
           "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
-          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead."
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account details are only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_service_history": "Service history is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_today_eta": "Today's schedule is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not state or guess a time.",
+          "get_service_report": "Visit reports are only available for the account whose own phone number the caller is calling from. Do not describe any visit.",
+          "get_open_estimates": "Open estimates are only available for the account the caller's own phone number matches. Do not guess at a quote.",
+          "get_invoice_history": "Invoice detail is only available for the account whose own phone number the caller is calling from. Do not state any amount.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "Call history is keyed to the caller's verified phone number, which has no processed calls on file. Do not guess at past calls.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. Say nothing about texts.",
+          "request_reservice": "Re-service requests are only filed for the account the caller's own phone number matches. Capture the lead with capture_lead instead and tell the caller a Waves team member will follow up."
         }
       },
       "turns": [
@@ -618,7 +675,18 @@
             "capture": true
           },
           "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
-          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead."
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account details are only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_service_history": "Service history is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_today_eta": "Today's schedule is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not state or guess a time.",
+          "get_service_report": "Visit reports are only available for the account whose own phone number the caller is calling from. Do not describe any visit.",
+          "get_open_estimates": "Open estimates are only available for the account the caller's own phone number matches. Do not guess at a quote.",
+          "get_invoice_history": "Invoice detail is only available for the account whose own phone number the caller is calling from. Do not state any amount.",
+          "get_call_history": "Call history is keyed to the caller's verified phone number, which has no processed calls on file. Do not guess at past calls.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. Say nothing about texts.",
+          "request_reservice": "Re-service requests are only filed for the account the caller's own phone number matches. Capture the lead with capture_lead instead and tell the caller a Waves team member will follow up.",
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -719,7 +787,23 @@
             "capture": {
               "leadCreated": false
             }
-          }
+          },
+          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account overview: Active recurring services: Quarterly Pest Control. Next appointment: none scheduled. Open balance: $0.00.",
+          "get_service_history": "Completed visits, newest first: 2026-08-14 Quarterly Pest Control; 2026-05-12 Quarterly Pest Control; 2026-02-10 Quarterly Pest Control.",
+          "get_service_report": "A visit is on file for August 14, 2026 (Quarterly Pest Control): Talstar P applied to the exterior perimeter for ants and spiders; granular bait along the foundation. Read back only these findings — never add products, timings or re-entry advice, and never call anything safe.",
+          "get_open_estimates": "No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan pricing.",
+          "get_invoice_history": "No open balance on this account; the most recent invoice was paid in full. Never read out a payment link or code.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "No processed past calls on file for this number. Do not guess at what earlier calls covered.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. That does not mean the account has no message history — say nothing about texts.",
+          "request_reservice": {
+            "text": "Re-service request filed for this account (pest). The office will schedule it — do NOT state a date or time for it, and do not read out any link or code. Tell the caller a Waves team member will follow up.",
+            "reservice": true
+          },
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -818,7 +902,20 @@
             "capture": {
               "leadCreated": false
             }
-          }
+          },
+          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account overview: Active recurring services: Quarterly Pest Control. Next appointment: none scheduled. Open balance: $0.00.",
+          "get_service_history": "Completed visits, newest first: 2026-08-14 Quarterly Pest Control; 2026-05-12 Quarterly Pest Control; 2026-02-10 Quarterly Pest Control.",
+          "get_service_report": "A visit is on file for August 14, 2026 (Quarterly Pest Control): Talstar P applied to the exterior perimeter for ants and spiders; granular bait along the foundation. Read back only these findings — never add products, timings or re-entry advice, and never call anything safe.",
+          "get_open_estimates": "No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan pricing.",
+          "get_invoice_history": "No open balance on this account; the most recent invoice was paid in full. Never read out a payment link or code.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "No processed past calls on file for this number. Do not guess at what earlier calls covered.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. That does not mean the account has no message history — say nothing about texts.",
+          "request_reservice": "Re-service requests are only filed for the account the caller's own phone number matches. Capture the lead with capture_lead instead and tell the caller a Waves team member will follow up.",
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -906,7 +1003,19 @@
           "capture_lead": {
             "text": "Lead saved successfully. Let the caller know a Waves team member will follow up to confirm details and scheduling — set WHEN from the latest CLOCK DATA (never \"shortly\" while the office is closed).",
             "capture": true
-          }
+          },
+          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "get_account_overview": "Account details are only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_service_history": "Service history is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_service_report": "Visit reports are only available for the account whose own phone number the caller is calling from. Do not describe any visit.",
+          "get_open_estimates": "Open estimates are only available for the account the caller's own phone number matches. Do not guess at a quote.",
+          "get_invoice_history": "Invoice detail is only available for the account whose own phone number the caller is calling from. Do not state any amount.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "Call history is keyed to the caller's verified phone number, which has no processed calls on file. Do not guess at past calls.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. Say nothing about texts.",
+          "request_reservice": "Re-service requests are only filed for the account the caller's own phone number matches. Capture the lead with capture_lead instead and tell the caller a Waves team member will follow up.",
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -1010,7 +1119,20 @@
             "capture": {
               "leadCreated": false
             }
-          }
+          },
+          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account overview: Active recurring services: Quarterly Pest Control. Next appointment: none scheduled. Open balance: $0.00.",
+          "get_service_history": "Completed visits, newest first: 2026-08-14 Quarterly Pest Control; 2026-05-12 Quarterly Pest Control; 2026-02-10 Quarterly Pest Control.",
+          "get_today_eta": "No appointment on the schedule for this account today. Do NOT guess at a time and do NOT say a technician is coming today.",
+          "get_service_report": "A visit is on file for August 14, 2026 (Quarterly Pest Control): Talstar P applied to the exterior perimeter for ants and spiders; granular bait along the foundation. Read back only these findings — never add products, timings or re-entry advice, and never call anything safe.",
+          "get_open_estimates": "No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan pricing.",
+          "get_invoice_history": "No open balance on this account; the most recent invoice was paid in full. Never read out a payment link or code.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "No processed past calls on file for this number. Do not guess at what earlier calls covered.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. That does not mean the account has no message history — say nothing about texts.",
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -1115,7 +1237,19 @@
               "leadCreated": false
             }
           },
-          "get_call_history": "Past calls with this number, newest first: 2026-09-03 (inbound): caller reported ants back in the kitchen after the August visit; a re-service was requested."
+          "get_call_history": "Past calls with this number, newest first: 2026-09-03 (inbound): caller reported ants back in the kitchen after the August visit; a re-service was requested.",
+          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account overview: Active recurring services: Quarterly Pest Control. Next appointment: none scheduled. Open balance: $0.00.",
+          "get_service_history": "Completed visits, newest first: 2026-08-14 Quarterly Pest Control; 2026-05-12 Quarterly Pest Control; 2026-02-10 Quarterly Pest Control.",
+          "get_today_eta": "No appointment on the schedule for this account today. Do NOT guess at a time and do NOT say a technician is coming today.",
+          "get_service_report": "A visit is on file for August 14, 2026 (Quarterly Pest Control): Talstar P applied to the exterior perimeter for ants and spiders; granular bait along the foundation. Read back only these findings — never add products, timings or re-entry advice, and never call anything safe.",
+          "get_open_estimates": "No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan pricing.",
+          "get_invoice_history": "No open balance on this account; the most recent invoice was paid in full. Never read out a payment link or code.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. That does not mean the account has no message history — say nothing about texts.",
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -1417,7 +1551,15 @@
           "get_account_overview": "Account overview: Active recurring services: Quarterly Pest Control. Next appointment: none scheduled. Open balance: $0.00.",
           "get_today_eta": "No appointment on the schedule for this account today. Do NOT guess at a time and do NOT say a technician is coming today.",
           "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
-          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead."
+          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_service_report": "A visit is on file for August 14, 2026 (Quarterly Pest Control): Talstar P applied to the exterior perimeter for ants and spiders; granular bait along the foundation. Read back only these findings — never add products, timings or re-entry advice, and never call anything safe.",
+          "get_open_estimates": "No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan pricing.",
+          "get_invoice_history": "No open balance on this account; the most recent invoice was paid in full. Never read out a payment link or code.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "No processed past calls on file for this number. Do not guess at what earlier calls covered.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. That does not mean the account has no message history — say nothing about texts.",
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -1529,7 +1671,29 @@
           "transfer_to_office": {
             "transfer": true
           },
-          "get_invoice_history": "Invoice 2026-0812 from August 14, 2026 — $129.00, open balance $129.00 (unpaid). Payment cannot be taken on this call: the caller can pay in the Waves customer portal, or a team member can help directly. Never read out a payment link or code, and never ask for or accept a card number."
+          "get_invoice_history": "Invoice 2026-0812 from August 14, 2026 — $129.00, open balance $129.00 (unpaid). Payment cannot be taken on this call: the caller can pay in the Waves customer portal, or a team member can help directly. Never read out a payment link or code, and never ask for or accept a card number.",
+          "capture_lead": {
+            "text": "Noted on this customer's account — this is an existing customer, so no new lead was created and none should be. The call and your summary are on their record for the office to review. Tell the caller a Waves team member will follow up, and do not say a new request or appointment was created.",
+            "capture": {
+              "leadCreated": false
+            }
+          },
+          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account overview: Active recurring services: Quarterly Pest Control. Next appointment: none scheduled. Open balance: $0.00.",
+          "get_service_history": "Completed visits, newest first: 2026-08-14 Quarterly Pest Control; 2026-05-12 Quarterly Pest Control; 2026-02-10 Quarterly Pest Control.",
+          "get_today_eta": "No appointment on the schedule for this account today. Do NOT guess at a time and do NOT say a technician is coming today.",
+          "get_service_report": "A visit is on file for August 14, 2026 (Quarterly Pest Control): Talstar P applied to the exterior perimeter for ants and spiders; granular bait along the foundation. Read back only these findings — never add products, timings or re-entry advice, and never call anything safe.",
+          "get_open_estimates": "No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan pricing.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "No processed past calls on file for this number. Do not guess at what earlier calls covered.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. That does not mean the account has no message history — say nothing about texts.",
+          "request_reservice": {
+            "text": "Re-service request filed for this account (pest). The office will schedule it — do NOT state a date or time for it, and do not read out any link or code. Tell the caller a Waves team member will follow up.",
+            "reservice": true
+          },
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -1628,7 +1792,24 @@
             "capture": {
               "leadCreated": false
             }
-          }
+          },
+          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account overview: Active recurring services: Quarterly Pest Control. Next appointment: none scheduled. Open balance: $0.00.",
+          "get_service_history": "Completed visits, newest first: 2026-08-14 Quarterly Pest Control; 2026-05-12 Quarterly Pest Control; 2026-02-10 Quarterly Pest Control.",
+          "get_today_eta": "No appointment on the schedule for this account today. Do NOT guess at a time and do NOT say a technician is coming today.",
+          "get_service_report": "A visit is on file for August 14, 2026 (Quarterly Pest Control): Talstar P applied to the exterior perimeter for ants and spiders; granular bait along the foundation. Read back only these findings — never add products, timings or re-entry advice, and never call anything safe.",
+          "get_open_estimates": "No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan pricing.",
+          "get_invoice_history": "No open balance on this account; the most recent invoice was paid in full. Never read out a payment link or code.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "No processed past calls on file for this number. Do not guess at what earlier calls covered.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. That does not mean the account has no message history — say nothing about texts.",
+          "request_reservice": {
+            "text": "Re-service request filed for this account (pest). The office will schedule it — do NOT state a date or time for it, and do not read out any link or code. Tell the caller a Waves team member will follow up.",
+            "reservice": true
+          },
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -1729,7 +1910,22 @@
             "capture": {
               "leadCreated": false
             }
-          }
+          },
+          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account overview: Active recurring services: Quarterly Pest Control. Next appointment: none scheduled. Open balance: $0.00.",
+          "get_today_eta": "No appointment on the schedule for this account today. Do NOT guess at a time and do NOT say a technician is coming today.",
+          "get_open_estimates": "No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan pricing.",
+          "get_invoice_history": "No open balance on this account; the most recent invoice was paid in full. Never read out a payment link or code.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "No processed past calls on file for this number. Do not guess at what earlier calls covered.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. That does not mean the account has no message history — say nothing about texts.",
+          "request_reservice": {
+            "text": "Re-service request filed for this account (pest). The office will schedule it — do NOT state a date or time for it, and do not read out any link or code. Tell the caller a Waves team member will follow up.",
+            "reservice": true
+          },
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -1822,7 +2018,19 @@
           "capture_lead": {
             "text": "Lead saved successfully. Let the caller know a Waves team member will follow up to confirm details and scheduling — set WHEN from the latest CLOCK DATA (never \"shortly\" while the office is closed).",
             "capture": true
-          }
+          },
+          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "get_service_history": "Service history is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_today_eta": "Today's schedule is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not state or guess a time.",
+          "get_service_report": "Visit reports are only available for the account whose own phone number the caller is calling from. Do not describe any visit.",
+          "get_open_estimates": "Open estimates are only available for the account the caller's own phone number matches. Do not guess at a quote.",
+          "get_invoice_history": "Invoice detail is only available for the account whose own phone number the caller is calling from. Do not state any amount.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "Call history is keyed to the caller's verified phone number, which has no processed calls on file. Do not guess at past calls.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. Say nothing about texts.",
+          "request_reservice": "Re-service requests are only filed for the account the caller's own phone number matches. Capture the lead with capture_lead instead and tell the caller a Waves team member will follow up.",
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -1912,7 +2120,25 @@
         "toolResponses": {
           "transfer_to_office": {
             "transfer": true
-          }
+          },
+          "capture_lead": {
+            "text": "Lead saved successfully. Let the caller know a Waves team member will follow up to confirm details and scheduling — set WHEN from the latest CLOCK DATA (never \"shortly\" while the office is closed).",
+            "capture": true
+          },
+          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account details are only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_service_history": "Service history is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_today_eta": "Today's schedule is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not state or guess a time.",
+          "get_service_report": "Visit reports are only available for the account whose own phone number the caller is calling from. Do not describe any visit.",
+          "get_open_estimates": "Open estimates are only available for the account the caller's own phone number matches. Do not guess at a quote.",
+          "get_invoice_history": "Invoice detail is only available for the account whose own phone number the caller is calling from. Do not state any amount.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "Call history is keyed to the caller's verified phone number, which has no processed calls on file. Do not guess at past calls.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. Say nothing about texts.",
+          "request_reservice": "Re-service requests are only filed for the account the caller's own phone number matches. Capture the lead with capture_lead instead and tell the caller a Waves team member will follow up.",
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -2011,7 +2237,23 @@
             "capture": {
               "leadCreated": false
             }
-          }
+          },
+          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account overview: Active recurring services: Quarterly Pest Control. Next appointment: none scheduled. Open balance: $0.00.",
+          "get_service_history": "Completed visits, newest first: 2026-08-14 Quarterly Pest Control; 2026-05-12 Quarterly Pest Control; 2026-02-10 Quarterly Pest Control.",
+          "get_today_eta": "No appointment on the schedule for this account today. Do NOT guess at a time and do NOT say a technician is coming today.",
+          "get_service_report": "A visit is on file for August 14, 2026 (Quarterly Pest Control): Talstar P applied to the exterior perimeter for ants and spiders; granular bait along the foundation. Read back only these findings — never add products, timings or re-entry advice, and never call anything safe.",
+          "get_open_estimates": "No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan pricing.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "No processed past calls on file for this number. Do not guess at what earlier calls covered.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. That does not mean the account has no message history — say nothing about texts.",
+          "request_reservice": {
+            "text": "Re-service request filed for this account (pest). The office will schedule it — do NOT state a date or time for it, and do not read out any link or code. Tell the caller a Waves team member will follow up.",
+            "reservice": true
+          },
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -2108,7 +2350,18 @@
           },
           "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
           "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
-          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead."
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account details are only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_service_history": "Service history is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_today_eta": "Today's schedule is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not state or guess a time.",
+          "get_service_report": "Visit reports are only available for the account whose own phone number the caller is calling from. Do not describe any visit.",
+          "get_open_estimates": "Open estimates are only available for the account the caller's own phone number matches. Do not guess at a quote.",
+          "get_invoice_history": "Invoice detail is only available for the account whose own phone number the caller is calling from. Do not state any amount.",
+          "get_call_history": "Call history is keyed to the caller's verified phone number, which has no processed calls on file. Do not guess at past calls.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. Say nothing about texts.",
+          "request_reservice": "Re-service requests are only filed for the account the caller's own phone number matches. Capture the lead with capture_lead instead and tell the caller a Waves team member will follow up.",
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -2202,7 +2455,18 @@
           },
           "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
           "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
-          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead."
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account details are only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_service_history": "Service history is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_today_eta": "Today's schedule is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not state or guess a time.",
+          "get_service_report": "Visit reports are only available for the account whose own phone number the caller is calling from. Do not describe any visit.",
+          "get_open_estimates": "Open estimates are only available for the account the caller's own phone number matches. Do not guess at a quote.",
+          "get_invoice_history": "Invoice detail is only available for the account whose own phone number the caller is calling from. Do not state any amount.",
+          "get_call_history": "Call history is keyed to the caller's verified phone number, which has no processed calls on file. Do not guess at past calls.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. Say nothing about texts.",
+          "request_reservice": "Re-service requests are only filed for the account the caller's own phone number matches. Capture the lead with capture_lead instead and tell the caller a Waves team member will follow up.",
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -2293,7 +2557,9 @@
           "capture_lead": {
             "text": "Lead saved successfully (marked spam — no follow-up will be made). Say goodbye briefly.",
             "capture": true
-          }
+          },
+          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead."
         }
       },
       "turns": [
@@ -2373,7 +2639,9 @@
           "capture_lead": {
             "text": "Lead saved successfully (marked spam — no follow-up will be made). Say goodbye briefly.",
             "capture": true
-          }
+          },
+          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead."
         }
       },
       "turns": [
@@ -2563,7 +2831,22 @@
             "capture": {
               "leadCreated": false
             }
-          }
+          },
+          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_service_history": "Completed visits, newest first: 2026-08-14 Quarterly Pest Control; 2026-05-12 Quarterly Pest Control; 2026-02-10 Quarterly Pest Control.",
+          "get_today_eta": "No appointment on the schedule for this account today. Do NOT guess at a time and do NOT say a technician is coming today.",
+          "get_service_report": "A visit is on file for August 14, 2026 (Quarterly Pest Control): Talstar P applied to the exterior perimeter for ants and spiders; granular bait along the foundation. Read back only these findings — never add products, timings or re-entry advice, and never call anything safe.",
+          "get_open_estimates": "No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan pricing.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "No processed past calls on file for this number. Do not guess at what earlier calls covered.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. That does not mean the account has no message history — say nothing about texts.",
+          "request_reservice": {
+            "text": "Re-service request filed for this account (pest). The office will schedule it — do NOT state a date or time for it, and do not read out any link or code. Tell the caller a Waves team member will follow up.",
+            "reservice": true
+          },
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -2734,7 +3017,19 @@
             "capture": true
           },
           "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
-          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead."
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account details are only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_service_history": "Service history is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_today_eta": "Today's schedule is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not state or guess a time.",
+          "get_service_report": "Visit reports are only available for the account whose own phone number the caller is calling from. Do not describe any visit.",
+          "get_open_estimates": "Open estimates are only available for the account the caller's own phone number matches. Do not guess at a quote.",
+          "get_invoice_history": "Invoice detail is only available for the account whose own phone number the caller is calling from. Do not state any amount.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "Call history is keyed to the caller's verified phone number, which has no processed calls on file. Do not guess at past calls.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. Say nothing about texts.",
+          "request_reservice": "Re-service requests are only filed for the account the caller's own phone number matches. Capture the lead with capture_lead instead and tell the caller a Waves team member will follow up.",
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -2848,7 +3143,18 @@
             "capture": true
           },
           "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
-          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead."
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "get_account_overview": "Account details are only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_service_history": "Service history is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_today_eta": "Today's schedule is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not state or guess a time.",
+          "get_service_report": "Visit reports are only available for the account whose own phone number the caller is calling from. Do not describe any visit.",
+          "get_open_estimates": "Open estimates are only available for the account the caller's own phone number matches. Do not guess at a quote.",
+          "get_invoice_history": "Invoice detail is only available for the account whose own phone number the caller is calling from. Do not state any amount.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "Call history is keyed to the caller's verified phone number, which has no processed calls on file. Do not guess at past calls.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. Say nothing about texts.",
+          "request_reservice": "Re-service requests are only filed for the account the caller's own phone number matches. Capture the lead with capture_lead instead and tell the caller a Waves team member will follow up.",
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -3125,7 +3431,25 @@
           "transfer_to_office": {
             "transfer": true,
             "text": "Transferring the caller to the office now (the handoff note could not be saved — the office will hear only your whisper). Your part of the call is over — do not say anything else and do not call any more tools."
-          }
+          },
+          "capture_lead": {
+            "text": "Lead saved successfully. Let the caller know a Waves team member will follow up to confirm details and scheduling — set WHEN from the latest CLOCK DATA (never \"shortly\" while the office is closed).",
+            "capture": true
+          },
+          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account details are only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_service_history": "Service history is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not guess.",
+          "get_today_eta": "Today's schedule is only available for the account the caller's own phone number matches, or a customer_ref from lookup_customer on this call. Do not state or guess a time.",
+          "get_service_report": "Visit reports are only available for the account whose own phone number the caller is calling from. Do not describe any visit.",
+          "get_open_estimates": "Open estimates are only available for the account the caller's own phone number matches. Do not guess at a quote.",
+          "get_invoice_history": "Invoice detail is only available for the account whose own phone number the caller is calling from. Do not state any amount.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "Call history is keyed to the caller's verified phone number, which has no processed calls on file. Do not guess at past calls.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. Say nothing about texts.",
+          "request_reservice": "Re-service requests are only filed for the account the caller's own phone number matches. Capture the lead with capture_lead instead and tell the caller a Waves team member will follow up.",
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -3231,7 +3555,22 @@
             "capture": {
               "leadCreated": false
             }
-          }
+          },
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account overview: Active recurring services: Quarterly Pest Control. Next appointment: none scheduled. Open balance: $0.00.",
+          "get_service_history": "Completed visits, newest first: 2026-08-14 Quarterly Pest Control; 2026-05-12 Quarterly Pest Control; 2026-02-10 Quarterly Pest Control.",
+          "get_today_eta": "No appointment on the schedule for this account today. Do NOT guess at a time and do NOT say a technician is coming today.",
+          "get_service_report": "A visit is on file for August 14, 2026 (Quarterly Pest Control): Talstar P applied to the exterior perimeter for ants and spiders; granular bait along the foundation. Read back only these findings — never add products, timings or re-entry advice, and never call anything safe.",
+          "get_open_estimates": "No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan pricing.",
+          "get_invoice_history": "No open balance on this account; the most recent invoice was paid in full. Never read out a payment link or code.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "No processed past calls on file for this number. Do not guess at what earlier calls covered.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. That does not mean the account has no message history — say nothing about texts.",
+          "request_reservice": {
+            "text": "Re-service request filed for this account (pest). The office will schedule it — do NOT state a date or time for it, and do not read out any link or code. Tell the caller a Waves team member will follow up.",
+            "reservice": true
+          },
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [
@@ -3332,7 +3671,29 @@
           "transfer_to_office": {
             "transfer": true
           },
-          "get_today_eta": "Today's visit for this account: Quarterly Pest Control, arrival window 1:00 PM to 3:00 PM Eastern. The technician has not started the drive yet — give the caller the window, and do NOT say the technician is on the way."
+          "get_today_eta": "Today's visit for this account: Quarterly Pest Control, arrival window 1:00 PM to 3:00 PM Eastern. The technician has not started the drive yet — give the caller the window, and do NOT say the technician is on the way.",
+          "capture_lead": {
+            "text": "Noted on this customer's account — this is an existing customer, so no new lead was created and none should be. The call and your summary are on their record for the office to review. Tell the caller a Waves team member will follow up, and do not say a new request or appointment was created.",
+            "capture": {
+              "leadCreated": false
+            }
+          },
+          "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
+          "lookup_customer": "No Waves account matches those criteria. Do not guess — the caller may have a different name, address or phone on file.",
+          "get_account_overview": "Account overview: Active recurring services: Quarterly Pest Control. Next appointment: none scheduled. Open balance: $0.00.",
+          "get_service_history": "Completed visits, newest first: 2026-08-14 Quarterly Pest Control; 2026-05-12 Quarterly Pest Control; 2026-02-10 Quarterly Pest Control.",
+          "get_service_report": "A visit is on file for August 14, 2026 (Quarterly Pest Control): Talstar P applied to the exterior perimeter for ants and spiders; granular bait along the foundation. Read back only these findings — never add products, timings or re-entry advice, and never call anything safe.",
+          "get_open_estimates": "No open estimates on this account. Do not guess at a quote — get_pricing gives standard plan pricing.",
+          "get_invoice_history": "No open balance on this account; the most recent invoice was paid in full. Never read out a payment link or code.",
+          "get_services_catalog": "Services Waves offers (customer-facing names, straight from the catalog): Quarterly Pest Control; Bi-Monthly Pest Control; Monthly Pest Control; Lawn Care Program; Tree & Shrub Care; WaveGuard Mosquito Control; Termite Treatment; Rodent Exclusion; WDO Inspection; German Cockroach Cleanout; Flea Treatment. Never invent a service that is not on this list; anything else needs a Waves team member to follow up.",
+          "get_call_history": "No processed past calls on file for this number. Do not guess at what earlier calls covered.",
+          "get_message_history": "No text messages on file WITH THIS NUMBER. That does not mean the account has no message history — say nothing about texts.",
+          "request_reservice": {
+            "text": "Re-service request filed for this account (pest). The office will schedule it — do NOT state a date or time for it, and do not read out any link or code. Tell the caller a Waves team member will follow up.",
+            "reservice": true
+          },
+          "get_pricing": "Standard pest control pricing for this property size: quarterly $129 per application; bimonthly $109 per application; monthly $89 per application. Prices are per application, quoted from the public price sheet — state them exactly as written; never discount, round, or estimate. Then gather the caller's first and last name, service address and email and call capture_lead."
         }
       },
       "turns": [

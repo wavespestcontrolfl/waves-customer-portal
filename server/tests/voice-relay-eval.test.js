@@ -82,6 +82,7 @@ describe('voice relay eval — fixture lint', () => {
         { ...good, id: 'bad-regex', expect: [exp('spoken_never_matches', ['(unclosed'])] },
         { ...good, id: 'bad-check', expect: [exp('spoken_is_polite', true)] },
         { ...good, id: 'bad-gate', gates: { teleport: true } },
+        { ...good, id: 'string-gate', gates: { context: 'true' } },
         { ...good, id: 'bad-fixture-tool', fixtures: { toolResponses: { not_a_tool: 'x' } } },
       ],
     };
@@ -95,6 +96,7 @@ describe('voice relay eval — fixture lint', () => {
     expect(joined).toMatch(/bad-regex: .*invalid regex/);
     expect(joined).toMatch(/bad-check: .*unknown check "spoken_is_polite"/);
     expect(joined).toMatch(/bad-gate: unknown gate "teleport"/);
+    expect(joined).toMatch(/string-gate: gate "context" must be boolean/);
     expect(joined).toMatch(/bad-fixture-tool: toolResponses names unknown tool "not_a_tool"/);
     expect(replay.lintFixture({ schemaVersion: 'nope', scenarios: [] })).toEqual(expect.arrayContaining([expect.stringMatching(/schemaVersion/), 'fixture: no scenarios']));
   });
@@ -282,10 +284,16 @@ describe('voice relay eval — the judge', () => {
     const verdict = { pass: true, forbidden_claims: [], required_facts_missing: [], prohibited_facts_stated: [], action_taken: 'capture_lead', action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 5, rationale: 'clean' };
     const dispatch = jest.fn(async () => ({ ok: true, json: verdict, text: JSON.stringify(verdict), model: 'judge-model-x', provider: 'anthropic', fallbackUsed: false }));
     const out = await judge.judgeTranscript({ spec: {}, transcript: 'Caller: hi' }, { dispatch });
-    expect(dispatch).toHaveBeenCalledWith(MODELS.TEXT_POLICIES.voiceJudge, expect.objectContaining({ laneId: 'voice_relay_judge', jsonMode: true, jsonSchema: judge.JUDGE_SCHEMA, promptVersion: judge.JUDGE_PROMPT_VERSION }));
+    expect(dispatch).toHaveBeenCalledWith(MODELS.TEXT_POLICIES.voiceJudge, expect.objectContaining({ laneId: 'voice_relay_judge', jsonMode: true, jsonSchema: judge.JUDGE_SCHEMA, promptVersion: judge.JUDGE_PROMPT_VERSION }), expect.objectContaining({ validate: expect.any(Function) }));
     // No explicit timeoutMs: an explicit budget would hand the whole remainder
     // to the primary leg and starve the fallback (llm/call.js semantics).
     expect(dispatch.mock.calls[0][1]).not.toHaveProperty('timeoutMs');
+    // The validate hook fails a leg whose JSON is not a complete verdict, so
+    // the dispatcher tries the backup provider instead of returning it.
+    const { validate } = dispatch.mock.calls[0][2];
+    expect(validate({ json: verdict })).toBeNull();
+    expect(validate({ json: { pass: true } })).toBe('unparseable_verdict');
+    expect(validate({ text: 'not json' })).toBe('unparseable_verdict');
     expect(out).toMatchObject({ ok: true, judge_model: 'judge-model-x', judge_provider: 'anthropic', judge_fallback: false, judge_prompt_sha: judge.judgePromptSha() });
     expect(out.verdict.pass).toBe(true);
 
@@ -312,6 +320,11 @@ describe('voice relay eval — the judge', () => {
     expect(scenarioStatus({ checks: advisory })).toBe('pass');
 
     const pinned = judgeChecks(scenario, { ok: true, judge_fallback: false, verdict });
+    expect(pinned.find((c) => c.check === 'judge:verdict')).toMatchObject({ status: 'fail', severity: 'major' });
+    // A holistic "fail" with clean detail fields is still a failed verdict.
+    const holistic = judgeChecks(scenario, { ok: true, judge_fallback: false, verdict: { ...verdict, pass: false, forbidden_claims: [], required_facts_missing: [], action_ok: true, transfer_ok: true, empathy_ok: true, tone: 4, rationale: 'rushed the caller off the line' } });
+    expect(holistic.find((c) => c.check === 'judge:verdict')).toMatchObject({ status: 'fail', detail: expect.stringContaining('rushed') });
+    expect(holistic.filter((c) => c.status === 'fail').map((c) => c.check)).toEqual(['judge:verdict']);
     expect(pinned.find((c) => c.check === 'judge:forbidden_claim:invented_price')).toMatchObject({ status: 'fail', severity: 'major', adjudicated: false });
     expect(pinned.find((c) => c.check === 'judge:transfer').status).toBe('fail');
     expect(pinned.find((c) => c.check === 'judge:empathy')).toMatchObject({ status: 'fail', severity: 'quality' });
@@ -337,8 +350,9 @@ describe('voice relay eval — the harness', () => {
             on() {},
             finalMessage: async () => {
               if (!next) throw new Error('script exhausted');
-              if (next instanceof Error) throw next;
-              return next;
+              const reply = typeof next === 'function' ? next() : next;
+              if (reply instanceof Error) throw reply;
+              return reply;
             },
           };
         }
@@ -442,16 +456,89 @@ describe('voice relay eval — the harness', () => {
     expect(process.env.VOICE_RELAY_CONTEXT_ENABLED).toBeUndefined();
   });
 
-  test('a tool with no fixture response is answered neutrally and flagged; a hanging tool degrades through the live bound', async () => {
-    jest.useFakeTimers({ advanceTimers: true });
+  test('a tool the fixture does not answer is a replay error — the world was no longer fixed', async () => {
     mockSdk();
     const replay = require('../services/eval/voice-relay-replay');
     replay.installHarness();
     script.push(toolUse('find_slots', { when: 'next week' }), say('A team member will call to find a time.'));
     const result = await replay.runScenario(scenario({ id: 'harness-unexpected', fixtures: { officeHours: 'unknown', toolResponses: {} }, turns: [{ caller: 'When can you come?' }], expect: [] }), { judge: false });
     expect(result.toolCalls[0]).toMatchObject({ name: 'find_slots', unexpected: true, ok: false, receipt: false });
-    expect(result.warnings).toEqual([expect.stringContaining('find_slots')]);
-    jest.useRealTimers();
+    expect(result.status).toBe('error');
+    expect(result.error).toMatchObject({ code: 'EVAL_UNFIXTURED_TOOL', message: expect.stringContaining('find_slots') });
+  });
+
+  test('a conversation that reaches for the database is a replay error even when the relay degraded silently', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const h = replay.installHarness();
+    // A guarded reach DURING the turn (the guard records it; the relay would
+    // have swallowed the refusal into a degraded answer).
+    script.push(() => { h.guard.attempts.push('db(call_log)'); return say('Let me check that for you.'); });
+    const reached = await replay.runScenario(scenario({ id: 'harness-db', turns: [{ caller: 'hi' }], expect: [] }), { judge: false });
+    expect(reached.status).toBe('error');
+    expect(reached.error).toMatchObject({ code: 'EVAL_DB_REFUSED', message: expect.stringContaining('db(call_log)') });
+    expect(reached.dbAttempts).toEqual(['db(call_log)']);
+    script.push(say('Hello.'));
+    const clean = await replay.runScenario(scenario({ id: 'harness-db-clean', turns: [{ caller: 'hi' }], expect: [] }), { judge: false });
+    expect(clean.status).toBe('pass');
+    expect(clean.dbAttempts).toEqual([]);
+  });
+
+  test('fixture tools validate their inputs like the real ones: required fields, enums, offered slot_refs and customer_refs', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    replay.installHarness();
+    const { validateToolInput } = replay._internals;
+    const rec = { events: [{ kind: 'tool', name: 'find_slots', text: 'Open times: Monday at 9 AM (slot_ref: S1); Tuesday at 1 PM (slot_ref: S2).' }, { kind: 'tool', name: 'lookup_customer', text: 'Found one matching account: R. Alvarez (customer_ref: C1).' }] };
+    expect(validateToolInput('capture_lead', {}, rec)).toMatch(/Missing required argument "call_summary"/);
+    expect(validateToolInput('capture_lead', { call_summary: 'x', lead_quality: 'scorching' }, rec)).toMatch(/not a valid lead_quality/);
+    expect(validateToolInput('capture_lead', { call_summary: 'x', lead_quality: 'hot' }, rec)).toBeNull();
+    expect(validateToolInput('request_booking', { slot_ref: 'S9' }, rec)).toMatch(/slot_ref "S9" was not offered/);
+    expect(validateToolInput('request_booking', { slot_ref: 'S2' }, rec)).toBeNull();
+    expect(validateToolInput('get_today_eta', { customer_ref: 'C7' }, rec)).toMatch(/customer_ref "C7" was not returned/);
+    expect(validateToolInput('get_today_eta', { customer_ref: 'C1' }, rec)).toBeNull();
+    expect(validateToolInput('get_today_eta', {}, rec)).toBeNull();
+    // Through the live loop: an invented slot_ref gets the refusal, never the fixture's success.
+    script.push(toolUse('request_booking', { slot_ref: 'S9' }), say('Sorry, that time is not one I offered — a team member will call to find one.'));
+    const result = await replay.runScenario(scenario({
+      id: 'harness-invalid', gates: { context: true, booking: true },
+      caller: { from: '+19415550131', verified: true, context: { customer: { id: 'c1', first_name: 'Dana' }, tier: 'full', attested: true, block: 'KNOWN CALLER — test\n<<<KNOWN CALLER DATA\nFirst name: Dana\nEND KNOWN CALLER DATA>>>', dataTurn: null } },
+      fixtures: { officeHours: 'open', toolResponses: { request_booking: { text: 'Booking request placed.', booking: true }, capture_lead: { text: 'Noted.', capture: { leadCreated: false } } } },
+      turns: [{ caller: 'Book me S9.' }], expect: [{ check: 'tools_called_include', value: ['request_booking'], severity: 'major' }],
+    }), { judge: false });
+    expect(result.toolCalls[0]).toMatchObject({ name: 'request_booking', invalid: true, ok: false, receipt: false });
+    expect(result.toolCalls[0].text).toMatch(/not offered on this call/);
+    expect(result.status).toBe('pass');
+  });
+
+  test('an interrupted utterance is graded as what the caller heard, with the full text kept as planned', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    replay.installHarness();
+    script.push(say('Got it, Ben — one two two zero Gulf Drive North in Bradenton Beach, and what is the best email for you?'), say('Thanks, one two three zero it is.'));
+    const result = await replay.runScenario(scenario({
+      id: 'harness-interrupt', gates: { interrupt: true },
+      fixtures: { officeHours: 'unknown', toolResponses: {} },
+      turns: [{ caller: 'Ben Carter, 1220 Gulf Drive North.' }, { interrupt: { words: 4 }, caller: 'Sorry, 1230 not 1220.' }],
+      expect: [{ check: 'spoken_never_matches', value: ['best email'], severity: 'major' }],
+    }), { judge: false });
+    const first = result.events.find((e) => e.kind === 'agent');
+    expect(first.text).toBe('Got it, Ben — [interrupted]');
+    expect(first.planned).toMatch(/best email/);
+    expect(first.interrupted).toBe(true);
+    expect(result.transcript).toMatch(/Agent: Got it, Ben — \[interrupted\]\n\[caller interrupted the agent after: "Got it, Ben —"\]/);
+    // The unheard clause is not graded: the never-matches check passes.
+    expect(result.checks[0].status).toBe('pass');
+  });
+
+  test('an hours object resolves the judge\'s office status through the relay\'s own open check', () => {
+    const replay = require('../services/eval/voice-relay-replay');
+    const { officeStatusForJudge } = replay._internals;
+    expect(officeStatusForJudge({ fixtures: { officeHours: 'closed' } })).toBe('closed');
+    expect(officeStatusForJudge({ fixtures: { officeHours: { startMin: 0, endMin: 24 * 60, closedToday: true } } })).toBe('closed');
+    expect(officeStatusForJudge({ fixtures: { officeHours: { startMin: 0, endMin: 24 * 60 } } })).toBe('open');
+    expect(officeStatusForJudge({ fixtures: { officeHours: { startMin: 0, endMin: 24 * 60, closedUnknown: true } } })).toBe('unknown');
+    expect(officeStatusForJudge({ fixtures: {} })).toBe('unknown');
   });
 
   test('a real model error with no completed round is a replay error, an injected failure is not', async () => {
@@ -610,6 +697,15 @@ describe('voice relay eval — scheduled wrapper and child process', () => {
     await expect(replay.runVoiceRelayEvalProcess({ execFileImpl: child(3, JSON.stringify({ status: 'inconclusive' })) })).resolves.toMatchObject({ status: 'inconclusive' });
     await expect(replay.runVoiceRelayEvalProcess({ execFileImpl: child(2, '', 'Voice relay eval failed to run: boom') })).rejects.toThrow(/exited 2: Voice relay eval failed to run: boom/);
     await expect(replay.runVoiceRelayEvalProcess({ execFileImpl: child(0, 'not json') })).rejects.toThrow(/exited 0/);
+  });
+
+  test('a crashed eval child pages through the inconclusive path', async () => {
+    const notify = jest.fn();
+    const sendEmail = jest.fn(async () => ({ ok: true }));
+    await replay.notifyEvalCrash(new Error('voice relay eval child timed out'), { notify, sendEmail });
+    expect(notify.mock.calls[0][0]).toMatchObject({ category: 'eval_regression', title: 'Voice relay eval could not run' });
+    expect(notify.mock.calls[0][0].body).toMatch(/child timed out/);
+    expect(sendEmail).toHaveBeenCalledWith(expect.objectContaining({ subject: 'FIX: Voice relay eval could not run' }));
   });
 
   test('summaryLine names the failed and errored scenarios', () => {

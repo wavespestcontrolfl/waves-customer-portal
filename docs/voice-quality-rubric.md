@@ -119,6 +119,11 @@ follow-up), `reservice-duplicate` (answered from call history, never filed the r
 `read-tool-timeout` (promised the follow-up before the capture landed), `read-back-grouping` (no
 read-back of the phone number).
 
+After that run the deterministic layer was tightened to what the judge had caught: `write-tool-timeout` now
+**fails critical** on the current Sandy ("I've got your information down" while the capture write is still
+in flight — the relay's own timeout text forbids exactly that). The weekly run fails on it until PR 5's
+outcome-claim invariant / PR 6's prompt work lands; that is the harness doing its job as the merge gate.
+
 **Telemetry half:** one week of `transcription_metadata.latency` on real relay calls — needs the
 sandbox number repointed (`VOICE_RELAY_SANDBOX_NUMBER`) and the profile telemetry live. Record
 stop-to-first-audio p50/p95 here when it lands.
