@@ -8,13 +8,13 @@ describe('bestTimeLabel', () => {
   });
 
   it('names the previous stop when the van comes from a customer', () => {
-    expect(bestTimeLabel({ start: '13:00', driveInMinutes: 12.4, fromHomeBase: false, fromName: 'Kelleher', detourMinutes: 4.4 }))
-      .toBe('1:00 PM · 12 min drive from Kelleher · +4 min added to route');
+    expect(bestTimeLabel({ start: '13:00', driveInMinutes: 12.4, fromHomeBase: false, fromName: 'Stop B', detourMinutes: 4.4 }))
+      .toBe('1:00 PM · 12 min drive from Stop B · +4 min added to route');
   });
 
   it('says no added drive when the stop is on the way', () => {
-    expect(bestTimeLabel({ start: '13:00', driveInMinutes: 6, fromHomeBase: false, fromName: 'Phelps', detourMinutes: 0 }))
-      .toBe('1:00 PM · 6 min drive from Phelps · no added drive');
+    expect(bestTimeLabel({ start: '13:00', driveInMinutes: 6, fromHomeBase: false, fromName: 'Stop D', detourMinutes: 0 }))
+      .toBe('1:00 PM · 6 min drive from Stop D · no added drive');
   });
 
   it('omits the drive-in leg when the slot has none (arrival-window mode) and treats a missing detour as none', () => {
@@ -30,8 +30,9 @@ describe('bestTimeLabel', () => {
 
 describe('bestDateLabel', () => {
   it('prefixes the weekday and date', () => {
-    expect(bestDateLabel({ date: '2026-09-09', start: '13:00', driveInMinutes: 8, fromHomeBase: false, fromName: 'Dilschneider', detourMinutes: 12 }))
-      .toBe('Wed, Sep 9 · 1:00 PM · 8 min drive from Dilschneider · +12 min added to route');
+    // Far-future fixture: fmtDate says "Today" for the ET date, so a near date would rot.
+    expect(bestDateLabel({ date: '2035-01-10', start: '13:00', driveInMinutes: 8, fromHomeBase: false, fromName: 'Stop C', detourMinutes: 12 }))
+      .toBe('Wed, Jan 10 · 1:00 PM · 8 min drive from Stop C · +12 min added to route');
   });
 });
 

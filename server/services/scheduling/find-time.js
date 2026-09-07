@@ -343,7 +343,7 @@ async function findAvailableSlots(opts) {
           insertion: {
             after: prev.id === 'HQ_START' ? 'HQ (start of day)' : `${prev.customer} (${minutesToTime(prev.endMin)})`,
             before: next.id === 'HQ_END' ? 'HQ (end of day)' : `${next.customer} (${minutesToTime(next.startMin)})`,
-            // Bare name for labels ("from Kelleher"); null = the home base.
+            // Bare name for labels ("from <previous stop>"); null = the home base.
             after_name: prev.id === 'HQ_START' ? null : prev.customer,
             after_stop_id: prev.id === 'HQ_START' || prev.id === 'HQ_END' ? null : prev.id,
             before_stop_id: next.id === 'HQ_START' || next.id === 'HQ_END' ? null : next.id,

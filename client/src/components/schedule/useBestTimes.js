@@ -73,9 +73,12 @@ export function useBestTimes({
   const [checking, setChecking] = useState(false);
   // Stable dep for the (usually tiny) id array.
   const excludeKey = (excludeServiceIds || []).map(String).join(',');
-  // Only a complete on-the-hour value is worth scoring; a half-typed field
-  // would 400 and (fail-open) blank the whole hint.
-  const pickedKey = /^\d{2}:\d{2}$/.test(String(pickedStart || '')) ? String(pickedStart) : '';
+  // Only a complete value is worth scoring; a half-typed field would 400
+  // and (fail-open) blank the whole hint. Stored windows arrive as
+  // PostgreSQL time values ('09:00:00') on the edit form's initial state —
+  // trim to HH:MM so the current hour is scored before the operator touches
+  // the field.
+  const pickedKey = /^\d{2}:\d{2}(:\d{2})?$/.test(String(pickedStart || '')) ? String(pickedStart).slice(0, 5) : '';
   const rangeKey = YMD.test(String(rangeFrom || '')) ? String(rangeFrom) : '';
   useEffect(() => {
     setBestTimes([]);

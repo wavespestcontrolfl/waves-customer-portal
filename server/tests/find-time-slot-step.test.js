@@ -209,7 +209,7 @@ test('every gap names its two legs and the anchor the van leaves from (picked-ho
     window_start: '11:00', window_end: '12:00', service_type: 'pest',
     estimated_duration_minutes: 60,
     svc_lat: 27.41, svc_lng: -82.41, cust_lat: null, cust_lng: null,
-    first_name: 'John', last_name: 'Kelleher', city: 'Bradenton',
+    first_name: 'Fixture', last_name: 'Stop', city: 'Bradenton',
   };
   db.mockImplementation((table) => (table === 'technicians' ? chain([{ id: 't1', name: 'A' }]) : chain([stop])));
   const { slots } = await findAvailableSlots({ ...BASE, slotStepMinutes: 60, topN: 10 });
@@ -222,6 +222,6 @@ test('every gap names its two legs and the anchor the van leaves from (picked-ho
   expect(first.insertion.after_stop_id).toBeNull();
   const second = byStart['13:00'];
   expect(second.drive_in_minutes).toBe(1);
-  expect(second.insertion.after_name).toBe('John Kelleher');
+  expect(second.insertion.after_name).toBe('Fixture Stop');
   expect(second.insertion.after_stop_id).toBe('s1');
 });

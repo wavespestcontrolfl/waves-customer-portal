@@ -7,7 +7,7 @@ afterEach(() => { vi.unstubAllGlobals(); });
 
 const daySlot = {
   date: '2035-01-02', start_time: '10:00', end_time: '11:00', detour_minutes: 12, drive_in_minutes: 8,
-  insertion: { after_name: 'Kyle Dilschneider', after_stop_id: 's-kyle' }, technician: { id: 'tech', name: 'A' },
+  insertion: { after_name: 'Stop C', after_stop_id: 's-c' }, technician: { id: 'tech', name: 'A' },
 };
 const rangeSlot = {
   date: '2035-01-03', start_time: '13:00', end_time: '14:00', detour_minutes: 3, drive_in_minutes: 5,
@@ -34,8 +34,16 @@ it('scores the picked hour on the day and searches the next 3 days for the singl
     start: '09:00', fits: true, detourMinutes: 57, driveInMinutes: 37, fromHomeBase: true, fromName: null,
     technicianId: 'tech', technicianName: null,
   });
-  expect(result.current.bestTimes[0]).toMatchObject({ date: '2035-01-02', start: '10:00', driveInMinutes: 8, fromHomeBase: false, fromName: 'Kyle Dilschneider' });
+  expect(result.current.bestTimes[0]).toMatchObject({ date: '2035-01-02', start: '10:00', driveInMinutes: 8, fromHomeBase: false, fromName: 'Stop C' });
   expect(result.current.bestInRange).toMatchObject({ date: '2035-01-03', start: '13:00', driveInMinutes: 5, fromHomeBase: true });
+});
+
+it('trims a stored HH:MM:SS window to the picked hour (edit form initial state)', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ slots: [] }) });
+  vi.stubGlobal('fetch', fetch);
+  renderHook(() => useBestTimes({ date: '2035-01-02', serviceId: 'fixture', technicianId: 'tech', pickedStart: '09:00:00' }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  expect(JSON.parse(fetch.mock.calls[0][1].body).pickedStart).toBe('09:00');
 });
 
 it('skips the range search without rangeFrom and never sends a half-typed picked hour', async () => {

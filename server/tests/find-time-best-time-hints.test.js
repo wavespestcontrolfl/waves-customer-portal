@@ -312,7 +312,7 @@ test.each([undefined, false, true])('existing-visit arrival routing requires exp
 const gapSlot = (over = {}) => ({
   rank: 1, date: '2026-09-01', start_time: '09:00', end_time: '10:00',
   detour_minutes: 57, drive_in_minutes: 37, drive_out_minutes: 31, latest_start_min: 9 * 60,
-  insertion: { after: 'HQ (start of day)', after_name: null, after_stop_id: null, before: 'John Kelleher (11:00)', before_stop_id: 's-kel' },
+  insertion: { after: 'HQ (start of day)', after_name: null, after_stop_id: null, before: 'Stop B (11:00)', before_stop_id: 's-b' },
   technician: { id: 't1', name: 'A' },
   ...over,
 });
@@ -323,7 +323,7 @@ test('pickedStart inside a gap answers that gap\'s drive-in leg, origin and deto
     slots: [
       gapSlot(),
       gapSlot({ rank: 2, start_time: '13:00', end_time: '14:00', latest_start_min: 15 * 60, detour_minutes: 4, drive_in_minutes: 12,
-        insertion: { after: 'Kyle Dilschneider (13:00)', after_name: 'Kyle Dilschneider', after_stop_id: 's-kyle', before: 'HQ (end of day)', before_stop_id: null } }),
+        insertion: { after: 'Stop C (13:00)', after_name: 'Stop C', after_stop_id: 's-c', before: 'HQ (end of day)', before_stop_id: null } }),
     ],
     evaluated: 2,
   });
@@ -332,7 +332,7 @@ test('pickedStart inside a gap answers that gap\'s drive-in leg, origin and deto
   const body = await res.json();
   expect(body.picked).toEqual({
     start: '14:00', fits: true, detour_minutes: 4, drive_in_minutes: 12,
-    from_home_base: false, from_name: 'Kyle Dilschneider', technician: { id: 't1', name: 'A' },
+    from_home_base: false, from_name: 'Stop C', technician: { id: 't1', name: 'A' },
   });
   // The picked hour can sit in the worst gap of the day, so the engine's
   // whole list is requested (the chips row is still sliced to topN).
