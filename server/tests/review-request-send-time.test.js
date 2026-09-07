@@ -42,6 +42,13 @@ describe('review request send-time calculator', () => {
     expect(etParts(sendAt)).toMatchObject({ year: 2026, month: 5, day: 27, hour: 10 });
   });
 
+  test('jitter:false gives the completion panel a stable preview of the same rule', () => {
+    const a = calculateReviewSendTime(new Date('2026-05-26T17:00:00Z'), 'lawn care', { jitter: false });
+    const b = calculateReviewSendTime(new Date('2026-05-26T17:00:00Z'), 'lawn care', { jitter: false });
+    expect(a.getTime()).toBe(b.getTime());
+    expect(etParts(a)).toMatchObject({ year: 2026, month: 5, day: 26, hour: 16, minute: 30 });
+  });
+
   test('moves WDO review requests that would land after 5 PM to the next morning', () => {
     const sendAt = calculateReviewSendTime(new Date('2026-05-26T19:45:00Z'), 'wdo inspection');
 

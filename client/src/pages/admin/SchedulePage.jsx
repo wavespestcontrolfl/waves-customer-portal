@@ -38,7 +38,7 @@ import CompletionPricingCard from "../../components/schedule/CompletionPricingCa
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 
-import { addETDays, etDateString } from "../../lib/timezone";
+import { addETDays, etDateString, formatETDateTime } from "../../lib/timezone";
 import {
   defaultApplicationMethodForLine,
   isPerBasisUnit,
@@ -317,6 +317,43 @@ const CUSTOMER_INTERACTION_OPTIONS = [
   { value: "not_home_partial_access", label: "Customer not home — partial access" },
   { value: "customer_specific_concern", label: "Customer had specific concern" },
 ];
+// Completion panel review timing (owner decisions 2026-09-07). "Automatic"
+// is the cadence's smart send window — the server's calculateReviewSendTime,
+// previewed through /admin/reviews/send-time-preview so the panel shows the
+// decision dispatch will make. "Customer asked for the link" is recorded on
+// the sequence (who/when/source) and goes at the next cadence tick; it is
+// never immediate, and the panel says so. The old "Now" / "In 2 hours"
+// values are gone: saved drafts carrying them fall back to Automatic.
+const REVIEW_TIMING_OPTIONS = [
+  { value: "auto", label: "Automatic (recommended)" },
+  { value: "customer_requested", label: "Customer asked for the link" },
+  { value: "tomorrow_8", label: "Tomorrow at 8 AM" },
+  { value: "custom", label: "Custom time" },
+];
+const REVIEW_TIMING_DEFAULT = "auto";
+function normalizeReviewTiming(value) {
+  return REVIEW_TIMING_OPTIONS.some((o) => o.value === value) ? value : REVIEW_TIMING_DEFAULT;
+}
+// What the chosen timing means, from the server preview (never a client
+// approximation of the smart window).
+function reviewTimingHint({ reviewTiming, reviewCustomAt, preview }) {
+  const fmt = (d) => formatETDateTime(d, { weekday: "short", hour: "numeric", minute: "2-digit" });
+  if (reviewTiming === "auto") {
+    return preview?.at ? `Review text goes out separately, about ${fmt(preview.at)}.` : "Review text goes out separately at the smart send window.";
+  }
+  if (reviewTiming === "customer_requested") {
+    return preview && preview.reviewSequencesEnabled === false
+      ? "Review link is included in the completion text."
+      : `Review text goes out separately within ${preview?.cadenceTickMinutes || 30} minutes. The request is recorded.`;
+  }
+  if (reviewTiming === "tomorrow_8") return "Review text goes out separately tomorrow at 8:00 AM.";
+  if (reviewTiming === "custom") {
+    const t = reviewCustomAt ? new Date(reviewCustomAt) : null;
+    return t && !Number.isNaN(t.getTime()) ? `Review text goes out separately ${fmt(t)}.` : "Choose a time for the review text.";
+  }
+  return "";
+}
+
 const CUSTOMER_INTERACTION_ALIASES = {
   spoke: "tech_home_spoke_with_them",
   not_home_full: "not_home_full_access",
@@ -10529,8 +10566,11 @@ export function CompletionPanel({
   // identically.
   const [offerInspectionCredit, setOfferInspectionCredit] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
-  const [reviewTiming, setReviewTiming] = useState("120");
+  const [reviewTiming, setReviewTiming] = useState(REVIEW_TIMING_DEFAULT);
   const [reviewCustomAt, setReviewCustomAt] = useState("");
+  // Server preview of the "Automatic" send time + whether cadence mode owns
+  // the ask (separate text) or the legacy path bundles it.
+  const [reviewSendPreview, setReviewSendPreview] = useState(null);
   const [oneTimeRecapOnly, setOneTimeRecapOnly] = useState(false);
   // Backdated closeout ("backfill") of a past-dated visit: the server records
   // the completion to the visit's scheduled day, sends NO customer messages
@@ -11812,10 +11852,18 @@ export function CompletionPanel({
   });
   const effectiveSendSms =
     !isIncompleteVisit && !backfillQuietCloseout && (oneTimeRecapOnly || sendSms);
+  // The review link rides inside the completion text ONLY on the legacy
+  // (non-cadence) path with an immediate ask — the server's shouldBundleReview.
+  // In cadence mode the ask is always its own message, so the preview must
+  // not claim "[review link inserted]" (it never was — the Aug 30 2026 ask).
   const reviewSendsWithCompletionSms =
     willReview &&
     effectiveSendSms &&
-    (oneTimeRecapOnly || reviewTiming === "now");
+    (oneTimeRecapOnly ||
+      (reviewTiming === "customer_requested" && reviewSendPreview?.reviewSequencesEnabled === false));
+  const reviewTimingHintText = willReview && !oneTimeRecapOnly
+    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview: reviewSendPreview })
+    : "";
   const smsPreview = [
     smsRecapPreview(customerRecap),
     !isIncompleteVisit && willSendPayLink ? "[pay link inserted]" : "",
@@ -11839,13 +11887,27 @@ export function CompletionPanel({
   };
   const reviewDelayMinutes = () => {
     if (!willReview) return null;
-    if (oneTimeRecapOnly || reviewTiming === "now") return 0;
+    if (oneTimeRecapOnly || reviewTiming === "customer_requested") return 0;
     if (reviewTiming === "custom") {
       const target = new Date(reviewCustomAt);
       return reviewCustomAt && !Number.isNaN(target.getTime()) ? 0 : null;
     }
-    return Number(reviewTiming) || 120;
+    if (reviewTiming === "tomorrow_8") return 0;
+    // Automatic: no explicit delay — the server picks the smart send window.
+    return undefined;
   };
+  useEffect(() => {
+    if (!willReview || oneTimeRecapOnly) return undefined;
+    let cancelled = false;
+    const qs = new URLSearchParams({ serviceType: service?.serviceType || "" });
+    fetch(`${API_BASE}/admin/reviews/send-time-preview?${qs}`, {
+      headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (!cancelled && data) setReviewSendPreview(data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [service?.id, service?.serviceType, willReview, oneTimeRecapOnly]);
   const recapStatusText = recapLoading
     ? "Drafting customer recap..."
     : recapError
@@ -12433,7 +12495,7 @@ export function CompletionPanel({
       parkedNext.trim() ||
       nextVisitNote.trim() ||
       oneTimeRecapOnly ||
-      reviewTiming !== "120" ||
+      reviewTiming !== REVIEW_TIMING_DEFAULT ||
       reviewCustomAt.trim() ||
       JSON.stringify(treeShrubCloseout) !== JSON.stringify(defaultTreeShrubCloseout(service)) ||
       Object.keys(findingsValues).length ||
@@ -12693,7 +12755,7 @@ export function CompletionPanel({
         ? savedDraft.clientPestRating
         : null,
     );
-    setReviewTiming(savedDraft.reviewTiming || "120");
+    setReviewTiming(normalizeReviewTiming(savedDraft.reviewTiming));
     setReviewCustomAt(savedDraft.reviewCustomAt || "");
     // Bed bug hides the recap-only control (typed-era billing parity) — a
     // pre-migration draft must not restore the flag into invisible state
@@ -17890,10 +17952,9 @@ export function CompletionPanel({
                     onChange={(e) => setReviewTiming(e.target.value)}
                     style={mInput}
                   >
-                    <option value="now">Now</option>
-                    <option value="120">In 2 hours</option>
-                    <option value="tomorrow_8">Tomorrow at 8 AM</option>
-                    <option value="custom">Custom time</option>
+                    {REVIEW_TIMING_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
                   </select>
                   {reviewTiming === "custom" ? (
                     <input
@@ -17905,6 +17966,9 @@ export function CompletionPanel({
                   ) : (
                     <div />
                   )}
+                  <div style={{ gridColumn: "1 / -1", fontFamily: font, fontSize: 14, color: M.ink3 }}>
+                    {reviewTimingHintText}
+                  </div>
                 </div>
               )}
             </Field>
@@ -20050,10 +20114,9 @@ export function CompletionPanel({
                 onChange={(e) => setReviewTiming(e.target.value)}
                 style={inputStyle}
               >
-                <option value="now">Now</option>
-                <option value="120">In 2 hours</option>
-                <option value="tomorrow_8">Tomorrow at 8 AM</option>
-                <option value="custom">Custom time</option>
+                {REVIEW_TIMING_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
               </select>
               {reviewTiming === "custom" ? (
                 <input
@@ -20065,6 +20128,9 @@ export function CompletionPanel({
               ) : (
                 <div />
               )}
+              <div style={{ gridColumn: "1 / -1", fontSize: 14, color: D.muted }}>
+                {reviewTimingHintText}
+              </div>
             </div>
           )}
           {/* Next Visit Prompt */}

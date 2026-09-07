@@ -409,7 +409,13 @@ function parseCompletionReviewDelayMinutes(body = {}) {
     Object.prototype.hasOwnProperty.call(body, 'reviewScheduledFor');
   if (!hasExplicitTiming) return undefined;
 
-  if (body.reviewTiming === 'now') return 0;
+  // "Automatic (recommended)" = no operator override: legacy 120-min default,
+  // cadence smart send window (calculateReviewSendTime).
+  if (body.reviewTiming === 'auto') return undefined;
+  // 'now' is the legacy value (still posted by the one-time recap path);
+  // 'customer_requested' is the panel's "Customer asked for the link" — same
+  // timing (next cadence tick), plus the request is recorded on the sequence.
+  if (body.reviewTiming === 'now' || body.reviewTiming === 'customer_requested') return 0;
   if (body.reviewTiming === 'tomorrow_8') {
     const targetDay = etDateString(addETDays(new Date(), 1));
     const target = parseETDateTime(`${targetDay}T08:00`);
@@ -2452,8 +2458,17 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     let preCommitCompletionPhotoRows = [];
     const promotedPhotoIds = new Set();
     let completionReviewDelayMinutes;
+    let customerRequestedReview = null;
     try {
       completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(completionInput.body || {});
+      if (completionInput.body?.reviewTiming === 'customer_requested') {
+        customerRequestedReview = {
+          by: completionInput.actor?.technicianId || null,
+          byName: completionInput.actor?.technician?.name || null,
+          at: new Date().toISOString(),
+          source: 'completion_panel',
+        };
+      }
     } catch (timingErr) {
       // A committed chain replays an immutable body, and by the time a
       // retry lands its custom reviewScheduledFor can legitimately be in
@@ -4882,6 +4897,9 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             reviewTiming: reviewTiming || null,
             reviewDelayMinutes: completionReviewDelayMinutes == null ? null : completionReviewDelayMinutes,
             reviewScheduledFor: reviewScheduledFor || null,
+            // Who captured "Customer asked for the link", when, and where —
+            // carried through the paid-invoice deferral (enrollForPaidInvoice).
+            customerRequestedReview: customerRequestedReview || null,
             incompleteReason,
             customerConcernText: concernText || null,
             customerRecap: effectiveCustomerRecap || null,
@@ -11512,6 +11530,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           // undefined = legacy 120-min default / cadence smart window.
           delayMinutes: completionReviewDelayMinutes,
           legacyDelayMinutes: 120,
+          customerRequested: customerRequestedReview,
         });
       } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
     }
@@ -11928,4 +11947,5 @@ module.exports = {
   completionSmsWithheldForMissingReportToken,
   backfillExpectedMintAtCommit,
   shouldAutoInvoiceCompletion,
+  parseCompletionReviewDelayMinutes,
 };

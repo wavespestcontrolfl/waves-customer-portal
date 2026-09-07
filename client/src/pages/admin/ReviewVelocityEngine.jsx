@@ -304,6 +304,35 @@ function calcScore(sentiment, daysAgo, revenue, stage, askCount, svcType) {
   return Math.max(0, Math.min(100, score));
 }
 
+// The cadence's stored decision (review_sequences.decision, written by
+// enrollment and every step-runner deferral) rendered the same way the
+// completion panel explains it: reason, planned/next time, owner action.
+const DECISION_LABELS = {
+  smart_window: "Day-0 ask at the smart send window",
+  operator_timing: "Day-0 ask at the time chosen on the completion panel",
+  customer_requested: "Customer asked for the link — next cadence tick",
+  immediate: "First touch sending now",
+  follow_up_scheduled: "Follow-up scheduled (3-day spacing after the last ask)",
+  send_window: "Held for the 8 AM–8 PM send window",
+  spacing: "Waiting for the 3-day spacing after the last ask",
+  provider_retry: "Provider retry",
+  send_error_retry: "Send error — retrying",
+  plan_reresolution_unavailable: "Re-checking the visit's cadence plan",
+  cap_stats_unavailable: "Re-checking the ask cap",
+};
+function decisionLine(seq) {
+  if (!seq) return null;
+  if (seq.sending) return "Sending now · Owner action: none";
+  const d = seq.decision || {};
+  const label = DECISION_LABELS[d.reason] || (d.reason ? String(d.reason).replace(/_/g, " ") : "Scheduled");
+  const when = seq.nextRunAt || d.plannedAt || d.nextEvalAt;
+  const whenText = when
+    ? new Date(when).toLocaleString("en-US", { timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+    : null;
+  const owner = d.ownerAction && d.ownerAction !== "none" ? `Owner action: ${d.ownerAction}` : "Owner action: none";
+  return [whenText ? `${d.plannedAt ? "Next" : "Re-check"} ${whenText}` : null, label, owner].filter(Boolean).join(" · ");
+}
+
 function fmtDate(d) {
   if (!d) return "—";
   if (typeof d === "string") return d;
@@ -1703,9 +1732,14 @@ function Pipeline({
                   </td>{" "}
                   <td style={tdStyle}>
                     {c.sequence ? (
-                      <Tag type="blu">
-                        Cadence {c.seqStep}/{c.seqTotal}
-                      </Tag>
+                      <>
+                        <Tag type="blu">
+                          Cadence {c.seqStep}/{c.seqTotal}
+                        </Tag>
+                        <div style={{ fontSize: 11, color: C.t3, marginTop: 4 }}>
+                          {decisionLine(c.sequence)}
+                        </div>
+                      </>
                     ) : c.seqStep > 0 ? (
                       <Tag type="acc">
                         Asked {c.askCount}×
@@ -2483,6 +2517,11 @@ function CustomerDrawer({
               </Btn>{" "}
               {c.sequence ? (
                 <Btn disabled>In cadence ({c.seqStep}/{c.seqTotal})</Btn>
+              ) : null}{" "}
+              {c.sequence ? (
+                <div style={{ fontSize: 12, color: C.t3, marginTop: 6, flexBasis: "100%" }}>
+                  {decisionLine(c.sequence)}
+                </div>
               ) : sequencesEnabled ? (
                 <Btn onClick={startSequence} disabled={seqStarting || !c.cadenceable}>
                   {seqStarting ? "Starting…" : "Start Cadence"}

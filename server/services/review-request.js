@@ -406,6 +406,23 @@ function nextTouchRunAt({ startedAt, step, now = new Date() }) {
 }
 
 /**
+ * The cadence's scheduling decision as the Reviews page and the completion
+ * panel show it (owner directive 2026-09-07): one reason code, the planned
+ * send (null while waiting), the next time the runner looks again, and
+ * whether the owner has anything to do — a routine deferral is
+ * ownerAction 'none', never a send/drop question.
+ */
+function sequenceDecision({ reason, plannedAt = null, nextEvalAt = null, ownerAction = "none" }) {
+  return JSON.stringify({
+    reason,
+    plannedAt: plannedAt ? new Date(plannedAt).toISOString() : null,
+    nextEvalAt: nextEvalAt ? new Date(nextEvalAt).toISOString() : null,
+    ownerAction,
+    at: new Date().toISOString(),
+  });
+}
+
+/**
  * Smart review send-time calculator.
  * Instead of a flat 90-180 min delay, pick the moment the customer is most
  * likely relaxed, on their phone, and has experienced the result of the service.
@@ -414,12 +431,13 @@ function nextTouchRunAt({ startedAt, step, now = new Date() }) {
  * @param {string} serviceType - e.g. 'pest_control', 'lawn_care', 'mosquito'
  * @returns {Date} optimal send timestamp
  */
-function calculateReviewSendTime(completedAt, serviceType) {
+function calculateReviewSendTime(completedAt, serviceType, { jitter: withJitter = true } = {}) {
   // Read ET wall-clock — server runs UTC, so getHours/getDay would be 4-5h off.
   const { hour, dayOfWeek: day } = etParts(completedAt);
 
-  // ±15 min jitter so messages don't all land at the same second
-  const jitter = () => Math.floor(Math.random() * 31) - 15;
+  // ±15 min jitter so messages don't all land at the same second. Off for
+  // the completion panel's preview (same rules, stable answer).
+  const jitter = () => (withJitter ? Math.floor(Math.random() * 31) - 15 : 0);
 
   // Build a Date at ET hour H of `date`'s ET calendar day (respecting DST).
   function atHour(date, targetHour) {
@@ -1327,6 +1345,9 @@ const ReviewService = {
     delayMinutes,
     legacyDelayMinutes,
     triggeredBy = "auto",
+    // Completion panel "Customer asked for the link": { by, at, source }.
+    // Recorded on the sequence; the ask still goes at the next cadence tick.
+    customerRequested = null,
   }) {
     const { isEnabled } = require("../config/feature-gates");
     if (!isEnabled("reviewSequences")) {
@@ -1379,7 +1400,8 @@ const ReviewService = {
       // the operator's selection must not be silently ignored in cadence
       // mode (Codex P2, r2). 0 = "Now" → first cron tick.
       const explicitDelay = Number(delayMinutes);
-      const firstTouchAt = delayMinutes !== undefined && delayMinutes !== null && Number.isFinite(explicitDelay)
+      const explicitTiming = delayMinutes !== undefined && delayMinutes !== null && Number.isFinite(explicitDelay);
+      const firstTouchAt = explicitTiming
         ? new Date(Date.now() + Math.max(0, explicitDelay) * 60000)
         : calculateReviewSendTime(
           completedAt ? new Date(completedAt) : new Date(),
@@ -1395,6 +1417,12 @@ const ReviewService = {
         firstTouchAt,
         plan: resolved.plan,
         seriesFinal: resolved.seriesFinal === true,
+        customerRequested: customerRequested || null,
+        decision: sequenceDecision({
+          reason: customerRequested ? "customer_requested" : explicitTiming ? "operator_timing" : "smart_window",
+          plannedAt: firstTouchAt,
+          nextEvalAt: firstTouchAt,
+        }),
       });
       if (result?.started) {
         logger.info(
@@ -1472,6 +1500,9 @@ const ReviewService = {
         triggeredBy: "auto",
         delayMinutes,
         legacyDelayMinutes: 120,
+        customerRequested: notes.customerRequestedReview && typeof notes.customerRequestedReview === "object"
+          ? notes.customerRequestedReview
+          : null,
       });
       // Honest outcome (codex #3235 r11 P1): the paid webhook is one-shot,
       // so a swallowed plan_resolution_failed here would silently lose the
@@ -3947,7 +3978,7 @@ const ReviewService = {
   // real provider-settle seconds.
   _SUPERSEDE_RETRY_DELAY_MS: 1500,
 
-  async startReviewSequence({ customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false }) {
+  async startReviewSequence({ customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, scheduledServiceId = null, firstTouchAt = null, seriesFinal = false, customerRequested = null, decision = null }) {
     const customer = await db("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
     if (customer.deleted_at) throw new Error("Customer is archived");
@@ -4180,6 +4211,12 @@ const ReviewService = {
           service_type: svcType,
           started_by: startedBy || null,
           started_at: new Date(),
+          customer_requested: customerRequested ? JSON.stringify(customerRequested) : null,
+          decision: decision || sequenceDecision({
+            reason: firstTouchAt ? "operator_timing" : "immediate",
+            plannedAt: firstTouchAt || new Date(),
+            nextEvalAt: firstTouchAt || new Date(),
+          }),
         })
           .returning("*");
       });
@@ -4275,9 +4312,10 @@ const ReviewService = {
           // Defer, never send on a possibly-stale plan (codex #3235 r19 P1):
           // a follow-up booked after enrollment may have flipped this to a
           // single first-treatment ask, so retry the classification next tick.
+          const nextEvalAt = new Date(Date.now() + 30 * 60 * 1000);
           await db("review_sequences")
             .where({ id: seq.id, status: "active" })
-            .update({ next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() })
+            .update({ next_run_at: nextEvalAt, decision: sequenceDecision({ reason: "plan_reresolution_unavailable", nextEvalAt }), updated_at: new Date() })
             .catch(() => {});
           return { ran: false, deferred: true, reason: "plan_reresolution_unavailable" };
         }
@@ -4303,9 +4341,10 @@ const ReviewService = {
       } catch {
         // Same posture as re.error (codex r19): a blip mid-swap must defer,
         // not send against a possibly half-updated plan/flag pair.
+        const nextEvalAt = new Date(Date.now() + 30 * 60 * 1000);
         await db("review_sequences")
           .where({ id: seq.id, status: "active" })
-          .update({ next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() })
+          .update({ next_run_at: nextEvalAt, decision: sequenceDecision({ reason: "plan_reresolution_unavailable", nextEvalAt }), updated_at: new Date() })
           .catch(() => {});
         return { ran: false, deferred: true, reason: "plan_reresolution_unavailable" };
       }
@@ -4392,9 +4431,10 @@ const ReviewService = {
     } catch {
       // Fail CLOSED: sendOutreachTouch does NOT enforce the lifetime cap, so a
       // stats blip must defer the step (retry next tick), not send a 4th ask.
+      const nextEvalAt = new Date(Date.now() + 30 * 60 * 1000);
       await db("review_sequences")
         .where({ id: seq.id, status: "active" })
-        .update({ next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() })
+        .update({ next_run_at: nextEvalAt, decision: sequenceDecision({ reason: "cap_stats_unavailable", nextEvalAt }), updated_at: new Date() })
         .catch(() => {});
       return { ran: false, deferred: true, reason: "cap_stats_unavailable" };
     }
@@ -4489,9 +4529,10 @@ const ReviewService = {
       // its own outcome (e.g. the review_requests insert or short-link fails),
       // restore a retry time so the cron picks the sequence up again instead of
       // stranding it with next_run_at = null.
+      const nextEvalAt = new Date(Date.now() + 30 * 60 * 1000);
       await db("review_sequences")
         .where({ id: seq.id, status: "active" })
-        .update({ next_run_at: new Date(Date.now() + 30 * 60 * 1000), updated_at: new Date() })
+        .update({ next_run_at: nextEvalAt, decision: sequenceDecision({ reason: "send_error_retry", nextEvalAt }), updated_at: new Date() })
         .catch(() => {});
       throw err;
     }
@@ -4522,6 +4563,7 @@ const ReviewService = {
         touches_sent: seq.touches_sent + 1,
         last_touch_at: new Date(),
         next_run_at,
+        decision: sequenceDecision({ reason: "follow_up_scheduled", plannedAt: next_run_at, nextEvalAt: next_run_at }),
         updated_at: new Date(),
       });
       return { ran: true, sent: true, step: seq.current_step };
@@ -4533,9 +4575,14 @@ const ReviewService = {
       return stop("opted_out");
     }
 
-    // Deferred / transient → retry this step later without advancing.
+    // Deferred / transient → retry this step later without advancing. A
+    // send-window hold (nextAllowedAt) is a planned send; a provider blip is
+    // a re-check.
     const retryAt = outcome.nextAllowedAt ? new Date(outcome.nextAllowedAt) : new Date(Date.now() + 30 * 60 * 1000);
-    await db("review_sequences").where({ id: seq.id }).update({ next_run_at: retryAt, updated_at: new Date() });
+    const decision = outcome.nextAllowedAt
+      ? sequenceDecision({ reason: "send_window", plannedAt: retryAt, nextEvalAt: retryAt })
+      : sequenceDecision({ reason: outcome.reason || "provider_retry", nextEvalAt: retryAt });
+    await db("review_sequences").where({ id: seq.id }).update({ next_run_at: retryAt, decision, updated_at: new Date() });
     return { ran: false, deferred: true, retryAt };
   },
 
@@ -5147,11 +5194,21 @@ const ReviewService = {
     const map = {};
     rows.forEach((r) => {
       const plan = Array.isArray(r.plan) ? r.plan : JSON.parse(r.plan || "[]");
+      const parseJson = (v) => {
+        if (!v) return null;
+        if (typeof v === "object") return v;
+        try { return JSON.parse(v); } catch { return null; }
+      };
       map[r.customer_id] = {
         id: r.id,
         currentStep: r.current_step,
         totalSteps: plan.length,
         nextRunAt: r.next_run_at,
+        // next_run_at NULL on an active row = the runner holds the send claim
+        // right now (or an inline start is in progress).
+        sending: r.next_run_at == null,
+        decision: parseJson(r.decision),
+        customerRequested: parseJson(r.customer_requested),
       };
     });
     return map;
@@ -5370,6 +5427,7 @@ const ReviewService = {
 ReviewService.__private = {
   retryAtForDeferredSend,
   calculateReviewSendTime,
+  sequenceDecision,
   nextTouchRunAt,
   shiftToWeekdayMorning,
   buildReviewUrl,

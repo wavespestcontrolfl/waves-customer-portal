@@ -665,6 +665,89 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(seq.next_run_at.getTime()).toBeLessThan(Date.now() + 48 * 3600000);
   });
 
+  describe('decision record (owner directive 2026-09-07: panel and Reviews page explain the same decision)', () => {
+    const parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
+
+    test('a smart-window enrollment records the planned Day-0 send with owner action none', async () => {
+      mockGates.reviewSequences = true;
+      const mock = makeMock({ customers: [{ id: 'dc-1', first_name: 'Ana', last_name: 'M', phone: '+19410000132', nearest_location_id: 'sarasota' }] });
+      db.mockImplementation(mock);
+
+      const result = await ReviewService.enrollPostService({ customerId: 'dc-1', serviceType: 'Quarterly Pest Control', completedAt: new Date() });
+
+      expect(result.started).toBe(true);
+      const seq = mock.__state.rows.review_sequences[0];
+      const d = parse(seq.decision);
+      expect(d).toMatchObject({ reason: 'smart_window', ownerAction: 'none' });
+      expect(new Date(d.plannedAt).getTime()).toBe(seq.next_run_at.getTime());
+      expect(seq.customer_requested == null).toBe(true);
+    });
+
+    test('"Customer asked for the link" is recorded (who/when/source) and the ask waits for the next tick — not an instant send', async () => {
+      mockGates.reviewSequences = true;
+      const mock = makeMock({ customers: [{ id: 'dc-2', first_name: 'Dana', last_name: 'Q', phone: '+19410000133', nearest_location_id: 'bradenton' }] });
+      db.mockImplementation(mock);
+      const requested = { by: 'tech-1', byName: 'Adam', at: new Date().toISOString(), source: 'completion_panel' };
+
+      const result = await ReviewService.enrollPostService({ customerId: 'dc-2', serviceType: 'pest control', completedAt: new Date(), delayMinutes: 0, customerRequested: requested });
+
+      expect(result.started).toBe(true);
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      const seq = mock.__state.rows.review_sequences[0];
+      expect(parse(seq.customer_requested)).toEqual(requested);
+      expect(parse(seq.decision)).toMatchObject({ reason: 'customer_requested', ownerAction: 'none' });
+      expect(seq.next_run_at.getTime()).toBeLessThanOrEqual(Date.now() + 1000);
+    });
+
+    test('an operator-picked time records operator_timing', async () => {
+      mockGates.reviewSequences = true;
+      const mock = makeMock({ customers: [{ id: 'dc-3', first_name: 'Lee', last_name: 'K', phone: '+19410000134', nearest_location_id: 'parrish' }] });
+      db.mockImplementation(mock);
+
+      await ReviewService.enrollPostService({ customerId: 'dc-3', completedAt: new Date(), delayMinutes: 600 });
+
+      expect(parse(mock.__state.rows.review_sequences[0].decision)).toMatchObject({ reason: 'operator_timing' });
+    });
+
+    test('a send-window hold records the planned send; a sent touch records the scheduled follow-up', async () => {
+      mockGates.reviewSequences = true;
+      const nextAllowedAt = new Date(Date.now() + 9 * 3600000);
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, deferred: true, nextAllowedAt: nextAllowedAt.toISOString(), code: 'SEND_WINDOW' });
+      const mock = makeMock({
+        customers: [{ id: 'dc-4', first_name: 'Mae', last_name: 'R', phone: '+19410000135', nearest_location_id: 'venice' }],
+        review_sequences: [{
+          id: 'seq-dc4', customer_id: 'dc-4', status: 'active', current_step: 0, touches_sent: 0, tech_name: 'Adam',
+          plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'day0_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true }]),
+          started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+        }],
+      });
+      db.mockImplementation(mock);
+
+      await ReviewService.processReviewSequences();
+      const held = mock.__state.rows.review_sequences[0];
+      expect(parse(held.decision)).toMatchObject({ reason: 'send_window', plannedAt: nextAllowedAt.toISOString(), ownerAction: 'none' });
+      expect(held.next_run_at.getTime()).toBe(nextAllowedAt.getTime());
+
+      held.next_run_at = new Date(Date.now() - 1000);
+      await ReviewService.processReviewSequences();
+      const sent = mock.__state.rows.review_sequences[0];
+      expect(sent.current_step).toBe(1);
+      const d = parse(sent.decision);
+      expect(d.reason).toBe('follow_up_scheduled');
+      expect(new Date(d.plannedAt).getTime()).toBe(sent.next_run_at.getTime());
+    });
+
+    test('getActiveSequencesForCustomers exposes the parsed decision and the request capture', async () => {
+      const mock = makeMock({
+        review_sequences: [{ id: 'seq-dc5', customer_id: 'dc-5', status: 'active', current_step: 1, plan: JSON.stringify([{ day: 0 }, { day: 4 }]), next_run_at: new Date(), decision: JSON.stringify({ reason: 'follow_up_scheduled', ownerAction: 'none' }), customer_requested: JSON.stringify({ by: 'tech-1', source: 'completion_panel' }) }],
+      });
+      db.mockImplementation(mock);
+
+      const map = await ReviewService.getActiveSequencesForCustomers(['dc-5']);
+      expect(map['dc-5']).toMatchObject({ currentStep: 1, totalSteps: 2, sending: false, decision: { reason: 'follow_up_scheduled' }, customerRequested: { source: 'completion_panel' } });
+    });
+  });
+
   test('enrollPostService is idempotent per customer — an active cadence blocks a second enrollment', async () => {
     mockGates.reviewSequences = true;
     const mock = makeMock({

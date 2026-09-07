@@ -904,6 +904,24 @@ router.get('/outreach-activity', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/reviews/send-time-preview?serviceType=… — what "Automatic"
+// means for a completion happening now: the cadence's own smart-window rule
+// (calculateReviewSendTime, jitter off) so the completion panel previews the
+// decision dispatch will make, not a client-side approximation. Also tells
+// the panel whether cadence mode owns the ask (a separate text) or the legacy
+// path bundles an immediate ask into the completion SMS.
+router.get('/send-time-preview', requireTechOrAdmin, (req, res) => {
+  const serviceType = typeof req.query.serviceType === 'string' ? req.query.serviceType.slice(0, 100) : '';
+  const at = ReviewService.__private.calculateReviewSendTime(new Date(), serviceType, { jitter: false });
+  res.json({
+    at: at.toISOString(),
+    reviewSequencesEnabled: isEnabled('reviewSequences'),
+    // processReviewSequences runs at :14 and :44 — an immediate ask waits for
+    // the next tick, up to 30 minutes.
+    cadenceTickMinutes: 30,
+  });
+});
+
 // GET /api/admin/reviews/outreach-templates — template registry for the composer.
 router.get('/outreach-templates', requireAdmin, (req, res) => {
   res.json({
