@@ -1651,8 +1651,9 @@ const InvoiceService = {
           token,
           invoice_number: invoiceNumber,
           customer_id: customerId,
-          ...(require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM')
-            ? { customer_address_snapshot: require('./invoice-address').invoiceAddressSnapshot(customer) } : {}),
+          // Freeze at creation even when the bar is disabled: a primary flip
+          // can commit between this customer read and the invoice INSERT.
+          customer_address_snapshot: require('./invoice-address').invoiceAddressSnapshot(customer),
           title,
           line_items: JSON.stringify(items),
           subtotal,
