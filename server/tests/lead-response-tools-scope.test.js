@@ -1,0 +1,129 @@
+const mockSend = jest.fn();
+const mockContext = jest.fn(async customer => ({ customerId: customer.id }));
+const mockPipeline = jest.fn();
+jest.mock('../services/twilio', () => ({ sendSMS: mockSend }));
+jest.mock('../services/context-aggregator', () => ({ getContextForCustomer: mockContext }));
+jest.mock('../services/pipeline-manager', () => ({ onEvent: mockPipeline }));
+jest.mock('../services/short-url', () => ({}));
+jest.mock('../services/pricing-authority-gate', () => ({}));
+jest.mock('../services/estimate-automation-duplicates', () => ({}));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn() }));
+const mockState = {};
+const mockDb = jest.fn(table => {
+  const filters = {};
+  let invocation;
+  const builder = {
+    where: jest.fn((key, value) => { Object.assign(filters, typeof key === 'object' ? key : { [key]: value }); return builder; }),
+    whereNull: jest.fn(key => { filters[key] = null; return builder; }),
+    whereRaw: jest.fn((_sql, bindings) => { invocation = bindings; return builder; }),
+    forUpdate: jest.fn(() => builder),
+    first: jest.fn(async () => {
+      const row = table === 'leads' ? mockState.lead : table === 'customers' ? mockState.customer : mockState.activity;
+      if (row && invocation) {
+        const metadata = JSON.parse(row.metadata);
+        if (metadata.sessionId !== invocation[0] || metadata.toolUseId !== invocation[1]) return undefined;
+      }
+      return row && Object.entries(filters).every(([key, value]) => (row[key] ?? null) === value) ? row : undefined;
+    }),
+    insert: jest.fn(value => {
+      if (mockState.insertFails) throw new Error('storage unavailable');
+      mockState.activity = { id: `activity-${++mockState.inserts}`, ...value };
+      return { returning: async () => [mockState.activity] };
+    }),
+  };
+  return builder;
+});
+mockDb.transaction = jest.fn(async callback => callback(mockDb));
+jest.mock('../models/db', () => mockDb);
+const { executeLeadTool } = require('../services/lead-response-tools');
+const context = { leadId: '00000000-0000-4000-8000-000000000001', customerId: '00000000-0000-4000-8000-000000000002', sessionId: 'session-1', toolUseId: 'tool-1' };
+beforeEach(() => {
+  jest.clearAllMocks();
+  mockState.lead = { id: context.leadId, customer_id: context.customerId, phone: '+19415550100' };
+  mockState.customer = { id: context.customerId, phone: '+19415550100' };
+  mockState.activity = null;
+  mockState.inserts = 0;
+  mockState.insertFails = false;
+  process.env.ADAM_PHONE = '+19415550101';
+  mockSend.mockResolvedValue({ success: true, sid: 'SM_fixture' });
+});
+afterAll(() => { delete process.env.ADAM_PHONE; });
+test('requires server context before database lookup', async () => {
+  expect(await executeLeadTool('get_customer_context', {})).toHaveProperty('error');
+  expect(mockDb).not.toHaveBeenCalled();
+});
+test.each([
+  { customer_id: '00000000-0000-4000-8000-000000000099' },
+  { lead_id: '00000000-0000-4000-8000-000000000099' },
+  { phone: '+19415550199' }, { phone: 'anonymous' }, { phone: '+4419415550100' },
+])('rejects foreign or malformed target %j', async input => {
+  expect(await executeLeadTool('get_customer_context', input, context)).toHaveProperty('error');
+  expect(mockContext).not.toHaveBeenCalled();
+});
+test.each(['deleted', 'repointed', 'customer_deleted'])('refuses %s subject', async mode => {
+  if (mode === 'deleted') mockState.lead.deleted_at = new Date();
+  if (mode === 'repointed') mockState.lead.customer_id = 'other';
+  if (mode === 'customer_deleted') mockState.customer.deleted_at = new Date();
+  expect(await executeLeadTool('get_customer_context', {}, context)).toHaveProperty('error');
+  expect(mockContext).not.toHaveBeenCalled();
+});
+test('uses resolved customer without shared-phone lookup', async () => {
+  expect(await executeLeadTool('get_customer_context', { phone: '(941) 555-0100' }, context)).toEqual({ customerId: context.customerId });
+  expect(mockContext).toHaveBeenCalledWith(mockState.customer);
+});
+test.each(['service_completed', 'subscription_cancelled', '__proto__'])('rejects non-lead event %s', async stage => {
+  expect(await executeLeadTool('update_lead_pipeline', { stage }, context)).toHaveProperty('error');
+  expect(mockPipeline).not.toHaveBeenCalled();
+});
+test('maps supported stage to assigned customer', async () => {
+  expect(await executeLeadTool('update_lead_pipeline', { stage: 'contacted' }, context)).toEqual({ updated: true, stage: 'contacted' });
+  expect(mockPipeline).toHaveBeenCalledWith(context.customerId, 'first_contact');
+});
+test('failed insert cannot report queued or alert', async () => {
+  mockState.insertFails = true;
+  await expect(executeLeadTool('queue_for_adam', { reason: 'Review', draft_response: 'Draft' }, context)).rejects.toThrow('storage unavailable');
+  expect(mockSend).not.toHaveBeenCalled();
+});
+test('saved draft survives alert failure; replay does not duplicate', async () => {
+  mockSend.mockRejectedValue(new Error('provider unavailable'));
+  const first = await executeLeadTool('queue_for_adam', { reason: 'Review', draft_response: 'Draft' }, context);
+  expect(first).toMatchObject({ queued: true, activityId: 'activity-1', alertStatus: 'failed' });
+  expect(await executeLeadTool('queue_for_adam', { reason: 'Review' }, context)).toEqual({ queued: true, activityId: 'activity-1', replayed: true });
+  expect(mockSend).toHaveBeenCalledTimes(1);
+});
+test('rechecks relationship inside draft transaction', async () => {
+  mockDb.transaction.mockImplementationOnce(async callback => {
+    mockState.lead.customer_id = 'other';
+    return callback(mockDb);
+  });
+  expect(await executeLeadTool('queue_for_adam', {}, context)).toHaveProperty('error');
+  expect(mockState.activity).toBeNull();
+  expect(mockSend).not.toHaveBeenCalled();
+});
+test('report persistence failure reports unsaved', async () => {
+  mockState.insertFails = true;
+  expect(await executeLeadTool('save_lead_response_report', {}, context)).toEqual({ saved: false, error: 'Lead response report could not be saved' });
+});
+
+
+test.each([
+  [undefined, 'failed'],
+  [{ success: false }, 'failed'],
+  [{ success: true, notificationUndelivered: true, suppressed: true }, 'failed'],
+  [{ success: true, notificationError: true, suppressed: true }, 'failed'],
+  [{ success: true, notificationRedirected: true, suppressed: true }, 'notified'],
+  [{ success: true, pushRouted: true, sid: 'push_fixture' }, 'notified'],
+  [{ success: true, gateBlocked: true }, 'suppressed'],
+  [{ success: true, suppressed: true }, 'suppressed'],
+  [{ success: true, sid: 'SM_fixture' }, 'sent'],
+])('reports adapter delivery honestly for %j', async (result, alertStatus) => {
+  mockSend.mockResolvedValue(result);
+  expect(await executeLeadTool('queue_for_adam', { reason: 'Review' }, context)).toMatchObject({ queued: true, alertStatus });
+});
+test.each([{ sessionId: 'session-2' }, { toolUseId: 'tool-2' }])('keeps independent queue invocations separate: %j', async different => {
+  const first = await executeLeadTool('queue_for_adam', { reason: 'Review' }, context);
+  const second = await executeLeadTool('queue_for_adam', { reason: 'Review' }, { ...context, ...different });
+  expect(first.activityId).not.toBe(second.activityId);
+  expect(mockState.inserts).toBe(2);
+  expect(mockSend).toHaveBeenCalledTimes(2);
+});

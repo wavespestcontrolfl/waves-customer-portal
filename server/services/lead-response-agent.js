@@ -26,6 +26,7 @@ const { recordToolEvent } = require('./intelligence-bar/tool-events');
 const { LEAD_RESPONSE_AGENT_CONFIG } = require('./lead-response-agent-config');
 const { recordSessionUsage } = require('./llm-dispatch-metrics');
 const { isSessionTerminal, isSessionError } = require('./agent-control/session-events');
+const { readSessionFrames } = require('./agent-control/session-stream');
 
 const leadToolBreaker = getBreaker('lead-response-agent');
 
@@ -87,28 +88,10 @@ async function* streamSessionEvents(sessionId) {
     throw Object.assign(new Error(`Stream error ${res.status}: ${err}`), { status: res.status, code: `anthropic_${res.status}` });
   }
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop();
-
-    let currentEvent = null;
-    for (const line of lines) {
-      if (line.startsWith('event: ')) {
-        currentEvent = line.slice(7).trim();
-      } else if (line.startsWith('data: ') && currentEvent) {
-        try {
-          yield { event: currentEvent, data: JSON.parse(line.slice(6)) };
-        } catch { /* skip */ }
-        currentEvent = null;
-      }
-    }
+  for await (const { event, data } of readSessionFrames(res.body)) {
+    let parsed;
+    try { parsed = JSON.parse(data); } catch { continue; }
+    yield { event, data: parsed };
   }
 }
 
@@ -206,6 +189,7 @@ const LeadResponseAgent = {
           const toolName = data.name;
           const toolInput = data.input || {};
           const toolUseId = data.id;
+          const toolContext = { leadId: lead.leadId, customerId: lead.customerId, sessionId, toolUseId };
 
           logger.info(`[lead-agent] Tool: ${toolName}`);
 
@@ -221,12 +205,13 @@ const LeadResponseAgent = {
           if (toolName === 'send_lead_response' && criticalFailures.length > 0) {
             logger.warn(`[lead-agent] Blocking auto-send — critical tool failures: ${criticalFailures.join(', ')}. Queueing draft for human review.`);
             try {
-              await executeLeadTool('queue_for_adam', {
+              const queued = await executeLeadTool('queue_for_adam', {
                 lead_id: lead.leadId,
                 customer_id: lead.customerId,
                 reason: `Auto-send blocked — critical context tools failed (${criticalFailures.join(', ')}). Please review and follow up.`,
                 draft_response: toolInput.message || '',
-              });
+              }, toolContext);
+              if (queued?.queued !== true) throw new Error(queued?.error || 'Draft was not saved');
               toolResult = {
                 sent: false,
                 queued: true,
@@ -247,7 +232,7 @@ const LeadResponseAgent = {
             if (CRITICAL_CONTEXT_TOOLS.has(toolName)) criticalFailures.push(toolName);
           } else {
             try {
-              toolResult = await executeLeadTool(toolName, toolInput);
+              toolResult = await executeLeadTool(toolName, toolInput, toolContext);
               if (isToolFailure(toolResult)) {
                 failed = true;
                 toolError = toolResult.error || 'tool returned error';
@@ -265,7 +250,7 @@ const LeadResponseAgent = {
                 if (toolName === 'send_lead_response' && toolResult && toolResult.sent === true) {
                   actionTaken = 'auto_sent';
                 }
-                if (toolName === 'queue_for_adam') actionTaken = 'queued_for_adam';
+                if (toolName === 'queue_for_adam' && toolResult?.queued === true) actionTaken = 'queued_for_adam';
               }
             } catch (err) {
               toolResult = { error: `Tool failed: ${err.message}` };
