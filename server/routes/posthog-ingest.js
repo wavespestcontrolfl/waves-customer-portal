@@ -26,7 +26,8 @@
  *    to /64 via the shared unauthenticated key) sits AFTER the gate so
  *    gate-off probes stay an unobservable 404 and never spend budget.
  *  - Cookies and Authorization never cross in either direction; Referer is
- *    dropped (a tokenized portal URL is not PostHog's business).
+ *    dropped (a tokenized portal URL is not PostHog's business); every
+ *    client-IP / proxy-chain header (incl. RFC 7239 Forwarded) is dropped.
  *  - X-Forwarded-For carries the visitor IP (req.ip, trust-proxy aware) so
  *    PostHog's GeoIP keeps working — otherwise every event geolocates to
  *    Railway.
@@ -60,6 +61,13 @@ const RATE_MAX_PER_MIN = Math.max(1, parseInt(process.env.POSTHOG_INGEST_RATE_MA
 // and posthog-js simply retries later. Analytics is best-effort; the portal
 // serving customers is not.
 const MAX_IN_FLIGHT = Math.max(1, parseInt(process.env.POSTHOG_INGEST_MAX_IN_FLIGHT, 10) || 32);
+// Per-IP share of those slots (same /64-collapsed key as the limiter): a
+// browser tab keeps 1–2 ingest requests open at once, so 4 is generous for a
+// real visitor and stops one caller from parking on every slot with partial
+// uploads (32 slots × 15 s deadline needs only 128 req/min — under the
+// per-minute budget).
+const MAX_IN_FLIGHT_PER_IP = Math.max(1, parseInt(process.env.POSTHOG_INGEST_MAX_IN_FLIGHT_PER_IP, 10) || 4);
+const inFlightByKey = new Map();
 // A slot is reserved BEFORE the body is read, so a stalled upload must not
 // keep it: the whole request body has this long to arrive (posthog-js bodies
 // are at most a replay batch — well under a second on any real link).
@@ -75,8 +83,12 @@ const DROP_REQUEST_HEADERS = new Set([
   'host', 'cookie', 'authorization', 'referer', 'connection', 'content-length',
   'content-encoding', 'transfer-encoding', 'keep-alive', 'upgrade', 'te', 'trailer',
   'proxy-authorization', 'proxy-connection', 'accept-encoding',
-  'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip',
-  'cf-connecting-ip', 'true-client-ip',
+  // Every client-IP / proxy-chain header, the RFC 7239 `Forwarded` one
+  // included: the ONLY attribution PostHog sees is the X-Forwarded-For we
+  // set from req.ip below.
+  'forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto',
+  'x-forwarded-port', 'x-real-ip', 'x-client-ip', 'x-cluster-client-ip',
+  'cf-connecting-ip', 'true-client-ip', 'fastly-client-ip', 'fly-client-ip', 'via',
 ]);
 // fetch() hands back a DECODED body, so the upstream encoding/length headers
 // would lie; set-cookie and HSTS are PostHog's, not ours.
@@ -121,6 +133,9 @@ function releaseSlot(res) {
   if (res.locals.ingestSlot) {
     res.locals.ingestSlot = false;
     inFlight -= 1;
+    const key = res.locals.ingestKey;
+    const n = (inFlightByKey.get(key) || 1) - 1;
+    if (n <= 0) inFlightByKey.delete(key); else inFlightByKey.set(key, n);
   }
   if (res.locals.ingestUploadTimer) {
     clearTimeout(res.locals.ingestUploadTimer);
@@ -206,9 +221,14 @@ router.use(rateLimit({
 // proxy()'s finally (after upstream settles) or by the error handler below
 // (a 413 / aborted upload that never reached proxy()).
 router.use((req, res, next) => {
-  if (inFlight >= MAX_IN_FLIGHT) return res.status(503).set('Retry-After', '5').end();
+  const key = unauthenticatedAuthLimitKey(req) || 'unknown';
+  if (inFlight >= MAX_IN_FLIGHT || (inFlightByKey.get(key) || 0) >= MAX_IN_FLIGHT_PER_IP) {
+    return res.status(503).set('Retry-After', '5').end();
+  }
   inFlight += 1;
+  inFlightByKey.set(key, (inFlightByKey.get(key) || 0) + 1);
   res.locals.ingestSlot = true;
+  res.locals.ingestKey = key;
   // Upload deadline: a body still incomplete when this fires is torn down,
   // which surfaces in express.raw as an aborted-request error → the error
   // handler below releases the slot. Cleared once the body is in (proxy()).
@@ -242,3 +262,4 @@ module.exports.upstreamUrl = upstreamUrl;
 module.exports.API_HOST = API_HOST;
 module.exports.ASSET_HOST = ASSET_HOST;
 module.exports.inFlightCount = () => inFlight;
+module.exports.inFlightCountFor = (key) => inFlightByKey.get(key) || 0;

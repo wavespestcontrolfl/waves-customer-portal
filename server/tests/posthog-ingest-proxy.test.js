@@ -5,7 +5,7 @@
  *    env change after the router loaded flips it); 405 for non GET/POST/OPTIONS
  *  - upstream host is FIXED: /static/* and /array/* → assets host, everything else → API host,
  *    query string preserved, ../ cannot escape the host
- *  - cookies / authorization / referer never reach PostHog; origin + content-type
+ *  - cookies / authorization / referer / Forwarded / every client-IP header never reach PostHog; origin + content-type
  *    do; X-Forwarded-For carries the visitor IP; raw POST body forwarded byte-for-byte;
  *    a gzip-encoded body arrives inflated WITHOUT a content-encoding label
  *  - upstream status/body/CORS headers pass through; set-cookie and
@@ -17,7 +17,8 @@
  *    and IPv6 addresses in one /64 share a bucket (shared unauthenticated key);
  *    a process-wide in-flight cap answers 503 before buffering, frees on completion,
  *    and a client disconnect aborts upstream while the slot is held until it settles;
- *    a stalled upload is torn down at the upload deadline and frees its slot
+ *    a stalled upload is torn down at the upload deadline and frees its slot;
+ *    a per-IP share of the slots keeps one caller off the rest
  *
  * Runs the real router on an ephemeral Express listener with global.fetch stubbed.
  */
@@ -161,6 +162,9 @@ describe('request boundary', () => {
         authorization: 'Bearer nope',
         referer: 'https://portal.wavespestcontrol.com/estimate/tok_abc',
         'x-forwarded-for': '203.0.113.9',
+        forwarded: 'for=198.51.100.99;host=evil.example;proto=https',
+        'x-real-ip': '198.51.100.98',
+        via: '1.1 something',
       },
       body: payload,
     });
@@ -176,6 +180,10 @@ describe('request boundary', () => {
     expect(init.headers.host).toBeUndefined();
     // trust proxy on → req.ip is the client behind the edge, not the edge.
     expect(init.headers['x-forwarded-for']).toBe('203.0.113.9');
+    // No other attribution header survives — the RFC 7239 one included.
+    expect(init.headers.forwarded).toBeUndefined();
+    expect(init.headers['x-real-ip']).toBeUndefined();
+    expect(init.headers.via).toBeUndefined();
     expect(init.redirect).toBe('manual');
   });
 
@@ -411,6 +419,39 @@ describe('per-IP limiter after the gate', () => {
       expect(fetchCalls).toHaveLength(0);
       expect(await get(base, '/ingest/flags/', '203.0.113.22')).toBe(200);
       stalled.destroy();
+    } finally {
+      await new Promise((done) => srv.close(done));
+    }
+  });
+
+  test('per-IP share of the in-flight slots: one caller cannot park on all of them', async () => {
+    let r;
+    jest.isolateModules(() => {
+      process.env.POSTHOG_INGEST_MAX_IN_FLIGHT = '8';
+      process.env.POSTHOG_INGEST_MAX_IN_FLIGHT_PER_IP = '1';
+      r = require('../routes/posthog-ingest');
+      delete process.env.POSTHOG_INGEST_MAX_IN_FLIGHT;
+      delete process.env.POSTHOG_INGEST_MAX_IN_FLIGHT_PER_IP;
+    });
+    const { srv, base } = await listen(r);
+    let releaseUpstream;
+    const held = new Promise((resolve) => { releaseUpstream = resolve; });
+    fetchImpl = async () => { await held; return upstreamResponse(); };
+    try {
+      const first = get(base, '/ingest/flags/', '203.0.113.30');
+      for (let i = 0; i < 50 && r.inFlightCountFor('203.0.113.30') < 1; i++) await new Promise((t) => setTimeout(t, 10));
+      expect(r.inFlightCountFor('203.0.113.30')).toBe(1);
+      // Same IP (and a sibling inside its /64 for v6) is over its share; another IP is not.
+      expect(await get(base, '/ingest/flags/', '203.0.113.30')).toBe(503);
+      const other = get(base, '/ingest/flags/', '203.0.113.31');
+      for (let i = 0; i < 50 && r.inFlightCount() < 2; i++) await new Promise((t) => setTimeout(t, 10));
+      expect(r.inFlightCount()).toBe(2);
+      releaseUpstream();
+      expect(await first).toBe(200);
+      expect(await other).toBe(200);
+      for (let i = 0; i < 50 && r.inFlightCount() > 0; i++) await new Promise((t) => setTimeout(t, 10));
+      expect(r.inFlightCountFor('203.0.113.30')).toBe(0);
+      expect(r.inFlightCount()).toBe(0);
     } finally {
       await new Promise((done) => srv.close(done));
     }

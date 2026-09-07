@@ -619,16 +619,19 @@ never resolve off-host (SSRF, Codex r1 on #4027); GET/POST/OPTIONS only
 keyed by the shared `unauthenticatedAuthLimitKey`, so IPv6 collapses to /64)
 sits AFTER the gate so gate-off probes stay an unobservable 404 and never
 spend budget; a process-wide in-flight cap (`POSTHOG_INGEST_MAX_IN_FLIGHT`,
-default 32; fast 503 + `Retry-After`) is checked BEFORE the body is buffered
-so concurrent bytes are bounded (32 × 2 MB), not just requests per minute —
+default 32; fast 503 + `Retry-After`) with a per-IP share of it
+(`POSTHOG_INGEST_MAX_IN_FLIGHT_PER_IP`, default 4, same /64 key as the
+limiter) is checked BEFORE the body is buffered so concurrent bytes are
+bounded (32 × 2 MB) and one caller cannot park on every slot —
 a client disconnect aborts the upstream call and the slot is held until
 that call settles, so upload-and-hang-up loops cannot exceed the cap, and an
 upload deadline (`POSTHOG_INGEST_UPLOAD_TIMEOUT_MS`, default 15 s) tears down
 a body that has not fully arrived so stalled uploads cannot sit on the slots;
 2 MB raw body cap (413); 10 s upstream timeout (502).
 Inbound `cookie`, `authorization`, `referer`, `content-encoding` (the raw
-body parser has already inflated the bytes), hop-by-hop and client-IP
-headers are stripped and `X-Forwarded-For` is set to `req.ip`
+body parser has already inflated the bytes), hop-by-hop, `Via` and every
+client-IP / proxy-chain header — RFC 7239 `Forwarded`, `X-Forwarded-*`,
+`X-Real-IP`, CDN client-IP variants — are stripped and `X-Forwarded-For` is set to `req.ip`
 (trust-proxy aware) so PostHog GeoIP survives; `origin` and `content-type`
 pass through so PostHog's own CORS reflection answers the browser (spoke
 origins never touch the portal allowlist). Outbound `set-cookie`,
