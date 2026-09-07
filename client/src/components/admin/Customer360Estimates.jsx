@@ -37,9 +37,21 @@ export default function Customer360Estimates({ estimates }) {
           <Badge className="!h-auto !min-h-6 !py-1 normal-case tracking-normal">{estimate.status || "Unknown status"}{estimate.archived_at && " · Archived"}</Badge>
         </div>
         <dl className="c360-estimate-totals">
+          <div><dt>Quoted monthly</dt><dd>{quotedAmount(estimate.monthly_total)}</dd></div>
           <div><dt>Quoted annual recurring</dt><dd>{quotedAmount(estimate.annual_total)}</dd></div>
           <div><dt>Quoted one-time</dt><dd>{quotedAmount(estimate.onetime_total)}</dd></div>
         </dl>
+        <div className="c360-estimate-applications">
+          <h3 className="text-14 font-medium mb-2">Per application</h3>
+          {(estimate.priceReferences || []).length > 0 ? <dl>
+            {estimate.priceReferences.map((line, index) => <div key={index}>
+              <dt>{line.name}</dt>
+              <dd>{line.perApplicationPrice != null ? quotedAmount(line.perApplicationPrice)
+                : line.monthlyPrice != null ? `${quotedAmount(line.monthlyPrice)} · billed monthly`
+                  : "Not recorded"}</dd>
+            </div>)}
+          </dl> : <p className="text-14 text-ink-secondary">No per-application amount recorded.</p>}
+        </div>
         <div className="flex flex-wrap items-center justify-between gap-3 text-14 text-ink-secondary">
           <span>{estimate.created_at ? formatETDate(estimate.created_at, { month: "short", day: "numeric", year: "numeric" }) : "No creation date"}</span>
           <a className="c360-outline-link u-focus-ring" href={`/admin/estimates?estimateId=${encodeURIComponent(estimate.id)}`}>Open estimate<ArrowUpRight size={15} aria-hidden="true" /></a>

@@ -48,8 +48,10 @@
 
 import { useState, useEffect, useRef, useId, lazy, Suspense } from "react";
 import { createPortal } from "react-dom";
+import "./customer360-workspace.css";
 import AddressAutocomplete, { sameAutocompleteAddress } from "../AddressAutocomplete";
 import {
+  ChevronDown,
   Bell,
   CheckCircle2,
   ChevronLeft,
@@ -84,6 +86,7 @@ import {
   Badge,
   Button,
   Input,
+  Select,
   Switch,
   Table,
   THead,
@@ -795,6 +798,16 @@ function canDeliverDocumentContract(contract) {
     !["signed", "cancelled", "voided"].includes(contract.status);
 }
 
+function ContractSection({ title, description, defaultOpen = false, children }) {
+  return <details className="c360-contract-section" open={defaultOpen}>
+    <summary>
+      <span><strong>{title}</strong><span>{description}</span></span>
+      <ChevronDown size={18} aria-hidden="true" />
+    </summary>
+    <div className="c360-contract-section-body">{children}</div>
+  </details>;
+}
+
 function ElectronicAuthorizationContractV2({
   customer,
   consents = [],
@@ -1178,7 +1191,228 @@ function ElectronicAuthorizationContractV2({
 
   return (
     <div className="c360-contracts-content">
-      {" "}
+      <div className="c360-contracts-heading">
+        <h2 className="text-18 font-medium">Contracts &amp; authorizations</h2>
+        <p className="text-14 text-ink-secondary">Review existing records or prepare a document for signing.</p>
+      </div>
+      <ContractSection title={`Contract history (${contracts.length})`} description="Status, delivery, and actions for existing agreements." defaultOpen>
+      <div className="mt-5">
+        {" "}
+
+        {contracts.length > 0 ? (
+          <div className="overflow-x-auto mb-5">
+            {" "}
+            <div className="c360-contract-records">
+              {contracts.map((contract) => (
+                <article key={contract.id} className="c360-contract-record">
+                    <div className="c360-contract-record-document">
+                      {contract.contractType === "document_template"
+                        ? contract.title || contract.documentTemplateKey || "Document"
+                        : paymentMethodLabel(contract)}
+                    </div>
+                    <div className="c360-contract-record-status">
+                      {" "}
+                      <Badge tone={contractStatusTone(contract.status)}>
+                        {contractStatusLabel(contract.status)}
+                      </Badge>{" "}
+                    </div>
+                    <div className="c360-contract-record-created"><span className="c360-contract-field-label">Created</span>{fmtDate(contract.createdAt)}</div>
+                    <div className="c360-contract-record-signed"><span className="c360-contract-field-label">Signed</span>
+                      {contract.signedAt ? fmtDate(contract.signedAt) : "—"}
+                    </div>
+                    <div className="c360-contract-record-delivery">
+                      <div className="flex flex-wrap gap-1">
+                        {contractDeliverySteps(contract).map((step) => (
+                          <span
+                            key={step.key}
+                            className={cn(
+                              "h-5 px-1.5 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label",
+                              step.done
+                                ? "bg-zinc-900 border-zinc-900 text-white"
+                                : "bg-zinc-50 border-zinc-200 text-ink-secondary",
+                            )}
+                            title={step.at ? fmtDate(step.at) : ""}
+                          >
+                            {step.label}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="c360-contract-record-actions">
+                      {" "}
+                      <div className="flex flex-wrap gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => loadContractAudit(contract)}
+                          disabled={auditLoading && auditContractId === contract.id}
+                        >
+                          {" "}
+                          <FileText size={13} className="mr-1" />
+                          Audit
+                        </Button>
+                        {canDeliverDocumentContract(contract) && (
+                          <>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => deliverDocumentContract(contract, "email")}
+                              disabled={!!contractDeliveryActionKey}
+                            >
+                              {" "}
+                              <Mail size={13} className="mr-1" />
+                              Email
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => deliverDocumentContract(contract, "sms")}
+                              disabled={!!contractDeliveryActionKey}
+                            >
+                              {" "}
+                              <MessageSquare size={13} className="mr-1" />
+                              SMS
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => deliverDocumentContract(contract, "email", "reminder")}
+                              disabled={!!contractDeliveryActionKey}
+                            >
+                              {" "}
+                              <Bell size={13} className="mr-1" />
+                              Remind
+                            </Button>
+                          </>
+                        )}
+                        {!["signed", "cancelled", "voided"].includes(
+                          contract.status,
+                        ) && (
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            onClick={() => regenerateLink(contract)}
+                            disabled={creatingContract}
+                          >
+                            {" "}
+                            <RotateCcw size={13} className="mr-1" />
+                            Link
+                          </Button>
+                        )}
+                        {contract.autoRenewalNoticeRequired &&
+                          !contract.autoRenewalNoticeSentAt && (
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => markRenewalNoticeSent(contract)}
+                              disabled={creatingContract}
+                            >
+                              {" "}
+                              <CheckCircle2 size={13} className="mr-1" />
+                              Notice
+                            </Button>
+                          )}
+                        {contract.status !== "cancelled" && (
+                          <Button
+                            size="sm"
+                            variant="danger"
+                            onClick={() => cancelContract(contract)}
+                            disabled={creatingContract}
+                          >
+                            {" "}
+                            <XCircle size={13} className="mr-1" />
+                            Cancel
+                          </Button>
+                        )}
+                      </div>{" "}
+                    </div>
+                </article>
+              ))}
+            </div>{" "}
+          </div>
+        ) : (
+          <div className="mb-5 text-13 text-ink-secondary">
+            No contract records created yet.
+          </div>
+        )}
+        {auditContractId && (
+          <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white p-4">
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <div>
+                <SectionTitle>
+                  Delivery Audit
+                </SectionTitle>
+                <div className="text-12 text-ink-secondary">
+                  {auditContract?.title || "Contract"} · {auditLoading ? "Loading events" : `${auditEvents.length} event${auditEvents.length === 1 ? "" : "s"}`}
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => {
+                  setAuditContractId("");
+                  setAuditContract(null);
+                  setAuditEvents([]);
+                  setAuditErr("");
+                }}
+              >
+                Close
+              </Button>
+            </div>
+            {auditErr && (
+              <div className="mb-3 rounded-sm border-hairline border-red-200 bg-red-50 px-3 py-2 text-12 text-red-900">
+                {auditErr}
+              </div>
+            )}
+            <div className="mb-3 flex flex-wrap gap-1.5">
+              {contractDeliverySteps(auditContract || contracts.find((contract) => contract.id === auditContractId)).map((step) => (
+                <span
+                  key={step.key}
+                  className={cn(
+                    "h-6 px-2 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label",
+                    step.done
+                      ? "bg-zinc-900 border-zinc-900 text-white"
+                      : "bg-zinc-50 border-zinc-200 text-ink-secondary",
+                  )}
+                >
+                  {step.label}
+                  {step.at ? <span className="u-nums ml-1 opacity-80">{fmtDate(step.at)}</span> : null}
+                </span>
+              ))}
+            </div>
+            <div className="divide-y divide-zinc-100 rounded-sm border-hairline border-zinc-200">
+              {auditEvents.map((event) => (
+                <div key={event.id} className="grid gap-2 px-3 py-2 md:grid-cols-[180px_1fr_160px]">
+                  <div className="text-12 font-medium text-zinc-900">
+                    {contractEventLabel(event.eventType)}
+                  </div>
+                  <div className="min-w-0 text-12 text-ink-secondary">
+                    {event.actorType || "system"}
+                    {event.ip ? ` · ${event.ip}` : ""}
+                    {event.metadata?.templateKey ? ` · ${event.metadata.templateKey}` : ""}
+                    {event.metadata?.reason ? ` · ${event.metadata.reason}` : ""}
+                  </div>
+                  <div className="u-nums text-11 text-ink-secondary md:text-right">
+                    {fmtDate(event.createdAt)}
+                  </div>
+                </div>
+              ))}
+              {!auditLoading && auditEvents.length === 0 && (
+                <div className="px-3 py-4 text-12 text-ink-secondary">
+                  No audit events recorded for this contract.
+                </div>
+              )}
+              {auditLoading && (
+                <div className="px-3 py-4 text-12 text-ink-secondary">
+                  Loading audit events...
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+      </ContractSection>
+      <ContractSection title={"Auto Pay authorization"} description="Payment authorization and signing links.">
       <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
         {" "}
         <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
@@ -1253,27 +1487,6 @@ function ElectronicAuthorizationContractV2({
             ) : null}
           </div>
         ) : null}
-        <div className="grid grid-cols-1 md:grid-cols-3 border-b border-hairline border-zinc-200">
-          {[
-            ["Details", "Recipient, name, payment, attachments"],
-            ["Add information", "Selected clauses and custom fields"],
-            ["Review & share", "Preview, signatures, audit status"],
-          ].map(([step, sub], idx) => (
-            <div
-              key={step}
-              className={cn(
-                "px-4 py-3 border-zinc-200",
-                idx < 2 ? "md:border-r border-hairline" : "",
-              )}
-            >
-              {" "}
-              <div className="text-12 font-medium text-zinc-900">
-                {step}
-              </div>{" "}
-              <div className="text-11 text-ink-secondary mt-1">{sub}</div>{" "}
-            </div>
-          ))}
-        </div>{" "}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 p-4">
           {" "}
           <ContractMeta label="Recipient" value={signerName} />{" "}
@@ -1300,7 +1513,7 @@ function ElectronicAuthorizationContractV2({
               <div className="u-label text-ink-secondary mb-1">
                 Payment method
               </div>{" "}
-              <select
+              <Select
                 value={selectedPaymentMethodId}
                 onChange={(e) =>
                   updateContractForm("paymentMethodId", e.target.value)
@@ -1315,7 +1528,7 @@ function ElectronicAuthorizationContractV2({
                     {paymentMethodLabel(card)}
                   </option>
                 ))}
-              </select>{" "}
+              </Select>{" "}
             </label>{" "}
             <label className="block">
               {" "}
@@ -1395,6 +1608,8 @@ function ElectronicAuthorizationContractV2({
           </div>{" "}
         </div>{" "}
       </div>{" "}
+      </ContractSection>
+      <ContractSection title={"Create a document"} description="Service agreements, notices, and reusable templates.">
       <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
         <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-hairline border-zinc-200">
           <div>
@@ -1420,7 +1635,7 @@ function ElectronicAuthorizationContractV2({
               <div className="u-label text-ink-secondary mb-1">
                 Template
               </div>
-              <select
+              <Select
                 value={selectedDocumentTemplateKey}
                 onChange={(e) => setSelectedDocumentTemplateKey(e.target.value)}
                 className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
@@ -1434,7 +1649,7 @@ function ElectronicAuthorizationContractV2({
                     {template.name}
                   </option>
                 ))}
-              </select>
+              </Select>
             </label>
             <label className="block">
               <div className="u-label text-ink-secondary mb-1">
@@ -1519,17 +1734,19 @@ function ElectronicAuthorizationContractV2({
           </div>
         </div>
       </div>
+      </ContractSection>
+      <ContractSection title={"Authorization preview & signature"} description="Full terms, selected clauses, and signing evidence.">
       <div className="grid grid-cols-1 md:grid-cols-[1.2fr_0.8fr] gap-5">
         {" "}
         <Card>
           {" "}
           <CardBody className="p-0">
             {" "}
-            <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-hairline border-zinc-200">
+            <div className="flex flex-wrap items-start justify-between gap-3 px-5 py-4 border-b border-hairline border-zinc-200">
               {" "}
               <div className="flex items-start gap-3">
                 {" "}
-                <div className="mt-0.5 inline-flex h-9 w-9 items-center justify-center rounded-sm border-hairline border-zinc-200 bg-zinc-50 text-zinc-900">
+                <div className="mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-sm border-hairline border-zinc-200 bg-zinc-50 text-zinc-900">
                   {" "}
                   <FileText size={18} strokeWidth={1.75} />{" "}
                 </div>{" "}
@@ -1564,7 +1781,7 @@ function ElectronicAuthorizationContractV2({
               <SectionTitle>Selected Clauses</SectionTitle>{" "}
               <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-4">
                 {" "}
-                <div className="flex items-start justify-between gap-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
                   {" "}
                   <div>
                     {" "}
@@ -1881,237 +2098,10 @@ function ElectronicAuthorizationContractV2({
           </CardBody>{" "}
         </Card>{" "}
       </div>{" "}
-      <div className="mt-5">
-        {" "}
-        <SectionTitle>Contract History ({contracts.length})</SectionTitle>
-        {contracts.length > 0 ? (
-          <div className="overflow-x-auto mb-5">
-            {" "}
-            <Table>
-              {" "}
-              <THead>
-                {" "}
-                <TR>
-                  {" "}
-                  <TH>Status</TH>
-                  <TH>Created</TH>
-                  <TH>Signed</TH>
-                  <TH>Document</TH>
-                  <TH>Delivery</TH>
-                  <TH>Actions</TH>{" "}
-                </TR>{" "}
-              </THead>{" "}
-              <TBody>
-                {contracts.map((contract) => (
-                  <TR key={contract.id}>
-                    {" "}
-                    <TD>
-                      {" "}
-                      <Badge tone={contractStatusTone(contract.status)}>
-                        {contractStatusLabel(contract.status)}
-                      </Badge>{" "}
-                    </TD>{" "}
-                    <TD className="u-nums">{fmtDate(contract.createdAt)}</TD>{" "}
-                    <TD className="u-nums">
-                      {contract.signedAt ? fmtDate(contract.signedAt) : "—"}
-                    </TD>{" "}
-                    <TD>
-                      {contract.contractType === "document_template"
-                        ? contract.title || contract.documentTemplateKey || "Document"
-                        : paymentMethodLabel(contract)}
-                    </TD>{" "}
-                    <TD>
-                      <div className="flex flex-wrap gap-1">
-                        {contractDeliverySteps(contract).map((step) => (
-                          <span
-                            key={step.key}
-                            className={cn(
-                              "h-5 px-1.5 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label",
-                              step.done
-                                ? "bg-zinc-900 border-zinc-900 text-white"
-                                : "bg-zinc-50 border-zinc-200 text-ink-secondary",
-                            )}
-                            title={step.at ? fmtDate(step.at) : ""}
-                          >
-                            {step.label}
-                          </span>
-                        ))}
-                      </div>
-                    </TD>{" "}
-                    <TD>
-                      {" "}
-                      <div className="flex flex-wrap gap-1.5">
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={() => loadContractAudit(contract)}
-                          disabled={auditLoading && auditContractId === contract.id}
-                        >
-                          {" "}
-                          <FileText size={13} className="mr-1" />
-                          Audit
-                        </Button>
-                        {canDeliverDocumentContract(contract) && (
-                          <>
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              onClick={() => deliverDocumentContract(contract, "email")}
-                              disabled={!!contractDeliveryActionKey}
-                            >
-                              {" "}
-                              <Mail size={13} className="mr-1" />
-                              Email
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              onClick={() => deliverDocumentContract(contract, "sms")}
-                              disabled={!!contractDeliveryActionKey}
-                            >
-                              {" "}
-                              <MessageSquare size={13} className="mr-1" />
-                              SMS
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              onClick={() => deliverDocumentContract(contract, "email", "reminder")}
-                              disabled={!!contractDeliveryActionKey}
-                            >
-                              {" "}
-                              <Bell size={13} className="mr-1" />
-                              Remind
-                            </Button>
-                          </>
-                        )}
-                        {!["signed", "cancelled", "voided"].includes(
-                          contract.status,
-                        ) && (
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            onClick={() => regenerateLink(contract)}
-                            disabled={creatingContract}
-                          >
-                            {" "}
-                            <RotateCcw size={13} className="mr-1" />
-                            Link
-                          </Button>
-                        )}
-                        {contract.autoRenewalNoticeRequired &&
-                          !contract.autoRenewalNoticeSentAt && (
-                            <Button
-                              size="sm"
-                              variant="secondary"
-                              onClick={() => markRenewalNoticeSent(contract)}
-                              disabled={creatingContract}
-                            >
-                              {" "}
-                              <CheckCircle2 size={13} className="mr-1" />
-                              Notice
-                            </Button>
-                          )}
-                        {contract.status !== "cancelled" && (
-                          <Button
-                            size="sm"
-                            variant="danger"
-                            onClick={() => cancelContract(contract)}
-                            disabled={creatingContract}
-                          >
-                            {" "}
-                            <XCircle size={13} className="mr-1" />
-                            Cancel
-                          </Button>
-                        )}
-                      </div>{" "}
-                    </TD>{" "}
-                  </TR>
-                ))}
-              </TBody>{" "}
-            </Table>{" "}
-          </div>
-        ) : (
-          <div className="mb-5 text-13 text-ink-secondary">
-            No contract records created yet.
-          </div>
-        )}
-        {auditContractId && (
-          <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white p-4">
-            <div className="flex items-start justify-between gap-3 mb-3">
-              <div>
-                <SectionTitle>
-                  Delivery Audit
-                </SectionTitle>
-                <div className="text-12 text-ink-secondary">
-                  {auditContract?.title || "Contract"} · {auditLoading ? "Loading events" : `${auditEvents.length} event${auditEvents.length === 1 ? "" : "s"}`}
-                </div>
-              </div>
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={() => {
-                  setAuditContractId("");
-                  setAuditContract(null);
-                  setAuditEvents([]);
-                  setAuditErr("");
-                }}
-              >
-                Close
-              </Button>
-            </div>
-            {auditErr && (
-              <div className="mb-3 rounded-sm border-hairline border-red-200 bg-red-50 px-3 py-2 text-12 text-red-900">
-                {auditErr}
-              </div>
-            )}
-            <div className="mb-3 flex flex-wrap gap-1.5">
-              {contractDeliverySteps(auditContract || contracts.find((contract) => contract.id === auditContractId)).map((step) => (
-                <span
-                  key={step.key}
-                  className={cn(
-                    "h-6 px-2 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label",
-                    step.done
-                      ? "bg-zinc-900 border-zinc-900 text-white"
-                      : "bg-zinc-50 border-zinc-200 text-ink-secondary",
-                  )}
-                >
-                  {step.label}
-                  {step.at ? <span className="u-nums ml-1 opacity-80">{fmtDate(step.at)}</span> : null}
-                </span>
-              ))}
-            </div>
-            <div className="divide-y divide-zinc-100 rounded-sm border-hairline border-zinc-200">
-              {auditEvents.map((event) => (
-                <div key={event.id} className="grid gap-2 px-3 py-2 md:grid-cols-[180px_1fr_160px]">
-                  <div className="text-12 font-medium text-zinc-900">
-                    {contractEventLabel(event.eventType)}
-                  </div>
-                  <div className="min-w-0 text-12 text-ink-secondary">
-                    {event.actorType || "system"}
-                    {event.ip ? ` · ${event.ip}` : ""}
-                    {event.metadata?.templateKey ? ` · ${event.metadata.templateKey}` : ""}
-                    {event.metadata?.reason ? ` · ${event.metadata.reason}` : ""}
-                  </div>
-                  <div className="u-nums text-11 text-ink-secondary md:text-right">
-                    {fmtDate(event.createdAt)}
-                  </div>
-                </div>
-              ))}
-              {!auditLoading && auditEvents.length === 0 && (
-                <div className="px-3 py-4 text-12 text-ink-secondary">
-                  No audit events recorded for this contract.
-                </div>
-              )}
-              {auditLoading && (
-                <div className="px-3 py-4 text-12 text-ink-secondary">
-                  Loading audit events...
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-        <SectionTitle>Authorization History ({consents.length})</SectionTitle>
+      </ContractSection>
+      <ContractSection title={`Authorization history (${consents.length})`} description="Previously recorded payment-method consents.">
+      <div>
+
         {consents.length > 0 ? (
           <div className="overflow-x-auto">
             {" "}
@@ -2149,7 +2139,8 @@ function ElectronicAuthorizationContractV2({
             No saved-payment authorizations recorded.
           </div>
         )}
-      </div>{" "}
+      </div>
+      </ContractSection>
     </div>
   );
 }
@@ -5177,7 +5168,7 @@ function CustomerWorkspaceHeader({ c, balanceOwed, nextService, isAdmin, onEdit,
       </div>
     </div>
     <div className="c360-workspace-actions">
-      {c.phone && <><Button variant="secondary" onClick={() => callViaBridge(c.phone, name)}><Phone size={16} />Call</Button><Button className="c360-text-action" onClick={() => onTab("comms")}><MessageSquare size={16} />Text</Button></>}
+      {c.phone && <><Button variant="secondary" onClick={() => callViaBridge(c.phone, name)}><Phone size={16} />Call</Button><Button variant="secondary" className="c360-text-action" onClick={() => onTab("comms")}><MessageSquare size={16} />Text</Button></>}
       {c.email && <a className="u-focus-ring" href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`} target="_blank" rel="noopener noreferrer"><Mail size={16} />Email</a>}
       {address && <a className="u-focus-ring" href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`} target="_blank" rel="noopener noreferrer"><MapPin size={16} />Address</a>}
       <div className="c360-more-action" ref={menuRef} onKeyDown={(event) => { if (event.key === "Escape" && menuOpen) { event.stopPropagation(); setMenuOpen(false); menuRef.current?.querySelector("button")?.focus(); } }}>

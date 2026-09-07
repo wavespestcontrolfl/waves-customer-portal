@@ -3330,7 +3330,17 @@ router.get('/:id', async (req, res, next) => {
         address: { line1: n.address_line1, line2: n.address_line2, city: n.city, state: n.state, zip: n.zip },
       })),
       tags: tags.map(t => t.tag),
-      interactions, preferences: prefs, services, estimates, payments, scheduled, upcomingScheduled, smsLog,
+      interactions, preferences: prefs, services, payments, scheduled, upcomingScheduled, smsLog,
+      // Reference the stored quote through the existing net-price mapper.
+      // No live catalog or current plan repricing belongs in historical quotes.
+      estimates: estimates.map((estimate) => ({
+        ...estimate,
+        priceReferences: scheduleLinesFromEstimate(estimate, indexServicesForSchedule([]), { includeSourceLines: true })
+          .filter((line) => line.source === 'recurring')
+          .map(({ estimateLabel, perApplicationPrice, monthlyPrice }) => ({
+            name: estimateLabel, perApplicationPrice: perApplicationPrice ?? null, monthlyPrice: monthlyPrice ?? null,
+          })),
+      })),
       healthScore: healthScore || null,
       invoices: mappedInvoices,
       cards: cards || [],

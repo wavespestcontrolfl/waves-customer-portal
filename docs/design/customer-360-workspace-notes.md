@@ -4,9 +4,10 @@ The workspace is available through `/admin/customers?customer360=workspace&custo
 
 ## Implemented
 
-- Call, Text, Email, and Address actions, with plain contact details underneath. Address opens Google Maps; Text opens this customer's Comms tab.
+- Call, Text, Email, and Address actions, with plain contact details underneath. Address opens Google Maps; Text opens this customer's Comms tab. White backgrounds are the default for action buttons throughout this workspace, including future additions.
 - Larger section labels and a vertical Overview: services, billing summary, health, then searchable activity. Activity supports text search and category filters across all history returned by the endpoint.
-- An Estimates tab with references, statuses, original stored annual recurring and one-time quote totals, and links to the full estimates. Missing amounts are labeled “Not recorded”; historical estimates are never repriced from the current plan.
+- An Estimates tab with references, statuses, stored monthly, annual recurring, and one-time quote totals, plus each recurring service's per-application amount and links to the full estimates. The customer response projects historical service amounts through the existing net-price mapper, preserving recorded discounts and zero amounts. Monthly-billed lines retain their unit; different service cadences are never combined into a per-application total. Missing amounts are labeled “Not recorded”; historical estimates are never repriced from the current plan.
+- Contracts open with readable history cards showing status, dates, delivery progress, and existing actions. Auto Pay setup, document creation, full terms/signature preview, and authorization history are separate expandable sections. Forms retain their inputs when collapsed; existing eligibility, signing, and delivery behavior remains in place.
 - The existing Messages composer in Comms, fixed to the profile's recipient and initialized to the latest known business line. It retains image attachments, AI draft, voice dictation, AI rewrite, links, and delayed text sending. Drafts survive section changes within the selected profile. Selecting another customer resets the composer.
 - Notification preference switches are omitted from the workspace. Saved customer choices and billing recipient routing remain authoritative. This does not enable notifications or change preferences.
 - White billing buttons, a legible Default payment-method badge, invoice references, and a customer-filtered invoice-list link.
@@ -49,6 +50,8 @@ Recommended next additions, based on those patterns and existing Waves features:
 ## Verification scope
 
 Validation completed: 111 focused tests passed across 13 files, the production build and its domain/brand checks passed, and ESLint reported no errors (existing structural warnings remain).
+
+The estimate and contract follow-up passed 55 focused client tests and 62 server unit tests. Desktop Chromium and mobile/tablet WebKit checks cover monthly/per-application values, white action buttons, contract cards, audit loading, expandable forms, retained draft inputs, and expanded preview width. Desktop and mobile screenshots were visually reviewed. The updated production build and lint also passed with no lint errors.
 
 Local browser checks use synthetic fixtures with all backend/provider calls intercepted. Automated UI tests cover history search, stored quote values, fixed SMS recipients, thread selection, provider suppression, AI draft edits, rewrite context, attachments, dictation input, and delayed sending. Browser checks include desktop Chromium, mobile Chromium, and mobile/tablet WebKit, with simulated Safari viewport and keyboard changes.
 

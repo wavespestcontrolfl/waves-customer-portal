@@ -1316,3 +1316,21 @@ describe('360 payload: technician stripping covers address neighbours', () => {
     expect(out.accountProperties).toBeUndefined();
   });
 });
+
+
+describe('Customer 360 historical price references', () => {
+  test('uses stored net amounts without a current catalog, preserving an explicitly free application', () => {
+    const lines = scheduleLinesFromEstimate({ id: 'estimate-reference-fixture', estimate_data: {
+      result: { recurring: { services: [
+        { service: 'pest_control', name: 'Pest Control', perTreatment: 121, priceAfterDiscount: 108.90, visitsPerYear: 4, annual: 484 },
+        { service: 'lawn', name: 'Lawn Care', perTreatment: 125, manualFinalAnnual: 0, visitsPerYear: 6, annual: 750 },
+        { service: 'rodent_bait', name: 'Rodent Bait', perTreatment: 117, visitsPerYear: 4, mo: 39 },
+      ] } },
+    } }, indexServicesForSchedule([]), { includeSourceLines: true });
+    expect(lines.find((line) => line.estimateLabel === 'Pest Control').perApplicationPrice).toBe(108.90);
+    expect(lines.find((line) => line.estimateLabel === 'Lawn Care').perApplicationPrice).toBe(0);
+    const monthly = lines.find((line) => line.estimateLabel === 'Rodent Bait');
+    expect(monthly.monthlyPrice).toBe(39);
+    expect(monthly.perApplicationPrice).toBeUndefined();
+  });
+});

@@ -39,7 +39,6 @@
 .c360-workspace-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 9px; font-size: 14px; color: #71717a; }
 .c360-workspace-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 21px; }
 .c360-workspace-actions > :is(a, button) { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 43px; padding: 0 16px; font-size: 14px; text-transform: none; letter-spacing: 0; text-decoration: none; border: 1px solid #d4d4d8; border-radius: 5px; background: #fff; color: #27272a; }
-.c360-workspace-actions > .c360-text-action { background: #18181b; border-color: #18181b; color: #fff; }
 .c360-workspace-actions .c360-more-action { margin-left: auto; position: relative; }
 .c360-workspace-action-menu { position: absolute; z-index: 30; top: calc(100% + 5px); right: 0; width: 230px; padding: 5px; background: #fff; border: 1px solid #d4d4d8; border-radius: 6px; }
 .c360-workspace-action-menu :is(a, button) { display: flex; align-items: center; width: 100%; padding: 10px; min-height: 44px; border: 0; text-align: left; font-size: 14px; color: #27272a; background: #fff; text-decoration: none; }
@@ -183,3 +182,54 @@
 /* Flat writing tools share the outline rhythm of the account actions. */
 .c360-embedded #sms-compose-v2 .sms-writing-tool { appearance: none; -webkit-appearance: none; border: 1px solid #d4d4d8; border-radius: 6px; box-shadow: none; }
 .c360-embedded #sms-compose-v2 select { min-height: 44px; padding: 8px 32px 8px 10px; border: 1px solid #d4d4d8; border-radius: 5px; }
+
+/* Default action style for this workspace and future additions. */
+.c360-workspace button.u-focus-ring:not([role="tab"]) { background: #fff; color: #27272a; border: 1px solid #d4d4d8; }
+.c360-workspace button.u-focus-ring:not([role="tab"]):hover { background: #fafafa; }
+.c360-workspace button.u-focus-ring:not([role="tab"])[aria-label="Stop dictation"] { color: #c8312f; border-color: #c8312f; }
+.c360-estimate-applications { margin: 0 0 20px; }
+.c360-estimate-applications dl { margin: 0; }
+.c360-estimate-applications dl > div { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 9px 0; border-bottom: 1px solid #f4f4f5; font-size: 14px; }
+.c360-estimate-applications dt { color: #71717a; }
+.c360-estimate-applications dd { margin: 0; text-align: right; font-weight: 500; }
+.c360-contracts-heading { margin-bottom: 22px; }
+.c360-contracts-heading p { margin-top: 7px; }
+.c360-contract-section { margin-bottom: 14px; border: 1px solid #e4e4e7; border-radius: 7px; background: #fff; }
+.c360-contract-section > summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 20px; cursor: pointer; list-style: none; }
+.c360-contract-section > summary::-webkit-details-marker { display: none; }
+.c360-contract-section > summary:focus-visible { outline: 2px solid #52525b; outline-offset: -2px; border-radius: 7px; }
+.c360-contract-section > summary strong { display: block; font-size: 16px; font-weight: 500; }
+.c360-contract-section > summary span span { display: block; margin-top: 5px; font-size: 14px; line-height: 1.5; color: #71717a; }
+.c360-contract-section > summary > svg { flex-shrink: 0; transform: rotate(-90deg); color: #71717a; }
+.c360-contract-section[open] > summary > svg { transform: rotate(0); }
+.c360-contract-section[open] > summary { border-bottom: 1px solid #e4e4e7; }
+.c360-contract-section-body { padding: 20px; }
+.c360-contract-section-body > div { margin-top: 0; margin-bottom: 0; }
+.c360-contract-section-body > div > .overflow-x-auto { margin-bottom: 0; }
+.c360-contract-section-body > .rounded-sm { border: 0; }
+.c360-contract-section-body > .rounded-sm > .flex:first-child { flex-direction: column; align-items: stretch; padding: 0 0 18px; }
+.c360-contract-section-body > .rounded-sm > .flex:first-child > .flex { justify-content: flex-start; }
+.c360-contract-section-body > .rounded-sm > .flex:first-child > button { align-self: flex-start; }
+.c360-contract-section-body > .rounded-sm > .flex:first-child > div:first-child { display: none; }
+.c360-contracts-content :is(input:not([type="checkbox"]), select) { min-height: 44px; font-size: 16px; }
+@container customer360 (max-width: 700px) {
+  .c360-contract-section > summary { padding: 16px; }
+  .c360-contract-section-body { padding: 16px; }
+  .c360-contract-section-body > .rounded-sm > .grid { padding-left: 0; padding-right: 0; }
+  .c360-contract-section-body > .grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+.c360-contract-records { display: grid; gap: 14px; }
+.c360-contract-record { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px 20px; padding: 18px; border: 1px solid #e4e4e7; border-radius: 6px; background: #fff; font-size: 14px; }
+.c360-contract-record > div { min-width: 0; }
+.c360-contract-record-document { font-size: 16px; font-weight: 500; overflow-wrap: anywhere; }
+.c360-contract-record-status { text-align: right; }
+.c360-contract-record-signed { text-align: right; }
+.c360-contract-field-label { display: block; font-size: 14px; color: #71717a; margin-bottom: 4px; }
+.c360-contract-record-delivery, .c360-contract-record-actions { grid-column: 1 / -1; }
+.c360-contract-record-actions { padding-top: 14px; border-top: 1px solid #e4e4e7; }
+.c360-contract-record-delivery span { height: auto; min-height: 24px; letter-spacing: 0; text-transform: none; line-height: 1.5; padding: 3px 7px; }
+.c360-contract-record-actions > div { gap: 8px; }
+@container customer360 (max-width: 700px) {
+  .c360-contract-record { padding: 14px; gap: 12px; }
+}

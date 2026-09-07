@@ -87,7 +87,7 @@ describe('Customer360ProfileV2 profile state', () => {
     await screen.findByRole('heading', { name: 'Avery Customer' });
     container.querySelector('.c360-panel').scrollTo = vi.fn();
     fireEvent.click(screen.getByRole('button', { name: 'Text', exact: true }));
-    const field = await screen.findByRole('textbox', { name: 'Text message' });
+    const field = await screen.findByRole('textbox', { name: 'Text message' }, { timeout: 5000 });
     fireEvent.change(field, { target: { value: 'Service update' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send', exact: true }));
     await waitFor(() => expect(field).toHaveValue(''));

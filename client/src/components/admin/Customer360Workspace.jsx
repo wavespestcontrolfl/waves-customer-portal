@@ -3,7 +3,6 @@ import { ChevronLeft, ChevronRight, Filter, PanelLeft, Plus, Search, X } from "l
 import { Button, Dialog, Input, cn } from "../ui";
 import useIsMobile from "../../hooks/useIsMobile";
 import Customer360Profile from "./Customer360ProfileV2";
-import "./customer360-workspace.css";
 
 function CustomerDirectory({
   customers, selectedId, search, onSearch, loading, error, onRetry,
