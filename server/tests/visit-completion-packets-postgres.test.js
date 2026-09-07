@@ -355,7 +355,6 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(res.json.mock.calls[0][0].needs_review)
       .toEqual(expect.arrayContaining([expect.objectContaining({ scheduled_service_id: fixture.serviceIds[1] })]));
   });
-
   test.each(['pest', 'lawn'])('concurrent submissions need only their transaction connection for %s helpers', async (lane) => {
     if (lane === 'lawn') {
       await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ service_type: 'WaveGuard Lawn Care' });
