@@ -86,6 +86,8 @@
  *     invoice-and-pay-link behavior. isPrepayCardAndChargeEnabled() enforces
  *     the conjunction; the flip checklist is all three vars.)
  *
+ *   GATE_LAWN_PROPERTY_HISTORY=true (property-scoped confirmed lawn history, one installed row per visit, report-date/reset windows and confirm-time baseline; dark in dev AND prod; consumers read at call time)
+ *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
  */
@@ -93,6 +95,9 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // GATE_LAWN_PROPERTY_HISTORY: opt-in in every environment. Registered for
+  // logGateStatus only; consumers use gateEnvValue at CALL time.
+  lawnPropertyHistory: gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'),
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.

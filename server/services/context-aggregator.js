@@ -570,7 +570,14 @@ class ContextAggregator {
         // facts render a visible unknown instead of "Balance: Current".
         .catch(() => null),
       // v10: lawn health scores — "how's my lawn doing" is a routine text.
-      db('lawn_assessments').where({ customer_id: customer.id })
+      require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY')
+        ? require('./lawn-assessment-history').latestForCustomer(customer.id, {}, db)
+          .then((rows) => rows.map((row) => ({
+            service_date: row.visit_date, turf_density: row.turf_density, weed_suppression: row.weed_suppression,
+            fungus_control: row.fungus_control, thatch_level: row.thatch_level, color_health: row.color_health,
+            overall_score: row.overall_score, stress_damage: row.stress_damage,
+          }))).catch(() => null)
+        : db('lawn_assessments').where({ customer_id: customer.id })
         // Tech-confirmed only (Codex r2): the customer lawn-health routes all
         // filter on confirmed_by_tech — provisional AI scores must not ground
         // a customer-facing text.

@@ -116,6 +116,16 @@ const FIXTURES = {
   }],
 };
 
+test.each([true, false])('a signed lawn history refuses a changed history or disabled gate (enabled=%s)', async (propertyHistoryEnabled) => {
+  const knex = makeKnex(FIXTURES);
+  await expect(buildReportV1Data(LAWN_SERVICE, 'token-lawn-next', knex, {
+    propertyHistoryEnabled,
+    pinnedLawnAssessmentId: 'la-1',
+    pinnedLawnHistoryIdentity: 'a'.repeat(40),
+    lawnHistory: { identity: 'b'.repeat(40) },
+  })).rejects.toMatchObject({ code: 'pinned_assessment_unavailable' });
+});
+
 test('a rescheduled phantom row never publishes as the lawn nextVisit — the real confirmed row wins', async () => {
   const knex = makeKnex({
     ...FIXTURES,
