@@ -178,6 +178,25 @@ describe("AgentModelsTab", () => {
     expect(within(card).queryByText(/Backup/)).toBeNull();
   });
 
+  it("a skipped backup leg (same model as primary, never called) is hidden from the chain and the retry becomes the backup", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path === "/admin/agents/models") {
+        const data = makeData();
+        const lane = data.lanes[0];
+        lane.fallback = { ...lane.fallback, skipped: true };
+        lane.retry = { ...lane.fallback, model: "m3", skipped: false };
+        return data;
+      }
+      throw new Error(path);
+    });
+    renderTab();
+    const card = (await screen.findByText("SMS intent")).closest(".p-4");
+    expect(within(card).getByText(/Backup/)).toBeInTheDocument();
+    expect(within(card).getByText("GPT-5.6 Terra")).toBeInTheDocument();
+    expect(within(card).queryByText(/then/)).toBeNull();
+    expect(within(card).queryByText(/No backup/)).toBeNull();
+  });
+
   it("a failed load offers Retry, and a failed refresh keeps the lanes on screen", async () => {
     let fail = true;
     adminFetch.mockImplementation(async (path) => {

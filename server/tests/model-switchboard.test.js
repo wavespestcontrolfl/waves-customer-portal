@@ -200,18 +200,21 @@ describe('model-switchboard', () => {
     const { lanes } = sb.getSwitchboard();
     const pest = lanes.find((l) => l.id === 'pest_id');
     expect(pest.fallback.selector).toBe('GEMINI_VISION_BEST');
-    expect(pest.retry).toBeNull();
+    // The retry leg stays in the payload (its selector still moves the lane —
+    // re-pinning GEMINI_VISION_FALLBACK_MODEL re-arms it) but is marked skipped.
+    expect(pest.retry.selector).toBe('GEMINI_VISION_FALLBACK');
+    expect(pest.retry.skipped).toBe(true);
     const sat = lanes.find((l) => l.id === 'satellite');
-    expect(sat.retry).toBeNull();
+    expect(sat.retry.skipped).toBe(true);
     expect(sat.also.map((a) => a.pinEnv)).toEqual(['OPENAI_VISION_MODEL']);
     expect(sat.also[0].provider).toBe('openai');
     expect(lanes.find((l) => l.id === 'property_trio').also[0].pinEnv).toBe('OPENAI_PROPERTY_MODEL');
     // The caption read and the treatment-zone map are sequential ladders in
-    // execution order (Gemini → Claude with the retry skipped), not fan-outs.
+    // execution order (Gemini → Claude with the Gemini retry skipped), not fan-outs.
     for (const id of ['tech_caption_vision', 'treatment_zone']) {
       const ladder = lanes.find((l) => l.id === id);
-      expect({ id, fanout: ladder.fanout, primary: ladder.primary.provider, fallback: ladder.fallback.selector, retry: ladder.retry })
-        .toEqual({ id, fanout: false, primary: 'gemini', fallback: 'VISION', retry: null });
+      expect({ id, fanout: ladder.fanout, primary: ladder.primary.provider, fallback: ladder.fallback.selector, fallbackSkipped: ladder.fallback.skipped, retry: ladder.retry.selector })
+        .toEqual({ id, fanout: false, primary: 'gemini', fallback: 'GEMINI_VISION_FALLBACK', fallbackSkipped: true, retry: 'VISION' });
     }
   });
 
@@ -225,6 +228,7 @@ describe('model-switchboard', () => {
       const video = lanes.find((l) => l.id === 'video_gen');
       expect(video.primary.model).toBe('veo-9.9-same');
       expect(video.fallback.model).toBe('veo-9.9-same');
+      expect(video.fallback.skipped).toBeUndefined();
     } finally {
       for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
       jest.resetModules();
@@ -240,10 +244,11 @@ describe('model-switchboard', () => {
       const pest = lanes.find((l) => l.id === 'pest_id');
       expect(pest.retry.model).toBe('gemini-9.9-prior');
       expect(pest.retry.selector).toBe('GEMINI_VISION_FALLBACK');
+      expect(pest.retry.skipped).toBeUndefined();
       for (const id of ['tech_caption_vision', 'treatment_zone']) {
         const ladder = lanes.find((l) => l.id === id);
-        expect({ id, fallback: ladder.fallback.selector, retry: ladder.retry.selector })
-          .toEqual({ id, fallback: 'GEMINI_VISION_FALLBACK', retry: 'VISION' });
+        expect({ id, fallback: ladder.fallback.selector, fallbackSkipped: ladder.fallback.skipped, retry: ladder.retry.selector })
+          .toEqual({ id, fallback: 'GEMINI_VISION_FALLBACK', fallbackSkipped: undefined, retry: 'VISION' });
       }
     } finally {
       if (prev === undefined) delete process.env.GEMINI_VISION_FALLBACK_MODEL; else process.env.GEMINI_VISION_FALLBACK_MODEL = prev;

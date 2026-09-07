@@ -183,8 +183,9 @@ function firstImageChainModel(value) {
 // resolve like any ref and count in the Models-in-use view and the change
 // preview. Without `fanout`, primary → fallback → retry IS the execution order.
 // `skipsEqualLeg` = the implementation guards FALLBACK !== MODEL, so a leg that
-// resolves to the same model as the one before it is not called (the card
-// hides it); ladders without the flag call every leg.
+// resolves to the same model as the one before it is not called: it is emitted
+// with `skipped: true` (kept for dependency math, hidden by the card); ladders
+// without the flag call every leg.
 const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by seven photo lanes';
 // `inbound: true` = the lane's prompt carries customer or third-party content
 // (SMS, email, call transcripts, uploaded photos/PDFs, web forms). The Gemini
@@ -763,13 +764,16 @@ function getSwitchboard() {
     let fallback = withProvider(legs.fallback);
     let retry = withProvider(resolveRef(lane.retry));
     // On a `skipsEqualLeg` lane the implementation guards `FALLBACK !== MODEL`
-    // and skips a leg that resolves to the same model as the one before it, so
-    // the card shows the executed chain: drop it and promote what follows. Other
-    // ladders (e.g. video_gen) call every leg regardless, so they keep theirs.
+    // and never calls a leg that resolves to the same model as the one before
+    // it. The leg is MARKED, not dropped: its selector still moves the lane (a
+    // split GEMINI_VISION_FALLBACK_MODEL re-arms six photo ladders), so the
+    // change composer and previews keep the dependency; the card hides
+    // `skipped` legs from the chain sentence. Ladders without the flag (e.g.
+    // video_gen) call every leg regardless, so nothing is marked there.
     const sameLeg = (a, b) => !!(a && b && a.model === b.model && a.provider === b.provider);
     if (lane.skipsEqualLeg) {
-      if (sameLeg(fallback, retry)) retry = null;
-      if (sameLeg(primary, fallback)) { fallback = retry; retry = null; }
+      if (sameLeg(fallback, retry)) retry = { ...retry, skipped: true };
+      if (sameLeg(primary, fallback)) fallback = { ...fallback, skipped: true };
     }
     const also = (lane.also || []).map((ref) => withProvider(resolveRef(ref)));
     const registration = lane.lock?.kind === 'registration';

@@ -374,7 +374,8 @@ function laneIdentity(lane, policy) {
     describe: lane.describe,
     area: lane.area,
     modelNow: lane.primary?.model || null,
-    backup: lane.fallback?.model || null,
+    // A `skipped` fallback is never called (same model as primary); the retry is the real backup.
+    backup: (lane.fallback?.skipped ? lane.retry : lane.fallback)?.model || null,
     continuity: lane.continuity,
     maturity: policy.maturity,
     riskTier: riskTierOf(policy.side_effect_class),

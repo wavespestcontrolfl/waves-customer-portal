@@ -56,9 +56,15 @@ export default function LaneModelCard({ lane, catalog, draft, effectiveLeg, envF
   const primaryDraft = primaryEnv && draft[primaryEnv];
   const primaryNow = effectiveLeg(l.primary);
   const changed = [l.primary, l.fallback, l.retry, ...(l.also || [])].filter(Boolean).some((leg) => effectiveLeg(leg) !== leg.model);
+  // A `skipped` leg resolves to the same model as the one before it and is not
+  // called at runtime. It stays pickable (its selector still moves the lane) but
+  // the chain sentence shows only what runs.
+  const skippedNote = (leg, which) => (leg?.skipped ? `${which} (skipped — same model)` : which);
+  const backupLeg = l.fallback?.skipped ? l.retry : l.fallback;
+  const retryLeg = l.fallback?.skipped || l.retry?.skipped ? null : l.retry;
   const extraLegs = [
-    { leg: l.fallback, which: l.fanout ? "parallel arm" : "backup" },
-    { leg: l.retry, which: "retry" },
+    { leg: l.fallback, which: skippedNote(l.fallback, l.fanout ? "parallel arm" : "backup") },
+    { leg: l.retry, which: skippedNote(l.retry, "retry") },
     ...(l.also || []).map((a) => ({ leg: a, which: "parallel arm" })),
   ].filter((x) => x.leg);
 
@@ -83,12 +89,12 @@ export default function LaneModelCard({ lane, catalog, draft, effectiveLeg, envF
           {primaryNow !== l.primary.model && <span className="text-13 text-ink-tertiary"> · was {modelLabel(catalog, l.primary.model)}</span>}
         </span>
         <span className="text-ink-secondary">
-          {l.fallback ? (
+          {backupLeg ? (
             <>
-              {l.fanout ? "Alongside" : "Backup"} <ModelChip catalog={catalog} id={effectiveLeg(l.fallback)} />
-              {l.retry && (
+              {l.fanout ? "Alongside" : "Backup"} <ModelChip catalog={catalog} id={effectiveLeg(backupLeg)} />
+              {retryLeg && (
                 <>
-                  {l.fanout ? " retried on" : " then"} <ModelChip catalog={catalog} id={effectiveLeg(l.retry)} />
+                  {l.fanout ? " retried on" : " then"} <ModelChip catalog={catalog} id={effectiveLeg(retryLeg)} />
                 </>
               )}
             </>
