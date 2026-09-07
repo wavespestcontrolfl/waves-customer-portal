@@ -72,3 +72,12 @@ The existing `calculateProductAmount` helper was run separately for each catalog
 | Non-ionic Surfactant | Missing rate and exact product | Unknown |
 
 NIS has no package, price or rate in the development catalog. No exact surfactant was inferred from the generic name. Its product/package cost and applicable mix-rate evidence were requested, as were measured travel/setup/treatment times. Until those inputs and actual conditional selections are available, combined treatments and a complete annual operating-cost model remain unverified.
+
+
+### Review correction: canonical identities and dry cost overrides
+
+The repository-seeded development catalog does not reproduce every imported canonical product row. Review identified three deduplication keepers that must be handled: `LESCO Chelated Iron Plus`, `LESCO K-Flow 0-0-25 17% S Turfgrass Liquid Fertilizer`, and `Primo Maxx Plant Growth Regulator for Turf`. Forward migration `20260907000100_canonical_lawn_cost_dimensions.js` selects exactly one active identity from each established keeper/legacy pair. It never selects a deactivated predecessor. The two earlier migrations remain intact because the preview already ran them.
+
+The forward migration also checks per-unit costs against the package for dry products, including rows whose inventory unit was already filled. Weight/volume contradictions, stale overrides, ambiguous active identities and conflicting package sizes fail closed. Compatible explicit units and consistent costs are preserved.
+
+Nine regression cases passed. A separate real PostgreSQL transaction created the three canonical keepers with inactive predecessors and verified the keepers received units, predecessor units were unchanged, prices were preserved and repetition added no audit rows. Both stale dry-cost cases failed even with a pre-filled weight unit. All fixtures rolled back. The unchanged seeded catalog also passed the complete forward migration in a rollback transaction. This supplements the fresh-catalog results above; neither fixture establishes production supplier-price freshness.
