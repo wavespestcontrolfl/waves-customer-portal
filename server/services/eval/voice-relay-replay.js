@@ -412,6 +412,7 @@ function installHarness() {
     if (proto && proto !== Object.prototype && typeof proto.stream === 'function') {
       const realStream = proto.stream;
       proto.stream = function evalStream(...args) {
+        if (state.record) state.record.modelCalls += 1;
         if (state.modelFailuresLeft > 0) {
           state.modelFailuresLeft -= 1;
           if (state.record) state.record.injected.push('model_failure');
@@ -669,7 +670,7 @@ function newRecord(scenario, h) {
   return {
     id: scenario.id, language: scenario.language || 'en', turn: 0, events: [], spoken: [], toolCalls: [], toolUse: {},
     endSession: null, injected: [], dbAttempts: [], warnings: [], toolsAvailable: [], promptSha: null, model: h.MODEL,
-    modelRounds: 0, modelErrors: [],
+    modelRounds: 0, modelErrors: [], modelCalls: 0,
   };
 }
 
@@ -719,6 +720,12 @@ async function runScenario(scenario, { judge = true, judgeFn = null } = {}) {
     // a pass.
     if (record.modelRounds === 0 && record.modelErrors.length) {
       throw Object.assign(new Error(`model unavailable: ${record.modelErrors[0]}`), { code: 'EVAL_MODEL_UNAVAILABLE' });
+    }
+    // The relay never reached the model at all: with no SDK client (no
+    // ANTHROPIC_API_KEY at load) relay-conversation speaks its "unavailable"
+    // copy and calls nothing — no round, no error, and a green-looking call.
+    if (record.modelCalls === 0 && record.turn > 0) {
+      throw Object.assign(new Error('model unavailable: the relay never called the model (no SDK client — is ANTHROPIC_API_KEY set?)'), { code: 'EVAL_MODEL_UNAVAILABLE' });
     }
   } catch (err) {
     record.error = errorRecord(err);
@@ -787,10 +794,13 @@ function summaryLine(summary = {}) {
     + ` qualityScore=${pct} modelRounds=${summary.modelRounds || 0}${summary.modelErrors ? ` modelErrors=${summary.modelErrors}` : ''}${summary.dbRefusals ? ` dbRefusals=${summary.dbRefusals}` : ''}${summary.failedIds && summary.failedIds.length ? ` failed=[${summary.failedIds.join(', ')}]` : ''}${summary.replayErrorIds && summary.replayErrorIds.length ? ` errors=[${summary.replayErrorIds.join(', ')}]` : ''}`;
 }
 
+// A run fails on any replay error, any failing scenario, or any scenario the
+// judge could not grade (judge: true) — an unjudged scenario is unverified,
+// and the weekly bell must say so rather than report a clean run.
 function isFailedVoiceRun(run) {
   if (run && run.failed === true) return true;
   const s = (run && run.summary) || {};
-  return (s.replayErrors || 0) > 0 || (s.failed || 0) > 0;
+  return (s.replayErrors || 0) > 0 || (s.failed || 0) > 0 || (s.judgeErrors || 0) > 0;
 }
 
 /**
@@ -834,6 +844,12 @@ async function runVoiceRelayReplay({ fixturePath = DEFAULT_FIXTURE_PATH, only = 
     const first = results.find((r) => r.error && r.error.code === 'EVAL_MODEL_UNAVAILABLE');
     throw new Error(`no scenario completed a model round — ${first.error.message}`);
   }
+  // The judged layer was requested and not one verdict came back: the run
+  // could not verify anything the judge owns — inconclusive, not a pass.
+  if (judge && summary.judged === 0 && summary.judgeErrors > 0) {
+    const first = results.find((r) => r.judge && !r.judge.ok);
+    throw new Error(`the judge graded no scenario — ${first.judge.reason}`);
+  }
   return { failed: isFailedVoiceRun({ summary }), fixturePath, schemaVersion: fixture.schemaVersion, runDate: runDate.toISOString(), judge, summary, results };
 }
 
@@ -843,6 +859,7 @@ function failureLines(run) {
   const lines = [];
   for (const r of (run && run.results) || []) {
     if (r.status === 'error') lines.push(`${r.id}: replay error (${r.error && r.error.message ? r.error.message : 'unknown error'})`);
+    if (r.judge && !r.judge.ok) lines.push(`${r.id}: unjudged — judge unavailable (${r.judge.reason || 'unknown'})`);
     for (const c of r.checks || []) {
       if (c.status === 'fail' && blocking(c)) lines.push(`${r.id}: ${c.severity}${c.adjudicated ? '*' : ''} ${c.check} — ${c.detail}`);
     }
@@ -865,7 +882,11 @@ async function notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixtur
         ? `\n\nRetry was inconclusive: ${retry.error && retry.error.message ? retry.error.message : 'unknown error'}. Keeping the first observed failure.`
         : '\n\nThe retry did not clear the failure.')
     : '';
-  const title = `Voice relay eval: ${(summary.failed || 0) + (summary.replayErrors || 0)} failing scenario(s)`;
+  const failing = (summary.failed || 0) + (summary.replayErrors || 0);
+  const unjudged = summary.judgeErrors || 0;
+  const title = failing
+    ? `Voice relay eval: ${failing} failing scenario(s)${unjudged ? `, ${unjudged} unjudged` : ''}`
+    : `Voice relay eval: ${unjudged} scenario(s) unjudged — judge unavailable`;
   const body = `${lines.join('\n').slice(0, 1400)}\n\n${summaryLine(summary)}${retryNote}\n\nRe-run manually: ${MANUAL_RERUN}`;
   let notifyError = null;
   try {

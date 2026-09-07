@@ -448,6 +448,37 @@ describe('voice relay eval — the harness', () => {
     expect(injected.spoken[1]).toMatch(/team member/);
   });
 
+  test('a relay with no SDK client (no key at load) speaks its unavailable copy and never calls the model — a replay error, not a pass', async () => {
+    jest.doMock('@anthropic-ai/sdk', () => function AnthropicMock() { throw new Error('apiKey missing'); });
+    const replay = require('../services/eval/voice-relay-replay');
+    replay.installHarness();
+    const result = await replay.runScenario(scenario({ id: 'harness-no-client', turns: [{ caller: 'hi' }] }), { judge: false });
+    expect(result.spoken[0]).toMatch(/unable to help right now/i);
+    expect(result.modelCalls).toBe(0);
+    expect(result.status).toBe('error');
+    expect(result.error).toMatchObject({ code: 'EVAL_MODEL_UNAVAILABLE', message: expect.stringContaining('never called the model') });
+  });
+
+  test('a judge that grades nothing makes the run inconclusive; a judge that misses some scenarios makes it unverified', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    replay.installHarness();
+    const fs = require('fs');
+    const os = require('os');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-eval-judge-'));
+    const fixturePath = path.join(dir, 'two.json');
+    fs.writeFileSync(fixturePath, JSON.stringify({ schemaVersion: replay.SCHEMA_VERSION, scenarios: [scenario({ id: 'one', turns: [{ caller: 'hi' }], expect: [] }), scenario({ id: 'two', turns: [{ caller: 'hi' }], expect: [] })] }));
+    script.push(say('Hello.'), say('Hello.'));
+    await expect(replay.runVoiceRelayReplay({ fixturePath, judge: true, judgeFn: async () => ({ ok: false, reason: 'all_providers_failed' }) })).rejects.toThrow(/judge graded no scenario — all_providers_failed/);
+    script.push(say('Hello.'), say('Hello.'));
+    let n = 0;
+    const verdict = { pass: true, forbidden_claims: [], required_facts_missing: [], prohibited_facts_stated: [], action_taken: 'x', action_ok: true, transfer_ok: true, empathy_ok: true, brevity_ok: true, tone: 4 };
+    const run = await replay.runVoiceRelayReplay({ fixturePath, judge: true, judgeFn: async () => (n++ === 0 ? { ok: true, judge_fallback: false, verdict } : { ok: false, reason: 'unparseable_verdict' }) });
+    expect(run.summary).toMatchObject({ judged: 1, judgeErrors: 1, failed: 0 });
+    expect(run.failed).toBe(true);
+    expect(replay.isFailedVoiceRun(run)).toBe(true);
+  });
+
   test('runVoiceRelayReplay lints the fixture first and is inconclusive when no scenario completes a model round', async () => {
     mockSdk();
     const replay = require('../services/eval/voice-relay-replay');
@@ -505,6 +536,17 @@ describe('voice relay eval — scheduled wrapper and child process', () => {
     expect(bell.body).toMatch(/card-number-spoken: critical spoken_never_matches — \/4111\/ matched/);
     expect(bell.body).toMatch(/Re-run manually: node server\/scripts\/run-voice-relay-eval.js --json/);
     expect(sendEmail).toHaveBeenCalledWith(expect.objectContaining({ subject: 'FIX: Voice relay eval: 1 failing scenario(s)', heading: 'Voice relay conversation eval' }));
+  });
+
+  test('unjudged scenarios page as unverified, with the judge reason in the body', async () => {
+    const notify = jest.fn();
+    const sendEmail = jest.fn(async () => ({ ok: true }));
+    const unjudged = () => run({ failed: true, summary: { ...run().summary, judged: 2, judgeErrors: 1 }, results: [{ id: 'pet-safety-bait', status: 'pass', checks: [], judge: { ok: false, reason: 'all_providers_failed' } }] });
+    const out = await replay.runVoiceRelayEval({ runReplay: async () => unjudged(), notify, sendEmail });
+    expect(out.status).toBe('fail');
+    const bell = notify.mock.calls[0][0];
+    expect(bell.title).toBe('Voice relay eval: 1 scenario(s) unjudged — judge unavailable');
+    expect(bell.body).toMatch(/pet-safety-bait: unjudged — judge unavailable \(all_providers_failed\)/);
   });
 
   test('a manual run (notifyOnFailure: false) touches no channel at all — no bell, no email, no ops digest', async () => {
