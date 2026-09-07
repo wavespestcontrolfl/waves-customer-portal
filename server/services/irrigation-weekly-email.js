@@ -1083,6 +1083,62 @@ async function findEligibleCustomers({ now = new Date(), customerId = null } = {
     .orderBy('c.id');
 }
 
+// Shared customer/home normalization for the sender and saved-plan validation.
+function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek = null, weekPlanEnabled, planWeekEnd, now }) {
+  // After a move, every NON-NULL sizing field must have been re-saved
+  // (irrigation_confirmed_fields, reset by the move, accrues one field
+  // per portal autosave) before any of them sizes an instruction — a
+  // single re-saved field, a non-sizing irrigation edit, or the row-wide
+  // updated_at never re-confirms the rest (codex gh-r20/r21).
+  const scheduleUnconfirmed = scheduleUnconfirmedAfterMove(customer);
+  const priorWeekEvents = priorWeek ? priorWeek.events : null;
+  const priorWeekPrescribedInches = priorWeek ? priorWeek.prescribedInches : null;
+  return {
+    firstName: customer.first_name,
+    // Grass type is a property of the LAWN: after a move the profile
+    // describes the former yard (Bahia Kc 0.45 vs St. Augustine 0.8
+    // changes the target and the hold/run call). Its OWN ledger entry
+    // gates it — re-saving the four sizing fields says nothing about
+    // the grass, so `scheduleUnconfirmed` clearing must not re-enable
+    // the old coefficient (codex gh-r40/r41). Until a turf writer
+    // re-establishes it (grass edit, or auto-capture filling a blank
+    // profile) the plan sizes from the unknown-grass fallback and the
+    // copy says "your lawn".
+    grassType: grassConfirmedAfterMove(customer) ? resolveGrassType(customer) : null,
+    weekEnding,
+    irrigationInchesPerWeek: customer.irrigation_inches_per_week,
+    turfIrrigationInchesPerWeek: customer.turf_irrigation_inches_per_week,
+    assessmentIrrigationInchesPerWeek: customer.assessment_irrigation_inches_per_week,
+    turfIrrigationType: customer.turf_irrigation_type,
+    irrigationSystem: customer.irrigation_system,
+    irrigationRunMinutes: customer.irrigation_run_minutes,
+    wateringDays: customer.watering_days,
+    irrigationSystemType: customer.irrigation_system_type,
+    // Settings saved BEFORE the home moved describe the former property's
+    // sprinkler system. The inputs still ride (so the decision routes to
+    // the plan renderer, not the "missing schedule" setup copy — codex
+    // gh-r22); the PLAN drops the sizing fields and says why.
+    scheduleUnconfirmed,
+    priorWeekEvents,
+    priorWeekPrescribedInches,
+    // The rain-sensor flag describes the former home's controller after a
+    // move — trusted again only when the customer re-saves THAT field
+    // (its own ledger entry; the sizing fields clearing
+    // scheduleUnconfirmed say nothing about the sensor — codex
+    // gh-r40/r41).
+    rainSensor: rainSensorConfirmedAfterMove(customer) && (customer.rain_sensor === true || customer.rain_sensor === 't'),
+    rainfallInches7d: weekWeather.rainInches,
+    et0Inches: weekWeather.et0Inches,
+    rainSource: weekWeather.rainSource,
+    weekPlanEnabled,
+    county: resolveRestrictionCounty({ county: customer.turf_county, profileCity: customer.turf_city, city: customer.city, zip: customer.zip, homeMoved: !!customer.irrigation_home_changed_at, movedAt: customer.irrigation_home_changed_at || null, countyConfirmed: countyConfirmedAfterMove(customer) }),
+    home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip, latitude: customer.latitude, longitude: customer.longitude },
+    // The restriction must cover the WHOLE plan week (through this Sunday).
+    planWeekEnd,
+    now,
+  };
+}
+
 // Grass for the water target: the turf profile's canonical key wins; legacy
 // customers without an active profile fall back to free-text customers.lawn_type
 // normalized to a canonical key ("Zoysia Empire" → zoysia) so a Bahia/Zoysia
@@ -1251,59 +1307,10 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         serviceDate: weekEnding,
       });
 
-      // After a move, every NON-NULL sizing field must have been re-saved
-      // (irrigation_confirmed_fields, reset by the move, accrues one field
-      // per portal autosave) before any of them sizes an instruction — a
-      // single re-saved field, a non-sizing irrigation edit, or the row-wide
-      // updated_at never re-confirms the rest (codex gh-r20/r21).
-      const scheduleUnconfirmed = scheduleUnconfirmedAfterMove(customer);
       const priorWeek = weekPlanEnabled ? await loadPriorWeekPlan({ customerId: customer.id, weekEnding, home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip } }) : null;
-      const priorWeekEvents = priorWeek ? priorWeek.events : null;
-      const priorWeekPrescribedInches = priorWeek ? priorWeek.prescribedInches : null;
-      const decisionInputs = {
-        firstName: customer.first_name,
-        // Grass type is a property of the LAWN: after a move the profile
-        // describes the former yard (Bahia Kc 0.45 vs St. Augustine 0.8
-        // changes the target and the hold/run call). Its OWN ledger entry
-        // gates it — re-saving the four sizing fields says nothing about
-        // the grass, so `scheduleUnconfirmed` clearing must not re-enable
-        // the old coefficient (codex gh-r40/r41). Until a turf writer
-        // re-establishes it (grass edit, or auto-capture filling a blank
-        // profile) the plan sizes from the unknown-grass fallback and the
-        // copy says "your lawn".
-        grassType: grassConfirmedAfterMove(customer) ? resolveGrassType(customer) : null,
-        weekEnding,
-        irrigationInchesPerWeek: customer.irrigation_inches_per_week,
-        turfIrrigationInchesPerWeek: customer.turf_irrigation_inches_per_week,
-        assessmentIrrigationInchesPerWeek: customer.assessment_irrigation_inches_per_week,
-        turfIrrigationType: customer.turf_irrigation_type,
-        irrigationSystem: customer.irrigation_system,
-        irrigationRunMinutes: customer.irrigation_run_minutes,
-        wateringDays: customer.watering_days,
-        irrigationSystemType: customer.irrigation_system_type,
-        // Settings saved BEFORE the home moved describe the former property's
-        // sprinkler system. The inputs still ride (so the decision routes to
-        // the plan renderer, not the "missing schedule" setup copy — codex
-        // gh-r22); the PLAN drops the sizing fields and says why.
-        scheduleUnconfirmed,
-        priorWeekEvents,
-        priorWeekPrescribedInches,
-        // The rain-sensor flag describes the former home's controller after a
-        // move — trusted again only when the customer re-saves THAT field
-        // (its own ledger entry; the sizing fields clearing
-        // scheduleUnconfirmed say nothing about the sensor — codex
-        // gh-r40/r41).
-        rainSensor: rainSensorConfirmedAfterMove(customer) && (customer.rain_sensor === true || customer.rain_sensor === 't'),
-        rainfallInches7d: weekWeather.rainInches,
-        et0Inches: weekWeather.et0Inches,
-        rainSource: weekWeather.rainSource,
-        weekPlanEnabled,
-        county: resolveRestrictionCounty({ county: customer.turf_county, profileCity: customer.turf_city, city: customer.city, zip: customer.zip, homeMoved: !!customer.irrigation_home_changed_at, movedAt: customer.irrigation_home_changed_at || null, countyConfirmed: countyConfirmedAfterMove(customer) }),
-        home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip, latitude: customer.latitude, longitude: customer.longitude },
-        // The restriction must cover the WHOLE plan week (through this Sunday).
-        planWeekEnd,
-        now: planAsOf,
-      };
+      const decisionInputs = weeklyInputsForCustomer(customer, {
+        weekEnding, weekWeather, priorWeek, weekPlanEnabled, planWeekEnd, now: planAsOf,
+      });
       // Decide from last week's balance FIRST — the forecast only fills an
       // optional copy line and never changes shouldSend, so skipped customers
       // (balanced / rain-unknown) must not cost an Open-Meteo forecast call.
@@ -1905,6 +1912,7 @@ async function findUnstampedRecurringLawnMembers({ now = new Date() } = {}) {
 module.exports = {
   runWeeklyIrrigationEmailSweep,
   buildWeeklyEmailDecision,
+  weeklyInputsForCustomer,
   findUnstampedRecurringLawnMembers,
   findEligibleCustomers,
   findLawnEmailAudienceGaps,
