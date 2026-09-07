@@ -734,6 +734,7 @@ export const CUSTOMER_COMPOSER_LINKS = [
   { key: "service_report", name: "Latest service report link", keywords: "report service report visit summary last recap", dynamic: true },
   { key: "contract", name: "Contract signing link", keywords: "contract sign signature agreement document esign", dynamic: true },
   { key: "statement", name: "Statement pay link", keywords: "statement payer bill-to property manager builder net30 pay", dynamic: true },
+  { key: "receipt", name: "Latest receipt link", keywords: "receipt paid payment record proof bookkeeping refund", dynamic: true },
   { key: "project_report", name: "Project report link", keywords: "project report wdo termite inspection specialty findings pdf", dynamic: true },
   ...STATIC_COMPOSER_LINKS,
 ].map((l) => ({ category: "customer", ...l }));
@@ -818,7 +819,7 @@ function SmsTab({ active }) {
   // Insert Link sheet — the searchable link library (customer links +
   // reviews + the whole website + app stores + socials).
   const [showLinkSheet, setShowLinkSheet] = useState(false);
-  const { links: libraryLinks, loading: libraryLoading, error: libraryError, retry: loadLinkLibrary } = useLinkLibrary(active && showLinkSheet);
+  const { links: libraryLinks, loading: libraryLoading, error: libraryError, retry: loadLinkLibrary, receiptLinksEnabled } = useLinkLibrary(active && showLinkSheet);
   // Which minted customer link is mid-lookup ('reschedule' | 'reservice' |
   // a /customer-link kind), and the inserted minted links being tracked per
   // kind: { url, recipientKey, customerId, requestId?, contractId? }. Same bearer-link
@@ -1722,6 +1723,7 @@ function SmsTab({ active }) {
       d.statement
         ? `Statement pay link added — ${d.statement.number}, $${Number(d.statement.total).toFixed(2)} for ${d.statement.payerName}.`
         : "Statement pay link added.",
+    receipt: (d) => `Receipt link added${d.receipt?.invoiceNumber ? ` — invoice ${d.receipt.invoiceNumber}` : ""}${d.receipt?.paidAt ? `, paid ${d.receipt.paidAt}` : ""}.`,
     project_report: (d) => `Project report link added${d.projectReport?.title ? ` — ${d.projectReport.title}` : ""}${d.projectReport?.projectDate ? ` (${d.projectReport.projectDate})` : ""}.`,
   };
 
@@ -1918,10 +1920,10 @@ function SmsTab({ active }) {
   // get a 403, so those rows are admin-only; the static rows stay staff-wide.
   const insertSheetLinks = useMemo(
     () => [
-      ...CUSTOMER_COMPOSER_LINKS.filter((l) => !l.dynamic || (smsIsAdminRole && toNumber.trim())),
+      ...CUSTOMER_COMPOSER_LINKS.filter((l) => (!l.dynamic || (smsIsAdminRole && toNumber.trim())) && (l.key !== "receipt" || receiptLinksEnabled)),
       ...(libraryLinks || []),
     ],
-    [libraryLinks, smsIsAdminRole, toNumber],
+    [libraryLinks, smsIsAdminRole, toNumber, receiptLinksEnabled],
   );
 
   const handleInsertSheetPick = (link, channel = null) => {

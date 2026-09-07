@@ -192,7 +192,7 @@ async function checkConsentForPurpose(input, policy, contactState) {
 
   // Master kill-switch. Set to false on STOP keyword (existing twilio-webhook
   // logic) and on any opt-out detection by detectOptOut().
-  if (prefs.sms_enabled === false) {
+  if (input.channel !== 'push' && prefs.sms_enabled === false) {
     return {
       ok: false,
       code: 'SMS_OPTED_OUT',
@@ -207,6 +207,7 @@ async function checkConsentForPurpose(input, policy, contactState) {
   // A policy may name several (payment_receipt honors both the legacy
   // receipt kill switch and the portal texts toggle) — ALL must be non-false.
   for (const prefsColumn of [].concat(policy.prefsColumn || [])) {
+    if (input.channel === 'push' && prefsColumn === 'payment_confirmation_sms') continue;
     if (prefs[prefsColumn] === false) {
       return {
         ok: false,

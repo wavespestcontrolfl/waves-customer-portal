@@ -394,6 +394,11 @@ async function applyVisitFanOut({ row, kind, actorType, actorId, smsOutcome, not
  * `attemptAt` is THIS attempt's en_route_at — every guard write is fenced
  * to it plus the schedule tuple and tracker state.
  */
+function enRouteNotificationKey(svc, attemptAt) {
+  if (!attemptAt) return null;
+  return `${svc.visit_id ? `visit:${svc.visit_id}` : `scheduled-service:${svc.id}`}:en-route:${new Date(attemptAt).toISOString()}`;
+}
+
 async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}, attemptAt }) {
   let smsSent = false;
   // Classification for the visit effect ledger (codex #3603 r2): a
@@ -471,6 +476,7 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
         trackToken,
         {
           operatorInitiated: ['tech', 'admin'].includes(String(opts.actorType || '')),
+          notificationEventKey: enRouteNotificationKey(svc, attemptAt),
         },
       );
 
@@ -1548,6 +1554,7 @@ async function cancel(serviceId, { reason, actorId } = {}) {
 }
 
 module.exports = {
+  enRouteNotificationKey,
   markEnRoute,
   markOnProperty,
   markComplete,

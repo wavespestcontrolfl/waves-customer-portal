@@ -341,6 +341,7 @@ describe("TwilioService.sendTechEnRoute", () => {
         metadata: {
           original_message_type: "tech_arrived",
           appointment_progress_event: "tech_arrived",
+          useCustomerChannel: true,
         },
       }),
     );
