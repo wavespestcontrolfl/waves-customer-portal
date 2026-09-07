@@ -2947,7 +2947,7 @@ describe('backfill keeps the pest recap quiet (Codex P2, PR #2897 fix round 6)',
   test('completion never enqueues the recap render under backfill — the pending row feeds an operator-reachable Approve & send card', () => {
     // The PEST_RECAP rail branches on isBackfillCompletion FIRST: quiet
     // closeouts log the skip…
-    expect(source).toMatch(/if \(process\.env\.PEST_RECAP === 'true' && typedDeliveryMode === 'auto_send'[^\n]*record\.scheduled_service_id\) \{\s*\n\s*if \(isBackfillCompletion\) \{\s*\n\s*logger\.info\(`\[dispatch\] backfill completion: pest recap render NOT enqueued for visit \$\{svc\.id\}/);
+    expect(source).toMatch(/if \(!packetEffects && process\.env\.PEST_RECAP === 'true' && typedDeliveryMode === 'auto_send'[^\n]*record\.scheduled_service_id\) \{\s*\n\s*if \(isBackfillCompletion\) \{\s*\n\s*logger\.info\(`\[dispatch\] backfill completion: pest recap render NOT enqueued for visit \$\{svc\.id\}/);
     // …and the enqueue lives only in the else branch.
     expect(source).toMatch(/\} else \{\s*\n\s*try \{\s*\n\s*const \{ enqueueRecap \} = require\('\.\.\/services\/service-report\/recap-pipeline'\);[\s\S]{0,400}await enqueueRecap\(record\.scheduled_service_id, \{ force: true \}\);/);
     // The completion path has exactly one enqueue call site — no ungated twin.

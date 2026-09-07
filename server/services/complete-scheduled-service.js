@@ -8678,7 +8678,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // operator-reachable "today's visit" text days after the fact — so this
     // rail is gated like the other customer-contact rails. Recap delivery also
     // refuses the structured_notes.backfill marker as defense in depth.
-    if (process.env.PEST_RECAP === 'true' && typedDeliveryMode === 'auto_send' && String(record.service_line || '').toLowerCase() === 'pest' && record.scheduled_service_id) {
+    if (!packetEffects && process.env.PEST_RECAP === 'true' && typedDeliveryMode === 'auto_send' && String(record.service_line || '').toLowerCase() === 'pest' && record.scheduled_service_id) {
       if (isBackfillCompletion) {
         logger.info(`[dispatch] backfill completion: pest recap render NOT enqueued for visit ${svc.id} — quiet closeout, nothing to approve or send`);
       } else {
@@ -11578,22 +11578,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
 
       try {
         const { triggerNotification } = require('../services/notification-triggers');
-        let pushClaimOwned = false;
         let pushClaimFailed = false;
         const notification = await triggerNotification('job_complete', {
           techName: svc.tech_name, serviceName: svc.service_type,
-          customerName: `${svc.first_name} ${svc.last_name}`, serviceId: svc.id,
+          customerName: `${svc.first_name} ${svc.last_name}`, serviceId: svc.id, customerId: svc.customer_id,
         }, packetEffects ? {
           dedupeKey: `visit_member_complete:${record.id}`,
-          beforePush: async () => {
-            if (pushClaimOwned) return true;
+          beforePush: async ({ dispatching }) => {
+            if (!dispatching) return true;
             try {
               const claimed = await db('visit_completion_packet_items')
                 .where({ id: packetContext.itemId, service_record_id: record.id })
                 .whereNull('notification_push_started_at')
                 .update({ notification_push_started_at: db.fn.now(), updated_at: db.fn.now() });
-              pushClaimOwned = claimed > 0;
-              return pushClaimOwned;
+              return claimed > 0;
             } catch {
               pushClaimFailed = true;
               return false;
@@ -11916,7 +11914,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // durable trx commits and the attempt is succeeded, an unhandled throw
     // in a recoverable side effect must NOT flip it back — that would
     // allow a retry to re-create service_record / invoice / SMS.
-    if (packetEffects && !markedSucceeded && durableCompletionCommitted) {
+    // Packet effects only claim already-committed records. A reload failure
+    // after the claim must release that resume even before record hydration.
+    if (packetEffects && !markedSucceeded && completionAttempt) {
       await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, err);
     } else if (!markedSucceeded && !durableCompletionCommitted) {
       await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);

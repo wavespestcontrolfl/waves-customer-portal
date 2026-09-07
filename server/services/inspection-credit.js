@@ -1241,12 +1241,8 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
         .where('o.status', 'offered')
         .where('o.expires_at', '>=', now)
         .where('o.created_at', '<=', auditCutoff)
-        .whereNotExists(function paidInvoiceExists() {
-          this.select('*').from('invoices')
-            .whereRaw('invoices.scheduled_service_id = o.source_scheduled_service_id')
-            .where('invoices.status', 'paid')
-            .whereNull('invoices.payer_id');
-        })
+        .whereNotExists(inspectionInvoices(db.ref('o.source_scheduled_service_id'))
+          .where('invoices.status', 'paid').whereNull('invoices.payer_id').select(db.raw('1')))
         .limit(limit)
         .select('o.id as id', 'o.source_scheduled_service_id as visit_id');
       for (const row of unchanneled) {
@@ -1274,7 +1270,8 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
         .where('o.status', 'offered')
         .where('o.expires_at', '>=', now)
         .where('o.created_at', '<=', auditCutoff)
-        .whereRaw("EXISTS (SELECT 1 FROM invoices i WHERE i.scheduled_service_id = o.source_scheduled_service_id AND i.status = 'paid' AND i.payer_id IS NULL)")
+        .whereExists(inspectionInvoices(db.ref('o.source_scheduled_service_id'))
+          .where('invoices.status', 'paid').whereNull('invoices.payer_id').select(db.raw('1')))
         // m.created_at >= o.UPDATED_at, not created_at (r35 P2): a
         // recovery-created offer backdates created_at to the promise
         // moment, so a receipt sent BEFORE the row materialized — which
@@ -1287,16 +1284,17 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
         // NOT EXISTS true so the sweep re-queues — the resend's own
         // ok:false handling then raises the once-per-offer alert; the
         // email layer's idempotency key prevents double-sends.
-        .whereRaw(`NOT EXISTS (
-          SELECT 1 FROM email_messages m
-          WHERE m.status IN ('sent', 'delivered', 'opened', 'clicked')
-            AND ((m.idempotency_key = 'inspection-credit-offer-' || o.id::text)
-              OR (m.created_at >= o.updated_at
-                AND m.trigger_event_id IN (
-                  SELECT 'invoice_receipt:' || i2.id::text FROM invoices i2
-                  WHERE i2.scheduled_service_id = o.source_scheduled_service_id
-                    AND i2.status = 'paid' AND i2.payer_id IS NULL)))
-        )`)
+        .whereNotExists(db('email_messages as m')
+          .whereIn('m.status', ['sent', 'delivered', 'opened', 'clicked'])
+          .where(function deliveredReceipt() {
+            this.whereRaw("m.idempotency_key = 'inspection-credit-offer-' || o.id::text")
+              .orWhere(function normalReceipt() {
+                this.whereRaw('m.created_at >= o.updated_at').whereIn('m.trigger_event_id',
+                  inspectionInvoices(db.ref('o.source_scheduled_service_id'))
+                    .where('invoices.status', 'paid').whereNull('invoices.payer_id')
+                    .select(db.raw("'invoice_receipt:' || invoices.id::text")));
+              });
+          }).select(db.raw('1')))
         .limit(limit)
         .select('o.id as id', 'o.source_scheduled_service_id as visit_id');
       for (const row of undelivered) {
@@ -1769,6 +1767,26 @@ async function reverseInspectionCreditForBooking({
  * idempotency key makes replays safe. Fire-and-forget by contract — a
  * completion or sweep never waits on an email.
  */
+// Receipt and recovery reads use the same billed-member identity. A grouped
+// invoice keeps one legacy anchor, while every billed member is linked by its
+// saved packet item. The argument can also be a Knex ref in the sweep's
+// correlated subqueries; it never becomes interpolated SQL.
+function inspectionInvoices(scheduledServiceId) {
+  return db('invoices').where(function matchingInspection() {
+    this.where('invoices.scheduled_service_id', scheduledServiceId).orWhereExists(
+      db('visit_completion_packet_items as i')
+        .join('visit_completion_packets as p', 'p.id', 'i.packet_id')
+        .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
+        .where('i.scheduled_service_id', scheduledServiceId)
+        .whereRaw('i.invoice_id = invoices.id')
+        .whereRaw('p.id = invoices.visit_completion_packet_id')
+        .whereRaw('p.visit_id = s.visit_id')
+        .whereRaw('s.customer_id = invoices.customer_id')
+        .select(db.raw('1')),
+    );
+  });
+}
+
 function queueCreditReceiptResend({ scheduledServiceId, offerId, attempt = 0 }) {
   if (!scheduledServiceId || !offerId) return;
   setImmediate(() => {
@@ -1803,8 +1821,8 @@ function queueCreditReceiptResend({ scheduledServiceId, offerId, attempt = 0 }) 
         );
       };
       try {
-        const paidInvoice = await db('invoices')
-          .where({ scheduled_service_id: scheduledServiceId, status: 'paid' })
+        const paidInvoice = await inspectionInvoices(scheduledServiceId)
+          .where({ status: 'paid' })
           .whereNull('payer_id')
           .orderBy('created_at', 'desc')
           .first('id');
@@ -1834,8 +1852,7 @@ function queueCreditReceiptResend({ scheduledServiceId, offerId, attempt = 0 }) 
           // refuses non-paid invoices — treating it as a deliverable
           // channel suppressed the alert while the customer got no written
           // deadline at all.
-          const liveInvoice = await db('invoices')
-            .where({ scheduled_service_id: scheduledServiceId })
+          const liveInvoice = await inspectionInvoices(scheduledServiceId)
             .whereNull('payer_id')
             .whereNotIn('status', [...CANCELLED_SERVICE_RESOLVED_STATUSES, 'prepaid'])
             .first('id');
