@@ -9,7 +9,7 @@
     },
     "founded_2024": {
       "label": "Founded 2024",
-      "pattern": "(?:founded|established|started|opened|founding|since|in business|operating|launched|incorporated|formed|filed|began|est\\.?|year)[^.\\n]{0,80}\\b2024\\b|\\b2024\\b[^.\\n]{0,30}(?:founding|founded|established|incorporat|filing|launch)|(?:^|\\n)\\s*(?:in\\s+)?(?:\\w+\\s+\\d{1,2},?\\s+)?2024\\b"
+      "pattern": "(?:founded|established|started|opened|founding|since|in business|operating|launched|incorporated|formed|filed|began|est\\.?|year)(?:(?!\\b(?:19|20)\\d\\d\\b)(?!,\\s*(?:and|but|or|while)\\b)[^.\\n;]){0,80}\\b2024\\b|\\b2024\\b[^.\\n;]{0,30}(?:founding|founded|established|incorporat|filing|launch)|(?:^|\\n)\\s*(?:in\\s+)?(?:\\w+\\s+\\d{1,2},?\\s+)?2024\\b"
     },
     "fdacs_license": {
       "label": "License JB351547",
