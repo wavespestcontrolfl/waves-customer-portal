@@ -2657,10 +2657,14 @@ async function refreshTermSnapshot(termOrId, conn = db) {
   // beyond the original end would never be linked or stamped prepaid and
   // completion would invoice the customer again for visits they prepaid.
   let windowEnd = termEnd;
-  // Every refreshed term, not only ACTIVE ones (GH Codex #4105 r4 P1): a
-  // renewed / switch_plan / decided-lapse term can still be paid coverage
-  // (coveredTermsAsOf), and its legacy callback stamp would otherwise stay.
-  await detachCallbacksFromTerm(term, conn);
+  // Every refreshed term that could ever have attached or stamped, not only
+  // ACTIVE ones (GH Codex #4105 r4 P1): a renewed / switch_plan /
+  // decided-lapse term can still be paid coverage (coveredTermsAsOf), and
+  // its legacy callback stamp would otherwise stay. A payment_pending term
+  // has never attached or stamped — nothing to detach, so it is skipped.
+  if (term.status !== PAYMENT_PENDING_STATUS) {
+    await detachCallbacksFromTerm(term, conn);
+  }
   if (ACTIVE_STATUSES.includes(term.status)) {
     const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn);
     if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
