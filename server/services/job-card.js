@@ -1455,7 +1455,7 @@ async function forecastAt({ coords, scheduledDate, now = new Date(), deps = {} }
 
 // A schedule strip reports exceptions from the card's existing evidence. No
 // amounts, access information, customer text, or vendor prices leave this view.
-function dispatchReadiness({ facts, lines, blocks, sprayCheck, isToday, now }) {
+function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, now }) {
   const issues = [];
   if (!lines.length) issues.push({ kind: 'protocol', status: 'unknown', label: 'No products resolved' });
   else if (sprayCheck.hold) issues.push({ kind: 'weather', status: 'hold', label: 'Weather hold' });
@@ -1471,6 +1471,15 @@ function dispatchReadiness({ facts, lines, blocks, sprayCheck, isToday, now }) {
   } else if (stock.some(item => item.inventory?.plannedAmountInventoryUnit == null || item.inventory?.onHand == null)) {
     issues.push({ kind: 'stock', status: 'unknown', label: 'Stock unverified' });
   }
+  // Not a rig requirement: only when neither a rig nor the protocol window
+  // supplies a carrier does the card withhold tank amounts, and the strip
+  // says so rather than reading clean.
+  const needsCarrier = selected.some(line => {
+    if (!isTankMixable(line.product)) return false;
+    const areaRate = line.planMix?.ratePer1000 ?? line.product.default_rate_per_1000;
+    return areaRate != null || !perGallonRate(line.product);
+  });
+  if (!tank.calibrated && needsCarrier) issues.push({ kind: 'carrier', status: 'unknown', label: 'No carrier rate' });
   if (blocks.length) issues.push({ kind: 'plan', status: 'hold', label: 'Plan blocked' });
   return { serviceId: facts.serviceId, checkedAt: now.toISOString(), issues };
 }
@@ -1495,7 +1504,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
   // begun): a 3 pm stop opened at 8 am is checked against the 3 pm hours.
   const labelSources = await checkReviewedWeatherSources(products);
   const sprayCheck = buildSprayCheck({ products, hourly, now: serviceInstant, labelSources });
-  if (readinessOnly) return dispatchReadiness({ facts, lines, blocks, sprayCheck, isToday, now });
+  if (readinessOnly) return dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, now });
   const packSizes = await loadPackSizes(dbh, products.map((p) => p.id));
   const cards = await buildProductCards({ facts, lines, verdicts: sprayCheck.verdicts, packSizes, blocked: blocks.length > 0, tankReason: tank.calibrated ? null : tank.reason, includePricing, dbh });
 

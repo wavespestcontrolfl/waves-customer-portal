@@ -3,7 +3,7 @@ const { _test: { dispatchReadiness }, buildSprayCheck } = require('../services/j
 const now = new Date('2026-09-04T13:00:00Z');
 const product = { id: 'product', name: 'Synthetic liquid', inventory_on_hand: 1, inventory_unit: 'gal', low_stock_threshold: 0, default_rate_per_1000: 2, rate_unit: 'fl_oz', label_verified_at: now, max_wind_mph: 10 };
 const line = { selected: true, product, planMix: { amount: 256, amountUnit: 'fl_oz' } };
-const base = { facts: { serviceId: 'visit' }, now, isToday: true, lines: [line], blocks: [], sprayCheck: { hold: false, verdicts: [{ verdict: 'ok' }] } };
+const base = { facts: { serviceId: 'visit' }, now, isToday: true, lines: [line], blocks: [], tank: { calibrated: true }, sprayCheck: { hold: false, verdicts: [{ verdict: 'ok' }] } };
 
 test('weather holds and a stock shortage survive missing readings and a blocked plan', () => {
   const hourly = [{ startTime: now.toISOString(), windMph: 20, temperatureF: null, rainChance: null }];
@@ -40,9 +40,11 @@ test('future weather stays on the visit day', () => {
   expect(result.issues).toContainEqual({ kind: 'weather', status: 'unknown', label: 'Weather on visit day' });
 });
 
-test('the rig is never a readiness issue — an area-rate tank mix reads the protocol carrier (owner ruling 2026-09-07)', () => {
+test('the rig is never a readiness issue; only a missing carrier from BOTH sources is, and only for an area-rate tank mix (owner ruling 2026-09-07)', () => {
   const dilution = { ...line, planMix: null, product: { ...product, default_rate_per_1000: null, default_rate: '1', default_unit: 'fl_oz/gal' } };
-  const summary = input => dispatchReadiness({ ...base, lines: [input] });
-  expect(summary(dilution).issues.some(issue => issue.kind === 'equipment')).toBe(false);
-  expect(summary({ ...dilution, planMix: { ratePer1000: 2 } }).issues.some(issue => issue.kind === 'equipment')).toBe(false);
+  const summary = (input, tank) => dispatchReadiness({ ...base, lines: [input], tank });
+  const noCarrier = { calibrated: false, source: null };
+  expect(summary(dilution, noCarrier).issues.some(issue => issue.kind === 'carrier')).toBe(false);
+  expect(summary({ ...dilution, planMix: { ratePer1000: 2 } }, noCarrier).issues).toContainEqual({ kind: 'carrier', status: 'unknown', label: 'No carrier rate' });
+  expect(summary({ ...dilution, planMix: { ratePer1000: 2 } }, { calibrated: true, source: 'protocol_default' }).issues.some(issue => issue.kind === 'carrier')).toBe(false);
 });
