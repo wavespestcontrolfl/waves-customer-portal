@@ -542,11 +542,18 @@ export default function AdminInvoicesPage() {
   }, [loadStats]);
   // tone "ok" | "error": a failure is announced as one (prefix, colour, a
   // longer dwell) instead of behind a green "OK".
+  const toastTimerRef = useRef(null);
   const showToast = (msg, tone = "ok") => {
     setToast(msg);
     setToastTone(tone);
-    setTimeout(() => setToast(""), tone === "error" ? 8000 : 3500);
+    // One timer at a time — an older toast's timer never clears a newer one.
+    clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(
+      () => setToast(""),
+      tone === "error" ? 8000 : 3500,
+    );
   };
+  useEffect(() => () => clearTimeout(toastTimerRef.current), []);
 
   return (
     <div
@@ -987,6 +994,10 @@ function InvoiceList({
   const [paymentModalInvoice, setPaymentModalInvoice] = useState(null);
   const [paymentPlanModalInvoice, setPaymentPlanModalInvoice] = useState(null);
   const [cancellingPlanInvoiceId, setCancellingPlanInvoiceId] = useState(null);
+  // Reverse prepaid moves money, so it carries its own latch: the shared
+  // rowActionBusy scalar can be overwritten and cleared by a sibling
+  // action mid-flight, which would re-enable the button early.
+  const [reversingId, setReversingId] = useState(null);
   const [annualPrepayModalInvoice, setAnnualPrepayModalInvoice] = useState(null);
   const [applyCreditInvoice, setApplyCreditInvoice] = useState(null);
   const [cardOnFileInvoice, setCardOnFileInvoice] = useState(null);
@@ -1004,7 +1015,10 @@ function InvoiceList({
         customerFilterId,
       });
 
-      const reqId = ++listReqIdRef.current;
+      // Only a replacement load takes a new id; an append rides on the
+      // current one, so it can never invalidate a filter/sort/date reload
+      // and is itself discarded if such a reload started meanwhile.
+      const reqId = append ? listReqIdRef.current : ++listReqIdRef.current;
       if (!append) {
         setListLoading(true);
         setListError(false);
@@ -1188,15 +1202,14 @@ function InvoiceList({
   };
 
   const handleReversePrepaid = async (id) => {
-    if (rowActionBusy) return;
+    if (reversingId) return;
     if (
       !confirm(
         "Reverse this prepaid invoice? The applied account credit is returned to the customer and the invoice reopens for collection.",
       )
     )
       return;
-    // Money moves here — the busy latch keeps a double click to one POST.
-    setRowActionBusy(id);
+    setReversingId(id);
     try {
       const res = await adminFetch(`/admin/invoices/${id}/reverse-prepaid`, {
         method: "POST",
@@ -1209,7 +1222,7 @@ function InvoiceList({
     } catch (err) {
       showToast(`Reverse failed: ${err.message}`, "error");
     } finally {
-      setRowActionBusy(null);
+      setReversingId(null);
     }
   };
 
@@ -2023,10 +2036,10 @@ function InvoiceList({
                           {inv.status === "prepaid" && (
                             <button
                               onClick={() => handleReversePrepaid(inv.id)}
-                              disabled={rowActionBusy === inv.id}
+                              disabled={reversingId !== null}
                               style={{
                                 ...sBtn("transparent", D.red, isMobile),
-                                opacity: rowActionBusy === inv.id ? 0.5 : 1,
+                                opacity: reversingId !== null ? 0.5 : 1,
                               }}
                               title="Return the applied account credit to the customer and reopen this invoice"
                             >
@@ -2126,11 +2139,11 @@ function InvoiceList({
                 setLoadingMore(false);
               }
             }}
-            disabled={loadingMore}
+            disabled={loadingMore || listLoading}
             style={{
               ...sBtn(D.card, D.text, isMobile),
               border: `1px solid ${D.border}`,
-              opacity: loadingMore ? 0.6 : 1,
+              opacity: loadingMore || listLoading ? 0.6 : 1,
             }}
           >
             {loadingMore
