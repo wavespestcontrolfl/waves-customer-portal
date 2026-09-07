@@ -111,7 +111,7 @@ const {
   savedFloorReplaySignals,
 } = require('../services/estimate-floor-signal-replay');
 const featureGates = require('../config/feature-gates');
-const { describeLawnProgramCadence } = require('../services/self-booking-plan-sync');
+const { resolveLawnCareRecurringPlanByCount } = require('../services/self-booking-plan-sync');
 
 function lawnCalendarBlock(services) {
   if (!featureGates.isEnabled('estimateLawnCalendar')) return {};
@@ -119,8 +119,8 @@ function lawnCalendarBlock(services) {
     .find((section) => section && section.key === 'lawn_care' && section.isRecurring === true);
   const programs = {};
   for (const frequency of Array.isArray(lawn?.frequencies) ? lawn.frequencies : []) {
-    const program = frequency?.key ? describeLawnProgramCadence(frequency.visitsPerYear) : null;
-    if (program) programs[frequency.key] = program;
+    const plan = frequency?.key ? resolveLawnCareRecurringPlanByCount(frequency.visitsPerYear) : null;
+    if (plan) programs[frequency.key] = { visitsPerYear: plan.visitsPerYear };
   }
   return Object.keys(programs).length ? { lawnCalendar: { programs } } : {};
 }
@@ -17767,7 +17767,7 @@ function shouldPersistPestOnlyRecurringChoice(estimate = {}, estData = {}) {
   return oneTimePestChoiceAmountForEstimate(estimate, estData) > 0;
 }
 
-function acceptanceServiceLists(estData) {
+function acceptanceServiceLists(estData, { preserveDuplicates = false } = {}) {
   const result = estData?.result && typeof estData.result === 'object'
     ? estData.result
     : (estData && typeof estData === 'object' ? estData : {});
@@ -17793,22 +17793,31 @@ function acceptanceServiceLists(estData) {
         price: item.amount,
       }));
 
+  const sourceResult = estData?.result || estData?.engineResult || estData || {};
+  const recurringRows = [
+    ...recurringServicesWithSupplements(sourceResult),
+    ...(Array.isArray(nestedRecurring.services) ? nestedRecurring.services : []),
+  ];
+  if (preserveDuplicates && Array.isArray(sourceResult.lineItems)) {
+    // Supplementation coalesces engine rows by family for acceptance.
+    // Completion must still see that two original lines claimed the same
+    // identity; repeating its normalized identity makes that match ambiguous.
+    const seenKeys = new Set();
+    for (const row of sourceResult.lineItems) {
+      const key = recurringServiceKey(row);
+      const matched = recurringRows.find((candidate) => recurringServiceKey(candidate) === key);
+      if (key && seenKeys.has(key) && matched) recurringRows.push(matched);
+      seenKeys.add(key);
+    }
+  }
   return {
-    recurringSvcList: uniqueRecurringServiceRows([
-      // Engine-invocation estimates (quote wizard / IB agent drafts) persist the
-      // priced lines under estData.engineResult with no v1-mapped
-      // result.recurring.services, so source recurring rows from engineResult too
-      // (same `result || engineResult || estData` idiom used elsewhere in this
-      // file) — otherwise a foam-only engine-backed accept yields an empty
-      // recurring list and EstimateConverter schedules/seeds/invoices nothing.
-      ...recurringServicesWithSupplements(estData?.result || estData?.engineResult || estData || {}),
-      ...(Array.isArray(nestedRecurring.services) ? nestedRecurring.services : []),
-    ]),
+    recurringSvcList: uniqueRecurringServiceRows(recurringRows, { preserveDuplicates }),
     oneTimeList,
   };
 }
 
-function uniqueRecurringServiceRows(rows = []) {
+function uniqueRecurringServiceRows(rows = [], { preserveDuplicates = false } = {}) {
+  if (preserveDuplicates) return rows.filter(Boolean);
   const seen = new Set();
   return rows.filter((row) => {
     if (!row) return false;
@@ -25463,12 +25472,11 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       ...returnVisitBlock,
       ...(successReferral ? { referral: successReferral } : {}),
       // Lawn program calendar (GATE_ESTIMATE_LAWN_CALENDAR): per lawn
-      // frequency key, the cadence line and the projected application months
-      // from the scheduling catalog (describeLawnProgramCadence) — the page
-      // only buckets months into seasons, so it can never promise an interval
-      // the scheduler does not keep (GH Codex P1 on #3755). A frequency with
-      // no catalog plan is omitted and renders nothing; the key is absent
-      // when nothing resolves.
+      // frequency key, the program's annual application count when that
+      // count is a catalog lawn plan (resolveLawnCareRecurringPlanByCount);
+      // the page renders the count and fixed season copy and never derives
+      // an interval itself. A frequency with no catalog plan is omitted and
+      // renders nothing; the key is absent when nothing resolves.
       ...lawnCalendarBlock(pricingBundle.services),
       // Authored commercial proposal, rendered on-page under the commercial
       // glass gate. Key only exists for gated proposal estimates so every

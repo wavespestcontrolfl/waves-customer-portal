@@ -9,7 +9,7 @@
  * visit commits; a failure just leaves verification_status at its prior value.
  */
 const MODELS = require('../config/models');
-const { anthropicText } = require('./llm/call');
+const { anthropicText, geminiText } = require('./llm/call');
 const logger = require('./logger');
 const db = require('../models/db');
 const photos = require('./photos');
@@ -20,7 +20,7 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY;
 // Was hardcoded gemini-2.5-flash in the request URL — the exact pattern that
 // broke call extraction when Google retired that model (2026-07-09): no env
 // lever, so a model retirement means a deploy.
-const GEMINI_OCR_MODEL = process.env.GEMINI_TURF_OCR_MODEL || 'gemini-3.5-flash';
+const GEMINI_OCR_MODEL = process.env.GEMINI_TURF_OCR_MODEL || MODELS.GEMINI_VISION_BEST;
 
 const GAUGE_OCR_PROMPT = `You are reading a Turfchek rough grass height-of-cut gauge from a photo. Find where the grass canopy line meets the printed inch scale and read the maintained height in inches. Return ONLY a JSON object: {"height_in": number, "confidence": number between 0 and 1, "readable": boolean}. If the gauge scale or canopy line is not clearly legible, set "readable" to false and "confidence" to 0.`;
 
@@ -86,12 +86,12 @@ async function callGeminiGaugeOcr(base64Image, mimeType) {
             { text: GAUGE_OCR_PROMPT },
           ],
         }],
-        generationConfig: { temperature: 0.1, maxOutputTokens: 200 },
+        generationConfig: { temperature: 0.1, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
       }),
     });
     if (!response.ok) return null;
     const data = await response.json();
-    const parsed = parseGaugeJson(data.candidates?.[0]?.content?.parts?.[0]?.text);
+    const parsed = parseGaugeJson(geminiText(data));
     return { model: 'gemini', ...(parsed || { height_in: null, confidence: 0, readable: false }) };
   } catch (err) {
     logger.warn(`[turf-ocr] Gemini gauge read failed: ${err.message}`);

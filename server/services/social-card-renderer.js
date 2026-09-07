@@ -171,7 +171,38 @@ function fitText(text, availW, sizes, maxLines, factor = 0.56) {
 // columns are wrapped FIRST so the two names share one baseline and bullet i
 // sits on the same row in both columns — a two-line name or point on one side
 // pushes both sides down together instead of colliding with what's below.
-function versusLayout({ left, right, colW, nameSize: baseNameSize, pointSize }) {
+function linesElided(lines) {
+  return lines.length > 0 && lines[lines.length - 1].endsWith('...');
+}
+
+// A myth card is the versus layout with the belief on the left and the
+// correction on the right — two tiles, one long line each, the VS badge on
+// the seam. Everything else (pairs) passes through untouched.
+function versusSides(input = {}) {
+  if (input.format === 'myth') {
+    return {
+      left: { name: 'Myth', points: [cleanText(input.myth, 120)].filter(Boolean) },
+      right: { name: 'Fact', points: [cleanText(input.fact, 120)].filter(Boolean) },
+      eyebrowLabel: 'Myth vs fact',
+      photoEyebrow: (city) => (city ? `${city} · myth vs fact` : 'Myth vs fact'),
+      pointLines: 6,
+      // One sentence per tile: start larger so the tile is not mostly empty.
+      typeSteps: [1.3, 1.15, 1, 0.9, 0.8, 0.7],
+    };
+  }
+  const left = input.left || {};
+  const right = input.right || {};
+  return {
+    left: { name: cleanText(left.name, 40) || 'Pest A', points: (Array.isArray(left.points) ? left.points : []).slice(0, 3) },
+    right: { name: cleanText(right.name, 40) || 'Pest B', points: (Array.isArray(right.points) ? right.points : []).slice(0, 3) },
+    eyebrowLabel: 'Pest ID: know the difference',
+    photoEyebrow: (city) => (city ? `${city} · pest ID` : 'Pest ID: know the difference'),
+    pointLines: 3,
+    typeSteps: [1, 0.9, 0.8, 0.7],
+  };
+}
+
+function versusLayout({ left, right, colW, nameSize: baseNameSize, pointSize, pointLines = 3 }) {
   // Prefer both names on ONE line (stepping the shared size down to ~70%)
   // before letting either wrap to two — a wrapped name is the exception for
   // long species names, not the default look.
@@ -191,14 +222,15 @@ function versusLayout({ left, right, colW, nameSize: baseNameSize, pointSize }) 
   const rowCount = Math.max(left.points.length, right.points.length);
   const rows = [];
   for (let i = 0; i < rowCount; i += 1) {
-    const cells = [left.points[i], right.points[i]].map((point) => (point ? wrapText(point, pointChars, 3) : []));
+    const cells = [left.points[i], right.points[i]].map((point) => (point ? wrapText(point, pointChars, pointLines) : []));
     const lineCount = Math.max(1, ...cells.map((c) => c.length));
     rows.push({ cells, h: Math.round(lineCount * pointSize * 1.22) + Math.round(pointSize * 0.9) });
   }
   const nameLineH = Math.round(nameSize * 1.06);
   const nameBlockH = Math.max(1, ...names.map((n) => n.length)) * nameLineH;
   const pointsH = rows.reduce((sum, row) => sum + row.h, 0);
-  return { names, rows, nameSize, nameLineH, nameBlockH, pointsH, gap: Math.round(nameSize * 0.55) };
+  const elided = rows.some((row) => row.cells.some(linesElided));
+  return { names, rows, nameSize, nameLineH, nameBlockH, pointsH, gap: Math.round(nameSize * 0.55), elided };
 }
 
 // Render a versusLayout at the given column x positions. `nameY` is the
@@ -386,15 +418,15 @@ function renderBlogSvg(input = {}, logoDataUri = null) {
 // center VS badge, and a one-line verdict. Deterministic text-only render — no
 // pest imagery — so it is GBP-eligible (no AI imagery on GBP) by construction.
 function renderVersusSvg(input = {}, logoDataUri = null) {
+  if (input.format === 'signs') return renderSignsSvg(input, logoDataUri);
   const { w: W, h: H } = resolveSize(input.platform);
   const city = cleanText(input.city || input.location, 60);
   const service = cleanText(input.service, 70) || 'Pest ID';
-  const left = input.left || {};
-  const right = input.right || {};
-  const leftName = cleanText(left.name, 40) || 'Pest A';
-  const rightName = cleanText(right.name, 40) || 'Pest B';
-  const leftPoints = (Array.isArray(left.points) ? left.points : []).slice(0, 3);
-  const rightPoints = (Array.isArray(right.points) ? right.points : []).slice(0, 3);
+  const { left, right, eyebrowLabel, pointLines, typeSteps } = versusSides(input);
+  const leftName = left.name;
+  const rightName = right.name;
+  const leftPoints = left.points;
+  const rightPoints = right.points;
   const verdict = cleanText(input.verdict, 120);
 
   const { svg: frame, box } = chrome({ W, H, city, service, logoDataUri });
@@ -423,14 +455,14 @@ function renderVersusSvg(input = {}, logoDataUri = null) {
 
   // Type steps down until the two columns fit inside the tile.
   let nameSize; let pointSize; let layout;
-  for (const step of [1, 0.9, 0.8, 0.7]) {
-    nameSize = Math.round(56 * S * step);
+  for (const step of typeSteps) {
+    nameSize = Math.round(56 * S * Math.min(1, step));
     pointSize = Math.round(31 * S * step);
     layout = versusLayout({
       left: { name: leftName, points: leftPoints }, right: { name: rightName, points: rightPoints },
-      colW: tileW - tilePad * 2, nameSize, pointSize,
+      colW: tileW - tilePad * 2, nameSize, pointSize, pointLines,
     });
-    if (layout.nameBlockH + layout.gap + layout.pointsH <= tileH - tilePad * 2) break;
+    if (!layout.elided && layout.nameBlockH + layout.gap + layout.pointsH <= tileH - tilePad * 2) break;
   }
   const nameY = tileY + tilePad + layout.nameSize;
   const tiles = [COLORS.blueLight, '#FFF6CC'].map((fill, i) => (
@@ -447,10 +479,91 @@ function renderVersusSvg(input = {}, logoDataUri = null) {
   return `
     <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
       ${frame}
-      ${eyebrow('Pest ID: know the difference', box.padL, eyebrowY, COLORS.wavesBlue)}
+      ${eyebrow(eyebrowLabel, box.padL, eyebrowY, COLORS.wavesBlue)}
       ${tiles}
       ${columns}
       ${vsBadge(midX, tileY, Math.round(44 * S))}
+      ${verdictLines.length ? `<rect x="${box.padL}" y="${verdictY - verdictSize + Math.round(verdictSize * 0.12)}" width="10" height="${verdictBlockH}" rx="5" fill="${COLORS.gold}"/>` : ''}
+      ${textBlock(verdictLines, { x: box.padL + 30, y: verdictY, size: verdictSize, weight: 800, fill: COLORS.blueDeeper, family: FONTS.display, lineHeight: 1.18 })}
+      ${waveMotif(box.padR - 60, verdictBottom - 40, W / 1080)}
+    </svg>
+  `;
+}
+
+// Three-signs card: a title, three numbered rows in one tinted tile, and the
+// verdict. Rows share the tile height evenly; type steps down until all
+// three fit without eliding.
+function signsRows(signs, { textW, baseSize, maxH, S }) {
+  let size = baseSize;
+  let rows = [];
+  for (const step of [1, 0.9, 0.8, 0.7]) {
+    size = Math.round(baseSize * step);
+    rows = signs.map((sign) => wrapText(sign, fitChars(textW, size, 0.54), 3));
+    const h = rows.reduce((sum, lines) => sum + Math.round(lines.length * size * 1.22), 0) + Math.round(size * 0.9) * (rows.length - 1);
+    if (h <= maxH && !rows.some(linesElided)) break;
+  }
+  const rowHs = rows.map((lines) => Math.round(lines.length * size * 1.22));
+  const used = rowHs.reduce((sum, h) => sum + h, 0);
+  const gap = rows.length > 1 ? Math.max(Math.round(size * 0.9), Math.floor((maxH - used) / rows.length)) : 0;
+  const numR = Math.round(size * 0.78 * S / Math.max(S, 0.001));
+  return { size, rows, rowHs, gap, numR };
+}
+
+function numberedRows({ rows, rowHs, gap, size, numR }, { x, y, textX, numFill, numText, textFill }) {
+  let cursor = y;
+  let svg = '';
+  rows.forEach((lines, i) => {
+    const cy = cursor - size * 0.36;
+    svg += `<circle cx="${x + numR}" cy="${cy}" r="${numR}" fill="${numFill}"/>`;
+    svg += `<text x="${x + numR}" y="${cy + Math.round(numR * 0.38)}" text-anchor="middle" font-family="${FONTS.display}" font-size="${Math.round(numR * 1.15)}" font-weight="800" fill="${numText}">${i + 1}</text>`;
+    svg += textBlock(lines, { x: textX, y: cursor, size, weight: 700, fill: textFill, family: FONTS.body, lineHeight: 1.22 });
+    cursor += rowHs[i] + gap;
+  });
+  return svg;
+}
+
+function renderSignsSvg(input = {}, logoDataUri = null) {
+  const { w: W, h: H } = resolveSize(input.platform);
+  const city = cleanText(input.city || input.location, 60);
+  const service = cleanText(input.service, 70) || 'Pest ID';
+  const title = cleanText(input.title, 90) || 'Three signs to check';
+  const signs = (Array.isArray(input.signs) ? input.signs : []).slice(0, 3).map((sign) => cleanText(sign, 120)).filter(Boolean);
+  const verdict = cleanText(input.verdict, 120);
+
+  const { svg: frame, box } = chrome({ W, H, city, service, logoDataUri });
+  const S = Math.min(W, H) / 1080;
+  const eyebrowY = box.panelY + 128;
+  const availW = box.padR - box.padL;
+
+  const { size: titleSize, lines: titleLines } = fitText(title, availW, [64, 56, 48, 42].map((n) => Math.round(n * S)), 2, 0.58);
+  const titleY = eyebrowY + 62 + titleSize;
+  const titleBlockH = Math.round(titleLines.length * titleSize * 1.1);
+
+  const { size: verdictSize, lines: verdictLines } = fitText(
+    verdict, availW - 200, [58, 50, 42].map((n) => Math.round(n * S)), 3
+  );
+  const verdictBlockH = verdictLines.length ? Math.round(verdictLines.length * verdictSize * 1.18) : 0;
+  const verdictBottom = box.panelY + box.panelH - 96;
+  const tileY = titleY - titleSize + titleBlockH + Math.round(36 * S);
+  const tileBottom = verdictLines.length ? verdictBottom - verdictBlockH - 54 : verdictBottom;
+  const tileH = tileBottom - tileY;
+  const tilePad = Math.round(34 * S);
+  const numR = Math.round(30 * S);
+  const numX = box.padL + tilePad;
+  const textX = numX + numR * 2 + Math.round(24 * S);
+  const laid = signsRows(signs, { textW: box.padR - tilePad - textX, baseSize: Math.round(40 * S), maxH: tileH - tilePad * 2, S });
+  laid.numR = numR;
+  const rowsH = laid.rowHs.reduce((sum, h) => sum + h, 0) + laid.gap * (laid.rows.length - 1);
+  const rowsY = tileY + tilePad + Math.max(0, Math.floor((tileH - tilePad * 2 - rowsH) / 2)) + laid.size;
+  const verdictY = verdictBottom - verdictBlockH + verdictSize;
+
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+      ${frame}
+      ${eyebrow('Three signs to check', box.padL, eyebrowY, COLORS.wavesBlue)}
+      ${textBlock(titleLines, { x: box.padL, y: titleY, size: titleSize, weight: 800, fill: COLORS.blueDeeper, family: FONTS.display, lineHeight: 1.1 })}
+      <rect x="${box.padL}" y="${tileY}" width="${availW}" height="${tileH}" rx="26" fill="${COLORS.blueLight}"/>
+      ${numberedRows(laid, { x: numX, y: rowsY, textX, numFill: COLORS.gold, numText: COLORS.blueDeeper, textFill: COLORS.blueDeeper })}
       ${verdictLines.length ? `<rect x="${box.padL}" y="${verdictY - verdictSize + Math.round(verdictSize * 0.12)}" width="10" height="${verdictBlockH}" rx="5" fill="${COLORS.gold}"/>` : ''}
       ${textBlock(verdictLines, { x: box.padL + 30, y: verdictY, size: verdictSize, weight: 800, fill: COLORS.blueDeeper, family: FONTS.display, lineHeight: 1.18 })}
       ${waveMotif(box.padR - 60, verdictBottom - 40, W / 1080)}
@@ -625,20 +738,20 @@ function renderPhotoReviewOverlaySvg(input = {}) {
 // the gold VS badge on the seam, and the verdict as the gold hero line. No CTA
 // button — the caption carries the ask; the card's job is the comparison.
 function renderPhotoVersusOverlaySvg(input = {}) {
+  if (input.format === 'signs') return renderPhotoSignsOverlaySvg(input);
   const { w: W, h: H } = resolveSize(input.platform);
   const S = Math.min(W, H) / 1080;
   const city = cleanText(input.city || input.location, 60);
-  const left = input.left || {};
-  const right = input.right || {};
-  const leftName = cleanText(left.name, 40) || 'Pest A';
-  const rightName = cleanText(right.name, 40) || 'Pest B';
-  const leftPoints = (Array.isArray(left.points) ? left.points : []).slice(0, 3);
-  const rightPoints = (Array.isArray(right.points) ? right.points : []).slice(0, 3);
+  const { left, right, photoEyebrow, pointLines } = versusSides(input);
+  const leftName = left.name;
+  const rightName = right.name;
+  const leftPoints = left.points;
+  const rightPoints = right.points;
   const verdict = cleanText(input.verdict, 120);
 
   const { svg: frame, box } = photoChrome({
     W, H,
-    eyebrowLabel: city ? `${city} · pest ID` : 'Pest ID: know the difference',
+    eyebrowLabel: photoEyebrow(city),
     eyebrowFill: COLORS.wavesBlue,
     logoDataUri: input.logoDataUri,
   });
@@ -648,8 +761,14 @@ function renderPhotoVersusOverlaySvg(input = {}) {
   const colW = Math.round((box.padR - box.padX - seamGap) / 2);
   const colX = [box.padX, box.padX + colW + seamGap];
   const midX = box.padX + colW + Math.round(seamGap / 2);
-  const nameSize = Math.round(48 * S);
-  const pointSize = Math.round(27 * S);
+  // A myth's two cells are whole sentences: step the point size down until
+  // neither elides (pairs' short points fit at the first step).
+  let nameSize = Math.round(48 * S);
+  let pointSize = Math.round(27 * S);
+  for (const step of [1, 0.9, 0.8]) {
+    pointSize = Math.round(27 * S * step);
+    if (!versusLayout({ left: { name: leftName, points: leftPoints }, right: { name: rightName, points: rightPoints }, colW, nameSize, pointSize, pointLines }).elided) break;
+  }
 
   // Bottom-anchor: footer < verdict < columns. The whole stack must stay on
   // the bottom scrim (legibility), so the columns start no higher than ~52%.
@@ -662,7 +781,7 @@ function renderPhotoVersusOverlaySvg(input = {}) {
   const columnsBottom = verdictLines.length ? verdictY - verdictSize - Math.round(30 * S) : verdictBottom;
   const layout = versusLayout({
     left: { name: leftName, points: leftPoints }, right: { name: rightName, points: rightPoints },
-    colW, nameSize, pointSize,
+    colW, nameSize, pointSize, pointLines,
   });
   const nameY = columnsBottom - layout.pointsH - layout.gap - layout.nameBlockH + layout.nameSize;
   const columns = versusColumns(layout, {
@@ -674,6 +793,53 @@ function renderPhotoVersusOverlaySvg(input = {}) {
       ${frame}
       ${columns}
       ${vsBadge(midX, nameY - Math.round(layout.nameSize * 0.32), badgeR)}
+      ${textBlock(verdictLines, { x: box.padX, y: verdictY, size: verdictSize, weight: 800, fill: COLORS.gold, family: FONTS.heading, lineHeight: 1.25 })}
+    </svg>
+  `;
+}
+
+// Three signs over a photo: title, three numbered white lines, gold verdict,
+// all bottom-anchored on the scrim.
+function renderPhotoSignsOverlaySvg(input = {}) {
+  const { w: W, h: H } = resolveSize(input.platform);
+  const S = Math.min(W, H) / 1080;
+  const city = cleanText(input.city || input.location, 60);
+  const title = cleanText(input.title, 90) || 'Three signs to check';
+  const signs = (Array.isArray(input.signs) ? input.signs : []).slice(0, 3).map((sign) => cleanText(sign, 120)).filter(Boolean);
+  const verdict = cleanText(input.verdict, 120);
+
+  const { svg: frame, box } = photoChrome({
+    W, H,
+    eyebrowLabel: city ? `${city} · three signs` : 'Three signs to check',
+    eyebrowFill: COLORS.wavesBlue,
+    logoDataUri: input.logoDataUri,
+  });
+  const availW = box.padR - box.padX;
+
+  const { size: verdictSize, lines: verdictLines } = fitText(
+    verdict, availW, [34, 30, 26].map((n) => Math.round(n * S)), 2
+  );
+  const verdictBlockH = verdictLines.length ? Math.round(verdictLines.length * verdictSize * 1.25) : 0;
+  const verdictBottom = H - Math.round(H * 0.082);
+  const verdictY = verdictBottom - verdictBlockH + verdictSize;
+  const rowsBottom = verdictLines.length ? verdictY - verdictSize - Math.round(30 * S) : verdictBottom;
+
+  const numR = Math.round(24 * S);
+  const textX = box.padX + numR * 2 + Math.round(20 * S);
+  const laid = signsRows(signs, { textW: box.padR - textX, baseSize: Math.round(30 * S), maxH: Math.round(H * 0.34), S });
+  laid.numR = numR;
+  laid.gap = Math.round(laid.size * 0.9);
+  const rowsH = laid.rowHs.reduce((sum, h) => sum + h, 0) + laid.gap * (laid.rows.length - 1);
+  const rowsY = rowsBottom - rowsH + laid.size;
+
+  const { size: titleSize, lines: titleLines } = fitText(title, availW, [52, 46, 40].map((n) => Math.round(n * S)), 2, 0.58);
+  const titleY = rowsY - laid.size - Math.round(48 * S) - Math.round((titleLines.length - 1) * titleSize * 1.1);
+
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+      ${frame}
+      ${textBlock(titleLines, { x: box.padX, y: titleY, size: titleSize, weight: 800, fill: COLORS.white, family: FONTS.display, lineHeight: 1.1 })}
+      ${numberedRows(laid, { x: box.padX, y: rowsY, textX, numFill: COLORS.gold, numText: COLORS.navy, textFill: COLORS.white })}
       ${textBlock(verdictLines, { x: box.padX, y: verdictY, size: verdictSize, weight: 800, fill: COLORS.gold, family: FONTS.heading, lineHeight: 1.25 })}
     </svg>
   `;

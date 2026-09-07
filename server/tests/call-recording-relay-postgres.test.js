@@ -41,4 +41,14 @@ postgres('recording composition retains legacy relay columns', () => {
       expect(row.metadata.relay_reconnects).toBe(1);
     }
   });
+
+  test.each([20000, 70000])('the actual processor UPDATE shares the composite budget for a %s-character recording', async (length) => {
+    const { composeRelayTranscript } = require('../services/voice-agent/relay-transcript');
+    const ai = '🌊'.repeat(60000);
+    const recorded = '🌊'.repeat(length);
+    await db(table).insert({ id: `budget-${length}`, metadata: { relay_transcript: { text: ai } }, call_outcome: 'voicemail' });
+    await db(table).where('id', `budget-${length}`).update({ transcription: expression('composeInSql', recorded) });
+    expect((await db(table).where('id', `budget-${length}`).first()).transcription)
+      .toBe(composeRelayTranscript(ai, '\n\n[Voicemail segment]\n' + recorded));
+  });
 });

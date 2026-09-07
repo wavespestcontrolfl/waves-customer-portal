@@ -35,6 +35,7 @@ const { buildReportIdentitySnapshot, canonicalProductId } = require('./service-r
 const { approvedReportProductFacts } = require('./service-report/report-data');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { isValidRateUnit } = require('./inventory-units');
+const { completionSuppliesOwedMarker } = require('./supplies-consumption');
 const { etDateString } = require('../utils/datetime-et');
 
 const PEST_CONTROL_CATEGORY = 'pest_control';
@@ -698,7 +699,7 @@ async function submitRecap({
         // crash between this commit and the hook still consumes, while a
         // recap edit of an already-completed visit (no transition) never
         // does (GH codex r3 P1).
-        ...(recapPriorCompleted ? {} : { field_flags: trx.raw("COALESCE(field_flags, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ completion_supplies_owed: true })]) }),
+        ...(recapPriorCompleted ? {} : { field_flags: completionSuppliesOwedMarker(trx) }),
         updated_at: new Date(),
       });
       // Merge-if-absent requirement freeze — ATOMIC guarded jsonb key

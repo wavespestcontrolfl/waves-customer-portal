@@ -446,6 +446,29 @@ describe('trio by-parcel routing', () => {
     expect(fetchedUrls.some((u) => u.includes('parcel-search-results'))).toBe(true);
   });
 
+  it('accuracy mode attempts address search even after the county GIS request consumes the old shared budget', async () => {
+    const countyGis = require('../services/property-lookup/county-parcel-gis');
+    const initialNow = Date.now();
+    let now = initialNow;
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    countyGis.lookupCountyParcelByPoint.mockImplementationOnce(async () => {
+      now += 90000;
+      return null;
+    });
+    const fetchedUrls = [];
+    global.fetch = jest.fn(async (url) => {
+      fetchedUrls.push(String(url));
+      if (String(url).includes('arcgis.com')) return { ok: true, json: async () => ({ features: [] }) };
+      throw new Error('network disabled in test');
+    });
+    try {
+      await lookupPropertyFromAITrio('100 Example Way, Bradenton, FL 34203', geo, null, { prioritizeAccuracy: true });
+      expect(fetchedUrls.some((url) => url.includes('parcel-search-results'))).toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('a stalled by-parcel detail fetch still leaves the address search its turn', async () => {
     // GIS hit, then the Manatee detail fetches hang until aborted — the
     // half-budget cap must leave time for the address-search fallback.

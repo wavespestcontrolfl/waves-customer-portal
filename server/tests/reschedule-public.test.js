@@ -402,6 +402,37 @@ describe('weatherMove banner context (GATE_RAINOUT_MOVE_BANNER)', () => {
 describe('collective series anchoring (GATE_COLLECTIVE_SERIES_ANCHOR)', () => {
   afterEach(() => { delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR; });
 
+  test('pins future placement across rollout and scheduler-mode changes, preserving dark legacy clients', () => {
+    const { gates } = require('../config/feature-gates');
+    const savedEnv = { ...process.env };
+    const savedGates = { cronJobs: gates.cronJobs, autoDispatch: gates.autoDispatch };
+    const series = { is_recurring: true, scheduled_date: '2026-08-13' };
+    const legacy = { disclosed_collective: false, disclosed_current_date: '2026-08-13' };
+    try {
+      gates.cronJobs = true;
+      gates.autoDispatch = true;
+      process.env.AUTO_DISPATCH_MODE = 'apply';
+      process.env.AUTO_DISPATCH_ALLOW_APPLY = 'true';
+      delete process.env.GATE_CUSTOMER_RECURRING_DISPATCH;
+      expect(seriesScopeMismatch(series, legacy)).toBe(false);
+      process.env.GATE_CUSTOMER_RECURRING_DISPATCH = 'true';
+      expect(seriesScopeMismatch(series, legacy)).toBe(true);
+      expect(seriesScopeMismatch(series, { ...legacy, disclosed_future_placement_days: null })).toBe(true);
+      expect(seriesScopeMismatch(series, { ...legacy, disclosed_future_placement_days: '3' })).toBe(true);
+      const disclosed = { ...legacy, disclosed_future_placement_days: 3 };
+      expect(seriesScopeMismatch(series, disclosed)).toBe(false);
+      process.env.AUTO_DISPATCH_MODE = 'dry_run';
+      expect(seriesScopeMismatch(series, disclosed)).toBe(true);
+      expect(seriesScopeMismatch(series, legacy)).toBe(false);
+    } finally {
+      for (const key of ['GATE_CUSTOMER_RECURRING_DISPATCH', 'AUTO_DISPATCH_MODE', 'AUTO_DISPATCH_ALLOW_APPLY']) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+      }
+      Object.assign(gates, savedGates);
+    }
+  });
+
   test('GET→POST scope pin: gate flips, missing disclosure, and anchor-date races all reject (codex P1 r1+r2)', () => {
     const series = { is_recurring: true, scheduled_date: '2026-08-13' };
     const ok = { disclosed_collective: true, disclosed_current_date: '2026-08-13' };

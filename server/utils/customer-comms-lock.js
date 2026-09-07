@@ -17,6 +17,9 @@
  *     exists to close);
  *   - booking's capture-intent lane (booking.js), which already used the
  *     resolve → lock → re-resolve idiom.
+ *   - recurring-series deferral (rebooker.js) versus 72h/24h reminder
+ *     delivery (appointment-reminders.js): the freeze read and deferral
+ *     commit share the fence with every SMS/email leg of an active send.
  *
  * LOCK ORDER CONTRACT (deadlock safety):
  *   1. Take this lock BEFORE locking or updating the same customer's
@@ -68,13 +71,14 @@ async function tryLockCustomerComms(trx, customerId) {
 /**
  * Open a transaction on `db`, take the customer-comms lock, and run `fn(trx)`
  * inside it — for insert sites that have no transaction of their own. The
- * lock releases with the commit/rollback.
+ * lock releases with the commit/rollback. A caller already holding a cron
+ * connection may reuse it rather than pinning another pooled connection.
  */
-async function withCustomerCommsLock(db, customerId, fn) {
+async function withCustomerCommsLock(db, customerId, fn, { connection } = {}) {
   return db.transaction(async (trx) => {
     await lockCustomerComms(trx, customerId);
     return fn(trx);
-  });
+  }, { connection });
 }
 
 module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock };

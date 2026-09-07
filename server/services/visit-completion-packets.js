@@ -57,16 +57,38 @@ async function saveVisitCompletionRecords(input, database = db) {
     return await database.transaction(async (trx) => {
       const peek = await trx('service_visits').where({ id: request.visitId }).first();
       if (!peek) return failure(404, 'visit_not_found', 'Visit not found.');
+      const { completeScheduledService, completionOwnershipError } = require('./complete-scheduled-service');
+      const pricing = require('./completion-pricing');
+      const pricingPlans = [];
+      // Reviewed estimates must precede the customer/stop/member locks,
+      // matching acceptance and canonical completion. Saved packets replay
+      // their frozen forms without revalidating an already-applied discount.
+      if (!await trx('visit_completion_packets').where({ visit_id: peek.id }).first('id')) {
+        const reviewed = request.items.filter((item) => item.body.pricingReview);
+        const candidates = await trx('scheduled_services').where({ visit_id: peek.id })
+          .whereIn('id', reviewed.map((item) => item.serviceId)).orderBy('id');
+        for (const member of candidates) {
+          const denied = completionOwnershipError({ role: input.actor?.techRole,
+            actorTechnicianId: input.actor?.technicianId, assignedTechnicianId: member.technician_id });
+          if (denied) return { status: denied.status, body: denied.payload };
+          const form = reviewed.find((item) => item.serviceId === member.id);
+          pricingPlans.push(await pricing.prepareCompletionPricingReview(member.id, form.body.pricingReview,
+            { database: trx, role: input.actor?.techRole }));
+        }
+        pricingPlans.sort((a, b) => (a.source.estimate?.id || '').localeCompare(b.source.estimate?.id || ''));
+        for (const plan of pricingPlans) await pricing.lockCompletionPricingEstimate(trx, plan);
+      }
       // Same customer -> stop -> visit/member order as grouping. Customer
       // identity and assignment cannot change while the records are written.
       await trx('customers').where({ id: peek.customer_id }).forNoKeyUpdate().first('id');
+      pricingPlans.sort((a, b) => (a.source.parent?.id || '').localeCompare(b.source.parent?.id || ''));
+      for (const plan of pricingPlans) await pricing.lockCompletionPricingParent(trx, plan);
       await lockStop(trx, peek.stop_base_key);
       const visit = await trx('service_visits').where({ id: peek.id }).forUpdate().first();
       if (!visit || visit.stop_base_key !== peek.stop_base_key || visit.customer_id !== peek.customer_id) {
         return failure(409, 'visit_changed', 'The visit moved. Refresh before closing it.');
       }
       const members = await trx('scheduled_services').where({ visit_id: visit.id }).orderBy('id').forUpdate();
-      const { completeScheduledService, completionOwnershipError } = require('./complete-scheduled-service');
       const ownership = members.map((member) => completionOwnershipError({
         role: input.actor?.techRole, actorTechnicianId: input.actor?.technicianId,
         assignedTechnicianId: member.technician_id,

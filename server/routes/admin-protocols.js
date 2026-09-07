@@ -15,6 +15,7 @@ const {
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const jobCard = require('../services/job-card');
+const { gateEnvValue } = require('../config/feature-gates');
 const { isTechnicianRequest, technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
 const { scopeFromText } = require('../services/service-report/action-scope');
 const {
@@ -1618,6 +1619,30 @@ router.get('/job-card/products', async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// Bounded read-only batch for the Schedule day view. The existing visit scope
+// is checked before and after each build, including a mid-read reassignment.
+router.get('/job-card/readiness', async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'private, no-store');
+    if (!jobCard.jobCardEnabled() || !gateEnvValue('GATE_DISPATCH_READINESS')) return res.json({ enabled: false });
+    const raw = req.query.serviceIds;
+    const ids = typeof raw === 'string' ? raw.split(',') : [];
+    if (!ids.length || ids.length > 6 || ids.some(id => !UUID_RE.test(id))) return res.status(400).json({ error: 'Provide 1 to 6 serviceIds' });
+    const visits = await Promise.all([...new Set(ids)].map(async serviceId => {
+      const unavailable = { serviceId, checkedAt: null, issues: [{ kind: 'readiness', status: 'unknown', label: 'Check unavailable' }] };
+      if (!(await techOwnsVisit(req, serviceId))) return unavailable;
+      try {
+        const result = await jobCard.buildJobCard(serviceId, { readinessOnly: true });
+        return result && await techOwnsVisit(req, serviceId) ? result : unavailable;
+      } catch {
+        return unavailable;
+      }
+    }));
+    if (!jobCard.jobCardEnabled() || !gateEnvValue('GATE_DISPATCH_READINESS')) return res.json({ enabled: false });
+    res.json({ enabled: true, visits });
+  } catch (err) { next(err); }
 });
 
 router.get('/job-card/:serviceId', async (req, res, next) => {

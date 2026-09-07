@@ -56,9 +56,16 @@ function isEligibleForAutoDispatch(service, ctx = {}) {
   if (service.auto_dispatch_locked === true) return deny('MANUALLY_LOCKED', 'Locked from auto-dispatch by staff');
   if (service.auto_dispatch_excluded === true) return deny('AUTO_DISPATCH_EXCLUDED', 'Excluded from auto-dispatch');
 
+  if (service.recurring_dispatch_due_date && service.customer_confirmed === true) {
+    return deny('CUSTOMER_CONFIRMED', 'Customer confirmed this recurring occurrence');
+  }
+
   const dateStr = toDateStr(service.scheduled_date) || '';
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return deny('INVALID_DATE', 'Missing/invalid scheduled_date');
-  if (ctx.routeTiers && ctx.routeTiers.enabled === true) {
+  if (service.recurring_dispatch_due_date && !service.window_start) {
+    // Due dates have no customer-promised time; placing one does not move a
+    // committed appointment. Candidate generation still excludes today/past.
+  } else if (ctx.routeTiers && ctx.routeTiers.enabled === true) {
     // ROUTE-TIERS (GATE_ROUTE_TIERS on): the flat lock is replaced by the tier
     // ladder — day-moves need a non-zero tier radius (>= 7 days out). Tier 3 /
     // frozen visits belong to the intra-day reorder pass (route-reorder.js) or

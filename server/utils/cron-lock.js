@@ -543,4 +543,12 @@ function wasLockSkipped(result) {
   return !!(result && result.skipped === true && LOCK_SKIP_REASONS.has(result.reason));
 }
 
-module.exports = { runExclusive, isLocked, recordJobStart, recordJobEnd, wasLockSkipped, sanitizeJobError };
+// Sequential work inside a cron body can reuse its pinned connection for a
+// short transaction. Holding a second connection while the body queries the
+// pool would deadlock at DB_POOL_MAX=2. Await the transaction before returning
+// from the body; never run overlapping transactions on this connection.
+function getHeldConnection() {
+  return lockSlotContext.getStore()?.conn;
+}
+
+module.exports = { runExclusive, isLocked, recordJobStart, recordJobEnd, wasLockSkipped, sanitizeJobError, getHeldConnection };

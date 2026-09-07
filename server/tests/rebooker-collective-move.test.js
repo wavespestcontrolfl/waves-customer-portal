@@ -1088,8 +1088,8 @@ describe('caller wiring (source)', () => {
     expect(rainOut).toContain('notifyRequested: notifyCustomer === true,');
     // r15: accepted overlaps ride on the operation (result.overlapDates, counted in conflict_count) and the shared card rings them; the anchor's reminder close precedes the Quick Move text's conclusion.
     expect(reb).toContain('overlapDates: [...overlapWarnDates].sort(),');
-    expect(reb).toContain('conflict_count: touched.filter((t) => t.conflicted).length + overlapWarnDates.size,');
-    expect(fx).toContain("if ((dueConflicts.length || (!cardOnly && overlapDates.length)) && !markers.conflict_card_at) {");
+    expect(reb).toContain('conflict_count: touched.filter((t) => t.conflicted).length + overlapWarnDates.size + preservedOccurrences.length,');
+    expect(fx).toContain("if ((dueConflicts.length || (!cardOnly && (overlapDates.length || preserved.length))) && !markers.conflict_card_at) {");
     expect(rainOut).not.toContain('Rain-out series shift overlaps other visits');
     // r16: a failed Quick Move reminder close records "text done, close owed" (customer_notified + notified_at NULL → the close-only branch); superseded rows keep cleanup debt; explicit tech unassign is presence-encoded; the preference row is serialized by the customer-scoped advisory lock the writer also takes (a missing row included); the backfill's optimizer-only rule needs the first nudge to start from cadence.
     expect(rainOut).toContain("update({ customer_notified: true, notified_at: null });");

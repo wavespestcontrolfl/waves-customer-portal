@@ -1079,13 +1079,10 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
   });
 
   test('the finalization takes the row lock at transaction start — corrections and finalizations are strictly ordered (codex P2 round 14)', () => {
-    // The only statement allowed ahead of the row lock is the report
-    // identity snapshot's customer FOR SHARE read — it must precede the
-    // visit lock to match customer-dedupe's customer → visit lock order
-    // (codex P1 #3742 r4) and touches no service_records/scheduled_services
-    // state, so the correction/finalization ordering this pin protects is
-    // unchanged.
-    expect(source).toMatch(/const persistRecord = async \(trx\) => \{\s*\n(?:\s*\/\/[^\n]*\n)*(?:\s*const snapshotCustomerRow = await trx\('customers'\)[^;]*;\s*\n)?\s*const lockedSvcRow = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);/);
+    // Pricing reads lock estimate -> customer -> parent before the visit,
+    // matching acceptance and customer-dedupe ordering. No visit mutation or
+    // timer snapshot may precede the visit lock that serializes corrections.
+    expect(source).toMatch(/const persistRecord = async \(trx\) => \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(completionPricingPlan\) \{\s*await require\('\.\.\/services\/completion-pricing'\)\.lockCompletionPricingEstimate\(trx, completionPricingPlan\);\s*\}\s*(?:\s*\/\/[^\n]*\n)*\s*const snapshotCustomerRow = await trx\('customers'\)[^;]*;\s*if \(completionPricingPlan\) \{\s*await require\('\.\.\/services\/completion-pricing'\)\.lockCompletionPricingParent\(trx, completionPricingPlan\);\s*\}\s*const lockedSvcRow = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);/);
     expect(source).toContain('else await db.transaction(persistRecord);');
   });
 

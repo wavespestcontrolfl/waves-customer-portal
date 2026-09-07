@@ -310,12 +310,65 @@ describe('versus + milestone redesign (2026-09-06)', () => {
   });
 });
 
+describe('myth and signs formats (showdown bank PR 3)', () => {
+  const Studio = require('../services/social-content-studio');
+  const myth = Studio.buildVersusCardInput(Studio.PEST_MYTHS.find((m) => m.key === 'myth_clean_house_no_roaches'), { city: 'Venice' });
+  const signs = Studio.buildVersusCardInput(Studio.PEST_SIGNS.find((g) => g.key === 'signs_subterranean_termites'), { city: 'Venice' });
+
+  test('myth text card: Myth and Fact tiles on the VS seam, both sentences whole, Pest ID label', () => {
+    const svg = Renderer.renderSocialCardSvg({ ...myth, platform: 'square' });
+    expect(svg).toContain('MYTH VS FACT');
+    expect(svg).toContain('>Myth</text>');
+    expect(svg).toContain('>Fact</text>');
+    expect(svg).toContain('>VS</text>');
+    for (const word of `${myth.myth} ${myth.fact}`.split(' ')) expect(svg).toContain(word);
+    expect(svg).not.toContain('...');
+    expect(svg).toContain('Pest ID');
+  });
+
+  test('signs text card: title, three gold numerals, every sign whole, verdict', () => {
+    for (const platform of ['square', 'gbp']) {
+      const svg = Renderer.renderSocialCardSvg({ ...signs, platform });
+      expect(svg).toContain('THREE SIGNS TO CHECK');
+      expect(svg).toContain('subterranean');
+      expect((svg.match(/>[123]<\/text>/g) || []).length).toBe(3);
+      for (const sign of signs.signs) for (const word of sign.split(' ')) expect(svg).toContain(word);
+      expect(svg).toContain('someone looks.');
+      expect(svg).not.toContain('...');
+      expect(svg).not.toContain('>VS</text>');
+    }
+  });
+
+  test('photo overlays: myth keeps the two-column versus overlay, signs get numbered white rows on the scrim', () => {
+    const m = Renderer.renderPhotoOverlaySvg({ ...myth, variant: 'photo_versus', platform: 'square' });
+    expect(m).toContain('VENICE · MYTH VS FACT');
+    expect(m).toContain('>Myth</text>');
+    expect(m).toContain('>VS</text>');
+    expect(m).not.toContain('...');
+    const g = Renderer.renderPhotoOverlaySvg({ ...signs, variant: 'photo_versus', platform: 'square' });
+    expect(g).toContain('VENICE · THREE SIGNS');
+    expect((g.match(/>[123]<\/text>/g) || []).length).toBe(3);
+    expect(g).toContain('scrimBottom');
+    expect(g).not.toContain('>VS</text>');
+    expect(g).not.toContain('...');
+    expect(g).not.toContain(`fill="${Renderer.COLORS.sand}"`);
+  });
+
+  test('pairs render exactly as before: three points per side, VS badge, Pest ID eyebrow', () => {
+    const pair = Studio.buildVersusCardInput(Studio.PEST_VERSUS_PAIRS[0], { city: 'Venice', service: 'general pest' });
+    const svg = Renderer.renderSocialCardSvg({ ...pair, platform: 'square' });
+    expect(svg).toContain('PEST ID: KNOW THE DIFFERENCE');
+    expect(svg).toContain('>VS</text>');
+    expect(svg).not.toContain('>Myth</text>');
+  });
+});
+
 describe('versus card copy budget (the whole pair bank must fit)', () => {
   const Studio = require('../services/social-content-studio');
 
-  test('no pair in PEST_VERSUS_PAIRS is elided on the square card, the GBP card, or the photo overlay', () => {
-    for (const pair of Studio.PEST_VERSUS_PAIRS) {
-      const input = { city: 'Lakewood Ranch', service: pair.service, left: pair.left, right: pair.right, verdict: pair.verdict };
+  test('no entry in SHOWDOWN_BANK (pairs, myths, signs) is elided on the square card, the GBP card, or the photo overlay', () => {
+    for (const pair of Studio.SHOWDOWN_BANK) {
+      const input = Studio.buildVersusCardInput(pair, { city: 'Lakewood Ranch', service: pair.service });
       for (const platform of ['square', 'gbp']) {
         const svg = Renderer.renderSocialCardSvg({ variant: 'versus', ...input, platform });
         expect({ pair: pair.key, platform, elided: svg.includes('...') }).toEqual({ pair: pair.key, platform, elided: false });
