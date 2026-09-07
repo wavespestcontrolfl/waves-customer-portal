@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { lawnPlanSelections, previousLawnAssessment, LAWN_FIELD_ACTIONS } from './lawn-completion';
+import { lawnPlanSelections, previousLawnAssessment, reconcileLawnPlanSelections, LAWN_FIELD_ACTIONS } from './lawn-completion';
 
 it('uses the engine mix instead of catalog defaults and skips unselected optional rows', () => {
   const build = (product) => ({ productId: product.id, rate: 99, areaValue: 5000, totalAmount: 999 });
@@ -65,4 +65,40 @@ it('selects the newest confirmed retake when appointment dates tie', () => {
   for (const rows of [[original, retake], [retake, original]]) {
     expect(previousLawnAssessment(rows, { id: 'today', date: '2026-09-05' }).id).toBe('retake');
   }
+});
+
+it('refresh cannot relabel a recalculated quantity with a manually chosen amount unit', () => {
+  const row = { productId: 'product', amountUnit: 'gal', totalAmount: 2, lawnPlanDefaults: {}, lawnPlanManualFields: ['amountUnit'] };
+  const fresh = { ...row, amountUnit: 'fl_oz', totalAmount: 12 };
+  expect(reconcileLawnPlanSelections([row], [fresh])[0]).toMatchObject({ amountUnit: 'gal', totalAmount: 2 });
+});
+
+it('a new restriction clears derived quantity and rate even after a product-area override', () => {
+  const row = { productId: 'product', rate: 3, areaValue: 1000, totalAmount: 3, lawnPlanDefaults: {}, lawnPlanManualFields: ['areaValue'] };
+  const fresh = { ...row, rate: '', totalAmount: '', areaValue: 5000 };
+  expect(reconcileLawnPlanSelections([row], [fresh])[0]).toMatchObject({ rate: '', areaValue: 1000, totalAmount: '' });
+  expect(reconcileLawnPlanSelections([{ ...row, totalAmountManual: true }], [fresh])[0].totalAmount).toBe(3);
+});
+
+it('a withdrawn default clears suggested fields while retaining a measured area with its unit', () => {
+  const row = { productId: 'product', rate: 3, rateUnit: 'fl_oz', totalAmount: 3, amountUnit: 'fl_oz', areaValue: 1000, areaUnit: 'sqft', applicationMethod: 'broadcast_spray', lawnPlanDefaults: {}, lawnPlanManualFields: ['areaValue'] };
+  expect(reconcileLawnPlanSelections([row], [])[0]).toMatchObject({
+    rate: '', rateUnit: '', totalAmount: '', amountUnit: '', applicationMethod: '', areaValue: 1000, areaUnit: 'sqft',
+  });
+  expect(reconcileLawnPlanSelections([{ ...row, lawnPlanManualFields: ['applicationMethod'] }], [])[0])
+    .toMatchObject({ rate: '', rateUnit: '', totalAmount: '', areaValue: '', areaUnit: '', applicationMethod: 'broadcast_spray' });
+});
+
+it('a withdrawn default preserves hand-entered amounts and rates in their recorded units', () => {
+  const row = { productId: 'product', rate: 2, rateUnit: 'lb', totalAmount: 7, amountUnit: 'lb', areaValue: 1000, areaUnit: 'sqft', applicationMethod: 'granular_broadcast', totalAmountManual: true, lawnPlanDefaults: {}, lawnPlanManualFields: ['rate', 'totalAmount'] };
+  expect(reconcileLawnPlanSelections([row], [])[0]).toMatchObject({
+    rate: 2, rateUnit: 'lb', totalAmount: 7, amountUnit: 'lb', areaValue: '', areaUnit: '', applicationMethod: '',
+  });
+});
+
+
+it('refresh preserves an entered amount in its original unit while updating untouched area', () => {
+  const row = { productId: 'product', totalAmount: 7, amountUnit: 'lb', areaValue: 1000, lawnPlanDefaults: {}, lawnPlanManualFields: ['totalAmount'], totalAmountManual: true };
+  const fresh = { ...row, totalAmount: 80, amountUnit: 'oz', areaValue: 2000 };
+  expect(reconcileLawnPlanSelections([row], [fresh])[0]).toMatchObject({ totalAmount: 7, amountUnit: 'lb', areaValue: 2000 });
 });

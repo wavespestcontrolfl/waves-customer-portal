@@ -38,7 +38,7 @@ import CompletionPricingCard from "../../components/schedule/CompletionPricingCa
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 
-import { addETDays, etDateString } from "../../lib/timezone";
+import { addETDays, etDateString, formatETDateOnly } from "../../lib/timezone";
 import {
   defaultApplicationMethodForLine,
   isPerBasisUnit,
@@ -59,7 +59,7 @@ import {
   specialtyCompletionFor,
   specialtyFindingActionConflict,
 } from "../../lib/service-completion-presets";
-import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, previousLawnAssessment } from "../../lib/lawn-completion";
+import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment } from "../../lib/lawn-completion";
 import LawnFindingPicker from "../../components/tech/LawnFindingPicker";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useCancelFeeNotice } from "../../components/schedule/CancelFeeNotice";
@@ -8317,6 +8317,50 @@ function LawnPreviousVisitCard({ service }) {
   );
 }
 
+function LawnVisitPlanSummary({ defaults, protocol, areaValue, onAreaChange, onReload, loading, error, disabled }) {
+  const history = defaults.history;
+  const score = (row) => row?.overall_score == null ? "—" : `${Math.round(Number(row.overall_score))}/100`;
+  const delta = history.progress.baselineDelta;
+  const latest = history?.current || history?.previous;
+  return (
+    <section aria-label="Lawn visit plan" style={{ margin: "16px 0", padding: 16, background: D.white, border: `1px solid ${D.border}`, borderRadius: 12, color: D.heading }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+        <div style={{ fontSize: 16, fontWeight: 500 }}>{protocol?.window?.title || "Lawn plan"}</div>
+        <button type="button" onClick={onReload} disabled={disabled || loading} style={{ padding: "8px 12px", border: `1px solid ${D.border}`, borderRadius: 8, background: D.white, color: D.heading, fontSize: 14 }}>Refresh plan</button>
+      </div>
+      <label style={{ display: "block", marginTop: 16, fontSize: 14 }}>
+        Area for this visit (sq ft)
+        <input type="number" min="1" max="10000000" step="1" value={areaValue} disabled={disabled}
+          onChange={event => onAreaChange(event.target.value)} placeholder="Enter treated area"
+          style={{ display: "block", marginTop: 6, width: "100%", boxSizing: "border-box", padding: 12, fontSize: 16, border: `1px solid ${D.border}`, borderRadius: 8, color: D.heading, background: D.white }} />
+      </label>
+      <p style={{ fontSize: 14, color: D.muted, lineHeight: 1.5 }}>Starts with saved turf area. For partial coverage, enter the area treated. Edited product amounts stay as entered.</p>
+      {loading && <p role="status" style={{ fontSize: 14 }}>Updating plan suggestions…</p>}
+      {error && <p role="status" style={{ fontSize: 14 }}>Plan could not be refreshed. Enter actual amounts or retry.</p>}
+      {defaults.message && <p style={{ fontSize: 14 }}>{defaults.message}</p>}
+      <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 14, marginTop: 14 }}>
+        <div style={{ fontSize: 16, fontWeight: 500 }}>Property progress</div>
+        {!history?.available ? <p style={{ fontSize: 14 }}>The service property could not be resolved. Earlier scores are unavailable.</p>
+          : !latest ? <p style={{ fontSize: 14 }}>No installed assessment in the current baseline period.</p>
+            : <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12, marginTop: 12, fontSize: 14 }}>
+                <div>{history.current ? "This visit’s confirmed score" : "Previous visit"}<div style={{ fontSize: 20, marginTop: 4 }}>{score(latest)}</div><div>{formatETDateOnly(latest.date)}</div></div>
+                <div>Baseline<div style={{ fontSize: 20, marginTop: 4 }}>{score(history.baseline)}</div><div>{history.baseline?.date && formatETDateOnly(history.baseline.date)}</div></div>
+              </div>
+              {delta != null && <p style={{ fontSize: 14 }}>{delta > 0 ? "+" : ""}{Math.round(delta)} points from baseline</p>}
+              <details style={{ marginTop: 12, fontSize: 14 }}>
+                <summary style={{ cursor: "pointer", padding: "8px 0" }}>Confirmed visit history</summary>
+                <ol style={{ margin: "8px 0 0", paddingLeft: 20 }}>
+                  {history.rows.map(row => <li key={row.id} style={{ padding: "6px 0" }}>{formatETDateOnly(row.date)} · {score(row)}</li>)}
+                </ol>
+                <p style={{ color: D.muted, lineHeight: 1.5 }}>Scores reflect the photos and conditions recorded at each visit. Seasons and assessment models can affect comparisons.</p>
+              </details>
+            </>}
+      </div>
+    </section>
+  );
+}
+
 function LawnAssessmentCompletionBlock({
   service,
   disabled,
@@ -8814,12 +8858,15 @@ function requiresAreaSqft(method, serviceType = "") {
   );
 }
 
-function requiredApplicationArea(method, serviceType = "") {
+function requiredApplicationArea(method, serviceType = "", includeOptionalLawnArea = false) {
   if (requiresLinearFt(method)) {
     return { unit: "linear_ft", label: "Linear ft", alertLabel: "linear feet" };
   }
   if (requiresAreaSqft(method, serviceType)) {
     return { unit: "sqft", label: "Sq ft", alertLabel: "square feet" };
+  }
+  if (includeOptionalLawnArea && serviceLineFromType(serviceType) === "lawn" && normalizeApplicationMethod(method) === "spot_treatment") {
+    return { unit: "sqft", label: "Treated sq ft", optional: true };
   }
   return null;
 }
@@ -8829,6 +8876,7 @@ function effectiveApplicationMethod(method) {
 }
 
 function productApplicationMethod(product = {}, serviceType = "") {
+  if (product.lawnPlanDefaults && product.applicationMethod === "") return "";
   return normalizeApplicationMethod(product.applicationMethod) ||
     defaultApplicationMethod(product, serviceType);
 }
@@ -10450,6 +10498,16 @@ export function CompletionPanel({
   // derived Total) when a broadcast/granular lawn product is added. No
   // profile / not a lawn visit → the fields stay manual as before.
   const [lawnSqftForPrefill, setLawnSqftForPrefill] = useState(null);
+  const [lawnCompletionDefaults, setLawnCompletionDefaults] = useState(null);
+  const [lawnPlanReady, setLawnPlanReady] = useState(false);
+  const [lawnAreaOverride, setLawnAreaOverride] = useState(undefined);
+  const [lawnRemovedDefaultIds, setLawnRemovedDefaultIds] = useState([]);
+  const [lawnDefaultsSeedSuppressed, setLawnDefaultsSeedSuppressed] = useState(false);
+  const [lawnPlanReloadKey, setLawnPlanReloadKey] = useState(0);
+  const lawnDefaultsEnabled = completionImprovements && lawnCompletionDefaults?.enabled === true && lawnCompletionDefaults.serviceId === service.id;
+  const currentLawnPlanReady = lawnPlanReady === service.id;
+  const lawnPlanArea = lawnDefaultsEnabled ? lawnAreaOverride : undefined;
+  const lawnVisitArea = lawnAreaOverride !== undefined ? lawnAreaOverride : lawnCompletionDefaults?.lawnSqft ?? "";
   useEffect(() => {
     let live = true;
     setLawnSqftForPrefill(null);
@@ -11678,8 +11736,29 @@ export function CompletionPanel({
   const lawnDefaultMixSeededRef = useRef(false);
   const lawnDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {
-    if (!completionImprovements || !isLawn || !inventoryAdvisoryTier || treatmentPlanLoading || treatmentPlanError || lawnAssessmentReady === false) return;
+    if (!lawnCompletionDefaults?.enabled || lawnCompletionDefaults.serviceId === service.id) return;
+    setSelectedProducts([]);
+    setLawnAreaOverride(undefined);
+    setLawnRemovedDefaultIds([]);
+    setLawnDefaultsSeedSuppressed(false);
+    lawnDefaultMixSeededRef.current = false;
+    lawnDefaultMixSnapshotRef.current = null;
+  }, [service.id]);
+  useEffect(() => {
+    if (!completionImprovements || !isLawn || treatmentPlanLoading || treatmentPlanError || lawnAssessmentReady === false) return;
     if (!products?.length) return;
+    if (lawnDefaultsEnabled) {
+      if (!draftReadyRef.current || showDraftPrompt) return;
+      const defaults = lawnPlanSelections(lawnCompletionDefaults.items, buildSelectedProduct, products, { areas: areasServiced, governed: true });
+      const activeDefaults = lawnDefaultsSeedSuppressed
+        ? defaults.filter(row => selectedProducts.some(product => String(product.productId) === String(row.productId))) : defaults;
+      const rows = reconcileLawnPlanSelections(selectedProducts, activeDefaults, lawnRemovedDefaultIds);
+      lawnDefaultMixSeededRef.current = true;
+      lawnDefaultMixSnapshotRef.current = JSON.stringify(defaults);
+      if (JSON.stringify(rows) !== JSON.stringify(selectedProducts)) setSelectedProducts(rows);
+      return;
+    }
+    if (!currentLawnPlanReady || !inventoryAdvisoryTier) return;
     const currentSnapshot = JSON.stringify(selectedProducts);
     // Refresh only an untouched seed when today’s assessment changes the plan.
     if (lawnDefaultMixSeededRef.current && currentSnapshot !== lawnDefaultMixSnapshotRef.current) return;
@@ -11690,7 +11769,21 @@ export function CompletionPanel({
     lawnDefaultMixSeededRef.current = true;
     lawnDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [completionImprovements, isLawn, inventoryAdvisoryTier, treatmentPlanMixItems, treatmentPlanLoading, treatmentPlanError, lawnAssessmentReady, products, selectedProducts]);
+  }, [completionImprovements, isLawn, inventoryAdvisoryTier, treatmentPlanMixItems, treatmentPlanLoading, treatmentPlanError, lawnAssessmentReady, products, selectedProducts, lawnDefaultsEnabled, lawnCompletionDefaults, currentLawnPlanReady, showDraftPrompt, areasServiced, lawnRemovedDefaultIds, lawnDefaultsSeedSuppressed]);
+  useEffect(() => {
+    if (lawnDefaultsEnabled && lawnAreaOverride === undefined && !LAWN_DEFAULT_AREAS.every(area => areasServiced.includes(area))) {
+      // A subset of zones has no known square footage. Do not silently count
+      // the entire saved lawn as treated after a zone is removed.
+      setLawnAreaOverride("");
+    }
+  }, [lawnDefaultsEnabled, lawnAreaOverride, areasServiced]);
+  useEffect(() => {
+    if (!lawnDefaultsEnabled) return;
+    setSelectedProducts(current => current.map(product => !product.lawnPlanDefaults && product.lawnAreaDefault && String(product.areaValue) !== String(lawnVisitArea)
+      ? { ...product, areaValue: lawnVisitArea,
+        totalAmount: product.totalAmountManual ? product.totalAmount
+          : isPerBasisUnit(product.rateUnit) ? "" : derivedTotalAmount(product.rate, lawnVisitArea) } : product));
+  }, [lawnDefaultsEnabled, lawnVisitArea]);
   useEffect(() => {
     if (!completionImprovements || !isLawn) return;
     const area = areasServiced.join(", ");
@@ -11906,7 +11999,8 @@ export function CompletionPanel({
     (product) =>
       !product.totalAmount ||
       Number(product.totalAmount) <= 0 ||
-      !product.amountUnit,
+      !product.amountUnit ||
+      (product.lawnPlanDefaults && !productApplicationMethod(product, serviceTypeForArea)),
   );
   // The protocol is now a read-only reference (mixing ratios), so the checklist
   // and default-product-disposition no longer gate completion. Real safeguards
@@ -12229,6 +12323,19 @@ export function CompletionPanel({
     setProtocolActions([]);
     setProtocolActionMeta(null);
     setProtocolActionError("");
+    if (completionImprovements && isLawn) {
+      if (!currentLawnPlanReady || lawnCompletionDefaults?.serviceId !== service.id) {
+        setProtocolActionsLoading(false);
+        return () => { cancelled = true; };
+      }
+      if (lawnDefaultsEnabled) {
+        setProtocolActions(lawnPlanActionOptions(lawnCompletionDefaults.options));
+        setProtocolActionMeta({ source: "appointment_plan" });
+        setProtocolActionsLoaded(true);
+        setProtocolActionsLoading(false);
+        return () => { cancelled = true; };
+      }
+    }
     // Typed jobs hide the protocol-actions section entirely — skip the fetch.
     if (!service.serviceType || isTypedFindings || specialtyCompletion)
       return () => {
@@ -12284,6 +12391,7 @@ export function CompletionPanel({
       cancelled = true;
     };
   }, [
+    service.id,
     service.serviceType,
     service.lawnType,
     service.scheduledDate,
@@ -12292,6 +12400,11 @@ export function CompletionPanel({
     isLawn,
     isTypedFindings,
     specialtyCompletion,
+    completionImprovements,
+    lawnDefaultsEnabled,
+    currentLawnPlanReady,
+    treatmentPlanMixItems,
+    lawnCompletionDefaults,
   ]);
 
   useEffect(() => {
@@ -12302,9 +12415,16 @@ export function CompletionPanel({
     // No equipment/calibration selection in the closeout any more (owner
     // directive 2026-07-29) — the plan endpoint auto-selects the assigned
     // rig server-side when one exists.
-    adminFetch(`/admin/treatment-plans/${service.id}`)
+    const includeCompletionDefaults = completionImprovements && isLawn;
+    const areaEdited = lawnPlanArea !== undefined;
+    const endpoint = `/admin/treatment-plans/${service.id}${areaEdited ? "/build" : includeCompletionDefaults ? "?completionDefaults=1" : ""}`;
+    const request = areaEdited ? {
+      method: "POST", body: JSON.stringify({ completionDefaults: true, lawnSqft: lawnPlanArea === "" ? null : Number(lawnPlanArea) }),
+    } : {};
+    const timer = setTimeout(() => adminFetch(endpoint, request)
       .then((data) => {
         if (cancelled) return;
+        setLawnCompletionDefaults({ ...(data?.plan?.completionDefaults || { enabled: false }), serviceId: service.id });
         const blocks =
           data?.plan?.propertyGate?.blocks ||
           data?.plan?.protocol?.blocked ||
@@ -12363,16 +12483,23 @@ export function CompletionPanel({
         ]);
       })
       .catch((err) => {
-        if (!cancelled)
+        if (!cancelled) {
           setTreatmentPlanError(err.message || "Could not load WaveGuard plan");
+          setSelectedProducts(current => current.map(product => product.lawnPlanDefaults
+            ? { ...product, totalAmount: product.totalAmountManual ? product.totalAmount : "",
+              rate: product.lawnPlanManualFields?.includes("rate") ? product.rate : "",
+              areaValue: product.lawnPlanManualFields?.includes("areaValue") ? product.areaValue : "",
+              lawnAmountReason: "Plan unavailable. Confirm the treated area and actual amount or retry." } : product));
+        }
       })
       .finally(() => {
-        if (!cancelled) setTreatmentPlanLoading(false);
-      });
+        if (!cancelled) { setTreatmentPlanLoading(false); setLawnPlanReady(service.id); }
+      }), areaEdited ? 300 : 0);
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
-  }, [calibrationRequired, completionImprovements, isLawn, service.id, lawnAssessmentRevision]);
+  }, [calibrationRequired, completionImprovements, isLawn, service.id, lawnAssessmentRevision, lawnPlanArea, lawnPlanReloadKey]);
 
   useEffect(() => {
     setTreeShrubCloseout(defaultTreeShrubCloseout(service));
@@ -12421,6 +12548,7 @@ export function CompletionPanel({
         JSON.stringify(selectedProducts) !== pestDefaultMixSnapshotRef.current &&
         JSON.stringify(selectedProducts) !== lawnDefaultMixSnapshotRef.current) ||
       JSON.stringify(areasServiced) !== JSON.stringify(lawnDefaultAreas) ||
+      (lawnDefaultsEnabled && (lawnAreaOverride !== undefined || lawnRemovedDefaultIds.length > 0)) ||
       customerInteraction ||
       customerConcern.trim() ||
       selectedProtocolActionLabels.length ||
@@ -12480,6 +12608,9 @@ export function CompletionPanel({
         notes,
         selectedProducts,
         lawnDefaultMixSnapshot: lawnDefaultMixSnapshotRef.current,
+        lawnAreaOverride,
+        lawnRemovedDefaultIds: lawnDefaultsEnabled ? lawnRemovedDefaultIds : undefined,
+        lawnDefaultsSeedSuppressed,
         sendSms,
         includePayLink,
         requestReview,
@@ -12626,6 +12757,10 @@ export function CompletionPanel({
     customerRecap,
     recapSource,
     areasServiced,
+    lawnDefaultsEnabled,
+    lawnAreaOverride,
+    lawnRemovedDefaultIds,
+    lawnDefaultsSeedSuppressed,
     stationNew,
     stationMoves,
     stationStatuses,
@@ -12666,6 +12801,9 @@ export function CompletionPanel({
     lawnAreasInitializedRef.current = true;
     lawnDefaultMixSeededRef.current = true;
     if (savedDraft.lawnDefaultMixSnapshot) lawnDefaultMixSnapshotRef.current = savedDraft.lawnDefaultMixSnapshot;
+    setLawnAreaOverride(savedDraft.lawnAreaOverride);
+    setLawnRemovedDefaultIds(Array.isArray(savedDraft.lawnRemovedDefaultIds) ? savedDraft.lawnRemovedDefaultIds : []);
+    setLawnDefaultsSeedSuppressed(savedDraft.lawnDefaultsSeedSuppressed === true || !Object.hasOwn(savedDraft, "lawnRemovedDefaultIds"));
     setNotes(savedDraft.notes || "");
     setSelectedProducts(
       Array.isArray(savedDraft.selectedProducts)
@@ -13708,7 +13846,16 @@ export function CompletionPanel({
     // untouched draft the same way a typed edit does (codex r28).
     invalidateGeneratedReportOnTypedEdit();
     lawnDefaultMixSeededRef.current = true;
-    setSelectedProducts((prev) => [...prev, buildSelectedProduct(product)]);
+    let row = buildSelectedProduct(product);
+    if (lawnDefaultsEnabled) {
+      const item = lawnCompletionDefaults.items.find(item => String(item.product.id) === String(product.id));
+      const planned = item && lawnPlanSelections([item], buildSelectedProduct, products, { areas: areasServiced, governed: true })[0];
+      row = planned || { ...row, rate: "", totalAmount: "", applicationArea: areasServiced.join(", "), applicationAreaDefault: true,
+        lawnAreaDefault: row.areaUnit === "sqft",
+        lawnAmountReason: "Enter the actual amount for this application." };
+      setLawnRemovedDefaultIds(ids => ids.filter(id => String(id) !== String(product.id)));
+    }
+    setSelectedProducts((prev) => [...prev, row]);
     setProductSearch("");
   }
   // One construction path for a selected-product row — the picker
@@ -13741,8 +13888,8 @@ export function CompletionPanel({
     // (Treatment Zone Mapper) so the tech doesn't retype what the trace
     // already measured. Editable as before.
     const prefillArea =
-      areaRequirement?.unit === "sqft" && Number(lawnSqftForPrefill) > 0
-        ? Number(lawnSqftForPrefill)
+      areaRequirement?.unit === "sqft" && Number(lawnDefaultsEnabled ? lawnVisitArea : lawnSqftForPrefill) > 0
+        ? Number(lawnDefaultsEnabled ? lawnVisitArea : lawnSqftForPrefill)
         : areaRequirement?.unit === "linear_ft" && Number(tracedLinearFt) > 0
           ? Number(tracedLinearFt)
           : "";
@@ -13860,6 +14007,7 @@ export function CompletionPanel({
   function removeProduct(productId) {
     if (generating) return;
     lawnDefaultMixSeededRef.current = true;
+    if (lawnDefaultsEnabled) setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
       prev.filter((p) => p.productId !== productId),
@@ -13873,6 +14021,10 @@ export function CompletionPanel({
       prev.map((p) => {
         if (p.productId !== productId) return p;
         const next = { ...p, [field]: value };
+        if (lawnDefaultsEnabled && ["areaValue", "applicationMethod", "applicationArea"].includes(field)) next.lawnAreaDefault = false;
+        if (lawnDefaultsEnabled) {
+          next.lawnPlanManualFields = [...new Set([...(p.lawnPlanManualFields || []), field])];
+        }
         if (field === "applicationArea") next.applicationAreaDefault = false;
         if (field === "applicationMethod") {
           const areaRequirement = requiredApplicationArea(
@@ -13893,6 +14045,9 @@ export function CompletionPanel({
             ) {
               next.areaValue = Number(tracedLinearFt);
             }
+          } else if (lawnDefaultsEnabled && value === "spot_treatment") {
+            next.areaUnit = "sqft";
+            next.areaValue = "";
           } else {
             next.areaUnit = "";
             next.areaValue = "";
@@ -13901,16 +14056,18 @@ export function CompletionPanel({
           const areaRequirement = requiredApplicationArea(
             productApplicationMethod(next, serviceTypeForArea),
             serviceTypeForArea,
+            lawnDefaultsEnabled,
           );
           if (areaRequirement) next.areaUnit = areaRequirement.unit;
         }
-        // A hand-entered Total is the tech's actual and is never recomputed;
+        // A hand-entered Total (or its unit in lawn defaults) is the tech's
+        // actual and is never recomputed;
         // otherwise rate/area edits keep the derived Total (rate × sq ft /
         // 1,000) in sync on area-based applications — including back to blank
         // when the rate/area is cleared or the method stops being area-based,
         // so a stale full-lawn total can't be submitted. The derived total is
         // in the rate's unit, so a rate-unit change moves the total unit too.
-        if (field === "totalAmount") {
+        if (field === "totalAmount" || (lawnDefaultsEnabled && field === "amountUnit")) {
           next.totalAmountManual = true;
         } else if (!next.totalAmountManual) {
           if (next.areaUnit !== "sqft") {
@@ -13929,6 +14086,19 @@ export function CompletionPanel({
             const perBasis = isPerBasisUnit(value);
             next.amountUnit = perBasis ? String(value).split("/")[0] : value;
             if (perBasis) next.totalAmount = "";
+          }
+        }
+        if (lawnDefaultsEnabled && field === "applicationArea" && !p.lawnPlanManualFields?.includes("areaValue")) {
+          // Selecting zones alone does not measure a partial application.
+          next.areaValue = "";
+          if (!next.totalAmountManual) next.totalAmount = "";
+          next.lawnPlanManualFields = [...new Set([...(next.lawnPlanManualFields || []), "areaValue"])];
+        }
+        if (lawnDefaultsEnabled && field === "applicationMethod") {
+          if (!next.totalAmountManual) next.totalAmount = "";
+          if (p.lawnPlanDefaults && !p.lawnPlanManualFields?.includes("rate")) {
+            next.rate = "";
+            if (!p.lawnPlanManualFields?.includes("rateUnit")) next.rateUnit = "";
           }
         }
         return next;
@@ -14710,12 +14880,11 @@ export function CompletionPanel({
           areaUnit: p.areaUnit,
           targets: Array.isArray(p.targets) ? p.targets : [],
         })),
-        // The protocol block is now read-only (mixing-ratio reference), so the tech
-        // no longer submits a checklist / treated-sqft / disposition. The server
-        // still records a protocol completion for WaveGuard lawn visits, deriving
-        // treated area + carrier from the plan; what was actually applied comes
-        // through the products list.
-        lawnProtocolCompletion: null,
+        // The existing completion field carries the visit area into the server
+        // planner, protocol record and nutrient ledger. Product-specific actuals
+        // remain on each product row; no saved turf profile is changed.
+        lawnProtocolCompletion: lawnDefaultsEnabled
+          ? { treatedSqft: lawnVisitArea === "" ? null : Number(lawnVisitArea) } : null,
         treeShrubCompletion: treeShrubCloseoutRequired
           ? {
               ...treeShrubCloseout,
@@ -15535,6 +15704,16 @@ export function CompletionPanel({
   // Mobile admin render — follows reference_waves_admin_ui_system.md
   // Light mode only. Roboto body. No D.palette.
   // ────────────────────────────────────────────────────────────────────
+  const lawnProgressPanel = completionImprovements && isLawn && (
+    !currentLawnPlanReady ? <p role="status" style={{ fontSize: 14 }}>Loading lawn plan…</p>
+      : lawnCompletionDefaults?.serviceId !== service.id ? <div role="status" style={{ margin: "16px 0", fontSize: 14 }}>Lawn plan unavailable.
+        <button type="button" onClick={() => setLawnPlanReloadKey(key => key + 1)} style={{ marginLeft: 12, padding: 8, fontSize: 14 }}>Retry plan</button></div>
+      : lawnDefaultsEnabled ? <LawnVisitPlanSummary defaults={lawnCompletionDefaults} protocol={treatmentPlanStructuredProtocol}
+        areaValue={lawnVisitArea} loading={treatmentPlanLoading} error={treatmentPlanError} disabled={submitting || generating}
+        onAreaChange={value => { invalidateGeneratedReportOnTypedEdit(); setLawnAreaOverride(value); }}
+        onReload={() => setLawnPlanReloadKey(key => key + 1)} />
+        : <LawnPreviousVisitCard service={service} />
+  );
   if (isMobile) {
     const M = {
       page: "#FAFAFA",
@@ -16156,7 +16335,7 @@ export function CompletionPanel({
                 />
               </Field>
             )}
-            {completionImprovements && isLawn && <LawnPreviousVisitCard service={service} />}
+            {lawnProgressPanel}
             {!completionImprovements && calibrationRequired && treatmentPlanStructuredProtocol?.window && (
               <Field label="Lawn Care Protocol">
                 <ProtocolMixSummary
@@ -17057,6 +17236,7 @@ export function CompletionPanel({
                         }}
                       >
                         {" "}
+                        <option value="" disabled>Unit</option>
                         <option value="oz">oz</option>{" "}
                         <option value="fl_oz">fl oz</option>{" "}
                         <option value="ml">ml</option>{" "}
@@ -17093,7 +17273,7 @@ export function CompletionPanel({
                         }}
                       />{" "}
                       <select
-                        value={sp.amountUnit || sp.rateUnit}
+                        value={sp.amountUnit ?? sp.rateUnit ?? ""}
                         onChange={(e) =>
                           updateProduct(
                             sp.productId,
@@ -17109,6 +17289,7 @@ export function CompletionPanel({
                         }}
                       >
                         {" "}
+                        <option value="" disabled>Unit</option>
                         <option value="oz">oz</option>{" "}
                         <option value="fl_oz">fl oz</option>{" "}
                         <option value="ml">ml</option>{" "}
@@ -17186,6 +17367,7 @@ export function CompletionPanel({
                           padding: "0 12px",
                         }}
                       >
+                        <option value="" disabled>Application method</option>
                         <option value="perimeter_spray">Perimeter spray</option>
                         <option value="broadcast_spray">Broadcast spray</option>
                         <option value="spot_treatment">Spot treatment</option>
@@ -17202,6 +17384,7 @@ export function CompletionPanel({
                         const areaRequirement = requiredApplicationArea(
                           productApplicationMethod(sp, serviceTypeForArea),
                           serviceTypeForArea,
+                          lawnDefaultsEnabled,
                         );
                         if (!areaRequirement) return null;
                         return (
@@ -17245,6 +17428,7 @@ export function CompletionPanel({
                       >
                         ×
                       </button>{" "}
+                      {lawnDefaultsEnabled && sp.lawnAmountReason && <p style={{ width: "100%", margin: "4px 0", fontSize: 14, color: M.ink3 }}>{sp.lawnAmountReason}</p>}
                       {(() => {
                         // Fall back to the selected row's serialized category
                         // when the catalog row is absent (protocol- or
@@ -18493,7 +18677,7 @@ export function CompletionPanel({
               )}
             </div>
           )}
-          {completionImprovements && isLawn && <LawnPreviousVisitCard service={service} />}
+          {lawnProgressPanel}
           {!completionImprovements && calibrationRequired && treatmentPlanStructuredProtocol?.window && (
             <div style={{ marginBottom: 20 }}>
               <label style={labelStyle}>Lawn Care Protocol</label>
@@ -19418,6 +19602,7 @@ export function CompletionPanel({
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   >
                     {" "}
+                    <option value="" disabled>Unit</option>
                     <option value="oz">oz</option>{" "}
                     <option value="fl_oz">fl oz</option>{" "}
                     <option value="ml">ml</option> <option value="g">g</option>{" "}
@@ -19444,13 +19629,14 @@ export function CompletionPanel({
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   />{" "}
                   <select
-                    value={sp.amountUnit || sp.rateUnit}
+                    value={sp.amountUnit ?? sp.rateUnit ?? ""}
                     onChange={(e) =>
                       updateProduct(sp.productId, "amountUnit", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   >
                     {" "}
+                    <option value="" disabled>Unit</option>
                     <option value="oz">oz</option>{" "}
                     <option value="fl_oz">fl oz</option>{" "}
                     <option value="ml">ml</option> <option value="g">g</option>{" "}
@@ -19541,6 +19727,7 @@ export function CompletionPanel({
                       marginBottom: 0,
                     }}
                   >
+                    <option value="" disabled>Application method</option>
                     <option value="perimeter_spray">Perimeter spray</option>
                     <option value="broadcast_spray">Broadcast spray</option>
                     <option value="spot_treatment">Spot treatment</option>
@@ -19557,6 +19744,7 @@ export function CompletionPanel({
                     const areaRequirement = requiredApplicationArea(
                       productApplicationMethod(sp, serviceTypeForArea),
                       serviceTypeForArea,
+                      lawnDefaultsEnabled,
                     );
                     if (!areaRequirement) return null;
                     return (
@@ -19577,6 +19765,8 @@ export function CompletionPanel({
                     );
                   })()}
                   <button
+                    type="button"
+                    aria-label="Remove product"
                     onClick={() => removeProduct(sp.productId)}
                     style={{
                       background: "none",
@@ -19589,6 +19779,7 @@ export function CompletionPanel({
                   >
                     &times;
                   </button>{" "}
+                  {lawnDefaultsEnabled && sp.lawnAmountReason && <p style={{ width: "100%", margin: "4px 0", fontSize: 14, color: D.muted }}>{sp.lawnAmountReason}</p>}
                   {(() => {
                     // Fall back to the selected row's serialized category when
                     // the catalog row is absent (protocol- or substitution-
