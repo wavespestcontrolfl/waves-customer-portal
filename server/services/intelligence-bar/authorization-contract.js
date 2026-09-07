@@ -47,6 +47,7 @@ const PREVIEW_NOISE_KEYS = new Set([
 const VOLATILE_KEY_RE = /(_at$|^at$|timestamp|generated|elapsed|took_ms|_ms$|latency|request_id|trace)/i;
 const PREVIEW_EFFECT_LINES = 12;
 const PREVIEW_EFFECT_CHARS = 200;
+const PROPERTY_ACTION_TOOL_NAMES = new Set(['add_customer_property', 'update_customer_property', 'set_primary_property']);
 
 // Tools whose commit cannot be undone from the portal (a message leaves,
 // money moves, a public reply posts). Everything else is editable after.
@@ -114,6 +115,9 @@ const ACTION_LABELS = {
   update_customer: 'Update customer record',
   bulk_update_customers: 'Update multiple customers',
   update_property_access: 'Update property access notes',
+  add_customer_property: 'Add saved property',
+  update_customer_property: 'Update saved property',
+  set_primary_property: 'Change primary property',
   create_appointment: 'Book an appointment',
   reschedule_appointment: 'Move an appointment',
   cancel_appointment: 'Cancel an appointment',
@@ -247,6 +251,22 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     seen.add(key);
     effects.push({ kind, label, ...extra });
   };
+  const propertyAction = PROPERTY_ACTION_TOOL_NAMES.has(toolName);
+  if (propertyAction) {
+    if (preview?.customer?.name) push('customer', preview.customer.name);
+    if (preview?.address) push('customer', `Save property: ${preview.address}`);
+    if (preview?.property?.address) push('customer', preview.property.address);
+    if (preview?.previous_primary?.address) push('customer', `Previous primary: ${preview.previous_primary.address}`);
+    if (preview?.primary_property?.address) push('customer', `New primary: ${preview.primary_property.address}`);
+    for (const [field, value] of Object.entries(preview?.changes || {})) {
+      if (!['label', 'occupancy_type'].includes(field)) continue; // complete address is shown above
+      push('customer', `${humanKey(field)}: ${value === null ? '(cleared)' : field === 'occupancy_type' ? humanKey(value) : value}`, {
+        ...(preview?.before ? { before: preview.before[field] ?? null } : {}), after: value,
+      });
+    }
+    const impacts = Array.isArray(preview?.effects) ? preview.effects : [preview?.effects];
+    for (const impact of impacts.filter(Boolean)) push('operational', impact);
+  }
   // A null in a customer `updates` map is a WRITE (the field is cleared) —
   // it must render as an effect, never vanish like an absent value.
   if (CUSTOMER_UPDATE_TOOL_NAMES.has(toolName) && displayParams?.updates && typeof displayParams.updates === 'object') {
@@ -518,7 +538,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     for (const n of preview.all_customer_names) moreEffects.push({ kind: 'customer', label: String(n) });
     push('customer', `All ${preview.all_customer_names.length} customer names are listed under "Show more"`);
   }
-  if (WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
+  if (!propertyAction && WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
     let shown = 0;
     for (const [k, v] of Object.entries(preview)) {
       if (PREVIEW_NOISE_KEYS.has(k) || String(k).startsWith('_') || VOLATILE_KEY_RE.test(k)) continue;
@@ -542,7 +562,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // one level of plain-object params flattens to its own lines (so an
   // update_customer card says WHAT changes), deeper structure is described
   // in full rather than dropped.
-  for (const [k, v] of Object.entries(displayParams || {})) {
+  for (const [k, v] of Object.entries(propertyAction ? {} : (displayParams || {}))) {
     if (k.startsWith('_')) continue;
     if (v && typeof v === 'object' && !Array.isArray(v)) {
       for (const [k2, v2] of Object.entries(v)) {
@@ -731,7 +751,8 @@ function normalizePreview(value, depth = 0) {
   if (value && typeof value === 'object') {
     const out = {};
     for (const [k, v] of Object.entries(value)) {
-      if (String(k).startsWith('_') || VOLATILE_KEY_RE.test(k)) continue;
+      // Domain record versions bind approval while remaining hidden from the card.
+      if ((String(k).startsWith('_') && k !== '_version') || VOLATILE_KEY_RE.test(k)) continue;
       if (depth === 0 && PREVIEW_NOISE_KEYS.has(k) && k !== 'matches' && k !== 'preview' && k !== 'action') continue;
       out[k] = normalizePreview(v, depth + 1);
     }

@@ -93,6 +93,9 @@ fingerprints. These three scheduling sites remain **unmapped**. Phase 3 must
 verify selected-property ownership and completeness, address-specific availability,
 and quote/property compatibility through the shared scheduling path; no scheduling
 parity is claimed by importing already-merged portal code into this foundation.
+The booking submission also carries `propertyId` in its separately constructed
+body. Its unchanged request call is not flagged by the source fingerprint;
+selected-property stamping and quote compatibility remain explicit Phase 3 work.
 
 Current foundation census: 1,693 UI sites; ten transport exceptions; 1,683 domain
 sites still unsupported/unverified in the matrix. Registration of existing tools
@@ -159,15 +162,17 @@ communication was performed. `GATE_IB_PLATFORM` defaults off.
 
 ## Outstanding implementation
 
-Phase 2 property creation/labels/primary switching, shared inventory operations,
-and existing-customer estimates are next. Phase 3 remaining domain operations
+Phase 2 saved-property creation, labels/occupancy and primary switching are
+implemented in `intelligence-bar-property-workflows.md`. Shared inventory
+operations and existing-customer estimates remain next. Phase 3 remaining domain operations
 are enumerated in `intelligence-bar-remaining-capabilities.md`; this is engineering
 work, not a credential blocker. Compound workflow and comprehensive adversarial
 verification remain incomplete.
 
-Browser review also found that Customer 360's modal covers the global touch
-opener; keyboard activation works. A touch entry inside record overlays and
-refresh of affected views remain required. Real iOS keyboard/safe-area behavior,
+Customer 360 now has an overlay touch opener and matching-record refresh for
+verified property mutations; the scoped context survives overlay open/close.
+The property browser run supersedes the earlier unstyled harness screenshots.
+Affected-view refresh for remaining domains is still required. Real iOS keyboard/safe-area behavior,
 voice permission/error states, attachment failure, full live-model behavior,
 and performance checks have not been verified. No full-parity completion claim
 is supported by this foundation checkpoint.

@@ -99,6 +99,7 @@ function customerName(customer) {
 }
 
 function billBlock(doc, invoice, customer, x, y) {
+  customer = require('../invoice-address').invoiceCustomerAddress(invoice, customer);
   const payer = invoice.payer || null;
 
   // Third-party Bill-To: the payer (builder / property manager / etc.) is who

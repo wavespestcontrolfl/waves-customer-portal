@@ -10,6 +10,7 @@ const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT
 const { threadsEnabled } = require('./threads');
 
 const MODULES = [
+  ['property-tools', 'PROPERTY_TOOLS', 'executePropertyTool'],
   ['tools', 'TOOLS', 'executeTool'],
   ['schedule-tools', 'SCHEDULE_TOOLS', 'executeScheduleTool'],
   ['closeout-tools', 'CLOSEOUT_TOOLS', 'executeCloseoutTool'],

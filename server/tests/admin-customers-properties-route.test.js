@@ -1,4 +1,4 @@
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gateEnvValue: jest.fn(() => false) }));
 /**
  * POST /admin/customers/:id/properties — the admin "Add service address"
  * path. customer_properties.state is varchar(2): a full state name must be
@@ -19,10 +19,20 @@ jest.mock('../models/db', () => {
   db.schema = { hasTable: jest.fn(async () => false) };
   return db;
 });
+// Keep shared production field validation real; isolate database writes at the
+// domain boundary. The PostgreSQL acceptance suite verifies the actual writer.
+const mockManualWrite = jest.fn(async () => ({ propertyId: 'p-new', properties: [{ id: 'p1' }, { id: 'p-new' }] }));
 const mockProps = {
   completePrimaryFromCall: jest.fn(async () => ({})),
   ensurePrimaryProperty: jest.fn(async () => ({})),
-  recordCallProperty: jest.fn(async () => ({ created: true, propertyId: 'p-new' })),
+  addManualProperty: jest.fn(async (customerId, input, options) => {
+    const fields = jest.requireActual('../services/customer-properties').manualPropertyFields('add', input);
+    return mockManualWrite(customerId, fields, options);
+  }),
+  editManualProperty: jest.fn(async (customerId, propertyId, input, options) => {
+    const fields = jest.requireActual('../services/customer-properties').manualPropertyFields('edit', input);
+    return mockManualWrite(customerId, fields, { ...options, propertyId });
+  }),
   listProperties: jest.fn(async () => [{ id: 'p1', is_primary: true }, { id: 'p-new', is_primary: false }]),
   OCCUPANCY_TYPES: ['owner_occupied', 'rental_investment', 'commercial', 'seasonal', 'vacant', 'unknown'],
 };
@@ -53,7 +63,7 @@ describe('POST /admin/customers/:id/properties', () => {
       expect(res.status).toBe(400);
       await expect(res.json()).resolves.toEqual({ error: 'state is required as a two-letter code' });
     });
-    expect(mockProps.recordCallProperty).not.toHaveBeenCalled();
+    expect(mockManualWrite).not.toHaveBeenCalled();
   });
 
   test('uppercases a two-letter code and records the property as manual', async () => {
@@ -64,9 +74,9 @@ describe('POST /admin/customers/:id/properties', () => {
       expect(body.propertyId).toBe('p-new');
       expect(body.properties).toHaveLength(2);
     });
-    expect(mockProps.recordCallProperty).toHaveBeenCalledWith(expect.objectContaining({
-      customerId: 'cust-1', address_line1: '20 Oak St', state: 'FL', zip: '34103', occupancyType: 'rental_investment', label: 'Rental', source: 'manual',
-    }));
+    expect(mockManualWrite).toHaveBeenCalledWith('cust-1', expect.objectContaining({
+      address_line1: '20 Oak St', state: 'FL', zip: '34103', occupancy_type: 'rental_investment', label: 'Rental',
+    }), { actorId: 'admin-1' });
   });
 
   test('state is REQUIRED — the service would otherwise default a missing state to FL silently', async () => {
@@ -79,7 +89,7 @@ describe('POST /admin/customers/:id/properties', () => {
       const blankState = await post(baseUrl, { address_line1: '20 Oak St', city: 'Naples', zip: '34103', state: '  ' });
       expect(blankState.status).toBe(400);
     });
-    expect(mockProps.recordCallProperty).not.toHaveBeenCalled();
+    expect(mockManualWrite).not.toHaveBeenCalled();
   });
 
   test('label longer than varchar(100) is a 400 on POST and PATCH, never a DB error', async () => {
@@ -95,7 +105,7 @@ describe('POST /admin/customers/:id/properties', () => {
       const exact = await post(baseUrl, { address_line1: '20 Oak St', city: 'Naples', state: 'FL', zip: '34103', label: 'y'.repeat(100) });
       expect(exact.status).toBe(201);
     });
-    expect(mockProps.recordCallProperty).toHaveBeenCalledTimes(1);
+    expect(mockManualWrite).toHaveBeenCalledTimes(1);
   });
 
   test('every address column is capped at its varchar width with a field-named 400', async () => {
@@ -112,11 +122,11 @@ describe('POST /admin/customers/:id/properties', () => {
       const exact = await post(baseUrl, { ...base, address_line1: 'a'.repeat(200), address_line2: 'b'.repeat(100), city: 'c'.repeat(50), zip: 'd'.repeat(10) });
       expect(exact.status).toBe(201);
     });
-    expect(mockProps.recordCallProperty).toHaveBeenCalledTimes(1);
+    expect(mockManualWrite).toHaveBeenCalledTimes(1);
   });
 
   test('duplicate street surfaces as 409', async () => {
-    mockProps.recordCallProperty.mockResolvedValueOnce({ created: false, propertyId: null });
+    mockManualWrite.mockRejectedValueOnce(Object.assign(new Error('A property with that street already exists for this customer'), { status: 409 }));
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { address_line1: '10 Palm Ave', city: 'Naples', state: 'FL', zip: '34102' });
       expect(res.status).toBe(409);

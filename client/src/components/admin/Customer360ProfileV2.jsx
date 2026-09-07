@@ -46,7 +46,8 @@
  *   Switching filter should clear stale rows / not mix categories.
  */
 
-import { useState, useEffect, useRef, useId } from "react";
+import { useState, useEffect, useRef, useId, useCallback } from "react";
+import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { createPortal } from "react-dom";
 import AddressAutocomplete, { sameAutocompleteAddress } from "../AddressAutocomplete";
 import {
@@ -64,6 +65,7 @@ import {
   PenLine,
   RotateCcw,
   ShieldCheck,
+  Sparkles,
   Trash2,
   XCircle,
 } from "lucide-react";
@@ -5144,6 +5146,8 @@ export default function Customer360ProfileV2({
   const [profileLoadError, setProfileLoadError] = useState("");
   const [profileReloadKey, setProfileReloadKey] = useState(0);
   const [profileActionErr, setProfileActionErr] = useState("");
+  const { open: openIntelligenceBar, lastMutation } = useIntelligenceBarActions();
+  usePublishIntelligenceBarPageData({ customer_id: customerId, overlay: true });
   const [activeTab, setActiveTab] = useState(initialTab);
   const [timelineFilter, setTimelineFilter] = useState("all");
   const [timeline, setTimeline] = useState([]);
@@ -5199,15 +5203,37 @@ export default function Customer360ProfileV2({
   // unchanged resave still self-heals a stale mirror), so a tuple-based
   // signal would leave the panel stale exactly when the server fixed it.
   const [profileVersion, setProfileVersion] = useState(0);
-  const reloadCustomer = () =>
-    adminFetch(`/admin/customers/${customerId}`)
-      .then((detail) => {
-        if (String(customerIdRef.current) === String(customerId)) {
-          setData(detail);
-          setProfileVersion((v) => v + 1);
-        }
-        return detail;
-      });
+  const reloadCustomer = useCallback(async () => {
+    if (customerIdRef.current !== customerId) return null;
+    const seq = ++profileSeqRef.current;
+    profileAbortRef.current?.abort();
+    const ctrl = new AbortController();
+    profileAbortRef.current = ctrl;
+    setTimelineRetrying(false);
+    try {
+      const [detail, tl] = await Promise.all([
+        adminFetch(`/admin/customers/${customerId}`, { signal: ctrl.signal }),
+        isAdmin ? adminFetch(`/admin/customers/${customerId}/timeline`, {
+          signal: ctrl.signal,
+        }).catch((err) => {
+          if (err.name === "AbortError") throw err;
+          return null;
+        }) : Promise.resolve({ timeline: [] }),
+      ]);
+      if (ctrl.signal.aborted || seq !== profileSeqRef.current || customerIdRef.current !== customerId) return null;
+      setData(detail);
+      setProfileVersion((v) => v + 1);
+      setProfileLoadError("");
+      setTimeline(tl?.timeline || []);
+      setTimelineError(tl === null);
+      return detail;
+    } catch (err) {
+      if (ctrl.signal.aborted || seq !== profileSeqRef.current || customerIdRef.current !== customerId) return null;
+      throw err;
+    } finally {
+      if (!ctrl.signal.aborted && seq === profileSeqRef.current && customerIdRef.current === customerId) setLoading(false);
+    }
+  }, [customerId, isAdmin]);
 
   useEffect(() => {
     adminFetch("/admin/payers")
@@ -5379,16 +5405,14 @@ export default function Customer360ProfileV2({
   useEffect(() => {
     commsSeqRef.current += 1;
     if (commsAbortRef.current) commsAbortRef.current.abort();
-    const seq = profileSeqRef.current + 1;
-    profileSeqRef.current = seq;
-    if (profileAbortRef.current) profileAbortRef.current.abort();
-    const ctrl = new AbortController();
-    profileAbortRef.current = ctrl;
     setLoading(true);
     setData(null);
     setProfileLoadError("");
     setTimelineRetrying(false);
     setProfileActionErr("");
+    setComms([]);
+    setCommsLoaded(false);
+    setCommsErr("");
     setCommsLoading(false);
     setMenuOpen(false);
     setEditOpen(false);
@@ -5401,32 +5425,18 @@ export default function Customer360ProfileV2({
     setCancelSignupOpen(false);
     setCancelPlanOpen(false);
     setRefundPayment(null);
-    Promise.all([
-      adminFetch(`/admin/customers/${customerId}`, { signal: ctrl.signal }),
-      isAdmin ? adminFetch(`/admin/customers/${customerId}/timeline`, {
-        signal: ctrl.signal,
-      }).catch((err) => {
-        if (err.name === "AbortError") throw err;
-        return null;
-      }) : Promise.resolve({ timeline: [] }),
-    ])
-      .then(([detail, tl]) => {
-        if (seq !== profileSeqRef.current) return;
-        setData(detail);
-        setTimeline(tl?.timeline || []);
-        setTimelineError(tl === null);
-        setComms([]);
-        setCommsLoaded(false);
-        setCommsErr("");
-        setLoading(false);
-      })
-      .catch((err) => {
-        if (err.name === "AbortError" || seq !== profileSeqRef.current) return;
-        setProfileLoadError(err.message || "Failed to load customer");
-        setLoading(false);
-      });
-    return () => ctrl.abort();
-  }, [customerId, profileReloadKey, isAdmin]);
+    void reloadCustomer().catch((err) => {
+      setProfileLoadError(err.message || "Failed to load customer");
+    });
+    return () => profileAbortRef.current?.abort();
+  }, [profileReloadKey, reloadCustomer]);
+
+  useEffect(() => {
+    if (lastMutation?.customer_id !== customerId) return;
+    void reloadCustomer().catch(() => {
+      if (customerIdRef.current === customerId) setProfileActionErr("The change was saved. Refresh this record to see it.");
+    });
+  }, [lastMutation, customerId, reloadCustomer]);
 
   const retryTimeline = async () => {
     const seq = profileSeqRef.current;
@@ -6072,6 +6082,9 @@ export default function Customer360ProfileV2({
               {c.memberSince && <span>Since {fmtDate(c.memberSince)}</span>}
             </div>{" "}
             <div className="flex gap-2 flex-wrap">
+              {isAdmin && openIntelligenceBar && (
+                <Button variant="secondary" className="text-14" onClick={openIntelligenceBar}>Intelligence Bar</Button>
+              )}
               {c.phone && (
                 <>
                   {" "}
@@ -8081,6 +8094,12 @@ export default function Customer360ProfileV2({
           <ChevronLeft size={18} strokeWidth={1.75} />{" "}
         </button>{" "}
         <div className="flex items-center gap-2">
+          {isAdmin && openIntelligenceBar && (
+            <button type="button" aria-label="Open Intelligence Bar for this customer" onClick={openIntelligenceBar}
+              className="inline-flex items-center justify-center h-11 w-11 rounded-sm border-hairline border-zinc-300 bg-white text-zinc-900 u-focus-ring">
+              <Sparkles size={18} strokeWidth={1.75} />
+            </button>
+          )}
           {c.phone && (
             <a
               href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}
