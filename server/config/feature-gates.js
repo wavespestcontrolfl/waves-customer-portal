@@ -1437,7 +1437,9 @@ const gates = {
   // unset → 404; revert the caller's host env too, or its SDK keeps posting
   // into the 404. This entry is for logGateStatus; the route reads
   // gateEnvValue('GATE_POSTHOG_INGEST_PROXY') at REQUEST time (the techTips
-  // idiom), so a flip needs no redeploy. See server/routes/posthog-ingest.js.
+  // idiom), so a flip needs no CODE deploy — Railway's automatic redeploy on
+  // the variable change is what restarts the process with the new value;
+  // never set it with --skip-deploys. See server/routes/posthog-ingest.js.
   posthogIngestProxy: gateEnvValue('GATE_POSTHOG_INGEST_PROXY'),
   // The surname rung of that matcher (click_name: the ONE in-window clicker
   // whose complete last name is the reviewer's; see

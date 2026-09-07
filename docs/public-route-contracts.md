@@ -621,8 +621,9 @@ server can't validate exposure keys)).
 browser SDK on the hub and on `/book` posts here instead of `*.posthog.com`
 so ad blockers stop dropping funnel events. **Gated behind
 GATE_POSTHOG_INGEST_PROXY** (generic 404 when off, no upstream call; read at
-REQUEST time via `gateEnvValue` — `1`/`true`/`on` — so a Railway unset is a
-live kill, no redeploy).
+REQUEST time via `gateEnvValue` — `1`/`true`/`on` — so a flip needs no code
+deploy; Railway restarts the process on the variable change, which is what
+makes it take effect — never set it with `--skip-deploys`).
 Mounted in `server/index.js` ABOVE helmet, the CORS allowlist and the body
 parsers → `routes/posthog-ingest.js`. Invariants: the upstream origins are
 FIXED constants (`https://us.i.posthog.com`; `/static/*` and `/array/*` →

@@ -362,9 +362,9 @@
       "routes": [
         "ALL /ingest/*",
         "USE /ingest (express-rate-limit({ handler#8c637dbe }))",
+        "USE /ingest (inline function#2cc18b4d)",
         "USE /ingest (inline function#3e44b7bf)",
-        "USE /ingest (inline function#3e8e0800)",
-        "USE /ingest (inline function#5a3084b2)"
+        "USE /ingest (inline function#3e8e0800)"
       ]
     },
     {
