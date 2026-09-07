@@ -2,7 +2,7 @@
 
 `GATE_COMPLETION_SERVICE_PRICING=true` enables the inline pricing card in Complete Service. It is off by default. The existing completion endpoint accepts an optional pricing review; older browser/native requests retain their existing behavior. No migration, new rate, or production data repair is part of this change.
 
-The card resolves the scheduled job's explicit accepted estimate and its matching service lines. A parent source can be inherited only when customer, property, and service identity agree. It never selects the customer's newest estimate. Duplicate source identities, another property, and missing accepted-price evidence remain visible review states. Opening the matched estimate keeps completion mounted; the full accepted PDF is available from the same dialog.
+The card resolves the scheduled job's explicit accepted estimate and its matching service lines. A parent source can be inherited only when customer, property, and service identity agree. It never selects the customer's newest estimate. Duplicate source identities, another property, and missing accepted-price evidence remain visible review states. Completion waits for pricing to load and requires a read retry on failure. Opening the matched estimate keeps completion mounted; the full accepted PDF is available from the same dialog.
 
 The existing accepted-price mapper supplies the agreed net. Its completion-only option preserves duplicate evidence and explicit fully discounted per-application amounts. Existing scheduling/acceptance consumers retain their normal normalization and response shapes.
 

@@ -11725,7 +11725,9 @@ export function CompletionPanel({
     svcTypeLower.includes("re-service") ||
     svcTypeLower.includes("callback") ||
     service.isCallback;
-  const reviewedPricing = completionPricing?.serviceId === service.id
+  const completionPricingPending = visitOutcome === "completed" && !backfillCloseout
+    && (completionPricing?.serviceId !== service.id || completionPricing?.ready !== true);
+  const reviewedPricing = completionPricing?.serviceId === service.id && completionPricing?.review
     && visitOutcome === "completed" && !backfillCloseout ? completionPricing : null;
   const applyingCompletionDiscounts = reviewedPricing?.apply === true;
   const completionVisitPrice = applyingCompletionDiscounts ? reviewedPricing.amount : service.estimatedPrice;
@@ -12107,6 +12109,8 @@ export function CompletionPanel({
     ? "Completing..."
     : committedReplayReady
       ? "Resume Closeout"
+      : completionPricingPending
+        ? "Review pricing to complete"
     : closeoutAdvisoriesPending
       ? "Loading plan…"
     : protocolActualsCompletionBlocked
@@ -14179,6 +14183,7 @@ export function CompletionPanel({
       // released for its own validation returns.
       setSubmitting(false);
     }
+    if (completionPricingPending) return;
     // Upload-mode dictation lands asynchronously after the mic stops; a
     // completion posted now would ship notes without it (pre-push P1).
     if (dictation.mode === "upload" && (dictation.listening || dictation.uploading)) {
@@ -17994,7 +17999,7 @@ export function CompletionPanel({
                 submitting ||
                 generating ||
                 (!committedReplayReady &&
-                  (closeoutAdvisoriesPending ||
+                  (completionPricingPending || closeoutAdvisoriesPending ||
                     treeShrubCompletionBlocked ||
                     protocolActualsCompletionBlocked))
               }
@@ -18003,7 +18008,7 @@ export function CompletionPanel({
                 opacity:
                   submitting ||
                   (!committedReplayReady &&
-                    (closeoutAdvisoriesPending ||
+                    (completionPricingPending || closeoutAdvisoriesPending ||
                       treeShrubCompletionBlocked ||
                       protocolActualsCompletionBlocked))
                     ? 0.5
@@ -20151,7 +20156,7 @@ export function CompletionPanel({
               submitting ||
               generating ||
               (!committedReplayReady &&
-                (closeoutAdvisoriesPending ||
+                (completionPricingPending || closeoutAdvisoriesPending ||
                   treeShrubCompletionBlocked ||
                   protocolActualsCompletionBlocked))
             }
@@ -20168,7 +20173,7 @@ export function CompletionPanel({
               opacity:
                 submitting ||
                 (!committedReplayReady &&
-                  (closeoutAdvisoriesPending ||
+                  (completionPricingPending || closeoutAdvisoriesPending ||
                     treeShrubCompletionBlocked ||
                     protocolActualsCompletionBlocked))
                   ? 0.6

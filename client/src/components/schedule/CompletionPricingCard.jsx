@@ -80,6 +80,7 @@ export default function CompletionPricingCard({ service, adminFetch, onReviewCha
         if (cancelled) return;
         const next = result?.completionPricing || null;
         setData(next); setApply(next?.canApply === true);
+        if (!next) onReviewChange({ serviceId: service.id, ready: true });
       })
       .catch(() => { if (!cancelled) setError("Couldn’t load this service’s estimate and discounts."); })
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -88,7 +89,7 @@ export default function CompletionPricingCard({ service, adminFetch, onReviewCha
 
   useEffect(() => {
     if (!data || String(data.serviceId) !== String(service.id)) return;
-    onReviewChange({ serviceId: service.id, review: { witness: data.witness, applyDiscounts: apply },
+    onReviewChange({ serviceId: service.id, ready: true, review: { witness: data.witness, applyDiscounts: apply },
       apply, amount: apply ? data.proposedAmount : data.currentAmount });
   }, [data, apply, service.id, onReviewChange]);
 

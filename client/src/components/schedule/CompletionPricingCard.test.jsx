@@ -38,7 +38,7 @@ it('clears a previous job and ignores a late response', async () => {
   await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument());
   resolveOld({ completionPricing: data });
   await waitFor(() => expect(screen.queryByText('WaveGuard Gold · 15%')).not.toBeInTheDocument());
-  expect(review).toHaveBeenLastCalledWith(null);
+  expect(review).toHaveBeenLastCalledWith({ serviceId: "job-2", ready: true });
 });
 it('keeps pricing failures explicit and allows a read retry', async () => {
   const fetch = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce({ completionPricing: data });
@@ -57,4 +57,17 @@ it('shows an accepted discount once when the same net is already stamped on the 
   expect(await screen.findByText('WaveGuard Gold · 15%')).toBeInTheDocument();
   expect(screen.getAllByText('−$15.00')).toHaveLength(1);
   expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+});
+
+it('remains unready during loading and failure, then becomes ready after retry', async () => {
+  let rejectRead;
+  const fetch = vi.fn().mockImplementationOnce(() => new Promise((resolve, reject) => { rejectRead = reject; }))
+    .mockResolvedValueOnce({ completionPricing: data });
+  const review = vi.fn();
+  render(<CompletionPricingCard service={service} adminFetch={fetch} onReviewChange={review} />);
+  expect(review).toHaveBeenLastCalledWith(null);
+  rejectRead(new Error('offline'));
+  fireEvent.click(await screen.findByRole('button', { name: 'Retry pricing' }));
+  expect(review).toHaveBeenLastCalledWith(null);
+  await waitFor(() => expect(review).toHaveBeenLastCalledWith(expect.objectContaining({ ready: true, review: { witness: data.witness, applyDiscounts: true } })));
 });
