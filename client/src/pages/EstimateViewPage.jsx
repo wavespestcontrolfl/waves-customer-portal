@@ -7912,6 +7912,13 @@ function EstimateViewPageInner({ websiteMode = false }) {
           ) : null
   );
 
+  const slotIssueBanner = ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
+    <SlotIssueBanner
+      kind={ctaPhase === 'reservation_expired' ? 'expired' : 'conflict'}
+      onRetry={() => setSlotsRefreshSignal((v) => v + 1)}
+    />
+  ) : null;
+
   if (websiteMode) {
     return (
       <WebsiteEstimateFlow
@@ -7919,7 +7926,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
         lockedSection={isLockedMirrorSection} oneTime={serviceMode === 'one_time'}
         oneTimeBreakdown={pricing.oneTimeBreakdown} combinedFrequency={combinedFrequency}
         fees={(pricing.firstVisitFees?.length ? pricing.firstVisitFees : (setupFeeEffective ? [setupFeeEffective] : [])).map(tierAwareFee).filter(fee => Number(fee.amount) > 0)}
-        bookingContent={<>{bookingContent}{paymentContent}</>} reviewContent={reviewContent}
+        bookingContent={<>{slotIssueBanner}{bookingContent}{paymentContent}</>} reviewContent={reviewContent}
         reviewing={!!reservation && (ctaPhase === 'review' || (ctaPhase === 'submitting' && !!inlineCardIntent))}
         busy={ctaPhase === 'submitting'} timer={<CountdownLine secondsRemaining={countdownSeconds} />}
         phone={WAVES_PHONE_DISPLAY} phoneHref={`tel:${WAVES_PHONE_TEL}`}
@@ -7947,12 +7954,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
 
       {data.returnVisit ? <ReturnVisitStrip returnVisit={data.returnVisit} showAsk={!isRegulatedCertificateSurface} /> : null}
 
-      {ctaPhase === 'slot_conflict' || ctaPhase === 'reservation_expired' ? (
-        <SlotIssueBanner
-          kind={ctaPhase === 'reservation_expired' ? 'expired' : 'conflict'}
-          onRetry={() => setSlotsRefreshSignal((v) => v + 1)}
-        />
-      ) : null}
+      {slotIssueBanner}
 
       {measurementReviewBasis ? (
         <MeasurementReviewSheet
