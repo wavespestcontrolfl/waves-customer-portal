@@ -258,7 +258,7 @@ router.post('/', async (req, res) => {
       : rawSlots;
     const picked = hint && pickedStart
       ? await scorePickedHour({
-        rawSlots, from, today, useArrivalWindows, pickedStart, pickedEnd, spanMin,
+        rawSlots, from, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
         serviceId, technicianId: technicianId || undefined, excludeServiceIds, excluded,
       })
       : undefined;

@@ -506,6 +506,20 @@ test('a same-day picked hour before the engine\'s now+30 floor is not scored (no
   expect(later.picked).toMatchObject({ start: '13:00', fits: true });
 });
 
+test('a same-day picked hour below the caller\'s sameDayFloorMin is not scored (Quick Move running-late marks it invalid), an hour at the floor is', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  // ET now is pinned at 12:00 (engine floor 12:30). Quick Move sends a
+  // stricter floor — the visit's current window ends at 14:00 — so 13:00
+  // sits inside the returned gap yet is invalid for the sheet; the verdict
+  // must not call it a fit. 14:00 clears the floor and scores normally.
+  const TODAY = { ...BASE, dateFrom: '2026-08-31', dateTo: '2026-08-31' };
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot({ date: '2026-08-31', start_time: '13:00', end_time: '14:00', latest_start_min: 15 * 60 })], evaluated: 1 });
+  const below = await (await post({ ...TODAY, hint: true, slotStepMinutes: 60, sameDayFloorMin: 14 * 60, pickedStart: '13:00' })).json();
+  expect(below.picked).toBeUndefined();
+  const atFloor = await (await post({ ...TODAY, hint: true, slotStepMinutes: 60, sameDayFloorMin: 14 * 60, pickedStart: '14:00' })).json();
+  expect(atFloor.picked).toMatchObject({ start: '14:00', fits: true });
+});
+
 test('arrival-window mode scores the picked hour with the shared route checker: feasible, unverified (no verdict), verified miss', async () => {
   process.env.GATE_BEST_TIME_HINTS = 'true';
   const saved = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;

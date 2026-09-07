@@ -1761,7 +1761,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     durationMinutes: slotCheckDuration,
     // Same tech scoping as the ranged search — auto mode searches all techs.
     technicianId: techMode === 'choose' && techId ? techId : undefined,
-    pickedStart: windowStart,
+    // The picked-hour verdict is priced on ONE technician's route. In Auto
+    // mode the booking's server-side matcher picks its own tech (or leaves
+    // the visit unassigned), and the typed hour has no chip to adopt the
+    // scored one — a cost for a route the booking will not use. Chips stay:
+    // picking one adopts its technician (Codex #4120 r5 P2).
+    pickedStart: techMode === 'choose' && techId ? windowStart : undefined,
     rangeFrom: etDateString(),
   });
 

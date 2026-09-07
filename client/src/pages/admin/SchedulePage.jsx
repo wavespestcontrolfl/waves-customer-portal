@@ -1400,6 +1400,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [timeOnSiteMinutes, setTimeOnSiteMinutes] = useState(timeOnSiteSeed);
   const isCompletedVisit =
     String(service.status || "").toLowerCase() === "completed";
+  // Terminal rows (completed / cancelled / skipped / no_show) are records,
+  // not live stops: no cancel action, and no scheduling hint that could
+  // retarget them onto a live day (Codex #4120 r4 P2 + r5 P2).
+  const isTerminalVisit = [
+    "completed",
+    "cancelled",
+    "skipped",
+    "no_show",
+  ].includes(String(service.status || "").toLowerCase());
   // Re-entry windows for a COMPLETED visit (interior/exterior dry-down
   // minutes on the customer report). Same posture as the time-on-site
   // correction: OUTSIDE `form`, saved through the dedicated admin-only
@@ -1524,12 +1533,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     excludeServiceIds: [service.id],
   });
   // Advisory drive-detour suggestions for the same fixed day — picking a
-  // chip only fills the window fields (never saves). A completed visit's
+  // chip only fills the window fields (never saves). A terminal visit's
   // date/window edit is a record correction: there is no route to price,
-  // and the range chip would move the finished visit onto a live day
-  // (update-details allows the edit) — no hint at all (Codex #4120 r4 P2).
+  // and the range chip would move the finished (or cancelled / skipped /
+  // no-show) visit onto a live day (update-details allows the edit) — no
+  // hint at all (Codex #4120 r4 P2, r5 P2).
   const { bestTimes, picked, bestInRange } = useBestTimes({
-    enabled: !isCompletedVisit,
+    enabled: !isTerminalVisit,
     arrivalWindows: true,
     date: form.scheduledDate,
     serviceId: service.id,
@@ -2475,12 +2485,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 
   // no_show is terminal on the server too (the status route 409s a
   // no_show → cancelled transition) — don't offer a cancel that must fail.
-  const canCancelAppointment = ![
-    "completed",
-    "cancelled",
-    "skipped",
-    "no_show",
-  ].includes(String(service.status || "").toLowerCase());
+  const canCancelAppointment = !isTerminalVisit;
 
   const handleCancelAppointment = async () => {
     if (cancelling) return;
@@ -6963,6 +6968,11 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   // Advisory drive-detour suggestions for the picked day — a chip only sets
   // the start select, never submits the reschedule.
   const { bestTimes: manualBestTimes, picked: manualPicked, bestInRange: manualBestInRange } = useBestTimes({
+    // Same route check as the manual save and the edit form: under
+    // GATE_ADMIN_ARRIVAL_WINDOWS the verdict and the chips must not endorse
+    // an hour the save would refuse for another customer's window
+    // (Codex #4120 r5 P1).
+    arrivalWindows: true,
     date: manualDate,
     serviceId: service.id,
     customerId: service.customerId || service.customer_id,

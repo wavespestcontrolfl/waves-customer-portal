@@ -129,12 +129,16 @@ async function guardHintSlots(slots, { today, sameDayFloorMin, step, spanMin, ex
 // validator refuses it outright (window-rules: appointment windows start on
 // the hour), so a verdict on it could endorse a window that cannot be saved
 // (Codex #4120 r4 P1). The window END may land off-hour and is never
-// rejected — only the start is checked.
-function pickedUnscorable({ from, today, pickedMin, pickedEndMin, useArrivalWindows }) {
+// rejected — only the start is checked. A caller's own same-day floor
+// (Quick Move running-late: the target must follow the current window) is
+// the same kind of bound — the picker marks an earlier hour invalid, so no
+// verdict may call it a fit (Codex #4120 r5 P2).
+function pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMin, useArrivalWindows }) {
   const nowEt = etParts();
   const dayEndMin = useArrivalWindows ? ADMIN_DAY_END_MINUTES : DAY_END_HOUR * 60;
   return pickedMin % 60 !== 0
     || (from === today && pickedMin < nowEt.hour * 60 + nowEt.minute + 30)
+    || (from === today && Number.isInteger(sameDayFloorMin) && pickedMin < sameDayFloorMin)
     || pickedMin < DAY_START_HOUR * 60
     || pickedEndMin > dayEndMin;
 }
@@ -212,12 +216,12 @@ async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, sp
  * honest to say (see pickedUnscorable / the arrival rules above).
  */
 async function scorePickedHour({
-  rawSlots, from, today, useArrivalWindows, pickedStart, pickedEnd, spanMin,
+  rawSlots, from, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
   serviceId, technicianId, excludeServiceIds, excluded,
 }) {
   const pickedMin = toMin(pickedStart);
   const pickedEndMin = Math.max(pickedMin + spanMin, pickedEnd !== undefined ? toMin(pickedEnd) : 0);
-  if (pickedUnscorable({ from, today, pickedMin, pickedEndMin, useArrivalWindows })) return undefined;
+  if (pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMin, useArrivalWindows })) return undefined;
   const pickedWindow = { start: pickedStart, end: toHHMM(pickedEndMin) };
   return useArrivalWindows
     ? pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds })
