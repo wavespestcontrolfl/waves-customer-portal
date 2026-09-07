@@ -132,6 +132,22 @@ describe('POST /admin/customers/:id/properties', () => {
       expect(res.status).toBe(409);
     });
   });
+
+  test('preserves relationship independently of occupancy and rejects invalid relationships', async () => {
+    await withServer(async base => {
+      const created = await post(base, { address_line1: '20 Oak St', city: 'Naples', state: 'FL', zip: '34103',
+        relationship: 'family_home', occupancy_type: 'owner_occupied' });
+      expect(created.status).toBe(201);
+      expect(mockManualWrite).toHaveBeenLastCalledWith('cust-1', expect.objectContaining({
+        relationship: 'family_home', occupancy_type: 'owner_occupied' }), { actorId: 'admin-1' });
+      const invalid = await post(base, { address_line1: '20 Oak St', city: 'Naples', state: 'FL', zip: '34103', relationship: 'family' });
+      expect(invalid.status).toBe(400);
+      const cleared = await fetch(`${base}/admin/customers/cust-1/properties/p1`, { method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ relationship: null }) });
+      expect(cleared.status).toBe(200);
+      expect(mockManualWrite).toHaveBeenLastCalledWith('cust-1', { relationship: null }, { actorId: 'admin-1', propertyId: 'p1' });
+    });
+  });
 });
 
 

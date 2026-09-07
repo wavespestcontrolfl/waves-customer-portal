@@ -81,8 +81,23 @@ Generated or saved tier selections replace the listed service cadences and
 retain omitted companion programs; choosing a tier is not a service removal.
 The existing pest-only recurring choice on eligible one-time-toggle estimates
 retains its intentional companion exclusion, using the acceptance predicate.
-Existing request fields, token/signature guards, rate limits, privacy headers,
-and booking duration policy apply), `/api/reports/:token/*` (the
+Existing request fields, token/signature guards, rate limits and privacy headers
+apply. With strict opt-in `GATE_VISIT_COMBINED_CAPACITY` and prerequisite
+`GATE_SEPARATE_COMBO_VISITS`, multi-service recurring selections reserve 60 minutes
+per physical service program. Termite rental and bond billing riders fold into
+bait service; legacy supplements use the converter's physical-program rules.
+Unsupported families/cadences, recurring foam and commercial programs return
+409 `COMBINED_VISIT_UNAVAILABLE` before offering or holding combined work.
+`durationMinutes` and `windowEnd` describe the whole work block; arrival copy
+remains start plus 120 minutes. One assignable technician must have no selected
+service capability explicitly disabled. The allocation stamp is server-owned
+and excluded from public slot metadata. `/api/estimates/:token/accept` rechecks
+the selection, technician and full occupancy under existing locks, then converts
+the hold into separate sequential 60-minute service windows with independent
+cadences. Missing or unmatched members abort the transaction. A stamped hold
+retains its capacity policy when the creation gate turns off. Shared-arrival
+reminder consumers use the persisted allocation, including with grouping off
+or Auto Pay enabled; invoice and Auto Pay policies remain unchanged), `/api/reports/:token/*` (the
 service-report V1 payload — `/data`, the PDF at `/:token`, `/map.svg`, and
 the queued PDF / report-email renders that share `buildReportV1Data` —
 renders the report's IDENTITY facts from the completion-time snapshot on
@@ -121,7 +136,11 @@ older cached PDFs to match this evidence rule),
 the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
-`/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound),
+`/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound; the SMS
+operational extension runs after acknowledgment under
+`GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
+it reuses persisted SMS evidence for private profile updates and admin
+notifications, with no additional response fields or customer sends),
 `/api/webhooks/twilio/collections-vestibule[-key|-noinput]` +
 `/api/webhooks/twilio/collections-relay-complete` +
 `/api/webhooks/twilio/collections-transfer-complete` +
@@ -609,6 +628,57 @@ AND server feature-cache warm — the client SDK fetches feature definitions
 only after it says enabled, which is what makes unsetting GATE_GROWTHBOOK a
 real rollback for client experiments too (and keeps clients dark while the
 server can't validate exposure keys)).
+`/ingest/*` (first-party PostHog ingest proxy — no auth, no token; the
+browser SDK on the hub and on `/book` posts here instead of `*.posthog.com`
+so ad blockers stop dropping funnel events. **Gated behind
+GATE_POSTHOG_INGEST_PROXY** (generic 404 when off, no upstream call; read at
+REQUEST time via `gateEnvValue` — `1`/`true`/`on` — so a flip needs no code
+deploy; Railway restarts the process on the variable change, which is what
+makes it take effect — never set it with `--skip-deploys`).
+Mounted in `server/index.js` ABOVE helmet, the CORS allowlist and the body
+parsers → `routes/posthog-ingest.js`. Invariants: the upstream origins are
+FIXED constants (`https://us.i.posthog.com`; `/static/*` and `/array/*` →
+`https://us-assets.i.posthog.com`, PostHog's own proxy split) and the resolved URL's origin is asserted
+against them (400 otherwise) — leading `/` and `\` runs are collapsed to one
+`/` first, so a protocol-relative (`//evil.com/e/`) or backslash tail can
+never resolve off-host (SSRF, Codex r1 on #4027); GET/POST/OPTIONS only
+(405); a per-IP limiter (`POSTHOG_INGEST_RATE_MAX`/min, default 300; 429;
+keyed by the shared `unauthenticatedAuthLimitKey`, so IPv6 collapses to /64)
+sits AFTER the gate so gate-off probes stay an unobservable 404 and never
+spend budget; a process-wide in-flight cap (`POSTHOG_INGEST_MAX_IN_FLIGHT`,
+default 32; fast 503 + `Retry-After`) with a per-IP share of it
+(`POSTHOG_INGEST_MAX_IN_FLIGHT_PER_IP`, default 4, same /64 key as the
+limiter) is checked BEFORE the body is buffered so concurrent bytes are
+bounded (32 × 2 MB) and one caller cannot park on every slot —
+a client disconnect aborts the upstream call and the slot is held until
+that call settles, so upload-and-hang-up loops cannot exceed the cap, and an
+upload deadline (`POSTHOG_INGEST_UPLOAD_TIMEOUT_MS`, default 15 s) tears down
+a body that has not fully arrived so stalled uploads cannot sit on the slots;
+2 MB raw body cap (413); 10 s upstream timeout (502); the upstream response
+is STREAMED to the client with backpressure — never buffered — under a size
+cap (`POSTHOG_INGEST_MAX_RESPONSE_BYTES`, default 8 MB; over it the response
+is cut off and upstream cancelled) and a downstream write deadline
+(`POSTHOG_INGEST_RESPONSE_TIMEOUT_MS`, default 15 s), and the in-flight slot
+is held until the downstream write has finished or the connection closed.
+Inbound request headers are ALLOWLISTED — only `content-type`, `accept`,
+`accept-language`, `origin`, `user-agent` and the preflight
+`access-control-request-*` pair cross — so cookies, authorization, referer,
+content-encoding (the raw body parser has already inflated the bytes) and
+every proxy-chain / client-IP header of any spelling (RFC 7239 `Forwarded`,
+`X-Forwarded-*`, `X-Real-IP`, mesh / CDN variants) never reach PostHog;
+`X-Forwarded-For` is set to `req.ip` (trust-proxy aware) so PostHog GeoIP
+survives, and `origin` passing through lets PostHog's own CORS reflection
+answer the browser (spoke origins never touch the portal allowlist). Outbound `set-cookie`,
+`content-encoding`, `content-length` and HSTS are dropped and
+`Cross-Origin-Resource-Policy: cross-origin` is set so the hub can load
+`array.js` cross-origin. Nothing from the request is logged — not the body
+and not the path (caller-controlled free text; an upstream failure logs the
+method, a fixed `static`/`ingest` category and the error kind only). The
+global `/api/` limiter does not apply (different prefix, mounted above it),
+hence the route limiter; abuse is bounded to forwarding to PostHog's public
+ingest, which the public project key already permits directly. Kill = unset the gate AND
+revert the caller's host env (hub `PUBLIC_POSTHOG_HOST`, portal
+`VITE_POSTHOG_HOST`) — an SDK pointed at a 404 just drops events.)
 `/api/public/services/menu` (read-only catalog-derived product menu the
 website quote form renders from — no auth, no token, no params, no PII.
 Mounted at `server/index.js` → `routes/public-services-menu.js`; payload is
@@ -1410,11 +1480,23 @@ server, no SSE). Treat the auth ordering and the read-only tool surface as
 security-critical).
 `/api/client-errors` (POST; unauthenticated client error telemetry. An
 anonymous surface — /admin/login, a public token route, or any page — can
-crash in the browser, so the reporter cannot require auth. Hardened: per-IP
-rate limit (30/min), every field truncated server-side before it reaches
-Sentry (tagged `source=client`), and the client scrubs token-like path
-segments out of the reported URL. No reads, no PII persistence, no writes to
-app data — it only forwards to Sentry).
+crash in the browser, so the reporter cannot require auth. Error reports
+retain a per-IP limit (30/min) followed by a global error ceiling (60/min).
+The same limiters reserve separate keys for routine native diagnostics:
+10/min per IP, then 20/min globally; normal app activity cannot debit the
+error budgets. IP keys use the shared unauthenticated /64-collapsing helper.
+Legacy reports accept
+`name/context/route`: error names and contexts are allowlisted; the server
+reduces routes to known roots and allowlisted admin/tech page segments before
+forwarding to Sentry, tagged `source=client`. Optional native-link diagnostics
+use `{ context: 'native-links', nativeLink: { platform, source, outcome,
+route, target } }`. Every native field is an exact allowlisted label; route
+and target are only `home/shortlink/estimate/other/none`, never a URL, token,
+query, error message, stack or device identifier. Invalid native reports are
+discarded with 204; extra fields are ignored. Native failures report at error
+severity under the error budgets and normal handoff stages at info severity
+under the routine budgets. Existing reporters remain compatible. No reads, no PII persistence,
+no writes to app data — it only forwards to Sentry).
 `/api/public/mcp` (POST; ANONYMOUS read-only MCP JSON-RPC server for
 third-party AI agents — the surface the hub's /.well-known agent-readiness
 cards point at. No token BY DESIGN (the audience is anonymous agents);

@@ -42,6 +42,42 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+it.each([false, true])('mobile History follows task availability when threads are off (tasks=%s)', async tasksEnabled => {
+  useIsMobile.mockReturnValue(true);
+  fetchMock.mockImplementation(async url => {
+    if (url.includes('/threads') || (!tasksEnabled && url.includes('/tasks'))) return { ok: false, status: 404, json: async () => ({ error: 'Not enabled' }) };
+    if (url.includes('/tasks/saved-task')) return ok({ taskId: 'saved-task', taskState: 'completed', response: 'Saved mobile request', canContinue: true });
+    if (url.includes('/tasks?')) return ok({ tasks: [{ id: 'saved-task', target: { target: { label: 'Synthetic saved target' } }, state: 'completed' }] });
+    return ok({ actions: [] });
+  });
+  await mount();
+  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/tasks?'))).toBe(true));
+  fireEvent.click(screen.getByLabelText('Conversation options'));
+  if (!tasksEnabled) { expect(screen.queryByRole('button', { name: 'History', exact: true })).not.toBeInTheDocument(); return; }
+  fireEvent.click(await screen.findByRole('button', { name: 'History', exact: true }));
+  fireEvent.click(await screen.findByRole('button', { name: /Synthetic saved target/ }));
+  expect(await screen.findByText('Saved mobile request')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Continue request' }));
+  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/tasks/saved-task/resume'))).toBe(true));
+});
+
+it.each([false, true])('retains a task receipt after confirmation when its status refresh fails (mobile=%s)', async mobile => {
+  useIsMobile.mockReturnValue(mobile);
+  fetchMock.mockImplementation(async url => {
+    if (url.endsWith('/query')) return ok({ taskId: 'task-a', taskState: 'awaiting_approval', response: 'Prepared.',
+      pendingActions: [{ id: 'action-a', tool: 'update_customer', summary: 'Save synthetic note', expiresInMs: 600000 }] });
+    if (url.endsWith('/confirm-action')) return ok({ success: true, outcome: 'completed' });
+    if (url.includes('/tasks/task-a?')) return { ok: false, status: 503, json: async () => ({ error: 'Unavailable' }) };
+    return ok({ actions: [], tasks: [], threads: [], thread: null });
+  });
+  await mount();
+  submit('Update this customer');
+  fireEvent.click(await screen.findByRole('button', { name: 'Confirm', exact: true }));
+  await screen.findByText('Status unavailable: Unavailable');
+  expect(screen.getByText('✓ Done', { exact: true })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Confirm', exact: true })).not.toBeInTheDocument();
+});
+
 it('sends the viewed record and isolates a late A response after query-only navigation to B', async () => {
   await mount();
   submit('Read this customer');

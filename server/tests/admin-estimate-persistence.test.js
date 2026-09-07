@@ -22,7 +22,25 @@ const {
   buildEstimatePersistenceFields,
   createOrReuseAdminEstimate,
   estimateViewUrl,
+  estimateEditVersion,
 } = require('../services/admin-estimate-persistence');
+
+describe('estimate edit version', () => {
+  const row = { id: 'synthetic-estimate', status: 'sent', updated_at: '2026-01-01', estimate_data: { selectedTier: 'quarterly' }, monthly_total: '50.00', view_count: 1, last_viewed_at: '2026-01-01' };
+  test('repeat customer opens do not invalidate the reviewed offer', () => {
+    expect(estimateEditVersion({ ...row, view_count: 2, last_viewed_at: '2026-01-02' })).toBe(estimateEditVersion(row));
+  });
+  test.each([
+    { status: 'viewed', viewed_at: '2026-01-02' },
+    { status: 'accepted' }, { status: 'sending' },
+    { monthly_total: '60.00' }, { customer_email: 'changed@example.invalid' },
+    { estimate_data: { selectedTier: 'monthly' } },
+    { estimate_data: { manualSendAttempts: [{ id: 'synthetic-attempt' }] } },
+    { updated_at: '2026-01-02' },
+  ])('preserves concurrency protection for %j', (change) => {
+    expect(estimateEditVersion({ ...row, ...change })).not.toBe(estimateEditVersion(row));
+  });
+});
 const {
   clearAllEstimatePricingCache,
   getEstimatePricingCache,

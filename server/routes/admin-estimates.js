@@ -3690,6 +3690,7 @@ router.get('/:id/proposal', async (req, res, next) => {
       // `proposal`/`totals`.
       estimate: {
         id: estimate.id,
+        editVersion: estimateEditVersion(estimate),
         status: estimate.status,
         customerName: estimate.customer_name,
         customerId: estimate.customer_id,

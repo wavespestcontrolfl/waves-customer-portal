@@ -1,14 +1,14 @@
 # Saved-property workflows through the Intelligence Bar
 
 This phase adds three operations to the platform registry: save an additional
-property, change its label/occupancy, and select a primary residence. They use
+property, change its label/relationship/occupancy, and select a primary residence. They use
 the same operations as the customer property editor. It does not establish
 parity for other customer actions or complete the platform assignment.
 
 | Capability | Portal entry | Shared operation | Approval and effects |
 | --- | --- | --- | --- |
 | Add property | Customer 360 → Property → Add service address | `customer-properties.addManualProperty` | Admin; complete address and dedupe; IB confirmation. Registers the old account property when needed, saves the additional property, and writes an audit. An addressless account receives a primary property and account address. |
-| Relabel/change occupancy | Customer 360 → Property row | `customer-properties.editManualProperty` | Admin; exact property/customer relationship; IB confirmation of the current label/occupancy. No address relocation. |
+| Relabel/change relationship or occupancy | Customer 360 → Property row | `customer-properties.editManualProperty` | Admin; exact property/customer relationship; IB confirmation of the current label/occupancy. No address relocation. |
 | Select primary | Customer 360 → Property → Make primary | `customer-properties.changePrimaryProperty` | Admin; current impact preview required in both interfaces. Existing residential owner-occupied/unknown occupancy policy is retained. Commercial/rental/tenant properties cannot use this residence promotion. |
 
 All three tools are discovered from other admin pages through the existing
@@ -143,3 +143,30 @@ The earlier unstyled screenshots are superseded by the property browser run.
 rolled-back transaction and applied only to the isolated development database.
 `GATE_IB_PLATFORM` remains off by default. Production migration, gate activation,
 merge and deployment are not authorized by this implementation assignment.
+
+The split foundation integration preserves the new upstream property relationship
+field separately from occupancy, using the existing relationship vocabulary and
+normalizer in both portal and IB writes. Confirmation effects show relationship
+changes and clearing. First-property previews mirror the existing manager
+default without inferring ownership from occupancy. The upstream relationship
+migrations were dry-run and applied only in the dedicated QA database.
+
+Current integration evidence: 137 server unit tests and 57 client tests passed;
+two further approval-effect regressions passed. The ten property Postgres cases
+passed across the full run and focused fixture/assertion reruns. Desktop/mobile
+Chrome exercised the relationship disclosure, persisted relationship, IB creation
+and relabel, portal occupancy/primary changes, touch opening and scoped refresh.
+The current census retains 1,748 sites: four verified property operations, seven
+IB transport exceptions and 1,737 unsupported/unverified sites. No historical
+site was removed from the denominator.
+
+Final foundation integration passes all ten property PostgreSQL scenarios in
+one run (72.60 seconds), 142 server unit/contract tests and 61 client tests.
+The production build and coverage/domain/portal-brand checks pass. Desktop
+1440 and mobile 390 Chrome verify relationship disclosure, creation, primary
+eligibility/selection, relabeling, focus and saved-state refresh. Screenshots
+were inspected with vision. The harness's auxiliary payer/request/unread/thread
+routes remain unavailable; there are no IB or property failures, JavaScript
+exceptions or horizontal overflow. The model is scripted and physical iOS
+keyboard/notch behavior remains unverified. Final GitHub Codex review is
+pending its shared usage-limit reset; this remains a development-only draft.

@@ -140,6 +140,40 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     expect(changed.verification.persisted).toBe(true);
   }, 30000);
 
+  test('portal and IB preserve and clear property relationships independently of occupancy', async () => {
+    const beforeB = await db('customer_properties').where({ customer_id: customerB });
+    const input = { ...address(650, 'Family residence'), relationship: 'family_home', occupancy_type: 'owner_occupied' };
+    const proposed = await propose('add_customer_property', { customer_id: customerA, ...input },
+      'Add the family home property at 650 Example Grove, Sarasota FL 34201 with owner-occupied occupancy');
+    expect(proposed.body.pendingActions[0].contract.effects).toContainEqual(expect.objectContaining({ label: 'relationship: family home' }));
+    const added = await confirm(proposed);
+    expect(added.body.success).toBe(true);
+    const propertyId = added.body.result.propertyId;
+    expect(await db('customer_properties').where('id', propertyId).first('relationship', 'occupancy_type'))
+      .toEqual({ relationship: 'family_home', occupancy_type: 'owner_occupied' });
+    const portal = await api(`/api/admin/customers/${customerA}/properties`, { ...input, ...address(660), relationship: 'family_home' });
+    expect(portal.status).toBe(201);
+    expect((await db('customer_properties').where('id', portal.body.propertyId).first()).relationship).toBe('family_home');
+    const changed = await confirm(await propose('update_customer_property', { customer_id: customerA, property_id: propertyId,
+      relationship: 'rental_owned' }, 'Change the saved 650 Example Grove property relationship to rental owned'));
+    expect(changed.body.success).toBe(true);
+    const cleared = await api(`/api/admin/customers/${customerA}/properties/${propertyId}`, { relationship: null }, 'PATCH');
+    expect(cleared.status).toBe(200);
+    expect(await db('customer_properties').where('id', propertyId).first('relationship', 'occupancy_type'))
+      .toEqual({ relationship: null, occupancy_type: 'owner_occupied' });
+    const blankCustomer = crypto.randomUUID();
+    await db('customers').insert({ id: blankCustomer, first_name: 'Synthetic', last_name: 'Manager', contact_role: 'property_manager',
+      phone: `+15550${Math.floor(Math.random() * 1000000).toString().padStart(6, '0')}` });
+    const service = require('../services/customer-properties');
+    const firstInput = { ...address(670), relationship: null };
+    const preview = await service.previewManualPropertyChange(blankCustomer, 'add', firstInput);
+    expect(preview.changes.relationship).toBe('managed_for_client');
+    const saved = await service.addManualProperty(blankCustomer, firstInput, { actorId: actor, expectedVersion: preview._version });
+    expect(saved.verification.persisted).toBe(true);
+    expect((await db('customer_properties').where('id', saved.propertyId).first()).relationship).toBe('managed_for_client');
+    expect(await db('customer_properties').where({ customer_id: customerB })).toEqual(beforeB);
+  }, 60000);
+
   test('billing contention is a confirmed failure through portal and IB, never an unknown outcome', async () => {
     const service = require('../services/customer-properties');
     const saved = await service.addManualProperty(customerA, address(1500), { actorId: actor });
@@ -356,7 +390,7 @@ suite('property UI and Intelligence Bar against isolated Postgres', () => {
     expect(foreign.body.pendingActions).toHaveLength(0);
     const stale = await propose('update_customer_property', { customer_id: customerA, property_id: ib.body.result.propertyId, label: 'Old instruction' }, 'Relabel the saved 500 Example Grove property Old instruction');
     await db('customer_properties').where('id', ib.body.result.propertyId).update({ label: 'New operator edit', updated_at: db.fn.now() });
-    expect((await confirm(stale)).body.preview_changed).toBe(true);
+    expect(await confirm(stale)).toMatchObject({ status: 409, body: { code: 'target_changed' } });
     expect((await db('customer_properties').where('id', ib.body.result.propertyId).first()).label).toBe('New operator edit');
     const missingPreview = await api(`/api/admin/customers/${customerB}/properties/${ui.body.propertyId}/primary`, {});
     expect(missingPreview.status).toBe(409);

@@ -88,6 +88,21 @@ describe('pending-actions service', () => {
     expect(new Date(stored.expires_at).getTime()).toBeGreaterThan(Date.now());
   });
 
+  test('storage replaces full raw-recipient context with exact-action authorization proof', async () => {
+    const inserted = insertBuilder({ id: 'pa-redacted', tool_name: 'send_sms' });
+    db.mockImplementation(() => inserted);
+    await createPendingAction({ toolName: 'send_sms', requestedBy: 'admin-1', params: {
+      phone: '+15550101234', message: 'Approved synthetic message',
+      _ib_task_context: { targets: [], explicitPhones: ['5550101234'], requestPhrase: 'Private full prompt',
+        candidates: [{ label: 'Private candidate', address: 'Private address' }], page: { records: { private: 'Private page data' } } },
+    } });
+    const stored = inserted.insert.mock.calls[0][0];
+    const params = JSON.parse(stored.params);
+    expect(JSON.stringify(params._ib_task_context)).not.toMatch(/Private|5550101234/);
+    expect(params._ib_task_context.actionBinding).toMatch(/^[a-f0-9]{64}$/);
+    expect(stored.params_hash).toBe(paramsHash('send_sms', params));
+  });
+
   test('claim succeeds when the atomic update wins and the hash matches', async () => {
     const params = { customer_id: 'c1', message: 'hi' };
     claimBuilder({

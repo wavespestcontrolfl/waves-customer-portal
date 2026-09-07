@@ -4,6 +4,8 @@ const { gateEnvValue } = require('../../config/feature-gates');
 const uuid = { type: 'string', format: 'uuid' };
 const label = { type: ['string', 'null'], maxLength: properties.PROPERTY_FIELD_LIMITS.label };
 const occupancy = { type: 'string', enum: properties.OCCUPANCY_TYPES };
+const relationship = { type: ['string', 'null'], enum: [...require('../../constants/property-relationships').PROPERTY_RELATIONSHIPS, null],
+  description: 'How the customer relates to this property; separate from occupancy. Use null when not recorded.' };
 const PROPERTY_TOOLS = [
   {
     name: 'add_customer_property',
@@ -15,14 +17,14 @@ const PROPERTY_TOOLS = [
         address_line2: { type: ['string', 'null'], maxLength: 100 },
         city: { type: 'string', minLength: 1, maxLength: 50 },
         state: { type: 'string', pattern: '^[A-Za-z]{2}$' },
-        zip: { type: 'string', minLength: 1, maxLength: 10 }, label, occupancy_type: occupancy },
+        zip: { type: 'string', minLength: 1, maxLength: 10 }, label, occupancy_type: occupancy, relationship },
       required: ['customer_id', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'label', 'occupancy_type'] },
   },
   {
     name: 'update_customer_property',
-    description: 'Relabel a saved property or update its occupancy. Look up the exact saved property ID and current values first. Only supplied changes are applied; account, invoice and service addresses stay unchanged.',
+    description: 'Relabel a saved property or update its relationship or occupancy. Relationship describes how the customer relates to the property; occupancy describes its use. Look up the exact saved property ID and current values first. Only supplied changes are applied; account, invoice and service addresses stay unchanged.',
     input_schema: { type: 'object', additionalProperties: false,
-      properties: { customer_id: uuid, property_id: uuid, label, occupancy_type: occupancy },
+      properties: { customer_id: uuid, property_id: uuid, label, occupancy_type: occupancy, relationship },
       required: ['customer_id', 'property_id'] },
   },
   {

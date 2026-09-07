@@ -435,7 +435,7 @@ async function runTaxAdvisor() {
       };
     }
 
-    return { note: 'Tax advisor service not available. Run from the AI Advisor tab instead.' };
+    return { blocked: true, note: 'Tax advisor service not available. Run from the AI Advisor tab instead.' };
   } catch (err) {
     return { error: `Advisor failed: ${err.message}` };
   }

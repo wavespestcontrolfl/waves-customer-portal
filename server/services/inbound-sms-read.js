@@ -103,9 +103,10 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
   return { updated, notificationsCleared };
 }
 
-// The Messages badge's number: conversations holding at least one inbound
-// SMS nobody has read — the rule the inbox's "Unread" chip applies per
-// thread, computed once server-side over every conversation. Internal
+// The Messages badge's number: contact-phone threads holding an unread inbound
+// SMS. CommunicationsPageV2.smsThreadKey groups across business numbers using
+// the last 10 digits (or "unknown"); /log prefers contact_phone to customer.phone.
+// Count that same identity across every conversation. Internal
 // admin-phone traffic is excluded exactly as the inbox log excludes it
 // (`excludePhones` = the router's ADMIN_PHONES).
 async function countUnreadInboundSms({ excludePhones = [] } = {}) {
@@ -122,7 +123,9 @@ async function countUnreadInboundSms({ excludePhones = [] } = {}) {
       .where((b) => b.whereNot('customers.phone', phone).orWhereNull('customers.phone'));
   }
   const row = await q.first(
-    db.raw('COUNT(DISTINCT messages.conversation_id)::int AS conversations'),
+    db.raw(`COUNT(DISTINCT COALESCE(NULLIF(RIGHT(
+      regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g'),
+      10), ''), 'unknown'))::int AS conversations`),
     db.raw('COUNT(*)::int AS messages'),
   );
   return { conversations: Number(row?.conversations || 0), messages: Number(row?.messages || 0) };

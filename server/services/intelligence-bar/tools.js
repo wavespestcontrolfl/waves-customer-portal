@@ -1761,7 +1761,7 @@ function cancelPlanServiceInput(input) {
     note: input.note || '',
     // Pinned at proposal time by the pending-action layer; the commit
     // refuses (preview_changed) when the live facts no longer match it.
-    previewFingerprint: input.preview_fingerprint || null,
+    previewFingerprint: input._approved_cancel_plan_fingerprint || null,
   };
 }
 

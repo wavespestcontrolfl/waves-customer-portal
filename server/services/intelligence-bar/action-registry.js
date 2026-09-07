@@ -8,6 +8,8 @@ const addFormats = require('ajv-formats');
 const policy = require('./action-policy.json');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
+const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
+const apiToolDefinition = require('./tool-definition');
 
 const MODULES = [
   ['property-tools', 'PROPERTY_TOOLS', 'executePropertyTool'],
@@ -73,7 +75,7 @@ for (const [moduleName, exportName, executeName] of MODULES) {
     // Existing domain schemas retain their nested semantics and validators.
     const schema = { ...tool.input_schema, additionalProperties: false };
     actions.set(tool.name, {
-      id: tool.name, ...p, schema, definition: tool,
+      id: tool.name, ...p, schema, definition: apiToolDefinition(tool),
       validate: ajv.compile(schema), executor: mod[executeName],
       retry: p.kind === 'read' ? 'read_only' : 'reconcile_before_retry',
       verification: 'domain_result',
@@ -95,9 +97,11 @@ const DISCOVERY_TOOL = {
   },
 };
 const validateDiscovery = ajv.compile(DISCOVERY_TOOL.input_schema);
+const DISCOVERY_STOPWORDS = new Set('a an the i me my we our you your it this that these those do does did can could will would should please like want need to for from of on in with is are be have has and or what how get find show search list'.split(' '));
 
 function allowed(action, { role, context } = {}) {
   if (!action) return false;
+  if (context === 'agent_estimate' && !AGENT_ESTIMATE_TOOL_NAMES.has(action.id)) return false;
   if (role !== 'admin') return role === 'technician' && action.role === 'technician_or_admin';
   if (context === 'tech') return action.role === 'technician_or_admin';
   if (action.id === 'search_ib_history' && !threadsEnabled()) return false;
@@ -110,7 +114,7 @@ function allowed(action, { role, context } = {}) {
 function validateInput(name, input, scope) {
   const action = actions.get(name);
   if (name !== DISCOVERY_TOOL.name && !action) return { error: 'Capability is not implemented or has no reviewed action policy', code: 'capability_unimplemented' };
-  if (name === DISCOVERY_TOOL.name ? scope?.role !== 'admin' : !allowed(action, scope)) {
+  if (name === DISCOVERY_TOOL.name ? (scope?.role !== 'admin' || ['tech', 'agent_estimate'].includes(scope?.context)) : !allowed(action, scope)) {
     return { error: 'Your current role or feature access does not permit this capability', code: 'permission_denied' };
   }
   const validate = name === DISCOVERY_TOOL.name ? validateDiscovery : action.validate;
@@ -124,11 +128,12 @@ function validateInput(name, input, scope) {
 function discover(input, scope) {
   const failure = validateInput(DISCOVERY_TOOL.name, input, scope);
   if (failure) return { result: failure, definitions: [] };
-  const terms = input.query.toLowerCase().match(/[a-z0-9]+/g) || [];
+  const terms = [...new Set(input.query.toLowerCase().match(/[a-z0-9]+/g) || [])]
+    .filter(term => !DISCOVERY_STOPWORDS.has(term));
   const ranked = [...actions.values()].filter(a => allowed(a, scope) && (!input.domain || a.domain === input.domain))
     .map(a => {
-      const text = `${a.id.replace(/_/g, ' ')} ${a.domain} ${a.definition.description}`.toLowerCase();
-      return { action: a, score: terms.reduce((n, word) => n + (text.includes(word) ? 1 : 0), 0) };
+      const words = new Set(`${a.id.replace(/_/g, ' ')} ${a.domain} ${a.definition.description}`.toLowerCase().match(/[a-z0-9]+/g) || []);
+      return { action: a, score: terms.reduce((n, word) => n + (words.has(word) ? 1 : 0), 0) };
     }).filter(r => r.score > 0).sort((a, b) => b.score - a.score || a.action.id.localeCompare(b.action.id));
   const selected = ranked.slice(0, 12).map(r => r.action);
   return {
@@ -145,20 +150,35 @@ function discover(input, scope) {
 }
 
 function initialTools(context, scope) {
-  const domain = { estimates: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
+  const domain = { estimates: 'estimate', agent_estimate: 'estimate', inventory: 'procurement', dispatch: 'schedule', reviews: 'review', blog: 'seo' }[context] || context;
   const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_products', 'query_leads']);
-  return [DISCOVERY_TOOL, ...[...actions.values()]
-    .filter(a => allowed(a, scope) && a.approval !== 'confirmed_endpoint' && (common.has(a.id) || a.domain === domain))
+  const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context) ? [DISCOVERY_TOOL] : [];
+  return [...discovery, ...[...actions.values()]
+    .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint' && (context === 'agent_estimate' || common.has(a.id) || a.domain === domain))
     .map(a => a.definition)];
 }
 
 function execute(name, input, { role, context, techContext, actionContext = {} } = {}) {
   const action = actions.get(name);
   if (!allowed(action, { role, context })) return Promise.resolve({ error: 'Capability is unavailable to this actor', code: 'permission_denied' });
+  if (role === 'technician' && (typeof techContext?.techId !== 'string' || !techContext.techId.trim())) {
+    return Promise.resolve({ error: 'A verified technician identity is required', code: 'permission_denied' });
+  }
+  if (action.approval === 'confirmed_endpoint') {
+    return Promise.resolve({ error: 'Use the existing owner approval workflow for this action', code: 'requires_existing_owner_workflow' });
+  }
   if (action.kind !== 'read' && actionContext.confirmed !== true && !WRITE_TWO_STEP_TOOL_NAMES.has(name)) {
     return Promise.resolve({ error: 'Explicit approval is required', code: 'approval_required' });
   }
-  return action.executor(name, input, action.module === 'tech-tools.js' ? (techContext || {}) : actionContext);
+  const invalid = validateInput(name, input, { role, context });
+  if (invalid) return Promise.resolve(invalid);
+  // Server pins travel separately from schema-validated model arguments.
+  // No input.confirmed/confirm or model-supplied hidden field can approve a
+  // two-step executor. Confirm is derived solely from authenticated routing.
+  const pins = Object.fromEntries(Object.entries(actionContext.executionPins || {}).filter(([key]) => key.startsWith('_')));
+  const executionInput = { ...input, ...pins,
+    ...(WRITE_TWO_STEP_TOOL_NAMES.has(name) ? { confirmed: actionContext.confirmed === true } : {}) };
+  return action.executor(name, executionInput, action.module === 'tech-tools.js' ? (techContext || {}) : actionContext);
 }
 
 module.exports = { actions, policyErrors, DISCOVERY_TOOL, initialTools, discover, validateInput, allowed, execute };
