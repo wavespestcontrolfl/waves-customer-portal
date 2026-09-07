@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 // ui/Tabs: keyboard model + aria wiring. Guards the two regressions Codex
 // caught on #4109: a dangling aria-controls when Tabs is a bare filter strip,
 // and an unstable registerPanel that looped the TabPanel mount effect.
@@ -32,7 +33,15 @@ describe('ui/Tabs', () => {
     expect(alpha).toHaveAttribute('aria-controls', panel.id);
     expect(panel).toHaveAttribute('aria-labelledby', alpha.id);
     expect(alpha).toHaveAttribute('tabindex', '0');
-    expect(screen.getByRole('tab', { name: 'Beta' })).toHaveAttribute('tabindex', '-1');
+    const beta = screen.getByRole('tab', { name: 'Beta' });
+    expect(beta).toHaveAttribute('tabindex', '-1');
+    // The inactive panel is not in the DOM, so its tab claims no aria-controls.
+    expect(beta).not.toHaveAttribute('aria-controls');
+    fireEvent.click(beta);
+    const panelB = screen.getByRole('tabpanel');
+    expect(beta).toHaveAttribute('aria-controls', panelB.id);
+    expect(alpha).not.toHaveAttribute('aria-controls');
+    expect(document.getElementById(beta.getAttribute('aria-controls'))).toBe(panelB);
   });
 
   it('claims no aria-controls when used as a bare filter strip', () => {

@@ -5,9 +5,9 @@ const TabsCtx = createContext(null);
 
 export function Tabs({ value, onValueChange, children, className }) {
   const base = useId();
-  // Panels register themselves (mounted or not) so a Tab only claims
-  // aria-controls when a matching TabPanel exists — some call sites use
-  // Tabs as a bare filter strip with no panels.
+  // Rendered panels register themselves so a Tab only claims aria-controls
+  // for a panel that is in the DOM — inactive panels render null, and some
+  // call sites use Tabs as a bare filter strip with no panels at all.
   // The set lives in a ref and registerPanel is stable, so a panel's mount
   // effect runs once; a version bump re-renders consumers only when the
   // set actually changes (an unstable callback here looped the effect).
@@ -106,8 +106,11 @@ export function Tab({ value, children, className, disabled, ...rest }) {
 export function TabPanel({ value, children, className, ...rest }) {
   const ctx = useContext(TabsCtx);
   const register = ctx?.registerPanel;
-  useEffect(() => (register ? register(value) : undefined), [register, value]);
-  if (!ctx || ctx.value !== value) return null;
+  const active = !!(ctx && ctx.value === value);
+  // Register only while rendered: an inactive panel returns null, so its tab
+  // must not claim aria-controls for an element that is not in the DOM.
+  useEffect(() => (register && active ? register(value) : undefined), [register, value, active]);
+  if (!active) return null;
   const base = ctx.base;
   return (
     <div
