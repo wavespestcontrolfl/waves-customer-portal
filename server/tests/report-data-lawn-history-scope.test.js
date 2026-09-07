@@ -8,6 +8,7 @@ jest.mock('../services/service-report/application-conditions', () => ({
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const { buildLawnAssessmentReportData, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
 const history = require('../services/lawn-assessment-history');
+const { etCalendarDayOf } = require('../utils/datetime-et');
 const { getLatestTurfHeight, getTurfHeightTrend } = require('../services/turf-height-service');
 
 describeDb('report property history projections', () => {
@@ -26,7 +27,10 @@ describeDb('report property history projections', () => {
     const currentRecord = await f.record(currentVisit);
     const current = await f.assessment(currentVisit, { service_record_id: currentRecord.id });
     const service = { ...currentRecord, service_line: 'lawn' };
+    const weatherFetch = require('../services/service-report/application-conditions').fetchServiceWeekWeather;
+    weatherFetch.mockClear();
     const enabled = await buildLawnAssessmentReportData(service, 'lawn', knex, { propertyHistoryEnabled: true });
+    expect(weatherFetch).toHaveBeenCalledWith(expect.objectContaining({ serviceDate: current.service_date }));
     const disabled = await buildLawnAssessmentReportData(service, 'lawn', knex, { propertyHistoryEnabled: false });
     expect(Object.keys(enabled).sort()).toEqual(Object.keys(disabled).sort());
     expect(Object.keys(enabled.scores).sort()).toEqual(Object.keys(disabled.scores).sort());
@@ -34,6 +38,9 @@ describeDb('report property history projections', () => {
     expect(disabled.trend).toHaveLength(3);
     expect(enabled.initialScores.assessmentId).toBe(old.id);
     expect(enabled.assessmentId).toBe(current.id);
+    expect(enabled.assessmentDate).toBe(etCalendarDayOf(currentVisit.scheduled_date));
+    expect(enabled.assessmentDate).toBe(enabled.trend[enabled.trend.length - 1].date);
+    expect(disabled.assessmentDate).toEqual(current.service_date);
     expect(enabled.trend[0].date).not.toEqual(old.service_date);
   });
 

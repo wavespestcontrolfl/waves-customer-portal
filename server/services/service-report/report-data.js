@@ -2890,7 +2890,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     assessmentId: assessment.id,
     serviceRecordId: assessment.service_record_id || null,
     serviceId: assessment.service_id || null,
-    assessmentDate: assessment.service_date,
+    assessmentDate: propertyHistoryEnabled ? assessment.visit_date : assessment.service_date,
     scores: currentScore,
     initialScores: initialScore,
     trend,
