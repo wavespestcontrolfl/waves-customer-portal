@@ -93,6 +93,8 @@ import CancelPlanDialog from "./CancelPlanDialog";
 import { CONTACT_ROLE_OPTIONS, contactRoleLabel, contactRoleTitle } from "../../lib/contact-roles";
 import { ZoneMarkingStep, StationMarkingStep } from "../../pages/admin/SchedulePage";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
+import useModalFocus from "../../hooks/useModalFocus";
+import { formatETDateOnly } from "../../lib/timezone";
 import { describeAutopaySetupLinkResult } from "../schedule/cardLinkStatus";
 import {
   CONSENT_TEXT,
@@ -161,6 +163,17 @@ function fmtDate(d) {
     day: "numeric",
     year: "numeric",
   });
+}
+
+// Postgres DATE columns (service_date, scheduled_date, payment_date) arrive
+// as UTC midnight ISO strings; fmtDate would render them in browser-local
+// time, a day early for every ET viewer. Anchor the calendar day instead.
+function fmtDateOnly(d) {
+  if (!d) return "—";
+  return (
+    formatETDateOnly(d, { month: "short", day: "numeric", year: "numeric" }) ||
+    "—"
+  );
 }
 
 function fmtCurrency(v) {
@@ -2182,7 +2195,7 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
               {fmtCurrency(s.total_cost)}
             </span>
           )}
-          <span className="text-ink-secondary">{fmtDate(s.service_date)}</span>{" "}
+          <span className="text-ink-secondary">{fmtDateOnly(s.service_date)}</span>{" "}
           <span
             className="text-ink-secondary text-12 transition-transform"
             style={{ transform: expanded ? "rotate(0deg)" : "rotate(-90deg)" }}
@@ -4064,12 +4077,23 @@ export function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], ann
     ? Math.round(Number(amount) * 1.07 * 100) / 100
     : Number(amount);
 
+  // Owns Escape and the focus trap while open (the profile's window-level
+  // Escape defers to any open sub-modal); backdrop clicks stop here so they
+  // never bubble through the React tree to the profile overlay's onClose.
+  const dialogRef = useModalFocus(true, () => !saving && onClose?.());
   return createPortal(
     <div
-      className="fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
-      onClick={() => !saving && onClose?.()}
+      className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!saving) onClose?.();
+      }}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Record collected annual prepay"
         className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[540px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
@@ -4489,12 +4513,23 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
     }
   };
 
+  // Owns Escape and the focus trap while open (the profile's window-level
+  // Escape defers to any open sub-modal); backdrop clicks stop here so they
+  // never bubble through the React tree to the profile overlay's onClose.
+  const dialogRef = useModalFocus(true, () => !saving && onClose?.());
   return createPortal(
     <div
-      className="fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
-      onClick={() => !saving && onClose?.()}
+      className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!saving) onClose?.();
+      }}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Send annual prepay invoice"
         className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[540px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
@@ -4739,12 +4774,23 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
     setRunning(false);
   };
 
+  // Owns Escape and the focus trap while open (the profile's window-level
+  // Escape defers to any open sub-modal); backdrop clicks stop here so they
+  // never bubble through the React tree to the profile overlay's onClose.
+  const dialogRef = useModalFocus(true, () => !running && onClose?.());
   return createPortal(
     <div
-      className="fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
-      onClick={() => !running && onClose()}
+      className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!running) onClose();
+      }}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Cancel signup and refund deposit"
         className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[560px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
@@ -5002,12 +5048,23 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
     setRunning(false);
   };
 
+  // Owns Escape and the focus trap while open (the profile's window-level
+  // Escape defers to any open sub-modal); backdrop clicks stop here so they
+  // never bubble through the React tree to the profile overlay's onClose.
+  const dialogRef = useModalFocus(true, () => !running && onClose?.());
   return createPortal(
     <div
-      className="fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
-      onClick={() => !running && onClose()}
+      className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!running) onClose();
+      }}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Refund payment"
         className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[440px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
@@ -5050,7 +5107,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
                   {payment.card_brand
                     ? ` · ${payment.card_brand} …${payment.last_four}`
                     : ""}{" "}
-                  · {fmtDate(payment.payment_date)}
+                  · {fmtDateOnly(payment.payment_date)}
                 </span>
               </div>
               {refundedCents > 0 && (
@@ -5185,6 +5242,10 @@ export default function Customer360ProfileV2({
   const [newPayerNotice, setNewPayerNotice] = useState("");
   const panelRef = useRef(null);
   const menuRef = useRef(null);
+  // The More (⋯) button outlives its menu items; modals launched from the
+  // menu focus it first so useModalFocus can return focus somewhere that
+  // still exists when the modal closes (the menu item unmounts on click).
+  const menuButtonRef = useRef(null);
   const commsSeqRef = useRef(0);
   const commsAbortRef = useRef(null);
   const profileSeqRef = useRef(0);
@@ -5477,13 +5538,34 @@ export default function Customer360ProfileV2({
     [],
   );
 
+  // Every sub-modal owns Escape while it is open (ui/Dialog and the
+  // hand-rolled modals each close themselves through useModalFocus); the
+  // profile only closes when nothing sits above it — otherwise one keypress
+  // discarded an in-progress edit, refund or prepay form AND the profile.
+  const subModalOpen =
+    editOpen ||
+    annualPrepayOpen ||
+    annualPrepayInvoiceOpen ||
+    cancelSignupOpen ||
+    cancelPlanOpen ||
+    !!refundPayment;
+  const editDialogRef = useModalFocus(editOpen, () => !savingEdit && setEditOpen(false));
+  // The thread renders oldest → newest inside a 400px box; land on the
+  // latest message instead of the first one the customer ever sent.
+  const commsScrollRef = useRef(null);
+  useEffect(() => {
+    if (activeTab !== "comms") return;
+    const el = commsScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [activeTab, comms.length]);
   useEffect(() => {
     const handler = (e) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape" || subModalOpen) return;
+      onClose();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [onClose]);
+  }, [onClose, subModalOpen]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -6492,7 +6574,7 @@ export default function Customer360ProfileV2({
                           {s.service_type}
                         </div>{" "}
                         <div className="text-12 text-ink-secondary">
-                          {fmtDate(s.scheduled_date)} · {s.status}
+                          {fmtDateOnly(s.scheduled_date)} · {s.status}
                         </div>{" "}
                       </div>
                     ))
@@ -6519,7 +6601,7 @@ export default function Customer360ProfileV2({
                           )}
                         </span>{" "}
                         <span className="text-ink-secondary">
-                          {fmtDate(s.service_date)}
+                          {fmtDateOnly(s.service_date)}
                         </span>{" "}
                       </div>
                     );
@@ -6651,7 +6733,7 @@ export default function Customer360ProfileV2({
                                 : p.method || p.processor || ""}
                             </span>{" "}
                             <span className="text-ink-secondary flex-shrink-0">
-                              {fmtDate(p.payment_date)}
+                              {fmtDateOnly(p.payment_date)}
                             </span>{" "}
                           </div>
                         );
@@ -6878,7 +6960,7 @@ export default function Customer360ProfileV2({
                         {s.service_type}
                       </span>{" "}
                       <span className="text-ink-secondary">
-                        {fmtDate(s.scheduled_date)}
+                        {fmtDateOnly(s.scheduled_date)}
                       </span>{" "}
                       <span
                         className={cn(
@@ -7043,7 +7125,7 @@ export default function Customer360ProfileV2({
                       {p.card_brand} …{p.last_four}
                     </span>{" "}
                     <span className="text-ink-secondary">
-                      {fmtDate(p.payment_date)}
+                      {fmtDateOnly(p.payment_date)}
                     </span>{" "}
                     <Badge
                       tone={
@@ -7150,7 +7232,10 @@ export default function Customer360ProfileV2({
               {" "}
               <OwedCommitmentsSummary customerId={customerId} />
               <SectionTitle>Thread ({comms.length})</SectionTitle>{" "}
-              <div className="flex-1 overflow-y-auto flex flex-col gap-1.5 mb-3 max-h-[400px]">
+              <div
+                ref={commsScrollRef}
+                className="flex-1 overflow-y-auto flex flex-col gap-1.5 mb-3 max-h-[400px]"
+              >
                 {commsLoading && (
                   <div className="text-ink-secondary text-13 text-center py-5">
                     Loading messages…
@@ -8110,6 +8195,7 @@ export default function Customer360ProfileV2({
           <div ref={menuRef} className="relative">
             {" "}
             <button
+              ref={menuButtonRef}
               onClick={() => setMenuOpen((v) => !v)}
               aria-label="More"
               aria-expanded={menuOpen}
@@ -8127,6 +8213,7 @@ export default function Customer360ProfileV2({
                   <button
                     role="menuitem"
                     onClick={() => {
+                      menuButtonRef.current?.focus();
                       openEditModal();
                       setMenuOpen(false);
                     }}
@@ -8139,6 +8226,7 @@ export default function Customer360ProfileV2({
                   <button
                     role="menuitem"
                     onClick={() => {
+                      menuButtonRef.current?.focus();
                       setAnnualPrepayInvoiceOpen(true);
                       setMenuOpen(false);
                     }}
@@ -8151,6 +8239,7 @@ export default function Customer360ProfileV2({
                   <button
                     role="menuitem"
                     onClick={() => {
+                      menuButtonRef.current?.focus();
                       setAnnualPrepayOpen(true);
                       setMenuOpen(false);
                     }}
@@ -8239,10 +8328,17 @@ export default function Customer360ProfileV2({
       {editOpen && (
         <div
           className="fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
-          onClick={() => !savingEdit && setEditOpen(false)}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (!savingEdit) setEditOpen(false);
+          }}
         >
           {" "}
           <div
+            ref={editDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Edit customer"
             className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[560px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
             onClick={(e) => e.stopPropagation()}
           >
