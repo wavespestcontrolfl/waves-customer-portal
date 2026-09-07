@@ -601,6 +601,7 @@ describe('/confirm-action commit path', () => {
       });
       expect(res.status).toBe(403);
       expect(mockExecuteTool).not.toHaveBeenCalled();
+      expect(mockRecordResult).toHaveBeenCalledWith(PENDING_ID, expect.objectContaining({ blocked: true, code: 'permission_denied' }));
     });
   });
 

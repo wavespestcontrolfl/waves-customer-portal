@@ -216,7 +216,7 @@ async function getInboxSummary({ days = 1 }) {
   }
 }
 
-async function searchEmails({ search, from, category, days_back = 30, has_attachment, is_unread, limit = 20 }) {
+async function searchEmails({ search, from, category, days_back = 30, has_attachment, is_unread, limit = 20 }, customerIds = []) {
   try {
     const since = new Date();
     since.setDate(since.getDate() - days_back);
@@ -225,6 +225,21 @@ async function searchEmails({ search, from, category, days_back = 30, has_attach
       .where('received_at', '>=', since)
       .orderBy('received_at', 'desc')
       .limit(Math.min(limit, 50));
+
+    if (customerIds.length) {
+      // A name in a sender/subject is only a search filter. Linked task rows
+      // and unlinked replies in exclusively owned threads establish scope.
+      const ownedThreads = db('emails').whereIn('customer_id', customerIds).whereNotNull('gmail_thread_id').select('gmail_thread_id');
+      const foreignThreads = db('emails').whereNotNull('customer_id').whereNotIn('customer_id', customerIds)
+        .whereNotNull('gmail_thread_id').select('gmail_thread_id');
+      query = query.where(function () {
+        this.whereIn('customer_id', customerIds).orWhere(function () {
+          this.whereNull('customer_id').whereIn('gmail_thread_id', ownedThreads);
+        });
+      }).where(function () {
+        this.whereNull('gmail_thread_id').orWhereNotIn('gmail_thread_id', foreignThreads);
+      });
+    }
 
     if (search) {
       query = query.where(function () {
@@ -447,7 +462,10 @@ async function sendEmailReply({ email_id, body, _pinned_email }) {
       subject: email.subject,
     };
   } catch (err) {
-    logger.error('[intelligence-bar:email] send_email_reply failed:', err);
+    if (err.providerOutcome?.outcomeUnknown) {
+      return { outcome_unknown: true, warning: 'Gmail did not confirm the send outcome. Check the sent thread before creating another send.' };
+    }
+    logger.error(`[intelligence-bar:email] send_email_reply failed for email ${email_id}: ${err.code || 'send_error'}`);
     return { error: err.message };
   }
 }
@@ -764,7 +782,7 @@ async function executeEmailTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'get_inbox_summary': return await getInboxSummary(input);
-      case 'search_emails': return await searchEmails(input);
+      case 'search_emails': return await searchEmails(input, actionContext.readCustomerIds);
       case 'get_email_thread': return await getEmailThread(input, actionContext.readCustomerIds);
       case 'draft_email_reply': return await draftEmailReply(input.email_id, input.thread_id, input.from_name, input.instructions, actionContext.readCustomerIds);
       case 'send_email_reply': return await sendEmailReply(input);
