@@ -1337,6 +1337,7 @@ function ExportsTab() {
           >
             Preview (first 5 payouts in range)
           </div>{" "}
+          <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr>
@@ -1377,6 +1378,7 @@ function ExportsTab() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>

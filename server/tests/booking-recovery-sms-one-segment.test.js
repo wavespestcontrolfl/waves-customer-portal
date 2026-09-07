@@ -18,7 +18,7 @@ jest.mock('../services/experimentation/growthbook', () => ({ assignBookingRecove
 jest.mock('../services/feature-flags', () => ({ isEnabled: jest.fn(() => false) }));
 
 const { countSegments } = require('../services/messaging/segment-counter');
-const { stripPortalUrlScheme } = require('../routes/admin-sms-templates');
+const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 const smsTemplates = require('../routes/admin-sms-templates');
 const { _internals } = require('../services/booking-abandon-recovery');
 
@@ -32,7 +32,7 @@ beforeEach(() => {
   smsTemplates.getTemplate = jest.fn(async (key, vars) => {
     let body = STOCK_BODY;
     for (const [k, v] of Object.entries(vars)) body = body.replace(new RegExp(`\\{${k}\\}`, 'g'), () => v);
-    return stripPortalUrlScheme(body).replace(/\n{3,}/g, '\n\n').trim();
+    return stripSmsUrlScheme(body).replace(/\n{3,}/g, '\n\n').trim();
   });
 });
 
@@ -98,7 +98,7 @@ describe('booking recovery SMS — one segment', () => {
     smsTemplates.getTemplate = jest.fn(async (key, vars) => {
       let body = curly;
       for (const [k, v] of Object.entries(vars)) body = body.replace(new RegExp(`\\{${k}\\}`, 'g'), () => v);
-      return stripPortalUrlScheme(body).trim();
+      return stripSmsUrlScheme(body).trim();
     });
     const body = await _internals.renderOneSegmentSms(intent({ first_name: 'Mary-Catherine', service_id: 'termite' }));
     expect(body).toMatch(/^Hello there!/);

@@ -1,5 +1,6 @@
 const MODELS = require('../config/models');
 const logger = require('./logger');
+const { savepointRead } = require('../utils/savepoint-read');
 const { dispatchWithFallback } = require('./llm/call');
 
 // Outcomes that always skip the AI path. These are customer-sensitive
@@ -397,9 +398,9 @@ async function buildReportTradeNameScreen({ products = [], extraNames = [], db =
     try {
       const ids = list.map((p) => p?.productId).filter(Boolean);
       rows = ids.length
-        ? await db('products_catalog')
+        ? await savepointRead(db, (k) => k('products_catalog')
           .whereIn('id', ids)
-          .select('id', 'name', 'active_ingredient', 'formulation')
+          .select('id', 'name', 'active_ingredient', 'formulation'))
         : [];
     } catch (err) {
       // A failed lookup loses two different things: exemption tokens
