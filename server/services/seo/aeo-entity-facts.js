@@ -80,7 +80,7 @@ function leadClause(text) {
 // the match IS the label ("Fumigation: not offered by Waves").
 function trailClause(text, matchIsLabel) {
   const clause = text.split(CLAUSE_BOUNDARY_RE)[0];
-  return matchIsLabel ? clause.replace(/^\s*:/, ' ') : clause.split(':')[0];
+  return matchIsLabel ? clause.replace(/^\s*[:\-\u2013\u2014(]/, ' ') : clause.split(':')[0];
 }
 
 // A negation AFTER the match denies it only as its own predicate ("fumigation
@@ -124,11 +124,20 @@ function stripEmphasis(line) {
     .replace(/(^|[\s(])_+|_+(?=[\s).,;:!?]|$)/g, '$1');
 }
 
+// The brand name is a name, not a statement of services: "Waves Pest Control
+// & Lawn Care treats termites" says nothing about pest control or lawn care.
+// The "and" form is a name only when both words are capitalized ("Waves Pest
+// Control and lawn care services" is a list).
+const BRAND_NAME_AND_RE = /\bWaves\s+Pest\s+Control\s+and\s+Lawn\s+Care\b/g;
+const BRAND_NAME_RE = /\bWaves\s+Pest\s+Control(?:\s*[&+]\s*Lawn\s+Care)?\b/gi;
+
 function normalizeAnswer(text) {
   const urls = [];
   const flat = String(text || '')
     .replace(/[\u2018\u2019\u02BC\u2032]/g, "'")
     .replace(/[\u201C\u201D]/g, '"')
+    .replace(BRAND_NAME_AND_RE, 'Waves')
+    .replace(BRAND_NAME_RE, 'Waves')
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, label, href) => { urls.push(href); return label; })
     .replace(URL_RE, url => { urls.push(url); return ' '; });
   const lines = [];

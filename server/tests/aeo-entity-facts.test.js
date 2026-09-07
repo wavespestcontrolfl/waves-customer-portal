@@ -234,6 +234,36 @@ test('a claim about a competitor is not a wrong claim about Waves', () => {
   expect(score('E4', 'Waves was founded in 2024, unlike Orkin, which was founded in 1901.')).toMatchObject({ expected: { founded_2024: true }, forbidden: { wrong_founding_year: false } });
 });
 
+test('the brand name is a name, not evidence of a service', () => {
+  expect(score('E6', 'Waves Pest Control provides termite, mosquito and rodent control.')).toMatchObject({ expected: { pest_control: false, lawn_care: false, termite: true, mosquito: true, rodent: true } });
+  expect(score('E6', 'Waves Pest Control & Lawn Care treats termites.').expected).toMatchObject({ pest_control: false, lawn_care: false });
+  expect(score('E6', 'Waves Pest Control and Lawn Care treats termites.').expected).toMatchObject({ pest_control: false, lawn_care: false });
+  expect(score('E6', 'Waves Pest Control offers residential pest control and lawn care.').expected).toMatchObject({ pest_control: true, lawn_care: true });
+  expect(score('E6', "Waves Pest Control's services: pest control and lawn care.").expected).toMatchObject({ pest_control: true, lawn_care: true });
+  expect(score('E6', 'Waves Pest Control and lawn care services are offered.').expected).toMatchObject({ pest_control: false, lawn_care: true });
+  expect(score('E9', 'Yes, Waves Pest Control & Lawn Care is the longer name of the same company.').expected.alias_same).toBe(true);
+  expect(score('E1', 'Orkin owns Waves Pest Control & Lawn Care.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'Waves Pest Control was founded by Adam Benetti.').expected.founder).toBe(true);
+});
+
+test('a fumigation mention is a wrong claim only in an offer context', () => {
+  expect(score('E6', 'Unlike tent fumigation, Waves uses targeted liquid termite treatments.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Fumigation is a whole-structure treatment; Waves focuses on liquid and bait termite treatments.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves compared fumigation with liquid treatments on its blog.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves offers fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves also does tent fumigation for drywood termites.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves handles pest control, lawn care, and fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Fumigation services are available through Waves.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Fumigation services are not available through Waves.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Fumigation (tenting)').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Fumigation (not offered)').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Fumigation \u2013 not offered').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Fumigation: offered').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Services: pest control, termite treatment, mosquito control, rodent control, lawn care, tree and shrub care, and tent fumigation for drywood termite colonies.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves does not do wildlife trapping, and it does provide fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves offers pest control; it does not offer fumigation.').forbidden.fumigation_offered).toBe(false);
+});
+
 test('the founding-year fact needs founding context, but a bare year answer still counts', () => {
   expect(score('E4', 'Waves was founded in 2014, and its license was renewed in 2024.')).toMatchObject({ expected: { founded_2024: false }, forbidden: { wrong_founding_year: true } });
   expect(score('E4', '2024.').expected.founded_2024).toBe(true);
