@@ -156,7 +156,9 @@ function asserted(compiled, answer) {
     while (end < answer.length && /[\w-]/.test(answer[end])) end++;
     // Clause boundaries are found on the full text, never a fixed window: a
     // governed list can run well past 80 characters before its last item.
-    const before = leadClause(answer.slice(0, start));
+    // A standalone "Yes," / "No," opener answers the question; it does not
+    // negate the assertion that follows ("No, they are not the same company").
+    const before = leadClause(answer.slice(0, start)).replace(/^\s*(?:yes|no)\s*[,.!:;-]\s*/i, '');
     const after = trailClause(answer.slice(end), before.trim() === '');
     // Facts and claims alike must be about Waves: "Orkin serves Manatee"
     // earns no footprint credit and "Orkin is a franchise" is no wrong claim.

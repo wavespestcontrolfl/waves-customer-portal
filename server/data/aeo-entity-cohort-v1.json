@@ -65,7 +65,7 @@
     },
     "bond_renewable": {
       "label": "Bond renews annually",
-      "pattern": "(?:annual|annually|yearly|renew\\w*|each year|per year|every year)[^.]{0,60}(?:bond|warranty)|(?:bond|warranty)[^.]{0,60}(?:annual|annually|yearly|renew\\w*|each year|per year|every year)"
+      "pattern": "(?:annual(?:ly)?|yearly|each year|every year|per year|year[- ]to[- ]year|12[- ]month|one[- ]year|1[- ]year)[^.]{0,60}(?:bond|warranty)|(?:bond|warranty)[^.]{0,60}(?:annual(?:ly)?|yearly|each year|every year|per year|year[- ]to[- ]year|12[- ]month|one[- ]year|1[- ]year)"
     },
     "independent": {
       "label": "Independently or family owned",
@@ -89,7 +89,7 @@
   "claims": {
     "wrong_founding_year": {
       "label": "Founding year other than 2024",
-      "pattern": "(?:founded|established|started|opened|operating|in business|serving|founding year|founded in|year founded)\\s*(?:in|since|:)?\\s*((?:19|20)\\d\\d)",
+      "pattern": "(?:founded|established|started|opened|operating|in business|serving|founding year|founded in|year founded)\\s*(?:in|since|on|:)?\\s*(?:\\w+\\s+\\d{1,2},?\\s+)?((?:19|20)\\d\\d)",
       "reject_value": "2024"
     },
     "wrong_founder": {

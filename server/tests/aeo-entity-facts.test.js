@@ -42,6 +42,8 @@ test('founding year: 2024 is right; any other asserted year, earlier or later, i
   expect(score('E4', 'Waves Pest Control was founded in 2024 by Adam Benetti.')).toMatchObject({ expected: { founded_2024: true }, forbidden: { wrong_founding_year: false }, right: 1, missing: 0, wrong: 0 });
   expect(score('E4', 'The company has been serving since 2014.')).toMatchObject({ expected: { founded_2024: false }, forbidden: { wrong_founding_year: true }, right: 0, missing: 1, wrong: 1 });
   expect(score('E4', 'Waves was founded in 2025.').forbidden.wrong_founding_year).toBe(true);
+  expect(score('E4', 'Waves Pest Control was founded on February 6, 2014.').forbidden.wrong_founding_year).toBe(true);
+  expect(score('E4', 'Waves Pest Control was founded on February 6, 2024.')).toMatchObject({ expected: { founded_2024: true }, forbidden: { wrong_founding_year: false } });
   expect(score('E4', 'It was not founded in 2019; it was founded in 2024.').forbidden.wrong_founding_year).toBe(false);
 });
 
@@ -162,6 +164,8 @@ test('termite bond: optional AND annual renewal are separate facts; repair cover
   const good = score('E7', 'Waves offers termite treatment; the warranty is an optional bond that renews annually.');
   expect(good).toMatchObject({ expected: { termite: true, bond_optional: true, bond_renewable: true }, missing: 0, wrong: 0 });
   expect(score('E7', 'The termite bond is annual.')).toMatchObject({ expected: { bond_optional: false, bond_renewable: true }, missing: 1 });
+  expect(score('E7', 'The termite bond is renewable every five years.').expected.bond_renewable).toBe(false);
+  expect(score('E7', 'The bond renews annually.').expected.bond_renewable).toBe(true);
   const bad = score('E7', 'The termite bond covers termite damage repairs and comes with a free bond in the first year with a lifetime guarantee.');
   expect(bad.forbidden).toMatchObject({ damage_repair_coverage: true, free_retreat_guarantee: true, bond_included_first_year: true });
   expect(bad.wrong).toBe(3);
@@ -173,6 +177,8 @@ test('footprint and contact facts read place names and the main line in any comm
   expect(score('E10', 'Call 941.297.5749 or visit https://www.wavespestcontrol.com/.')).toMatchObject({ right: 2 });
   expect(score('E9', 'Yes, Waves Pest Control & Lawn Care is the longer name of the same company.')).toMatchObject({ expected: { alias_same: true }, forbidden: { alias_different: false } });
   expect(score('E9', 'They appear to be two different companies.').forbidden.alias_different).toBe(true);
+  expect(score('E9', 'No, they are not the same company.').forbidden.alias_different).toBe(true);
+  expect(score('E9', 'Yes, they are the same company.')).toMatchObject({ expected: { alias_same: true }, forbidden: { alias_different: false } });
 });
 
 test('search-query tests score only the global forbidden claims', () => {
