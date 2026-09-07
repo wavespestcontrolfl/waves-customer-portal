@@ -87,7 +87,14 @@ an implicit exception. Wrapper/dynamic endpoints and local exports remain in
 scope. Server-generated action variants need separate semantic review even when
 one UI request site dispatches them.
 
-Current foundation census: 1,692 UI sites; ten transport exceptions; 1,682 domain
+The subsequent `625dc2c38` main integration records PR #4015's property lookup
+and two address-aware slot-search changes with upstream provenance and prior
+fingerprints. These three scheduling sites remain **unmapped**. Phase 3 must
+verify selected-property ownership and completeness, address-specific availability,
+and quote/property compatibility through the shared scheduling path; no scheduling
+parity is claimed by importing already-merged portal code into this foundation.
+
+Current foundation census: 1,693 UI sites; ten transport exceptions; 1,683 domain
 sites still unsupported/unverified in the matrix. Registration of existing tools
 has deliberately not been relabeled as verified application parity.
 

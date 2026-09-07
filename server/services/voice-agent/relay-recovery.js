@@ -11,7 +11,7 @@
  * at call time so unsetting it is the live kill switch.
  */
 const logger = require('../logger');
-const { compareSegments, segmentsText, callerTurnsFromText, nonEmptyFields, latestPromises } = require('./relay-segments');
+const { hasCompleteSegments, compareSegments, segmentsText, callerTurnsFromText, nonEmptyFields, latestPromises } = require('./relay-segments');
 
 const RECONNECT_LIMIT = 1;
 const RESUME_STATE_TIMEOUT_MS = 2000;
@@ -131,12 +131,16 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
       const promises = latestPromises(meta.relay_segments);
       const callerTurns = callerTurnsFromText(full);
       const legs = Array.isArray(meta.relay_segments) ? meta.relay_segments.filter((seg) => seg && typeof seg === 'object') : [];
-      const latest = [...legs].sort(compareSegments).at(-1) || null;
+      const latest = [...legs].sort(compareSegments).at(-1);
+      const predecessorsComplete = hasCompleteSegments(meta, sessionKey);
+      const failureState = predecessorsComplete ? latest : null;
       return {
         reconnects,
+        predecessorsComplete,
         reconnectMs: Number(meta.relay_reconnect_ms) || null,
-        modelFailures: latest ? Number(latest.model_failures) || 0 : 0,
-        toolFailures: latest ? Number(latest.tool_failures) || 0 : 0,
+        // An older close can contain failures a still-draining successor
+        // cleared. Do not trigger handoff from a partial predecessor set.
+        ...Object.fromEntries(['model', 'tool'].map((kind) => [`${kind}Failures`, Number(failureState?.[`${kind}_failures`]) || 0])),
         reserviceFiled: meta.relay_reservice_filed === true || legs.some((seg) => seg.reservice_filed === true),
         noLeadCreated: legs.some((seg) => seg.no_lead_created === true),
         // A lead captured on an earlier leg even when its relay_lead_id
@@ -156,7 +160,7 @@ async function loadResumeState(db, callSid, { sessionKey = null, timeoutMs = RES
         startedAtMs: legs.map((seg) => Date.parse(seg.started_at || '')).filter((ms) => Number.isFinite(ms) && ms > 0).reduce((min, ms) => (min === null || ms < min ? ms : min), null),
         // The LATEST leg's hold (a later complete capture clears it) and the
         // estimate fields accumulated across every leg, later legs winning.
-        holdOpen: latest ? latest.hold_open === true : false,
+        holdOpen: latest?.hold_open === true,
         estimateFields: nonEmptyFields(Object.assign({}, ...[...legs].sort((a, b) => (Number(a.generation) || 0) - (Number(b.generation) || 0)).map((seg) => nonEmptyFields(seg.estimate_fields) || {}))),
         // The seed keeps the TAIL (the most recent turns matter most).
         segmentsText: full.length > RESUME_SEED_MAX_CHARS ? `[…]${full.slice(-RESUME_SEED_MAX_CHARS)}` : full,

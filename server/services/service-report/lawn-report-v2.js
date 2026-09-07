@@ -546,34 +546,19 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const diagnosis = categories.map((c) => ({ ...c, explanation: c.customerExplanation }));
 
   // ── Consistency: water AMOUNT vs COVERAGE ──────────────────────────────────
-  // A balanced/high weekly amount can still hide a localized dry/uneven area seen
-  // in the photos. When the photo analysis mentions dry/drought/uneven/coverage,
-  // the Water row must NOT read "Strong" — downgrade it to a coverage "watch" so it
-  // never contradicts the photo caption (the report's biggest trust bug).
-  // "dry out"/"drying out"/"dries out" is WET-area aftercare ("let the damp
-  // areas dry out") — strip those phrases before testing so they can't
-  // satisfy the dry regex (codex P1 r11), alongside the r8 removals of
-  // 'moisture'/'irrigation' (both appear in wet observations and flipped a
-  // confirmed-overwatering read into a dry-coverage story).
-  const obsText = `${lawnAssessment.observations || ''} ${lawnAssessment.aiSummary || ''}`
-    .toLowerCase()
-    .replace(/\b(?:dry|dries|drying)\s+(?:out|down)\b/g, '');
-  // DRY-specific signals only — not generic "stress" (heat/insect).
-  // "uneven"/"coverage" need MOISTURE context: the repo uses "uneven" for
-  // ordinary color variation and "coverage" for turf density, and a bare
-  // match converted non-moisture observations into customer-facing drought
-  // claims (codex P1 r22).
-  const drySignal = /\b(dry|drier|drought|tan|wilt)\b/.test(obsText)
-    || /\buneven\s+(?:irrigation|water(?:ing)?|sprinkler|moisture)\b/.test(obsText)
-    // Reversed order — "irrigation is uneven across the west side"
-    // (codex P2 r36). Bounded gap so the subject and qualifier stay in
-    // the same clause.
-    || /\b(?:irrigation|water(?:ing)?|sprinkler|moisture)\b[^.!?]{0,30}\buneven\b/i.test(obsText)
-    || /\b(?:sprinkler|irrigation|water)\s+coverage\b/.test(obsText);
+  // A balanced weekly amount can still leave a dry area. Use this visit's
+  // structured moisture evidence, with an explicit technician flag taking
+  // precedence over the photo severity. Prose, other stress scores, and old
+  // assessments without either signal cannot establish a watering problem.
+  const technicianDrought = scores.stressFlags?.drought_stress;
+  const drySignal = typeof technicianDrought === 'boolean'
+    ? technicianDrought
+    : ['none', 'minor', 'moderate', 'severe'].includes(lawnAssessment.droughtStress)
+      ? lawnAssessment.droughtStress !== 'none' : null;
   // The Water/Coverage score is derived from fungus/over-water signals and ignores
   // drought — so a dry/uneven photo read must downgrade it regardless of the weekly
   // amount (this is the "95 Strong vs photo says drought" contradiction).
-  const coverageWatch = drySignal && effectiveWaterStatus !== 'deficit';
+  const coverageWatch = drySignal === true && effectiveWaterStatus !== 'deficit';
   const waterCat = diagnosis.find((c) => c.key === 'water_moisture_stress');
   if (waterCat && drySignal && (waterCat.status === 'strong' || waterCat.status === 'healthy')) {
     waterCat.status = 'watch';
@@ -583,7 +568,10 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
       : 'A few areas look dry — the lawn may benefit from a bit more even watering.';
     waterCat.explanation = waterCat.customerExplanation;
   }
-  if (water) water.coverageWatch = coverageWatch;
+  if (water) {
+    water.coverageWatch = coverageWatch;
+    water.droughtSignal = drySignal;
+  }
 
   const mowing = mapMowing(mowingHeight, grassLabel);
   const treatment = buildTreatment({ applications, actions });
@@ -599,6 +587,8 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
       status: effectiveWaterStatus,
       // A balanced total with a localized dry read → coverage, not "water more".
       localizedDry: coverageWatch || (usingSnapshot && waterSnapshot.interpretation === 'coverage_issue_possible'),
+      localizedDryConfidence: technicianDrought === true
+        ? 'tech_confirmed' : 'area_estimated',
     } : {},
     mowing,
     grassLabel,
@@ -666,7 +656,8 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     mainWatch: topIssue ? (topIssue.whatWeSaw || topIssue.headline) : null,
     wavesNext,
     customerAction: realCustomerAction,
-    noActionNeeded: !realCustomerAction,
+    // An older assessment's missing moisture cause is not an all-clear.
+    noActionNeeded: !realCustomerAction && drySignal !== null,
   };
 
   // (Season-aware dormancy guard is applied above — before diagnosis/insights/snapshot

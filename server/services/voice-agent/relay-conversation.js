@@ -109,7 +109,6 @@ const WRITE_DRAIN_TIMEOUT_MS = 10000;
 // The capture floor's summary when the caller said nothing this session could
 // see — the exact text the late-segment refresh below replaces (hook r22 P1).
 const FLOOR_NO_TRANSCRIPT = 'No transcript captured.';
-const RESUME_RELOAD_ATTEMPTS = 3; // PR 2B: turns on which a resumed session re-reads a not-yet-appended earlier segment
 
 /** Resolve `promise`, or `fallback` after `ms`. The loser is never awaited. */
 // Bound on the detached preferred_language stamp (read + write) — never on
@@ -1411,7 +1410,7 @@ class RelayConversation {
       // Per-call lookup budget: true while the caller still has lookups left.
       consumeLookup: () => {
         const { LOOKUP_SESSION_BUDGET } = require('./relay-context');
-        if (this._resumedHint && require('./relay-recovery').isRecoveryGateOn() && !this._resume?.segmentsText) return false;
+        if (this._resumedHint && require('./relay-recovery').isRecoveryGateOn() && !this._resume?.predecessorsComplete) return false;
         if (this._lookupsUsed + this._priorLookupsUsed >= LOOKUP_SESSION_BUDGET) return false;
         this._lookupsUsed += 1;
         return true;
@@ -1739,14 +1738,14 @@ class RelayConversation {
     // The provider-failure streak continues across the drop (codex r1 P2):
     // a second consecutive failure on the resumed leg hands off at the
     // documented threshold instead of counting from zero again.
-    // Restore each provider independently. Add only newly observed inherited
-    // failures, preserving failures here without counting repeated reloads twice.
+    // Replace each provider's inherited contribution independently; a newer
+    // predecessor snapshot may clear a previously observed failure streak.
     // A success clears only its own provider's inherited streak for this leg.
     for (const kind of ['model', 'tool']) {
       if (this._clearedFailures[kind]) continue;
       const inherited = Math.max(0, Number(state[`${kind}Failures`]) || 0);
-      this[`_${kind}Failures`] += Math.max(0, inherited - this._inheritedFailures[kind]);
-      this._inheritedFailures[kind] = Math.max(this._inheritedFailures[kind], inherited);
+      this[`_${kind}Failures`] += inherited - this._inheritedFailures[kind];
+      this._inheritedFailures[kind] = inherited;
     }
     for (const p of state.promises || []) {
       if (!this._promises.has(p.kind)) this._promises.set(p.kind, { verdict: p.verdict === true, expectation: p.expectation || null, at: p.at ? new Date(p.at) : null });
@@ -1815,7 +1814,7 @@ class RelayConversation {
     if (this._callerVerified !== true || !recovery.isRecoveryGateOn()) return;
     try {
       const fresh = await recovery.loadResumeState(db, this.callSid, { sessionKey: this.sessionKey });
-      if (fresh && (fresh.segmentsText || !this._resume)) await this._applyResumeState(fresh);
+      if (fresh) await this._applyResumeState(fresh);
     } catch { /* fail-soft: a later turn or close may retry */ }
   }
 
@@ -1886,15 +1885,12 @@ class RelayConversation {
     // PR 2B: the earlier segment(s) of a reconnected call ride the USER role
     // the same way, ONCE, as played text — the model resumes instead of
     // starting over. Only when the row proved the reconnect.
-    if (this._callerVerified === true && !this._resumeSeeded && this._resumedHint && (!this._resume || !this._resume.segmentsText) && (this._resumeReloads || 0) < RESUME_RELOAD_ATTEMPTS && require('./relay-recovery').isRecoveryGateOn()) {
-      // The previous socket appends its segment only after draining its turn
-      // chain and in-flight writes; a reconnect that wins that race read an
-      // empty list. Reload (bounded) on each of the first turns until the
-      // segment is there — the seed then lands on that turn (hook P1).
-      this._resumeReloads = (this._resumeReloads || 0) + 1;
+    if (this._resumedHint && !this._resume?.predecessorsComplete) {
+      // One bounded owner-verified read per turn until every predecessor
+      // closed, including silent sockets and closes delayed beyond turn three.
       await this._reloadResumeState();
     }
-    if (!this._resumeSeeded && this._resume && this._resume.segmentsText) {
+    if (!this._resumeSeeded && this._resume?.predecessorsComplete && this._resume.segmentsText) {
       this._resumeSeeded = true;
       const { formatSmsTime } = require('../../utils/sms-time-format');
       const offeredSlots = [...this._slotRefs].map(([ref, slot]) => {
@@ -2185,7 +2181,7 @@ class RelayConversation {
     if (this._resumeReady) {
       try { await this._resumeReady; } catch { /* unproven ⇒ fresh session */ }
     }
-    if (this._resumedHint && !this._resume?.segmentsText) await this._reloadResumeState();
+    if (this._resumedHint && !this._resume?.predecessorsComplete) await this._reloadResumeState();
 
     // …and then drain the writes the chain does NOT cover. A tool that blew its
     // WRITE timeout was detached from the turn loop deliberately (the caller
@@ -2234,7 +2230,7 @@ class RelayConversation {
     // grants no account access or permission to load prior dialogue.
     if (recoveryOn && this.callSid && (this._callerVerified === true || this._callTokenVerified)) {
       try {
-        const { buildTranscriptText, summarizeTurnStats } = require('./relay-transcript');
+        const { buildTranscriptText, summarizeTurnStats, storedTurnStats } = require('./relay-transcript');
         segment = segmentStore.buildSegment({
           generation: this.sessionGeneration,
           sessionKey: this.sessionKey,
@@ -2242,6 +2238,9 @@ class RelayConversation {
           text: buildTranscriptText(this._transcript),
           turns: this._transcript.length,
           latency: summarizeTurnStats(this._turnStats),
+          turnCounts: Object.fromEntries([['caller_turns', 'caller'], ['agent_turns', 'agent'], ['tool_calls', 'tool']]
+            .map(([key, role]) => [key, this._transcript.filter((turn) => turn.role === role).length])),
+          turnStats: storedTurnStats(this._turnStats),
           versions: this._versionStamps(),
           leadId: this._leadId,
           leadCaptured: this.leadCaptured && !this._noLeadCreated,
@@ -2615,10 +2614,20 @@ class RelayConversation {
       const legs = Array.isArray(meta?.relay_segments) ? meta.relay_segments : [];
       const starts = legs.map((leg) => Date.parse(leg.started_at)).filter(Number.isFinite);
       const ends = legs.map((leg) => Date.parse(leg.ended_at)).filter(Number.isFinite);
-      if (ends.length) await withTimeout(
-        db('call_log').where('twilio_call_sid', this.callSid).update({
-          duration_seconds: db.raw("GREATEST(COALESCE(duration_seconds, 0), FLOOR(EXTRACT(EPOCH FROM (?::timestamptz - COALESCE(?::timestamptz, created_at))))::integer, 0)",
+      const metrics = segmentStore.summarizeSegments(meta);
+      if (metrics) await withTimeout(
+        db('call_log').where('twilio_call_sid', this.callSid)
+          .whereRaw("COALESCE(metadata->'relay_segments', '[]'::jsonb) = ?::jsonb", [JSON.stringify(legs)])
+          .whereRaw("metadata->'relay_segment_owners' IS NOT DISTINCT FROM ?::jsonb", [JSON.stringify(meta.relay_segment_owners) || null])
+          .update({
+          ...(ends.length ? { duration_seconds: db.raw("GREATEST(COALESCE(duration_seconds, 0), FLOOR(EXTRACT(EPOCH FROM (?::timestamptz - COALESCE(?::timestamptz, created_at))))::integer, 0)",
             [new Date(Math.max(...ends)), starts.length ? new Date(Math.min(...starts)) : null]),
+          } : {}),
+          // A recording owns its top-level provenance and counters. Relay
+          // metrics stay in its existing nested relay record.
+          transcription_metadata: db.raw("CASE WHEN transcription_provider = ? THEN COALESCE(transcription_metadata, '{}'::jsonb) || ?::jsonb ELSE jsonb_set(COALESCE(transcription_metadata, '{}'::jsonb), '{relay}', COALESCE(transcription_metadata->'relay', '{}'::jsonb) || ?::jsonb, true) END",
+            ['conversation_relay', JSON.stringify(metrics), JSON.stringify(metrics)]),
+          metadata: db.raw("CASE WHEN metadata->'relay_transcript'->'metadata' IS NOT NULL THEN jsonb_set(metadata, '{relay_transcript,metadata}', (metadata->'relay_transcript'->'metadata') || ?::jsonb, false) ELSE metadata END", [JSON.stringify(metrics)]),
         }), WRITE_DRAIN_TIMEOUT_MS, 0,
       );
       if (!callerTurns.length) return false;
