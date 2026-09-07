@@ -16,8 +16,40 @@ const scenarios = [
   { name: 'secure-lawn', url: '/preview-secure.html?v=lawn', ready: 'Lawn Care' },
   { name: 'service-report', url: '/preview-service-report.html', ready: 'Quarterly Pest Control' },
   { name: 'completion', url: '/preview-completion-presets.html', ready: 'Completion' },
+  { name: 'track', url: '/preview-track.html', ready: 'Alex arrives in', verify: verifyTracker },
+  { name: 'track-scheduled', url: '/preview-track.html?state=scheduled', ready: 'stops before yours' },
+  { name: 'reschedule', url: '/preview-schedule-flow.html', ready: 'Our best times for you', verify: verifyScheduleFlow },
+  { name: 'reservice', url: '/preview-schedule-flow.html?flow=reservice', ready: 'pests back between visits', verify: verifyScheduleFlow },
 ];
 const viewports = { desktop: { width: 1440, height: 1000 }, mobile: { width: 390, height: 844 } };
+
+async function assertNoOverflow(page) {
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  assert.ok(overflow <= 2, `Horizontal overflow: ${overflow}px`);
+}
+
+async function verifyTracker(page) {
+  assert.match(await page.getByRole('link', { name: 'TEXT ALEX', exact: true }).getAttribute('href'), /^sms:/);
+  await page.goto(new URL('/preview-track.html?state=complete', page.url()).href);
+  await page.getByText('Thanks for choosing Waves, Jordan.').waitFor();
+  assert.match(await page.getByRole('link', { name: 'View service report', exact: true }).getAttribute('href'), /^\/report\//);
+  assert.equal(await page.getByRole('link', { name: 'TEXT ALEX', exact: true }).count(), 0);
+}
+
+async function verifyScheduleFlow(page, key) {
+  await page.getByRole('textbox', { name: 'Search for a service date or time' }).fill('An afternoon');
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await page.getByText('Afternoon openings from the preview calendar.', { exact: true }).waitFor();
+  assert.equal(await page.getByRole('button', { name: /^Choose 9:00 AM/ }).count(), 0);
+  await page.getByRole('button', { name: 'Show all open times', exact: true }).click();
+  await page.getByRole('button', { name: /^Choose 9:00 AM/ }).first().click();
+  await page.screenshot({ path: path.join(artifactDir, `${key}-selected.png`), fullPage: true });
+  await page.getByRole('button', { name: /^(Confirm|Book).*→/ }).click();
+  await page.getByText("You're all set", { exact: true }).waitFor();
+  // Fixture job ends at 10:30; the customer arrival promise stays two hours.
+  await page.getByText('9:00 AM–11:00 AM', { exact: true }).waitFor();
+  await page.screenshot({ path: path.join(artifactDir, `${key}-confirmed.png`), fullPage: true });
+}
 
 async function checkScenario(browser, baseUrl, scenario, viewportName, viewport) {
   const key = `${scenario.name}-${viewportName}`;
@@ -56,9 +88,10 @@ async function checkScenario(browser, baseUrl, scenario, viewportName, viewport)
       const text = await page.locator('main').innerText();
       assert.ok(text.includes('[Found] Yellowjacket') && text.includes('[Protocol] Nest physically removed'));
     }
+    await assertNoOverflow(page);
     await page.screenshot({ path: path.join(artifactDir, `${key}.png`), fullPage: true });
-    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
-    assert.ok(overflow <= 2, `Horizontal overflow: ${overflow}px`);
+    if (scenario.verify) await scenario.verify(page, key);
+    await assertNoOverflow(page);
     assert.deepEqual(errors, [], 'Browser runtime errors');
   } catch (error) {
     failure = error.message;
