@@ -2,6 +2,11 @@
 
 Run top to bottom before merging any portal/astro PR. Every unchecked item is a blocked merge.
 
+## Before the PR opens
+- [ ] Review tier chosen (Light / Full per waves-ship §4) and named in the PR body; any touched file on the Full list makes the PR Full
+- [ ] Under ~600 changed lines excluding mechanical bulk — otherwise split now, not after round 4
+- [ ] Review map in the PR body: requirement → files → invariant at risk → proving command (Full: every requirement; Light: one line each)
+
 ## Pre-push
 - [ ] `git branch --show-current` matches the intended branch
 - [ ] Staged explicit paths only (no `git add -A`)
@@ -16,7 +21,7 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 - [ ] `git ls-remote origin <branch>` shows my SHA
 - [ ] Re-checked remote tip ~2 min later (external Codex hijack watch)
 - [ ] **(portal only)** `scripts/verify-pr-checks.sh` passed — PR head == my SHA, NOT CONFLICTING, and a `tests` pull_request run exists for this head (a CONFLICTING PR's workflow silently never fires, and a stale green from the OLD head is not CI). Read the "run attribution" line it prints: `exact` only when `VERIFY_PR_PUSH_AFTER` was set before the push; otherwise it is inferred, which cannot distinguish a leftover run from a same-SHA re-push. **After any force-push or recovery push, export that timestamp before pushing.** Astro repo: no script — check mergeable + the Pages build by hand.
-- [ ] `@codex` (fresh PR) or `@codex review` (subsequent push) posted and not bounced
+- [ ] `@codex` (fresh PR) or `@codex review` (subsequent push) posted and not bounced — only on a settled head: hook clean, `verify-pr-checks.sh` passed, no known fix still unpushed
 - [ ] Session owns the CI/review wait and remediation under waves-ship §4; pending results are not handed to Adam to relay
 
 ## CI green gate (separate from the trigger check above)
@@ -28,7 +33,7 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 - [ ] Severity read on the GitHub P0–P3 badge scale (the pre-push schema's P0–P2 is a different scale; its P2 = GitHub P2+P3)
 - [ ] Zero unresolved P0/P1 on the current head (`original_commit_id` checked for staleness): each one FIXED, or rebutted inline with file:line evidence AND that rebuttal accepted — by Adam in-session, or by a later Codex round on this same head that did not re-dispute it. A rebuttal Codex has not yet evaluated is unresolved (post `@codex review` and wait); one Codex re-disputed is unresolved and listed under `Open for Adam` in the PR body — it blocks every merge path until Adam decides
 - [ ] Every P2 on the current head is fixed, rebutted inline, or listed under `Deferred P2s` in the PR body with file:line + reason — nothing silently unaddressed. P3s are advisory and need nothing.
-- [ ] Round history checked: if round 5 or later produced a NEW P0/P1, this PR is a split proposal for Adam, not a merge
+- [ ] Round history checked against the tier: Light = one round, P2-only is merge-ready from round 1; Full = P2-only from round 4; if round 5 or later produced a NEW P0/P1, this PR is a split proposal for Adam, not a merge
 
 ## Merge authorization
 - [ ] Blast-radius diff? Check the diff against the FULL CLAUDE.md rule-18 list (money, customer comms, schema/CHECK values, public token routes, every webhook payload, admin auth, iOS/Android-consumed endpoints, astro spoke-fleet form posts and feeds, retained V1 exports, persisted identifiers) plus AGENTS.md P0 domains → Adam's in-session authorization is REQUIRED; standing "merge when clean" does not apply
