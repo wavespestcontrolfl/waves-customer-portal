@@ -1,0 +1,1465 @@
+{
+  "adjust_stock": {
+    "module": "procurement-tools.js",
+    "domain": "procurement",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "analyze_margins": {
+    "module": "procurement-tools.js",
+    "domain": "procurement",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "approve_price": {
+    "module": "procurement-tools.js",
+    "domain": "procurement",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "approve_seo_action": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "confirmed_endpoint"
+  },
+  "assign_technician": {
+    "module": "schedule-tools.js",
+    "domain": "schedule",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "block_sender": {
+    "module": "email-tools.js",
+    "domain": "email",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "bulk_update_customers": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "bulk_update_leads": {
+    "module": "leads-tools.js",
+    "domain": "leads",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "cancel_and_reschedule_far_out": {
+    "module": "schedule-tools.js",
+    "domain": "schedule",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "cancel_appointment": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "cancel_plan": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "canonical_conflicts": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "check_customer_status": {
+    "module": "tech-tools.js",
+    "domain": "tech",
+    "kind": "read",
+    "role": "technician_or_admin",
+    "approval": null
+  },
+  "check_email_suppression": {
+    "module": "sendgrid-ops-tools.js",
+    "domain": "sendgrid-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "check_site_health": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "compare_domains": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "compare_periods": {
+    "module": "dashboard-tools.js",
+    "domain": "dashboard",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "compare_revenue_periods": {
+    "module": "revenue-tools.js",
+    "domain": "revenue",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "compare_technicians": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "compare_vendor_pricing": {
+    "module": "procurement-tools.js",
+    "domain": "procurement",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "compute_estimate": {
+    "module": "estimate-tools.js",
+    "domain": "estimate",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "create_agent_estimate_draft": {
+    "module": "estimate-tools.js",
+    "domain": "estimate",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "create_appointment": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "create_customer": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "create_pending_estimate": {
+    "module": "estimate-tools.js",
+    "domain": "estimate",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "create_restock_request": {
+    "module": "procurement-tools.js",
+    "domain": "procurement",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "detect_duplicates": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "draft_email_reply": {
+    "module": "email-tools.js",
+    "domain": "email",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "draft_review_reply": {
+    "module": "review-tools.js",
+    "domain": "review",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "draft_sms": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "draft_sms_reply": {
+    "module": "comms-tools.js",
+    "domain": "comms",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "export_payouts": {
+    "module": "banking-tools.js",
+    "domain": "banking",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "find_available_slots": {
+    "module": "schedule-tools.js",
+    "domain": "schedule",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "find_cheapest_vendor": {
+    "module": "procurement-tools.js",
+    "domain": "procurement",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "find_duplicates": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "find_overdue_customers": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "find_schedule_gaps": {
+    "module": "schedule-tools.js",
+    "domain": "schedule",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "find_similar_estimates": {
+    "module": "estimate-tools.js",
+    "domain": "estimate",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_ad_attribution": {
+    "module": "revenue-tools.js",
+    "domain": "revenue",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_advisor_alerts": {
+    "module": "tax-tools.js",
+    "domain": "tax",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_apify_status": {
+    "module": "apify-ops-tools.js",
+    "domain": "apify-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_app_store_status": {
+    "module": "store-ops-tools.js",
+    "domain": "store-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_approval_queue": {
+    "module": "procurement-tools.js",
+    "domain": "procurement",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_ar_aging": {
+    "module": "tax-tools.js",
+    "domain": "tax",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_backlink_overview": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_blocked_senders": {
+    "module": "email-tools.js",
+    "domain": "email",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_call_log": {
+    "module": "comms-tools.js",
+    "domain": "comms",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_cash_flow": {
+    "module": "banking-tools.js",
+    "domain": "banking",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_churn_analysis": {
+    "module": "dashboard-tools.js",
+    "domain": "dashboard",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_closeout_status": {
+    "module": "closeout-tools.js",
+    "domain": "closeout",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_cloudflare_edge_errors": {
+    "module": "cloudflare-ops-tools.js",
+    "domain": "cloudflare-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_cloudflare_pages_builds": {
+    "module": "cloudflare-ops-tools.js",
+    "domain": "cloudflare-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_cloudflare_zones": {
+    "module": "cloudflare-ops-tools.js",
+    "domain": "cloudflare-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_commit_info": {
+    "module": "github-ops-tools.js",
+    "domain": "github-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_content_decay_alerts": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_content_pipeline": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_content_workflow_brief": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_conversation_thread": {
+    "module": "comms-tools.js",
+    "domain": "comms",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_csr_overview": {
+    "module": "comms-tools.js",
+    "domain": "comms",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_customer_acquisition": {
+    "module": "dashboard-tools.js",
+    "domain": "dashboard",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_customer_detail": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_dataforseo_balance": {
+    "module": "dataforseo-ops-tools.js",
+    "domain": "dataforseo-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_day_summary": {
+    "module": "schedule-tools.js",
+    "domain": "schedule",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_email_stats": {
+    "module": "email-tools.js",
+    "domain": "email",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_email_suppressions": {
+    "module": "sendgrid-ops-tools.js",
+    "domain": "sendgrid-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_email_thread": {
+    "module": "email-tools.js",
+    "domain": "email",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_equipment_depreciation": {
+    "module": "tax-tools.js",
+    "domain": "tax",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_estimate_funnel": {
+    "module": "dashboard-tools.js",
+    "domain": "dashboard",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_expenses": {
+    "module": "tax-tools.js",
+    "domain": "tax",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_fee_analysis": {
+    "module": "banking-tools.js",
+    "domain": "banking",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_filing_deadlines": {
+    "module": "tax-tools.js",
+    "domain": "tax",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_ga4_snapshot": {
+    "module": "ga4-ops-tools.js",
+    "domain": "ga4-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_gbp_status": {
+    "module": "gbp-ops-tools.js",
+    "domain": "gbp-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_google_ads_disapprovals": {
+    "module": "google-ads-ops-tools.js",
+    "domain": "google-ads-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_google_ads_serving_status": {
+    "module": "google-ads-ops-tools.js",
+    "domain": "google-ads-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_growthbook_experiments": {
+    "module": "growthbook-tools.js",
+    "domain": "growthbook",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_growthbook_features": {
+    "module": "growthbook-tools.js",
+    "domain": "growthbook",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_inbox_summary": {
+    "module": "email-tools.js",
+    "domain": "email",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_integration_token_health": {
+    "module": "token-health-tools.js",
+    "domain": "token-health",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_kpi_snapshot": {
+    "module": "dashboard-tools.js",
+    "domain": "dashboard",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_lead_funnel": {
+    "module": "leads-tools.js",
+    "domain": "leads",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_lead_overview": {
+    "module": "leads-tools.js",
+    "domain": "leads",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_lost_analysis": {
+    "module": "leads-tools.js",
+    "domain": "leads",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_managed_agent_runs": {
+    "module": "managed-agents-ops-tools.js",
+    "domain": "managed-agents-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_meta_ads_delivery_status": {
+    "module": "meta-ads-ops-tools.js",
+    "domain": "meta-ads-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_meta_ads_issues": {
+    "module": "meta-ads-ops-tools.js",
+    "domain": "meta-ads-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_mileage_summary": {
+    "module": "tax-tools.js",
+    "domain": "tax",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_mrr_trend": {
+    "module": "dashboard-tools.js",
+    "domain": "dashboard",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_my_route": {
+    "module": "tech-tools.js",
+    "domain": "tech",
+    "kind": "read",
+    "role": "technician_or_admin",
+    "approval": null
+  },
+  "get_neighborhood_grass_profile": {
+    "module": "estimate-tools.js",
+    "domain": "estimate",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_open_commitments": {
+    "module": "comms-tools.js",
+    "domain": "comms",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_outreach_candidates": {
+    "module": "review-tools.js",
+    "domain": "review",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_outstanding_balances": {
+    "module": "dashboard-tools.js",
+    "domain": "dashboard",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_partner_call_history": {
+    "module": "comms-tools.js",
+    "domain": "comms",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_payer_ar_aging": {
+    "module": "dashboard-tools.js",
+    "domain": "dashboard",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_payout_details": {
+    "module": "banking-tools.js",
+    "domain": "banking",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_payout_history": {
+    "module": "banking-tools.js",
+    "domain": "banking",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_play_store_status": {
+    "module": "store-ops-tools.js",
+    "domain": "store-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_pnl": {
+    "module": "tax-tools.js",
+    "domain": "tax",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_price_trends": {
+    "module": "procurement-tools.js",
+    "domain": "procurement",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_product_info": {
+    "module": "tech-tools.js",
+    "domain": "tech",
+    "kind": "read",
+    "role": "technician_or_admin",
+    "approval": null
+  },
+  "get_protocol": {
+    "module": "tech-tools.js",
+    "domain": "tech",
+    "kind": "read",
+    "role": "technician_or_admin",
+    "approval": null
+  },
+  "get_quarterly_estimate": {
+    "module": "tax-tools.js",
+    "domain": "tax",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_railway_deployments": {
+    "module": "ops-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_railway_logs": {
+    "module": "ops-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_railway_status": {
+    "module": "ops-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_railway_variable_names": {
+    "module": "ops-tools.js",
+    "domain": "ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_recent_completions": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_recent_merged_prs": {
+    "module": "github-ops-tools.js",
+    "domain": "github-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_report_engagement": {
+    "module": "dashboard-tools.js",
+    "domain": "dashboard",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_response_times": {
+    "module": "leads-tools.js",
+    "domain": "leads",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_restock_queue": {
+    "module": "procurement-tools.js",
+    "domain": "procurement",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_revenue_breakdown": {
+    "module": "dashboard-tools.js",
+    "domain": "dashboard",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_revenue_overview": {
+    "module": "revenue-tools.js",
+    "domain": "revenue",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_review_stats": {
+    "module": "review-tools.js",
+    "domain": "review",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_review_trends": {
+    "module": "review-tools.js",
+    "domain": "review",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_schedule_view": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_scheduled_job_health": {
+    "module": "job-health-tools.js",
+    "domain": "job-health",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_semantic_concept_map": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_sentry_issue_detail": {
+    "module": "sentry-ops-tools.js",
+    "domain": "sentry-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_sentry_new_issues": {
+    "module": "sentry-ops-tools.js",
+    "domain": "sentry-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_sentry_top_issues": {
+    "module": "sentry-ops-tools.js",
+    "domain": "sentry-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_service_history": {
+    "module": "tech-tools.js",
+    "domain": "tech",
+    "kind": "read",
+    "role": "technician_or_admin",
+    "approval": null
+  },
+  "get_service_line_pnl": {
+    "module": "revenue-tools.js",
+    "domain": "revenue",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_service_mix": {
+    "module": "dashboard-tools.js",
+    "domain": "dashboard",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_sms_stats": {
+    "module": "comms-tools.js",
+    "domain": "comms",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_social_channel_status": {
+    "module": "social-ops-tools.js",
+    "domain": "social-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_source_performance": {
+    "module": "leads-tools.js",
+    "domain": "leads",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_stale_leads": {
+    "module": "leads-tools.js",
+    "domain": "leads",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_stock_movements": {
+    "module": "procurement-tools.js",
+    "domain": "procurement",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_stop_details": {
+    "module": "tech-tools.js",
+    "domain": "tech",
+    "kind": "read",
+    "role": "technician_or_admin",
+    "approval": null
+  },
+  "get_stripe_balance": {
+    "module": "banking-tools.js",
+    "domain": "banking",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_stripe_payment_intents": {
+    "module": "stripe-ops-tools.js",
+    "domain": "stripe-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_stripe_webhook_endpoints": {
+    "module": "stripe-ops-tools.js",
+    "domain": "stripe-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_stripe_webhook_failures": {
+    "module": "stripe-ops-tools.js",
+    "domain": "stripe-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_tax_dashboard": {
+    "module": "tax-tools.js",
+    "domain": "tax",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_tech_revenue_performance": {
+    "module": "revenue-tools.js",
+    "domain": "revenue",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_today_briefing": {
+    "module": "dashboard-tools.js",
+    "domain": "dashboard",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_todays_activity": {
+    "module": "comms-tools.js",
+    "domain": "comms",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_top_revenue_customers": {
+    "module": "revenue-tools.js",
+    "domain": "revenue",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_truck_status": {
+    "module": "bouncie-ops-tools.js",
+    "domain": "bouncie-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_truck_trips": {
+    "module": "bouncie-ops-tools.js",
+    "domain": "bouncie-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_twilio_alerts": {
+    "module": "twilio-ops-tools.js",
+    "domain": "twilio-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_twilio_failed_messages": {
+    "module": "twilio-ops-tools.js",
+    "domain": "twilio-ops",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_unanswered_threads": {
+    "module": "comms-tools.js",
+    "domain": "comms",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_unpriced_summary": {
+    "module": "procurement-tools.js",
+    "domain": "procurement",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_unreconciled_payouts": {
+    "module": "banking-tools.js",
+    "domain": "banking",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_unresponded_reviews": {
+    "module": "review-tools.js",
+    "domain": "review",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_velocity_pipeline": {
+    "module": "review-tools.js",
+    "domain": "review",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_vendor_invoices": {
+    "module": "email-tools.js",
+    "domain": "email",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_waveguard_tiers": {
+    "module": "estimate-tools.js",
+    "domain": "estimate",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "get_weather_conditions": {
+    "module": "tech-tools.js",
+    "domain": "tech",
+    "kind": "read",
+    "role": "technician_or_admin",
+    "approval": null
+  },
+  "get_zone_density": {
+    "module": "schedule-tools.js",
+    "domain": "schedule",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "indexation_report": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "inspect_url": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "intent_routing_report": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "internal_link_graph": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "list_call_partners": {
+    "module": "comms-tools.js",
+    "domain": "comms",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "list_open_closeouts": {
+    "module": "closeout-tools.js",
+    "domain": "closeout",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "lookup_property": {
+    "module": "estimate-tools.js",
+    "domain": "estimate",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "match_existing_customer": {
+    "module": "estimate-tools.js",
+    "domain": "estimate",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "move_stops_to_day": {
+    "module": "schedule-tools.js",
+    "domain": "schedule",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "optimize_all_routes": {
+    "module": "schedule-tools.js",
+    "domain": "schedule",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "optimize_tech_route": {
+    "module": "schedule-tools.js",
+    "domain": "schedule",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "query_blog_performance": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "query_customers": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "query_gsc_performance": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "query_leads": {
+    "module": "leads-tools.js",
+    "domain": "leads",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "query_products": {
+    "module": "procurement-tools.js",
+    "domain": "procurement",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "query_revenue": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "query_seo_rankings": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "query_stock": {
+    "module": "procurement-tools.js",
+    "domain": "procurement",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "query_top_pages": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "query_top_queries": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "query_vendors": {
+    "module": "procurement-tools.js",
+    "domain": "procurement",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "read_pricing_config": {
+    "module": "estimate-tools.js",
+    "domain": "estimate",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "recent_pricing_changes": {
+    "module": "estimate-tools.js",
+    "domain": "estimate",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "reply_via_sms": {
+    "module": "email-tools.js",
+    "domain": "email",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "request_instant_payout": {
+    "module": "banking-tools.js",
+    "domain": "banking",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "confirmed_endpoint"
+  },
+  "request_standard_payout": {
+    "module": "banking-tools.js",
+    "domain": "banking",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "confirmed_endpoint"
+  },
+  "reschedule_appointment": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "run_price_lookup": {
+    "module": "procurement-tools.js",
+    "domain": "procurement",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "run_seo_pipeline": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "confirmed_endpoint"
+  },
+  "run_tax_advisor": {
+    "module": "tax-tools.js",
+    "domain": "tax",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "scan_url_issues": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "score_page_refresh_priority": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "search_call_research": {
+    "module": "call-research-tools.js",
+    "domain": "call-research",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "search_emails": {
+    "module": "email-tools.js",
+    "domain": "email",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "search_field_intelligence": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "search_ib_history": {
+    "module": "history-tools.js",
+    "domain": "history",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "search_knowledge_base": {
+    "module": "tech-tools.js",
+    "domain": "tech",
+    "kind": "read",
+    "role": "technician_or_admin",
+    "approval": null
+  },
+  "search_messages": {
+    "module": "comms-tools.js",
+    "domain": "comms",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "search_reviews": {
+    "module": "review-tools.js",
+    "domain": "review",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "send_email_reply": {
+    "module": "email-tools.js",
+    "domain": "email",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "send_sms": {
+    "module": "comms-tools.js",
+    "domain": "comms",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "seo_action_queue": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "seo_experiment_results": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "set_estimate_presentation": {
+    "module": "estimate-tools.js",
+    "domain": "estimate",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "sitemap_validation": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "read",
+    "role": "admin",
+    "approval": null
+  },
+  "submit_review_reply": {
+    "module": "review-tools.js",
+    "domain": "review",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "swap_tech_assignments": {
+    "module": "schedule-tools.js",
+    "domain": "schedule",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "switch_appointment_property": {
+    "module": "schedule-tools.js",
+    "domain": "schedule",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "toggle_estimate_v2_view": {
+    "module": "estimate-tools.js",
+    "domain": "estimate",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "toggle_show_one_time_option": {
+    "module": "estimate-tools.js",
+    "domain": "estimate",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "trigger_review_request": {
+    "module": "review-tools.js",
+    "domain": "review",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "update_customer": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "update_lead_status": {
+    "module": "leads-tools.js",
+    "domain": "leads",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "update_property_access": {
+    "module": "tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  },
+  "update_restock_request": {
+    "module": "procurement-tools.js",
+    "domain": "procurement",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm"
+  }
+}
