@@ -545,23 +545,12 @@ function buildRecurringOccurrenceDates(baseDateStr, pattern, count = 4, opts = {
   ));
 }
 
-// Customer-facing cadence for a lawn program, from the catalog plan whose
-// visitsPerYear matches (the estimate's lawn frequencies carry only the
-// count). Returns null when no plan matches — the estimate page then shows
-// no cadence rather than inventing one. `months` are the 0-based ET month
-// indices of the projected occurrences, the first one in `baseDateStr`'s
-// month, stepped by the plan's own pattern through the same projector the
-// scheduler uses (buildRecurringOccurrenceDates).
-const CADENCE_LABELS = { monthly: 'about once a month', bimonthly: 'about every 2 months', quarterly: 'about every 3 months' };
-function describeLawnProgramCadence(visitsPerYear, baseDateStr = etDateString()) {
+// The catalog lawn plan whose visitsPerYear matches (the estimate's lawn
+// frequencies carry only the count). Returns null when no plan matches —
+// the estimate page then shows no program rather than inventing one.
+function resolveLawnCareRecurringPlanByCount(visitsPerYear) {
   const n = Number(visitsPerYear);
-  const plan = Object.values(LAWN_CARE_RECURRING_PLANS).find((cfg) => cfg.visitsPerYear === n);
-  if (!plan) return null;
-  const cadence = CADENCE_LABELS[plan.recurringPattern]
-    || (plan.recurringPattern === 'custom' && plan.recurringIntervalDays > 0 ? `about every ${plan.recurringIntervalDays} days` : null);
-  if (!cadence) return null;
-  const dates = buildRecurringOccurrenceDates(baseDateStr, plan.recurringPattern, n, { recurringIntervalDays: plan.recurringIntervalDays });
-  return { visitsPerYear: n, cadence, months: dates.map((d) => Number(d.slice(5, 7)) - 1) };
+  return Object.values(LAWN_CARE_RECURRING_PLANS).find((cfg) => cfg.visitsPerYear === n) || null;
 }
 
 function activeTierRank(tier) {
@@ -1626,7 +1615,6 @@ module.exports = {
   buildLabelOnlyTierRealignmentUpdates,
   buildNoPlanTierEnrollmentUpdates,
   buildRecurringOccurrenceDates,
-  describeLawnProgramCadence,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
   isAutoDerivedTierLabelRow,
@@ -1639,6 +1627,7 @@ module.exports = {
   reconcileRecurringTiers,
   representativePlanKeys,
   resolveLawnCareRecurringPlan,
+  resolveLawnCareRecurringPlanByCount,
   resolveMosquitoRecurringPlan,
   resolvePestControlRecurringPlan,
   resolveSelfBookedRecurringPlan,
