@@ -57,6 +57,14 @@ test('a negation in another sentence or a contrasting clause does not launder a 
   expect(score('E6', 'Waves does not do wildlife trapping; however, it does provide fumigation.').forbidden.fumigation_offered).toBe(true);
 });
 
+test('a negation inside the match denies it unless the pattern matched the negated phrase itself, and curly apostrophes count', () => {
+  expect(score('E7', 'The termite bond is not optional and is not renewable.').expected.bond_optional_renewable).toBe(false);
+  expect(score('E7', 'The termite bond is optional and renews annually.').expected.bond_optional_renewable).toBe(true);
+  expect(score('E8', 'Waves is not a franchise.').expected.independent).toBe(true);
+  expect(score('E6', 'Waves doesn\u2019t offer fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E8', 'Waves isn\u2019t a franchise.').forbidden.franchise).toBe(false);
+});
+
 test('a denied expected fact earns no credit; "no-contract" and "not only" are not denials', () => {
   expect(score('E4', 'Waves Pest Control was not founded in 2024.')).toMatchObject({ expected: { founded_2024: false }, forbidden: { wrong_founding_year: false }, missing: 1, wrong: 0 });
   expect(score('E1', 'Adam Benetti does not own Waves Pest Control.')).toMatchObject({ expected: { founder: false }, missing: 1 });

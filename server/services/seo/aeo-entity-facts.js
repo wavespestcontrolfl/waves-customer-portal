@@ -36,6 +36,11 @@ const NEGATION_RE = /\b(?:not(?! only)|no(?!-)|never|none|nor|without|except|exc
 const CLAUSE_BOUNDARY_RE = /[.!?;:\n]|,?\s+(?:but|however|whereas|although|though|yet)\b/i;
 const CLAUSE_WINDOW = 80;
 
+// Engines emit typographic apostrophes; the contraction patterns expect '.
+function normalizeAnswer(text) {
+  return String(text || '').replace(/[\u2018\u2019\u02BC\u2032]/g, "'");
+}
+
 function asserted(compiled, answer) {
   for (const match of answer.matchAll(compiled.scanRe)) {
     if (compiled.rejectValue !== undefined && match[1] === compiled.rejectValue) continue;
@@ -43,7 +48,11 @@ function asserted(compiled, answer) {
     const end = start + match[0].length;
     const before = answer.slice(Math.max(0, start - CLAUSE_WINDOW), start).split(CLAUSE_BOUNDARY_RE).pop();
     const after = answer.slice(end, end + CLAUSE_WINDOW).split(CLAUSE_BOUNDARY_RE)[0];
-    if (NEGATION_RE.test(before) || NEGATION_RE.test(after)) continue;
+    // A negation INSIDE the match ("bond is not optional") also denies it,
+    // unless the pattern deliberately matched a negated phrase from its first
+    // word ("not a franchise" as evidence of independence).
+    const inner = NEGATION_RE.exec(match[0]);
+    if ((inner && inner.index > 0) || NEGATION_RE.test(before) || NEGATION_RE.test(after)) continue;
     return true;
   }
   return false;
@@ -74,7 +83,7 @@ function isEntityQuestion(query) {
 function scoreEntityAnswer(query, text) {
   const question = entityQuestion(query);
   if (!question) return null;
-  const answer = String(text || '');
+  const answer = normalizeAnswer(text);
   const expected = {};
   for (const key of question.expect) expected[key] = asserted(FACTS[key], answer);
   const forbidden = {};
