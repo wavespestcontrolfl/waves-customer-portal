@@ -419,8 +419,8 @@ async function buildAutopaySetupLink(customerId) {
     // link (GH Codex #3812 r4 P2). The minted URL must be in the body —
     // compared scheme-stripped, because getTemplate strips https:// from
     // owned portal hosts before returning (r5 P1).
-    const { stripPortalUrlScheme } = require('../routes/admin-sms-templates');
-    if (!String(body).includes(stripPortalUrlScheme(result.secureUrl))) {
+    const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+    if (!String(body).includes(stripSmsUrlScheme(result.secureUrl))) {
       return { url: null, line: '', reason: AUTOPAY_SKIP_REASONS.template_missing_link };
     }
     return {
@@ -437,7 +437,7 @@ async function buildAutopaySetupLink(customerId) {
 // The /secure/:token bearer the composer inserts (autopay-setup-link mints
 // 16 random bytes base64url = 22 chars; the visit lane's card requests share
 // the page and the table). Bodies carry the link scheme-stripped
-// (stripSmsLinkScheme), so the match is host + path, scheme optional.
+// (stripSmsUrlScheme), so the match is host + path, scheme optional.
 // Percent-escapes decode before detection: React Router decodes the
 // pathname, so "/secur%65/<token>" still opens the page and must still be
 // judged (GH Codex #3812 r5 P1). Malformed escapes are left as typed.
@@ -1591,8 +1591,8 @@ async function buildCardRequestLink(visit) {
     .where({ token: result.secureUrl.slice(result.secureUrl.lastIndexOf('/') + 1) })
     .first('id', 'status', 'token', 'selected_plan', 'annual_prepay_term_id');
   const body = (await cardRequestPlanVariant(visit.id, request, templateVars)) || base;
-  const { stripPortalUrlScheme } = require('../routes/admin-sms-templates');
-  if (!String(body).includes(stripPortalUrlScheme(result.secureUrl))) {
+  const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+  if (!String(body).includes(stripSmsUrlScheme(result.secureUrl))) {
     return { url: null, line: '', reason: 'The card request text in Templates has no {secure_link} placeholder — add it before texting a card link' };
   }
   return {

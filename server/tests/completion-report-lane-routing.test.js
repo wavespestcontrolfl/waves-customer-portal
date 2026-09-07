@@ -1,5 +1,5 @@
 const { completionUsesReportLane, reportV1InvoiceBodyCarriesPayLink, completionSmsWithheldForMissingReportToken } = require('../services/complete-scheduled-service');
-const smsTemplates = require('../routes/admin-sms-templates');
+const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 const { serviceReportV1SmsType } = require('../services/service-report/delivery');
 
 // The defect this pins: buildServiceReportV1DeliveryContext has always
@@ -72,12 +72,12 @@ describe('completionUsesReportLane', () => {
 
   describe('a customer with a bill never gets a text without the pay link', () => {
     // The fixtures below are what the RENDERER actually returns, not
-    // hand-written bodies: getTemplate runs stripPortalUrlScheme, which removes
-    // https:// from owned portal hosts. A test written against the full URL
+    // hand-written bodies: getTemplate runs stripSmsUrlScheme, which removes
+    // https:// from SMS links. A test written against the full URL
     // passes while production always falls back — the lane would have shipped
     // permanently unreachable. Both the strings and the URL here are pushed
     // through the same production function the route uses.
-    const strip = smsTemplates.stripPortalUrlScheme;
+    const strip = stripSmsUrlScheme;
     const payUrl = 'https://portal.wavespestcontrol.com/l/invoice-xyz89';
     const reportUrl = 'https://portal.wavespestcontrol.com/l/report-abc12';
     const render = (body) => strip(body);
@@ -115,9 +115,8 @@ describe('completionUsesReportLane', () => {
       expect(reportV1InvoiceBodyCarriesPayLink(body, null)).toBe(false);
     });
 
-    test('a third-party link keeps its scheme and still matches', () => {
-      // stripPortalUrlScheme is host-allowlisted, so a non-portal pay URL is
-      // untouched on both sides.
+    test('a third-party link loses its scheme and still matches', () => {
+      // External pay URLs use the same SMS display form on both sides.
       const other = 'https://pay.example.com/i/abc';
       const body = render(`Report: ${reportUrl}\n\nInvoice: ${other}`);
       expect(reportV1InvoiceBodyCarriesPayLink(body, other)).toBe(true);

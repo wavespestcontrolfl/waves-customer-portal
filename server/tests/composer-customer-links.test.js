@@ -97,7 +97,6 @@ jest.mock('../services/payer-statement-settle', () => ({
 // the mocked render mirrors that, and the comparison helper is the real
 // contract the builder must use.
 jest.mock('../routes/admin-sms-templates', () => ({
-  stripPortalUrlScheme: (b) => String(b).replace(/https?:\/\/(portal\.wavespestcontrol\.com)/g, '$1'),
 }));
 jest.mock('../services/review-request', () => ({
   createInline: jest.fn(),
