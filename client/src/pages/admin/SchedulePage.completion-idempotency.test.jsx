@@ -70,6 +70,11 @@ describe("completion idempotency retry keys", () => {
     ).toBe(true);
   });
 
+  it("refreshes an uncommitted pricing review without resetting a committed resume", () => {
+    expect(shouldResetCompletionIdempotencyKey({ status: 409, code: "completion_pricing_changed" })).toBe(true);
+    expect(shouldResetCompletionIdempotencyKey({ status: 409, code: "completion_pricing_resume_unavailable" })).toBe(false);
+  });
+
   it("does not reset for server errors", () => {
     expect(shouldResetCompletionIdempotencyKey({ status: 500 })).toBe(false);
   });
