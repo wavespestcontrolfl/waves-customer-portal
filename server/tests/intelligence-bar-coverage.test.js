@@ -10,6 +10,8 @@ const save = async () => {
   await api.patch(path, body);
   await admin_post(endpoint, body);
   await api_patch('/admin/customers/' + customerId, body);
+  await adminFetch?.('/admin/optional-fetch');
+  await api?.post('/admin/optional-post', body);
   cache.get(key);
   navigate('/admin/customers');
   URL.createObjectURL(blob);
@@ -17,7 +19,7 @@ const save = async () => {
 const census = frontendSourceCensus(source, 'client/src/pages/admin/Fixture.jsx');
 
 test('census includes writes through wrappers, dynamic endpoints, navigation and local exports', () => {
-  expect(census).toHaveLength(10);
+  expect(census).toHaveLength(12);
   expect(census.map(a => [a.operation.method, a.operation.endpoint])).toEqual(expect.arrayContaining([
     ['POST', '/admin/knowledge/sources'], ['GET', '/admin/knowledge/sources'],
     ['PATCH', '/admin/customers/:param'], ['POST', null], ['GET', '/admin/customers'], ['LOCAL_EXPORT', null],
@@ -25,6 +27,9 @@ test('census includes writes through wrappers, dynamic endpoints, navigation and
   expect(new Set(census.map(a => a.id)).size).toBe(census.length);
   expect(census.filter(a => a.operation.method === 'POST' && !a.operation.endpoint)).toHaveLength(3);
   expect(census.filter(a => a.operation.method === 'PATCH' && a.operation.endpoint)).toHaveLength(2);
+  expect(census.map(a => [a.operation.method, a.operation.endpoint])).toEqual(expect.arrayContaining([
+    ['GET', '/admin/optional-fetch'], ['POST', '/admin/optional-post'],
+  ]));
 });
 
 test('new and changed actions cannot hide behind a baseline or a stale review', () => {

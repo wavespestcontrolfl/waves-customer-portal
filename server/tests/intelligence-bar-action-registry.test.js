@@ -5,6 +5,16 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const registry = require('../services/intelligence-bar/action-registry');
 const { tierFor } = require('../services/intelligence-bar/authorization-contract');
 
+test('every tool-bearing module in the existing tool census joins the registry', () => {
+  const fs = require('fs'), path = require('path');
+  const directory = path.join(__dirname, '../services/intelligence-bar');
+  for (const file of fs.readdirSync(directory).filter(name => name === 'tools.js' || name.endsWith('-tools.js'))) {
+    const definitions = Object.values(require(path.join(directory, file))).filter(Array.isArray).flat()
+      .filter(tool => tool && typeof tool.name === 'string' && tool.input_schema?.type === 'object');
+    for (const definition of definitions) expect(registry.actions.get(definition.name)?.module).toBe(file);
+  }
+});
+
 test('every existing tool has an explicit valid policy and a concrete executor', () => {
   expect(registry.policyErrors).toEqual([]);
   expect(registry.actions.size).toBe(Object.keys(require('../services/intelligence-bar/action-policy.json')).length);
@@ -24,6 +34,12 @@ test('Estimates can discover real inventory executors without preloading every d
   expect(found.result.capabilities).toContainEqual(expect.objectContaining({
     id: 'create_restock_request', kind: 'internal_write', approval: 'ui_confirm', availability: 'loaded',
   }));
+});
+
+test('the dedicated agent estimate workflow preloads its permitted draft tool', () => {
+  const scope = { role: 'admin', context: 'agent_estimate' };
+  expect(registry.initialTools(scope.context, scope).some(tool => tool.name === 'create_agent_estimate_draft')).toBe(true);
+  expect(registry.initialTools('estimates', { ...scope, context: 'estimates' }).some(tool => tool.name === 'create_agent_estimate_draft')).toBe(false);
 });
 
 test('technicians cannot discover admin tools or forge a tool scope', async () => {

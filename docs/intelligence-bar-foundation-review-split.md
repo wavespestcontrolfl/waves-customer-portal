@@ -67,3 +67,11 @@ retains dynamic admin verb-wrapper calls. All 1,736 recorded sites remain
 unsupported/unverified. Backend registrations remain a manual inventory in
 this split; automated backend drift enforcement is deferred to the final
 capability reconciliation, so this gate currently enforces frontend sites only.
+
+Part A integrates merged main `e7c4e9eb4` and records its changed property-editor
+request as unsupported. Optional request calls now join the census; registry
+tests detect omitted tool modules, and the dedicated agent-estimate workflow
+preloads its own authorized estimate tools. Broader payload/helper dependency
+fingerprinting remains deferred alongside backend drift enforcement. Current
+fingerprints describe call expressions; changes outside those expressions still
+require manual review until final capability reconciliation.

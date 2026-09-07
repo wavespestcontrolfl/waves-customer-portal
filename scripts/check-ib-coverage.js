@@ -35,7 +35,7 @@ function expressionText(node) {
 function named(node) {
   if (!node) return '';
   if (node.type === 'Identifier') return node.name;
-  if (node.type === 'MemberExpression') return `${named(node.object)}.${named(node.property)}`;
+  if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') return `${named(node.object)}.${named(node.property)}`;
   return '';
 }
 
@@ -82,7 +82,7 @@ function frontendSourceCensus(source, relative) {
   const occurrences = new Map();
   const ast = parser.parse(source, { sourceType: 'unambiguous', plugins: ['jsx', 'typescript'] });
     walk(ast, (node, parents) => {
-      if (node.type !== 'CallExpression') return;
+      if (node.type !== 'CallExpression' && node.type !== 'OptionalCallExpression') return;
       const callee = named(node.callee);
       const verbRequest = callee.match(/^(?:admin|api)(?:\.|_)?(get|post|put|patch|delete)(?:Strict)?$/i);
       const verbCall = verbRequest || callee.match(/(?:^|\.)(?:admin|api)?(get|post|put|patch|delete)(?:Strict)?$/i);
