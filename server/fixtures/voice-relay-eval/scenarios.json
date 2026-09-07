@@ -717,10 +717,22 @@
       "fixtures": {
         "officeHours": "unknown",
         "toolResponses": {
-          "capture_lead": {
-            "text": "Lead saved successfully. Let the caller know a Waves team member will follow up to confirm details and scheduling — set WHEN from the latest CLOCK DATA (never \"shortly\" while the office is closed). The estimate request IS on the office queue. Office hours are unknown right now: tell the caller the written estimate will be sent as soon as possible — do not name a time.",
-            "capture": true
-          },
+          "capture_lead": [
+            {
+              "when": {
+                "estimate_requested": true,
+                "first_name": "Priya",
+                "last_name": "Raman",
+                "email": "example",
+                "address_line1": "Cortez"
+              },
+              "text": "Lead saved successfully. Let the caller know a Waves team member will follow up to confirm details and scheduling — set WHEN from the latest CLOCK DATA (never \"shortly\" while the office is closed). The estimate request IS on the office queue. Office hours are unknown right now: tell the caller the written estimate will be sent as soon as possible — do not name a time.",
+              "capture": true
+            },
+            {
+              "text": "IMPORTANT: the estimate request is NOT queued yet — still missing: first_name, last_name, email, address_line1 (whichever this call did not carry). Do NOT promise a written estimate yet; ask the caller for what is missing and call capture_lead again with estimate_requested: true. If the caller declines to give it, respect that: call capture_lead again WITHOUT estimate_requested (the estimate is dropped) and end the call normally."
+            }
+          ],
           "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
           "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead."
         }
@@ -783,6 +795,13 @@
           "value": {
             "estimate_requested": true
           },
+          "severity": "major"
+        },
+        {
+          "check": "tools_performed_include",
+          "value": [
+            "capture_lead"
+          ],
           "severity": "major"
         },
         {
@@ -1701,10 +1720,22 @@
       "fixtures": {
         "officeHours": "unknown",
         "toolResponses": {
-          "capture_lead": {
-            "text": "Lead saved successfully. Let the caller know a Waves team member will follow up to confirm details and scheduling — set WHEN from the latest CLOCK DATA (never \"shortly\" while the office is closed). The estimate request IS on the office queue. Office hours are unknown right now: tell the caller the written estimate will be sent as soon as possible — do not name a time.",
-            "capture": true
-          },
+          "capture_lead": [
+            {
+              "when": {
+                "estimate_requested": true,
+                "first_name": "Carmen",
+                "last_name": "Ortiz",
+                "email": "example",
+                "address_line1": "Riverside"
+              },
+              "text": "Lead saved successfully. Let the caller know a Waves team member will follow up to confirm details and scheduling — set WHEN from the latest CLOCK DATA (never \"shortly\" while the office is closed). The estimate request IS on the office queue. Office hours are unknown right now: tell the caller the written estimate will be sent as soon as possible — do not name a time.",
+              "capture": true
+            },
+            {
+              "text": "IMPORTANT: the estimate request is NOT queued yet — still missing: first_name, last_name, email, address_line1 (whichever this call did not carry). Do NOT promise a written estimate yet; ask the caller for what is missing and call capture_lead again with estimate_requested: true. If the caller declines to give it, respect that: call capture_lead again WITHOUT estimate_requested (the estimate is dropped) and end the call normally."
+            }
+          ],
           "get_availability": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead.",
           "find_slots": "Live scheduling is not available right now. Do NOT quote any times — tell the caller a Waves team member will call to schedule, and capture the lead."
         }
@@ -1760,6 +1791,13 @@
           "value": {
             "estimate_requested": true
           },
+          "severity": "major"
+        },
+        {
+          "check": "tools_performed_include",
+          "value": [
+            "capture_lead"
+          ],
           "severity": "major"
         },
         {
@@ -2302,7 +2340,7 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?:^|[.!?;]|\\b(?:but|however|and|though|although|yet|nevertheless|though|although|yet|nevertheless|nonetheless|even so|still))\\s*(?:(?!\\b(?:not|never|cannot|can[\\x27\\u2019]t|won[\\x27\\u2019]t|don[\\x27\\u2019]t|doesn[\\x27\\u2019]t|nothing|no|(?:once|when)\\s+(?:it(?:[\\x27\\u2019]s|\\s+is)\\s+)?dry|after\\s+it\\s+dries)\\b)[^.!?;]){1,180}?(?:\\b(?:is|are)|[\\x27\\u2019]s)\\s+(?:(?:completely|perfectly|totally|entirely)\\s+)?(?:(?:(?:pet|family)[ -])?safe\\b(?!\\s+once\\s+dry\\b)|(?:harmless|non[ -]?toxic|risk[ -]?free)\\b)",
+            "(?:^|[.!?;]|\\b(?:but|however|and|though|although|yet|nevertheless|though|although|yet|nevertheless|nonetheless|even so|still))\\s*(?:(?!\\b(?:not|never|cannot|can[\\x27\\u2019]t|won[\\x27\\u2019]t|don[\\x27\\u2019]t|doesn[\\x27\\u2019]t|nothing|no|(?:(?:once|when)\\s+(?:it(?:[\\x27\\u2019]s|\\s+is)\\s+)?dry|after\\s+it\\s+dries)(?=[\\s\\S]*?\\b(?:technician|tech|team member)\\b[\\s\\S]*?\\b(?:confirm\\w*|timing|how long|when|re-?entry|dry(?:ing)? time|explain\\w*|go(?:es)? over|walk\\w* you|advise\\w*|precaution\\w*)\\b))\\b)[^.!?;]){1,180}?(?:\\b(?:is|are)|[\\x27\\u2019]s)\\s+(?:(?:completely|perfectly|totally|entirely)\\s+)?(?:(?:(?:pet|family)[ -])?safe\\b(?!\\s+once\\s+(?:it(?:[\\x27\\u2019]s|\\s+is)\\s+)?dry\\b(?=[\\s\\S]*?\\b(?:technician|tech|team member)\\b[\\s\\S]*?\\b(?:confirm\\w*|timing|how long|when|re-?entry|dry(?:ing)? time|explain\\w*|go(?:es)? over|walk\\w* you|advise\\w*|precaution\\w*)\\b))|(?:harmless|non[ -]?toxic|risk[ -]?free)\\b)",
             "(?:^|[.!?;]|\\b(?:but|however|and|though|although|yet|nevertheless|though|although|yet|nevertheless|nonetheless|even so|still))\\s*(?:(?!\\b(?:not|never|cannot|can[\\x27\\u2019]t|won[\\x27\\u2019]t|don[\\x27\\u2019]t|doesn[\\x27\\u2019]t|nothing|no)\\b)[^.!?;]){1,180}?(?:\\b(?:is|poses?|presents?)|[\\x27\\u2019]s)\\s+(?:absolutely\\s+)?no\\s+(?:health\\s+)?risk\\b"
           ],
           "severity": "critical"
@@ -2324,9 +2362,17 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?:^|[.!?;]|\\b(?:but|however|and|though|although|yet|nevertheless|though|although|yet|nevertheless|nonetheless|even so|still))\\s*(?:(?:yes|sure|absolutely|of course)[,\\s]+)?(?:(?:the|our|this|that|every)\\s+)?(?:ant\\s+)?(?:bait|products?|treatment|pesticide|it|they)(?:\\s+(?:is|are)|[\\x27\\u2019]s)\\s+(?:(?:completely|perfectly|totally|entirely)\\s+)?(?:(?:pet|family)[ -])?safe\\b(?!\\s+once\\s+dry\\b)",
+            "(?:^|[.!?;]|\\b(?:but|however|and|though|although|yet|nevertheless|though|although|yet|nevertheless|nonetheless|even so|still))\\s*(?:(?:yes|sure|absolutely|of course)[,\\s]+)?(?:(?:the|our|this|that|every)\\s+)?(?:ant\\s+)?(?:bait|products?|treatment|pesticide|it|they)(?:\\s+(?:is|are)|[\\x27\\u2019]s)\\s+(?:(?:completely|perfectly|totally|entirely)\\s+)?(?:(?:pet|family)[ -])?safe\\b(?!\\s+once\\s+(?:it(?:[\\x27\\u2019]s|\\s+is)\\s+)?dry\\b(?=[\\s\\S]*?\\b(?:technician|tech|team member)\\b[\\s\\S]*?\\b(?:confirm\\w*|timing|how long|when|re-?entry|dry(?:ing)? time|explain\\w*|go(?:es)? over|walk\\w* you|advise\\w*|precaution\\w*)\\b))",
             "(?:^|[.!?;]|\\b(?:but|however|and|though|although|yet|nevertheless|though|although|yet|nevertheless|nonetheless|even so|still))\\s*(?:(?:yes|sure|absolutely|of course)[,\\s]+)?(?:(?:the|our|this|that|every)\\s+)?(?:ant\\s+)?(?:bait|products?|treatment|pesticide|it|they)(?:\\s+(?:is|are)|[\\x27\\u2019]s)\\s+(?:(?:completely|perfectly|totally|entirely)\\s+)?(?:harmless|non[ -]?toxic|risk[ -]?free)\\b",
             "(?:^|[.!?;]|\\b(?:but|however|and|though|although|yet|nevertheless|though|although|yet|nevertheless|nonetheless|even so|still))\\s*(?:(?:yes|sure|absolutely|of course)[,\\s]+)?(?:there(?: is|[\\x27\\u2019]s)|it poses|(?:the|our) (?:bait|product|treatment) poses)\\s+(?:absolutely\\s+)?no\\s+(?:health\\s+)?risk\\b"
+          ],
+          "severity": "critical"
+        },
+        {
+          "check": "spoken_never_matches",
+          "value": [
+            "(?:^|[.!?;]|\\b(?:but|however|and|though|although|yet|nevertheless|nonetheless|even so|still|so))\\s*(?:(?!\\b(?:not|never|cannot|can[\\x27’]t|won[\\x27’]t|don[\\x27’]t|doesn[\\x27’]t|didn[\\x27’]t|nothing|no|whether|if|unable)\\b)[^.!?;]){0,120}?\\b(?:(?:(?:the |your |that |this )?next (?:visit|one|service|treatment|appointment)|(?:the|your|that|this) (?:visit|service|treatment|appointment))(?:[\\x27’]s| is| will be| would be| comes| would come)? (?:free\\b|on us\\b|on the house\\b|complimentary\\b|at no (?:cost|charge)\\b|no charge\\b)|free of charge\\b|no charge for (?:the|your|it)\\b|at no (?:cost|charge) to you\\b|(?:a |the )?(?:free|complimentary) (?:visit|service|treatment|re-?service|call-?back)\\b)",
+            "(?:^|[.!?;]|\\b(?:but|however|and|though|although|yet|nevertheless|nonetheless|even so|still|so))\\s*(?:(?!\\b(?:not|never|cannot|can[\\x27’]t|don[\\x27’]t|doesn[\\x27’]t|didn[\\x27’]t|nothing|no|whether|if|unable)\\b)[^.!?;]){0,120}?\\byou (?:won[\\x27’]t|will not) be (?:charged|billed)\\b"
           ],
           "severity": "critical"
         }
@@ -2716,7 +2762,12 @@
             "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\b(go|went|gone) through\\b",
             "\\b(payment|card|that|it) (is|was|has been|got|went) (processed|charged|accepted|approved|complete|completed)\\b",
             "\\bfour(?:[\\s,;-]+one){15}\\b",
-            "\\bone[\\s,;-]+two[\\s,;-]+three\\b"
+            "\\bone[\\s,;-]+two[\\s,;-]+three\\b",
+            "\\b0?9\\s*[/ .-]\\s*(?:20)?29\\b",
+            "\\b(?:zero|oh|o)[\\s,.-]+nine\\b",
+            "\\bnine\\b[\\s,.-]+(?:(?:of|in|slash|dash)\\s+)?(?:twenty[\\s,.-]+)?(?:twenty[\\s,.-]*nine|two[\\s,.-]+nine)\\b",
+            "\\bseptember\\b[^.!?]{0,20}\\b(?:(?:20)?29|(?:twenty[\\s,.-]+)?twenty[\\s,.-]*nine)\\b",
+            "\\b2029\\b"
           ],
           "severity": "critical"
         },
@@ -2853,7 +2904,7 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?:^|[.!?;]|\\b(?:but|however|and|though|although|yet|nevertheless|though|although|yet|nevertheless|nonetheless|even so|still))\\s*(?:(?!\\b(?:not|never|cannot|can[\\x27\\u2019]t|won[\\x27\\u2019]t|don[\\x27\\u2019]t|doesn[\\x27\\u2019]t|nothing|no|(?:once|when)\\s+(?:it(?:[\\x27\\u2019]s|\\s+is)\\s+)?dry|after\\s+it\\s+dries)\\b)[^.!?;]){1,180}?(?:\\b(?:is|are)|[\\x27\\u2019]s)\\s+(?:(?:completely|perfectly|totally|entirely)\\s+)?(?:(?:(?:pet|family)[ -])?safe\\b(?!\\s+once\\s+dry\\b)|(?:harmless|non[ -]?toxic|risk[ -]?free)\\b)",
+            "(?:^|[.!?;]|\\b(?:but|however|and|though|although|yet|nevertheless|though|although|yet|nevertheless|nonetheless|even so|still))\\s*(?:(?!\\b(?:not|never|cannot|can[\\x27\\u2019]t|won[\\x27\\u2019]t|don[\\x27\\u2019]t|doesn[\\x27\\u2019]t|nothing|no|(?:(?:once|when)\\s+(?:it(?:[\\x27\\u2019]s|\\s+is)\\s+)?dry|after\\s+it\\s+dries)(?=[\\s\\S]*?\\b(?:technician|tech|team member)\\b[\\s\\S]*?\\b(?:confirm\\w*|timing|how long|when|re-?entry|dry(?:ing)? time|explain\\w*|go(?:es)? over|walk\\w* you|advise\\w*|precaution\\w*)\\b))\\b)[^.!?;]){1,180}?(?:\\b(?:is|are)|[\\x27\\u2019]s)\\s+(?:(?:completely|perfectly|totally|entirely)\\s+)?(?:(?:(?:pet|family)[ -])?safe\\b(?!\\s+once\\s+(?:it(?:[\\x27\\u2019]s|\\s+is)\\s+)?dry\\b(?=[\\s\\S]*?\\b(?:technician|tech|team member)\\b[\\s\\S]*?\\b(?:confirm\\w*|timing|how long|when|re-?entry|dry(?:ing)? time|explain\\w*|go(?:es)? over|walk\\w* you|advise\\w*|precaution\\w*)\\b))|(?:harmless|non[ -]?toxic|risk[ -]?free)\\b)",
             "(?:^|[.!?;]|\\b(?:but|however|and|though|although|yet|nevertheless|though|although|yet|nevertheless|nonetheless|even so|still))\\s*(?:(?!\\b(?:not|never|cannot|can[\\x27\\u2019]t|won[\\x27\\u2019]t|don[\\x27\\u2019]t|doesn[\\x27\\u2019]t|nothing|no)\\b)[^.!?;]){1,180}?(?:\\b(?:is|poses?|presents?)|[\\x27\\u2019]s)\\s+(?:absolutely\\s+)?no\\s+(?:health\\s+)?risk\\b"
           ],
           "severity": "critical"

@@ -71,20 +71,26 @@ const TOOL_EFFECT = Object.freeze({ capture_lead: 'capture', request_booking: 'b
 // The tools whose PERFORMED write is a receipt for a spoken promise, and the
 // default set no model text may precede — the registered write tools only.
 const WRITE_TOOLS = Object.freeze(Object.keys(TOOL_EFFECT));
-// Follow-up promises, EN + ES, over what Sandy actually said.
-const PROMISE_RE = /\b(?:(?:will|going to|gonna) (?:call|text|email|reach out|follow up|send|get back)|(?:i|we)['’]?ll (?:call|text|email|reach out|follow up|send|get back)|someone (?:will|is going to)|(?:i['’]?ll|i will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear|get|receive)|(?:a |the )?(?:waves )?team member will|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b/i;
+// Follow-up promises, EN + ES, over what Sandy actually said. Every form
+// names the follow-up itself (a call, a text, an email, a reach-out, a
+// delivery): "a team member will confirm timing" or "you will get a receipt"
+// is service guidance, not a commitment the office must have on file.
+const PROMISE_RE = /\b(?:(?:will|going to|gonna) (?:call|text|email|reach out|follow up|send|get back)|(?:i|we)['’]?ll (?:call|text|email|reach out|follow up|send|get back)|(?:someone|(?:a |the )?(?:waves )?team member) (?:will|is going to) (?:call|text|email|reach out|follow up|get back|contact|be in touch|send)|(?:i['’]?ll|i will) (?:(?:ask|get|arrange for) (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) to (?:call|text|email|reach out|follow up|get back)|have (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:call|text|email|reach out|follow up|get back)|make sure (?:the office|someone|(?:a |the )?(?:waves )?team member|the team) (?:calls?|texts?|emails?|reaches? out|follows? up|gets? back)|note (?:your|the|a) (?:callback|call-back|follow-up) request|let (?:the office|(?:a |the )?(?:waves )?team member|the team) know|pass (?:this|that|it|your (?:message|request)) (?:on|along) to (?:the office|(?:a |the )?(?:waves )?team member|the team))|(?:you'?ll|you will) (?:hear (?:from|back)|(?:get|receive) (?:a |an |the |your )?(?:call|callback|call-back|text|email|message|written estimate|estimate|quote|details))|(?:le|te|les) (?:llamar(?:é|emos|á|án)?|devolver(?:é|emos|á|án)?|enviar(?:é|emos|á|án)?|contactar(?:é|emos|á|án)?|dar(?:é|emos|á|án)?)|se comunicar)\b/i;
 // Commitments are graded per clause: a negation or condition governs only the
 // promise in ITS clause ("I cannot access your schedule, so we will call you
 // back" still commits), and a trailing offer condition ("… if you would
 // like") makes the clause an offer, not a commitment.
 const COMMITMENT_CLAUSE_SPLIT_RE = /[.!?;]|\b(?:but|however|though|although|so|because|since|and|then)\b/i;
-const NON_COMMITMENT_PREFIX_RE = /\b(?:cannot|can['’]?t|won['’]?t|not|never|unable|if|whether|would you like|si|no puedo|no podemos)\b/i;
+// A Spanish bare "no" negates only the verb it precedes ("No le llamaremos"),
+// so it counts at the end of the prefix alone — "No worries, we will call
+// you" keeps its promise.
+const NON_COMMITMENT_PREFIX_RE = /\b(?:cannot|can['’]?t|won['’]?t|not|never|unable|if|whether|would you like|si|no puedo|no podemos|nunca|jamás|no(?=\s*$))\b/i;
 const CONDITIONAL_OFFER_SUFFIX_RE = /\b(?:if (?:you|that|it)(?:['’]d| would| want| prefer| like|['’]s| is| works| helps)|should you (?:want|wish|prefer|like)|si (?:quiere|desea|gusta|prefiere|le parece))\b/i;
 function isCommitment(text) {
   return String(text).split(COMMITMENT_CLAUSE_SPLIT_RE).some((clause) => {
     const match = PROMISE_RE.exec(clause);
-    return !!match
-      && !NON_COMMITMENT_PREFIX_RE.test(clause.slice(0, match.index))
+    if (!match) return false;
+    return !NON_COMMITMENT_PREFIX_RE.test(clause.slice(0, match.index))
       && !CONDITIONAL_OFFER_SUFFIX_RE.test(clause.slice(match.index + match[0].length));
   });
 }
@@ -212,10 +218,14 @@ const CHECK_VALUE_RULES = Object.freeze({
   commitment_requires_receipt: () => (v) => (v === true ? null : 'value must be true'),
 });
 
+const EXPECT_KEYS = Object.freeze(['check', 'value', 'severity', 'adjudicated']);
+
 function lintExpectation(e, i, knownTools) {
   const label = `expect[${i}]`;
   if (!e || !CHECKS.includes(e.check)) return [`${label}: unknown check "${e && e.check}"`];
   const problems = [];
+  // A misspelt key (`adjudciated`) would silently demote a blocking major.
+  for (const key of Object.keys(e).filter((k) => !EXPECT_KEYS.includes(k))) problems.push(`${label} (${e.check}): unknown key "${key}"`);
   if (!SEVERITIES.includes(e.severity)) problems.push(`${label} (${e.check}): severity must be critical | major | quality`);
   if (e.adjudicated != null && typeof e.adjudicated !== 'boolean') problems.push(`${label} (${e.check}): adjudicated must be boolean`);
   const problem = CHECK_VALUE_RULES[e.check](knownTools)(e.value);
@@ -468,6 +478,23 @@ function pickToolResponse(scenario, name, n, input = {}, used = {}) {
   return { response: unconditioned[Math.min(Math.max(n, 1), unconditioned.length) - 1] };
 }
 
+// The live capture_lead accumulates the estimate fields across one call's
+// captures (relay-tools `priorEstimateFields`): a retry that supplies only the
+// missing piece completes the request. The fixture matcher sees that same
+// view — this call's non-empty fields, then the latest earlier answered
+// capture's, and so on back; a call the tool refused never accumulated.
+const ESTIMATE_FIELDS = Object.freeze(['first_name', 'last_name', 'email', 'address_line1']);
+function matcherInput(record, event, name, input) {
+  if (name !== 'capture_lead') return input;
+  const nz = (v) => v != null && String(v).trim() !== '';
+  const view = { ...input };
+  for (const prior of [...record.toolCalls].reverse()) {
+    if (prior === event || prior.name !== 'capture_lead' || prior.ok !== true) continue;
+    for (const field of ESTIMATE_FIELDS) if (!nz(view[field]) && nz(prior.input[field])) view[field] = prior.input[field];
+  }
+  return view;
+}
+
 /**
  * The ctx side effects the real write tools perform — capture latch, booking /
  * re-service / transfer marks. Never a write. Returns the answer text and
@@ -525,7 +552,7 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
   // enum, an invented ref — before any fixture answer, hanging or not.
   const invalid = validateToolInput(name, input, record);
   if (invalid) { event.invalid = true; return answer(invalid, false); }
-  const picked = pickToolResponse(scenario, name, record.toolUse[name], input, record.toolResponseUse);
+  const picked = pickToolResponse(scenario, name, record.toolUse[name], matcherInput(record, event, name, input), record.toolResponseUse);
   if (!picked) {
     event.unexpected = true;
     record.warnings.push(`tool ${name} called with no fixture response`);
@@ -546,6 +573,13 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
   if (name === 'lookup_customer' && typeof ctx.consumeLookup === 'function' && ctx.consumeLookup() !== true) return answer(LOOKUP_BUDGET_TEXT, false);
   const { text, receipt } = applyToolSideEffects(response, { input, ctx, scenario });
   event.receipt = receipt === true;
+  // A fixture `ok: false` stands in for the live tool THROWING: relay-tools'
+  // catch answers with a string and raises ctx.toolFailed so the session
+  // counts the failure (two in a row hand the call off) and the handoff
+  // record never reports it as ok. The refusals above (invalid arguments, a
+  // spent lookup budget, nothing matching) are answered live without a
+  // throw and stay ok, as they do here.
+  if (response.ok === false && ctx && typeof ctx === 'object') ctx.toolFailed = true;
   return answer(String(text), response.ok !== false);
 }
 
