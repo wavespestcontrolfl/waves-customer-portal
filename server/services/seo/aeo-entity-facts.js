@@ -20,23 +20,30 @@ function compile(def) {
   const flags = typeof def.flags === 'string' ? def.flags : 'i';
   return {
     label: def.label,
-    re: new RegExp(def.pattern, flags),
     scanRe: new RegExp(def.pattern, flags.includes('g') ? flags : `${flags}g`),
     rejectValue: typeof def.reject_value === 'string' ? def.reject_value : undefined,
   };
 }
 
-// A correct denial ("does not cover termite damage", "except fumigation") is
-// not a wrong claim. Only the same-sentence text before a match is checked, so
-// a negation in an earlier sentence cannot launder a later assertion.
-const NEGATION_RE = /\b(?:not|no|never|none|nor|without|except|excluding|other than|aside from|outside of|rather than|instead of|doesn'?t|does not|do not|don'?t|isn'?t|is not|aren'?t|are not|wasn'?t|was not|cannot|can'?t|won'?t|will not|shouldn'?t|should not|neither)\b/i;
-const NEGATION_WINDOW = 60;
+// Facts and claims are both ASSERTIONS: a match counts only when its clause
+// carries no negation. "Was not founded in 2024" earns no credit for the
+// founding-year fact; "does not cover termite damage" and "fumigation is not
+// offered" are correct denials, not wrong claims. The clause is bounded by
+// sentence punctuation or a contrastive conjunction, so "not a franchise, but
+// it offers fumigation" still flags fumigation. "no-contract" and "not only"
+// are not negations.
+const NEGATION_RE = /\b(?:not(?! only)|no(?!-)|never|none|nor|without|except|excluding|other than|aside from|outside of|rather than|instead of|doesn'?t|does not|do not|don'?t|isn'?t|is not|aren'?t|are not|wasn'?t|was not|cannot|can'?t|won'?t|will not|shouldn'?t|should not|neither)\b/i;
+const CLAUSE_BOUNDARY_RE = /[.!?;:\n]|,?\s+(?:but|however|whereas|although|though|yet)\b/i;
+const CLAUSE_WINDOW = 80;
 
-function claimAsserted(claim, answer) {
-  for (const match of answer.matchAll(claim.scanRe)) {
-    if (claim.rejectValue !== undefined && match[1] === claim.rejectValue) continue;
-    const lead = answer.slice(Math.max(0, match.index - NEGATION_WINDOW), match.index).split(/[.!?;:\n]/).pop();
-    if (NEGATION_RE.test(lead)) continue;
+function asserted(compiled, answer) {
+  for (const match of answer.matchAll(compiled.scanRe)) {
+    if (compiled.rejectValue !== undefined && match[1] === compiled.rejectValue) continue;
+    const start = match.index;
+    const end = start + match[0].length;
+    const before = answer.slice(Math.max(0, start - CLAUSE_WINDOW), start).split(CLAUSE_BOUNDARY_RE).pop();
+    const after = answer.slice(end, end + CLAUSE_WINDOW).split(CLAUSE_BOUNDARY_RE)[0];
+    if (NEGATION_RE.test(before) || NEGATION_RE.test(after)) continue;
     return true;
   }
   return false;
@@ -69,10 +76,10 @@ function scoreEntityAnswer(query, text) {
   if (!question) return null;
   const answer = String(text || '');
   const expected = {};
-  for (const key of question.expect) expected[key] = FACTS[key].re.test(answer);
+  for (const key of question.expect) expected[key] = asserted(FACTS[key], answer);
   const forbidden = {};
   for (const key of new Set([...cohort.global_forbid, ...question.forbid])) {
-    forbidden[key] = claimAsserted(CLAIMS[key], answer);
+    forbidden[key] = asserted(CLAIMS[key], answer);
   }
   const right = Object.values(expected).filter(Boolean).length;
   return {

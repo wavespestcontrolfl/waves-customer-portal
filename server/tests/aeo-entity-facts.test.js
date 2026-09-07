@@ -45,10 +45,23 @@ test('founding year: 2024 is right; any other asserted year, earlier or later, i
   expect(score('E4', 'It was not founded in 2019; it was founded in 2024.').forbidden.wrong_founding_year).toBe(false);
 });
 
-test('a same-sentence denial is not a wrong claim, but a negation in an earlier sentence does not launder one', () => {
+test('a denial in the same clause is not a wrong claim, whether it comes before or after the claim', () => {
   expect(score('E7', 'The bond does not cover termite damage repairs. Re-treatment is not free.').forbidden).toMatchObject({ damage_repair_coverage: false, free_retreat_guarantee: false });
-  expect(score('E7', 'Waves is not a national chain. The bond covers termite damage repairs.').forbidden.damage_repair_coverage).toBe(true);
+  expect(score('E6', 'Fumigation is not offered by Waves Pest Control.').forbidden.fumigation_offered).toBe(false);
   expect(score('E8', 'Waves is not an Orkin location, rather than a franchise of anyone.').forbidden.franchise).toBe(false);
+});
+
+test('a negation in another sentence or a contrasting clause does not launder a claim', () => {
+  expect(score('E7', 'Waves is not a national chain. The bond covers termite damage repairs.').forbidden.damage_repair_coverage).toBe(true);
+  expect(score('E6', 'Waves is not a franchise, but it offers fumigation.').forbidden).toMatchObject({ franchise: false, fumigation_offered: true });
+  expect(score('E6', 'Waves does not do wildlife trapping; however, it does provide fumigation.').forbidden.fumigation_offered).toBe(true);
+});
+
+test('a denied expected fact earns no credit; "no-contract" and "not only" are not denials', () => {
+  expect(score('E4', 'Waves Pest Control was not founded in 2024.')).toMatchObject({ expected: { founded_2024: false }, forbidden: { wrong_founding_year: false }, missing: 1, wrong: 0 });
+  expect(score('E1', 'Adam Benetti does not own Waves Pest Control.')).toMatchObject({ expected: { founder: false }, missing: 1 });
+  expect(score('E1', 'Waves Pest Control is not a franchise; it is owned by Adam Benetti.').expected.founder).toBe(true);
+  expect(score('E6', 'Waves offers no-contract pest control and not only lawn care but termite and mosquito and rodent work.')).toMatchObject({ right: 5, missing: 0 });
 });
 
 test('ownership: another capitalized name is a wrong founder; Adam is not', () => {
