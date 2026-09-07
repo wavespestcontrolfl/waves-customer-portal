@@ -21,7 +21,6 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 
 ## CI green gate (separate from the trigger check above)
 - [ ] The `tests` run for the FINAL head **concluded `success`** — `gh pr checks <n>` shows every job pass. `verify-pr-checks.sh` proves CI is ALIVE, not that it passed, and exits 0 on a run that is still in progress or that failed/was cancelled/skipped. Nothing else in this checklist requires a green conclusion, so without this box an operator can satisfy every item and merge on red CI.
-- [ ] Diff adds or changes a repo-scanning gate (`scripts/check-*.js`, an `npm run check:*` step in the `gates` job) → re-run that gate on a fresh merge with `origin/main` right before merging (`git fetch origin && git merge origin/main` in the worktree, then the check; if anything changed, push it and the box above re-applies: wait for the `tests` run on that NEW head to conclude `success` — pushing only starts CI, it does not pass it). A green `tests` run proves the gate only against main as of that run — later merges to main can carry the very sites or patterns the gate rejects, and main goes red on its first post-merge run.
 
 ## Codex gate (all, on the FINAL commit)
 - [ ] Codex completed on the final HEAD: either the clean issue comment (Reviewed-commit SHA == final HEAD) or a review whose findings anchor to the final HEAD
@@ -36,6 +35,7 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 - [ ] Otherwise: the task authorizes shipping and does not restrict merging — merge when clean is the standing default under waves-ship §5, with no separate merge prompt. Both the final-HEAD CI and Codex gates above passed (an unevaluated or re-disputed P0/P1 rebuttal still blocks)
 - [ ] If the PR was just un-drafted: the deeper un-draft review has completed on the final HEAD
 - [ ] Squash commit message checked — it comes from the commit message (written from a file), not the PR title
+- [ ] **Last box before `gh pr merge`, after every wait above** — diff adds or changes a repo-scanning gate (`scripts/check-*.js`, an `npm run check:*` step in the `gates` job) → `git fetch origin && git merge origin/main` in the worktree and re-run that gate NOW. Fast-forward/no-op → merge. Anything changed → push it, then go back to the CI green gate and the Codex gate for the NEW head (pushing only starts CI; Codex must complete on the new SHA), and repeat this box. A green run proves the gate only against main as of that run, and the 15-min Codex wait is itself a window in which main can take the very sites or patterns the gate rejects.
 
 ## Post-merge
 - [ ] Final commit landed: `gh pr view <n> --json headRefOid` == final push SHA (squash rewrites SHAs — ancestry check only valid for true merge commits)
