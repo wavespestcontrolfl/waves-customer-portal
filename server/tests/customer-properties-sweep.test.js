@@ -12,7 +12,10 @@ const logger = require('../services/logger');
 // mirror row (FOR UPDATE is a no-op); `customer_properties` reads answer
 // from `props`; insert appends. transaction(fn) hands back the same fake
 // (top-level and the core's nested savepoint alike).
-function installDb({ candidates = [], customersById = {}, props = {}, insertError = null } = {}) {
+// `appearOnLock`: rows that land for a customer BETWEEN candidate selection
+// and the FOR UPDATE (a concurrent lazy read committing its primary) — the
+// re-check must see them, the selection must not.
+function installDb({ candidates = [], customersById = {}, props = {}, insertError = null, appearOnLock = {} } = {}) {
   const inserted = [];
   const chain = (table) => {
     const q = {
@@ -21,7 +24,7 @@ function installDb({ candidates = [], customersById = {}, props = {}, insertErro
       modify: (cb) => { cb(q); return q; },
       whereNotIn: (col, ids) => { q._excluded = ids; return q; },
       limit: (n) => { q._limit = n; return q; },
-      forUpdate: () => q,
+      forUpdate: () => { if (appearOnLock[q._id]) props[q._id] = appearOnLock[q._id]; return q; },
       where: (arg) => { if (arg && typeof arg === 'object') q._id = arg.id || arg.customer_id || null; return q; },
       // Candidate list mirrors the real predicate: a customer that now HAS a
       // property row (created this run) drops out; excluded ids drop out.
@@ -67,7 +70,7 @@ describe('sweepMissingPrimaryProperties (daily primary backstop)', () => {
     const { inserted } = installDb({
       candidates: ['gone', 'blank', 'raced'],
       customersById: { gone: live('gone', { deleted_at: new Date() }), blank: live('blank', { address_line1: '   ' }), raced: live('raced') },
-      props: { raced: [{ id: 'p-existing', is_primary: true, active: true }] },
+      appearOnLock: { raced: [{ id: 'p-existing', is_primary: true, active: true }] },
     });
     expect(await sweepMissingPrimaryProperties()).toEqual({ checked: 3, created: 0, skipped: 3, failed: 0 });
     expect(inserted).toHaveLength(0);
