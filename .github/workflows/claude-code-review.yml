@@ -80,7 +80,13 @@ jobs:
           # Opus 5 is the review model. Swap to claude-fable-5-1 for the
           # strongest (and most expensive) pass; every push re-reviews, so
           # weigh cost per PR round before doing that.
+          # --setting-sources user: never load this checkout's .claude/settings.json
+          # (its allowlist approves npm commands, which a PR-controlled
+          # package.json could weaponize) — the allow/deny lists below are the
+          # whole permission set. CLAUDE.md is then not auto-loaded either;
+          # the prompt tells the reviewer to read it and AGENTS.md explicitly.
           claude_args: |
+            --setting-sources user
             --model claude-opus-5
             --max-turns 120
             --allowedTools "Agent,Task,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr checks:*),Bash(git log:*),Bash(git blame:*),Bash(git show:*),Bash(git diff:*)"
