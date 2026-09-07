@@ -25,7 +25,7 @@ const normalizeName = value => String(value || '').toLowerCase().replace(/[’']
 // Overlapping selectors matter: "update customer Jhon" must still inspect
 // "customer Jhon" after seeing "update customer".
 const PERSON_ACTIONS = 'reply|respond|send|email|text|sms|message|reminder|contact|notify|quote|schedule|reschedule|move|call|remind|cancel|book|archive|delete|merge|pause|reactivate|restore|refund|charge|invoice|credit|change|update';
-const PERSON_SELECTOR_SOURCE = `(?:${PERSON_ACTIONS})(?:\\s+(?:to|for))?|for|customer|named`;
+const PERSON_SELECTOR_SOURCE = `(?:${PERSON_ACTIONS})(?:\\s+(?:to|for))?|for|customer|named|both|these customers|all of these`;
 const PERSON_REFERENCE = new RegExp(`\\b(?=((?:${PERSON_SELECTOR_SOURCE}))\\s+([\\p{L}'-]+)\\b)`, 'gu');
 const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'using', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
@@ -106,7 +106,8 @@ function namesTargetCustomer(clause, customer) {
   const before = clause.slice(0, offset).trim();
   if (!before || before === 'please') return true;
   return new RegExp(`\\b(?:${PERSON_SELECTOR_SOURCE})(?:\\s+both)?$`).test(before)
-    || (/\bboth\b/.test(clause) && /\band$/.test(before));
+    || /\b(?:both|these customers|all of these)$/.test(before)
+    || (/\b(?:both|these customers|all of these)\b/.test(clause) && /\band$/.test(before));
 }
 
 async function namedCustomers(prompt) {
@@ -219,6 +220,19 @@ async function loadPage(pageData, prompt) {
 function candidateSelection(candidates, prompt, viewedCustomer, complete) {
   if (!complete) return { target: null, targets: [], ambiguous: true };
   const labels = candidates.map(c => normalizeName(c.label));
+  const requestedSet = targetClause(prompt).split(/\b(?:both|these customers|all of these)\s+/i)[1];
+  if (requestedSet) {
+    const members = requestedSet.split(/\s+and\s+|\s*,\s*/i).filter(Boolean)
+      .map(member => normalizeName(member).replace(/^(?:(?:(?:the\s+)?customer|named)\s+)+/, ''));
+    const namesMembers = members.some(member => labels.some(label => member === label || member.startsWith(`${label} `)));
+    // A valid subset cannot stand in for the complete requested cohort.
+    const resolved = members.map((member, index) => labels.filter(label => member === label
+      || (index === members.length - 1 && member.startsWith(`${label} `)
+        && AFTER_SINGLE_NAME.has(member.slice(label.length + 1).split(' ')[0]))));
+    if (namesMembers && (members.length < 2 || resolved.some(matches => matches.length !== 1))) {
+      return { target: null, targets: [], ambiguous: true };
+    }
+  }
   const namedSet = candidates.length > 1 && new Set(labels).size === candidates.length
     && /\b(?:both|these customers|all of these)\b/i.test(prompt)
     && labels.every(label => normalizeName(prompt).includes(label));
@@ -241,11 +255,12 @@ async function resolve({ prompt, pageData, selectedTarget }) {
   let selection = candidateSelection(candidates, prompt, page.customer, namedResult.complete);
   if (selectedTarget?.customer_id) {
     const selected = await customerById(selectedTarget.customer_id);
-    if (!selected || (named.length && !named.some(c => c.id === selected.id))) {
+    if (!selected || ((namesRequested(prompt) || named.length || !namedResult.complete) && !named.some(c => c.id === selected.id))
+      || (selection.ambiguous && /\b(?:both|these customers|all of these)\b/i.test(targetClause(prompt)))) {
       return { error: 'The selected customer conflicts with the current request', code: 'context_mismatch' };
     }
     const target = customerTarget(selected, 'operator_selection');
-    selection = { target, targets: [target], ambiguous: false };
+    if (selection.targets.length < 2) selection = { target, targets: [target], ambiguous: false };
   }
   // Only the leading recipient expression establishes a raw contact. A later
   // "text <number>" inside a note or an unresolved person's message is data.

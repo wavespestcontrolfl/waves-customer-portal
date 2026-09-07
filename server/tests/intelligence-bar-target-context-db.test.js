@@ -102,6 +102,49 @@ suite('IB target resolution against isolated PostgreSQL', () => {
     }
   });
 
+  test('converted-lead email ownership scopes search, thread reads and drafts, including mixed and changed links', async () => {
+    const foreignId = randomUUID(), ownLead = randomUUID(), foreignLead = randomUUID();
+    await mockDb('customers').insert({ id: foreignId, first_name: 'Synthetic', last_name: 'Leadmail', phone: '+15550109877' });
+    await mockDb('leads').insert([{ id: ownLead, customer_id: customerId }, { id: foreignLead, customer_id: foreignId }]);
+    const owned = randomUUID(), mixed = randomUUID(), conflicting = randomUUID();
+    const ownEmail = randomUUID();
+    const email = (thread, customer_id, lead_id, id = randomUUID()) => ({ id, gmail_id: randomUUID(), gmail_thread_id: thread,
+      customer_id, lead_id, from_address: 'fixture@example.invalid', from_name: 'Synthetic Lead Sender', subject: 'Synthetic lead-linked email',
+      body_text: thread === owned ? 'Owned converted-lead content' : 'Foreign converted-lead content', received_at: new Date() });
+    await mockDb('emails').insert([
+      email(owned, null, ownLead, ownEmail), email(owned, null, null),
+      email(mixed, customerId, null), email(mixed, null, foreignLead),
+      email(conflicting, customerId, foreignLead),
+    ]);
+    const scope = { readCustomerIds: [customerId] };
+    const search = () => executeEmailTool('search_emails', { from: 'Synthetic Lead Sender' }, scope);
+    expect((await search()).results.map(row => row.gmail_thread_id)).toEqual([owned, owned]);
+    expect(await executeEmailTool('get_email_thread', { thread_id: owned }, scope)).toMatchObject({ thread_id: owned, message_count: 2 });
+    const oldKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'synthetic-controlled-adapter';
+    mockDraft.mockClear();
+    try {
+      expect(await executeEmailTool('draft_email_reply', { email_id: ownEmail }, scope)).toMatchObject({ draft: true, reply_draft: 'Synthetic draft' });
+      expect(mockDraft).toHaveBeenCalledTimes(1);
+      for (const thread_id of [mixed, conflicting]) {
+        expect(await executeEmailTool('get_email_thread', { thread_id }, scope)).toMatchObject({ code: 'target_clarification_required' });
+        expect(await executeEmailTool('draft_email_reply', { thread_id }, scope)).toMatchObject({ code: 'target_clarification_required' });
+      }
+      // Even a task containing both customers cannot bless contradictory links.
+      expect(await executeEmailTool('get_email_thread', { thread_id: conflicting }, { readCustomerIds: [customerId, foreignId] }))
+        .toMatchObject({ code: 'target_clarification_required' });
+      for (const changes of [{ customer_id: foreignId }, { customer_id: customerId, deleted_at: new Date() }]) {
+        await mockDb('leads').where('id', ownLead).update(changes);
+        expect((await search()).results).toEqual([]);
+        expect(await executeEmailTool('get_email_thread', { thread_id: owned }, scope)).toMatchObject({ code: 'target_clarification_required' });
+        expect(await executeEmailTool('draft_email_reply', { email_id: ownEmail }, scope)).toMatchObject({ code: 'target_clarification_required' });
+      }
+      expect(mockDraft).toHaveBeenCalledTimes(1);
+    } finally {
+      if (oldKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = oldKey;
+    }
+  });
+
 
   test('selector-free call history inherits the resolved customer and reads only its persisted calls', async () => {
     const foreignId = randomUUID(), ownCall = randomUUID(), foreignCall = randomUUID();
