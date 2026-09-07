@@ -178,23 +178,29 @@ router.post('/call', async (req, res, next) => {
     // One bridge at a time to this customer: the panel's Call lock is a
     // timer, not call state, so a tap after it lapses (or from a reloaded
     // page) must not ring the tech and dial the customer again while the
-    // first bridge is still ringing or connected (codex #4072 r8 P2).
-    const active = await activeBridgeCall({ source: 'tech-click', customerId: target.customer.id });
-    if (active) {
-      return res.status(409).json({ error: 'A call to this customer from your line is still ringing or connected', code: 'CALL_IN_FLIGHT' });
-    }
-
-    let bridged;
+    // first bridge is still ringing or connected (codex #4072 r8 P2). The
+    // check and the bridge (whose first act is the call_log insert) run
+    // under a per-customer transaction advisory lock, so two concurrent
+    // taps — two open PWAs — cannot both pass the check before either row
+    // exists (r9 P2): the second waits for the first to commit its row, then
+    // sees it. The transaction carries only the lock; the row itself
+    // commits with placeBridgeCall.
+    let bridged = null;
     try {
-      bridged = await placeBridgeCall({
-        to: target.to,
-        bridgePhone: ctx.cell,
-        from: ctx.line.number,
-        customer: target.customer,
-        source: 'tech-click',
-        adminUserId: req.technicianId,
-        metadata: { scheduledServiceId: target.visit.id },
-        leadName: [target.customer.first_name, target.customer.last_name].filter(Boolean).join(' ').trim(),
+      bridged = await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`tech-bridge:${target.customer.id}`]);
+        const active = await activeBridgeCall({ source: 'tech-click', customerId: target.customer.id, database: trx });
+        if (active) return null;
+        return placeBridgeCall({
+          to: target.to,
+          bridgePhone: ctx.cell,
+          from: ctx.line.number,
+          customer: target.customer,
+          source: 'tech-click',
+          adminUserId: req.technicianId,
+          metadata: { scheduledServiceId: target.visit.id },
+          leadName: [target.customer.first_name, target.customer.last_name].filter(Boolean).join(' ').trim(),
+        });
       });
     } catch (err) {
       if (err.code === 'TWILIO_NOT_CONFIGURED') return res.status(500).json({ error: 'Twilio not configured' });
@@ -205,6 +211,9 @@ router.post('/call', async (req, res, next) => {
         errorMessage: err.message, from: ctx.line.number, to: ctx.cell, link: '/admin/communications',
       }).catch((alertErr) => logger.error(`[twilio-alerts] async notification failed: ${alertErr.message}`));
       return next(sanitized(err, 'call'));
+    }
+    if (!bridged) {
+      return res.status(409).json({ error: 'A call to this customer from your line is still ringing or connected', code: 'CALL_IN_FLIGHT' });
     }
     res.json({ success: true, callSid: bridged.callSid, callLogId: bridged.callLogId, from: publicLine(ctx) });
   } catch (err) { next(sanitized(err, 'call')); }

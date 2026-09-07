@@ -105,9 +105,9 @@ const ACTIVE_BRIDGE_WINDOW_MS = 15 * 60 * 1000;
  * connected, so a second bridge must not originate. A row Twilio never called
  * back on ages out of the window rather than locking the caller out for good.
  */
-async function activeBridgeCall({ source, customerId, withinMs = ACTIVE_BRIDGE_WINDOW_MS }) {
+async function activeBridgeCall({ source, customerId, withinMs = ACTIVE_BRIDGE_WINDOW_MS, database = db }) {
   if (!source || !customerId) return null;
-  return db('call_log')
+  return database('call_log')
     .where({ source, customer_id: customerId, direction: 'outbound' })
     .whereNotIn('status', TERMINAL_CALL_STATUSES)
     .where('created_at', '>', new Date(Date.now() - withinMs))

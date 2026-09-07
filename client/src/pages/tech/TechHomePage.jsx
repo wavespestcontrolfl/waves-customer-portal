@@ -40,7 +40,7 @@
 // - Route refresh: when a service status changes, does the rest of
 //   the day's route re-fetch / re-render correctly? Stale rows are
 //   common here.
-import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { io } from 'socket.io-client';
 import { useNavigate } from 'react-router-dom';
@@ -224,9 +224,16 @@ export default function TechHomePage() {
   // error, codex #4072 r5 P2); only an authoritative { line: null } shows
   // the personal links.
   const [techLine, setTechLine] = useState({ unknown: true });
+  // Overlapping refreshes start overlapping lookups; only the NEWEST one
+  // may set state — an older `{ line: null }` landing last would expose
+  // the personal links after an assignment, an older assigned-line answer
+  // would restore the buttons after a revoke (codex #4072 r9 P2).
+  const lineLookupSeq = useRef(0);
   const fetchTechLine = useCallback(async () => {
+    const seq = ++lineLookupSeq.current;
     try {
       const d = await techRequest('/tech/line');
+      if (seq !== lineLookupSeq.current) return;
       setTechLine(d?.line ? d : null);
     } catch { /* keep the last known line */ }
   }, []);

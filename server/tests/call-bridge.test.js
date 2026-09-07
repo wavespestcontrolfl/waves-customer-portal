@@ -94,6 +94,14 @@ describe('activeBridgeCall', () => {
     expect(before - since.getTime()).toBeLessThan(15 * 60 * 1000 + 5000);
   });
 
+  test('runs on the caller\'s transaction when one is given (the interlock\'s advisory-lock trx)', async () => {
+    const chain = { where: jest.fn(() => chain), whereNotIn: jest.fn(() => chain), orderBy: jest.fn(() => chain), first: jest.fn(async () => null) };
+    const trx = jest.fn(() => chain);
+    db.mockImplementation(() => { throw new Error('must use the trx'); });
+    expect(await activeBridgeCall({ source: 'tech-click', customerId: 'c1', database: trx })).toBeNull();
+    expect(trx).toHaveBeenCalledWith('call_log');
+  });
+
   test('no customer or source → null without a query', async () => {
     db.mockImplementation(() => { throw new Error('must not query'); });
     expect(await activeBridgeCall({ source: 'tech-click', customerId: null })).toBeNull();

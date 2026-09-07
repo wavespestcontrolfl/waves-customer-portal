@@ -63,7 +63,14 @@ function primeVisit({ visit = { id: VISIT, customer_id: 'c1', technician_id: 'te
   });
 }
 
-beforeEach(() => { jest.clearAllMocks(); techLineContext.mockResolvedValue(CTX); isEnabled.mockReturnValue(true); });
+// The bridge interlock runs under a per-customer transaction advisory lock.
+const trx = { raw: jest.fn(async () => ({})) };
+beforeEach(() => {
+  jest.clearAllMocks();
+  techLineContext.mockResolvedValue(CTX);
+  isEnabled.mockReturnValue(true);
+  db.transaction = jest.fn(async (fn) => fn(trx));
+});
 
 describe('GET /', () => {
   test('reports the line and whether calls can bridge', async () => {
@@ -207,6 +214,11 @@ describe('POST /call', () => {
       metadata: { scheduledServiceId: VISIT }, leadName: 'Pat Sample',
     });
     expect(r.body).toEqual({ success: true, callSid: 'CA-1', callLogId: 'log-1', from: LINE });
+    // Check + bridge ran inside the lock's transaction (codex #4072 r9 P2).
+    expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['tech-bridge:c1']);
+    expect(activeBridgeCall).toHaveBeenCalledWith({ source: 'tech-click', customerId: 'c1', database: trx });
+    expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(activeBridgeCall.mock.invocationCallOrder[0]);
+    expect(activeBridgeCall.mock.invocationCallOrder[0]).toBeLessThan(placeBridgeCall.mock.invocationCallOrder[0]);
   });
 
   test('a bridge still ringing or connected → 409 CALL_IN_FLIGHT, no second Twilio call (codex #4072 r8 P2)', async () => {
@@ -215,7 +227,7 @@ describe('POST /call', () => {
     const r = await call('post', '/call', { body: { scheduledServiceId: VISIT } });
     expect(r.statusCode).toBe(409);
     expect(r.body.code).toBe('CALL_IN_FLIGHT');
-    expect(activeBridgeCall).toHaveBeenCalledWith({ source: 'tech-click', customerId: 'c1' });
+    expect(activeBridgeCall).toHaveBeenCalledWith({ source: 'tech-click', customerId: 'c1', database: trx });
     expect(placeBridgeCall).not.toHaveBeenCalled();
   });
 
