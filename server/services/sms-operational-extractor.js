@@ -8,7 +8,7 @@ const { COMMITMENT_KINDS, kindBelongsToParty, parseDueAt } = require('./call-com
 const { parseQuotedETDeadline } = require('../utils/datetime-et');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
 
-const VERSION = 'sms-operations-v10';
+const VERSION = 'sms-operations-v11';
 const FACT_FIELDS = Object.freeze([
   'contact_preference', 'irrigation_controller_location', 'irrigation_schedule_notes',
   'irrigation_issues', 'parking_notes', 'pet_details', 'access_notes', 'special_instructions',
@@ -76,9 +76,13 @@ function explicitContactPreference(quote) {
 // Questions in SMS frequently omit punctuation. Check every clause, not only
 // the start of the message, and normalize compatibility question marks.
 const INTERROGATIVE = /(?:^|[.!;:\n]\s*)(?:(?:and|but|also|however|please)[, ]+)?(?:(?:are|is|am|was|were|do(?!\s+not\b)|does|did|can|could|would|should|will|won't|have|has|had|may|might|shall|what|where|when|why|who|whose|which|how)\b|ok(?:ay)? (?:to|if)\b|mind if\b)/i;
+// Indirect questions do not invert the subject and auxiliary. Keep the
+// inquiry verb and its embedded question in the same clause; any such
+// clause makes a whole-message fact unsuitable for automatic persistence.
+const INDIRECT_INTERROGATIVE = /\b(?:wonder(?:ing|ed|s)?|ask(?:ing|ed|s)?|know|confirm|clarify)\b[^.!?;:\n]*\b(?:if|whether|what|where|when|why|who|whose|which|how)\b/i;
 function isQuestionSource(source) {
   const text = String(source || '').normalize('NFKC');
-  return /[?¿؟]/u.test(text) || INTERROGATIVE.test(text);
+  return /[?¿؟]/u.test(text) || INTERROGATIVE.test(text) || INDIRECT_INTERROGATIVE.test(text);
 }
 
 function matchesExplicitAccessCode({ quote, field, value }) {

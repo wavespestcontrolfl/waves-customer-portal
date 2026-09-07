@@ -189,6 +189,32 @@ describe('SMS operational evidence and ownership', () => {
     })).toEqual({ obligations: [], facts: [], dropped: 1 });
   });
 
+  test.each([
+    'I was wondering if you could leave the side gate open',
+    'I wonder if you could leave the side gate open',
+    'I wanted to ask whether you could leave the side gate open',
+    'We were just wondering whether the gate should stay open',
+    'I am asking if you can park in the driveway',
+    'I would like to know if the gate can stay open',
+    'Please confirm whether we should leave the gate open',
+    'The side gate is unlocked. I wanted to ask how you enter',
+    'The controller is outside; wondering where we should leave the key',
+  ])('indirect questions cannot become durable access instructions: %s', (quote) => {
+    expect(groundExtraction(extracted([], [fact({ field: 'access_notes', quote, value: quote })]), {
+      message: source(quote), properties,
+    })).toEqual({ obligations: [], facts: [], dropped: 1 });
+  });
+
+  test.each([
+    'Leave the side gate closed.',
+    'Please ask before entering the yard.',
+    'The controller is beside the garage.',
+  ])('explicit instructions and reported facts remain grounded: %s', (quote) => {
+    const item = fact({ field: 'access_notes', quote, value: quote });
+    expect(groundExtraction(extracted([], [item]), { message: source(quote), properties }))
+      .toEqual({ obligations: [], facts: [item], dropped: 0 });
+  });
+
   test.each(['unknown', 'none', 'not known', 'not available', 'unsure', 'N A', 'same as last time', 'the usual',
     'on the fridge'])('missing or relational access code remains empty: %s', (value) => {
     const quote = `Lockbox code is ${value}`;
