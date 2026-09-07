@@ -171,10 +171,24 @@ function checkCoverage(current, manifest, policy, baselineProof = new Set()) {
 
 function verifiedBaselineProof(current, manifest) {
   const stored = new Map(manifest.actions.map(action => [action.id, action]));
+  const currentIds = new Set(current.map(action => action.id));
+  const relocationCounts = new Map();
+  for (const action of current) {
+    const from = stored.get(action.id)?.relocatedFrom;
+    if (from) relocationCounts.set(from, (relocationCounts.get(from) || 0) + 1);
+  }
   const proof = new Set(), sources = new Map(), revisions = new Map();
   for (const action of current) {
     const previous = stored.get(action.id);
     if (previous?.baselineFingerprint !== action.fingerprint) continue;
+    const original = stored.get(previous.relocatedFrom);
+    // An explicitly reviewed move of an unchanged call retains its unsupported
+    // status. It cannot cover a copy, a payload change, or source never on main.
+    const relocated = original && !currentIds.has(original.id) && relocationCounts.get(original.id) === 1
+      && original.status === 'unmapped' && original.baselineFingerprint === action.fingerprint
+      && original.ui.file === action.ui.file
+      && typeof previous.relocationReview === 'string' && previous.relocationReview.trim();
+    if (previous.relocatedFrom && !relocated) continue;
     const ref = previous.baselineSource || manifest.baselineCommit;
     // Baseline allowances may only name source already merged on main.
     // A contributor's new call plus a matching JSON row is not a baseline.
@@ -195,7 +209,8 @@ function verifiedBaselineProof(current, manifest) {
       } catch { sources.set(key, new Set()); }
     }
     const identity = `${action.id}:${action.fingerprint}`;
-    if (sources.get(key).has(identity)) proof.add(identity);
+    const sourceIdentity = `${relocated ? original.id : action.id}:${action.fingerprint}`;
+    if (sources.get(key).has(sourceIdentity)) proof.add(identity);
   }
   return proof;
 }

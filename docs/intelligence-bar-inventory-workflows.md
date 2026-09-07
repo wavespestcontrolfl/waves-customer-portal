@@ -2,7 +2,9 @@
 
 This Phase 2 change shares manual stock/restock operations between the inventory
 portal and the existing Intelligence Bar. It resolves inventory requests from
-Estimates without pretending a saved restock request is a supplier order.
+the global Estimates/Pipeline surface without pretending a saved restock request
+is a supplier order. The dedicated Agent Estimate page still needs its own
+platform-discovery integration and is not yet verified.
 Full inventory and platform parity remain incomplete.
 
 ## Implemented scope
@@ -20,19 +22,27 @@ isolation. These four census entries are **partially_verified**, with admin
 evidence and an explicit remaining technician scope. They remain in the
 unsupported/unverified denominator. No role parity is claimed.
 
-The census retains 1,735 UI sites: four verified property sites, four partially
-verified inventory sites, ten transport exceptions and 1,721 sites still counted
-as unsupported/unverified (including those four inventory sites). One additional
-stats site records the exact unchanged request moved into `useCallback`; its
-original unsupported entry is retained. The check accepts partial entries only
-with registered tools, evidence, reviewed fingerprints, tested scopes, and named
-remaining gaps. It never counts them as complete parity.
+The census retains 1,750 UI sites: four verified property sites, four partially
+verified inventory sites, eight transport/navigation exceptions and 1,738 sites
+still unsupported/unverified (including the four inventory sites). An unchanged
+stats request moved into a callback; its old row remains, and Git proves the
+identical call existed on main before allowing the relocation as still unmapped.
+Copies, changed payloads, absent provenance, missing review, and a still-present
+original site cannot use that allowance. The receipt link is navigation to an
+already verified result, not an additional domain capability.
 
 ## Safety and completion truth
 
 - Existing actor/hash/expiry confirmation remains authoritative. Model fields
   cannot provide confirmation or the fresh inventory version. Revoked roles block
   before domain mutation and persist a blocked receipt; old approvals cannot replay.
+- The current operator request establishes the product. A fresh shared catalog
+  lookup preserves full formulation punctuation and refuses duplicate exact names,
+  partial-search truncation, unrelated model IDs/names and product IDs in message
+  or note bodies. Explicit UUIDs and deictic inventory selections are checked
+  against the preview. Named restock requests resolve through the current queue,
+  filtered by product before a two-row ambiguity limit; explicit request IDs and
+  viewed requests cannot be substituted, even for the same product.
 - Exact product ID and full-precision product/request versions bind approval.
   The domain rechecks under locks; a stock or identity change requires a fresh
   preview. Ambiguous names return candidates with formulation/package/SKU data.
@@ -58,38 +68,51 @@ remaining gaps. It never counts them as complete parity.
 
 ## Verification
 
-- Twelve real Express/auth/registry/shared-domain/Postgres cases pass in
-  `server/tests/intelligence-bar-inventory-db.test.js`. The model adapter is
-  scripted. Independent row reads verify request IDs, quantities, unit/actor
-  parity, untouched viewed customers, zero order submission, stock changes,
-  stale approvals, replay, revoked roles, staff-recorded orders and cancellations,
-  concurrent request/receive behavior, invalid amounts,
-  impossible deadlines, preserved notes, packaged quantities and late orders.
-- Stock/write-gate suites pass 58 tests. The coverage suite passes four tests.
-  The initial combined run passed all 71 tests; the integrated database suite passes all twelve cases. CI explicitly runs the inventory database
-  suite against its disposable migrated Postgres service.
-- Client suites pass 27 tests: 17 global bar, eight receipt-card and two inventory
-  refresh cases. The refresh cases resolve responses out of order and verify
-  product filters, movements, pinned request links and clearing the queue filter.
-- The 48-case legacy inventory costing suite passes. Its fixture now retains
-  product UPDATE values for the shared service’s persisted-state verification;
-  the production read-back check remains intact. Independent review found no
-  actionable issues in this repair or the two additional operation cases.
-- Production build, portal-brand and coverage checks pass. New shared domain
-  functions and the coverage check have no structural warnings. Legacy route,
-  inventory page and receipt-card functions retain warnings.
-- Chrome/Playwright at 1440×1050 and 390×844 uses the actual Estimates/Pipeline,
-  inventory queue and expanded-product pages. Each viewport saves a request from
-  Estimates, opens its persisted record, records a staff-placed order, receives
-  stock, changes the physical count, cancels a second request, and verifies automatic refresh plus independent database state. Stock
-  moves 10 → 12 → 15 with two movement rows and no supplier order. No JS exceptions
-  or page-width overflow. Disabled thread reads and the unmounted communications unread-count route
-  return 404s in the isolated harness.
-  Artifacts are `.local/ib-inventory-*-saved.png`, `*-queue.png`,
-  `*-received-refresh.png`, `*-stock-refresh.png` and browser evidence JSON.
-- The checked local preview is `http://127.0.0.1:5292/admin/estimates` while the
-  synthetic harness runs; the application redirects to Pipeline’s Estimates tab.
-  No live-model evaluation or supplier integration delivery is claimed.
+- `node .local/run-ib-test.cjs tests/intelligence-bar-inventory-db.test.js`:
+  **21 real PostgreSQL cases pass** (91.09 seconds), using actual Express/auth,
+  registry, shared domain operations and an isolated dev database with a scripted
+  model. Independent reads cover persisted IDs/quantities/actors, portal/bar
+  equivalence, untouched viewed customers, zero order submission, stale versions,
+  replay, concurrent requests/receives, invalid amounts/dates, saved notes,
+  package conversion, late-order receipt, revoked roles, exact formulation,
+  duplicate names, untrusted content, and request substitution.
+- Four server suites (`intelligence-bar-stock-tools`, `write-gate-contract`,
+  `action-registry`, `target-context`) pass **197 tests** before the additional ID-alternative regression. The final
+  registry/tool-definition check passes 20 tests, including that new regression.
+  A focused real-DB ID-only vendor comparison also passes (the other 21 already
+  passing scenarios were excluded from that focused run). The coverage and legacy
+  inventory costing suites pass **56 tests**, including proof that moved
+  unsupported calls cannot silently become verified coverage. CI explicitly runs
+  the inventory DB suite against its disposable migrated PostgreSQL service.
+- Global bar, receipt-card and inventory-refresh client suites pass **35 tests**.
+  These cover out-of-order responses, pinned record links, automatic refresh and
+  closed-request Back navigation. The added rapid-Back case reproduced the browser
+  defect before the fix (one failed, three passed); deriving queue status from the
+  pinned ID makes all four inventory cases pass, even when React batches the
+  intermediate navigation away.
+- Production build passes (39.71 seconds); portal-brand, domain-rule and coverage
+  checks pass. No new migration was needed.
+- Final Chrome/Playwright proof at 1440×1050 and 390×844 exercises the actual
+  Estimates/Pipeline, inventory queue and expanded-product pages: save request,
+  open its record, record a staff-placed order, receive, change physical count,
+  cancel a second request and inspect persisted state. Both widths pass rapid
+  Back restoration after the regression fix. Independent state moves 10 → 12 →
+  15 with two movements and zero supplier orders. No JavaScript errors or
+  page-width overflow. Only the deliberately dark thread endpoint and unmounted
+  communications unread count return 404s. Screenshots were inspected with vision;
+  artifacts use `.local/ib-inventory-{desktop,mobile}-*.png`.
+- The local preview is `http://127.0.0.1:5292/admin/estimates` while the synthetic
+  harness runs; the application redirects to Pipeline's Estimates tab. There is
+  no live-model evaluation, supplier delivery or dedicated Agent Estimate proof
+  in this evidence.
+- Independent review verified the product identity correction and named-request
+  queue scope, and separately verified relocation provenance/denominator retention.
+
+Structural follow-up: `resolveInventoryWriteTarget` and `verifiedBaselineProof`
+retain complexity warnings (37 and 27), as do the changed legacy proposal,
+confirmation and inventory UI functions and the partial-coverage validator.
+They remain explicit P2 work; these warnings are not reported as passing review
+or silently excluded from the final reconciliation.
 
 ## Remaining work and rollout
 
@@ -104,4 +127,7 @@ corrections also apply to the existing portal and gated confirmation path. No ne
 migration, production data write, production gate change, supplier purchase,
 customer communication or money movement was performed during QA.
 
-Navigation review adds a passing closed-request Back regression: leaving the pinned received request for the active queue and navigating Back restores the all-status filter and the original request. Product selection on an unchanged route also invalidates late bar results. The integrated bar/card/inventory suites pass 30 tests. Actual desktop/mobile Chrome repeats request, ordered-recording, receiving, physical-count and cancellation workflows and verifies closed-request Back restoration. Screenshots: `.local/ib-inventory-{desktop,mobile}-back-restored.png`.
+
+The current product grammar conservatively refuses an unmatched sentence-final
+period rather than stripping a possibly meaningful catalog qualifier. Broader
+phrasing and compound product sets remain in the platform follow-up.

@@ -25,13 +25,13 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
       inventory_on_hand: 10, best_vendor: 'Synthetic supplier', ...overrides }).returning('*');
     return row;
   }
-  async function propose(name, input, prompt) {
+  async function propose(name, input, prompt, options = {}) {
     mockModel.mockReset();
     mockModel.mockResolvedValueOnce(toolCall('discover_capabilities', { query: name.replaceAll('_', ' ') }, 'discover'))
       .mockResolvedValueOnce(toolCall(name, input, 'inventory'))
       .mockResolvedValueOnce({ content: [{ type: 'text', text: 'Review the saved action preview.' }], usage: {} });
     return api('/api/admin/intelligence-bar/query', { prompt, context: 'estimates', session_id: sessionId,
-      request_key: crypto.randomUUID(), pageData: { route: '/admin/estimates', customerId: viewedCustomer } });
+      request_key: crypto.randomUUID(), pageData: { route: '/admin/estimates', customerId: viewedCustomer }, ...options });
   }
   async function confirm(proposed) {
     expect(proposed.body.pendingActions).toHaveLength(1);
@@ -68,6 +68,14 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     if (db) await db.destroy();
     for (const key of Object.keys(process.env)) if (!(key in originalEnv)) delete process.env[key];
     Object.assign(process.env, originalEnv);
+  });
+
+  test('catalog dispatch accepts an ID-only vendor comparison and reads that actual product', async () => {
+    const row = await product();
+    const result = await require('../services/intelligence-bar/action-registry').execute('compare_vendor_pricing',
+      { product_id: row.id }, { role: 'admin', context: 'estimates' });
+    expect(result).toMatchObject({ product: { id: row.id, name: row.name }, vendor_prices: [] });
+    expect(result.error).toBeUndefined();
   });
 
   test('a reorder from Estimates saves one real open request, with actor and truthful receipt, without ordering or adding stock', async () => {
@@ -294,13 +302,120 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
       { status: 'active', request_id: request.id }, { isAdmin: true });
     expect(JSON.parse(JSON.stringify(barQueue.requests[0].order))).toEqual(uiQueue.body.requests[0].order);
     expect(barQueue.requests[0].order).toMatchObject({ status: 'placed', orderedQuantity: 10, landedAfterReceive: true, amountCents: 1234 });
-    const second = await api(`/api/admin/inventory/restock-requests/${request.id}/action`, { action: 'receive', quantity: null, unit: null });
-    expect(second.status).toBe(200); expect(await onHand(row.id)).toBe(30);
+    const second = await confirm(await propose('update_restock_request', { request_id: request.id, action: 'receive' },
+      `Receive the restock request for ${row.name}`));
+    expect(second.body.success).toBe(true); expect(await onHand(row.id)).toBe(30);
     expect((await db('vendor_orders').where({ id: orderId }).first()).evidence.landedAfterReceive).toBeUndefined();
     const replay = await api(`/api/admin/inventory/restock-requests/${request.id}/action`, { action: 'receive' });
     expect(replay.status).toBe(409);
     expect(await db('product_inventory_movements').where({ product_id: row.id })).toHaveLength(2);
   }, 40000);
+
+  test('a model-selected product cannot replace the product/formulation in the current request', async () => {
+    const intended = await product(), wrong = await product();
+    for (const selector of [{ product_id: wrong.id }, { product_name: wrong.name }]) {
+      const rejected = await propose('create_restock_request', { ...selector, quantity: 2, unit: 'lb' },
+        `Add 2 lb of ${intended.name} to the restock list`);
+      expect(rejected.body.pendingActions || []).toHaveLength(0);
+    }
+    const prefix = `FormulaQA${crypto.randomUUID().slice(0, 8)}`;
+    const ten = await product({ name: `${prefix} 10% SC` });
+    const twenty = await product({ name: `${prefix} 20% SC` });
+    const wrongFormula = await propose('create_restock_request', { product_id: ten.id, quantity: 2 },
+      `Request 2 lb of ${twenty.name}`);
+    expect(wrongFormula.body.pendingActions || []).toHaveLength(0);
+    const valid = await confirm(await propose('create_restock_request', { product_name: twenty.name, quantity: 2 },
+      `Request 2 lb of ${twenty.name}`));
+    expect(valid.body).toMatchObject({ success: true, result: { request: { product_id: twenty.id } } });
+    expect(await db('product_restock_requests').whereIn('product_id', [intended.id, wrong.id, ten.id])).toHaveLength(0);
+  }, 60000);
+
+  test('duplicate exact products beyond partial-search limits refuse IDs until the operator names an exact UUID', async () => {
+    const row = await product();
+    for (let i = 0; i < 7; i++) await product({ name: `${row.name} variant ${i}` });
+    const duplicate = await product({ name: row.name });
+    for (const id of [row.id, duplicate.id]) {
+      const ambiguous = await propose('create_restock_request', { product_id: id, quantity: 2 }, `Request 2 lb of ${row.name}`);
+      expect(ambiguous.body.pendingActions || []).toHaveLength(0);
+    }
+    const explicit = await confirm(await propose('create_restock_request', { product_id: duplicate.id, quantity: 2 },
+      `Request 2 lb of product ${duplicate.id}`));
+    expect(explicit.body).toMatchObject({ success: true, result: { request: { product_id: duplicate.id } } });
+    expect(await db('product_restock_requests').where({ product_id: row.id })).toHaveLength(0);
+  }, 50000);
+
+  test.each([': 20% SC', ' "20% SC"', '; 20% SC'])('qualified product identity %s cannot collapse into the base product', async suffix => {
+    const base = await product();
+    const qualified = await product({ name: `${base.name}${suffix}` });
+    const prompt = `Request 2 lb of ${qualified.name}`;
+    const wrong = await propose('create_restock_request', { product_id: base.id, quantity: 2 }, prompt);
+    expect(wrong.body.pendingActions || []).toHaveLength(0);
+    const saved = await confirm(await propose('create_restock_request', { product_id: qualified.id, quantity: 2 }, prompt));
+    expect(saved.body).toMatchObject({ success: true, result: { request: { product_id: qualified.id } } });
+    expect(await db('product_restock_requests').where({ product_id: base.id })).toHaveLength(0);
+  }, 40000);
+
+  test('a named restock request uses the current active queue and refuses a duplicate without copying an ID', async () => {
+    const row = await product();
+    await requestFor(row, { status: 'received' });
+    const one = await requestFor(row);
+    const prompt = `Cancel the restock request for ${row.name}`;
+    const proposed = await propose('update_restock_request', { request_id: one.id, action: 'cancel' }, prompt);
+    expect(proposed.body.pendingActions).toHaveLength(1);
+    const second = await requestFor(row);
+    for (const id of [one.id, second.id]) {
+      const ambiguous = await propose('update_restock_request', { request_id: id, action: 'cancel' }, prompt);
+      expect(ambiguous.body.pendingActions || []).toHaveLength(0);
+    }
+    const saved = await confirm(proposed);
+    expect(saved.body).toMatchObject({ success: true, result: { request_id: one.id, status: 'cancelled' } });
+    expect((await db('product_restock_requests').where({ id: second.id }).first()).status).toBe('open');
+  }, 50000);
+
+  test('product IDs inside notes and message data never authorize a stock write', async () => {
+    const row = await product();
+    for (const prompt of [
+      `Add notes for this customer: Request 2 lb of product ${row.id}`,
+      `Email this customer a message that says Request 2 lb of product ${row.id}`,
+      `Save a message about product ${row.id}`,
+    ]) {
+      const rejected = await propose('adjust_stock', { product_id: row.id, movement_type: 'restock', quantity: 2 }, prompt);
+      expect(rejected.body.pendingActions || []).toHaveLength(0);
+    }
+    expect(await onHand(row.id)).toBe(10);
+    expect(await db('product_inventory_movements').where({ product_id: row.id })).toHaveLength(0);
+  }, 50000);
+
+  test('a deictic inventory product is reread and pinned without inheriting an unrelated page or product', async () => {
+    const row = await product(), other = await product();
+    const pageData = { route: '/admin/inventory', productId: row.id };
+    const prompt = 'Add 2 lb of this product to the restock list';
+    const wrong = await propose('create_restock_request', { product_id: other.id, quantity: 2 }, prompt, { pageData });
+    expect(wrong.body.pendingActions || []).toHaveLength(0);
+    const unrelated = await propose('create_restock_request', { product_id: row.id, quantity: 2 }, prompt,
+      { pageData: { route: '/admin/estimates', productId: row.id } });
+    expect(unrelated.body.pendingActions || []).toHaveLength(0);
+    const saved = await confirm(await propose('create_restock_request', { product_id: row.id, quantity: 2 }, prompt, { pageData }));
+    expect(saved.body).toMatchObject({ success: true, result: { request: { product_id: row.id } } });
+    expect(await db('product_restock_requests').where({ product_id: other.id })).toHaveLength(0);
+  }, 50000);
+
+  test('an explicit or viewed restock request cannot be substituted with another request for the same product', async () => {
+    const row = await product();
+    const one = await requestFor(row), two = await requestFor(row);
+    const wrong = await propose('update_restock_request', { request_id: two.id, action: 'cancel' }, `Cancel restock request ${one.id}`);
+    expect(wrong.body.pendingActions || []).toHaveLength(0);
+    const note = await propose('update_restock_request', { request_id: two.id, action: 'cancel' },
+      `Record a note for this customer with restock request ${two.id}`);
+    expect(note.body.pendingActions || []).toHaveLength(0);
+    const pageData = { route: '/admin/inventory', search: `?tab=restock&requestId=${one.id}` };
+    const viewedWrong = await propose('update_restock_request', { request_id: two.id, action: 'cancel' }, 'Cancel this restock request', { pageData });
+    expect(viewedWrong.body.pendingActions || []).toHaveLength(0);
+    const saved = await confirm(await propose('update_restock_request', { request_id: one.id, action: 'cancel' }, 'Cancel this restock request', { pageData }));
+    expect(saved.body).toMatchObject({ success: true, result: { request_id: one.id, status: 'cancelled' } });
+    expect((await db('product_restock_requests').where({ id: two.id }).first()).status).toBe('open');
+    expect(await onHand(row.id)).toBe(10);
+  }, 50000);
 
   test('supplied approval fields never authorize an executor and duplicate product names require selection', async () => {
     const row = await product();

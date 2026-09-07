@@ -73,16 +73,23 @@ test('product and movement refresh preserve the product filter and ignore an ear
   expect(productCalls.every(([url]) => url.includes('search=Synthetic'))).toBe(true);
 });
 
-test('browser Back restores a closed pinned request after Show all requests', async () => {
+test.each([false, true])('browser Back restores a closed pinned request after Show all requests (rapid=%s)', async rapid => {
   const row = { id: requestId, productId, productName: 'Synthetic closed request', status: 'received', priority: 'normal', requestedQuantity: 2, unit: 'lb' };
   vi.stubGlobal('fetch', vi.fn(url => Promise.resolve(reply(url.includes('/restock-requests?')
     ? { requests: new URL(url, 'http://localhost').searchParams.get('status') === 'all' ? [row] : [] }
     : {}))));
   mount(`tab=restock&requestId=${requestId}`);
   await screen.findByText('Synthetic closed request');
-  fireEvent.click(screen.getByText('Show all requests'));
-  await waitFor(() => expect(screen.queryByText('Synthetic closed request')).toBeNull());
-  fireEvent.click(screen.getByText('Browser Back'));
+  if (rapid) {
+    await act(async () => {
+      fireEvent.click(screen.getByText('Show all requests'));
+      fireEvent.click(screen.getByText('Browser Back'));
+    });
+  } else {
+    fireEvent.click(screen.getByText('Show all requests'));
+    await waitFor(() => expect(screen.queryByText('Synthetic closed request')).toBeNull());
+    fireEvent.click(screen.getByText('Browser Back'));
+  }
   await screen.findByText('Synthetic closed request');
   expect(fetch.mock.calls.filter(([url]) => url.includes('/restock-requests?')).at(-1)[0])
     .toContain(`status=all&requestId=${requestId}`);

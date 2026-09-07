@@ -55,9 +55,9 @@ Use for: "compare SiteOne vs LESCO on Bifen IT", "where's the cheapest Demand CS
       type: 'object',
       properties: {
         product_name: { type: 'string', description: 'Product name to compare (partial match OK)' },
-        product_id: { type: 'string', description: 'Or use exact product UUID' },
+        product_id: { type: 'string', format: 'uuid', description: 'Or use exact product UUID' },
       },
-      required: ['product_name'],
+      anyOf: [{ required: ['product_name'] }, { required: ['product_id'] }],
     },
   },
   {
@@ -888,17 +888,77 @@ async function resolveProduct(input) {
   }
   const name = String(input.product_name || '').trim();
   if (!name) return { error: 'product_name or product_id is required' };
-  const matches = await db('products_catalog').whereILike('name', `%${name}%`).limit(6);
+  const exact = await db('products_catalog').whereRaw('lower(btrim(name)) = ?', [name.toLowerCase()]).limit(2);
+  if (exact.length === 1) return { product: exact[0] };
+  const literal = name.replace(/[\\%_]/g, '\\$&');
+  const matches = exact.length ? exact : await db('products_catalog').whereILike('name', `%${literal}%`).limit(6);
   if (!matches.length) return { error: `Product "${name}" not found in catalog` };
   if (matches.length > 1) {
-    const exact = matches.filter(m => String(m.name).toLowerCase() === name.toLowerCase());
-    if (exact.length === 1) return { product: exact[0] };
     return {
       error: `Multiple products match "${name}" — retry with product_id`,
       candidates: matches.map(inventory.productIdentity),
     };
   }
   return { product: matches[0] };
+}
+
+// Inventory noun slots come from the current operator request, never a model
+// selector, note body, attachment, or transcript. Keep formulation punctuation
+// intact: `10% SC` and `20% SC` are different products.
+async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview }) {
+  const { targetClause, UUID_RE } = require('./task-context');
+  // A colon/quote can be part of a catalog identity. Never turn a qualified
+  // product into the shorter base product by applying the contact-body split.
+  // The anchored inventory grammar below excludes communication/note intents.
+  const clause = String(toolName === 'update_restock_request' ? targetClause(prompt, true) : prompt)
+    .trim().replace(/^(?:(?:please|can you|could you|would you)\s+)+/i, '');
+  const unavailable = { error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' };
+  const inventoryPage = /^\/admin\/inventory(?:[/?]|$)/.test(pageData.route || '');
+  const query = new URLSearchParams(typeof pageData.search === 'string' ? pageData.search : '');
+  const quantity = '(?:[0-9]+(?:\\.[0-9]+)?|one|two|three|four|five|six|seven|eight|nine|ten|zero)';
+  const unit = '(?:lb|lbs|pounds?|oz|ounces?|fl_oz|fluid ounces?|gal|gallons?|liters?|ml|grams?|kg|each|items?|bottles?|bags?|containers?|cases?|jugs?)';
+  if (toolName === 'update_restock_request') {
+    const requestClause = clause.replace(new RegExp(`^receive\\s+(?:the\\s+)?(?:${quantity}\\s+${unit}(?:\\s+that arrived)?|(?:actual\\s+)?(?:packaged\\s+)?shipment)\\s+for\\s+`, 'i'), 'receive ');
+    const referenceMatch = requestClause.match(/^(?:mark|record|cancel|receive)\s+(?:(this|that|current|selected|viewed|open|the)\s+)?(?:restock\s+)?request(?:\s+([0-9a-f-]{36}))?(?:\s+as\s+(?:ordered|received|cancelled))?[.!]?$/i);
+    if (referenceMatch) {
+      const reference = referenceMatch[2] || (referenceMatch[1] && referenceMatch[1].toLowerCase() !== 'the' && inventoryPage
+        ? pageData.requestId || pageData.request_id || query.get('requestId') : null);
+      if (!UUID_RE.test(String(reference || '')) || reference.toLowerCase() !== preview.request?.id) return unavailable;
+      return { productId: preview.product.id, requestId: preview.request.id };
+    }
+    // Named request selectors also retain the complete product identity.
+    const namedClause = String(prompt).trim().replace(/^(?:(?:please|can you|could you|would you)\s+)+/i, '');
+    const productName = namedClause.match(/^(?:mark|record|cancel|receive)\s+(?:the\s+)?restock request for\s+(.+?)(?:\s+as\s+(?:ordered|received|cancelled))?$/i)?.[1];
+    if (!productName) return unavailable;
+    const resolved = await resolveProduct({ product_name: productName });
+    if (resolved.error) return { ...resolved, code: 'target_clarification_required' };
+    const { requests } = await require('../inventory-restock-queue').listRestockRequests({
+      productId: resolved.product.id, status: 'active', limit: 2,
+    });
+    if (requests.length !== 1 || requests[0].id !== preview.request?.id || resolved.product.id !== preview.product?.id) return unavailable;
+    return { productId: preview.product.id, requestId: preview.request.id };
+  }
+  const amount = `(?:the\\s+)?${quantity}\\s+${unit}\\s+of\\s+`;
+  const patterns = [
+    new RegExp(`^(?:add|record|request|receive|write off)\\s+${amount}(.+)$`, 'i'),
+    new RegExp(`^(?:save|create)\\s+(?:a|an|another|the)\\s+(?:(?:restock|reorder)\\s+)?request\\s+for\\s+${amount}(.+)$`, 'i'),
+    /^(?:set\s+)?(?:the\s+)?(?:physical\s+)?shelf count for\s+(.+?)\s+(?:is|to)\s+.+$/i,
+    new RegExp(`^we have\\s+${amount}(.+?)\\s+on the shelf$`, 'i'),
+    /^(?:put|add)\s+(.+?)\s+(?:on|to)\s+(?:the\s+)?(?:restock|reorder)\s+list$/i,
+    /^(?:restock|reorder)\s+(.+)$/i,
+  ];
+  const selected = patterns.map(pattern => clause.match(pattern)?.[1]).find(Boolean);
+  if (!selected) return unavailable;
+  const name = selected.replace(/\s+(?:to\s+(?:the\s+)?(?:restock|reorder)\s+list|that\s+(?:physically\s+)?arrived|on the shelf)[.!]?$/i, '').trim();
+  const deictic = /^(?:this|that|current|selected|viewed|open)\s+product$/i.test(name);
+  const productId = deictic && inventoryPage ? pageData.productId || pageData.product_id || query.get('productId')
+    : name.replace(/^product\s+/i, '');
+  const selector = UUID_RE.test(String(productId || '')) ? { product_id: productId } : { product_name: name };
+  if (deictic && !selector.product_id) return unavailable;
+  const resolved = await resolveProduct(selector);
+  if (resolved.error) return { ...resolved, code: 'target_clarification_required' };
+  if (resolved.product.id !== preview.product?.id) return { ...unavailable, code: 'target_relationship_mismatch' };
+  return { productId: resolved.product.id };
 }
 
 async function queryStock(input) {
@@ -1068,4 +1128,4 @@ async function updateRestockRequest(input, actionContext) {
     receipt: { label: labels[input.action], summary, href: result.href } };
 }
 
-module.exports = { PROCUREMENT_TOOLS, executeProcurementTool };
+module.exports = { PROCUREMENT_TOOLS, executeProcurementTool, resolveInventoryWriteTarget };

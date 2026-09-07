@@ -7,8 +7,9 @@ function restockMeta(raw) {
   try { return JSON.parse(raw) || {}; } catch { return {}; }
 }
 
-async function listRestockRequests({ status = 'active', limit = 100, showSpend = false, requestId } = {}) {
+async function listRestockRequests({ status = 'active', limit = 100, showSpend = false, requestId, productId } = {}) {
     if (requestId && require('joi').string().guid().validate(requestId).error) throw Object.assign(new Error('Invalid restock request id'), { statusCode: 400 });
+    if (productId && require('joi').string().guid().validate(productId).error) throw Object.assign(new Error('Invalid product id'), { statusCode: 400 });
     if (!(await db.schema.hasTable('product_restock_requests'))) {
       return { requests: [] };
     }
@@ -47,6 +48,7 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
     if (status === 'active' && hasOrders) query = query.where((q) => q.whereIn('prr.status', ['open', 'ordered']).orWhereRaw("(prr.status = 'received' AND NULLIF(vo.evidence->>'landedAfterReceive', '') IS NOT NULL)"));
     else if (status !== 'all') query = query.whereIn('prr.status', status === 'active' ? ['open', 'ordered'] : [status]);
     if (requestId) query = query.where('prr.id', requestId);
+    if (productId) query = query.where('prr.product_id', productId);
     const rows = await query;
     // Technicians see the order outcome (placed / needs review), never the
     // spend: a single-product order total IS the unit cost — owner-only,

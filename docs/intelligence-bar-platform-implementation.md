@@ -147,7 +147,9 @@ The dependent property branch adds two UI sites and verifies four property
 operations: 1,748 retained sites, seven transport exceptions, and 1,737 unverified.
 The inventory branch adds its retained request site and four partially verified
 admin inventory scopes; the technician and other remaining scopes continue to
-count as unsupported/unverified.
+count as unsupported/unverified. Its final census retains 1,750 sites: four
+verified property sites, eight transport/navigation exceptions, and 1,738
+unsupported/unverified sites including the four partial inventory entries.
 
 ## Verification evidence
 

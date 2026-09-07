@@ -1266,6 +1266,17 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       };
     }
   }
+  if (['adjust_stock', 'create_restock_request', 'update_restock_request'].includes(toolUse.name)) {
+    const target = await require('../services/intelligence-bar/procurement-tools').resolveInventoryWriteTarget({
+      toolName: toolUse.name, prompt: req.body.prompt, pageData: req.body.pageData, preview,
+    });
+    if (target.error) return { failed: true, modelResult: target };
+    if (toolUse.name !== 'update_restock_request') {
+      params.product_id = target.productId;
+      delete params.product_name;
+      taskContext = { ...taskContext, requestedRecords: { ...taskContext?.requestedRecords, product_id: target.productId } };
+    }
+  }
   if (toolUse.name === AGENT_ESTIMATE_WRITE_TOOL) {
     params._approvedPreviewFingerprint = agentEstimatePreviewFingerprint(preview);
   } else if (WRITE_TWO_STEP_TOOL_NAMES.has(toolUse.name)) {
@@ -3083,7 +3094,7 @@ router.post('/confirm-action', async (req, res, next) => {
         // full-precision preview, then recheck that version under domain locks.
         if (['adjust_stock', 'create_restock_request', 'update_restock_request'].includes(action.tool_name)) {
           execParams._verified_inventory_version = livePreview?._version;
-          if (livePreview?.product?.id) execParams.product_id = livePreview.product.id;
+          if (action.tool_name !== 'update_restock_request' && livePreview?.product?.id) execParams.product_id = livePreview.product.id;
         }
       }
     }

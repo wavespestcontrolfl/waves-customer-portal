@@ -2807,8 +2807,10 @@ const EVIDENCE_LINK_TTL_MS = 55 * 60 * 1000;
 function RestockRequestsTab({ showToast, onUpdate, canAuthor = false, refreshId, requestId = null }) {
   const [, setSearchParams] = useSearchParams();
   const [requests, setRequests] = useState([]);
-  const [status, setStatus] = useState(requestId ? "all" : "active");
-  useEffect(() => { if (requestId) setStatus("all"); }, [requestId]);
+  const [status, setStatus] = useState("active");
+  // Back may restore the pinned URL before React commits the intermediate
+  // unpinned render. A saved request always includes its terminal state.
+  const queueStatus = requestId ? "all" : status;
   const [loading, setLoading] = useState(true);
   const loadSequence = useRef(0);
   const [receivingId, setReceivingId] = useState("");
@@ -2843,14 +2845,14 @@ function RestockRequestsTab({ showToast, onUpdate, canAuthor = false, refreshId,
     const sequence = ++loadSequence.current;
     setLoading(true);
     try {
-      const data = await adminFetch(`/admin/inventory/restock-requests?status=${encodeURIComponent(status)}${requestId ? `&requestId=${encodeURIComponent(requestId)}` : ""}`);
+      const data = await adminFetch(`/admin/inventory/restock-requests?status=${encodeURIComponent(queueStatus)}${requestId ? `&requestId=${encodeURIComponent(requestId)}` : ""}`);
       if (sequence === loadSequence.current) setRequests(data.requests || []);
     } catch (err) {
       if (sequence === loadSequence.current) showToast(`Failed to load restock requests: ${err.message}`);
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [status, showToast, requestId]);
+  }, [queueStatus, showToast, requestId]);
 
   useEffect(() => {
     void load();
