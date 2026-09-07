@@ -272,3 +272,47 @@ explicit estimate IDs, while message-body commands grant no record authority.
 Validation passes 179 unit/catalog/write-boundary tests and 23 isolated
 PostgreSQL tests. Independent review closed both additional edge cases before
 the fifth remote review. No provider, customer message or production write ran.
+
+Scoped email history now resolves effective ownership through converted leads
+for search candidates, owned/foreign Gmail thread sets and complete-thread
+read/draft validation. Missing/deleted lead links or conflicting direct and
+lead owners refuse before model egress. The controlled PostgreSQL suite covers
+lead-only success, mixed-thread isolation, contradictory links, ownership
+changes and deletion. Its eight cases pass; the affected email-outcome and
+operational-read units add 16 passes. No live model/provider was called.
+
+The shared outcome classifier now also replaces the older route-local failure
+predicate in B2, so a blocked optimizer preview cannot create an approval card
+and blocked commit/execute results cannot return success. The existing route
+confirmation suite passes 49 cases, including both new outcome regressions.
+This brings the adapter's blocked-result contract forward from D so the smaller
+B2 review unit has the same behavior before downstream route integration.
+
+## B1 selection follow-up
+
+Target validation #4062 stopped receiving pushes at `600841fa52` after its
+fifth review introduced a new P1: an unmatched explicit customer name could
+accept a stale `selectedTarget` (3948877186). Review history: round 1
+`265f8c4173` had two P1/four P2; round 2 `7c15c116e7` had two P1/three P2;
+round 3 on the same head had two P1/one P2; round 4 `27897bb40c` had two
+P1/one P2; round 5 `600841fa52` had one P1/three P2. Earlier P1 corrections
+remain in their recorded commits; the final finding prevents merge readiness.
+
+`fix/ib-target-selection` is a focused child of B1, required before downstream
+integration is ready. It rejects a selected customer whenever a current-request
+name has no matching row, refuses incomplete explicitly named customer sets,
+and preserves the whole resolved cohort when the client supplies one member
+as its selection. Multi-field requests such as both phone and email remain
+single-customer operations. Existing customer/named qualifiers are preserved.
+
+The UUID-suffix P2 (3948877178) is rebutted: the existing `UUID_RE` already
+ends in `$`. A real PostgreSQL regression proves suffixes fail the identifier
+gate without aborting the transaction. The single-name unlinked-lead P2
+(3948877194) remains deferred: fresh full-name/explicit-ID targeting works;
+expanding component-name uniqueness for unlinked rows needs its own ambiguity
+proof and is not claimed by this focused selection correction.
+
+Validation: 156 target unit and isolated PostgreSQL cases pass, including
+26 rollback-only database cases. Independent review of the focused correction
+is clean after fixing multi-field and qualified-set regressions. No model,
+provider, production query, migration, merge or gate change occurred.
