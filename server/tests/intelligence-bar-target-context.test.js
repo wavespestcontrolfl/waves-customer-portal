@@ -25,7 +25,7 @@ beforeEach(() => {
   db.raw = text => ({ text });
 });
 
-const selectors = ['Reschedule', 'Reschedule for', 'Move', 'Move for', 'Call', 'Remind', 'Cancel', 'Book', 'Archive', 'Delete', 'Merge', 'Pause', 'Reactivate', 'Restore', 'Refund', 'Charge', 'Invoice', 'Credit', 'Assign', 'Unassign', 'Send to', 'Email to', 'Text to', 'Message to', 'Notify to', 'Quote for', 'Schedule for', 'Reply to', 'Respond to', 'Send a message to', 'Send an SMS to', 'Send a reminder to', 'Update customer'];
+const selectors = ['Reschedule', 'Reschedule for', 'Move', 'Move for', 'Call', 'Remind', 'Cancel', 'Book', 'Archive', 'Delete', 'Merge', 'Pause', 'Reactivate', 'Restore', 'Refund', 'Charge', 'Invoice', 'Credit', 'Send to', 'Email to', 'Text to', 'Message to', 'Notify to', 'Quote for', 'Schedule for', 'Reply to', 'Respond to', 'Send a message to', 'Send an SMS to', 'Send a reminder to', 'Update customer'];
 test.each(selectors)(
   'an unresolved person after "%s" cannot fall back to the viewed customer', async selector => {
     const task = await Context.resolve({ prompt: `${selector} Jhon using this customer`, pageData: { customer_id: A } });
@@ -146,4 +146,22 @@ test('this customer resolves through a viewed property without requiring a redun
   expect(task.target.customer_id).toBe(B);
   expect(task.requestedRecords).toEqual({});
   expect(await Context.validateRecordTarget({ customer_id: B }, task)).toBeNull();
+});
+
+
+test.each(['Text this customer', 'Email this customer', 'Send this customer a text', 'Update this customer and text them'])(
+  'a customer name in the body after "%s that" cannot choose the target', async prefix => {
+    lookupRows = [rows.customers[0]]; // A real matching alternate name is available to the lookup.
+    const task = await Context.resolve({ prompt: `${prefix} that customer Synthetic Person canceled`, pageData: { customer_id: B } });
+    expect(task.target.customer_id).toBe(B);
+    expect((await Context.validateRecordTarget({ customer_id: A }, task)).code).toBe('target_clarification_required');
+  });
+
+test('a technician name in assignment is not an explicit customer selector', async () => {
+  lookupRows = [rows.customers[0]];
+  const appointment = '40000000-0000-4000-8000-000000000004';
+  rows.scheduled_services = [{ id: appointment, customer_id: B }];
+  const task = await Context.resolve({ prompt: 'Assign Synthetic Person to this appointment', pageData: { appointment_id: appointment } });
+  expect(task.target.customer_id).toBe(B);
+  expect(await Context.validateRecordTarget({ appointment_id: appointment }, task)).toBeNull();
 });

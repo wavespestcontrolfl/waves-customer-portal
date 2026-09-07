@@ -24,19 +24,28 @@ const normalizeName = value => String(value || '').toLowerCase().replace(/[’']
   .replace(/[^\p{L}\p{N}\s'-]/gu, ' ').replace(/\s+/g, ' ').trim();
 // Overlapping selectors matter: "update customer Jhon" must still inspect
 // "customer Jhon" after seeing "update customer".
-const PERSON_ACTIONS = 'reply|respond|send|email|text|sms|message|reminder|contact|notify|quote|schedule|reschedule|move|call|remind|cancel|book|archive|delete|merge|pause|reactivate|restore|refund|charge|invoice|credit|assign|unassign|change|update';
+const PERSON_ACTIONS = 'reply|respond|send|email|text|sms|message|reminder|contact|notify|quote|schedule|reschedule|move|call|remind|cancel|book|archive|delete|merge|pause|reactivate|restore|refund|charge|invoice|credit|change|update';
 const PERSON_SELECTOR_SOURCE = `(?:${PERSON_ACTIONS})(?:\\s+(?:to|for))?|for|customer|named`;
 const PERSON_REFERENCE = new RegExp(`\\b(?=((?:${PERSON_SELECTOR_SOURCE}))\\s+([\\p{L}'-]+)\\b)`, 'gu');
 const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'using', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
   'property', 'properties', 'appointment', 'appointments', 'estimate', 'invoice', 'details', 'inactive', 'active', 'reminder', 'reminders']);
+const NON_PERSON_NAMES = new Set(['this', 'that', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using']);
 const PAGE_REFERENCE_RE = /\b(?:(?:this|that|current|selected|viewed|open)\s+(?:customer|account|property|appointment|estimate|invoice|review)|his|her|their)\b/i;
 
 function targetClause(prompt) {
   // Message bodies and replacement values are data, even when they contain
   // another customer's exact name. They never select the recipient/account.
-  const referenced = String(prompt).replace(/^(\s*(?:please\s+)?(?:(?:reply|respond)\s+to|(?:draft|write|post|submit)\s+(?:(?:a|the)\s+)?(?:reply|response)\s+(?:to|for))\s+)that(?=\s+review\b)/i, '$1this');
-  const clause = referenced.split(/[:;\n“”"]|\b(?:notes?|message|instructions)\s+that\b|\b(?:that(?!\s+(?:customer|account|property|appointment|estimate|invoice|review|email|call|product|lead)\b)|saying|regarding|about)\b/i)[0];
+  const source = String(prompt).split(/[:;\n“”"]|\b(?:notes?|message|instructions|comments)\s+that\b|\b(?:saying|regarding|about)\b/i)[0];
+  const referenced = source.replace(/\bthat(?=\s+(?:customer|account|property|appointment|estimate|invoice|review|email|call|product|lead)\b)/gi, (word, offset) => {
+    const before = source.slice(0, offset);
+    const communication = before.match(/\b(?:text|message|sms|email|send|reply|respond)\b/i);
+    // After a communication recipient, "that ..." begins message content.
+    // Bare "send a text to that customer" still names the actual target.
+    const opener = /^(?:(?:text|message|sms|email|reply|respond)(?:\s+(?:to|for))?|send(?:\s+(?:a|an))?(?:\s+(?:text|sms|message|reminder|email|reply))?(?:\s+(?:to|for))?)\s*$/i;
+    return communication && !opener.test(before.slice(communication.index)) ? word : 'this';
+  });
+  const clause = referenced.split(/\bthat\b/i)[0];
   if (!/\b(?:change|update|set|rename|relabel|add|save)\b/i.test(clause)) return clause;
   return clause.split(/\b(?:name|address|email|phone|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+/i)[0];
 }
@@ -50,15 +59,14 @@ function explicitSingleNames(prompt) {
       .map(m => m[2]),
     ...[...clause.matchAll(/\b([\p{L}-]+)[’']s\b/giu)].map(m => normalizeName(m[1])),
     ...(normalized.match(/^([\p{L}'-]+)\s+(?:needs|wants|has|is|should|would|asked)\b/u)?.slice(1, 2) || []),
-  ])];
+  ])].filter(word => !NON_PERSON_NAMES.has(word));
 }
 
 function namesRequested(prompt) {
   // This is a refusal hint, never a fuzzy identity match. A misspelling after
   // an explicit person reference must not fall back to the open customer.
   const references = explicitSingleNames(prompt);
-  const nonNames = new Set(['this', 'that', 'current', 'selected', 'viewed', 'open', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'review', 'reviews', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using']);
-  return references.some(word => !nonNames.has(word));
+  return references.length > 0;
 }
 
 function pageIds(pageData = {}) {
