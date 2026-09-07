@@ -554,6 +554,23 @@ function initScheduledJobs() {
   const { isEnabled, logGateStatus } = require('../config/feature-gates');
   logGateStatus();
 
+  // A process that died mid-job (deploy kill) left its job_health row at
+  // 'running'; settle every such row whose advisory lock nobody holds
+  // (cron-lock.settleDeadRunningJobs). Once at boot, then every 15 min: on
+  // a rolling deploy the OUTGOING instance still holds its locks while this
+  // one boots and is killed afterwards, so the boot pass alone would skip
+  // exactly the rows it exists for (pre-push codex P1). Registered ABOVE
+  // the cronJobs early return — it is maintenance of the health ledger,
+  // not a job — and unguarded by runExclusive: the pinned conditional
+  // update makes concurrent passes harmless. The sweep reads pg_locks and
+  // never takes a work lease, and runs at :03/:18/:33/:48 — off every
+  // quarter-hour and top-of-hour job boundary (codex P1 on #4103).
+  // Fire-and-forget, fail-soft.
+  const settleDeadRunning = () => require('../utils/cron-lock').settleDeadRunningJobs()
+    .catch((err) => logger.warn(`[scheduler] dead-running job_health settle failed: ${err.message}`));
+  settleDeadRunning();
+  cron.schedule('3,18,33,48 * * * *', settleDeadRunning, { timezone: 'America/New_York' });
+
   // Cancel-notice late-claim rollout boundary (codex #3233 r35): stamped
   // at BOOT when the hook gate is on, so the boundary necessarily
   // predates every gated cancellation this deploy processes — a cancel
