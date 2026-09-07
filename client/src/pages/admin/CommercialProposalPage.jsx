@@ -7,6 +7,7 @@ import {
   ClipboardList, ChevronDown, ChevronUp, Wand2,
 } from 'lucide-react';
 import AdminCommandHeader from '../../components/admin/AdminCommandHeader';
+import { EstimateSendProvider, useEstimateSend } from '../../components/admin/EstimateSendDialog';
 
 // Commercial proposal builder — the full-page surface for authoring the
 // multi-building, per-line-item commercial bid on an estimate (HOAs,
@@ -169,23 +170,17 @@ function canMarkProposalWon(est) {
   return est.showOneTimeOption !== true;
 }
 
-function summarizeSend(data) {
-  const parts = [];
-  if (data?.channels?.sms) {
-    parts.push(data.channels.sms.ok ? 'Text sent' : `Text failed: ${data.channels.sms.error || 'unknown error'}`);
-  }
-  if (data?.channels?.email) {
-    parts.push(data.channels.email.ok ? 'Email sent' : `Email failed: ${data.channels.email.error || 'unknown error'}`);
-  }
-  if (parts.length === 0) return data?.error || 'Estimate send failed';
-  return parts.join(' / ');
-}
-
 const LABEL = 'text-11 uppercase tracking-label text-zinc-500';
 
 export default function CommercialProposalPage() {
+  return <EstimateSendProvider><CommercialProposalEditor /></EstimateSendProvider>;
+}
+
+function CommercialProposalEditor() {
   const { estimateId } = useParams();
   const navigate = useNavigate();
+  const openSend = useEstimateSend();
+  const loadedVersionRef = React.useRef(null);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -225,7 +220,6 @@ export default function CommercialProposalPage() {
     paymentTerms: '', initialTermMonths: '', renewal: '',
     priceAdjustment: '', cancellation: '', accessRequirements: '',
   });
-  const [sendMethod, setSendMethod] = useState('email');
   // Engine-composed prospect research (commercial proposal lane). Read-only
   // context for pricing the walkthrough — never sent to the customer.
   const [prospectBrief, setProspectBrief] = useState(null);
@@ -265,6 +259,7 @@ export default function CommercialProposalPage() {
   const applyLoaded = useCallback((data) => {
     const p = data.proposal || {};
     const est = data.estimate || null;
+    loadedVersionRef.current = est?.editVersion;
     setEstimate(est);
     setTitle(p.title || 'Commercial Service Proposal');
     setPreparedFor(p.preparedFor || est?.customerName || '');
@@ -862,20 +857,6 @@ export default function CommercialProposalPage() {
 
   const sendProposal = async () => {
     setError(null);
-    const wantsEmail = sendMethod === 'email' || sendMethod === 'both';
-    const wantsSms = sendMethod === 'sms' || sendMethod === 'both';
-    if (wantsEmail && !estimate?.customerEmail) {
-      setError('No customer email on this estimate — edit the estimate contact first or send by text.');
-      return;
-    }
-    if (wantsSms && !estimate?.customerPhone) {
-      setError('No customer phone on this estimate — send by email instead.');
-      return;
-    }
-    const methodLabel = sendMethod === 'both' ? 'text + email' : sendMethod === 'sms' ? 'text' : 'email';
-    if (!window.confirm(
-      `Send this proposal to ${estimate?.customerName || 'the customer'} by ${methodLabel}?\n\nThe email includes the branded proposal PDF as an attachment.`,
-    )) return;
     setSending(true);
     try {
       // Persist any on-screen edits so the emailed PDF matches the page.
@@ -883,18 +864,10 @@ export default function CommercialProposalPage() {
         const saved = await save();
         if (!saved) return;
       }
-      const data = await adminFetch(`/admin/estimates/${estimateId}/send`, {
-        method: 'POST',
-        body: JSON.stringify({
-          sendMethod,
-          idempotencyKey:
-            globalThis.crypto?.randomUUID?.() ||
-            `proposal-send-${estimateId}-${Math.random()}`,
-        }),
+      const outcome = await openSend(estimateId, {
+        expectedEditVersion: loadedVersionRef.current,
       });
-      const summary = summarizeSend(data);
-      if (data.partialFailure) window.alert(`Send had issues: ${summary}`);
-      await reload();
+      if (outcome) await reload();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -1582,16 +1555,9 @@ export default function CommercialProposalPage() {
               </Button>
 
               {!locked && (
-                <div className="flex gap-2 pt-1">
-                  <Select size="sm" value={sendMethod} onChange={(e) => setSendMethod(e.target.value)} className="flex-1">
-                    <option value="email">Email (PDF attached)</option>
-                    <option value="sms">Text (link)</option>
-                    <option value="both">Text + email</option>
-                  </Select>
-                  <Button variant="secondary" onClick={sendProposal} disabled={sending}>
-                    {sending ? <Loader2 size={15} className="animate-spin" /> : <SendIcon size={15} />} Send
-                  </Button>
-                </div>
+                <Button variant="secondary" className="w-full" onClick={sendProposal} disabled={sending || saving}>
+                  {sending ? <Loader2 size={15} className="animate-spin" /> : <SendIcon size={15} />} Review and send
+                </Button>
               )}
 
               {/* A draft from the estimator handoff already carries a share

@@ -39,6 +39,17 @@ export const OCCUPANCY_OPTIONS = [
   { value: "commercial", label: "Commercial" },
 ];
 
+// Relationship vocabulary of customer_properties.relationship (server
+// constants/property-relationships.js) — how the CUSTOMER relates to the
+// address, distinct from occupancy. "" = not recorded.
+export const RELATIONSHIP_OPTIONS = [
+  { value: "", label: "Not recorded" },
+  { value: "own_home", label: "Own home" },
+  { value: "rental_owned", label: "Rental I own" },
+  { value: "family_home", label: "Family member's home" },
+  { value: "managed_for_client", label: "Managed for a client" },
+];
+
 // One-word chip copy for the New Appointment service-address picker. Reads
 // customer_properties.relationship when the row carries it (own_home /
 // rental_owned / family_home / managed_for_client — see

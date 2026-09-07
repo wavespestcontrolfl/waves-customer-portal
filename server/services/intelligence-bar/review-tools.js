@@ -12,6 +12,27 @@ const { etDateString, addETDays, startOfETMonth, etMonthStart, parseETDateTime }
 
 const { DRAFT_REPLY_PREFIX, isDraftReply, hasRealReply, whereNeedsRealReply, whereHasRealReply } = require('../review-reply/draft-prefix');
 
+const REVIEW_PIN_FIELDS = ['id', 'customer_id', 'link_source', 'reviewer_name', 'location_id',
+  'star_rating', 'review_created_at', 'review_text', 'review_reply', 'missing_since', 'dismissed'];
+function reviewReplyVersion(review) {
+  return require('./pending-actions').paramsHash('submit_review_reply',
+    Object.fromEntries(REVIEW_PIN_FIELDS.map(field => [field,
+      review[field] instanceof Date ? review[field].toISOString() : review[field] ?? null])));
+}
+function reviewPinChanged(review, pin) {
+  return pin && (reviewReplyVersion(review) !== pin.version
+    || (pin.resourceName && review.gbp_review_name !== pin.resourceName));
+}
+
+async function loadReviewReplyPin(reviewId) {
+  const review = await db('google_reviews').where('id', reviewId).first([...REVIEW_PIN_FIELDS, 'gbp_review_name']);
+  if (!review || review.reviewer_name === '_stats' || review.missing_since) return null;
+  return { review_id: review.id, reviewer: review.reviewer_name, location: review.location_id,
+    rating: review.star_rating, review_created_at: review.review_created_at,
+    customer_id: review.customer_id || null, attribution: review.link_source || null,
+    _pin: { version: reviewReplyVersion(review), resourceName: review.gbp_review_name || null } };
+}
+
 const REVIEW_TOOLS = [
   {
     name: 'get_review_stats',
@@ -42,7 +63,7 @@ Use for: "draft a reply for the Smith review", "write a response to that 3-star 
     input_schema: {
       type: 'object',
       properties: {
-        review_id: { type: 'string', description: 'Review UUID' },
+        review_id: { type: 'string', format: 'uuid', description: 'Review UUID' },
       },
       required: ['review_id'],
     },
@@ -54,7 +75,7 @@ Use for: "post that reply", "send the response I just approved"`,
     input_schema: {
       type: 'object',
       properties: {
-        review_id: { type: 'string' },
+        review_id: { type: 'string', format: 'uuid' },
         reply_text: { type: 'string', description: 'The reply to post' },
         grounding_token: { type: 'string', description: 'The grounding_token returned by draft_review_reply for this exact draft (required — binds the reply to the review it was written for AND to the exact reply_draft text; submit that text unchanged)' },
       },
@@ -129,13 +150,14 @@ Use for: "how's our review velocity?", "what's the conversion rate on review req
 
 // ─── EXECUTION ──────────────────────────────────────────────────
 
-async function executeReviewTool(toolName, input) {
+async function executeReviewTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'get_review_stats': return await getReviewStats();
       case 'get_unresponded_reviews': return await getUnrespondedReviews(input);
       case 'draft_review_reply': return await draftReviewReply(input.review_id);
-      case 'submit_review_reply': return await submitReviewReply(input.review_id, input.reply_text, input.grounding_token);
+      case 'submit_review_reply': return await submitReviewReply(input.review_id, input.reply_text, input.grounding_token,
+        { reviewPin: input._ib_review_pin, actorId: actionContext.actorId });
       case 'get_outreach_candidates': return await getOutreachCandidates(input);
       case 'trigger_review_request': return await triggerReviewRequest(input);
       case 'search_reviews': return await searchReviews(input);
@@ -267,7 +289,7 @@ async function draftReviewReply(reviewId) {
 }
 
 
-async function submitReviewReply(reviewId, replyText, groundingToken) {
+async function submitReviewReply(reviewId, replyText, groundingToken, { reviewPin, actorId }) {
   const { parseGroundingToken } = require('../review-reply/runner');
   // Posts to Google through the canonical publisher (liveness lock + audit).
   // This tool used to write review_reply locally and claim the reply would
@@ -280,6 +302,9 @@ async function submitReviewReply(reviewId, replyText, groundingToken) {
   try {
     const review = await db('google_reviews').where('id', reviewId).first();
     if (!review || review.reviewer_name === '_stats') return { error: 'Review not found' };
+    if (reviewPinChanged(review, reviewPin)) {
+      return { error: 'The review identity or content changed. Review a fresh proposal.', code: 'preview_changed', preview_changed: true };
+    }
     if (review.missing_since) return { error: 'This review has been removed from Google — replies are disabled. The row is retained as evidence for a missing-reviews support case.' };
     const { buildReplyGrounding } = require('../review-reply/grounding');
     const Drafter = require('../review-reply/drafter');
@@ -303,7 +328,9 @@ async function submitReviewReply(reviewId, replyText, groundingToken) {
     if (!parsedToken.text || parsedToken.text !== replyTextFingerprint(replyText)) {
       return { error: 'reply_text must be exactly the reply_draft that was approved. Re-run draft_review_reply if a different wording is wanted.', code: 'draft_text_mismatch' };
     }
-    submitGuard = pipelineDraftGuard(replyText, { groundingToken });
+    const draftGuard = pipelineDraftGuard(replyText, { groundingToken });
+    submitGuard = fresh => reviewPinChanged(fresh, reviewPin)
+      ? 'The approved review identity or content changed.' : draftGuard(fresh);
   } catch (err) {
     if (err instanceof ReviewReplyError) return { error: err.message, code: err.code };
     return { error: `Could not verify the reply before posting (${err.message}).`, code: 'verify_failed' };
@@ -312,7 +339,7 @@ async function submitReviewReply(reviewId, replyText, groundingToken) {
     const result = await publishReviewReply({
       reviewId,
       text: replyText,
-      actor: { type: 'ib', adminUserId: null },
+      actor: { type: 'ib', adminUserId: actorId || null },
       // This tool submits a draft for an UNANSWERED review; it is not an
       // explicit edit of a known reply, so it takes the non-overwrite path
       // (local + live Google reply checks) and yields to anyone who answered
@@ -626,4 +653,4 @@ async function reviewAskBlockedReason(customer) {
   return null;
 }
 
-module.exports = { REVIEW_TOOLS, executeReviewTool, loadReviewRecipient, reviewAskBlockedReason };
+module.exports = { REVIEW_TOOLS, executeReviewTool, loadReviewRecipient, reviewAskBlockedReason, loadReviewReplyPin };

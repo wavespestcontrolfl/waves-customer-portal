@@ -71,6 +71,12 @@ async function createPendingAction({ toolName, params, summary, requestedBy, con
       throw new Error('Resolve the preceding action outcome before preparing another write');
     }
   }
+  if (params?._ib_task_context) {
+    const scope = await require('./task-context').validateRecordTarget(params, params._ib_task_context,
+      { toolName, forApproval: true });
+    if (scope.error) throw Object.assign(new Error(scope.error), { code: scope.code });
+    params = { ...params, _ib_task_context: scope };
+  }
   let insert = trx('ib_pending_actions').insert({
     tool_name: toolName,
     params: JSON.stringify(params || {}),

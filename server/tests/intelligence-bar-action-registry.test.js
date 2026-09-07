@@ -5,6 +5,16 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const registry = require('../services/intelligence-bar/action-registry');
 const { tierFor } = require('../services/intelligence-bar/authorization-contract');
 
+test('every tool-bearing module in the existing tool census joins the registry', () => {
+  const fs = require('fs'), path = require('path');
+  const directory = path.join(__dirname, '../services/intelligence-bar');
+  for (const file of fs.readdirSync(directory).filter(name => name === 'tools.js' || name.endsWith('-tools.js'))) {
+    const definitions = Object.values(require(path.join(directory, file))).filter(Array.isArray).flat()
+      .filter(tool => tool && typeof tool.name === 'string' && tool.input_schema?.type === 'object');
+    for (const definition of definitions) expect(registry.actions.get(definition.name)?.module).toBe(file);
+  }
+});
+
 test('every existing tool has an explicit valid policy and a concrete executor', () => {
   expect(registry.policyErrors).toEqual([]);
   expect(registry.actions.size).toBe(Object.keys(require('../services/intelligence-bar/action-policy.json')).length);
@@ -26,11 +36,36 @@ test('Estimates can discover real inventory executors without preloading every d
   }));
 });
 
+test('the dedicated agent estimate workflow preloads its permitted draft tool', () => {
+  const scope = { role: 'admin', context: 'agent_estimate' };
+  expect(registry.initialTools(scope.context, scope).some(tool => tool.name === 'create_agent_estimate_draft')).toBe(true);
+  expect(registry.initialTools('estimates', { ...scope, context: 'estimates' }).some(tool => tool.name === 'create_agent_estimate_draft')).toBe(false);
+});
+
 test('technicians cannot discover admin tools or forge a tool scope', async () => {
   const scope = { role: 'technician', context: 'estimates' };
   expect(registry.discover({ query: 'customer inventory' }, scope).result.code).toBe('permission_denied');
   expect(registry.validateInput('update_customer', { customer_id: 'fixture' }, scope).code).toBe('permission_denied');
   expect(await registry.execute('send_sms', {}, scope)).toMatchObject({ code: 'permission_denied' });
+  expect(registry.initialTools('tech', { role: 'technician', context: 'tech' }).some(t => t.name === 'discover_capabilities')).toBe(false);
+  expect(registry.initialTools('tech', { role: 'admin', context: 'tech' }).some(t => t.name === 'discover_capabilities')).toBe(false);
+});
+
+test('execute validates raw model arguments before a two-step executor can see approval fields', async () => {
+  const action = registry.actions.get('create_customer');
+  const original = action.executor;
+  action.executor = jest.fn(async (_name, input) => ({ confirmed: input.confirmed }));
+  const scope = { role: 'admin', context: 'customers' };
+  const input = { first_name: 'Synthetic', last_name: 'Person', phone: '+15550101234' };
+  try {
+    expect(await registry.execute('create_customer', { ...input, confirmed: true }, scope)).toMatchObject({ code: 'invalid_input' });
+    expect(await registry.execute('create_customer', { ...input, _approved: true }, scope)).toMatchObject({ code: 'invalid_input' });
+    expect(action.executor).not.toHaveBeenCalled();
+    expect(await registry.execute('create_customer', input, scope)).toEqual({ confirmed: false });
+    expect(await registry.execute('create_customer', input, { ...scope, actionContext: { confirmed: true,
+      executionPins: { _ib_customer_version: 'server-version', confirmed: false } } })).toEqual({ confirmed: true });
+    expect(action.executor.mock.calls.at(-1)[1]).toMatchObject({ _ib_customer_version: 'server-version', confirmed: true });
+  } finally { action.executor = original; }
 });
 
 test('unknown classification, coerced quantities, and injected approval/actor fields fail closed', () => {

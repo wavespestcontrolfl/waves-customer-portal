@@ -1,5 +1,9 @@
 # Intelligence Bar platform implementation
 
+> Review split: this is the evidence ledger for the integrated #4019 stack.
+> The catalog-only branch does not yet contain that runtime, UI, or database
+> integration. See [the split boundaries](intelligence-bar-foundation-review-split.md).
+
 ## Objective and authorization
 
 Implement verified parity with supported admin operations, preserving domain
@@ -240,3 +244,10 @@ refresh of affected views remain required. Real iOS keyboard/safe-area behavior,
 voice permission/error states, attachment failure, full live-model behavior,
 and performance checks have not been verified. No full-parity completion claim
 is supported by this foundation checkpoint.
+# Review split
+
+This ledger describes the complete development stack. The registry/coverage
+foundation alone adds the catalog and drift check; runtime discovery, task
+targeting and recovery are introduced by its dependent PRs. Recorded browser
+and database evidence below was obtained against the integrated stack, not
+against the registry-only commit. See `intelligence-bar-foundation-review-split.md`.

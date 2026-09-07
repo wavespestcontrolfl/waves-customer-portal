@@ -155,11 +155,7 @@ const cspDirectives = {
   styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
   fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
   imgSrc: ["'self'", "https:", "data:", "blob:"],
-  // GrowthBook feature-definition host for the client SDK (harmless while
-  // VITE_GROWTHBOOK_CLIENT_KEY is unset). Follows GROWTHBOOK_API_HOST so a
-  // self-hosted/proxy deployment stays CSP-allowed — keep it in lockstep with
-  // the VITE_GROWTHBOOK_API_HOST baked into the client build.
-  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com", (process.env.GROWTHBOOK_API_HOST || 'https://cdn.growthbook.io').replace(/\/+$/, '')],
+  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com"],
   // blob: — the customer portal's in-app document viewer renders Bearer-only
   // report PDFs through an iframe on a blob URL (Capacitor shell has no
   // download pipeline); blob frames are same-origin script-created only.
@@ -192,6 +188,14 @@ const embedHelmet = helmet({
   frameguard: false, // disable X-Frame-Options so frame-ancestors governs embedding
   crossOriginOpenerPolicy,
 });
+
+// First-party PostHog ingest proxy (/ingest/* → PostHog Cloud). Mounted
+// ABOVE helmet, the CORS allowlist, and the body parsers on purpose: PostHog's
+// own CORS headers must pass through untouched (spoke origins are not on the
+// portal allowlist), helmet's same-origin CORP would refuse the hub's
+// cross-origin load of /ingest/static/array.js, and the route buffers its own
+// raw body. Dark until GATE_POSTHOG_INGEST_PROXY=true (404 otherwise).
+app.use('/ingest', require('./routes/posthog-ingest'));
 
 app.use((req, res, next) => {
   // Only the /book HTML document needs frame-ancestors loosened

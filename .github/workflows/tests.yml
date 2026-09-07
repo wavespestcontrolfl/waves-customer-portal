@@ -87,6 +87,11 @@ jobs:
             | grep -v products-catalog-label-fields \
             | tee /dev/stderr \
             | xargs npx jest --ci --silent --runInBand
+      - name: Combined reservation and conversion transaction tests
+        working-directory: server
+        env:
+          COMBINED_VISIT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/combined-visit-capacity-postgres.test.js tests/combined-visit-conversion-postgres.test.js
       - name: Shared reservation arrival transaction tests
         working-directory: server
         env:
@@ -111,7 +116,12 @@ jobs:
         working-directory: server
         env:
           IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/intelligence-bar-operational-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/intelligence-bar-operational-postgres.test.js tests/intelligence-bar-target-context-db.test.js
+      - name: Intelligence Bar task recovery transaction tests
+        working-directory: server
+        env:
+          IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/intelligence-bar-task-recovery-db.test.js
       - name: Tool contract tests (202 IB/agent tools vs the migrated schema)
         # Blocks on critical only (schema drift, missing tables/columns);
         # execute-smoke warnings (e.g. uuid-typed params fed 'test') are

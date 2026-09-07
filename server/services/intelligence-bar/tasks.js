@@ -6,8 +6,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const { stableStringify } = require('./pending-actions');
 const PendingActions = require('./pending-actions');
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const { UUID_RE } = require('./task-context');
 const REQUEST_KEY_RE = /^[a-zA-Z0-9._:-]{8,120}$/;
 const STATES = new Set(['running', 'responded', 'awaiting_approval', 'needs_information', 'failed', 'outcome_unknown', 'canceled']);
 const leaseExpiry = () => new Date(Date.now() + 120000);
@@ -141,8 +140,15 @@ async function list(actorId, sessionId) {
 // Keep an active runner until its lease ends. Pending-action receipts survive
 // through their existing FK SET NULL and remain actor-bound for reconciliation.
 async function purgeExpiredTasks() {
+  // Legacy proposals stored the whole resolution context in params. Never
+  // rewrite an approval that can still be claimed; after expiry remove only
+  // that private evidence while retaining params, result and the receipt IDs.
+  // This also reaches orphaned receipts whose task FK has already been nulled.
+  await db('ib_pending_actions').where('expires_at', '<=', db.fn.now())
+    .whereRaw("params->'_ib_task_context' IS NOT NULL")
+    .update({ params: db.raw("params - '_ib_task_context'") });
   return db('ib_tasks').where('expires_at', '<=', db.fn.now())
     .where('lease_expires_at', '<=', db.fn.now()).del();
 }
 
-module.exports = { UUID_RE, REQUEST_KEY_RE, begin, checkpoint, claimResume, get, list, snapshot, requestHash, withoutImages, purgeExpiredTasks };
+module.exports = { REQUEST_KEY_RE, begin, checkpoint, claimResume, get, list, snapshot, requestHash, withoutImages, purgeExpiredTasks };

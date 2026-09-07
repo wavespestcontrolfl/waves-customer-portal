@@ -698,7 +698,7 @@ async function bulkUpdateLeads(input) {
       .update(updates, ['id']);
   }
   const ids = rows.map(r => r.id);
-  if (ids.length === 0) return { success: true, updated: 0, note: 'No matching leads found' };
+  if (ids.length === 0) return { blocked: true, updated: 0, note: 'No matching leads found' };
 
   // Funnel-row mirror for the whole batch — one set-based UPDATE with the
   // same monotonic stage predicate as the single-lead bridge. Conditional

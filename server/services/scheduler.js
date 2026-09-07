@@ -6547,11 +6547,12 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 6:40 AM ET — Schedule-integrity watchdog. Pages three silent-loss
+  // DAILY 6:40 AM ET — Schedule-integrity watchdog. Pages silent-loss
   // classes: past-dated visits stuck in on_site/en_route (performed but
   // never completed → no service record / invoice / report / SMS), upcoming
   // recurring series with no price on any row, and recurring-lawn customers
-  // invisible to the Monday irrigation email. 6:40, NOT later (Codex #3209
+  // invisible to the Monday irrigation email, and accepted-plan schedule
+  // gaps. 6:40, NOT later (Codex #3209
   // post-merge P2): the Monday irrigation send fires at 7:00 ET, so a
   // lawn-email gap alert after that is unactionable for the very send it
   // warns about — this tick must precede it. Still before the day's route
@@ -6563,8 +6564,8 @@ function initScheduledJobs() {
     try {
       const { runScheduleIntegrityWatchdog } = require('./schedule-integrity-watchdog');
       const result = await runScheduleIntegrityWatchdog();
-      if (!result.skipped && (result.stale > 0 || result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed)) {
-        logger.warn(`[schedule-integrity] stale=${result.stale} unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} alerted=${result.alerted}`);
+      if (!result.skipped && (result.stale > 0 || result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.acceptedScheduleGaps > 0 || result.acceptedScheduleCheckFailed)) {
+        logger.warn(`[schedule-integrity] stale=${result.stale} unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} acceptedScheduleGaps=${result.acceptedScheduleGaps}${result.acceptedScheduleCheckFailed ? ' ACCEPTED-SCHEDULE-CHECK-FAILED' : ''} alerted=${result.alerted}`);
       }
     } catch (err) {
       logger.error(`Schedule-integrity watchdog tick failed: ${err.message}`);
