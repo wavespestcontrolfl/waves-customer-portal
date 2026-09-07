@@ -18,6 +18,7 @@ const { recordMessageOperations, loadMessageContext, runSmsOperationalActions } 
 const numbers = require('../config/twilio-numbers');
 const NotificationService = require('../services/notification-service');
 const migration = require('../models/migrations/20260906000001_sms_operational_actions');
+const irrigationRevisionMigration = require('../models/migrations/20260907000020_property_irrigation_revision');
 const { listOpenCommitments } = require('../services/call-commitments');
 const connection = process.env.SMS_OPERATIONS_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -51,6 +52,9 @@ postgres('SMS operations on PostgreSQL', () => {
     for (const table of TABLES) {
       await admin.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
     }
+    // LIKE does not copy triggers. Exercise the real migration inside the
+    // private schema so every profile writer uses its production counter.
+    await irrigationRevisionMigration.up(mockPg);
   });
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -476,7 +480,7 @@ postgres('SMS operations on PostgreSQL', () => {
       expect(companions).toEqual({ irrigation_system: false, irrigation_baseline: { input_hashes: {
         irrigation_zones: expect.stringMatching(/^[a-f0-9]{64}$/),
         irrigation_schedule_notes: expect.stringMatching(/^[a-f0-9]{64}$/),
-      }, confirmed: [] } });
+      }, confirmed: [], revision: '1' } });
       expect(JSON.stringify(companions)).not.toContain('Private watering instructions.');
       recorded = companions;
     });
@@ -506,14 +510,91 @@ postgres('SMS operations on PostgreSQL', () => {
     await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_confirmed_fields: JSON.stringify([]), irrigation_zones: 8 });
     expect(await revert()).toEqual({ reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } });
     await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_zones: 6 });
-    expect(await revert()).toEqual({ reverted: ['irrigation_system'] });
-    expect((await mockPg('property_preferences').first()).irrigation_system).toBe(false);
-    // Existing preview approvals retain their revert semantics after the format change.
+    expect(await revert()).toEqual({ reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } });
+    expect((await mockPg('property_preferences').first()).irrigation_system).toBe(true);
+    // Existing approvals also preserve edits made since the migration.
     recorded = { irrigation_system: false, irrigation_baseline: {
       inputs: { irrigation_zones: 6, irrigation_schedule_notes: 'Private watering instructions.' }, confirmed: [],
     } };
     await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_system: true });
-    expect(await revert()).toEqual({ reverted: ['irrigation_system'] });
+    expect(await revert()).toEqual({ reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } });
+  });
+
+  test.each([
+    ['unchanged irrigation', []],
+    ['an unrelated preference edit', [{ parking_notes: 'Use the driveway.' }]],
+    ['a same-value irrigation save', [{ irrigation_zones: 6 }]],
+  ])('revert restores its companion after %s', async (_label, edits) => {
+    const writer = require('../services/data-hygiene/property-preferences');
+    const [row] = await mockPg('property_preferences').insert({ customer_id: message.customer_id,
+      irrigation_system: false, irrigation_zones: 6 }).returning('*');
+    const proposal = { scope_id: message.customer_id, field: 'irrigation_controller_location', resource_id: row.id };
+    const { companions } = await mockPg.transaction(async (trx) => writer.applyPropertyPreferenceValue({
+      trx, proposal, target: row, proposedRaw: 'Beside the garage.',
+    }));
+    for (const edit of edits) await mockPg('property_preferences').where({ id: row.id }).update(edit);
+    await mockPg.transaction(async (trx) => {
+      // Mirror the approve route: lock before restoring the proposed value,
+      // and judge companion ownership against that locked snapshot.
+      const target = await trx('property_preferences').where({ id: row.id }).forUpdate().first();
+      await trx('property_preferences').where({ id: row.id }).update({ irrigation_controller_location: null });
+      expect(await writer.revertPropertyPreferenceCompanions({ trx, proposal, target, companions }))
+        .toEqual({ reverted: ['irrigation_system'] });
+    });
+    expect(await mockPg('property_preferences').first()).toMatchObject({
+      irrigation_system: false, irrigation_controller_location: null,
+    });
+  });
+
+  test.each([
+    ['input', { irrigation_zones: 8 }, { irrigation_zones: 6 }],
+    ['confirmation', { irrigation_confirmed_fields: JSON.stringify(['watering_days']) }, { irrigation_confirmed_fields: '[]' }],
+    ['active-system choice', { irrigation_system: false }, { irrigation_system: true }],
+  ])('edit-then-restore of an irrigation %s retains the companion', async (_label, edit, restore) => {
+    const writer = require('../services/data-hygiene/property-preferences');
+    const [row] = await mockPg('property_preferences').insert({ customer_id: message.customer_id,
+      irrigation_system: false, irrigation_zones: 6 }).returning('*');
+    const proposal = { scope_id: message.customer_id, field: 'irrigation_controller_location', resource_id: row.id };
+    const { companions } = await mockPg.transaction(async (trx) => writer.applyPropertyPreferenceValue({
+      trx, proposal, target: row, proposedRaw: 'Beside the garage.',
+    }));
+    await mockPg('property_preferences').where({ id: row.id }).update(edit);
+    await mockPg('property_preferences').where({ id: row.id }).update(restore);
+    await mockPg.transaction(async (trx) => {
+      const target = await trx('property_preferences').where({ id: row.id }).forUpdate().first();
+      await trx('property_preferences').where({ id: row.id }).update({ irrigation_controller_location: null });
+      expect(await writer.revertPropertyPreferenceCompanions({ trx, proposal, target, companions }))
+        .toEqual({ reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } });
+    });
+    expect((await mockPg('property_preferences').first()).irrigation_system).toBe(true);
+  });
+
+  test('a legacy approval can restore its companion while no post-migration irrigation edit exists', async () => {
+    const writer = require('../services/data-hygiene/property-preferences');
+    const [target] = await mockPg('property_preferences').insert({ customer_id: message.customer_id,
+      irrigation_system: true, irrigation_controller_location: 'Beside the garage.', irrigation_zones: 6 }).returning('*');
+    const proposal = { scope_id: message.customer_id, field: 'irrigation_controller_location', resource_id: target.id };
+    const companions = { irrigation_system: false, irrigation_baseline: { inputs: { irrigation_zones: 6 }, confirmed: [] } };
+    await mockPg.transaction(async (trx) => {
+      expect(await writer.revertPropertyPreferenceCompanions({ trx, proposal, target, companions }))
+        .toEqual({ reverted: ['irrigation_system'] });
+    });
+  });
+
+  test('irrigation revision migration is reversible and an aborted edit leaves no revision', async () => {
+    await mockPg('property_preferences').insert({ customer_id: message.customer_id, irrigation_zones: 6 });
+    const abort = new Error('synthetic rollback');
+    await expect(mockPg.transaction(async (trx) => {
+      await irrigationRevisionMigration.down(trx);
+      await irrigationRevisionMigration.down(trx);
+      expect(await trx.schema.hasColumn('property_preferences', 'irrigation_revision')).toBe(false);
+      await irrigationRevisionMigration.up(trx);
+      await irrigationRevisionMigration.up(trx);
+      await trx('property_preferences').where({ customer_id: message.customer_id }).update({ irrigation_zones: 8 });
+      expect((await trx('property_preferences').first()).irrigation_revision).toBe('1');
+      throw abort;
+    })).rejects.toBe(abort);
+    expect(await mockPg('property_preferences').first()).toMatchObject({ irrigation_zones: 6, irrigation_revision: '0' });
   });
 
   test('a failed critical audit rolls back profile and processed marker together', async () => {

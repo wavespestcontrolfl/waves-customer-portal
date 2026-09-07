@@ -58,17 +58,20 @@ async function applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw
   // row can hold inputs with the flag off) from evidence added afterwards.
   const companions = irrigation && target.irrigation_system !== true
     ? { irrigation_system: target.irrigation_system ?? null, irrigation_baseline: irrigationEvidence(target, proposal.field) } : {};
-  const updated = await trx('property_preferences')
+  const [updated] = await trx('property_preferences')
     .where({ id: target.id, customer_id: proposal.scope_id })
     .update({
       [proposal.field]: proposedRaw,
       ...(irrigation ? { irrigation_system: true } : {}),
       updated_at: trx.fn.now(),
-    });
+    }).returning('irrigation_revision');
   if (!updated) {
     const err = new Error('Property preferences update failed');
     err.status = 409;
     throw err;
+  }
+  if (companions.irrigation_baseline) {
+    companions.irrigation_baseline.revision = String(updated.irrigation_revision);
   }
   return { companions };
 }
@@ -80,6 +83,12 @@ async function revertPropertyPreferenceCompanions({ trx, proposal, target, compa
   if (!('irrigation_system' in companions) || target.irrigation_system !== true) return { reverted: [] };
   const now = irrigationEvidence(target, proposal.field);
   const baseline = companions.irrigation_baseline || { input_hashes: {}, confirmed: [] };
+  // Existing approvals start at the migration's zero revision. Any later
+  // irrigation edit, including an edit followed by a restore, preserves the
+  // active flag. The caller supplies the row locked BEFORE its own revert.
+  if (String(target.irrigation_revision) !== String(baseline.revision ?? 0)) {
+    return { reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } };
+  }
   // Approvals already persisted by previews may carry the earlier value map.
   const baselineHashes = baseline.input_hashes || Object.fromEntries(
     Object.entries(baseline.inputs || {}).map(([field, value]) => [field, hashSensitiveValue(value)]));
