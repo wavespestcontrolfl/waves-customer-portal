@@ -718,6 +718,7 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     }
   };
   const serializeCapture = opts.callSid && opts.aniPhone && typeof db.transaction === 'function';
+  let writtenFloorSummary = null;
 
   // ⭐ THE LOCK COVERS THE MUTABLE LEAD STATE, NOT JUST THE INSERT. Releasing
   // it after the lookup/insert left the current-read → merge → update →
@@ -727,7 +728,9 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   // connection.
   const mergeAndStamp = async (q) => {
     if (!leadId) return;
-    const current = existingLead || (await q('leads').where({ id: leadId }).first());
+    const current = q.isTransaction
+      ? await q('leads').where({ id: leadId }).forUpdate().first()
+      : existingLead || (await q('leads').where({ id: leadId }).first());
     const leadUpdates = {};
     if (extracted.first_name && isEmpty(current?.first_name)) leadUpdates.first_name = nameCase(extracted.first_name);
     if (extracted.last_name && isEmpty(current?.last_name)) leadUpdates.last_name = nameCase(extracted.last_name);
@@ -843,6 +846,7 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     if (customerId) leadUpdates.customer_id = customerId;
     leadUpdates.updated_at = new Date();
     await q('leads').where({ id: leadId }).update(leadUpdates);
+    if (opts.summarySource === 'capture_floor') writtenFloorSummary = leadUpdates.transcript_summary || null;
 
     // The activity row is stashed for a POST-COMMIT best-effort insert —
     // ⭐ a caught error INSIDE a Postgres transaction still ABORTS it
@@ -888,12 +892,12 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
           }
         }
         await runCapture(trx);
-        // The takeover waits on this transaction's call-row lock. Its resume
-        // read must see a committed lead even if this socket is still waiting
-        // for post-commit work and already appended its close segment.
-        if (opts.sessionKey && process.env.GATE_VOICE_RELAY_RECOVERY === 'true') {
+        // A keyed takeover waits on this transaction's call-row lock. An
+        // unverified floor may also record its summary ownership, but only
+        // while the call is still unclaimed (the stamp enforces that atomically).
+        if ((opts.sessionKey || writtenFloorSummary) && process.env.GATE_VOICE_RELAY_RECOVERY === 'true') {
           const { stampCallLeadLinkage } = require('./voice-agent/relay-context');
-          await stampCallLeadLinkage(opts.callSid, leadId, { trx });
+          await stampCallLeadLinkage(opts.callSid, leadId, { trx, sessionKey: opts.sessionKey, floorSummary: writtenFloorSummary });
         }
       });
       if (superseded) {
