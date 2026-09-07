@@ -64,6 +64,7 @@ async function maybeSendOnEnRoute(svc) {
       customerId: svc.customer_id,
       sourceId: svc.id,
       trackToken: svc.track_view_token,
+      trackTokenExpiresAt: svc.track_token_expires_at,
     });
   } catch (err) {
     logger.error(`[recurring-app-intro] send failed for customer ${svc?.customer_id}: ${err.message}`);

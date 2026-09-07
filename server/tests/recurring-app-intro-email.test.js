@@ -32,7 +32,7 @@ const RecurringAppIntro = require('../services/recurring-app-intro-email');
 
 // svc deliberately omits waveguard_tier — it isn't on scheduled_services, so the
 // module must source the tier from the customers table, not from svc.
-const recurringSvc = { id: 's1', customer_id: 'c1', is_recurring: true, scheduled_date: '2030-01-02', track_view_token: 'a'.repeat(64) };
+const recurringSvc = { id: 's1', customer_id: 'c1', is_recurring: true, scheduled_date: '2030-01-02', track_view_token: 'a'.repeat(64), track_token_expires_at: new Date(Date.now() + 3600000).toISOString() };
 
 describe('recurring-app-intro-email gating', () => {
   beforeEach(() => {
@@ -74,7 +74,7 @@ describe('recurring-app-intro-email gating', () => {
   test('sends for a recurring member on their first visit', async () => {
     const r = await RecurringAppIntro.maybeSendOnEnRoute(recurringSvc);
     expect(AccountMembershipEmail.sendAppIntro).toHaveBeenCalledTimes(1);
-    expect(AccountMembershipEmail.sendAppIntro).toHaveBeenCalledWith({ customerId: 'c1', sourceId: 's1', trackToken: 'a'.repeat(64) });
+    expect(AccountMembershipEmail.sendAppIntro).toHaveBeenCalledWith({ customerId: 'c1', sourceId: 's1', trackToken: 'a'.repeat(64), trackTokenExpiresAt: recurringSvc.track_token_expires_at });
     expect(mockFirstServiceVisit).toHaveBeenCalledWith('c1', recurringSvc.scheduled_date);
     expect(r).toMatchObject({ ok: true });
   });
