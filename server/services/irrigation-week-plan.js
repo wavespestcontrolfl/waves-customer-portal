@@ -105,7 +105,7 @@ function decideWeekPlan({
   // The plan week's Sunday: a policy that expires before it does not cover
   // the instruction and yields no plan.
   planWeekEnd = null,
-  // Last week's SENT plan's event count — cool-season cadence input.
+  // Last week's published/sent plan's event count — cool-season cadence input.
   priorWeekEvents = null,
   // Last week's delivered plan's prescribed inches — replaces the programmed
   // schedule as last week's applied irrigation (null = no delivered plan).
@@ -273,7 +273,7 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
       : cool
         ? `December through March your ${grassLabel} is barely growing — every 10–14 days if needed is plenty`
         : `Your ${grassLabel} doesn't need a full watering this week`;
-    // Cadence hold: a SENT plan proves the email went out, not that the
+    // Cadence hold: a published/sent plan proves advice was available, not that the
     // irrigation ran — the copy is conditional on what the customer did,
     // never "you watered last week" (hook P1 on 246b5bfc8).
     actionLine = plan.reasons.includes('cool_season_cadence')
@@ -438,32 +438,17 @@ function renderWeekPlanAfterTreatment(plan, { restriction = null } = {}) {
 }
 
 /**
- * Snapshot lifecycle — exactness contract: the row the report renders is the
- * decision the SENT email was built from.
- *   persistWeekPlan()       before the send: ATOMIC CLAIM — insert, or
- *                           replace an existing UNSENT row only when no
- *                           other worker holds a live lease on it (lease =
- *                           the email library's queued-row lease); a SENT
- *                           row is never touched. Only the claimant sends.
- *   markWeekPlanSent()      after the provider accepts: stamp sent_at on the
- *                           row whose decision_hash matches — a stale row
- *                           from another decision can never be stamped.
- *   discardUnsentWeekPlan() send failed/blocked/threw: drop the undelivered
- *                           row — only the claimant's own (claim_token) —
- *                           so the next run's plan is the one both sent and
- *                           stored.
- *   weekPlanDeliveryState() the sweep's source of truth for "did a prior
- *                           run deliver, and which decision?" —
- *                           email_messages by idempotency key, whose
- *                           categories carry "plan:<hash>". A rerun that
- *                           finds 'sent' stamps ONLY the row with that hash
- *                           and never replaces it; a record with no hash
- *                           leaves the report plan absent; 'pending' (in
- *                           flight / unknown) touches nothing; a
- *                           post-provider throw is reconciled the same way.
- * A deduped rerun with no row (both inserts failed on the original run) is
- * left absent — the report shows no plan rather than one that was never
- * emailed. None of these throw — a snapshot problem must never block a send.
+ * One customer-week decision for app, email and reports. The Monday sweep
+ * publishes under the existing property-preferences lock after validating
+ * the current home, settings, policy and cutoff. published_at means readable
+ * in the app; sent_at means the email provider accepted that exact decision.
+ *
+ * persistWeekPlan claims a draft using the email library's existing lease.
+ * Published/sent inputs are immutable; an email retry can claim only the
+ * same published hash. markWeekPlanSent and email_messages reconciliation
+ * record email outcomes without changing publication. discardUnsentWeekPlan
+ * removes only the claimant's unpublished draft, never a published plan.
+ * Missing or ambiguous email records never authorize a replacement decision.
  */
 // The hash covers EVERYTHING persisted on the row that shapes copy or
 // premise binding — the plan, every decision input (runtime, home, county,
@@ -482,8 +467,8 @@ function decisionHash(plan, decisionInputs = {}, restriction = null) {
 const CLAIM_LEASE_SECONDS = Math.max(1, Math.round(QUEUED_IN_FLIGHT_MS / 1000));
 
 /**
- * Pre-send write AND send claim, in one statement: insert the row, or
- * replace an existing UNSENT row only when nobody holds a live lease on it
+ * Atomic draft or email-retry claim: insert the row, or
+ * replace an unpublished UNSENT row only when nobody holds a live lease on it
  * (or we hold it — the post-send retry). RETURNING tells us whether we own
  * the row: { claimed: true, hash } → this worker sends; { claimed: false }
  * → another worker (or a sent row) owns the customer-week — do not send.
@@ -506,12 +491,12 @@ async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), 
       claimed_at: db.fn.now(),
       updated_at: db.fn.now(),
     };
-    const returned = await db('irrigation_week_plans')
+    let returned = await db('irrigation_week_plans')
       .insert({ ...row, created_at: db.fn.now() })
       .onConflict(['customer_id', 'week_ending'])
       .merge(row)
       .whereRaw(
-        `irrigation_week_plans.sent_at IS NULL AND (
+        `irrigation_week_plans.sent_at IS NULL AND irrigation_week_plans.published_at IS NULL AND (
            irrigation_week_plans.claim_token = ?
            OR irrigation_week_plans.claimed_at IS NULL
            OR irrigation_week_plans.claimed_at < now() - interval '${CLAIM_LEASE_SECONDS} seconds'
@@ -519,6 +504,16 @@ async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), 
         [token],
       )
       .returning(['decision_hash']);
+    // A published decision is immutable. A later email worker may reclaim
+    // its lease only for that exact decision, without rewriting any inputs.
+    if (!returned.length) {
+      returned = await db('irrigation_week_plans')
+        .where({ customer_id: customerId, week_ending: weekEnding, decision_hash: hash })
+        .whereNull('sent_at').whereNotNull('published_at')
+        .whereRaw(`(claim_token = ? OR claimed_at IS NULL OR claimed_at < now() - interval '${CLAIM_LEASE_SECONDS} seconds')`, [token])
+        .update({ claim_token: token, claimed_at: db.fn.now(), updated_at: db.fn.now() })
+        .returning(['decision_hash']);
+    }
     const claimed = Array.isArray(returned) && returned.length > 0;
     return { claimed, hash: claimed ? hash : null, claimToken: token };
   } catch (err) {
@@ -587,7 +582,7 @@ async function loadPriorWeekPlan({ customerId, weekEnding, home = null } = {}) {
   try {
     const row = await db('irrigation_week_plans')
       .where({ customer_id: customerId, week_ending: prior })
-      .first('week_plan', 'sent_at', 'decision_hash', 'weather_inputs');
+      .first('week_plan', 'sent_at', 'published_at', 'decision_hash', 'weather_inputs');
     if (!row) return null;
     // The prior plan was decided for the HOME on its snapshot. After a move
     // it is evidence about the former property: its prescribed depth must
@@ -613,7 +608,7 @@ async function loadPriorWeekPlan({ customerId, weekEnding, home = null } = {}) {
     // Delivered = stamped, OR the durable customer-week delivery record says
     // the provider accepted it and names this decision — the same
     // reconciliation the sweep and the merge use (codex gh-r20/r23).
-    if (!row.sent_at) {
+    if (!row.sent_at && !row.published_at) {
       const delivery = await weekPlanDeliveryState({ triggerEventId: `irrigation.weekly:${customerId}:${prior}` });
       if (delivery.state !== 'sent' || !delivery.decisionHash || delivery.decisionHash !== row.decision_hash) return null;
     }
@@ -763,11 +758,14 @@ async function weekPlanDeliveryState({ triggerEventId, idempotencyKey } = {}) {
  * UNKNOWN (lookup failed / table unavailable) — the caller falls back to the
  * pre-plan email rather than treating an unreadable table as a sent row.
  */
-async function hasSentWeekPlan({ customerId, weekEnding } = {}) {
+async function hasSentWeekPlan({ customerId, weekEnding, includePublished = false } = {}) {
   try {
     const row = await db('irrigation_week_plans')
       .where({ customer_id: customerId, week_ending: weekEnding })
-      .whereNotNull('sent_at')
+      .where((q) => {
+        q.whereNotNull('sent_at');
+        if (includePublished) q.orWhereNotNull('published_at');
+      })
       .first('id');
     return !!row;
   } catch (err) {
@@ -783,7 +781,7 @@ async function discardUnsentWeekPlan({ customerId, weekEnding, claimToken = null
   try {
     await db('irrigation_week_plans')
       .where({ customer_id: customerId, week_ending: weekEnding, claim_token: claimToken })
-      .whereNull('sent_at')
+      .whereNull('sent_at').whereNull('published_at')
       .del();
   } catch (err) {
     logger.warn(`[irrigation-week-plan] discard failed for ${customerId}/${weekEnding}: ${err.message}`);
@@ -827,7 +825,7 @@ function samePolicy(a, b) {
 }
 
 /**
- * The SENT snapshot for the CURRENT week (the sweep's week_ending key), and
+ * The published or SENT snapshot for the CURRENT week (the sweep's week_ending key), and
  * only if the restriction policy it was decided under is still the one in force
  * — a policy that expired or tightened mid-week makes Monday's plan wrong,
  * so the report shows nothing rather than a stale legal instruction.
@@ -847,17 +845,17 @@ class PinnedWeekPlanUnavailable extends Error {
   }
 }
 
-async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedSentAt, strict = false } = {}) {
+async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedAvailableAt, strict = false } = {}) {
   if (!customerId) return null;
   // A render pinned to the cache-signature lookup's answer: the snapshot
-  // counts only if it is the SAME one that lookup saw (its sent_at), so a
+  // counts only if it is the SAME one that lookup saw (its first availability timestamp), so a
   // Monday stamp landing between the two reads can't cache a plan under a
   // "plan=none" key (or vice versa).
-  const pinned = pinnedSentAt !== undefined;
-  if (pinned && pinnedSentAt === null) return null;
-  // Strict + pinned to a real send: any way the pinned plan fails to resolve
+  const pinned = pinnedAvailableAt !== undefined;
+  if (pinned && pinnedAvailableAt === null) return null;
+  // Strict + pinned to an available plan: any way the pinned plan fails to resolve
   // is a refusal, not an absence.
-  const strictPin = strict && typeof pinnedSentAt === 'string';
+  const strictPin = strict && typeof pinnedAvailableAt === 'string';
   const absent = (reason) => {
     if (strictPin) throw new PinnedWeekPlanUnavailable(reason);
     return null;
@@ -868,7 +866,7 @@ async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedSentAt,
       .where({ customer_id: customerId, week_ending: weekEnding })
       .first();
     if (!row) return absent('missing');
-    if (!row.sent_at) {
+    if (!row.sent_at && !row.published_at) {
       // The provider may have accepted the email while the post-send stamp
       // failed (a once-a-week cron would otherwise leave the report plan-less
       // all week): reconcile from the customer-week delivery record, stamp,
@@ -880,7 +878,7 @@ async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedSentAt,
           .where({ customer_id: customerId, week_ending: weekEnding })
           .first();
       }
-      if (!row || !row.sent_at) return absent('unstamped');
+      if (!row || (!row.sent_at && !row.published_at)) return absent('unstamped');
     }
     const parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
     const restriction = parse(row.restriction_policy) || null;
@@ -889,11 +887,13 @@ async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedSentAt,
     // snapshot's whole plan week.
     const horizonEnd = decisionInputs.planWeekEnd || etDateStringPlusDays(row.week_ending, 7);
     if (!samePolicy(restriction, currentRestrictionPolicy(now, { county: decisionInputs.county || restriction?.county || null, horizonEnd }))) return absent('policy_changed');
-    if (pinned && new Date(row.sent_at).toISOString() !== pinnedSentAt) return absent('sent_at_mismatch');
+    if (pinned && new Date(row.published_at || row.sent_at).toISOString() !== pinnedAvailableAt) return absent('availability_mismatch');
     return {
       weekEnding: row.week_ending,
       planAsOf: row.plan_as_of,
       sentAt: row.sent_at,
+      availableAt: row.published_at || row.sent_at,
+      publishedAt: row.published_at,
       // The inputs the decision was made from — the report's "N minutes more
       // than you run now" compares against THESE, not today's prefs.
       decisionInputs,
@@ -911,6 +911,7 @@ async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedSentAt,
 }
 
 module.exports = {
+  samePolicy,
   decideWeekPlan,
   renderWeekPlanEmail,
   renderWeekPlanReport,

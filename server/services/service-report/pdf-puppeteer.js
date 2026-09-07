@@ -20,13 +20,13 @@ function serviceReportPublicBase(req) {
 // the attachment's content deterministic is to tell the page which assessment
 // to show. The data route validates the pin against what this token already
 // exposes and refuses anything else.
-function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessmentId = null, pinnedWeekPlanSentAt } = {}) {
+function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessmentId = null, pinnedWeekPlanAvailableAt } = {}) {
   const base = serviceReportPublicBase(req).replace(/\/+$/, '');
   const params = [];
   if (mode) params.push(`mode=${encodeURIComponent(mode)}`);
   // Week-plan identity rides inside the assessment pin's signature (an
   // unpinned plan = '' — the page then reads the live snapshot).
-  const planPin = pinnedWeekPlanSentAt === undefined ? '' : (pinnedWeekPlanSentAt === null ? 'none' : String(pinnedWeekPlanSentAt));
+  const planPin = pinnedWeekPlanAvailableAt === undefined ? '' : (pinnedWeekPlanAvailableAt === null ? 'none' : String(pinnedWeekPlanAvailableAt));
   if (pinnedLawnAssessmentId) {
     // The signature is what makes the pin trustworthy: the route refuses an
     // unsigned pin, because only this server may ask a report to render a

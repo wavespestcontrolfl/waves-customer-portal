@@ -340,7 +340,7 @@ async function buildServiceReportV1ResponseData(service, token, {
   pinnedLawnAssessmentId = null,
   // The week-plan snapshot the cache signature saw (ISO sent_at | null);
   // undefined leaves the render unpinned (live snapshot).
-  pinnedWeekPlanSentAt,
+  pinnedWeekPlanAvailableAt,
   // OPT-IN, and only the /data render path opts in (codex #3367 PR r15).
   // Composing the offer runs the whole ownership → property → estimate →
   // pricing pipeline plus a referral-settings read. The Q&A endpoint calls
@@ -359,7 +359,7 @@ async function buildServiceReportV1ResponseData(service, token, {
   // Summary narrative) can exclude the live-only next appointment from
   // pdf/static text — the field-level strip below can't reach prose.
   const data = await buildReportV1Data(service, token, db, {
-    pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanSentAt,
+    pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -1942,7 +1942,7 @@ router.get('/:token', async (req, res, next) => {
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const renderSignature = visibilitySignature;
           const data = await buildServiceReportV1ResponseData(service, req.params.token, {
-            mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin, pinnedWeekPlanSentAt: canonical.weekPlanSentAt,
+            mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt,
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
           cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
@@ -1960,7 +1960,7 @@ router.get('/:token', async (req, res, next) => {
             // page's freedom to choose; the key already carries assessment
             // identity, so this render stays cacheable.
             pinnedLawnAssessmentId: canonicalPin,
-            pinnedWeekPlanSentAt: canonical.weekPlanSentAt,
+            pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt,
           });
           pdf = rendered.pdf;
           renderImageFailures = rendered.imageFailures ?? null;
@@ -2231,11 +2231,11 @@ router.get('/:token/data', async (req, res, next) => {
         return res.status(409).json({ error: 'Requested assessment is not available for this report' });
       }
       const pinnedLawnAssessmentId = requestedAssessment;
-      const pinnedWeekPlanSentAt = requestedAssessment && requestedPlan ? (requestedPlan === 'none' ? null : requestedPlan) : undefined;
+      const pinnedWeekPlanAvailableAt = requestedAssessment && requestedPlan ? (requestedPlan === 'none' ? null : requestedPlan) : undefined;
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
-        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanSentAt, composeOffers: true,
+        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, composeOffers: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was

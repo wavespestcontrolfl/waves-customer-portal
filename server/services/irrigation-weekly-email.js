@@ -25,11 +25,13 @@
  */
 
 const crypto = require('crypto');
+const { isDeepStrictEqual } = require('node:util');
+const { dateOnlyString } = require('../utils/date-only');
 const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { buildIrrigationAdvice } = require('./service-report/irrigation-advice');
-const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, hasSentWeekPlan, discardUnsentWeekPlan, weekPlanDeliveryState, planCategory, renewWeekPlanClaimWithRetry, loadPriorWeekPlan } = require('./irrigation-week-plan');
+const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, hasSentWeekPlan, discardUnsentWeekPlan, weekPlanDeliveryState, planCategory, renewWeekPlanClaimWithRetry, loadPriorWeekPlan, loadCurrentWeekPlan, planBindsToService, samePolicy } = require('./irrigation-week-plan');
 
 // Mirrors IRRIGATION_SIZING_FIELDS in routes/property.js: the settings the
 // plan sizes controller instructions from. A field that is empty on the row
@@ -40,10 +42,10 @@ const IN_PROGRESS_RETRIES = 3;
 const IN_PROGRESS_RETRY_MS = 2000;
 // Sprinkler settings follow the home — one resolver shared with the report.
 const { IRRIGATION_SIZING_FIELDS, sizingFieldsUnconfirmed, scheduleUnconfirmedAfterMove, countyConfirmedAfterMove, grassConfirmedAfterMove, rainSensorConfirmedAfterMove } = require('./irrigation-schedule-confirmation');
-const { resolveRestrictionCounty } = require('../config/irrigation-restrictions');
+const { resolveRestrictionCounty, currentRestrictionPolicy } = require('../config/irrigation-restrictions');
 const { fetchServiceWeekWeather, sumPrecipInches, et0SumToInches } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
-const { isEnabled } = require('../config/feature-gates');
+const { isEnabled, gateEnvValue } = require('../config/feature-gates');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { etDateString, addETDays, etParts, lastCompletedWeekEndingET } = require('../utils/datetime-et');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
@@ -978,10 +980,10 @@ async function hasLawnServiceEvidence(customerId, { now = new Date() } = {}) {
   return !!row;
 }
 
-async function findEligibleCustomers({ now = new Date(), customerId = null } = {}) {
+async function findEligibleCustomers({ now = new Date(), customerId = null, includeApp = false, conn = db } = {}) {
   const lawnServiceCutoff = etDateString(addETDays(now, -LAWN_SERVICE_RECENCY_DAYS));
   const todayET = etDateString(now);
-  return db('customers as c')
+  return conn('customers as c')
     // LEFT so a recurring-lawn customer who never opened Property Preferences
     // is still reachable — under the old INNER JOIN a missing prefs row made
     // them invisible to the sweep entirely (1 live customer, verified
@@ -992,7 +994,9 @@ async function findEligibleCustomers({ now = new Date(), customerId = null } = {
       this.on('tp.customer_id', '=', 'c.id').andOnVal('tp.active', '=', true);
     })
     .leftJoin('notification_prefs as np', 'np.customer_id', 'c.id')
-    .whereRaw('np.email_enabled IS DISTINCT FROM false')
+    .where((q) => {
+      if (!includeApp) q.whereRaw('np.email_enabled IS DISTINCT FROM false').whereNotNull('c.email');
+    })
     // This email IS a seasonal lawn tip — the portal labels seasonal_tips
     // "Watering, mowing height, and care tips for SW Florida" — so the
     // dedicated opt-out is honored too (the SMS tip path gates on the same
@@ -1005,7 +1009,6 @@ async function findEligibleCustomers({ now = new Date(), customerId = null } = {
     // the tp join): customers.active defaults TRUE for lead rows, so
     // pipeline_stage is what separates a customer from a lead.
     .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
-    .whereNotNull('c.email')
     .whereNotNull('c.latitude')
     .whereNotNull('c.longitude')
     // NOTE: irrigation_system / irrigation_inches_per_week are deliberately
@@ -1023,6 +1026,7 @@ async function findEligibleCustomers({ now = new Date(), customerId = null } = {
       'c.id',
       'c.first_name',
       'c.email',
+      'np.email_enabled',
       'c.latitude',
       'c.longitude',
       'pp.irrigation_inches_per_week',
@@ -1068,7 +1072,7 @@ async function findEligibleCustomers({ now = new Date(), customerId = null } = {
       // (routes/lawn-health.js:191,358). This is a VALIDITY filter, not a value
       // filter — unconfirmed rows are not readings yet, so removing them before
       // ORDER BY is correct and does not reintroduce the skipped-newer-zero bug.
-      db.raw(`(
+      conn.raw(`(
         SELECT la.irrigation_inches_per_week
           FROM lawn_assessments la
          WHERE la.customer_id = c.id
@@ -1139,6 +1143,32 @@ function weeklyInputsForCustomer(customer, { weekEnding, weekWeather, priorWeek 
   };
 }
 
+// Rebuild from frozen weather, then require current settings to yield the
+// identical decision. Neither a retry nor a reader may invent a second plan.
+function replayWeekPlanForCustomer(snapshot, current) {
+  if (!snapshot?.decisionInputs?.home?.addressLine1 || !planBindsToService(snapshot, current)) return null;
+  const inputs = JSON.parse(JSON.stringify(snapshot.decisionInputs));
+  const replay = buildWeeklyEmailDecision({
+    ...weeklyInputsForCustomer(current, {
+      weekEnding: dateOnlyString(snapshot.weekEnding),
+      weekWeather: { rainInches: inputs.rainfallInches7d, et0Inches: inputs.et0Inches, rainSource: inputs.rainSource },
+      priorWeek: { events: inputs.priorWeekEvents, prescribedInches: inputs.priorWeekPrescribedInches },
+      weekPlanEnabled: true,
+      planWeekEnd: inputs.planWeekEnd,
+      now: new Date(snapshot.planAsOf),
+    }),
+    forecastRainInches: inputs.forecastRainInches,
+    forecastEt0Inches: inputs.forecastEt0Inches,
+  });
+  if (!replay.shouldSend || !replay.weekPlan) return null;
+  // Premise identity was checked above with homesDiffer's street/unit/ZIP
+  // rules. Postal-city spelling and formatting must not invalidate that match.
+  const replayInputs = { ...JSON.parse(JSON.stringify(replay.decisionInputs)), home: inputs.home };
+  if (!isDeepStrictEqual(replay.weekPlan, snapshot.plan)
+    || !isDeepStrictEqual(replayInputs, inputs)) return null;
+  return replay;
+}
+
 // Grass for the water target: the turf profile's canonical key wins; legacy
 // customers without an active profile fall back to free-text customers.lawn_type
 // normalized to a canonical key ("Zoysia Empire" → zoysia) so a Bahia/Zoysia
@@ -1204,9 +1234,11 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
   // given.
   const tick = clock || (now ? () => now : () => new Date());
   const weekEnding = lastCompletedWeekEnding(startedAt);
-  const candidates = await findEligibleCustomers({ now: startedAt });
+  const appPublication = gateEnvValue('GATE_IRRIGATION_APP_PLAN') && gateEnvValue('GATE_IRRIGATION_WEEK_PLAN');
+  const emailEnabled = isEnabled('irrigationWeeklyEmail');
+  const candidates = await findEligibleCustomers({ now: startedAt, includeApp: appPublication });
 
-  if (!isEnabled('irrigationWeeklyEmail')) {
+  if (!emailEnabled && !appPublication) {
     logger.info(`[irrigation-weekly-email] shadow mode (gate off): ${candidates.length} candidate(s) for week ending ${weekEnding} — no emails sent`);
     return { shadow: true, weekEnding, candidates: candidates.length, sent: 0 };
   }
@@ -1217,6 +1249,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
     candidates: candidates.length,
     attempted: 0,
     sent: 0,
+    published: 0,
     deduped: 0,
     blocked: 0,
     skipped: { rain_unknown: 0, unknown: 0, missing_email: 0, capped: 0, no_longer_eligible: 0, home_moved_mid_sweep: 0 },
@@ -1240,7 +1273,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
   const planWeekEnd = etDateString(addETDays(new Date(`${weekEnding}T16:00:00Z`), 7));
 
   for (let customer of candidates) {
-    if (summary.attempted >= maxSendAttempts) {
+    if (summary.attempted >= maxSendAttempts && !appPublication) {
       summary.skipped.capped += 1;
       continue;
     }
@@ -1253,7 +1286,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
     // re-read keeps the loaded row (the queue-transition stamp check below
     // still guards the plan path).
     try {
-      const fresh = await findEligibleCustomers({ now: startedAt, customerId: customer.id });
+      const fresh = await findEligibleCustomers({ now: tick(), customerId: customer.id, includeApp: appPublication });
       if (!fresh.length) { summary.skipped.no_longer_eligible += 1; continue; }
       // A move stamp that CHANGED since the audience load means this row is
       // mid-transition: the address paths clear and re-geocode coordinates
@@ -1271,6 +1304,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       customer = fresh[0];
     } catch (err) {
       logger.warn(`[irrigation-weekly-email] candidate re-read failed for ${customer.id}: ${err.message}`);
+      if (appPublication) { summary.failed += 1; continue; }
     }
     // Hoisted so the catch can discard a pre-send snapshot when the send throws.
     let snapshotArgs = null;
@@ -1296,20 +1330,28 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
     const isMondayET = planWindowOpen(planAsOf);
     const weekPlanEnabled = weekPlanGate && isMondayET;
     try {
-      if (!isEmailLike(customer.email)) {
+      const canEmail = emailEnabled && customer.email_enabled !== false && isEmailLike(customer.email);
+      if (!canEmail && !appPublication) {
         summary.skipped.missing_email += 1;
         continue;
       }
 
-      const weekWeather = await fetchServiceWeekWeather({
-        latitude: customer.latitude,
-        longitude: customer.longitude,
-        serviceDate: weekEnding,
-      });
-
-      const priorWeek = weekPlanEnabled ? await loadPriorWeekPlan({ customerId: customer.id, weekEnding, home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip } }) : null;
+      const saved = appPublication ? await loadCurrentWeekPlan(customer.id, { now: planAsOf, strict: true }) : null;
+      if (saved?.sentAt) { summary.deduped += 1; continue; }
+      // Publication freezes this week's weather and decision. Even a later
+      // email attempt consumes those inputs, after validating current settings.
+      if (saved && (!weekPlanEnabled || !replayWeekPlanForCustomer(saved, customer))) {
+        summary.plan.unavailable += 1;
+        continue;
+      }
+      const frozen = saved?.decisionInputs;
+      const weekWeather = frozen
+        ? { rainInches: frozen.rainfallInches7d, et0Inches: frozen.et0Inches, rainSource: frozen.rainSource }
+        : await fetchServiceWeekWeather({ latitude: customer.latitude, longitude: customer.longitude, serviceDate: weekEnding });
+      const priorWeek = frozen ? { events: frozen.priorWeekEvents, prescribedInches: frozen.priorWeekPrescribedInches }
+        : weekPlanEnabled ? await loadPriorWeekPlan({ customerId: customer.id, weekEnding, home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip } }) : null;
       const decisionInputs = weeklyInputsForCustomer(customer, {
-        weekEnding, weekWeather, priorWeek, weekPlanEnabled, planWeekEnd, now: planAsOf,
+        weekEnding, weekWeather, priorWeek, weekPlanEnabled, planWeekEnd, now: saved ? new Date(saved.planAsOf) : planAsOf,
       });
       // Decide from last week's balance FIRST — the forecast only fills an
       // optional copy line and never changes shouldSend, so skipped customers
@@ -1320,7 +1362,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         else summary.skipped.unknown += 1;
         continue;
       }
-      const upcoming = await fetchUpcomingWeekForecast({
+      const upcoming = frozen ? { rainInches: frozen.forecastRainInches, et0Inches: frozen.forecastEt0Inches } : await fetchUpcomingWeekForecast({
         latitude: customer.latitude,
         longitude: customer.longitude,
         // Plan mode only: the plan week ends the Sunday after the completed
@@ -1356,7 +1398,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       // 41705b745: gating this on weekPlanGate let a gate-off retry bypass
       // the customer-week dedupe.
       if (!decision.weekPlan) {
-        const alreadySentLegacyPath = await hasSentWeekPlan({ customerId: customer.id, weekEnding });
+        const alreadySentLegacyPath = await hasSentWeekPlan({ customerId: customer.id, weekEnding, includePublished: true });
         const priorLegacyPath = alreadySentLegacyPath === true ? { state: 'sent' } : await weekPlanDeliveryState({ triggerEventId, idempotencyKey });
         if (alreadySentLegacyPath === true || priorLegacyPath.state === 'sent') {
           summary.deduped += 1;
@@ -1380,7 +1422,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         // has — stamp it and never replace it. In flight/unknown → touch
         // nothing. Otherwise write THIS decision (replacing only an unsent
         // row) and stamp it after the provider accepts.
-        snapshotArgs = { customerId: customer.id, weekEnding, planAsOf, decisionInputs: decision.decisionInputs, restriction: decision.restriction, plan: p, idempotencyKey, triggerEventId };
+        snapshotArgs = { customerId: customer.id, weekEnding, planAsOf: saved?.planAsOf || planAsOf, decisionInputs: decision.decisionInputs, restriction: decision.restriction, plan: p, idempotencyKey, triggerEventId };
         // One plan per customer-week. A SENT snapshot with a different
         // idempotency key (the customer changed email mid-week) means the
         // week's email already went out — never send a second, possibly
@@ -1417,6 +1459,7 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
         } else if (prior.state !== 'pending') {
           const claim = await persistWeekPlan(snapshotArgs);
           snapshotArgs.claimToken = claim.claimToken;
+          if (claim.error && saved) { summary.plan.claim_error += 1; continue; }
           if (claim.error) {
             // A snapshot DB error is not contention: the week's email still
             // goes out on the pre-plan template (a Tuesday retry could not
@@ -1443,6 +1486,32 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       } else if (weekPlanGate && !isMondayET) {
         summary.plan.late_retry += 1;
       }
+      if (snapshotArgs && appPublication) {
+        // Publish under the existing property lock. Re-read the whole eligible
+        // customer and replay the saved decision while the lock fences moves
+        // and preference edits; clock and rollout gates are checked last.
+        const published = await db.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customer.id)]);
+          const current = (await findEligibleCustomers({ customerId: customer.id, now: tick(), includeApp: true, conn: trx }))[0];
+          const snapshot = { ...snapshotArgs, plan: decision.weekPlan };
+          if (!current || !replayWeekPlanForCustomer(snapshot, current)) return false;
+          const stampAt = (v) => (v ? new Date(v).getTime() : null);
+          if (stampAt(current.irrigation_home_changed_at) !== stampAt(customer.irrigation_home_changed_at)) return false;
+          const at = tick();
+          if (!planWindowOpen(at) || !gateEnvValue('GATE_IRRIGATION_APP_PLAN') || !gateEnvValue('GATE_IRRIGATION_WEEK_PLAN')) return false;
+          if (!samePolicy(snapshot.restriction, currentRestrictionPolicy(at, { county: snapshot.decisionInputs.county, horizonEnd: planWeekEnd }))) return false;
+          return (await trx('irrigation_week_plans')
+            .where({ customer_id: customer.id, week_ending: weekEnding, claim_token: snapshotArgs.claimToken, decision_hash: snapshotArgs.decisionHash })
+            .update({ published_at: trx.raw('COALESCE(published_at, ?)', [at]), updated_at: trx.fn.now() })) > 0;
+        });
+        if (!published) { summary.plan.unavailable += 1; continue; }
+        snapshotArgs.published = true;
+        if (!saved?.publishedAt) summary.published += 1;
+      }
+      // An unavailable plan never falls into an email-only template when
+      // email is disabled. Publication does not consume the email send cap.
+      if (!canEmail) continue;
+      if (summary.attempted >= maxSendAttempts) { summary.skipped.capped += 1; continue; }
       // Consume the cap BEFORE the provider call: an error thrown after
       // SendGrid accepts (audit/DB failure) must still count as an attempt.
       summary.attempted += 1;
@@ -1534,6 +1603,11 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       };
       let result = await dispatch();
 
+      if (result.aborted && windowClosedAtQueue && snapshotArgs?.published) {
+        summary.plan.window_closed += 1;
+        if (!result.providerAttempted) summary.attempted -= 1;
+        continue;
+      }
       if (result.aborted && windowClosedAtQueue) {
         // The cutoff passed while this send waited on the provider: the
         // plan is withheld and its unsent snapshot discarded (this worker's
@@ -1913,6 +1987,7 @@ module.exports = {
   runWeeklyIrrigationEmailSweep,
   buildWeeklyEmailDecision,
   weeklyInputsForCustomer,
+  replayWeekPlanForCustomer,
   findUnstampedRecurringLawnMembers,
   findEligibleCustomers,
   findLawnEmailAudienceGaps,

@@ -2203,10 +2203,10 @@ async function resolveCanonicalLawnRender(service, knex = db) {
   // failed prefs read stamps random so the cache re-renders instead of
   // serving stale (same fail-open-to-rerender posture as the outer catch).
   let irrigationStamp;
-  // The week-plan snapshot this signature describes (ISO sent_at, or null);
-  // callers pass it back as pinnedWeekPlanSentAt so the render uses exactly
+  // The week-plan snapshot this signature describes (ISO availability time, or null);
+  // callers pass it back as pinnedWeekPlanAvailableAt so the render uses exactly
   // the plan the cache key was computed from.
-  let weekPlanSentAt = null;
+  let weekPlanAvailableAt = null;
   try {
     const prefs = await knex('property_preferences')
       .where({ customer_id: service.customer_id })
@@ -2240,14 +2240,14 @@ async function resolveCanonicalLawnRender(service, knex = db) {
     // a same-home postal-city correction — codex gh-r42): an address change
     // (or a stamped visit elsewhere) flips the binding and re-keys the PDF.
     const snapshot = await loadCurrentWeekPlan(service.customer_id, { strict: true });
-    weekPlanSentAt = snapshot?.sentAt && planBindsToService(snapshot, premise) ? new Date(snapshot.sentAt).toISOString() : null;
-    irrigationStamp += `:plan=${weekPlanSentAt || 'none'}`;
+    weekPlanAvailableAt = snapshot?.availableAt && planBindsToService(snapshot, premise) ? new Date(snapshot.availableAt).toISOString() : null;
+    irrigationStamp += `:plan=${weekPlanAvailableAt || 'none'}`;
   }
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true });
   if (!assessment?.id) {
     const bare = crypto.createHash('sha1').update(`none|${irrigationStamp}`).digest('hex').slice(0, 12);
-    return { pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0${bare}`, weekPlanSentAt };
+    return { pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0${bare}`, weekPlanAvailableAt };
   }
 
   const recs = typeof assessment.recommendations === 'string'
@@ -2257,7 +2257,7 @@ async function resolveCanonicalLawnRender(service, knex = db) {
     .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}|${irrigationStamp}`)
     .digest('hex')
     .slice(0, 12);
-  return { pin: assessment.id, signature: `-la${LAWN_RENDER_STRATEGY}${stamp}`, weekPlanSentAt };
+  return { pin: assessment.id, signature: `-la${LAWN_RENDER_STRATEGY}${stamp}`, weekPlanAvailableAt };
 }
 
 // Signature-only entry point for CACHE-LOOKUP sites, which must never throw —
@@ -2479,7 +2479,7 @@ async function freezeLawnWeekWeather(serviceRecordId, weekWeather, knex = db) {
   }
 }
 
-async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanSentAt } = {}) {
+async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt } = {}) {
   if (serviceLine !== 'lawn') return null;
   // Pinned-empty is unconditional: the attachment provably carries no lawn
   // section, which is exactly what the fence sealed.
@@ -2824,7 +2824,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // signature pod and the /data pod (rollout, kill switch), or a stamp that
   // now diverges, would otherwise answer a plan-less page under the
   // plan-present key (codex gh-r17).
-  if (typeof pinnedWeekPlanSentAt === 'string') {
+  if (typeof pinnedWeekPlanAvailableAt === 'string') {
     if (!featureGates.isEnabled('irrigationWeekPlan')) throw new PinnedWeekPlanUnavailable('gate_off');
   }
   // Plan visibility is decided by planBindsToService (the shared homesDiffer
@@ -2836,7 +2836,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   if (featureGates.isEnabled('irrigationWeekPlan')) {
     // Pinned renders are STRICT: a failed lookup must refuse the render
     // rather than cache a plan-less page under a plan-present key.
-    const snapshot = await loadCurrentWeekPlan(service.customer_id, { pinnedSentAt: pinnedWeekPlanSentAt, strict: typeof pinnedWeekPlanSentAt === 'string' });
+    const snapshot = await loadCurrentWeekPlan(service.customer_id, { pinnedAvailableAt: pinnedWeekPlanAvailableAt, strict: typeof pinnedWeekPlanAvailableAt === 'string' });
     // The plan binds to the HOME the sweep decided it for: the serviced
     // address (stamped, else the customer's current mirror) must be that
     // home — a mid-week move makes the stamp match the NEW address while
@@ -2848,7 +2848,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // customer mirror moved between the signature and this lookup, with no
     // stamp to flag it) is a refusal, never a plan-less payload under the
     // plan-present key (codex gh-r18).
-    if (servicedElsewhere && typeof pinnedWeekPlanSentAt === 'string') throw new PinnedWeekPlanUnavailable('premise_diverged');
+    if (servicedElsewhere && typeof pinnedWeekPlanAvailableAt === 'string') throw new PinnedWeekPlanUnavailable('premise_diverged');
     if (snapshot?.plan && !servicedElsewhere) {
       // Compare against the runtime Monday's decision saw, never today's prefs.
       const rendered = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null });
@@ -3291,7 +3291,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex, {
     pinnedAssessmentId: opts.pinnedLawnAssessmentId || null,
     // undefined = unpinned (live snapshot); null = the signature saw none.
-    pinnedWeekPlanSentAt: opts.pinnedWeekPlanSentAt,
+    pinnedWeekPlanAvailableAt: opts.pinnedWeekPlanAvailableAt,
   });
   // Render-time treatment reconciliation (codex P1 r19): the completion SMS
   // links this report immediately — a customer can open it BEFORE the

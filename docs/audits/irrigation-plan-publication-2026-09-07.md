@@ -1,0 +1,15 @@
+# Weekly watering plans without email
+
+This extends the saved-plan app workstream with the third package of the approved customer notification scope. An eligible recurring lawn customer can read the week's valid plan and receive its permitted property advisory while email is disabled or unavailable.
+
+The existing Monday sweep publishes one authoritative customer-week decision behind `GATE_IRRIGATION_APP_PLAN` plus `GATE_IRRIGATION_WEEK_PLAN`. Email retains its separate `GATE_IRRIGATION_WEEKLY_EMAIL` and existing consent/suppression checks. Turning the email gate off does not disable plan publication; no additional cron, queue or notification preference is introduced.
+
+`irrigation_week_plans.published_at` records app availability. `sent_at` remains the real email outcome. Once published, the decision, weather, restriction and home inputs cannot be replaced or deleted by an email failure. A permitted email retry replays frozen weather against current settings and must reproduce the same decision before claiming the existing email lease. A changed home, schedule, policy or closed Monday window refuses the actionable email. A late/gate-off retry cannot substitute a contradictory legacy email for an already published plan.
+
+Publication rechecks current eligibility, home/settings, policy and the Monday cutoff under the existing property-preferences advisory lock. Seasonal-tip opt-outs remain excluded. The property-alert engine still owns weather-alert opt-outs, quiet hours, weekly-plan priority and its shared seven-day cap. The new account native-push preference is supplied by the separate notification-preferences PR; turning push off does not delete the plan.
+
+The app and report readers accept a published plan or a legacy sent snapshot. Their existing policy, plan-week, current-setting and property checks remain in force. Report cache signatures and signed render pins use the stable availability timestamp; a later successful email does not change it. Existing signed `plan` URL values keep working for older email snapshots. The app API retains an honest nullable `sentAt` and adds `availableAt`.
+
+Migration `20260907000050` is additive and uses the existing plan table. This PR depends on the saved-plan screen workstream; it does not take ownership of that branch. Rollout remains dark pending owner authorization and device acceptance checks. No production database or customer communication is used for validation.
+
+Validation passed: 478 unit tests across 26 files, 13 real PostgreSQL integration cases in the worktree's empty private dev database, and the production build with brand/domain checks. The database cases cover email gate/opt-out independence, failed delivery and frozen retries, immutable decisions, stable report pins, prior-week rain accounting, setting changes during calculation, and late or gate-off retries. Desktop (1440px) and mobile (390px) previews rendered an actual synthetic database response with `sentAt: null`, all four guides, no horizontal overflow, and cleared stale instructions on refresh. No installed-device push delivery is claimed.

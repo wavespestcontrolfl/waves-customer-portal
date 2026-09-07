@@ -1,9 +1,8 @@
 'use strict';
 
-const { isDeepStrictEqual } = require('node:util');
 const { gateEnvValue } = require('../config/feature-gates');
 const { dateOnlyString } = require('../utils/date-only');
-const { findEligibleCustomers, buildWeeklyEmailDecision, weeklyInputsForCustomer } = require('./irrigation-weekly-email');
+const { findEligibleCustomers, replayWeekPlanForCustomer } = require('./irrigation-weekly-email');
 const { loadCurrentWeekPlan, planBindsToService, renderWeekPlanReport } = require('./irrigation-week-plan');
 
 const GUIDES = [
@@ -17,41 +16,26 @@ function appPlanEnabled() {
   return gateEnvValue('GATE_IRRIGATION_APP_PLAN') && gateEnvValue('GATE_IRRIGATION_WEEK_PLAN');
 }
 
-// Reuse the sent email snapshot. Replaying its original weather with CURRENT
+// Reuse the published plan (or a legacy sent email snapshot). Replaying its original weather with CURRENT
 // customer inputs is a validity check only: any changed decision is withheld,
 // never substituted for the plan the customer already received.
 async function loadCustomerWateringPlan(customerId, { now = new Date(), customer = null } = {}) {
   if (!appPlanEnabled()) return null;
   const snapshot = await loadCurrentWeekPlan(customerId, { now, strict: true });
   if (!snapshot?.decisionInputs?.home?.addressLine1) return null;
-  const current = customer || (await findEligibleCustomers({ customerId, now }))[0];
+  const current = customer || (await findEligibleCustomers({ customerId, now, includeApp: true }))[0];
   if (!current || !planBindsToService(snapshot, current)) return null;
+  const replay = replayWeekPlanForCustomer(snapshot, current);
+  if (!replay) return null;
   const inputs = snapshot.decisionInputs;
-  const replay = buildWeeklyEmailDecision({
-    ...weeklyInputsForCustomer(current, {
-      weekEnding: dateOnlyString(snapshot.weekEnding),
-      weekWeather: { rainInches: inputs.rainfallInches7d, et0Inches: inputs.et0Inches, rainSource: inputs.rainSource },
-      priorWeek: { events: inputs.priorWeekEvents, prescribedInches: inputs.priorWeekPrescribedInches },
-      weekPlanEnabled: true,
-      planWeekEnd: inputs.planWeekEnd,
-      now: new Date(snapshot.planAsOf),
-    }),
-    forecastRainInches: inputs.forecastRainInches,
-    forecastEt0Inches: inputs.forecastEt0Inches,
-  });
-  if (!replay.shouldSend || !replay.weekPlan) return null;
-  // Premise identity was checked above with homesDiffer's street/unit/ZIP
-  // rules. Postal-city spelling and formatting must not invalidate that match.
-  const replayInputs = { ...JSON.parse(JSON.stringify(replay.decisionInputs)), home: inputs.home };
-  if (!isDeepStrictEqual(replay.weekPlan, snapshot.plan)
-    || !isDeepStrictEqual(replayInputs, inputs)) return null;
   const reportCopy = renderWeekPlanReport(snapshot.plan, { runMinutes: inputs.runMinutes, restriction: snapshot.restriction });
   if (!reportCopy) return null;
   const copy = replay.payload;
   return {
     weekEnding: dateOnlyString(snapshot.weekEnding),
     validThrough: inputs.planWeekEnd,
-    sentAt: new Date(snapshot.sentAt).toISOString(),
+    sentAt: snapshot.sentAt ? new Date(snapshot.sentAt).toISOString() : null,
+    availableAt: new Date(snapshot.availableAt).toISOString(),
     action: snapshot.plan.action,
     conditionalOnForecast: snapshot.plan.conditionalOnForecast === true,
     title: reportCopy.title,
