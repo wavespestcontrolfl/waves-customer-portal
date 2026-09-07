@@ -9,7 +9,7 @@ const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { normalizePhone } = require('../utils/phone');
+const { normalizePhone, phoneMatchDigits } = require('../utils/phone');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { parseETDateTime, etDateString, etParts } = require('../utils/datetime-et');
@@ -1370,6 +1370,13 @@ router.get('/log', async (req, res, next) => {
           .orWhereNull('customers.phone'));
     }
 
+    // Exact contact match for a lead that has no customer record yet. Never
+    // use broad body/name search to choose the conversation or mark it read.
+    if (req.query.phone !== undefined) {
+      const phones = phoneMatchDigits(req.query.phone);
+      if (!phones.length) return res.status(400).json({ error: 'A valid contact phone is required' });
+      query = query.whereRaw("regexp_replace(COALESCE(conversations.contact_phone, ''), '[^0-9]', '', 'g') = ANY (?::text[])", [phones]);
+    }
     if (customerId) query = query.where('conversations.customer_id', customerId);
     if (direction) query = query.where('messages.direction', direction);
     if (messageType) query = query.where('messages.message_type', messageType);
@@ -1526,6 +1533,14 @@ router.post('/messages/read', async (req, res, next) => {
       messageIds: ids, conversationIds, readBefore, adminUserId: req.technicianId || null, role: req.techRole,
     });
     res.json({ success: true, updated, notificationsCleared });
+  } catch (err) { next(err); }
+});
+
+// Same conversation count consumed by Customer 360's one global badge.
+router.get('/unread-count', requireAdmin, async (req, res, next) => {
+  try {
+    const { countUnreadInboundSms } = require('../services/inbound-sms-read');
+    res.json(await countUnreadInboundSms({ excludePhones: ADMIN_PHONES }));
   } catch (err) { next(err); }
 });
 

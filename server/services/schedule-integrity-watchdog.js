@@ -28,6 +28,9 @@
  *     verify, missing or conflicting stamps on linked paid terms, or an unstamped family
  *     member present during a recorded manual series payment.
  *
+ * Accepted-plan gaps also start from the accepted estimate, covering missing
+ * recurrence, applications, and matching cadence/property evidence.
+ *
  * Alerting mirrors call-booking-miss-watchdog: one bell per subject, deduped
  * forever via the notifications metadata dedupeKey, with a per-run cap so
  * the first enable over the existing backlog rings loudly but readably —
@@ -386,6 +389,26 @@ async function runInner({ now = new Date() } = {}) {
     ];
   }));
 
+  // Morning lawn-email gaps must page before any historical acceptance backlog.
+  let acceptedGaps = [];
+  let acceptedScheduleCheckFailed = false;
+  try {
+    acceptedGaps = await require('./recurring-schedule-audit').findAcceptedRecurringScheduleGaps({ now });
+  } catch (err) {
+    acceptedScheduleCheckFailed = true;
+    logger.error(`[schedule-integrity] accepted-plan check failed: ${err.message}`);
+  }
+  alerts.push(...acceptedGaps.map((gap) => [
+      `accepted-schedule:${gap.estimateId}:${gap.serviceFamily}:${gap.evidenceKey}`,
+      'Accepted recurring plan needs schedule review',
+      `The accepted ${gap.serviceFamily.replace(/_/g, ' ')} plan calls for ${gap.pattern.replace(/_/g, ' ')} service (${gap.expectedVisits} applications). ` +
+        `The linked schedule has ${gap.recordedVisits} working/completed applications. Review: ${gap.issues.map((issue) => issue.replace(/_/g, ' ')).join('; ')}. ` +
+        'Check any later amendment or cancellation before changing appointments or prices.',
+      { estimate_id: gap.estimateId, customer_id: gap.customerId, issues: gap.issues,
+        expected_pattern: gap.pattern, expected_visits: gap.expectedVisits, appointment_ids: gap.appointmentIds },
+      { link: `/admin/customers?customerId=${encodeURIComponent(gap.customerId)}` },
+  ]));
+
   alerts.push(...stale.map((v) => {
     const d = v.service_date;
     return [
@@ -411,6 +434,9 @@ async function runInner({ now = new Date() } = {}) {
     lawnEmailGaps: lawnGaps.length,
     lawnGapCheckFailed,
     prepayCoverageGaps: prepayGaps.length,
+
+    acceptedScheduleGaps: acceptedGaps.length,
+    acceptedScheduleCheckFailed,
     alerted,
   };
 }

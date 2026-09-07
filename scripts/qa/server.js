@@ -36,7 +36,10 @@ Twilio.checkVerificationCode = async (phone, code) => {
 };
 Twilio.sendSMS = async () => { capture('sms', {}); return { success: true, sid: 'SM_qa_fixture', status: 'queued' }; };
 const messaging = require('../../server/services/messaging/send-customer-message');
-messaging.sendCustomerMessage = async () => { capture('customer-message', {}); return { sent: true, channel: 'qa' }; };
+messaging.sendCustomerMessage = async (input) => {
+  capture('customer-message', { channel: input.channel, estimateId: input.estimateId || null });
+  return { sent: true, channel: 'qa', providerMessageId: 'SM_qa_fixture' };
+};
 
 // Real Stripe signature verification and application settlement code; only
 // external charge metadata lookup is simulated. No charge creation is enabled.
