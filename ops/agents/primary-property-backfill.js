@@ -15,9 +15,11 @@
 // deactivation and is skipped (the service's primary check has no active
 // filter, so it would return created=false anyway).
 //
-// Reversible: rows written by one run carry source='backfill' and a
-// created_at inside the run window printed at the end; nothing else is
-// touched (customers.address_* is the source, not a target).
+// Reversible: the run prints the exact ids it created and a DELETE scoped
+// to those ids (still source='backfill' and unreferenced by any visit or
+// estimate — a row a booking has since anchored to must not vanish under
+// it). Nothing else is touched (customers.address_* is the source, not a
+// target).
 //
 // Usage (repo root):
 //   railway run --service Postgres -- node ops/agents/primary-property-backfill.js            # dry run
@@ -67,7 +69,7 @@ const limit = limitIdx > -1 ? Math.max(0, parseInt(process.argv[limitIdx + 1], 1
     return;
   }
 
-  let created = 0;
+  const createdIds = [];
   let skipped = 0;
   let failed = 0;
   for (const c of candidates) {
@@ -75,15 +77,22 @@ const limit = limitIdx > -1 ? Math.max(0, parseInt(process.argv[limitIdx + 1], 1
       // The service decides: created=true is the new primary; created=false
       // means a primary appeared meanwhile (race) — count it as skipped.
       const r = await ensurePrimaryProperty(c.id, { source: 'backfill' });
-      if (r.created) created += 1; else skipped += 1;
+      if (r.created) createdIds.push(r.propertyId); else skipped += 1;
     } catch (e) {
       failed += 1;
-      // Customer id only — no address values in the output (PII rule).
-      console.error(`[primary-property-backfill] ${c.id}: ${e.message}`);
+      // Customer id + error code only: a knex error message embeds the SQL
+      // with its bindings, i.e. the address (PII logging rule).
+      console.error(`[primary-property-backfill] ${c.id}: insert failed (${e.code || 'no code'})`);
     }
   }
-  console.log(`[primary-property-backfill] done — created ${created}, skipped ${skipped}, failed ${failed}`);
-  console.log(`[primary-property-backfill] rollback window: DELETE FROM customer_properties WHERE source='backfill' AND created_at >= '${startedAt.toISOString()}' AND created_at <= '${new Date().toISOString()}'`);
+  console.log(`[primary-property-backfill] done — created ${createdIds.length}, skipped ${skipped}, failed ${failed} (started ${startedAt.toISOString()})`);
+  if (createdIds.length) {
+    console.log(`[primary-property-backfill] created property ids: ${createdIds.join(',')}`);
+    console.log("[primary-property-backfill] rollback (this run's rows only, still unreferenced): "
+      + `DELETE FROM customer_properties WHERE id = ANY('{${createdIds.join(',')}}'::uuid[]) AND source='backfill'`
+      + ' AND NOT EXISTS (SELECT 1 FROM scheduled_services s WHERE s.property_id = customer_properties.id)'
+      + ' AND NOT EXISTS (SELECT 1 FROM estimates e WHERE e.property_id = customer_properties.id)');
+  }
 })()
   .catch((e) => { console.error('[primary-property-backfill] failed:', e.message); process.exitCode = 1; })
   .finally(() => db.destroy());
