@@ -6,6 +6,7 @@ const {
   shouldSkipExtraction,
 } = require('./source-extraction-store');
 const { upsertSensitiveProposal, findPendingExtractionProposal } = require('./proposal-store');
+const { valuesEqual } = require('./property-preferences');
 
 const EXTRACTOR_VERSION = 'message-property-preferences-v3';
 const DEFAULT_LOOKBACK_DAYS = 180;
@@ -117,20 +118,24 @@ async function runMessageExtractionPhase({
       for (const proposal of proposals) {
         increment(counts.by_rule, proposal.rule_id);
         increment(counts.by_field, proposal.field);
-        // The SMS profile lane may already hold a pending proposal for this
-        // field from the same dual-written message, or a newer message was
-        // processed earlier in this newest-first pass: never stack a second.
-        if (await findPendingExtractionProposal({ scope_id: proposal.scope_id, field: proposal.field })) {
-          counts.duplicates += 1;
-          continue;
-        }
         if (dryRun) {
-          counts.would_create += 1;
-          proposalCount += 1;
+          const pendingSibling = await findPendingExtractionProposal({ scope_id: proposal.scope_id, field: proposal.field });
+          counts[pendingSibling ? 'duplicates' : 'would_create'] += 1;
+          proposalCount += pendingSibling ? 0 : 1;
           continue;
         }
 
-        const result = await upsertSensitiveProposal(proposal, { run_id: runId });
+        // The SMS profile lane proposes the same dual-written message under the
+        // customer preference advisory lock. Check and insert under that lock
+        // so the two writers serialize: never stack on a pending sibling, and
+        // never propose against a field that changed since the candidate load.
+        const result = await db.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(proposal.scope_id)]);
+          if (await findPendingExtractionProposal({ trx, scope_id: proposal.scope_id, field: proposal.field })) return { inserted: false };
+          const live = await trx('property_preferences').where({ customer_id: proposal.scope_id }).first(proposal.field);
+          if (!valuesEqual(live ? live[proposal.field] : null, proposal.current_value)) return { inserted: false };
+          return upsertSensitiveProposal(proposal, { run_id: runId, trx });
+        });
         if (result.inserted) {
           counts.created += 1;
           proposalCount += 1;

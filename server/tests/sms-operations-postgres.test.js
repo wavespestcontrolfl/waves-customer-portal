@@ -234,6 +234,29 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(pending[0].rule_id).toBe('extract.sms_profile');
   });
 
+  test('the extraction phase checks for a sibling only under the customer preference lock', async () => {
+    const { runMessageExtractionPhase } = require('../services/data-hygiene/message-extractor');
+    const quote = 'Two friendly dogs in the yard.';
+    const [conversation] = await mockPg('conversations').insert({ customer_id: message.customer_id, channel: 'sms' }).returning('id');
+    await mockPg('messages').insert({ conversation_id: conversation.id, channel: 'sms', direction: 'inbound',
+      author_type: 'customer', body: quote, twilio_sid: 'SM_race' });
+    let lockTaken;
+    const locked = new Promise((resolve) => { lockTaken = resolve; });
+    const held = mockPg.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(message.customer_id)]);
+      lockTaken();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await trx('data_hygiene_proposals').insert({ rule_id: 'extract.sms_profile', rule_version: 'sms-profile-v5',
+        resource_type: 'property_preferences', scope_type: 'customer', scope_id: message.customer_id, field: 'pet_details',
+        source: 'message-extraction', proposed_value: JSON.stringify({ masked: 'T***.', length: quote.length }),
+        confidence: 0.9, tier: 'medium', is_sensitive: true, status: 'pending', idempotency_key: randomUUID() });
+    });
+    await locked;
+    const [counts] = await Promise.all([runMessageExtractionPhase({ lookbackDays: 1, limit: 10 }), held]);
+    expect(counts).toMatchObject({ created: 0, duplicates: 1, errors: 0 });
+    expect(await mockPg('data_hygiene_proposals').where({ status: 'pending', field: 'pet_details' })).toHaveLength(1);
+  });
+
   test('a stated pet becomes a pending proposal instead of a direct write', async () => {
     const quote = 'Two friendly dogs in the yard.';
     message.message_body = quote;
