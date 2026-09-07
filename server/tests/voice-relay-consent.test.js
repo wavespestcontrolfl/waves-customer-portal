@@ -264,6 +264,52 @@ describe('authenticated caller + alternate callback number — lead reuse bounda
     }
   });
 
+  test.each([null, 'Staff-authored fixture summary with the complete job details, intake history, and the next follow-up action.'])('capture marks floor provenance only when it writes the summary (existing=%s)', async (summary) => {
+    const floor = 'Inbound voice call (auto-captured on hangup). No transcript captured.';
+    existingLead = { id: LEAD_ID, phone: CALLER, transcript_summary: summary, twilio_call_sid: 'CA-floor' };
+    primeDb();
+    tables.call_log = makeBuilder('call_log', [{ metadata: { relay_session_claim_owner: 'owner' } }]);
+    db.transaction = jest.fn(async (cb) => {
+      const trx = (table) => db(table);
+      trx.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+      trx.isTransaction = true;
+      return cb(trx);
+    });
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    try {
+      expect(await createLeadFromExtraction({ call_summary: floor }, {
+        phone: CALLER, aniPhone: CALLER, aniVerified: true, callSid: 'CA-floor', sessionKey: 'owner', summarySource: 'capture_floor',
+      })).toMatchObject({ leadId: LEAD_ID });
+      expect(tables.leads.forUpdate).toHaveBeenCalled();
+      const linkage = writes.find((write) => write.table === 'call_log' && write.payload.metadata?.bindings?.[0]?.includes('relay_lead_id'));
+      const meta = JSON.parse(linkage.payload.metadata.bindings[0]);
+      if (summary) expect(meta.relay_floor_summary).toBeUndefined();
+      else expect(meta.relay_floor_summary).toEqual({ lead_id: LEAD_ID,
+        sha256: require('crypto').createHash('sha256').update(floor).digest('hex') });
+    } finally { delete db.transaction; delete process.env.GATE_VOICE_RELAY_RECOVERY; }
+  });
+
+  test('an unverified capture floor stamps its summary without resolving an account', async () => {
+    const floor = 'Inbound voice call (auto-captured on hangup). Caller said: a synthetic request';
+    primeDb();
+    db.transaction = jest.fn(async (cb) => {
+      const trx = (table) => db(table);
+      trx.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+      trx.isTransaction = true;
+      return cb(trx);
+    });
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'true';
+    try {
+      expect(await createLeadFromExtraction({ call_summary: floor }, {
+        phone: CALLER, aniPhone: CALLER, aniVerified: false, callSid: 'CA-unverified-floor', summarySource: 'capture_floor',
+      })).toMatchObject({ leadId: LEAD_ID, customerId: null });
+      expect(tables.customers.first).not.toHaveBeenCalled();
+      const linkage = writes.find((write) => write.table === 'call_log' && write.payload.metadata?.bindings?.[0]?.includes('relay_floor_summary'));
+      expect(JSON.parse(linkage.payload.metadata.bindings[0]).relay_floor_summary).toEqual({ lead_id: LEAD_ID,
+        sha256: require('crypto').createHash('sha256').update(floor).digest('hex') });
+    } finally { delete db.transaction; delete process.env.GATE_VOICE_RELAY_RECOVERY; }
+  });
+
   // ⭐ OWNERSHIP IS RE-PROVEN INSIDE THE CAPTURE TRANSACTION — a takeover
   // landing mid-write aborts before any lead state is touched.
   test('a capture whose claim was taken over aborts INSIDE the lock — nothing written', async () => {

@@ -7,11 +7,11 @@ const SEGMENT_SEPARATOR = '\n\n[Reconnected]\n';
 const MAX_SEGMENT_TEXT_CHARS = require('./relay-transcript').MAX_TRANSCRIPT_CHARS;
 
 /** One socket's close record — played text only (buildTranscriptText reads played text). */
-function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, leadCaptured, leadId = null, reserviceFiled, noLeadCreated, promises = [], holdOpen, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [], slotRefs = [], modelFailures = 0, toolFailures = 0, turnCounts = null, turnStats = null }) {
+function buildSegment({ generation, sessionKey, reason, text, turns, latency, versions, model = null, leadCaptured, leadId = null, reserviceFiled, noLeadCreated, promises = [], holdOpen, estimateFields = null, startedAt = null, lookupsUsed = 0, lookupRefs = [], lookupResults = [], slotRefs = [], modelFailures = 0, toolFailures = 0, turnCounts = null, turnStats = null }) {
   return {
     ...Object.fromEntries(Object.entries({ model_failures: modelFailures, tool_failures: toolFailures,
       lookups_used: lookupsUsed, generation, turns }).map(([key, value]) => [key, Number(value) || 0])),
-    ...Object.fromEntries(Object.entries({ session_key: sessionKey, reason, latency, versions })
+    ...Object.fromEntries(Object.entries({ session_key: sessionKey, reason, latency, versions, model })
       .map(([key, value]) => [key, value || null])),
     slot_refs: slotRefs,
     lookup_refs: lookupRefs,
@@ -174,8 +174,13 @@ function summarizeSegments(meta) {
   const counts = Object.fromEntries(countKeys.map((key) => [key,
     telemetryComplete ? legs.reduce((sum, leg) => sum + leg.turn_counts[key], 0) : null,
   ]));
+  const latest = [...legs].sort(compareSegments).at(-1);
   return {
     ...counts,
+    lead_captured: Boolean(meta.relay_lead_id) || legs.some((leg) => leg.lead_captured === true),
+    reservice_filed: meta.relay_reservice_filed === true || legs.some((leg) => leg.reservice_filed === true),
+    ...Object.fromEntries(Object.entries({ end_reason: latest.reason, versions: latest.versions, model: latest.model })
+      .filter(([, value]) => value != null)),
     latency: telemetryComplete ? require('./relay-transcript').summarizeTurnStats(legs.flatMap((leg) => leg.turn_stats)) : null,
     segments: { count: legs.length, complete: hasCompleteSegments(meta), telemetry_complete: telemetryComplete },
   };
