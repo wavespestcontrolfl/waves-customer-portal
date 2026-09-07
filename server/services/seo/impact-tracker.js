@@ -24,6 +24,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const GitHubClient = require('../content-astro/github-client');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
+const { MEASUREMENT_VERSION, observationDate, isMeasuredAnswer, ownedCitations, citationMatchesPage } = require('./aeo-measurement');
 
 // Parse a stored date (a 'YYYY-MM-DD' string or a pg Date at UTC midnight) as
 // an ET calendar day anchored at noon. Without this, `new Date('2026-05-28')`
@@ -715,9 +716,9 @@ async function checkAeoVisibility({ db: database = db, now = new Date() } = {}) 
   try {
     pending = await database('content_optimization_impact')
       .where('bucket', 'aeo_gap')
-      .whereNull('aeo_checked_at')
+      .where(b => b.whereNull('aeo_measurement_version').orWhere('aeo_verdict', 'insufficient_data'))
       .where('deployed_at', '<=', addETDays(now, -AEO_REPROBE_DAYS))
-      .select('id', 'aeo_query_ids', 'deployed_at');
+      .select('id', 'page_url', 'aeo_query_ids', 'deployed_at');
   } catch (err) {
     logger.warn(`[impact-tracker] checkAeoVisibility query failed: ${err.message}`);
     return { checked: 0 };
@@ -734,11 +735,11 @@ async function checkAeoVisibility({ db: database = db, now = new Date() } = {}) 
         const obs = await database('seo_llm_mentions')
           .whereIn('query_id', ids)
           .where('check_date', '>=', etDateString(row.deployed_at))
-          .select('check_date', 'waves_mentioned');
+          .select('check_date', 'measurement_version', 'answer_available', 'citations_complete', 'waves_cited_urls');
         const days = new Map(); // date → any waves hit that day
-        for (const o of obs) {
-          const d = String(o.check_date).slice(0, 10);
-          days.set(d, (days.get(d) || false) || !!o.waves_mentioned);
+        for (const o of obs.filter(isMeasuredAnswer)) {
+          const d = observationDate(o.check_date);
+          days.set(d, (days.get(d) || false) || ownedCitations(o).some(url => citationMatchesPage(url, row.page_url)));
         }
         observedDays = days.size;
         wavesHitDays = Array.from(days.values()).filter(Boolean).length;
@@ -747,7 +748,8 @@ async function checkAeoVisibility({ db: database = db, now = new Date() } = {}) 
       const { verdict, nowCited } = aeoVerdict({ observedDays, wavesHitDays });
       await database('content_optimization_impact')
         .where('id', row.id)
-        .update({ aeo_checked_at: now, aeo_now_cited: nowCited, aeo_verdict: verdict, updated_at: now });
+        .update({ aeo_checked_at: now, aeo_now_cited: nowCited, aeo_verdict: verdict,
+          aeo_measurement_version: MEASUREMENT_VERSION, updated_at: now });
       checked++;
     } catch (err) {
       logger.warn(`[impact-tracker] checkAeoVisibility row ${row.id} failed: ${err.message}`);
