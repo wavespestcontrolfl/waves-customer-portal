@@ -317,7 +317,7 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
     .where(function includeUnconvertedStage() {
       this.whereNotIn('c.pipeline_stage', FORMER_CUSTOMER_STAGES).orWhereNull('c.pipeline_stage');
     })
-    .select('e.id', 'e.customer_id', 'e.property_id', 'e.estimate_data', 'e.accepted_service_mode',
+    .select('e.id', 'e.customer_id', 'e.property_id', 'e.estimate_data', 'e.accepted_service_mode', 'e.accepted_at',
       'e.monthly_total', 'e.annual_total', 'e.onetime_total')
     .orderBy('e.accepted_at', 'desc');
   if (!estimates.length) return [];
@@ -350,7 +350,9 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
   const stopped = new Set([...latestDecision].filter(([, action]) => ['cancel_series', 'let_lapse'].includes(action)).map(([id]) => id));
   // Index history once: each estimate only walks its explicitly linked roots.
   const customers = new Map(customerIds.map((id) => [id, { roots: new Map(), holds: new Set() }]));
-  const estimatesById = new Map(estimates.map((estimate) => [estimate.id, { estimate, roots: new Set(), reservations: new Set() }]));
+  const estimatesById = new Map(estimates.map((estimate) => [estimate.id, {
+    estimate, roots: new Set(), retainedRoots: new Set(), reservations: new Set(),
+  }]));
   for (const row of visits) {
     const root = row.recurring_parent_id || row.id;
     const series = customers.get(row.customer_id).roots;
@@ -366,6 +368,7 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
     const retained = customers.get(event.customer_id).roots.get(metadata.existingParentId);
     if (!retained) continue;
     target.roots.add(metadata.existingParentId);
+    target.retainedRoots.add(metadata.existingParentId);
     // The converter intentionally keeps the customer's selected reservation
     // without seeding another series. Only explicit, same-customer retained
     // series evidence can exempt that standalone row from recurrence checks.
@@ -373,12 +376,17 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
   }
   for (const hold of holds) customers.get(hold.customer_id).holds.add(hold.family_key);
   const findings = [];
-  for (const { estimate, roots, reservations } of estimatesById.values()) {
+  for (const { estimate, roots, retainedRoots, reservations } of estimatesById.values()) {
     // Pre-mode acceptances and pre-lineage schedules were never backfilled.
     // Without either evidence, "no link" cannot establish "no schedule".
     if (!estimate.accepted_service_mode && !roots.size) continue;
     const customer = customers.get(estimate.customer_id);
-    const linkedRows = [...roots].flatMap((root) => customer.roots.get(root) || [])
+    const acceptedDay = etDateString(estimate.accepted_at);
+    // Retaining a series does not carry its prior term's applications into
+    // the new acceptance. Keep stopped roots as evidence for the classifier's
+    // cancellation exemption; they never contribute to working visit counts.
+    const linkedRows = [...roots].flatMap((root) => (customer.roots.get(root) || [])
+      .filter((row) => stopped.has(root) || !retainedRoots.has(root) || row.scheduled_date >= acceptedDay))
       .filter((row) => row.is_recurring || row.recurring_parent_id || !reservations.has(row.id));
     findings.push(...acceptedScheduleFindings(estimate, linkedRows, stopped, { todayET, heldFamilies: customer.holds }));
   }

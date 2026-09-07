@@ -117,6 +117,33 @@ postgres('accepted recurring schedules against migrated PostgreSQL', () => {
     expect((await findings())[0].issues).toContain('missing_recurrence');
   });
 
+  test('prior-term applications in a retained series cannot satisfy a new acceptance', async () => {
+    const root = await visit({ source_estimate_id: null, scheduled_date: '2039-01-15', status: 'completed' });
+    for (let month = 2; month <= 12; month += 1) {
+      await visit({ source_estimate_id: null, recurring_parent_id: root.id, status: 'completed',
+        scheduled_date: `2039-${String(month).padStart(2, '0')}-15` });
+    }
+    await visit({ source_estimate_id: null, recurring_parent_id: root.id });
+    await trx('activity_log').insert({ customer_id: customerId, action: 'recurring_series_skipped',
+      metadata: { estimateId, existingParentId: root.id } });
+    expect(await findings()).toEqual([expect.objectContaining({ recordedVisits: 1,
+      expectedVisits: 12, issues: ['missing_applications'] })]);
+    for (let month = 2; month <= 12; month += 1) {
+      await visit({ source_estimate_id: null, recurring_parent_id: root.id,
+        scheduled_date: `2040-${String(month).padStart(2, '0')}-15` });
+    }
+    expect(await findings()).toEqual([]);
+  });
+
+  test('a stopped retained series stays exempt when all its visits predate acceptance', async () => {
+    const root = await visit({ source_estimate_id: null, scheduled_date: '2039-01-15', status: 'completed' });
+    await trx('activity_log').insert({ customer_id: customerId, action: 'recurring_series_skipped',
+      metadata: { estimateId, existingParentId: root.id } });
+    await trx('recurring_plan_alerts').insert({ customer_id: customerId, recurring_parent_id: root.id,
+      alert_type: 'plan_lapsed', resolved_action: 'cancel_series', resolved_at: now });
+    expect(await findings()).toEqual([]);
+  });
+
   test('does not use another customer\'s source-estimate stamp as coverage', async () => {
     const otherCustomer = randomUUID();
     await trx('customers').insert({ id: otherCustomer, first_name: 'Synthetic', last_name: 'Other',
