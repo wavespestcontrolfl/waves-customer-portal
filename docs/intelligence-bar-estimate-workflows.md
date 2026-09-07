@@ -47,6 +47,16 @@ preserving edits made before or during the refresh request.
 
 ## Verification
 
+Review corrections preserve canonical unknown/mixed grass instead of falling
+back to a stale property type, apply the estimator's shared field-review and
+low-confidence predicates, and conditionally persist interrupted outcomes
+without overwriting an atomic completed receipt. The affected confirmation and
+pending-action unit suites pass 63 tests; the real PostgreSQL route suite passes
+20 scenarios, including unknown/mixed grass, oversize lawns, transactional
+rollback, and a failed recovery read after commit. Independent review found no
+remaining issues in these corrections. Model output is scripted in this suite;
+pricing, domain persistence, authentication and PostgreSQL are real.
+
 All fixtures are synthetic in the dedicated development Postgres database.
 The model is scripted and provider adapters are isolated. This is real
 HTTP/auth/domain/persistence evidence, not live-model or provider-send evidence.

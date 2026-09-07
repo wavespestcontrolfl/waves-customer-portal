@@ -6,6 +6,7 @@ const { loadCurrentServiceSpendContext } = require('../estimate-membership-conte
 const { agentEngineResultDigest } = require('../agent-estimate-preview');
 const { storedManualDiscountForReplay } = require('../estimate-manual-discount-replay');
 const { perApplicationChargeAmount } = require('../billing-cadence');
+const { lineRequiresReview, lineHasHeuristicTurf } = require('../estimator-engine/draft-builder');
 
 const uuid = { type: 'string', format: 'uuid' };
 const CUSTOMER_ESTIMATE_TOOLS = [
@@ -56,12 +57,13 @@ async function loadContext(input, database = db, lock = false) {
     if (profileRows.length > 1) throw failure('More than one active lawn profile exists. Resolve the lawn profile before pricing.', 'ambiguous_measurements');
     grass = await loadCustomerGrassContext(customer.id, database, { strict: true });
   }
+  const grassType = grass?.grassType ?? normalizeGrassType(selected?.lawn_type);
   const property = selected ? {
     id: selected.id, label: selected.label, address: address(selected), is_primary: selected.is_primary,
     occupancy_type: selected.occupancy_type, property_type: selected.property_type,
     treatable_lawn_sqft: profileLawnSqft ?? grass?.propertySqft ?? selected.property_sqft ?? null,
-    grass_type: grass?.grassType || normalizeGrassType(selected.lawn_type),
-    track: grass?.trackKey || resolveTrackKey(null, normalizeGrassType(selected.lawn_type)),
+    grass_type: grassType,
+    track: resolveTrackKey(grass?.trackKey, grassType),
     lot_sqft: selected.lot_sqft || null,
     measurement_source: profileLawnSqft !== null || grass?.propertySqft != null ? 'saved_primary_lawn_context' : 'saved_service_property',
   } : null;
@@ -158,7 +160,8 @@ async function estimatePreview(input, database = db, context = null) {
   }
   const engineDigest = agentEngineResultDigest(data.engineResult);
   const lines = data.engineResult?.lineItems || [];
-  if (lines.length !== 1 || lines.some(line => line.quoteRequired || line.requiresQuote)
+  if (lines.length !== 1 || lines.some(line => lineRequiresReview(line) || line.requiresQuote
+      || lineHasHeuristicTurf(line) || String(line.pricingConfidence || '').toUpperCase() === 'LOW')
       || !lines.some(line => Number(line.annualPrice ?? line.annual) > 0)) {
     throw failure('The engine could not produce a priced lawn estimate from the saved facts.', 'pricing_unavailable');
   }

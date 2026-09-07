@@ -3139,6 +3139,7 @@ router.post('/confirm-action', async (req, res, next) => {
       if (saved?.result && saved.outcome !== 'outcome_unknown') {
         return res.status(200).json({ success: saved.success, outcome: saved.outcome, tool: claimedAction.tool_name, result: saved.result });
       }
+      await PendingActions.recordResult(claimedAction.id, result, { onlyIfEmpty: true });
       return res.status(200).json({ success: false, outcome: 'outcome_unknown', tool: claimedAction.tool_name, result });
     }
     logger.error(`[intelligence-bar] confirm-action failed (code=${err.code || 'unknown'})`);

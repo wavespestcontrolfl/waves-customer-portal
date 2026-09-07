@@ -168,10 +168,11 @@ async function cancelPendingAction(id, requestedBy) {
   return { cancelled: count > 0 };
 }
 
-async function recordResult(id, result, { database = db, critical = false } = {}) {
+async function recordResult(id, result, { database = db, critical = false, onlyIfEmpty = false } = {}) {
   try {
     const query = database('ib_pending_actions').where({ id });
     if (critical) query.where({ status: 'confirmed' }).whereNotNull('consumed_at');
+    if (onlyIfEmpty) query.whereNull('result');
     const updated = await query.update({
       result: JSON.stringify(result ?? null),
       updated_at: database.fn.now(),

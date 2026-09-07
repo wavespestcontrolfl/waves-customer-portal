@@ -248,6 +248,32 @@ suite('existing-customer estimates from another workspace', () => {
     expect(await db('estimates').where({ customer_id: fixture.customer.id })).toHaveLength(0);
   }, 60000);
 
+  test.each(['unknown', 'mixed'])('canonical %s grass cannot fall back to a stale property grass type', async grass_type => {
+    const fixture = await customerFixture();
+    await db('customer_turf_profiles').insert({ id: crypto.randomUUID(), customer_id: fixture.customer.id,
+      active: true, grass_type, track_key: null, lawn_sqft: 5000 });
+    const proposed = await propose(fixture);
+    expect(proposed.body.pendingActions || []).toHaveLength(0);
+    const results = mockModel.mock.calls.at(-1)[0].messages.flatMap(message => Array.isArray(message.content) ? message.content : []);
+    const lookup = JSON.parse(results.find(block => block.type === 'tool_result' && block.tool_use_id === 'lookup').content);
+    const save = JSON.parse(results.find(block => block.type === 'tool_result' && block.tool_use_id === 'save').content);
+    expect(lookup.property).toMatchObject({ grass_type, track: null });
+    expect(save).toMatchObject({ code: 'missing_information' });
+    expect(await db('estimates').where({ customer_id: fixture.customer.id })).toHaveLength(0);
+  }, 60000);
+
+  test('an oversize lawn requiring field review never produces an ordinary price confirmation', async () => {
+    const fixture = await customerFixture({ property_sqft: 25000, lot_sqft: 50000 });
+    await db('customer_turf_profiles').insert({ id: crypto.randomUUID(), customer_id: fixture.customer.id,
+      active: true, grass_type: 'st_augustine', track_key: 'st_augustine', lawn_sqft: 25000 });
+    const proposed = await propose(fixture);
+    expect(proposed.body.pendingActions || []).toHaveLength(0);
+    const result = mockModel.mock.calls.at(-1)[0].messages.flatMap(message => Array.isArray(message.content) ? message.content : [])
+      .find(block => block.type === 'tool_result' && block.tool_use_id === 'save');
+    expect(JSON.parse(result.content)).toMatchObject({ code: 'pricing_unavailable' });
+    expect(await db('estimates').where({ customer_id: fixture.customer.id })).toHaveLength(0);
+  }, 60000);
+
   test('grouped address revision waits for the editor address lock before taking its send lock', async () => {
     const fixture = await customerFixture();
     const created = await confirm(await propose(fixture));
@@ -347,6 +373,8 @@ suite('existing-customer estimates from another workspace', () => {
     expect(response.body.success).toBe(false);
     expect(await db('estimates').where({ customer_id: fixture.customer.id })).toHaveLength(0);
     expect(await db('audit_log').where({ resource_id: proposal.body.pendingActions[0].id })).toHaveLength(0);
+    const receipt = await api(`/api/admin/intelligence-bar/actions/${proposal.body.pendingActions[0].id}`);
+    expect(receipt.body.result).toMatchObject({ outcome_unknown: true, code: 'execution_interrupted' });
   }, 60000);
 
   test('failure after commit recovers the atomic receipt without downgrading success or repeating the save', async () => {
@@ -360,6 +388,23 @@ suite('existing-customer estimates from another workspace', () => {
     expect(response.body).toMatchObject({ success: true, outcome: 'completed' });
     const receipt = await api(`/api/admin/intelligence-bar/actions/${proposal.body.pendingActions[0].id}`);
     expect(receipt.body.result.estimate_id).toBe(response.body.result.estimate_id);
+    expect((await confirm(proposal)).status).toBe(409);
+    expect(await db('estimates').where({ customer_id: fixture.customer.id })).toHaveLength(1);
+  }, 60000);
+
+  test('a recovery read failure cannot overwrite the committed receipt with an unknown outcome', async () => {
+    const fixture = await customerFixture(), proposal = await propose(fixture);
+    const pending = require('../services/intelligence-bar/pending-actions'), original = pending.recordResult;
+    jest.spyOn(pending, 'recordResult').mockImplementation((id, result, options) => {
+      if (!options) throw new Error('Synthetic runner stopped after commit');
+      return original(id, result, options);
+    });
+    jest.spyOn(pending, 'getActionReceipt').mockRejectedValueOnce(new Error('Synthetic recovery read unavailable'));
+    const response = await confirm(proposal);
+    expect(response.body).toMatchObject({ success: false, outcome: 'outcome_unknown' });
+    const receipt = await api(`/api/admin/intelligence-bar/actions/${proposal.body.pendingActions[0].id}`);
+    expect(receipt.body).toMatchObject({ success: true, outcome: 'completed' });
+    expect(receipt.body.result.estimate_id).toBe(proposal.body.pendingActions[0].id);
     expect((await confirm(proposal)).status).toBe(409);
     expect(await db('estimates').where({ customer_id: fixture.customer.id })).toHaveLength(1);
   }, 60000);
