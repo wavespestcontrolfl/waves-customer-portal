@@ -101,11 +101,14 @@ BASE="${CODEX_REVIEW_BASE:-origin/main}"
 # pre-deploy, and main deploys to prod. knex tracks migrations by
 # filename, so modifying that file is a silent no-op in every environment
 # that ran it, and renaming/deleting it fails every later deploy of that
-# environment ("migration directory is corrupt"). Both baselines are
+# environment ("migration directory is corrupt"). Three baselines are
 # checked for every destination: the remote tip catches the branch's own
-# preview-run files, the merge base catches main's prod-run files even when
-# the branch only just merged them (its old tip never had the file, so
-# the remote diff would read "added"). Supersede with a NEW file instead —
+# preview-run files; the merge base catches main's prod-run files the
+# branch inherited by merging (its old tip never had the file, so the
+# remote diff would read "added"); and the $BASE TIP itself, modified
+# files only, catches a stale branch that cherry-picked or squashed a
+# main migration instead of merging (the merge base predates the file,
+# so both ancestry diffs read "added" too). Supersede with a NEW file instead —
 # .claude/skills/waves-db/SKILL.md §4. Blocks the push (exit 1). A
 # baseline that is not fetched locally is skipped with a warning (the
 # guard cannot see what it cannot diff).
@@ -122,7 +125,7 @@ guard_diff() {
   # $1 = baseline sha, $2 = pushed sha. Prints M/D/R/T lines under the
   # migrations dir, prefixed with the baseline for the message.
   git diff --name-status --diff-filter=MDRT "$1" "$2" -- "$MIGRATIONS_DIR" 2>/dev/null \
-    | sed "s/^/    vs ${1:0:9}: /"
+    | sed "s|^|    vs ${1:0:9}: |"
 }
 if [ "${SKIP_MIGRATION_GUARD:-0}" = "1" ]; then
   echo "[migration-guard] SKIP_MIGRATION_GUARD=1 set — skipping applied-migration guard." >&2
@@ -153,6 +156,14 @@ else
         [ -n "$base_hits" ] && hits="${hits:+$hits
 }$base_hits"
       fi
+      # $BASE tip, modified only: a path that exists on the tip with
+      # different content is a deployed file this push changes, whatever
+      # the ancestry. D/R are not checked here — a stale branch simply
+      # lacks main's newer files, that is not a deletion.
+      tip_hits="$(git diff --name-status --diff-filter=M "$BASE" "$pushed" -- "$MIGRATIONS_DIR" 2>/dev/null \
+        | sed "s|^|    vs $BASE tip: |")"
+      [ -n "$tip_hits" ] && hits="${hits:+$hits
+}$tip_hits"
     fi
     if [ -n "$hits" ]; then
       GUARD_HITS="${GUARD_HITS}  ${GUARD_LABELS[$i]}

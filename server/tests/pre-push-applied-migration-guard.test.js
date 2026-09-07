@@ -171,6 +171,31 @@ describe('pre-push applied-migration guard', () => {
     git(work, ['reset', '-q', '--hard', 'origin/main']);
   });
 
+  // A stale branch that cherry-picks a migration main has already deployed
+  // (instead of merging main): the merge base predates the file, so both
+  // ancestry diffs read "added" — the $BASE-tip check catches the edit
+  // (Codex on #4047, e1aa9a5 round). An unedited cherry-pick must pass.
+  test('a STALE branch that cherry-picks a deployed main migration and edits it is BLOCKED via the base tip', () => {
+    git(work, ['fetch', '-q', 'origin']);
+    const MIG_MAIN = path.join(MIGRATIONS, '20260101000004_landed_on_main.js');
+    // Branch from the commit BEFORE main gained that migration.
+    git(work, ['checkout', '-q', '-b', 'stale-edit', 'origin/main~1']);
+    writeAndCommit(work, { [MIG_MAIN]: "exports.up = async () => { /* squashed in, then edited */ };\nexports.down = async () => {};\n" }, 'cherry-pick + edit');
+    const r = pushResult(work, {}, 'HEAD:refs/heads/stale-edit');
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toMatch(/\[migration-guard\] BLOCKED/);
+    expect(r.stderr).toContain('vs origin/main tip: M\t' + MIG_MAIN.split(path.sep).join('/'));
+  });
+
+  test('a STALE branch carrying a byte-identical copy of a main migration passes', () => {
+    const MIG_MAIN = path.join(MIGRATIONS, '20260101000004_landed_on_main.js');
+    const mainBody = git(work, ['show', 'origin/main:' + MIG_MAIN.split(path.sep).join('/')]);
+    git(work, ['checkout', '-q', '-b', 'stale-identical', 'origin/main~1']);
+    writeAndCommit(work, { [MIG_MAIN]: mainBody }, 'identical cherry-pick');
+    const r = pushResult(work, {}, 'HEAD:refs/heads/stale-identical');
+    expect(r.ok).toBe(true);
+  });
+
   test('a NEW remote branch that only adds a migration passes', () => {
     git(work, ['checkout', '-q', '-b', 'feature-add', 'origin/main']);
     writeAndCommit(work, {
