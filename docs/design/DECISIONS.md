@@ -2195,3 +2195,18 @@ selection, rendering and the final check. Live portal/context/score history is
 capped at the current Eastern date. The unconfirmed-inclusive admin inventory
 remains available; its completion-card client must adopt target-property scope
 in the later UI PR, which is a documented P2 deferral here.
+
+## 2026-09-07 — Customer 360 workspace inside the admin shell
+
+**Context.** Adam approved the live directory-and-profile design and requested the implementation, including Safari and the bookmarked admin app on phones.
+
+**Decisions.** The Customers route opts in with `?customer360=workspace`; selecting a customer retains that parameter and adds the existing `customerId`. Removing `customer360` is the kill switch. Customer 360 embeds in the admin content area, with a persistent directory at wide desktop widths and a customer drawer below 1280px. Other entry points retain the existing profile sheet. The seven sections use a sticky, horizontally scrollable strip. The Activity list renders every event returned by the existing timeline endpoint, with category filtering and expandable descriptions; no source, date cutoff, or backend contract changes. Existing customer actions, billing controls, metrics, authorization checks, and loading/error paths remain authoritative.
+
+**Safari.** The workspace inherits the admin shell's `useAdminViewport` sizing. The directory drawer accounts for visual viewport offsets and safe areas; form inputs are at least 16px. Contract forms respond to the profile container width so the Waves sidebar does not force tablet overflow.
+
+**Verification.** Synthetic fixtures rendered the real Customers route and Waves shell at desktop, phone, and tablet widths in Chromium and WebKit. All sections, full history, directory selection/filtering, modal dismissal, and simulated keyboard viewport changes passed; screenshots were inspected. Focused client tests and the production build passed. No migrations or database integration checks were run. Physical iPhone home-screen behavior was not device-tested. This entry records a local implementation, not a deployment.
+
+
+### Customer directory controls and numeric scores (2026-09-07)
+
+Directory, Map, and Outreach & Upsells use a compact outlined toolbar with their existing icons. A single responsive search and Filter row replaces separate desktop/mobile controls. Customer names show the recorded numeric health score in a circle using the existing score color bands; zero and missing values remain distinct, and stored letter grades remain filterable.

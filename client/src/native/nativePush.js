@@ -119,7 +119,9 @@ async function bindPushListeners(PushNotifications) {
       finishRegistration(registered ? 'granted' : 'registration_unavailable');
     });
     await PushNotifications.addListener('registrationError', (err) => {
-      finishRegistration('registration_unavailable');
+      // Native errors carry no attempt ID and may arrive after a timeout.
+      // Keep them diagnostic: each active attempt has its own deadline,
+      // so a stale error cannot cancel a retry that is still registering.
       console.error('[nativePush] push registration error:', err?.error || err);
     });
     await PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
@@ -174,13 +176,17 @@ export async function requestNativePushPermission() {
       state = permissionValue(await PushNotifications.requestPermissions());
     }
     if (state === 'granted') {
+      let finish;
       const confirmation = new Promise((resolve) => {
-        const finish = (result) => { clearTimeout(timeout); registrationWaiters.delete(finish); resolve(result); };
+        finish = (result) => { clearTimeout(timeout); registrationWaiters.delete(finish); resolve(result); };
         const timeout = setTimeout(() => finish('registration_unavailable'), 15000);
         registrationWaiters.add(finish);
       });
-      try { await PushNotifications.register(); }
-      catch { finishRegistration('registration_unavailable'); }
+      // The native bridge can leave register() pending even after a token
+      // event or our deadline. Completion belongs to the event/timeout,
+      // and a late bridge rejection must not fail a newer retry's waiters.
+      void Promise.resolve().then(() => PushNotifications.register())
+        .catch(() => finish('registration_unavailable'));
       return await confirmation;
     }
     return state;

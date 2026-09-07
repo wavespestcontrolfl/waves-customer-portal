@@ -2334,7 +2334,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 {customerSearch.trim().length >= 2 && (
                   <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: '0 0 10px 10px', maxHeight: 240, overflowY: 'auto', WebkitOverflowScrolling: 'touch', zIndex: 20 }}>
                     {customerResults.map(c => (
-                      <div key={c.id} onClick={() => selectCustomer(c)} className="waves-sq-row" style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 58, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                      <button type="button" key={c.id} onClick={() => selectCustomer(c)} className="waves-sq-row u-focus-ring" style={{ width: '100%', textAlign: 'left', font: 'inherit', background: 'transparent', border: 'none', padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 58, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                         <div style={{ minWidth: 0 }}>
                           <div style={{ fontWeight: 500 }}>
                             {c.firstName} {c.lastName}
@@ -2345,7 +2345,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           </div>
                         </div>
                         {c.tier && <span style={{ fontSize: 10, padding: '2px 6px', borderRadius: 6, background: `${TIER_COLORS[c.tier] || D.teal}22`, color: TIER_COLORS[c.tier] || D.teal, flex: '0 0 auto' }}>{c.tier}</span>}
-                      </div>
+                      </button>
                     ))}
                     {!customerLoading && customerResults.length === 0 && (
                       <div style={{ padding: '14px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
@@ -2943,7 +2943,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 })()}
 
                 {!svc.lineDiscount && (
-                  <div style={{ gridColumn: '1 / -1', position: 'relative', padding: '0 0 2px' }}>
+                  <div
+                    style={{ gridColumn: '1 / -1', position: 'relative', padding: '0 0 2px' }}
+                    // Close only when focus leaves the whole picker: the options are
+                    // real buttons now, so Tab must be able to reach them.
+                    onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setLineDiscountOpenIdx((current) => (current === idx ? null : current)); }}
+                  >
                     {serviceFieldLabel('Discount')}
                     <input
                       value={lineDiscountQueries[svc.lineId || idx] || ''}
@@ -2952,7 +2957,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         if (lineDiscountPresets.length > 0) setLineDiscountOpenIdx(idx);
                       }}
                       onFocus={() => { if (lineDiscountPresets.length > 0) setLineDiscountOpenIdx(idx); }}
-                      onBlur={() => setTimeout(() => setLineDiscountOpenIdx((current) => (current === idx ? null : current)), 150)}
                       placeholder={lineDiscountPresets.length === 0 ? 'No invoice discounts are available' : `Search discounts${svc.name ? ` for ${svc.name}` : ''}...`}
                       disabled={lineDiscountPresets.length === 0}
                       style={{ ...inputStyle, fontSize: isMobile ? 15 : 12, minHeight: isMobile ? 42 : 36, padding: isMobile ? '10px 12px' : '8px 10px', opacity: lineDiscountPresets.length === 0 ? 0.65 : 1 }}
@@ -2962,14 +2966,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         {matchingLineDiscounts(idx).length === 0 ? (
                           <div style={{ padding: '10px 12px', color: D.muted, fontSize: 12 }}>No discounts match.</div>
                         ) : matchingLineDiscounts(idx).map((d) => (
-                          <div
+                          <button type="button"
                             key={d.id}
-                            onMouseDown={(e) => { e.preventDefault(); applyLineDiscount(idx, d); }}
-                            style={{ padding: '10px 12px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 13, display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => applyLineDiscount(idx, d)}
+                            className="u-focus-ring"
+                            style={{ width: '100%', textAlign: 'left', font: 'inherit', background: 'transparent', border: 'none', padding: '10px 12px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 13, display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}
                           >
                             <span style={{ color: D.text, fontWeight: 500, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.name}</span>
                             <span style={{ color: D.text, fontFamily: ROBOTO_STACK, fontSize: 12, whiteSpace: 'nowrap' }}>{formatDiscountLabel(d)}</span>
-                          </div>
+                          </button>
                         ))}
                       </div>
                     )}
@@ -3025,11 +3031,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               {serviceSearch.trim().length > 0 && (
                 <div style={{ marginTop: 8, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, maxHeight: 280, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
                   {serviceResults.map((svc, i) => (
-                    <div
+                    <button type="button"
                       key={`${svc.id || svc.name}-${i}`}
                       onClick={() => addServiceFromCatalog(svc)}
-                      className="waves-sq-row"
-                      style={{ padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
+                      className="waves-sq-row u-focus-ring"
+                      style={{ width: '100%', textAlign: 'left', font: 'inherit', background: 'transparent', border: 'none', padding: '12px 14px', cursor: 'pointer', borderBottom: `1px solid ${D.border}`, fontSize: 14, color: '#18181B', minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
                     >
                       <span style={{ flex: 1, fontWeight: 500, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{svc.name}</span>
                       {(svc.base_price != null || svc.priceMin != null) && (
@@ -3037,7 +3043,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           ${Number(svc.base_price ?? svc.priceMin).toFixed(2)}
                         </span>
                       )}
-                    </div>
+                    </button>
                   ))}
                   {!serviceLoading && serviceResults.length === 0 && (
                     <div style={{ padding: '14px', textAlign: 'center', color: D.muted, fontSize: 13 }}>
