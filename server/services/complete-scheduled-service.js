@@ -6033,7 +6033,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
               customerId: svc.customer_id,
               turfProfile: lawnDefaultsEnabled ? {
                 ...turfProfile,
-                lawn_sqft: nutrientTreatedSqft(p.areaValue, areaUnit, lawnCompletionArea === undefined ? turfProfile?.lawn_sqft : lawnCompletionArea),
+                lawn_sqft: nutrientTreatedSqft(p.areaValue, areaUnit, waveguardPlan?.propertyGate?.lawnSqft || null),
               } : turfProfile,
               serviceRecord: record,
               serviceProduct,

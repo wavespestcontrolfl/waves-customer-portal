@@ -242,4 +242,24 @@ describeDb('appointment completion defaults through PostgreSQL', () => {
     }
     expect(Number((await knex('customer_turf_profiles').where({ id: profile.id }).first()).lawn_sqft)).toBe(4000);
   });
+
+  test('an omitted area on a second property never borrows primary-profile nutrient square footage', async () => {
+    const { f, visit } = await plannedVisit();
+    const [second] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Fixture Street' }).returning('*');
+    await knex('scheduled_services').where({ id: visit.id }).update({ property_id: second.id });
+    const plan = await buildPlanForService(visit.id, { db: knex, completionDefaultsEnabled: true });
+    expect(plan.propertyGate.lawnSqft).toBeNull();
+    const record = await f.record(visit);
+    const profile = await knex('customer_turf_profiles').where({ customer_id: f.customerId }).first();
+    const [product] = await knex('products_catalog').insert({ name: 'Fixture spot nutrient', category: 'fertilizer', analysis_n: 20 }).returning('*');
+    const [actual] = await knex('service_products').insert({ service_record_id: record.id, product_id: product.id, product_name: product.name, total_amount: 5, amount_unit: 'lb' }).returning('*');
+    const nutrient = await recordServiceProductNutrients(knex, {
+      customerId: f.customerId, turfProfile: { ...profile, lawn_sqft: nutrientTreatedSqft(null, null, plan.propertyGate.lawnSqft) },
+      serviceRecord: record, serviceProduct: actual, product,
+    });
+    expect(nutrient).toBeNull();
+    expect(await knex('property_nutrient_ledger').where({ customer_id: f.customerId })).toEqual([]);
+    expect(Number(profile.lawn_sqft)).toBe(4000);
+  });
+
 });
