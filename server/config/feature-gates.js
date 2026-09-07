@@ -6,6 +6,7 @@
  * Adam manually enables them after verifying each one works.
  *
  * Set these as environment variables on Railway:
+ *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
@@ -96,6 +97,8 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // Staff Quick Links receipt picker; delivery evidence is recorded even while dark.
+  composerReceiptLinks: process.env.GATE_COMPOSER_RECEIPT_LINKS === 'true',
   // GATE_LAWN_PROPERTY_HISTORY: opt-in in every environment. Registered for
   // logGateStatus only; consumers use gateEnvValue at CALL time.
   lawnPropertyHistory: gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'),
@@ -1786,6 +1789,10 @@ const gates = {
   // 2026-08-12). Flip AFTER #464 is live on the hub + spokes.
   // Enable with GATE_PUBLIC_QUOTE_LAWN_AREA=true.
   publicQuoteLawnArea: isProd ? process.env.GATE_PUBLIC_QUOTE_LAWN_AREA === 'true' : true,
+
+  // Website estimate pages publish eligible engine quotes directly into the
+  // existing estimate booking/Auto Pay flow. Ordinary lead forms never opt in.
+  websiteQuoteBooking: process.env.GATE_WEBSITE_QUOTE_BOOKING === 'true',
 
   // Commercial estimate glass parity — the customer estimate page renders an
   // authored commercial proposal's line items INSIDE the glass layout (plus

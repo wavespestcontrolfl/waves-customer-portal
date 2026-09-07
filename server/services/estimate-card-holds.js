@@ -2339,7 +2339,7 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
   // estimate-deposits twin. payment_receipt=false stays the full
   // every-channel kill switch.
   const smsOptedOut = prefs?.payment_confirmation_sms === false || prefs?.sms_enabled === false;
-  const smsChannel = channel === 'sms' || channel === 'both';
+  const smsChannel = ['sms', 'both', 'push'].includes(channel);
 
   // Emailed PDF receipt — attempted FIRST so an email-only channel whose
   // email leg deterministically can't deliver (portal-wide email opt-out or

@@ -45,6 +45,16 @@ function socketStub() {
 }
 
 describe('track-transitions lifecycle side effects', () => {
+  test('en-route retries share a visit attempt while a same-day restart gets a new notification', () => {
+    const first = new Date('2030-04-08T13:00:00Z');
+    const restart = new Date('2030-04-08T16:00:00Z');
+    const key = trackTransitions.enRouteNotificationKey;
+    expect(key({ id: 'job-1', visit_id: 'visit-1' }, first)).toBe(key({ id: 'job-2', visit_id: 'visit-1' }, first.toISOString()));
+    expect(key({ id: 'job-1', visit_id: 'visit-1' }, first)).not.toBe(key({ id: 'job-1', visit_id: 'visit-1' }, restart));
+    expect(key({ id: 'job-1' }, first)).not.toBe(key({ id: 'job-1' }, restart));
+    expect(key({ id: 'job-1' }, null)).toBeNull();
+  });
+
   beforeEach(() => {
     jest.clearAllMocks();
     transitionJobStatus.mockReset().mockResolvedValue({});

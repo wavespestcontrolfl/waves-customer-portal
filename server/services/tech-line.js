@@ -66,10 +66,18 @@ async function technicianForLine(number, connection = db) {
 
 // The cell to ring for a call on the line; null when nobody assignable holds
 // it or the holder has no usable cell (the office list then rings alone).
+// A Waves-owned number is never a ring target: technicians.phone can hold an
+// office line (the owner's row does), and <Dial>ing our own Twilio number
+// from inside /voice would open a second inbound call into the same webhook.
 async function ringTargetForLine(number) {
   const tech = await technicianForLine(number);
   const cell = tech ? toE164(tech.phone) : null;
-  return cell && isLikelyE164(cell) ? cell : null;
+  if (!cell || !isLikelyE164(cell)) return null;
+  if (TWILIO_NUMBERS.isOwnedNumber(cell)) {
+    logger.warn(`[tech-line] holder of ${maskPhone(number)} has a Waves line as their phone — office list rings instead`);
+    return null;
+  }
+  return cell;
 }
 
 // Registry entry for the line a technician holds, or null (gate off, no line,

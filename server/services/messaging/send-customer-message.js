@@ -55,6 +55,30 @@ const { isEnabled } = require('../../config/feature-gates');
 
 const DEFAULT_PROVIDER_RETRY_DELAY_MS = 5 * 60 * 1000;
 
+// Receipt re-sharing needs invoice-specific SMS evidence. receipt_sent_at
+// also covers email; provider success can mean push or an owner-silence
+// sentinel. Only an accepted Twilio SMS/MMS for a settled invoice qualifies.
+async function recordReceiptSmsDelivery(input, outcome) {
+  const receipt = (input.purpose === 'payment_receipt' && input.metadata?.original_message_type === 'receipt')
+    || (input.purpose === 'appointment' && input.metadata?.original_message_type === 'service_complete_paid_receipt');
+  if (!receipt || input.channel !== 'sms' || !input.invoiceId || !input.customerId
+    || outcome.sent !== true || outcome.provider !== 'twilio'
+    || !/^(SM|MM)[a-f0-9]{32}$/i.test(outcome.providerMessageId || '')) return;
+  try {
+    const db = require('../../models/db');
+    await db('invoices')
+      .where({ id: input.invoiceId, customer_id: input.customerId })
+      .whereIn('status', ['paid', 'refunded'])
+      .whereNull('payer_id')
+      .whereNull('receipt_sms_sent_at')
+      .update({ receipt_sms_sent_at: outcome.sentAt ? new Date(outcome.sentAt) : db.fn.now() });
+  } catch (err) {
+    // The provider already accepted. A missing fact keeps Quick Links
+    // closed; it must never turn this delivery into a retry/double text.
+    logger.warn(`[messaging] receipt SMS evidence failed for invoice ${input.invoiceId}: ${err.message}`);
+  }
+}
+
 // Grouped unit-move hold for appointment notices (codex #3609 r30/r31).
 // A visit mid-move (or stranded partial) stamps move_hold_until on its
 // members' reminder rows; a notice rendered for the OLD slot must not
@@ -202,6 +226,23 @@ async function sendCustomerMessage(input) {
   // 4. Load contact state once (consent + suppression share the lookup)
   let contactState = await loadContactState(sendInput);
   contactState = await loadSuppressionState(sendInput, contactState);
+  const PushRouting = require('./push-channel-routing');
+  if (await PushRouting.wantsAppFirst(sendInput)) {
+    if (!validateNoCustomerEmoji({ ...sendInput, channel: 'push' }, policy).ok) {
+      const fallback = await sendCustomerMessage({ ...input, channel: 'sms', metadata: {
+        ...input.metadata, requestedChannel: 'push', appFallbackReason: 'push_body_unsupported',
+      } });
+      return { ...fallback, requestedChannel: 'push', fallbackReason: 'push_body_unsupported' };
+    }
+    sendInput.channel = 'push';
+    sendInput.metadata = {
+      ...sendInput.metadata, requestedChannel: 'push',
+      notificationEventKey: sendInput.metadata?.notificationEventKey
+        || (sendInput.invoiceId ? `invoice:${sendInput.invoiceId}:${sendInput.purpose}`
+          : `${sendInput.purpose}:${sendInput.appointmentId || sendInput.estimateId || sendInput.customerId}:${require('crypto').createHash('sha256').update(sendInput.body).digest('hex')}`),
+    };
+  }
+
 
   // 5. Run validator pipeline. Each entry is { name, fn }; fn is invoked
   //    with (input, policy, contactState).
@@ -410,6 +451,8 @@ async function sendCustomerMessage(input) {
     };
   }
 
+  await recordReceiptSmsDelivery(sendInput, providerOutcome);
+
   // 8. Persist final audit row with provider outcome. A throw past this
   // point carries the KNOWN provider outcome on the error, so callers with
   // durable send-once claims can distinguish a definite provider failure
@@ -429,6 +472,17 @@ async function sendCustomerMessage(input) {
   } catch (auditErr) {
     auditErr.providerOutcome = providerOutcome;
     throw auditErr;
+  }
+
+  if (!providerOutcome.sent && sendInput.channel === 'push' && providerOutcome.appUnavailable) {
+    // Re-enter the complete pipeline for an allowed backup, using fresh
+    // consent/suppression state. Never clear an opt-out to enable fallback.
+    const fallback = await sendCustomerMessage({
+      ...input,
+      channel: 'sms',
+      metadata: { ...input.metadata, requestedChannel: 'push', appFallbackReason: providerOutcome.error || 'push_unavailable' },
+    });
+    return { ...fallback, requestedChannel: 'push', fallbackReason: providerOutcome.error || 'push_unavailable' };
   }
 
   if (!providerOutcome.sent) {
@@ -456,6 +510,7 @@ async function sendCustomerMessage(input) {
     sent: true,
     blocked: false,
     providerMessageId: providerOutcome.providerMessageId,
+    channel: providerOutcome.provider === 'push' ? 'push' : sendInput.channel,
     auditLogId: audit.id,
     segmentCount: segmentMeta.segmentCount,
     encoding: segmentMeta.encoding,
@@ -509,7 +564,7 @@ function validateContract(input) {
  * portal_chat dispatchers land when the corresponding call sites migrate.
  */
 async function dispatchToProvider(input, hooks = {}) {
-  if (input.channel === 'sms') {
+  if (input.channel === 'sms' || input.channel === 'push') {
     return sendViaTwilio(input, hooks);
   }
   return {

@@ -30,9 +30,9 @@ jest.mock('../routes/estimate-public', () => ({
   adoptionServiceModesForContract: jest.fn(() => ['recurring']),
 }));
 jest.mock('../services/autopay-setup-link', () => ({ requestAutopaySetupLink: jest.fn(), setupLinkIneligibility: jest.fn(), KIND: 'customer' }));
-// Only the Auto Pay customer-SMS gate reads true — every other gate (the
+// Only the Auto Pay and receipt picker gates read true — every other gate (the
 // pricing-authority send gate the estimate builder consults) stays off.
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((g) => g === 'autopayCustomerSms') }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((g) => ['autopayCustomerSms', 'composerReceiptLinks'].includes(g)) }));
 jest.mock('../services/appointment-card-request', () => ({
   claimCardLinkSend: jest.fn(),
   markCardLinkSendOutcome: jest.fn(),
@@ -70,6 +70,19 @@ jest.mock('../services/project-report-links', () => ({
   projectReportPathForProject: jest.fn(async (_db, project, customer) => `/report/project/${String(customer?.first_name || 'customer').toLowerCase()}-${String(project.report_token).slice(0, 12)}`),
 }));
 jest.mock('../services/email-template-library', () => ({ loadTemplateByKey: jest.fn() }));
+// The receipt route's own payment resolution (metadata → PI / charge →
+// manual description); the receipt quick link orders and vets by it.
+jest.mock('../services/receipt-payment', () => ({ loadPaymentForInvoice: jest.fn(async () => null) }));
+// The messaging policy's own receipt-text consent (payment_receipt purpose):
+// the receipt quick link runs the real validators before offering a link.
+jest.mock('../services/messaging/validators/consent', () => ({
+  loadContactState: jest.fn(async () => ({ prefs: {}, customer: { id: 'c2', phone: '+19415550100' }, lookupFailed: false })),
+  checkConsentForPurpose: jest.fn(async () => ({ ok: true })),
+}));
+jest.mock('../services/messaging/validators/suppression', () => ({
+  loadSuppressionState: jest.fn(async (_input, state) => state),
+  checkSuppression: jest.fn(async () => ({ ok: true })),
+}));
 // The real predicate: typedReportDelivery set to anything but auto_send is
 // suppressed (internal_only / disabled typed reports 404 publicly).
 jest.mock('../routes/reports-public', () => ({
@@ -136,6 +149,7 @@ const {
   buildServiceReportLink,
   buildContractSigningLink,
   buildStatementLink,
+  buildReceiptLink,
   buildProjectReportLink,
   markStatementsSent,
   markPrepGuidesSent,
@@ -168,6 +182,7 @@ function chainBuilder({ firstRow = null, rows = [] } = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  isEnabled.mockImplementation((g) => ['autopayCustomerSms', 'composerReceiptLinks'].includes(g));
   mockDb.mockClear();
 });
 
@@ -1031,6 +1046,123 @@ describe('buildServiceReportLink', () => {
   });
 });
 
+describe('buildReceiptLink', () => {
+  const { loadPaymentForInvoice } = require('../services/receipt-payment');
+  const PAID = { id: 'inv-1', customer_id: 'c2', token: 'r'.repeat(64), invoice_number: 'INV-1042', status: 'paid', total: '85.00', paid_at: '2026-08-30T15:00:00Z', created_at: '2026-08-29T00:00:00Z', updated_at: '2026-08-30T15:00:00Z', stripe_payment_intent_id: 'pi_1', stripe_charge_id: null };
+
+  // Receipt availability uses the durable per-invoice text delivery fact.
+  const wireReceiptRows = (rows) => { mockBuilders = { invoices: chainBuilder({ rows }) }; };
+
+  test('the picker gate fails closed before any invoice read', async () => {
+    isEnabled.mockReturnValueOnce(false);
+    const result = await buildReceiptLink(['c1']);
+    expect(result).toMatchObject({ url: null, reason: 'Receipt Quick Links are not enabled' });
+    expect(mockDb).not.toHaveBeenCalled();
+  });
+
+  test('the account\'s most recently settled invoice — permanent /receipt token, raw URL, nothing minted', async () => {
+    wireReceiptRows([PAID]);
+    const r = await buildReceiptLink(['c1', 'c2'], 'c1');
+    // A paid row dates itself (paid_at) — the receipt route's payment
+    // resolution is for rows that cannot (refunded / unstamped).
+    expect(loadPaymentForInvoice).not.toHaveBeenCalled();
+    // … and by the receipt policy's own text consent, for the RECIPIENT
+    // (the resolved phone owner c1, not the invoice's c2), with the receipt
+    // path's input shape (r9 P1 + pre-push P1).
+    const { checkConsentForPurpose, loadContactState } = require('../services/messaging/validators/consent');
+    const { checkSuppression } = require('../services/messaging/validators/suppression');
+    const { PURPOSE_POLICY } = require('../services/messaging/policy');
+    expect(loadContactState).toHaveBeenCalledWith({ customerId: 'c1' });
+    const input = { customerId: 'c1', to: '+19415550100', channel: 'sms', audience: 'customer', purpose: 'payment_receipt', hasEmailLeg: true };
+    expect(checkSuppression).toHaveBeenCalledWith(input, PURPOSE_POLICY.payment_receipt, expect.any(Object));
+    expect(checkConsentForPurpose).toHaveBeenCalledWith(input, PURPOSE_POLICY.payment_receipt, expect.any(Object));
+    expect(mockBuilders.invoices.whereIn).toHaveBeenCalledWith('customer_id', ['c1', 'c2']);
+    // Exactly the statuses the receipt viewer renders: a 'prepaid' close-out
+    // shows "Payment not completed" and its PDF 409s (pre-push Codex P1), an
+    // in-flight ACH has no receipt yet, an open invoice is the pay link's.
+    expect(mockBuilders.invoices.whereIn).toHaveBeenCalledWith('status', ['paid', 'refunded']);
+    // Self-pay only: a payer-billed invoice's receipt is the payer's AP
+    // inbox's (it shows the payer's address, AP email and payment method) —
+    // never a homeowner quick link (pre-push Codex P0).
+    expect(mockBuilders.invoices.whereNull).toHaveBeenCalledWith('payer_id');
+    expect(mockBuilders.invoices.whereNotNull).toHaveBeenCalledWith('token');
+    expect(mockBuilders.invoices.whereNotNull).toHaveBeenCalledWith('receipt_sms_sent_at');
+    expect(mockBuilders.invoices.whereNotNull).not.toHaveBeenCalledWith('receipt_sent_at');
+    // Every texted receipt on the account is considered — no candidate cap
+    // ahead of the payment-aware pick (r10 P2).
+    expect(mockBuilders.invoices.limit).not.toHaveBeenCalled();
+    expect(mockBuilders.invoices.orderByRaw).toHaveBeenCalledWith('COALESCE(paid_at, created_at) DESC, id DESC');
+    expect(r.url).toBe(`https://portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}`);
+    expect(r.line).toBe(`Here is your receipt for invoice INV-1042: ${r.url}\n\n`);
+    // Immediate-only: the recipient's receipt-text consent is re-run by
+    // the send seam, which scheduled / draft dispatch never reaches.
+    expect(r.immediateOnly).toBe(true);
+    expect(r.receipt).toEqual({ id: 'inv-1', invoiceNumber: 'INV-1042', status: 'paid', total: 85, paidAt: '2026-08-30' });
+    const { shortenOrPassthrough } = require('../services/short-url');
+    expect(shortenOrPassthrough).not.toHaveBeenCalled();
+  });
+
+  test('no settled invoice → reason', async () => {
+    wireReceiptRows([]);
+    const r = await buildReceiptLink(['c1']);
+    expect(r.url).toBeNull();
+    expect(r.reason).toMatch(/No previously texted receipt/);
+  });
+
+  test('ordered by the linked PAYMENT event: a full refund NULLs paid_at, so an older-created invoice whose payment came last still wins — never the mutable updated_at (GH Codex #3893 r7 + r9 P2)', async () => {
+    const refunded = { ...PAID, id: 'inv-0', token: 'q'.repeat(64), invoice_number: 'INV-1001', status: 'refunded', paid_at: null, created_at: '2026-08-01T00:00:00Z', updated_at: '2026-08-01T00:00:00Z' };
+    wireReceiptRows([PAID, refunded]);
+    // Only the refunded row (no paid_at) needs the payment resolved.
+    loadPaymentForInvoice.mockResolvedValueOnce({ id: 'pay-0', created_at: '2026-09-02T15:00:00Z' });
+    const r = await buildReceiptLink(['c1', 'c2']);
+    expect(loadPaymentForInvoice).toHaveBeenCalledTimes(1);
+    expect(loadPaymentForInvoice).toHaveBeenCalledWith('inv-0', 'c2', { stripePaymentIntentId: 'pi_1', stripeChargeId: null, invoiceNumber: 'INV-1001' });
+    expect(r.url).toBe(`https://portal.wavespestcontrol.com/receipt/${'q'.repeat(64)}`);
+    expect(r.receipt.status).toBe('refunded');
+    // An edit bumping updated_at on an old refunded invoice does not make it newest.
+    const edited = { ...refunded, updated_at: '2026-09-04T00:00:00Z' };
+    wireReceiptRows([edited, PAID]);
+    loadPaymentForInvoice.mockResolvedValueOnce({ id: 'pay-0', created_at: '2026-08-02T15:00:00Z' });
+    expect((await buildReceiptLink(['c1', 'c2'])).url).toBe(`https://portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}`);
+  });
+
+  test('the receipt policy\'s text consent gates the link: email-only receipts, a receipt-texts opt-out, STOP — each a reason, never a link (r9 P1)', async () => {
+    const { checkConsentForPurpose } = require('../services/messaging/validators/consent');
+    const { checkSuppression } = require('../services/messaging/validators/suppression');
+    for (const [code, copy] of [['CHANNEL_EMAIL_ONLY', /email only/], ['PURPOSE_OPTED_OUT', /opted out of receipt texts/], ['CONSENT_LOOKUP_FAILED', /cannot receive receipt texts/]]) {
+      wireReceiptRows([PAID]);
+      checkConsentForPurpose.mockResolvedValueOnce({ ok: false, code });
+      const r = await buildReceiptLink(['c1', 'c2']);
+      expect(r.url).toBeNull();
+      expect(r.reason).toMatch(copy);
+    }
+    wireReceiptRows([PAID]);
+    checkSuppression.mockResolvedValueOnce({ ok: false, code: 'SUPPRESSED_OPT_OUT' });
+    expect((await buildReceiptLink(['c1', 'c2'])).reason).toMatch(/cannot receive receipt texts/);
+  });
+
+  test('a refunded invoice with no resolvable refund record has no receipt (its PDF 409s) — skipped, never shadowing an older valid one (r7 P2)', async () => {
+    const refunded = { ...PAID, id: 'inv-0', token: 'q'.repeat(64), invoice_number: 'INV-1001', status: 'refunded', paid_at: null, updated_at: '2026-09-02T10:00:00Z' };
+    wireReceiptRows([refunded, PAID]);
+    loadPaymentForInvoice.mockResolvedValueOnce(null);
+    const r = await buildReceiptLink(['c1', 'c2']);
+    expect(r.url).toBe(`https://portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}`);
+    wireReceiptRows([refunded]);
+    loadPaymentForInvoice.mockResolvedValueOnce(null);
+    expect((await buildReceiptLink(['c1'])).reason).toMatch(/No previously texted receipt/);
+  });
+
+  test('a paid row without paid_at is dated by its linked payment, like a refunded one', async () => {
+    const unstamped = { ...PAID, id: 'inv-2', token: 's'.repeat(64), invoice_number: 'INV-1050', paid_at: null, created_at: '2026-08-20T00:00:00Z' };
+    wireReceiptRows([PAID, unstamped]);
+    loadPaymentForInvoice.mockResolvedValueOnce({ id: 'pay-2', created_at: '2026-09-01T15:00:00Z' });
+    const r = await buildReceiptLink(['c1', 'c2']);
+    expect(loadPaymentForInvoice).toHaveBeenCalledTimes(1);
+    expect(loadPaymentForInvoice).toHaveBeenCalledWith('inv-2', 'c2', expect.any(Object));
+    expect(r.url).toBe(`https://portal.wavespestcontrol.com/receipt/${'s'.repeat(64)}`);
+  });
+});
+
 describe('buildProjectReportLink', () => {
   const HELD = { id: 'p-held', customer_id: 'c1', title: 'WDO Inspection', project_type: 'wdo', project_date: '2026-09-01', report_token: 'e'.repeat(32), report_hold_status: 'held', sent_at: '2026-09-01T12:00:00Z' };
   const ISSUED = { id: 'p-ok', customer_id: 'c2', title: 'Termite Treatment', project_type: 'termite', project_date: '2026-08-10', report_token: 'f'.repeat(32), report_hold_status: null, sent_at: '2026-08-11T12:00:00Z' };
@@ -1223,9 +1355,39 @@ describe('immediateOnlyLinkSendCheck (schedule + draft fence)', () => {
     // The viewer ignores the slug — a working vanity URL with `_` / `.` in
     // it is the same report and is fenced the same (r5 P1).
     expect(await immediateOnlyLinkSendCheck(`portal.wavespestcontrol.com/report/project/dana_lee.jr-${'f'.repeat(12)}`)).toEqual({ present: true, label: 'Project report' });
+    expect(await immediateOnlyLinkSendCheck(`Receipt: portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}`)).toEqual({ present: true, label: 'Receipt' });
+    expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}`)).toEqual({ present: true, label: 'Receipt' });
+    // The shortened form receipt delivery texts (invoice-email.js) — pasted
+    // from message history — is the same page (pre-push Codex P1 on r9).
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'rc1', kind: 'receipt', target_url: `https://portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}` } }) };
+    expect(await immediateOnlyLinkSendCheck('Your receipt: wavespest.co/l/rc1')).toEqual({ present: true, label: 'Receipt' });
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'rc2', kind: 'other', target_url: `https://portal.wavespestcontrol.com/receipt/${'r'.repeat(64)}` } }) };
+    expect(await immediateOnlyLinkSendCheck('Your receipt: wavespest.co/l/rc2')).toEqual({ present: true, label: 'Receipt' });
+    // The receipt SMS itself shortens /pay/<invoice token> (receiptSmsFacts)
+    // — a receipt-kind code with that target is the receipt. An invoice
+    // code whose target is still unpaid remains a payment link.
+    mockBuilders = { short_codes: chainBuilder({ firstRow: { code: 'rc3', kind: 'receipt', target_url: `https://portal.wavespestcontrol.com/pay/${'r'.repeat(64)}` } }) };
+    expect(await immediateOnlyLinkSendCheck('Your receipt: wavespest.co/l/rc3')).toEqual({ present: true, label: 'Receipt' });
+    mockBuilders = {
+      short_codes: chainBuilder({ firstRow: { code: 'pay1', kind: 'invoice', target_url: `https://portal.wavespestcontrol.com/pay/${'r'.repeat(64)}` } }),
+      invoices: chainBuilder({ firstRow: { status: 'sent' } }),
+    };
+    expect(await immediateOnlyLinkSendCheck('Pay here: wavespest.co/l/pay1')).toEqual({ present: false });
     // An explicit http:// owned link is still a protected link (fence reads presence).
     expect(await immediateOnlyLinkSendCheck(`http://portal.wavespestcontrol.com/report/project/${'f'.repeat(32)}`)).toEqual({ present: true, label: 'Project report' });
     expect(await immediateOnlyLinkSendCheck(`evil.example/report/project/${'f'.repeat(32)}`)).toEqual({ present: false });
+  });
+
+  test.each(['paid', 'processing', 'sent', 'refunded'])('raw and invoice-kind /pay links follow the %s payment-page redirect at the schedule/draft fence', async (status) => {
+    const url = `https://portal.wavespestcontrol.com/pay/${'r'.repeat(64)}`;
+    mockBuilders = {
+      invoices: chainBuilder({ firstRow: { status } }),
+      short_codes: chainBuilder({ firstRow: { code: 'pay1', kind: 'invoice', target_url: url } }),
+    };
+    const expected = ['paid', 'processing'].includes(status) ? { present: true, label: 'Receipt' } : { present: false };
+    for (const body of [url, url.replace('https://', ''), url.replace('https://', 'http://'), 'wavespest.co/l/pay1']) {
+      expect(await immediateOnlyLinkSendCheck(body)).toEqual(expected);
+    }
   });
 
   test('an appointment page link (branded short form of kind appointment, or the long /appointment form) is immediate-only', async () => {
@@ -1909,6 +2071,120 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/${REPORT}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer viewable/);
       wireAccount({ linkCustomer: acct('c9', 'other'), report: { id: 'r1', customer_id: 'c9', structured_notes: null } });
       expect((await bearerLinkSendCheck(`portal.wavespestcontrol.com/report/${REPORT}`, '9415550100', { trustedCustomerId: null })).error).toMatch(/different customer/);
+    });
+
+    describe('receipt links re-run the builder\'s predicate, bind to the account, and re-check the RECIPIENT\'s receipt-text consent at the send (pre-push Codex P1 on r9)', () => {
+      const TOKEN = 'r'.repeat(64);
+      const inv = (over = {}) => ({ id: 'inv-1', customer_id: 'c2', status: 'paid', payer_id: null, receipt_sms_sent_at: '2026-08-30T15:00:00Z', ...over });
+      // A separate SMS stamp excludes email-only and ambiguous delivery.
+      function wireReceipt({ row = inv(), texted = true, ...account } = {}) {
+        wireAccount({ linkCustomer: acct('c2'), ...account });
+        mockBuilders.invoices = chainBuilder({ firstRow: row && { ...row, receipt_sms_sent_at: texted ? row.receipt_sms_sent_at : null } });
+      }
+
+      test.each([
+        [`portal.wavespestcontrol.com/receipt/${TOKEN}`, null],
+        ['wavespest.co/l/rc1', { code: 'rc1', kind: 'receipt', target_url: `https://portal.wavespestcontrol.com/receipt/${TOKEN}` }],
+      ])('a receipt already inserted in a stale composer refuses after the kill switch closes: %s', async (body, shortRow) => {
+        wireReceipt({ shortRow });
+        expect(await bearerLinkSendCheck(body, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+        isEnabled.mockImplementation((g) => g === 'autopayCustomerSms');
+        expect(await bearerLinkSendCheck(body, '9415550100', { trustedCustomerId: 'c1' })).toMatchObject({ ok: false, error: expect.stringMatching(/Receipt Quick Links are switched off/) });
+      });
+
+      test.each([
+        [`https://portal.wavespestcontrol.com/pay/${TOKEN}`, null],
+        [`portal.wavespestcontrol.com/pay/${TOKEN}`, null],
+        ['wavespest.co/l/pay1', { code: 'pay1', kind: 'invoice', target_url: `https://portal.wavespestcontrol.com/pay/${TOKEN}` }],
+        ['wavespest.co/l/pay1', { code: 'pay1', kind: 'other', target_url: `https://portal.wavespestcontrol.com/pay/${TOKEN}` }],
+      ])('a /pay link that opens a receipt checks account, delivery evidence, consent and gate: %s', async (body, shortRow) => {
+        const { checkConsentForPurpose } = require('../services/messaging/validators/consent');
+        const send = () => bearerLinkSendCheck(body, '9415550100', { trustedCustomerId: 'c1' });
+        wireReceipt({ shortRow });
+        expect(await send()).toEqual({ ok: true });
+        wireReceipt({ shortRow, linkCustomer: acct('c9', 'other') });
+        expect((await send()).error).toMatch(/different customer/);
+        wireReceipt({ shortRow, texted: false });
+        expect((await send()).error).toMatch(/not available to text/);
+        wireReceipt({ shortRow });
+        checkConsentForPurpose.mockResolvedValueOnce({ ok: false, code: 'CHANNEL_EMAIL_ONLY' });
+        expect((await send()).error).toMatch(/receipts by email only/);
+        isEnabled.mockImplementation((g) => g === 'autopayCustomerSms');
+        expect((await send()).error).toMatch(/Receipt Quick Links are switched off/);
+      });
+
+      test('raw receipt payment links refuse plaintext and unsettled ACH, while unpaid payment links keep their existing path', async () => {
+        const url = `https://portal.wavespestcontrol.com/pay/${TOKEN}`;
+        wireReceipt();
+        expect((await bearerLinkSendCheck(url.replace('https://', 'http://'), '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/uses http/);
+        wireReceipt({ row: inv({ status: 'processing' }) });
+        expect((await bearerLinkSendCheck(url, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/not available to text/);
+        wireReceipt({ row: inv({ status: 'sent' }) });
+        isEnabled.mockReturnValue(false);
+        expect(await bearerLinkSendCheck(url, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+      });
+
+      test('a delivered self-pay receipt on the recipient\'s account passes as a bearer; consent is the trusted recipient\'s', async () => {
+        const { checkConsentForPurpose, loadContactState } = require('../services/messaging/validators/consent');
+        wireReceipt();
+        expect(await bearerLinkSendCheck(`Receipt: portal.wavespestcontrol.com/receipt/${TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+        expect(mockBuilders.invoices.where).toHaveBeenCalledWith({ token: TOKEN });
+        expect(mockBuilders.invoices.first).toHaveBeenCalledWith(expect.any(String), expect.any(String), expect.any(String), expect.any(String), 'receipt_sms_sent_at', expect.any(String), expect.any(String), expect.any(String));
+        expect(loadContactState).toHaveBeenCalledWith({ customerId: 'c1' });
+        expect(checkConsentForPurpose).toHaveBeenCalled();
+        // No trusted customer: the one live row on the number is the recipient.
+        wireReceipt({ recipientRows: [acct('c1')] });
+        expect(await bearerLinkSendCheck(`portal.wavespestcontrol.com/receipt/${TOKEN}`, '9415550100', { trustedCustomerId: null })).toEqual({ ok: true, customerId: 'c1' });
+        expect(loadContactState).toHaveBeenLastCalledWith({ customerId: 'c1' });
+        // The shortened form receipt delivery texts, judged by its target.
+        wireReceipt({ shortRow: { code: 'rc1', kind: 'receipt', target_url: `https://portal.wavespestcontrol.com/receipt/${TOKEN}` } });
+        expect(await bearerLinkSendCheck('Your receipt: wavespest.co/l/rc1', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+        expect(mockBuilders.invoices.where).toHaveBeenCalledWith({ token: TOKEN });
+        // … including the /pay/<token> target the receipt SMS actually
+        // shortens (receiptSmsFacts) — vetted by the same invoice (r10 P2).
+        wireReceipt({ shortRow: { code: 'rc2', kind: 'receipt', target_url: `https://portal.wavespestcontrol.com/pay/${TOKEN}` } });
+        expect(await bearerLinkSendCheck('Your receipt: wavespest.co/l/rc2', '9415550100', { trustedCustomerId: 'c1' })).toEqual({ ok: true });
+        expect(mockBuilders.invoices.where).toHaveBeenCalledWith({ token: TOKEN });
+      });
+
+      test('an undelivered, open, or payer-billed receipt, a vanished token, another account, or a recipient without receipt-text consent refuses', async () => {
+        const { checkConsentForPurpose } = require('../services/messaging/validators/consent');
+        const send = () => bearerLinkSendCheck(`portal.wavespestcontrol.com/receipt/${TOKEN}`, '9415550100', { trustedCustomerId: 'c1' });
+        // Never texted by the receipt lifecycle (an email-only delivery stamps
+        // receipt_sent_at too): the first text stays sendReceipt's (r10 P1).
+        wireReceipt({ texted: false });
+        expect((await send()).error).toMatch(/not available to text/);
+        wireReceipt({ row: inv({ status: 'sent' }) });
+        expect((await send()).error).toMatch(/not available to text/);
+        wireReceipt({ row: inv({ payer_id: 'payer-1' }) });
+        expect((await send()).error).toMatch(/not available to text/);
+        wireReceipt({ row: null });
+        expect((await send()).error).toMatch(/not available to text/);
+        wireReceipt({ linkCustomer: acct('c9', 'other') });
+        expect((await send()).error).toMatch(/different customer/);
+        wireReceipt();
+        checkConsentForPurpose.mockResolvedValueOnce({ ok: false, code: 'CHANNEL_EMAIL_ONLY' });
+        expect((await send()).error).toMatch(/receipts by email only — remove the receipt link/);
+        // Short forms: an expired code, a receipt-kind code whose target is
+        // not a receipt page, and a consent refusal through the short form.
+        wireReceipt({ shortRow: { code: 'rc1', kind: 'receipt', target_url: `https://portal.wavespestcontrol.com/receipt/${TOKEN}`, expires_at: '2020-01-01T00:00:00Z' } });
+        expect((await bearerLinkSendCheck('wavespest.co/l/rc1', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/receipt link has expired/);
+        wireReceipt({ shortRow: { code: 'rc1', kind: 'receipt', target_url: 'https://portal.wavespestcontrol.com/estimate/xyz' } });
+        expect((await bearerLinkSendCheck('wavespest.co/l/rc1', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/does not open a receipt/);
+        // The receipt SMS's /pay short link: the pay page redirects only a
+        // paid / processing invoice to its receipt — refunded, it is the
+        // payment page (r11 P2). The permanent /receipt form still opens it.
+        wireReceipt({ row: inv({ status: 'refunded' }), shortRow: { code: 'rc2', kind: 'receipt', target_url: `https://portal.wavespestcontrol.com/pay/${TOKEN}` } });
+        expect((await bearerLinkSendCheck('wavespest.co/l/rc2', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/no longer opens the receipt/);
+        wireReceipt({ row: inv({ status: 'refunded' }) });
+        expect((await send()).error).toMatch(/not available to text/);
+        require('../services/receipt-payment').loadPaymentForInvoice.mockResolvedValueOnce({ id: 'payment-1' });
+        expect(await send()).toEqual({ ok: true });
+        wireReceipt({ shortRow: { code: 'rc1', kind: 'receipt', target_url: `https://portal.wavespestcontrol.com/receipt/${TOKEN}` } });
+        checkConsentForPurpose.mockResolvedValueOnce({ ok: false, code: 'PURPOSE_OPTED_OUT' });
+        expect((await bearerLinkSendCheck('wavespest.co/l/rc1', '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/opted out of receipt texts — remove the receipt link/);
+        expect((await bearerLinkSendCheck(`https://evil.example/receipt/${TOKEN}`, '9415550100', { trustedCustomerId: 'c1' })).error).toMatch(/not on the Waves portal/);
+      });
     });
 
     describe('project report links resolve as the viewer does and bind to the account', () => {
