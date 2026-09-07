@@ -55,7 +55,18 @@ const { ensurePrimaryProperty } = require(path.join(__dirname, '..', '..', 'serv
 
 const execute = process.argv.includes('--execute');
 const limitIdx = process.argv.indexOf('--limit');
-const limit = limitIdx > -1 ? Math.max(0, parseInt(process.argv[limitIdx + 1], 10) || 0) : 0;
+let limit = 0;
+if (limitIdx > -1) {
+  // A supplied --limit must be a positive integer: a missing / zero /
+  // negative value must abort, never silently disable the cap and write
+  // the whole candidate set under --execute.
+  const raw = process.argv[limitIdx + 1];
+  if (!/^[1-9]\d*$/.test(String(raw || ''))) {
+    console.error(`[primary-property-backfill] --limit needs a positive integer, got ${JSON.stringify(raw ?? null)} — aborting`);
+    process.exit(1);
+  }
+  limit = parseInt(raw, 10);
+}
 
 (async () => {
   const startedAt = new Date();
@@ -85,9 +96,20 @@ const limit = limitIdx > -1 ? Math.max(0, parseInt(process.argv[limitIdx + 1], 1
   let failed = 0;
   for (const c of candidates) {
     try {
-      // The service decides: created=true is the new primary; created=false
-      // means a primary appeared meanwhile (race) — count it as skipped.
-      const r = await ensurePrimaryProperty(c.id, { source: 'backfill' });
+      // One transaction per customer: lock the customers row, re-check the
+      // eligibility the candidate query saw (still live, still addressed,
+      // still no property row — a merge or a booking-anchor backfill may
+      // have landed since), then run the service backfill ON THAT
+      // connection so the insert cannot race the re-check.
+      const r = await db.transaction(async (trx) => {
+        const row = await trx('customers').where({ id: c.id }).forUpdate().first('id', 'deleted_at', 'address_line1');
+        if (!row || row.deleted_at || !String(row.address_line1 || '').trim()) return { created: false };
+        const any = await trx('customer_properties').where({ customer_id: c.id }).first('id');
+        if (any) return { created: false };
+        return ensurePrimaryProperty(c.id, { source: 'backfill', conn: trx });
+      });
+      // created=false here means the re-check found the customer no longer
+      // eligible (or lost the primary race) — count it as skipped.
       if (r.created) createdIds.push(r.propertyId); else skipped += 1;
     } catch (e) {
       failed += 1;
