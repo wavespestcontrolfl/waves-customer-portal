@@ -4172,6 +4172,9 @@ async function completeScheduledService(completionInput, packetRecord = null) {
       try {
         const annualN = plan?.propertyGate?.annualN || null;
         const lawnSqft = Number(plan?.propertyGate?.lawnSqft || 0);
+        // Annual N is per 1,000 sq ft of the WHOLE property — the same
+        // denominator calculateNutrientLedger uses — never the visit area.
+        const propertyLawnSqft = Number(plan?.propertyGate?.profileLawnSqft || lawnSqft || 0);
         const limit = Number(annualN?.limit);
         // The catalog scan runs whenever products were submitted — the
         // unquantified-unit detection must NOT hide behind the area/limit
@@ -4204,7 +4207,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
               // zone counts in proportion to its coverage (ledgerRowCoverage),
               // the same way the annual ledger aggregates it.
               actualVisitN += ((pounds * (Number(catalog.analysis_n) / 100)) / (treatedSqft / 1000))
-                * ledgerRowCoverage({ lawn_sqft: treatedSqft }, lawnSqft);
+                * ledgerRowCoverage({ lawn_sqft: treatedSqft }, propertyLawnSqft);
             }
           }
           const used = Number(annualN?.used || 0);

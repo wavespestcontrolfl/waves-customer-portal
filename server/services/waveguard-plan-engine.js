@@ -1620,6 +1620,9 @@ async function buildPlanForService(serviceId, options = {}) {
       month,
       visit: visit?.visit || null,
       lawnSqft: completionContext ? lawnSqft || null : profile?.lawn_sqft || null,
+      // The saved whole-property area, untouched by a visit-only override: the
+      // denominator every annual per-1,000 nutrient figure shares.
+      profileLawnSqft: profile?.lawn_sqft || null,
       municipality: resolvedOrdinanceCity,
       county: profile?.county || null,
       ordinanceStatus: ordinanceSummary.activeWindows.length ? 'restricted_window_active' : 'no_active_blackout',
