@@ -1129,13 +1129,31 @@ function frozenResumeCompletionState(frozenStructuredNotes, { requestBackfill = 
   };
 }
 
-// Fail-soft reads that inherit a packet member's OUTER transaction: a failed
-// statement aborts that transaction (25P02) despite the JavaScript catch, so
-// on a transaction handle the read runs on a savepoint (mirrors
-// productReentryFloor). On the root connection it is the plain query.
+// Recoverable reads that inherit a packet member's OUTER transaction: a
+// failed statement aborts that transaction (25P02) whatever JavaScript
+// catches it. On a transaction handle the read runs between an explicit
+// SAVEPOINT and RELEASE / ROLLBACK TO — explicit rather than a knex nested
+// transaction because helpers that catch their own query error resolve
+// normally, RELEASE of an aborted savepoint then fails, and only ROLLBACK TO
+// restores the outer transaction. On the root connection it is the plain
+// query. savepointRead rethrows for callers with their own catch;
+// failSoftRead applies the fallback.
+async function savepointRead(database, query) {
+  if (!database.isTransaction) return query(database);
+  const name = `fail_soft_${crypto.randomBytes(6).toString('hex')}`;
+  await database.raw(`SAVEPOINT ${name}`);
+  try {
+    const result = await query(database);
+    await database.raw(`RELEASE SAVEPOINT ${name}`);
+    return result;
+  } catch (err) {
+    await database.raw(`ROLLBACK TO SAVEPOINT ${name}`);
+    throw err;
+  }
+}
+
 function failSoftRead(database, query, fallback) {
-  const run = database.isTransaction ? database.transaction((sp) => query(sp)) : query(database);
-  return Promise.resolve(run).catch(() => fallback);
+  return savepointRead(database, query).catch(() => fallback);
 }
 
 async function loadSubmittedCatalogProducts(submittedProducts = [], database = db) {
@@ -2508,8 +2526,8 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     // print "$0.00 billed" forever (codex r13 P1).
     let customerColumnsProbeFailed = false;
     try {
-      billingModeColumnsExist = await db.schema.hasColumn('customers', 'billing_mode');
-      customerTierSourceColumnExists = await db.schema.hasColumn('customers', 'waveguard_tier_source');
+      billingModeColumnsExist = await savepointRead(db, (k) => k.schema.hasColumn('customers', 'billing_mode'));
+      customerTierSourceColumnExists = await savepointRead(db, (k) => k.schema.hasColumn('customers', 'waveguard_tier_source'));
     } catch { customerColumnsProbeFailed = true; /* legacy select shape */ }
     const svc = await db('scheduled_services').where('scheduled_services.id', completionInput.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -3849,9 +3867,9 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     if (!customerAutopayActive && !visitIsPayerBilled && !perApplicationBilling && !annualPrepayBilling
       && (explicitMembershipLane || (!svc.cust_billing_mode && isMembershipTier(svc.cust_waveguard_tier)))) {
       try {
-        duesCollectedThisMonth = await monthlyDuesCollected(
-          db, svc.customer_id, new Date(`${serviceDateOnly(svc.scheduled_date)}T12:00:00Z`),
-        );
+        duesCollectedThisMonth = await savepointRead(db, (k) => monthlyDuesCollected(
+          k, svc.customer_id, new Date(`${serviceDateOnly(svc.scheduled_date)}T12:00:00Z`),
+        ));
       } catch (e) {
         logger.warn(`[dispatch] dues-collected lookup failed on completion for service ${svc.id}: ${e.message}`);
       }
@@ -4166,7 +4184,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
         if (Array.isArray(products) && products.length) {
           const ids = [...new Set(products.map((p) => p.productId).filter(Boolean))];
           const catalogRows = ids.length
-            ? await db('products_catalog').whereIn('id', ids).select('id', 'name', 'analysis_n')
+            ? await savepointRead(db, (k) => k('products_catalog').whereIn('id', ids).select('id', 'name', 'analysis_n'))
             : [];
           const catalogById = new Map(catalogRows.map((row) => [String(row.id), row]));
           let actualVisitN = 0;
@@ -4507,11 +4525,11 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           // r14): tech-selected products + visit context. Best-effort only.
           let completionVisitContext = '';
           try {
-            completionVisitContext = await buildRecapVisitContext({
-              knex: db,
+            completionVisitContext = await savepointRead(db, (k) => buildRecapVisitContext({
+              knex: k,
               serviceType: svc.service_type,
               customerId: svc.customer_id,
-            });
+            }));
           } catch { /* context is polish — never block completion */ }
           // The completion payload's products carry productId but no name —
           // hydrate catalog names or safeProducts drops every entry and the
@@ -4522,9 +4540,9 @@ async function completeScheduledService(completionInput, packetRecord = null) {
               .filter((p) => p && !p.name && !p.product_name && p.productId)
               .map((p) => p.productId);
             if (missingNameIds.length) {
-              const nameRows = await db('products_catalog')
+              const nameRows = await savepointRead(db, (k) => k('products_catalog')
                 .whereIn('id', missingNameIds)
-                .select('id', 'name');
+                .select('id', 'name'));
               const nameById = new Map(nameRows.map((r) => [String(r.id), r.name]));
               recapProducts = recapProducts.map((p) => (
                 p && !p.name && !p.product_name && p.productId

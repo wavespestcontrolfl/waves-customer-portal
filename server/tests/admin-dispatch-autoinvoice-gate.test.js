@@ -340,9 +340,11 @@ describe('completion route wires dues-collected coverage', () => {
   const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
 
   test('monthlyDuesCollected is keyed on the visit month and passed into membershipDuesCoverVisit', () => {
-    expect(source).toMatch(/duesCollectedThisMonth = await monthlyDuesCollected\(\s*\n\s*db, svc\.customer_id, new Date\(`\$\{serviceDateOnly\(svc\.scheduled_date\)\}T12:00:00Z`\),/);
+    // The lookup runs on the completion handle through savepointRead so a
+    // packet member's failed read cannot abort the outer transaction.
+    expect(source).toMatch(/duesCollectedThisMonth = await savepointRead\(db, \(k\) => monthlyDuesCollected\(\s*\n\s*k, svc\.customer_id, new Date\(`\$\{serviceDateOnly\(svc\.scheduled_date\)\}T12:00:00Z`\),/);
     expect(source).toMatch(/const autopayCoversVisit = membershipDuesCoverVisit\(\{\s*\n\s*visitIsPayerBilled,\s*\n\s*perApplicationBilling,\s*\n\s*annualPrepayBilling,\s*\n\s*customerAutopayActive,\s*\n\s*duesCollectedThisMonth,/);
-    const lookupAt = source.indexOf('duesCollectedThisMonth = await monthlyDuesCollected(');
+    const lookupAt = source.indexOf('duesCollectedThisMonth = await savepointRead(db, (k) => monthlyDuesCollected(');
     const coverageAt = source.indexOf('const autopayCoversVisit = membershipDuesCoverVisit({');
     const freezeAt = source.indexOf('const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit({');
     expect(lookupAt).toBeGreaterThan(-1);

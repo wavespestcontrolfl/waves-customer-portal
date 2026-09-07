@@ -33,15 +33,18 @@ function packetRequest({ visitId, idempotencyKey, items }) {
   // Canonical completion normalizes some form fields in place. Keep the
   // submitted snapshot immutable, and use its existing semantic hash rules
   // so a ticking panel timer does not invalidate a retry of the same packet.
-  // PostgreSQL returns uuid columns lowercase; compare, sort and hash the
-  // submitted ids in that same canonical form.
+  // PostgreSQL returns uuid columns lowercase; look up, compare, sort and
+  // hash every submitted id in that same canonical form, so a retry built
+  // from a response's ids replays instead of mismatching.
+  const canonicalVisitId = visitId.toLowerCase();
   const ordered = structuredClone(items)
     .map((item) => ({ ...item, serviceId: item.serviceId.toLowerCase() }))
     .sort((a, b) => a.serviceId.localeCompare(b.serviceId));
   const hash = crypto.createHash('sha256').update(JSON.stringify({
-    visitId, items: ordered.map((item) => ({ serviceId: item.serviceId, hash: hashCompletionRequest(item.body) })),
+    visitId: canonicalVisitId,
+    items: ordered.map((item) => ({ serviceId: item.serviceId, hash: hashCompletionRequest(item.body) })),
   })).digest('hex');
-  return { visitId, key: idempotencyKey.trim(), items: ordered, hash };
+  return { visitId: canonicalVisitId, key: idempotencyKey.trim(), items: ordered, hash };
 }
 
 function recordsResult(packet, items, replayed = false) {
