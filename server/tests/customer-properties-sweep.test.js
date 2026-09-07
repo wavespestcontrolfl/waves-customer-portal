@@ -16,11 +16,18 @@ function installDb({ candidates = [], customersById = {}, props = {}, insertErro
   const inserted = [];
   const chain = (table) => {
     const q = {
-      _id: null,
-      whereNull: () => q, whereRaw: () => q, whereNotExists: () => q, orderBy: () => q, limit: () => q, select: () => q,
+      _id: null, _excluded: [], _limit: Infinity,
+      whereNull: () => q, whereRaw: () => q, whereNotExists: () => q, orderBy: () => q, select: () => q,
+      modify: (cb) => { cb(q); return q; },
+      whereNotIn: (col, ids) => { q._excluded = ids; return q; },
+      limit: (n) => { q._limit = n; return q; },
       forUpdate: () => q,
       where: (arg) => { if (arg && typeof arg === 'object') q._id = arg.id || arg.customer_id || null; return q; },
-      then: (resolve) => resolve(candidates.map((id) => ({ id }))),
+      // Candidate list mirrors the real predicate: a customer that now HAS a
+      // property row (created this run) drops out; excluded ids drop out.
+      then: (resolve) => resolve(
+        candidates.filter((id) => !(props[id] || []).length && !q._excluded.includes(id)).slice(0, q._limit).map((id) => ({ id })),
+      ),
       first: async () => {
         if (table === 'customers') return customersById[q._id] || null;
         return (props[q._id] || [])[0] || null;
@@ -77,6 +84,21 @@ describe('sweepMissingPrimaryProperties (daily primary backstop)', () => {
     expect(logger.error).toHaveBeenCalledTimes(2);
     expect(logger.error.mock.calls[0][0]).toContain('42P01');
     expect(logger.error.mock.calls[0][0]).not.toContain('Main St');
+  });
+
+  test('a backlog larger than one batch is drained in one run, and failed ids are not re-selected', async () => {
+    const ids = Array.from({ length: 250 }, (_, i) => `c${i}`);
+    const customersById = Object.fromEntries(ids.map((id) => [id, live(id)]));
+    const { inserted } = installDb({ candidates: ids, customersById });
+    expect(await sweepMissingPrimaryProperties({ batchSize: 100 })).toEqual({ checked: 250, created: 250, skipped: 0, failed: 0 });
+    expect(inserted).toHaveLength(250);
+    expect(new Set(inserted.map((r) => r.customer_id)).size).toBe(250);
+  });
+
+  test('maxRows caps a runaway run', async () => {
+    const ids = Array.from({ length: 30 }, (_, i) => `c${i}`);
+    installDb({ candidates: ids, customersById: Object.fromEntries(ids.map((id) => [id, live(id)])) });
+    expect((await sweepMissingPrimaryProperties({ batchSize: 10, maxRows: 25 })).checked).toBe(25);
   });
 
   test('nothing to do → zero counts and no log noise', async () => {

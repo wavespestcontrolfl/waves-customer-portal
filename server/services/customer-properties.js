@@ -550,28 +550,40 @@ async function syncPrimaryCoordsFromCustomer(customerId, conn = db) {
  * failure is counted and logged by code only (a knex error message embeds
  * the SQL bindings, i.e. the address) and the sweep moves on.
  */
-async function sweepMissingPrimaryProperties({ limit = 100 } = {}) {
-  const rows = await db('customers as c')
-    .whereNull('c.deleted_at')
-    .whereRaw("btrim(coalesce(c.address_line1, '')) <> ''")
-    .whereNotExists(db('customer_properties as p').select(1).whereRaw('p.customer_id = c.id'))
-    .orderBy('c.created_at', 'desc')
-    .limit(limit)
-    .select('c.id');
-  const results = { checked: rows.length, created: 0, skipped: 0, failed: 0 };
-  for (const row of rows) {
-    try {
-      const r = await db.transaction(async (trx) => {
-        const customer = await trx('customers').where({ id: row.id }).forUpdate().first();
-        if (!customer || customer.deleted_at || !String(customer.address_line1 || '').trim()) return { created: false };
-        const any = await trx('customer_properties').where({ customer_id: row.id }).first('id');
-        if (any) return { created: false };
-        return ensurePrimaryCore(customer, { source: 'backfill' }, trx);
-      });
-      if (r.created) results.created += 1; else results.skipped += 1;
-    } catch (err) {
-      results.failed += 1;
-      logger.error(`[customer-properties] primary backstop failed for customer ${row.id}: ${err.code || err.name || 'error'}`);
+async function sweepMissingPrimaryProperties({ batchSize = 100, maxRows = 2000 } = {}) {
+  const results = { checked: 0, created: 0, skipped: 0, failed: 0 };
+  // Batches until nothing is eligible (or maxRows, a runaway guard): a
+  // daily run must drain the whole backlog, not the newest 100. A created
+  // row leaves the candidate set by itself; a failed or skipped-but-still-
+  // row-less id is excluded from later batches so it cannot be re-selected
+  // forever within one run.
+  const seen = new Set();
+  while (results.checked < maxRows) {
+    const rows = await db('customers as c')
+      .whereNull('c.deleted_at')
+      .whereRaw("btrim(coalesce(c.address_line1, '')) <> ''")
+      .whereNotExists(db('customer_properties as p').select(1).whereRaw('p.customer_id = c.id'))
+      .modify((q) => { if (seen.size) q.whereNotIn('c.id', Array.from(seen)); })
+      .orderBy('c.created_at', 'desc')
+      .limit(Math.min(batchSize, maxRows - results.checked))
+      .select('c.id');
+    if (!rows.length) break;
+    for (const row of rows) {
+      seen.add(row.id);
+      results.checked += 1;
+      try {
+        const r = await db.transaction(async (trx) => {
+          const customer = await trx('customers').where({ id: row.id }).forUpdate().first();
+          if (!customer || customer.deleted_at || !String(customer.address_line1 || '').trim()) return { created: false };
+          const any = await trx('customer_properties').where({ customer_id: row.id }).first('id');
+          if (any) return { created: false };
+          return ensurePrimaryCore(customer, { source: 'backfill' }, trx);
+        });
+        if (r.created) results.created += 1; else results.skipped += 1;
+      } catch (err) {
+        results.failed += 1;
+        logger.error(`[customer-properties] primary backstop failed for customer ${row.id}: ${err.code || err.name || 'error'}`);
+      }
     }
   }
   if (results.checked > 0) {
