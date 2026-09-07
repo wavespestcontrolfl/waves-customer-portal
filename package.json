@@ -39,6 +39,7 @@
     "agent:evaluate-fixtures": "node server/scripts/evaluate-agent-decision-fixtures.js",
     "agent:replay-estimate-conversion": "node server/scripts/replay-estimate-conversion-agent.js",
     "eval:call-replay": "node server/scripts/run-call-extraction-replay-eval.js --json",
+    "eval:voice-relay": "node server/scripts/run-voice-relay-eval.js --json",
     "verify:blog-schema": "node packages/blog-schema/scripts/verify-vendor.js",
     "sync:blog-schema": "node packages/blog-schema/scripts/sync-from-astro.js",
     "sync:affiliate-registry": "node packages/affiliate-registry/scripts/sync-from-astro.js",
