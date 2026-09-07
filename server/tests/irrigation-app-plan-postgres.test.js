@@ -69,6 +69,7 @@ const SKIP = !process.env.DATABASE_URL;
     expect(plan).not.toBeNull();
     expect(plan.instruction).toBe(decision.payload.week_plan);
     expect(plan.conditionalOnForecast).toBe(true);
+    expect(plan.notificationEligible).toBe(true);
     expect(plan).not.toHaveProperty('home');
     expect(await loadCustomerWateringPlan(customerId, { now: new Date('2026-09-14T14:05:00Z') })).toBeNull();
   }, 30000);
