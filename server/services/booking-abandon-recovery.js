@@ -231,7 +231,8 @@ const SERVICE_LABELS = {
   tree_shrub: 'Tree & Shrub',
   termite: 'Termite Inspection',
   rodent: 'Rodent Control',
-  bora_care: 'Bora-Care Wood Treatment Service',
+  // Short enough to keep the recovery SMS in one segment (2026-09-07).
+  bora_care: 'Bora-Care Treatment',
 };
 function serviceLabelOf(intent) {
   return SERVICE_LABELS[String(intent.service_id || '').trim()] || 'your service';
@@ -456,5 +457,5 @@ async function checkAbandoned(now = new Date()) {
 
 module.exports = {
   checkAbandoned,
-  _internals: { hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10, bookingUrlFor },
+  _internals: { hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10, bookingUrlFor, SERVICE_LABELS },
 };
