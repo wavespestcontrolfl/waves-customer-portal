@@ -360,6 +360,16 @@ async function runSmsOperationalActions({ now = new Date(), conn = db, extract =
   if (!since) return { skipped: 'activation_time_required' };
   return runExclusive('sms-operational-actions', async () => {
     const candidates = await conn('sms_log as s').modify(withoutScheduledDeliveryTwins, 's').where('s.created_at', '>=', since).where('s.created_at', '<=', now)
+      // Filter the effective delivery before LIMIT: failed or pre-activation
+      // sends must not occupy the recovery page forever. A later successful
+      // delivery becomes eligible without clearing a terminal receipt.
+      .whereRaw(`COALESCE((SELECT CASE
+        WHEN delivery.status IN ('sent', 'delivered') AND delivery.created_at >= ? THEN TRUE ELSE FALSE END
+        FROM sms_log delivery
+        WHERE s.direction = 'outbound' AND delivery.direction = 'outbound'
+          AND delivery.customer_id = s.customer_id
+          AND delivery.metadata->>'scheduled_sms_log_id' = s.id::text
+        ORDER BY delivery.created_at DESC, delivery.id DESC LIMIT 1), TRUE)`, [since])
       .whereNull('s.operational_analysis').whereNotNull('s.customer_id')
       .whereExists(function availableCustomer() {
         this.select(1).from('customers as c').whereRaw('c.id = s.customer_id').whereNull('c.deleted_at');

@@ -89,6 +89,30 @@ postgres('SMS commitments on PostgreSQL', () => {
 
   
 
+  test.each(['failed', 'pre-activation'])('thirty %s scheduled deliveries cannot starve new inbound capture', async (reason) => {
+    const queues = Array.from({ length: 30 }, () => ({ ...message, id: randomUUID(),
+      direction: 'outbound', message_type: 'manual', message_body: 'I will call with an update.',
+      from_phone: message.to_phone, to_phone: message.from_phone, status: 'sent',
+      created_at: new Date(message.created_at.getTime() - 500), scheduled_for: new Date(message.created_at.getTime() - 600) }));
+    const deliveries = queues.map((queue) => ({ ...queue, id: randomUUID(), scheduled_for: null,
+      status: reason === 'failed' ? 'undelivered' : 'sent', metadata: { scheduled_sms_log_id: queue.id },
+      created_at: new Date(message.created_at.getTime() - (reason === 'failed' ? 550 : 2000)) }));
+    await mockPg('sms_log').insert([...queues, ...deliveries]);
+    const extract = jest.fn(async () => ({ facts: [], obligations: [], dropped: 0 }));
+    expect(await runSmsOperationalActions({ conn: mockPg, extract, now: new Date(message.created_at.getTime() + 1000) }))
+      .toMatchObject({ processed: 1, failed: 0 });
+    expect(extract).toHaveBeenCalledTimes(1);
+    expect(extract.mock.calls[0][0].message.id).toBe(message.id);
+    expect(await mockPg('data_hygiene_source_extractions')).toHaveLength(1);
+    // A later successful delivery becomes eligible without deleting receipts.
+    if (reason === 'failed') {
+      await mockPg('sms_log').where({ id: deliveries[0].id }).update({ status: 'delivered' });
+      expect(await runSmsOperationalActions({ conn: mockPg, extract, now: new Date(message.created_at.getTime() + 1000) }))
+        .toMatchObject({ processed: 1, failed: 0 });
+      expect(extract.mock.calls[1][0].message.id).toBe(queues[0].id);
+    }
+  });
+
   test('the locked writer retains a multiple-property request without assigning a model-selected property', async () => {
     await mockPg('customer_properties').insert({ id: randomUUID(), customer_id: message.customer_id,
       address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236', active: true });
@@ -324,7 +348,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const provider = { ...message, id: randomUUID(), scheduled_for: null, status, metadata: { scheduled_sms_log_id: message.id } };
     await mockPg('sms_log').insert(provider);
     const extract = jest.fn();
-    expect(await runSmsOperationalActions({ conn: mockPg, extract })).toMatchObject({ processed: 0, skipped: 1 });
+    expect(await runSmsOperationalActions({ conn: mockPg, extract })).toMatchObject({ processed: 0, skipped: 0 });
     expect(extract).not.toHaveBeenCalled();
     expect(await mockPg('data_hygiene_source_extractions')).toHaveLength(0);
     context = await loadMessageContext(mockPg, message);
