@@ -83,6 +83,9 @@ test('stale or incomplete reviewed metadata cannot use an otherwise valid baseli
     { status: 'verified', tools: ['save'], evidence: ['fixture'], reviewedFingerprint: 'stale' },
     { status: 'reviewed_exception', exception: { reason: 'fixture' } },
     { status: 'reviewed_exception', exception: { review: 'fixture' } },
+    ...['review', 'reason'].flatMap(key => [undefined, '', ' ', {}, []].map(value => ({
+      status: 'reviewed_exception', exception: { review: 'fixture', reason: 'fixture', [key]: value },
+    }))),
     { status: 'reviewed_exception', exception: { reason: 'fixture', review: 'fixture' }, reviewedFingerprint: 'stale' },
   ]) expect(checkCoverage([action], { actions: [{ ...base, ...extra }] }, { save: {} }, proof)).toHaveLength(1);
 });
