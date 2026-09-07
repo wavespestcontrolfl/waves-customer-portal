@@ -43,6 +43,12 @@ describe('fieldTech registry bucket', () => {
     }
   });
 
+  test('isTechLine is true with the gate OFF too — automated senders must never pick the line as From', () => {
+    delete process.env.GATE_TECH_LINES;
+    expect(TWILIO_NUMBERS.isTechLine(LINE)).toBe(true);
+    expect(TWILIO_NUMBERS.isTechLine('+19413187612')).toBe(false);
+  });
+
   test('never attributed as a lead source', () => {
     expect(TWILIO_NUMBERS.getLeadSourceFromNumber(LINE).source).toBe('unknown');
   });

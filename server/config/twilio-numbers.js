@@ -194,6 +194,15 @@ const TWILIO_NUMBERS = {
     return this.isOwnedNumber(phoneNumber) || this.isStaffForwardNumber(phoneNumber);
   },
 
+  // True for a registry tech line REGARDLESS of GATE_TECH_LINES. Automated
+  // senders that reuse "the line the customer reached" as their From must
+  // never pick a tech line (owner ruling: automated texts stay on the
+  // location lines) — even while the gate is off and findByNumber reports
+  // the line with office semantics.
+  isTechLine(phoneNumber) {
+    return this.fieldTech.some((t) => t.number === phoneNumber);
+  },
+
   findByNumber(phoneNumber) {
     // Location lines
     for (const [locId, loc] of Object.entries(this.locations)) {

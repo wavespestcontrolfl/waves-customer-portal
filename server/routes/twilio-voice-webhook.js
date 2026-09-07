@@ -1387,6 +1387,26 @@ router.post('/voice', async (req, res) => {
       return res.type('text/xml').send(buildPreconnectChallengeTwiML());
     }
 
+    // ── Tech line (GATE_TECH_LINES): the holder rings before anything else ──
+    // The technician holding the line rings first, alone, with the same
+    // press-1 screen; an unaccepted leg continues into the office list from
+    // /call-complete?stage=tech_line, and voicemail — or the AI after-dial
+    // backstop, unchanged — only after both (owner ruling: tech cell → office
+    // → voicemail). Sits BEFORE the answers-first block so Sandy never fronts
+    // a call to a tech's own number (codex #4053 r1 P1); no Spanish vestibule
+    // on this leg — the greeting alone carries the FL §934.03 disclosure. No
+    // assignable holder or no cell on file → the ordinary flow below.
+    if (numberConfig?.type === 'tech_line') {
+      const techCell = await ringTargetForLine(To).catch(() => null);
+      if (techCell) {
+        logger.info(`[voice] tech line ${maskPhone(To)}: ringing the holder first for ${maskSid(CallSid)}`);
+        const techTwiml = new VoiceResponse();
+        appendLanguageVestibule(techTwiml, { greetingUrl, vestibule: null });
+        appendStaffRingDial(techTwiml, [techCell], TECH_LINE_RING_SEC, { stage: 'tech_line' });
+        return res.type('text/xml').send(techTwiml.toString());
+      }
+    }
+
     // ── AI voice agent routing (opt-in; default path untouched) ──
     // The agent NEVER fronts a call unless GATE_VOICE_AI_AGENT is on AND the
     // owner enabled "answers first" (manual toggle or active nightly schedule)
@@ -1491,20 +1511,6 @@ router.post('/voice', async (req, res) => {
     // Waves-owned voicemail recorder.
     const twiml = new VoiceResponse();
     appendLanguageVestibule(twiml, { greetingUrl, vestibule }); // greeting = disclosure; replayed on a menu re-entry (hook P0)
-    // Tech line (GATE_TECH_LINES): the technician holding the line rings
-    // first, alone, with the same press-1 screen; an unaccepted leg continues
-    // into the office list from /call-complete?stage=tech_line, and voicemail
-    // only after both (owner ruling: tech cell → office → voicemail). No
-    // assignable holder or no cell on file → the office list rings as today.
-    if (numberConfig?.type === 'tech_line') {
-      const techCell = await ringTargetForLine(To).catch(() => null);
-      if (techCell) {
-        logger.info(`[voice] tech line ${maskPhone(To)}: ringing the holder first for ${maskSid(CallSid)}`);
-        appendStaffRingDial(twiml, [techCell], TECH_LINE_RING_SEC, { stage: 'tech_line' });
-        return res.type('text/xml').send(twiml.toString());
-      }
-    }
-
     const forwardNumbers = getFallbackForwardNumbers();
     if (forwardNumbers.length === 0) {
       logger.error('[voice] No inbound staff forward numbers configured; sending caller to Waves voicemail');

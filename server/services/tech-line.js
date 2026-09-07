@@ -36,6 +36,12 @@ function registryLine(number) {
   return TWILIO_NUMBERS.fieldTech.find((t) => t.number === number) || null;
 }
 
+// Log tags only — a knex error message can carry the failed SQL and its bound
+// values (sender phone, customer name, the text itself). Never log err.message.
+function errorTag(err) {
+  return String((err && (err.code || err.name)) || 'error');
+}
+
 function maskPhone(value) {
   return String(value || '').replace(/\+1(\d{3})(\d{3})(\d{4})/g, '+1$1***$3');
 }
@@ -53,7 +59,7 @@ async function technicianForLine(number, connection = db) {
       .first('id', 'name', 'phone', 'employment_status', 'field_dispatchable');
     return isAssignable(tech) ? tech : null;
   } catch (err) {
-    logger.warn(`[tech-line] holder lookup failed for ${maskPhone(number)}: ${err.message}`);
+    logger.warn(`[tech-line] holder lookup failed for ${maskPhone(number)} (${errorTag(err)})`);
     return null;
   }
 }
@@ -77,7 +83,7 @@ async function lineForTechnician(technicianId) {
     if (!isAssignable(tech) || !tech.twilio_number) return null;
     return registryLine(tech.twilio_number);
   } catch (err) {
-    logger.warn(`[tech-line] line lookup failed for technician ${technicianId}: ${err.message}`);
+    logger.warn(`[tech-line] line lookup failed for technician ${technicianId} (${errorTag(err)})`);
     return null;
   }
 }
@@ -109,7 +115,7 @@ async function notifyTechLineText({ lineNumber, from, body, customer = null, med
       }),
     });
   } catch (err) {
-    logger.error(`[tech-line] text card failed for technician ${tech.id}: ${err.message}`);
+    logger.error(`[tech-line] text card failed for technician ${tech.id} (${errorTag(err)})`);
     return false;
   }
   try {
@@ -122,7 +128,7 @@ async function notifyTechLineText({ lineNumber, from, body, customer = null, med
       priority: 'high',
     });
   } catch (pushErr) {
-    logger.warn(`[tech-line] push failed for technician ${tech.id} (card already written): ${pushErr.message}`);
+    logger.warn(`[tech-line] push failed for technician ${tech.id} (card already written, ${errorTag(pushErr)})`);
   }
   return true;
 }
