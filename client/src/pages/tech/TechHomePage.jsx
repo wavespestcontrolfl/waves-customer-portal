@@ -218,8 +218,12 @@ export default function TechHomePage() {
   // dispatch broadcast, retry): a line cleared or reassigned — or the gate
   // switched off — while the PWA stays open must bring the personal-phone
   // links back instead of buttons that only 409 (codex #4072 r3 P2). A
-  // failed read keeps the last known answer.
-  const [techLine, setTechLine] = useState(null);
+  // failed read keeps the last known answer — on first load that is
+  // `{ unknown: true }`, which the brief renders as "line couldn't be
+  // checked" with NO contact links (never the personal phone on a lookup
+  // error, codex #4072 r5 P2); only an authoritative { line: null } shows
+  // the personal links.
+  const [techLine, setTechLine] = useState({ unknown: true });
   const fetchTechLine = useCallback(async () => {
     try {
       const d = await techRequest('/tech/line');

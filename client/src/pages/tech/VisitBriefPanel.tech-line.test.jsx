@@ -61,6 +61,29 @@ describe('VisitBriefPanel — own tech line', () => {
     expect(screen.getByRole('button', { name: /Text/ })).toBeInTheDocument();
   });
 
+  it('line lookup not yet succeeded: no personal links, no line buttons, a notice — never the personal phone on a lookup error', () => {
+    render(<VisitBriefPanel stop={stop} detail={detail} techLine={{ unknown: true }} request={vi.fn()} />);
+    expect(screen.queryByRole('link', { name: /Call|Text/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^(📞 )?Call$|Text/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent("Your line couldn't be checked");
+    expect(screen.getByRole('button', { name: /Navigate/ })).toBeInTheDocument();
+  });
+
+  it('while a text is sending, Close and the Text toggle are disabled so the pending send cannot be unmounted and resent', async () => {
+    let resolveSend;
+    const request = vi.fn(() => new Promise((resolve) => { resolveSend = resolve; }));
+    render(<VisitBriefPanel stop={stop} detail={detail} techLine={LINE} request={request} />);
+    fireEvent.click(screen.getByRole('button', { name: /Text/ }));
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'hi' } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Send' })); });
+    expect(screen.getByRole('button', { name: 'Close' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Text/ })).toBeDisabled();
+    await act(async () => { resolveSend({ success: true }); });
+    expect(screen.getByRole('button', { name: 'Close' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Text/ })).toBeEnabled();
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
   it('a declined confirm never calls the server', () => {
     const request = vi.fn();
     vi.spyOn(window, 'confirm').mockReturnValue(false);
