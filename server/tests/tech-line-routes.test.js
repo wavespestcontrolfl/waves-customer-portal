@@ -252,23 +252,18 @@ describe('POST /call', () => {
   });
 });
 
-describe('tech-click calls never auto-book (codex #4072 r1 P1)', () => {
-  // The predicate lives deep in the recording processor; pin the string the
-  // route sends to the one the processor excludes so a rename cannot
-  // silently re-enable outbound auto-booking for field follow-ups.
-  test('the processor excludes the exact bridge source this route sends', () => {
+describe('tech-click calls take the processor\'s tech follow-up seam (codex #4072 r1–r8)', () => {
+  // The processor finalizes a tech's own-line call at ONE seam above the
+  // lead pipeline (isTechFollowUpCall) — pin the source string the route
+  // sends to the one the seam matches, and keep the seam the only place
+  // the source is special-cased so a rename cannot re-open a branch.
+  test('the route\'s bridge source is exactly the one the processor short-circuits on', () => {
     const fs = require('fs');
     const path = require('path');
     const proc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    const predicate = proc.slice(proc.indexOf('const outboundAutoBooking ='), proc.indexOf(';', proc.indexOf('const outboundAutoBooking =')));
-    expect(predicate).toContain("call.source !== 'tech-click'");
-    // The CSR scorer's gate excludes the same source (codex #4072 r4 P1).
-    const scorable = proc.slice(proc.indexOf('const csrScorable ='), proc.indexOf(';', proc.indexOf('const csrScorable =')));
-    expect(scorable).toContain("call.source !== 'tech-click'");
-    // …and the approved-but-unbooked audit never opens a card for one (codex #4072 r6 P2).
-    expect(proc).toContain("if (!bookedServiceId && call.source !== 'tech-click' && !heldReasons.has(appointmentResult?.skippedReason)) {");
-    // …nor the unbooked-call "collect the email" advisory (codex #4072 r7 P2).
-    expect(proc).toContain("if (customerId && !appointmentResult?.scheduleCreated && call.source !== 'tech-click') {");
+    expect(proc).toContain("return call?.source === 'tech-click';");
+    expect(proc.indexOf('if (isTechFollowUpCall(call)) {')).toBeLessThan(proc.indexOf('// ── Voicemail routing ──'));
+    expect(proc).not.toContain("call.source !== 'tech-click'");
     const route = fs.readFileSync(path.join(__dirname, '../routes/tech-line.js'), 'utf8');
     expect(route).toContain("source: 'tech-click'");
   });
