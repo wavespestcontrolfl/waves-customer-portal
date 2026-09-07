@@ -149,6 +149,27 @@ const LAWN_TIER_META = {
   premium: { label: 'Monthly', visitsPerYear: 12, frequencyKey: 'monthly' },
 };
 
+// Mosquito ladder selections (seasonal9 / monthly12) carry no
+// perServiceTreatments, so recurringRowsForEstimate falls back to the
+// STORED row — a monthly-default estimate selected as seasonal9 would
+// profile 12 visits and slip past every seasonal guard downstream (winter
+// slots listed, reserved, and seeded — codex r13 P0). The selected tier
+// token restamps the mosquito row's visit count AND label (a stored
+// default's label would otherwise read "9x Monthly Mosquito Control",
+// which slot-reservation persists into the appointment notes dispatch
+// reads — codex #3000 post-merge P2).
+const MOSQUITO_TIER_PROFILE = {
+  seasonal9: { visitsPerYear: 9, label: 'Seasonal Mosquito Control' },
+  seasonal_feb_oct: { visitsPerYear: 9, label: 'Seasonal Mosquito Control' },
+  monthly12: { visitsPerYear: 12, label: 'Monthly Mosquito Control' },
+};
+
+// The bundle's per-service cadence axes ({ lawn_care, tree_shrub, mosquito }
+// → tier key); anything but a plain object means "no axes sent".
+function bundleServiceCadences(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
 function lawnTierKeyForValue(value) {
   if (value == null) return '';
   const raw = String(value).trim().toLowerCase();
@@ -444,7 +465,8 @@ function recurringRowsForEstimate(estimate = {}, estData = {}, selectedFrequency
   const { recurringServiceKey } = require('./estimate-converter');
   const selectedKeys = new Set(selected.map(recurringServiceKey));
   const rows = [...selected, ...stored.filter((row) => !selectedKeys.has(recurringServiceKey(row)))];
-  if (!serviceCadences || typeof serviceCadences !== 'object' || Array.isArray(serviceCadences)) return rows;
+  const cadences = bundleServiceCadences(serviceCadences);
+  if (!cadences) return rows;
 
   // Bundle selectedFrequency owns pest; the other axes must be restamped
   // BEFORE the converter decides which physical programs it can schedule.
@@ -456,7 +478,7 @@ function recurringRowsForEstimate(estimate = {}, estData = {}, selectedFrequency
     tree_shrub: acceptance.applySelectedTreeShrubTierToEstimateData,
     mosquito: acceptance.applySelectedMosquitoTierToEstimateData,
   };
-  return Object.entries(serviceCadences).reduce((current, [service, tierKey]) => {
+  return Object.entries(cadences).reduce((current, [service, tierKey]) => {
     const writer = writers[service];
     const row = current.find((candidate) => recurringServiceKey(candidate) === service);
     if (!writer || !row) return current;
@@ -735,29 +757,36 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   const estData = parseEstimateData(estimate.estimate_data);
   const serviceMode = userOpts.serviceMode === 'one_time' ? 'one_time' : 'recurring';
   const selectedFrequency = userOpts.selectedFrequency || '';
+  const cadences = bundleServiceCadences(userOpts.serviceCadences);
+  // The bundle mosquito axis, when sent — part of the wrapper-cache key so
+  // a seasonal-axis slot list can never be served from the pest-frequency
+  // cache bucket (and vice versa). In a bundle the mosquito tier travels on
+  // this axis while selectedFrequency stays the pest cadence (r14 P1).
+  const mosquitoAxis = normalizeSelectionToken(cadences?.mosquito);
   const combinedPolicy = serviceMode !== 'one_time'
     && (process.env.GATE_VISIT_COMBINED_CAPACITY === 'true' || userOpts.preserveCombinedCapacity === true);
-  let recurringSelection = serviceMode === 'one_time' ? []
-    : recurringRowsForEstimate(estimate, estData, selectedFrequency, combinedPolicy ? userOpts.serviceCadences : null);
-  if (combinedPolicy) {
-    const converter = require('./estimate-converter');
-    const isLegacyRodentRow = require('./billing-cadence').legacyRodentRowPredicateFor(estData);
-    const units = converter.combineRecurringServicesForScheduling(
-      converter.foldTermiteRentalIntoBait(recurringSelection).filter((row) => !isLegacyRodentRow(row)), {
-        acceptFrequency: selectedFrequency,
-        supplementalCompanions: converter.supplementalCompanionLines(estData),
-      },
-    );
-    recurringSelection = [
-      ...units.remaining,
-      ...units.standalone.map((unit) => unit.service),
-      ...units.combos.flatMap((unit) => unit.route.retiredBySeparateVisits ? unit.combinedFrom : [unit.service]),
-    ];
-  }
-
-  let services = serviceMode === 'one_time'
-    ? oneTimeProfileServices(estimate, estData)
-    : recurringSelection
+  let recurringSelection = [];
+  let services;
+  if (serviceMode === 'one_time') {
+    services = oneTimeProfileServices(estimate, estData);
+  } else {
+    recurringSelection = recurringRowsForEstimate(estimate, estData, selectedFrequency, combinedPolicy ? cadences : null);
+    if (combinedPolicy) {
+      const converter = require('./estimate-converter');
+      const isLegacyRodentRow = require('./billing-cadence').legacyRodentRowPredicateFor(estData);
+      const units = converter.combineRecurringServicesForScheduling(
+        converter.foldTermiteRentalIntoBait(recurringSelection).filter((row) => !isLegacyRodentRow(row)), {
+          acceptFrequency: selectedFrequency,
+          supplementalCompanions: converter.supplementalCompanionLines(estData),
+        },
+      );
+      recurringSelection = [
+        ...units.remaining,
+        ...units.standalone.map((unit) => unit.service),
+        ...units.combos.flatMap((unit) => unit.route.retiredBySeparateVisits ? unit.combinedFrom : [unit.service]),
+      ];
+    }
+    services = recurringSelection
       .map((row) => {
         const key = serviceKeyFor(row);
         const label = labelForService(row);
@@ -775,62 +804,35 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
         };
       })
       .filter((row) => row.service && row.label);
-  // Mosquito ladder selections (seasonal9 / monthly12) carry no
-  // perServiceTreatments, so recurringRowsForEstimate falls back to the
-  // STORED row — a monthly-default estimate selected as seasonal9 would
-  // profile 12 visits and slip past every seasonal guard downstream (winter
-  // slots listed, reserved, and seeded — codex r13 P0). Override the mosquito
-  // row's visit count from the selected tier token itself. In a bundle the
-  // mosquito tier travels as a combo axis (serviceCadences.mosquito) while
-  // selectedFrequency stays the pest cadence — honor that axis too (r14 P1).
-  if (serviceMode !== 'one_time') {
-    const cadences = userOpts.serviceCadences && typeof userOpts.serviceCadences === 'object'
-      && !Array.isArray(userOpts.serviceCadences)
-      ? userOpts.serviceCadences
-      : null;
-    const selToken = normalizeSelectionToken(cadences?.mosquito || '')
-      || normalizeSelectionToken(selectedFrequency);
-    const tierVisits = selToken === 'seasonal9' || selToken === 'seasonal_feb_oct' ? 9
-      : selToken === 'monthly12' ? 12
-        : null;
-    if (tierVisits != null) {
-      services = services.map((row) => (row.service === 'mosquito'
-        ? {
-          ...row,
-          visitsPerYear: tierVisits,
-          // Restamp the LABEL with the selected tier too (codex #3000
-          // post-merge P2): the stored default's label would otherwise
-          // produce profiles like "9x Monthly Mosquito Control", which
-          // slot-reservation persists into the appointment notes dispatch
-          // reads.
-          label: tierVisits === 9 ? 'Seasonal Mosquito Control' : 'Monthly Mosquito Control',
-        }
-        : row));
+    const mosquitoTier = MOSQUITO_TIER_PROFILE[mosquitoAxis || normalizeSelectionToken(selectedFrequency)];
+    if (mosquitoTier) {
+      services = services.map((row) => (row.service === 'mosquito' ? { ...row, ...mosquitoTier } : row));
     }
   }
 
   // Legacy and single-service bookings retain their default. Combined stops
-  // reserve the owner-approved 60 minutes for EACH selected service.
+  // reserve the owner-approved 60 minutes for EACH selected service, and only
+  // when every member can be seeded as its own recurring program.
   const reservationServiceMix = combinedPolicy && services.length > 1
     ? require('./combined-visit-capacity').capacityForServices(services)
     : null;
-  if (reservationServiceMix && process.env.GATE_SEPARATE_COMBO_VISITS !== 'true') {
-    throw require('./combined-visit-capacity').capacityUnavailable();
-  }
   if (reservationServiceMix) {
     const { converterFollowUpSeedingPattern } = require('./estimate-converter');
-    const supported = recurringSelection.every((row, index) => {
+    const seedable = (row, index) => {
       const profile = services[index];
       const selected = { ...row, visitsPerYear: profile.visitsPerYear };
       if (profile.service === 'pest_control') {
         selected.frequency = require('./recurring-appointment-seeder').patternFromVisitsPerYear(profile.visitsPerYear);
       }
       return !!converterFollowUpSeedingPattern(selected, { service_type: profile.label });
-    });
-    if (!supported) throw require('./combined-visit-capacity').capacityUnavailable();
+    };
+    if (process.env.GATE_SEPARATE_COMBO_VISITS !== 'true' || !recurringSelection.every(seedable)) {
+      throw require('./combined-visit-capacity').capacityUnavailable();
+    }
   }
-  const durationMinutes = reservationServiceMix?.durationMinutes
-    || clampDuration(userOpts.durationMinutes || DEFAULT_OPTS.durationMinutes);
+  const durationMinutes = reservationServiceMix
+    ? reservationServiceMix.durationMinutes
+    : clampDuration(userOpts.durationMinutes || DEFAULT_OPTS.durationMinutes);
   const serviceLabel = formatServiceProfileLabel(services)
     || estimate.service_interest
     || (serviceMode === 'one_time' ? 'One-time service' : 'Estimate service');
@@ -838,15 +840,7 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   return {
     serviceMode,
     selectedFrequency: normalizeFrequencyKey(selectedFrequency) || null,
-    // The bundle mosquito axis, when sent — part of the wrapper-cache key so
-    // a seasonal-axis slot list can never be served from the pest-frequency
-    // cache bucket (and vice versa).
-    mosquitoCadence: normalizeSelectionToken(
-      (userOpts.serviceCadences && typeof userOpts.serviceCadences === 'object'
-        && !Array.isArray(userOpts.serviceCadences)
-        ? userOpts.serviceCadences.mosquito
-        : '') || '',
-    ) || null,
+    mosquitoCadence: mosquitoAxis || null,
     durationMinutes,
     serviceLabel,
     services,
