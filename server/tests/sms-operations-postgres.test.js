@@ -18,6 +18,7 @@ const { recordMessageOperations, loadMessageContext, runSmsOperationalActions, r
 const numbers = require('../config/twilio-numbers');
 const NotificationService = require('../services/notification-service');
 const migration = require('../models/migrations/20260906000001_sms_operational_actions');
+const replayMigration = require('../models/migrations/20260907000021_sms_replay_contact_preference');
 const { listOpenCommitments } = require('../services/call-commitments');
 const connection = process.env.SMS_OPERATIONS_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -51,6 +52,7 @@ postgres('SMS operations on PostgreSQL', () => {
     for (const table of TABLES) {
       await admin.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
     }
+    await mockPg.transaction((trx) => replayMigration.up(trx));
   });
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -165,6 +167,72 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(replay).toMatchObject({ applied: 0, proposed: status === 'pending' ? 1 : 0 });
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
     expect(await mockPg('data_hygiene_proposals').first()).toMatchObject({ id: proposal.id, status });
+  });
+
+  test.each(['pending', 'rejected'].flatMap((status) => ['version', 'resource', 'inbox-twin'].map((change) => [status, change])))(
+    'an identical %s fact keeps its disposition across a %s change', async (status, change) => {
+      await recordMessageOperations(mockPg, message, result, context);
+      const proposal = await mockPg('data_hygiene_proposals').first();
+      const patch = { status, idempotency_key: randomUUID() };
+      if (change === 'version') patch.rule_version = 'older-extractor';
+      if (change === 'resource') await mockPg('property_preferences').insert({ customer_id: message.customer_id });
+      if (change === 'inbox-twin') {
+        const [conversation] = await mockPg('conversations').insert({ customer_id: message.customer_id, channel: 'sms' }).returning('id');
+        const [inbox] = await mockPg('messages').insert({ conversation_id: conversation.id, channel: 'sms', direction: 'inbound',
+          author_type: 'customer', body: message.message_body, twilio_sid: message.twilio_sid }).returning('id');
+        patch.evidence = JSON.stringify({ message_id: inbox.id, after_hash: proposal.evidence.after_hash });
+      }
+      await mockPg('data_hygiene_proposals').where({ id: proposal.id }).update(patch);
+      expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, extract: async () => result }))
+        .toMatchObject({ applied: 0, proposed: status === 'pending' ? 1 : 0 });
+      expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
+      expect(await mockPg('data_hygiene_proposals').first()).toMatchObject({ id: proposal.id, status });
+    },
+  );
+
+  test('replayed contact preference is approved and reverted through the existing audited route', async () => {
+    message.message_body = 'I prefer call';
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
+    await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const extract = async () => ({ facts: [{ field: 'contact_preference', value: 'call', quote: message.message_body,
+      duration: 'durable', property_id: context.properties[0].id }], dropped: 0 });
+    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, extract }))
+      .toMatchObject({ applied: 0, proposed: 1 });
+    const proposal = await mockPg('data_hygiene_proposals').first();
+    expect(proposal).toMatchObject({ field: 'contact_preference', resource_id: null, status: 'pending' });
+    expect(await mockPg('property_preferences')).toHaveLength(0);
+    // Real route handlers, vault and transaction; authentication is unchanged.
+    const router = require('../routes/admin-data-hygiene');
+    const act = async (action) => {
+      const handler = router.stack.find((layer) => layer.route?.path === `/proposals/:id/${action}`).route.stack.at(-1).handle;
+      const req = { params: { id: proposal.id }, technicianId: randomUUID() };
+      const res = { status: jest.fn().mockReturnThis(), json: jest.fn() };
+      await handler(req, res, (error) => { throw error; });
+      expect(res.status).not.toHaveBeenCalled();
+    };
+    await act('approve');
+    expect(await mockPg('property_preferences').first()).toMatchObject({ contact_preference: 'call' });
+    expect(await mockPg('data_hygiene_proposals').first()).toMatchObject({ status: 'approved' });
+    await act('revert');
+    expect(await mockPg('property_preferences').first()).toMatchObject({ contact_preference: null });
+    expect(await mockPg('data_hygiene_proposals').first()).toMatchObject({ status: 'reverted' });
+    expect(await mockPg('audit_log').whereIn('action', ['data_hygiene.proposal.apply', 'data_hygiene.proposal.revert'])).toHaveLength(2);
+  });
+
+  test('contact-preference migration rollback refuses to erase pending review work', async () => {
+    message.message_body = 'I prefer call';
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
+    await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, extract: async () => ({
+      facts: [{ field: 'contact_preference', value: 'call', quote: message.message_body,
+        duration: 'durable', property_id: context.properties[0].id }], dropped: 0,
+    }) });
+    await expect(mockPg.transaction((trx) => replayMigration.down(trx))).rejects.toThrow('check constraint');
+    expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
+    await mockPg('data_hygiene_sensitive_vault').delete();
+    await mockPg('data_hygiene_proposals').delete();
+    await mockPg.transaction((trx) => replayMigration.down(trx));
+    await mockPg.transaction((trx) => replayMigration.up(trx));
   });
 
   test.each(['approved', 'reverted'])('an %s inbox-twin proposal prevents replay from re-offering the field', async (status) => {

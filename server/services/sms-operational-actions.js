@@ -12,12 +12,13 @@ const { recordAuditEvent } = require('./audit-log');
 const NotificationService = require('./notification-service');
 const { validate: isUuid } = require('uuid');
 const { hashExtractionSource, recordExtractionAttempt, shouldSkipExtraction, TERMINAL_STATUSES } = require('./data-hygiene/source-extraction-store');
-const { stalePendingExtractionProposals, findPendingExtractionProposal, upsertSensitiveProposal, findAppliedSmsExtractionFields, buildIdempotencyKey } = require('./data-hygiene/proposal-store');
+const { stalePendingExtractionProposals, findPendingExtractionProposal, upsertSensitiveProposal, findSmsExtractionProposals, buildIdempotencyKey } = require('./data-hygiene/proposal-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
 const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode } = require('./sms-operational-extractor');
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
+const { hashSensitiveValue } = require('./data-hygiene/sensitive-vault');
 
 const enabled = () => gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS');
 const REPLAY_VERSION = `${VERSION}:replay`;
@@ -128,7 +129,12 @@ async function proposeFact(trx, message, fact, current) {
   // Re-extraction can return an identical proposal. Preserve its pending or
   // terminal disposition before retiring siblings; the idempotent insert
   // would otherwise leave that very proposal stale with no replacement.
-  const existing = await trx('data_hygiene_proposals').where({ idempotency_key: buildIdempotencyKey(input) }).first('id', 'status');
+  const prior = await findSmsExtractionProposals({ trx, scope_id: message.customer_id,
+    sms_log_id: message.id, twilio_sid: message.twilio_sid });
+  const sameFact = prior.filter((proposal) => proposal.field === fact.field
+    && proposal.evidence?.after_hash === hashSensitiveValue(fact.value));
+  const existing = sameFact.find((proposal) => proposal.status !== 'pending') || sameFact[0]
+    || await trx('data_hygiene_proposals').where({ idempotency_key: buildIdempotencyKey(input) }).first('id', 'status');
   if (existing) return existing.status === 'pending' ? existing.id : null;
   await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field,
     notNewerThan: message.created_at, sameMessageSid: message.twilio_sid });
@@ -206,10 +212,11 @@ async function appliedSmsProfileFields(conn, message) {
   const [audits, proposals] = await Promise.all([
     conn('audit_log').where({ action: 'sms.property_preference.updated', resource_type: 'property_preferences' })
       .whereRaw("metadata->>'sms_log_id' = ?", [message.id]).pluck('metadata'),
-    findAppliedSmsExtractionFields({ trx: conn, scope_id: message.customer_id,
+    findSmsExtractionProposals({ trx: conn, scope_id: message.customer_id,
       sms_log_id: message.id, twilio_sid: message.twilio_sid }),
   ]);
-  return new Set([...audits.map((entry) => entry.field), ...proposals]);
+  return new Set([...audits.map((entry) => entry.field),
+    ...proposals.filter((proposal) => ['approved', 'auto_applied', 'reverted'].includes(proposal.status)).map((proposal) => proposal.field)]);
 }
 
 async function recordMessageOperations(conn, message, extracted, matchedContext) {

@@ -35,3 +35,11 @@ Commitment extraction, explicit deadlines, guarded delivery witnesses and staff 
 Changing a model version or correcting a source body never clears analysis markers or terminal receipts. An operator may request a replay of one already-analyzed inbound SMS with `node ops/agents/replay-sms-profile.js --sms-log-id=<uuid>`. The default is a read-only preview with no provider calls; add `--execute` to use the existing extractor. Both the SMS gate and activation timestamp still apply, and messages before activation remain excluded.
 
 Replayed results always require staff review. Prior automatic-write audits and applied or reverted proposals for the same SMS identify fields that must remain untouched, including inbox twins linked by Twilio message id. An identical pending proposal stays pending; an identical terminal proposal keeps its disposition. New eligible facts use the existing vaulted proposal queue and its chronology, authority and before-value checks. The replay has its own extraction receipt per extractor version and source hash, plus a critical audit; it preserves the original analysis and receipts. A failed replay leaves prior work intact and records a bounded retry attempt. No customer communications, scheduling writes or automatic profile changes run during replay.
+
+Replay reconciles the stable message identity, field and vault value hash, so
+an extractor-version change or later creation of a preferences row cannot
+reopen an identical rejected fact. Inbox twins use their linked Twilio identity.
+Contact preferences join the existing sensitive approval/revert path through
+migration `20260907000021_sms_replay_contact_preference.js`; replay itself
+never writes the preference. The migration rollback refuses to remove the
+allowance while a NULL-target contact-preference proposal still exists.
