@@ -174,9 +174,24 @@ async function applyFacts(trx, message, facts, context) {
   return outcomes;
 }
 
+// A scheduled send has a durable queue row and may also have a provider log.
+// Always retain the queue identity, including before it settles and when the
+// provider log is absent. Body equality is not identity: distinct sends stay
+// separate, and send-time rendering/phone refresh may change the provider row.
+function withoutScheduledDeliveryTwins(query, alias) {
+  query.whereNotExists(function scheduledQueue() {
+    this.select(1).from('sms_log as scheduled_source')
+      .where(`${alias}.direction`, 'outbound')
+      .where('scheduled_source.direction', 'outbound')
+      .whereNotNull('scheduled_source.scheduled_for')
+      .whereRaw("scheduled_source.id::text = ??->>'scheduled_sms_log_id'", [`${alias}.metadata`])
+      .whereRaw('scheduled_source.customer_id = ??', [`${alias}.customer_id`]);
+  });
+}
+
 async function loadMessageContext(conn, message) {
   const [history, properties, preferences] = await Promise.all([
-    conn('sms_log').where({ customer_id: message.customer_id }).where('created_at', '<', new Date(message.created_at))
+    conn('sms_log').modify(withoutScheduledDeliveryTwins, 'sms_log').where({ customer_id: message.customer_id }).where('created_at', '<', new Date(message.created_at))
       .where(function endpoints() {
         this.where({ from_phone: message.from_phone, to_phone: message.to_phone })
           .orWhere({ from_phone: message.to_phone, to_phone: message.from_phone });
@@ -196,7 +211,8 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
       ['property-preferences', String(message.customer_id)]);
     const customer = await trx('customers').where({ id: message.customer_id }).whereNull('deleted_at').forUpdate().first();
     if (!customer) return { skipped: 'customer_unavailable' };
-    const live = await trx('sms_log').where({ id: message.id }).forUpdate().first();
+    const live = await trx('sms_log').modify(withoutScheduledDeliveryTwins, 'sms_log')
+      .where({ id: message.id }).forUpdate().first();
     if (!enabled()) return { skipped: 'gate_off' };
     if (!eligibleMessage(live) || live.customer_id !== message.customer_id || live.message_body !== message.message_body) return { skipped: 'source_changed' };
     if (live.operational_analysis?.version === VERSION) return { skipped: 'already_processed' };
@@ -233,7 +249,7 @@ async function runSmsOperationalActions({ now = new Date(), conn = db, extract =
   const since = gateEnvTimestamp('GATE_SMS_OPERATIONAL_ACTIONS_SINCE');
   if (!since) return { skipped: 'activation_time_required' };
   return runExclusive('sms-operational-actions', async () => {
-    const candidates = await conn('sms_log as s').where('s.created_at', '>=', since).where('s.created_at', '<=', now)
+    const candidates = await conn('sms_log as s').modify(withoutScheduledDeliveryTwins, 's').where('s.created_at', '>=', since).where('s.created_at', '<=', now)
       .whereNull('s.operational_analysis').whereNotNull('s.customer_id')
       .whereExists(function availableCustomer() {
         this.select(1).from('customers as c').whereRaw('c.id = s.customer_id').whereNull('c.deleted_at');
