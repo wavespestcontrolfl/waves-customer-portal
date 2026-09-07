@@ -85,7 +85,7 @@ suite('IB target validation against isolated PostgreSQL', () => {
 
   test('a viewed call resolves its owner and cannot be swapped for a sibling call or body reference', async () => {
     const ids = [randomUUID(), randomUUID()];
-    await mockDb('call_log').insert(ids.map(id => ({ id, customer_id: customerId, call_sid: `fixture-${id}`,
+    await mockDb('call_log').insert(ids.map(id => ({ id, customer_id: customerId, twilio_call_sid: `fixture-${id}`,
       direction: 'inbound', from_phone: '+15550101234', to_phone: '+15550104321' })));
     for (const word of ['this', 'that', 'selected']) {
       const task = await Context.resolve({ prompt: `Update ${word} call`, pageData: { call_id: ids[0] } });
@@ -99,4 +99,42 @@ suite('IB target validation against isolated PostgreSQL', () => {
     await mockDb('customers').where('id', customerId).update({ deleted_at: mockDb.fn.now() });
     expect((await Context.resolve({ prompt: 'Update this call', pageData: { call_id: ids[0] } })).code).toBe('record_unavailable');
   });
+
+  test.each([['lead', 'leads'], ['estimate', 'estimates']])('a fresh duplicate unlinked %s invalidates name authority for either model ID', async (noun, table) => {
+    const ids = [randomUUID(), randomUUID()];
+    const name = table === 'leads' ? { first_name: 'Synthetic', last_name: 'Duplicatefixture' }
+      : { customer_name: 'Synthetic Duplicatefixture' };
+    await mockDb(table).insert({ id: ids[0], ...name, customer_id: null });
+    const task = await Context.resolve({ prompt: 'Update Synthetic Duplicatefixture', pageData: {} });
+    expect(await Context.validateRecordTarget({ [`${noun}_id`]: ids[0] }, task)).toBeNull();
+    await mockDb(table).insert({ id: ids[1], ...name, customer_id: null });
+    // Validation must re-read after resolution instead of retaining a unique-name claim.
+    for (const id of ids) expect((await Context.validateRecordTarget({ [`${noun}_id`]: id }, task)).code).toBe('target_clarification_required');
+    const selected = await Context.resolve({ prompt: `Update this ${noun}`, pageData: { [`${noun}_id`]: ids[0] } });
+    expect(await Context.validateRecordTarget({ [`${noun}_id`]: ids[0] }, selected)).toBeNull();
+    expect((await Context.validateRecordTarget({ [`${noun}_id`]: ids[1] }, selected)).code).toBe('target_clarification_required');
+    if (table === 'leads') {
+      await mockDb(table).where('id', ids[1]).update({ deleted_at: mockDb.fn.now() });
+      expect(await Context.validateRecordTarget({ lead_id: ids[0] }, task)).toBeNull();
+      await mockDb(table).where('id', ids[1]).update({ deleted_at: null, customer_id: customerId });
+    } else await mockDb(table).where('id', ids[1]).update({ status: 'accepted', customer_id: customerId });
+    expect((await Context.validateRecordTarget({ [`${noun}_id`]: ids[0] }, task)).code).toBe('target_clarification_required');
+  });
+
+  test.each([
+    ["Synthetic O’Neill", "SYNTHETIC O'Neill"],
+    ['Synthetic   Hyphen-Fixture', 'synthetic Hyphen-Fixture'],
+    ['Synthetic, Punctuation', 'Synthetic Punctuation'],
+    ["Synthetic Owner's", 'Synthetic Owner'],
+    ['Synthetic José', 'synthetic José'],
+    ['Synthetic\u00a0Spacefixture', 'Synthetic Spacefixture'],
+  ])('equivalent normalized unlinked names cannot hide a duplicate: %s', async (first, second) => {
+    const ids = [randomUUID(), randomUUID()];
+    await mockDb('estimates').insert({ id: ids[0], customer_name: first });
+    const task = await Context.resolve({ prompt: `Update ${first}`, pageData: {} });
+    expect(await Context.validateRecordTarget({ estimate_id: ids[0] }, task)).toBeNull();
+    await mockDb('estimates').insert({ id: ids[1], customer_name: second });
+    for (const id of ids) expect((await Context.validateRecordTarget({ estimate_id: id }, task)).code).toBe('target_clarification_required');
+  });
+
 });
