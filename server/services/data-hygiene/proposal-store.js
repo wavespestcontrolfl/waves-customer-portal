@@ -204,23 +204,40 @@ async function stalePendingNormalizationForResource({
 // `notNewerThan` limits the retirement to siblings whose source evidence is
 // no newer than the given instant (evidence without a source_at counts as
 // older), so a retried older message cannot displace a newer proposal.
-async function stalePendingExtractionProposals({ trx = null, scope_id, field, source = 'message-extraction', notNewerThan = null }) {
+// Existing proposals link to either source table; resolve their Twilio identity
+// as well as newly stamped identities. Timestamps alone never establish twins.
+const EXTRACTION_MESSAGE_SID = `COALESCE(evidence->>'twilio_sid',
+  (SELECT twilio_sid FROM sms_log WHERE id = NULLIF(data_hygiene_proposals.evidence->>'sms_log_id', '')::uuid),
+  (SELECT twilio_sid FROM messages WHERE id = NULLIF(data_hygiene_proposals.evidence->>'message_id', '')::uuid))`;
+
+async function stalePendingExtractionProposals({ trx = null, scope_id, field, source = 'message-extraction', notNewerThan = null, sameMessageSid = null }) {
   const client = trx || db;
   const query = client('data_hygiene_proposals')
     .where({ resource_type: 'property_preferences', scope_type: 'customer', scope_id, field, source, status: 'pending' });
   if (notNewerThan) {
-    query.whereRaw("(evidence->>'source_at') IS NULL OR (evidence->>'source_at')::timestamptz <= ?", [new Date(notNewerThan)]);
+    query.where((candidate) => {
+      candidate.whereRaw("(evidence->>'source_at') IS NULL OR (evidence->>'source_at')::timestamptz <= ?", [new Date(notNewerThan)]);
+      if (sameMessageSid) candidate.orWhereRaw(`${EXTRACTION_MESSAGE_SID} = ?`, [sameMessageSid]);
+    });
   }
   const updated = await query.update({ status: 'stale', updated_at: client.fn.now() });
   return Number(updated) || 0;
 }
 
 // The pending sibling an extraction writer must not stack a second entry on.
-async function findPendingExtractionProposal({ trx = null, scope_id, field, source = 'message-extraction', newerThan = null }) {
+async function findPendingExtractionProposal({ trx = null, scope_id, field, source = 'message-extraction', newerThan = null, sameMessageSid = null, keepTwin = false }) {
   const client = trx || db;
   const query = client('data_hygiene_proposals')
     .where({ resource_type: 'property_preferences', scope_type: 'customer', scope_id, field, source, status: 'pending' });
-  if (newerThan) query.whereRaw("(evidence->>'source_at')::timestamptz > ?", [new Date(newerThan)]);
+  if (newerThan) {
+    query.where((candidate) => {
+      candidate.whereRaw("(evidence->>'source_at')::timestamptz > ?", [new Date(newerThan)]);
+      if (sameMessageSid) {
+        candidate.whereRaw(`${EXTRACTION_MESSAGE_SID} IS DISTINCT FROM ?`, [sameMessageSid]);
+        if (keepTwin) candidate.orWhereRaw(`${EXTRACTION_MESSAGE_SID} = ?`, [sameMessageSid]);
+      }
+    });
+  }
   return query.first('id');
 }
 

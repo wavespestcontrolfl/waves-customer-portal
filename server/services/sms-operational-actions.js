@@ -19,7 +19,7 @@ const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
 
 const enabled = () => gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS');
-const SOURCE_COLUMNS = ['id', 'customer_id', 'direction', 'message_body', 'message_type', 'created_at', 'from_phone', 'to_phone', 'status'];
+const SOURCE_COLUMNS = ['id', 'customer_id', 'direction', 'message_body', 'message_type', 'created_at', 'from_phone', 'to_phone', 'status', 'twilio_sid'];
 const EXCLUDED_TYPES = ['opt_out', 'opt_in', 'sms_reaction', 'help_request'];
 // Owner decision 2026-09-07: only bounded typed fields auto-apply, each behind
 // its strict validator. Free-form text becomes a pending proposal in the
@@ -103,20 +103,16 @@ function factVerdict(fact, { properties, current = {}, expectedCurrent = current
 // existing sensitive-proposal path: the same row shape, vault and approve
 // route the data-hygiene extraction phase uses (create-on-apply when the
 // customer has no preferences row yet).
-// The unified-inbox twin of an SMS is written moments after the sms_log row;
-// siblings inside this window are the same message, not older or newer ones.
-const SAME_MESSAGE_WINDOW_MS = 120_000;
-const afterTwinWindow = (message) => new Date(new Date(message.created_at).getTime() + SAME_MESSAGE_WINDOW_MS);
-
 async function proposeFact(trx, message, fact, current) {
   // The same SMS is also dual-written to the unified inbox, where the admin
   // extraction phase may already have proposed this field from a regex
   // fragment, and an older SMS can be retried after a newer one succeeded.
-  // The customer's newest statement wins: a pending sibling clearly newer
-  // than this message supersedes it; otherwise retire the twin and the
-  // older siblings first.
-  if (await findPendingExtractionProposal({ trx, scope_id: message.customer_id, field: fact.field, newerThan: afterTwinWindow(message) })) return null;
-  await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field, notNewerThan: afterTwinWindow(message) });
+  // The customer's newest statement wins. Only a matching Twilio identity
+  // identifies a twin; a distinct newer correction always outranks this SMS.
+  if (await findPendingExtractionProposal({ trx, scope_id: message.customer_id, field: fact.field,
+    newerThan: message.created_at, sameMessageSid: message.twilio_sid })) return null;
+  await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field,
+    notNewerThan: message.created_at, sameMessageSid: message.twilio_sid });
   const proposal = await upsertSensitiveProposal({
     rule_id: 'extract.sms_profile', rule_version: VERSION, resource_type: 'property_preferences',
     resource_id: current?.id || null, scope_type: 'customer', scope_id: message.customer_id, field: fact.field,
@@ -125,7 +121,8 @@ async function proposeFact(trx, message, fact, current) {
     // The proposals API returns evidence without the audited reveal step, so
     // the text itself stays in the vault and the customer conversation.
     evidence: { evidence_source_type: 'message', evidence_source_id: message.id, sms_log_id: message.id,
-      channel: 'sms', source_at: new Date(message.created_at).toISOString(), property_id: fact.property_id, extractor_version: VERSION,
+      channel: 'sms', source_at: new Date(message.created_at).toISOString(), twilio_sid: message.twilio_sid || null,
+      property_id: fact.property_id, extractor_version: VERSION,
       source_excerpt: 'Customer SMS; the text is in the vault and the customer conversation.' },
   }, { trx });
   return proposal.id;
@@ -149,9 +146,10 @@ async function applyFacts(trx, message, facts, context) {
       outcomes.push({ ...fact, outcome: proposalId ? 'proposed' : 'superseded', proposal_id: proposalId });
       continue;
     }
-    // A clearly newer pending proposal for this typed field (the extraction
+    // A newer distinct pending proposal for this typed field (the extraction
     // phase saw a later message) outranks an older retried SMS: leave it to staff.
-    if (await findPendingExtractionProposal({ trx, scope_id: message.customer_id, field: fact.field, newerThan: afterTwinWindow(message) })) {
+    if (await findPendingExtractionProposal({ trx, scope_id: message.customer_id, field: fact.field,
+      newerThan: message.created_at, sameMessageSid: message.twilio_sid })) {
       outcomes.push({ ...fact, outcome: 'superseded' });
       continue;
     }

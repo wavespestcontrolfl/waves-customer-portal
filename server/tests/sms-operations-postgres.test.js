@@ -64,6 +64,7 @@ postgres('SMS operations on PostgreSQL', () => {
     await mockPg('customer_properties').insert({ id: propertyId, customer_id: customerId, is_primary: true,
       address_line1: '100 Example Lane', city: 'Sarasota', zip: '34236', active: true });
     message = { id: randomUUID(), customer_id: customerId, direction: 'inbound',
+      twilio_sid: `SM${randomUUID().replaceAll('-', '')}`,
       message_body: 'The controller is beside the garage. Please send the estimate.',
       from_phone: '+12025550101', to_phone: numbers.locations.parrish.number, created_at: new Date(), status: 'received' };
     process.env.GATE_SMS_OPERATIONAL_ACTIONS_SINCE = new Date(message.created_at.getTime() - 1000).toISOString();
@@ -217,8 +218,8 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(rows.filter((row) => row.status === 'pending')).toHaveLength(3);
   });
 
-  test('a retried older SMS never auto-applies a typed field over a newer pending proposal', async () => {
-    const newer = new Date(message.created_at.getTime() + 3600_000).toISOString();
+  test.each([3600_000, 30_000])('an older typed SMS cannot auto-apply over a proposal %i ms newer', async (gap) => {
+    const newer = new Date(message.created_at.getTime() + gap).toISOString();
     await mockPg('data_hygiene_proposals').insert({ rule_id: 'extract.lockbox_code', rule_version: '1',
       resource_type: 'property_preferences', scope_type: 'customer', scope_id: message.customer_id, field: 'lockbox_code',
       source: 'message-extraction', proposed_value: JSON.stringify({ masked: '****', length: 4 }), confidence: 0.86,
@@ -234,9 +235,10 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('the extraction phase supersedes a clearly older pending sibling with a newer message', async () => {
+  test.each([3600_000, 30_000])('the extraction phase supersedes a pending sibling %i ms older', async (gap) => {
     const { runMessageExtractionPhase } = require('../services/data-hygiene/message-extractor');
-    const older = new Date(Date.now() - 3600_000).toISOString();
+    const older = new Date(Date.now() - gap).toISOString();
+    process.env.GATE_SMS_OPERATIONAL_ACTIONS = 'false';
     await mockPg('data_hygiene_proposals').insert({ rule_id: 'extract.sms_profile', rule_version: 'sms-profile-v5',
       resource_type: 'property_preferences', scope_type: 'customer', scope_id: message.customer_id, field: 'pet_details',
       source: 'message-extraction', proposed_value: JSON.stringify({ masked: 'O***.', length: 12 }), confidence: 0.9,
@@ -245,14 +247,16 @@ postgres('SMS operations on PostgreSQL', () => {
     const [conversation] = await mockPg('conversations').insert({ customer_id: message.customer_id, channel: 'sms' }).returning('id');
     await mockPg('messages').insert({ conversation_id: conversation.id, channel: 'sms', direction: 'inbound',
       author_type: 'customer', body: 'Two friendly dogs in the yard.', twilio_sid: 'SM_newer' });
+    const preview = await runMessageExtractionPhase({ dryRun: true, lookbackDays: 1, limit: 10 });
+    expect(preview).toMatchObject({ would_create: 1, duplicates: 0, errors: 0 });
     const counts = await runMessageExtractionPhase({ lookbackDays: 1, limit: 10 });
     expect(counts).toMatchObject({ created: 1, duplicates: 0, errors: 0 });
     const rows = await mockPg('data_hygiene_proposals').where({ field: 'pet_details' }).select('rule_id', 'status').orderBy('rule_id');
     expect(rows).toEqual([{ rule_id: 'extract.pet_details', status: 'pending' }, { rule_id: 'extract.sms_profile', status: 'stale' }]);
   });
 
-  test('a retried older SMS never displaces a newer pending proposal for the field', async () => {
-    const newer = new Date(message.created_at.getTime() + 3600_000).toISOString();
+  test.each([3600_000, 30_000])('a retried SMS never displaces a pending proposal %i ms newer', async (gap) => {
+    const newer = new Date(message.created_at.getTime() + gap).toISOString();
     await mockPg('data_hygiene_proposals').insert({ rule_id: 'extract.sms_profile', rule_version: 'sms-profile-v5',
       resource_type: 'property_preferences', scope_type: 'customer', scope_id: message.customer_id, field: 'pet_details',
       source: 'message-extraction', proposed_value: JSON.stringify({ masked: 'O***.', length: 12 }), confidence: 0.9,
@@ -271,16 +275,22 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('the extraction phase does not stack a second proposal on a pending SMS proposal', async () => {
+  test.each([false, true])('the extraction phase recognizes the same SMS by identity (legacy evidence: %s)', async (legacy) => {
     const { runMessageExtractionPhase } = require('../services/data-hygiene/message-extractor');
     const quote = 'Two friendly dogs in the yard.';
     message.message_body = quote;
     await mockPg('sms_log').where({ id: message.id }).update({ message_body: quote });
     result.facts = [{ field: 'pet_details', quote, value: quote, property_id: context.properties[0].id, duration: 'durable' }];
     await recordMessageOperations(mockPg, message, result, context);
+    if (legacy) {
+      const proposal = await mockPg('data_hygiene_proposals').first();
+      delete proposal.evidence.twilio_sid;
+      await mockPg('data_hygiene_proposals').where({ id: proposal.id }).update({ evidence: JSON.stringify(proposal.evidence) });
+    }
     const [conversation] = await mockPg('conversations').insert({ customer_id: message.customer_id, channel: 'sms' }).returning('id');
     await mockPg('messages').insert({ conversation_id: conversation.id, channel: 'sms', direction: 'inbound',
-      author_type: 'customer', body: quote, twilio_sid: 'SM_dual_written' });
+      author_type: 'customer', body: quote, twilio_sid: message.twilio_sid,
+      created_at: new Date(message.created_at.getTime() + 180_000) });
     const counts = await runMessageExtractionPhase({ lookbackDays: 1, limit: 10 });
     expect(counts).toMatchObject({ created: 0, duplicates: 1, errors: 0 });
     const pending = await mockPg('data_hygiene_proposals').where({ status: 'pending', field: 'pet_details' });
@@ -310,6 +320,29 @@ postgres('SMS operations on PostgreSQL', () => {
     const [counts] = await Promise.all([runMessageExtractionPhase({ lookbackDays: 1, limit: 10 }), held]);
     expect(counts).toMatchObject({ created: 0, duplicates: 1, errors: 0 });
     expect(await mockPg('data_hygiene_proposals').where({ status: 'pending', field: 'pet_details' })).toHaveLength(1);
+  });
+
+  test.each(['pet_details', 'lockbox_code'])('the SMS lane reconciles the inbox twin for %s even when its write is delayed', async (field) => {
+    const { runMessageExtractionPhase } = require('../services/data-hygiene/message-extractor');
+    const quote = field === 'pet_details' ? 'Two friendly dogs in the yard.' : 'Lockbox code is #0123';
+    const value = field === 'pet_details' ? quote : '#0123';
+    message.message_body = quote;
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: quote });
+    result.facts = [{ field, quote, value, property_id: context.properties[0].id, duration: 'durable' }];
+    const [conversation] = await mockPg('conversations').insert({ customer_id: message.customer_id, channel: 'sms' }).returning('id');
+    await mockPg('messages').insert({ conversation_id: conversation.id, channel: 'sms', direction: 'inbound',
+      author_type: 'customer', body: quote, twilio_sid: message.twilio_sid,
+      created_at: new Date(message.created_at.getTime() + 180_000) });
+    expect(await runMessageExtractionPhase({ lookbackDays: 1, limit: 10 })).toMatchObject({ created: 1, errors: 0 });
+    const proposal = await mockPg('data_hygiene_proposals').where({ field }).first();
+    // Older proposals carry the inbox row id instead of a stamped Twilio id.
+    delete proposal.evidence.twilio_sid;
+    await mockPg('data_hygiene_proposals').where({ id: proposal.id }).update({ evidence: JSON.stringify(proposal.evidence) });
+    await recordMessageOperations(mockPg, message, result, context);
+    expect((await mockPg('data_hygiene_proposals').where({ id: proposal.id }).first()).status).toBe('stale');
+    const outcome = (await mockPg('sms_log').where({ id: message.id }).first()).operational_analysis.facts[0].outcome;
+    expect(outcome).toBe(field === 'pet_details' ? 'proposed' : 'applied');
+    expect(await mockPg('data_hygiene_proposals').where({ status: 'pending', field })).toHaveLength(field === 'pet_details' ? 1 : 0);
   });
 
   test('a stated pet becomes a pending proposal instead of a direct write', async () => {
@@ -434,13 +467,17 @@ postgres('SMS operations on PostgreSQL', () => {
     // A legacy row can hold an irrigation input with the flag off; that
     // pre-existing evidence must not block the revert later.
     const [row] = await mockPg('property_preferences').insert({ customer_id: message.customer_id, irrigation_system: false,
-      irrigation_zones: 6 }).returning('*');
+      irrigation_zones: 6, irrigation_schedule_notes: 'Private watering instructions.' }).returning('*');
     const proposal = { scope_id: message.customer_id, field: 'irrigation_controller_location', resource_id: row.id };
     let recorded;
     await mockPg.transaction(async (trx) => {
       const target = await writer.resolvePropertyPreferencesTarget({ trx, proposal, currentRaw: null });
       const { companions } = await writer.applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw: 'Beside the garage.' });
-      expect(companions).toEqual({ irrigation_system: false, irrigation_baseline: { inputs: { irrigation_zones: 6 }, confirmed: [] } });
+      expect(companions).toEqual({ irrigation_system: false, irrigation_baseline: { input_hashes: {
+        irrigation_zones: expect.stringMatching(/^[a-f0-9]{64}$/),
+        irrigation_schedule_notes: expect.stringMatching(/^[a-f0-9]{64}$/),
+      }, confirmed: [] } });
+      expect(JSON.stringify(companions)).not.toContain('Private watering instructions.');
       recorded = companions;
     });
     expect(await mockPg('property_preferences').first()).toMatchObject({ irrigation_system: true, irrigation_controller_location: 'Beside the garage.' });
@@ -458,11 +495,21 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await revert()).toEqual({ reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } });
     expect((await mockPg('property_preferences').first()).irrigation_system).toBe(true);
     // An edit to a pre-existing input after approval is later evidence too.
+    await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_confirmed_fields: JSON.stringify([]),
+      irrigation_schedule_notes: 'Changed private watering instructions.' });
+    expect(await revert()).toEqual({ reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } });
+    await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_schedule_notes: 'Private watering instructions.' });
     await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_confirmed_fields: JSON.stringify([]), irrigation_zones: 8 });
     expect(await revert()).toEqual({ reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } });
     await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_zones: 6 });
     expect(await revert()).toEqual({ reverted: ['irrigation_system'] });
     expect((await mockPg('property_preferences').first()).irrigation_system).toBe(false);
+    // Existing preview approvals retain their revert semantics after the format change.
+    recorded = { irrigation_system: false, irrigation_baseline: {
+      inputs: { irrigation_zones: 6, irrigation_schedule_notes: 'Private watering instructions.' }, confirmed: [],
+    } };
+    await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_system: true });
+    expect(await revert()).toEqual({ reverted: ['irrigation_system'] });
   });
 
   test('a failed critical audit rolls back profile and processed marker together', async () => {

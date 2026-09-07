@@ -1,6 +1,7 @@
 'use strict';
 
 const { IRRIGATION_INPUT_FIELDS, parseConfirmedFields } = require('../irrigation-schedule-confirmation');
+const { hashSensitiveValue } = require('./sensitive-vault');
 
 // Shared compare-and-set writer for private property preferences.
 // Callers own authorization, field allowlists, the transaction and audit.
@@ -42,12 +43,12 @@ async function resolvePropertyPreferencesTarget({ trx, proposal, currentRaw }) {
 const hasValue = (value) => !(value === null || value === undefined || value === '' || value === false
   || (Array.isArray(value) && value.length === 0));
 
-// Values, not just names: an edit to a pre-existing input after approval is
-// affirmative irrigation evidence too.
+// Compare keyed hashes: companion metadata is returned without a vault reveal,
+// while an edit to a pre-existing input still counts as later evidence.
 const irrigationEvidence = (target, field) => ({
-  inputs: Object.fromEntries(IRRIGATION_INPUT_FIELDS
+  input_hashes: Object.fromEntries(IRRIGATION_INPUT_FIELDS
     .filter((candidate) => candidate !== field && hasValue(target[candidate]))
-    .map((candidate) => [candidate, target[candidate]])),
+    .map((candidate) => [candidate, hashSensitiveValue(target[candidate])])),
   confirmed: parseConfirmedFields(target.irrigation_confirmed_fields),
 });
 
@@ -78,8 +79,11 @@ async function applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw
 async function revertPropertyPreferenceCompanions({ trx, proposal, target, companions = {} }) {
   if (!('irrigation_system' in companions) || target.irrigation_system !== true) return { reverted: [] };
   const now = irrigationEvidence(target, proposal.field);
-  const baseline = companions.irrigation_baseline || { inputs: {}, confirmed: [] };
-  const laterEvidence = Object.entries(now.inputs).some(([field, value]) => !(field in baseline.inputs) || !valuesEqual(value, baseline.inputs[field]))
+  const baseline = companions.irrigation_baseline || { input_hashes: {}, confirmed: [] };
+  // Approvals already persisted by previews may carry the earlier value map.
+  const baselineHashes = baseline.input_hashes || Object.fromEntries(
+    Object.entries(baseline.inputs || {}).map(([field, value]) => [field, hashSensitiveValue(value)]));
+  const laterEvidence = Object.entries(now.input_hashes).some(([field, hash]) => hash !== baselineHashes[field])
     || now.confirmed.some((field) => !baseline.confirmed.includes(field));
   if (laterEvidence) return { reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } };
   await trx('property_preferences')

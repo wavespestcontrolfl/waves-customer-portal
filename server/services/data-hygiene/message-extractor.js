@@ -9,9 +9,6 @@ const { upsertSensitiveProposal, findPendingExtractionProposal, stalePendingExtr
 const { valuesEqual } = require('./property-preferences');
 
 const EXTRACTOR_VERSION = 'message-property-preferences-v3';
-// The unified-inbox row is written moments after the sms_log row of the same
-// SMS; siblings inside this window are the same message, not older or newer.
-const SAME_MESSAGE_WINDOW_MS = 120_000;
 const DEFAULT_LOOKBACK_DAYS = 180;
 const DEFAULT_LIMIT = 1000;
 
@@ -122,7 +119,8 @@ async function runMessageExtractionPhase({
         increment(counts.by_rule, proposal.rule_id);
         increment(counts.by_field, proposal.field);
         if (dryRun) {
-          const pendingSibling = await findPendingExtractionProposal({ scope_id: proposal.scope_id, field: proposal.field });
+          const pendingSibling = await findPendingExtractionProposal({ scope_id: proposal.scope_id, field: proposal.field,
+            newerThan: row.created_at, sameMessageSid: row.twilio_sid, keepTwin: true });
           counts[pendingSibling ? 'duplicates' : 'would_create'] += 1;
           proposalCount += pendingSibling ? 0 : 1;
           continue;
@@ -130,16 +128,15 @@ async function runMessageExtractionPhase({
 
         // The SMS profile lane proposes the same dual-written message under the
         // customer preference advisory lock. Check and insert under that lock
-        // so the two writers serialize. Siblings inside the same-message window
-        // are this message's twin (skip); a clearly newer sibling outranks this
-        // message (skip); clearly older siblings are superseded by it (retire).
+        // so the two writers serialize. A matching Twilio identity is a twin
+        // (skip); newer distinct messages outrank this one; older ones retire.
         const result = await db.transaction(async (trx) => {
           await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(proposal.scope_id)]);
-          const beforeTwinWindow = new Date(new Date(row.created_at).getTime() - SAME_MESSAGE_WINDOW_MS);
-          if (await findPendingExtractionProposal({ trx, scope_id: proposal.scope_id, field: proposal.field, newerThan: beforeTwinWindow })) return { inserted: false };
+          if (await findPendingExtractionProposal({ trx, scope_id: proposal.scope_id, field: proposal.field,
+            newerThan: row.created_at, sameMessageSid: row.twilio_sid, keepTwin: true })) return { inserted: false };
           const live = await trx('property_preferences').where({ customer_id: proposal.scope_id }).first(proposal.field);
           if (!valuesEqual(live ? live[proposal.field] : null, proposal.current_value)) return { inserted: false };
-          await stalePendingExtractionProposals({ trx, scope_id: proposal.scope_id, field: proposal.field, notNewerThan: beforeTwinWindow });
+          await stalePendingExtractionProposals({ trx, scope_id: proposal.scope_id, field: proposal.field, notNewerThan: row.created_at });
           return upsertSensitiveProposal(proposal, { run_id: runId, trx });
         });
         if (result.inserted) {
@@ -198,6 +195,7 @@ async function loadCandidateMessages({ lookbackDays, limit }) {
       'm.channel',
       'm.body',
       'm.created_at',
+      'm.twilio_sid',
       'c.customer_id',
       'pp.id as property_preferences_id',
       'pp.neighborhood_gate_code',
@@ -251,6 +249,7 @@ function buildAccessCodeProposals(row) {
         message_id: row.id,
         channel: row.channel,
         source_at: row.created_at,
+        twilio_sid: row.twilio_sid || null,
         matched_label: pattern.label,
         extractor_version: EXTRACTOR_VERSION,
         source_excerpt: redactExcerpt(body, code),
@@ -292,6 +291,7 @@ function buildNoteProposals(row) {
         message_id: row.id,
         channel: row.channel,
         source_at: row.created_at,
+        twilio_sid: row.twilio_sid || null,
         matched_label: pattern.label,
         extractor_version: EXTRACTOR_VERSION,
         source_excerpt: redactExcerpt(body, note),
