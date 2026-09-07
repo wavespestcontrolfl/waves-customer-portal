@@ -21,6 +21,8 @@ const EmailTemplateLibrary = require('./email-template-library');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { shortenOrPassthrough } = require('./short-url');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { gsmSafeName } = require('./messaging/gsm-normalize');
+const { countSegments } = require('./messaging/segment-counter');
 const { isEnabled } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const Experiments = require('./experimentation/growthbook');
@@ -231,8 +233,8 @@ const SERVICE_LABELS = {
   tree_shrub: 'Tree & Shrub',
   termite: 'Termite Inspection',
   rodent: 'Rodent Control',
-  // Short enough to keep the recovery SMS in one segment (2026-09-07).
-  bora_care: 'Bora-Care Treatment',
+  // Short enough to keep the recovery SMS in one segment (owner, 2026-09-07).
+  bora_care: 'Bora-Care',
 };
 function serviceLabelOf(intent) {
   return SERVICE_LABELS[String(intent.service_id || '').trim()] || 'your service';
@@ -263,6 +265,32 @@ async function bookingUrlFor(intent) {
   return shortenOrPassthrough(url, {
     kind: 'booking', entityType: 'booking_intents', entityId: intent.id, customerId: intent.customer_id || null,
   }).catch(() => url);
+}
+
+// One segment (owner, 2026-09-07 — multi-segment texts have failed to
+// deliver): the name is GSM-folded first (one non-GSM character would flip
+// the whole text to UCS-2 and three segments); if the render still spills
+// past a single segment the only variable part worth dropping is the name,
+// so it is re-rendered with the generic greeting. Beyond that the body is
+// what /admin holds — it goes out as rendered and the count is logged.
+async function renderOneSegmentSms(intent) {
+  const vars = {
+    first_name: gsmSafeName(firstNameOf(intent)),
+    service_type: serviceLabelOf(intent),
+    booking_url: await bookingUrlFor(intent),
+  };
+  let body = await renderSms(vars);
+  if (!body) return body;
+  let segments = countSegments(body).segmentCount;
+  if (segments > 1 && vars.first_name !== 'there') {
+    const generic = await renderSms({ ...vars, first_name: 'there' });
+    if (generic && countSegments(generic).segmentCount < segments) {
+      body = generic;
+      segments = countSegments(body).segmentCount;
+    }
+  }
+  if (segments > 1) logger.warn(`[booking-recovery] SMS for intent ${intent.id} renders as ${segments} segments (${countSegments(body).encoding}) — check the template in /admin`);
+  return body;
 }
 
 // ── SMS stage (touch 1) ────────────────────────────────────────────────────
@@ -297,11 +325,7 @@ async function runSmsStage(now, sentPhones) {
         logger.info(`[booking-recovery] SMS skip ${intent.id}: customer-replied-recently`);
         continue;
       }
-      const body = await renderSms({
-        first_name: firstNameOf(intent),
-        service_type: serviceLabelOf(intent),
-        booking_url: await bookingUrlFor(intent),
-      });
+      const body = await renderOneSegmentSms(intent);
       if (!body) continue; // missing template — don't claim, retry next tick
 
       if (!(await claimStage(intent.id, 'followup_sms_sent', new Date(nowMs - SMS_MIN_AGE_H * 3600000)))) continue;
@@ -457,5 +481,5 @@ async function checkAbandoned(now = new Date()) {
 
 module.exports = {
   checkAbandoned,
-  _internals: { hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10, bookingUrlFor, SERVICE_LABELS },
+  _internals: { hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10, bookingUrlFor, SERVICE_LABELS, renderOneSegmentSms },
 };
