@@ -856,12 +856,13 @@ async function findActiveRecurringSeries(conn, {
           .orWhere('status', 'on_site');
       })
       .orderBy('scheduled_date', 'asc')
-      .first('scheduled_date');
+      .first('id', 'scheduled_date');
     const ongoing = columns.recurring_ongoing ? parent.recurring_ongoing === true : false;
     if (!ongoing && !upcoming) continue; // lapsed series — a new one is legitimate
     matches.push({
       ...parent,
       next_upcoming_date: upcoming ? dateOnly(upcoming.scheduled_date) : null,
+      next_upcoming_id: upcoming?.id || null,
     });
   }
   return matches;
@@ -1271,7 +1272,18 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   };
 }
 
+// The admin reviewed this exact set of active programs. Recheck under the
+// existing create locks: a concurrent create changes the set and invalidates
+// the approval, including a retry whose first response was lost.
+function separateProgramMatches(existingSeries, reviewedIds) {
+  if (!Array.isArray(reviewedIds) || !reviewedIds.length) return false;
+  const ids = new Set(reviewedIds.map(String));
+  return ids.size === reviewedIds.length && ids.size === existingSeries.length
+    && existingSeries.every((series) => ids.has(String(series.id)));
+}
+
 module.exports = {
+  separateProgramMatches,
   acquireSeriesCreateLocks,
   buildRecurringFollowUpRows,
   checkActiveSeriesLocked,

@@ -68,6 +68,9 @@ import {
   getCompletionResumeBody,
   pruneCompletionResumeBodies,
   putCompletionResumeBody,
+  deleteCompletionDraft,
+  getCompletionDraft,
+  putCompletionDraft,
 } from "../../lib/completion-resume-store";
 import termiteTreatmentMethods from "../../../../shared/termite-treatment-methods.json";
 import AREA_SCOPES from "../../../../shared/treatment-area-scopes.json";
@@ -78,6 +81,7 @@ import { Mic, MicOff } from "lucide-react";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 import TechTreatmentZoneModal from "../../components/tech/TechTreatmentZoneModal";
 import EstimateProvenanceCard from "../../components/schedule/EstimateProvenanceCard";
+import { showScheduleSaveNotice } from "../../components/schedule/ScheduleSaveNotice";
 import SlotConflictNotice from "../../components/schedule/SlotConflictNotice";
 import { useSlotConflicts } from "../../components/schedule/useSlotConflicts";
 import { appointmentHistory as buildAppointmentHistory } from "../../components/schedule/customerAppointments";
@@ -915,6 +919,11 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "backfill_invoice_mint_failed",      // REQUIRED completion invoice did not mint
   "service_report_token_mint_failed",  // report link could not be minted; report text withheld
   "completion_sms_send_failed",        // completion text failed at the provider / requeue
+  "terminal_invoice_lookup_failed",
+  "historic_setup_fee_alert_failed",
+  "unminted_setup_fee_lookup_failed",
+  "terminal_invoice_manual_billing_alert_failed",
+  "unminted_setup_fee_alert_failed",
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
@@ -2295,7 +2304,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         }),
       });
       if (notifyOnMove && result?.notificationSent === false) {
-        alert(
+        showScheduleSaveNotice(
           `Appointment saved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
         );
       }
@@ -2303,13 +2312,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // longer block admin edits) — tell the operator what now stacks so
       // the double-booking is a choice, not a surprise.
       if (Array.isArray(result?.warnings) && result.warnings.length) {
-        alert(`Appointment saved.\n\n${result.warnings.join("\n\n")}`);
+        showScheduleSaveNotice(`Appointment saved.\n\n${result.warnings.join("\n\n")}`);
       }
       // A 'following' scope rewrites visits the operator can't see from this
       // modal — report what actually moved rather than closing silently.
       if (result?.priceServiceScope?.scope === "following") {
         const n = Number(result.priceServiceScope.updatedVisits) || 0;
-        alert(
+        showScheduleSaveNotice(
           `Price/service change applied to this visit and ${n} other upcoming visit${n === 1 ? "" : "s"} in the series. Visits the plan schedules later will use the new values too.`,
         );
       }
@@ -2333,7 +2342,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         // Report what the plan HAS, not what was asked for — the server can
         // place fewer than requested when the cadence runs out of open dates,
         // and silently claiming the target hides missing service.
-        alert(
+        showScheduleSaveNotice(
           shortfall
             ? `Plan now has ${now} visit${now === 1 ? "" : "s"}, not the ${target} requested — ${moves.join(", ")}. The cadence had no open date for the remaining ${shortfall}; add ${shortfall === 1 ? "it" : "them"} by hand. The customer was not notified.`
             : `Plan now has ${now} visit${now === 1 ? "" : "s"} — ${moves.join(", ")}. The customer was not notified.`,
@@ -2360,7 +2369,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           // still corrected, but the customer report did not. Silence here
           // would read as a full success (codex P2 round 3).
           if (patchResult?.recordUpdated === false) {
-            alert(
+            showScheduleSaveNotice(
               patchResult?.recordAmbiguous
                 ? "Duration corrected on the appointment, but several legacy report records match this visit — the customer report was NOT changed and needs a manual fix."
                 : "Duration corrected on the appointment, but no report record was found for this visit — the customer report was not changed.",
@@ -2391,7 +2400,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               }
             }
             if (retryNow && retried?.costingUpdated !== true) {
-              alert(
+              showScheduleSaveNotice(
                 "The job-cost refresh failed again — the corrected duration itself is saved; use Job Costs → Recalculate to refresh the labor cost.",
               );
             }
@@ -2413,12 +2422,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   : patchResult?.timeEntryCorrectionBlocked === "multiple_job_entries"
                     ? "several timer entries are linked to this visit"
                     : "it could not be edited automatically";
-            alert(
+            showScheduleSaveNotice(
               `Duration corrected, but the technician's linked job timer was NOT changed (${timerReason}) — it still shows the old span in Timesheets until corrected there.`,
             );
           }
         } catch (patchErr) {
-          alert(
+          showScheduleSaveNotice(
             `Appointment saved, but the time-on-site correction failed: ${patchErr.message}. Reopen the appointment to retry it.`,
           );
         }
@@ -2445,7 +2454,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             }),
           });
         } catch (patchErr) {
-          alert(
+          showScheduleSaveNotice(
             `Appointment saved, but the re-entry correction failed: ${patchErr.message}. Reopen the appointment to retry it.`,
           );
         }
@@ -11292,6 +11301,8 @@ export function CompletionPanel({
   const [lawnAssessmentRevision, setLawnAssessmentRevision] = useState(0);
   const [savedDraft, setSavedDraft] = useState(null);
   const [showDraftPrompt, setShowDraftPrompt] = useState(false);
+  const [draftLoading, setDraftLoading] = useState(true);
+  const [draftStorageNotice, setDraftStorageNotice] = useState("");
   // Tree & Shrub AI photo review. Runs silently in the background (owner
   // 2026-07-23: no closeout card, no tech review step) — treeShrubReview holds
   // the signed preview { scores, observations, findings } so the submit body
@@ -11334,7 +11345,7 @@ export function CompletionPanel({
   // awaits this before deciding replay-vs-rebuild so a tap that beats the
   // read still replays.
   // True once a restored body is pinned: the reopened panel's FORM is empty
-  // (drafts never persist photos, the Tree/Shrub and product gates read the
+  // (a draft may not have been restored, and product gates read the
   // live form), so the submit CTA and handleSubmit's pre-submit validation
   // are bypassed for the replay — the stored body already passed them when
   // it committed (Codex r1 P1).
@@ -11368,9 +11379,12 @@ export function CompletionPanel({
   // meanwhile (codex P2 #3187 r7).
   const sideEffectsPollTimerRef = useRef(null);
   const completionPanelClosedRef = useRef(false);
-  useEffect(() => () => {
-    completionPanelClosedRef.current = true;
-    window.clearTimeout(sideEffectsPollTimerRef.current);
+  useEffect(() => {
+    completionPanelClosedRef.current = false;
+    return () => {
+      completionPanelClosedRef.current = true;
+      window.clearTimeout(sideEffectsPollTimerRef.current);
+    };
   }, []);
   const draftReadyRef = useRef(false);
 
@@ -12378,39 +12392,74 @@ export function CompletionPanel({
     setTreeShrubCloseout(defaultTreeShrubCloseout(service));
   }, [service.id]);
 
-  // Save the newest edit when Details, checkout, or Close unmounts the panel
-  // before the autosave delay. Discovery below resets the ref for a new visit.
-  useEffect(() => () => {
-    const draft = draftSnapshotRef.current;
-    if (draft?.serviceId === service.id) {
-      localStorage.setItem(completionDraftKey(service.id), JSON.stringify(draft));
-    }
+  function saveDraftSnapshot(draft) {
+    const { servicePhotos: _photos, ...metadata } = draft;
+    try {
+      localStorage.setItem(completionDraftKey(draft.serviceId), JSON.stringify(metadata));
+    } catch { /* IndexedDB can still preserve the full draft. */ }
+    return putCompletionDraft(draft.serviceId, draft).then((saved) => {
+      if (draftSnapshotRef.current === draft && !completionPanelClosedRef.current) {
+        setDraftStorageNotice(saved ? "" : "Draft storage is unavailable. Keep this panel open to retain your photos and latest edits.");
+      }
+    });
+  }
+
+  function clearSavedDraft() {
+    draftSnapshotRef.current = null;
+    try { localStorage.removeItem(completionDraftKey(service.id)); } catch { /* unavailable */ }
+    void deleteCompletionDraft(service.id);
+  }
+
+  // Also flush on pagehide: browser reload/navigation does not unmount React.
+  useEffect(() => {
+    const flush = () => {
+      const draft = draftSnapshotRef.current;
+      if (draft?.serviceId === service.id) void saveDraftSnapshot(draft);
+    };
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
   }, [service.id]);
 
   useEffect(() => {
+    let cancelled = false;
     draftSnapshotRef.current = null;
     draftReadyRef.current = false;
+    setDraftLoading(true);
     setSavedDraft(null);
     setShowDraftPrompt(false);
+    let metadata = null;
     try {
       const raw = localStorage.getItem(completionDraftKey(service.id));
-      if (raw) {
-        const draft = JSON.parse(raw);
-        if (draft && draft.serviceId === service.id) {
-          setSavedDraft(draft);
-          setShowDraftPrompt(true);
+      if (raw) metadata = JSON.parse(raw);
+    } catch { /* Fall back to the full IndexedDB draft. */ }
+    void getCompletionDraft(service.id).then((stored) => {
+      if (cancelled) return;
+      // A killed page may have written newer metadata before its photo
+      // transaction committed. Never attach older photos to that newer draft.
+      const draft = metadata?.serviceId === service.id
+        && metadata.draftId !== stored?.draftId
+        && (!stored || String(metadata.savedAt || "") >= String(stored.savedAt || ""))
+        ? metadata : stored || metadata;
+      if (draft?.serviceId === service.id) {
+        setSavedDraft(draft);
+        setShowDraftPrompt(true);
+        if (draft.generationPhotoCount > 0 && !draft.servicePhotos?.length) {
+          setDraftStorageNotice("The saved photos could not be restored. Reattach them before completing this visit.");
         }
       }
-    } catch {
-      localStorage.removeItem(completionDraftKey(service.id));
-    } finally {
       draftReadyRef.current = true;
-    }
+      setDraftLoading(false);
+    });
+    return () => { cancelled = true; };
   }, [service.id]);
 
   useEffect(() => {
-    if (!draftReadyRef.current || showDraftPrompt || success) return;
+    if (!draftReadyRef.current || draftLoading || showDraftPrompt || success) return;
     const hasDraftContent =
+      servicePhotos.length ||
       notes.trim() ||
       customerRecap.trim() ||
       // The untouched default pest tank mix is a starting state, not tech
@@ -12468,7 +12517,7 @@ export function CompletionPanel({
       // during draft discovery, state updates for the restore prompt have not
       // rendered yet and the form still appears empty here.
       if (draftSnapshotRef.current) {
-        localStorage.removeItem(completionDraftKey(service.id));
+        clearSavedDraft();
       }
       draftSnapshotRef.current = null;
       return;
@@ -12476,7 +12525,9 @@ export function CompletionPanel({
 
     const draft = {
         serviceId: service.id,
+        draftId: crypto.randomUUID(),
         savedAt: new Date().toISOString(),
+        servicePhotos,
         notes,
         selectedProducts,
         lawnDefaultMixSnapshot: lawnDefaultMixSnapshotRef.current,
@@ -12556,9 +12607,8 @@ export function CompletionPanel({
         // The installed-report identity restores too, so an UNTOUCHED
         // restored draft stays invalidatable on later typed edits (codex r24).
         generatedReportText: generatedReportTextRef.current,
-        // Photos themselves are not persisted — record how many the
-        // installed report was generated against so a restore that can't
-        // bring them back invalidates the prose they grounded (codex r78).
+        // Metadata retains the count so a failed photo write invalidates
+        // prose grounded in photos that could not be restored.
         generationPhotoCount: servicePhotos.length,
         // The lawn-assessment identity the installed report rode (same
         // untouched-draft reasoning as the photo count) — a restore that
@@ -12588,19 +12638,21 @@ export function CompletionPanel({
         companionState,
       };
     // The departure cleanup reads this snapshot before cancelling autosave.
+    const photosChanged = draftSnapshotRef.current?.servicePhotos !== servicePhotos;
     draftSnapshotRef.current = draft;
+    // Start photo persistence immediately, including a photo-only draft.
+    if (photosChanged) void saveDraftSnapshot(draft);
     const timer = setTimeout(() => {
       if (draftSnapshotRef.current !== draft) return;
-      localStorage.setItem(
-        completionDraftKey(service.id),
-        JSON.stringify(draft),
-      );
+      void saveDraftSnapshot(draft);
     }, 700);
     return () => clearTimeout(timer);
   }, [
     service.id,
+    draftLoading,
     showDraftPrompt,
     success,
+    servicePhotos,
     notes,
     selectedProducts,
     sendSms,
@@ -12663,6 +12715,8 @@ export function CompletionPanel({
 
   function restoreDraft() {
     if (!savedDraft) return;
+    const restoredPhotos = Array.isArray(savedDraft.servicePhotos) ? savedDraft.servicePhotos : [];
+    setServicePhotos(restoredPhotos);
     lawnAreasInitializedRef.current = true;
     lawnDefaultMixSeededRef.current = true;
     if (savedDraft.lawnDefaultMixSnapshot) lawnDefaultMixSnapshotRef.current = savedDraft.lawnDefaultMixSnapshot;
@@ -12896,14 +12950,10 @@ export function CompletionPanel({
     // otherwise adopt the pruned state as original and keep prose that
     // describes facts no longer submitted (codex r64).
     let restorePruned = false;
-    // The draft deliberately does not persist servicePhotos — if the
-    // installed report rode a nonzero photo set the restore couldn't bring
-    // back, the prose is grounded in inputs completion will no longer
-    // submit, so it invalidates like any other pruned generation input
-    // (codex r78).
+    // Legacy drafts or a failed photo transaction may have no photo body.
     if (generatedReportTextRef.current
       && Number.isInteger(savedDraft.generationPhotoCount)
-      && savedDraft.generationPhotoCount !== servicePhotos.length) {
+      && savedDraft.generationPhotoCount !== restoredPhotos.length) {
       restorePruned = true;
     }
     // Same contract for the lawn-assessment identity (codex r82): a
@@ -13061,11 +13111,8 @@ export function CompletionPanel({
   }
 
   function discardDraft() {
-    draftSnapshotRef.current = null;
-    localStorage.removeItem(completionDraftKey(service.id));
-    // Photos live in memory rather than localStorage. A deliberate Discard
-    // must clear them too or old evidence remains attached to the
-    // otherwise-reset completion.
+    clearSavedDraft();
+    setDraftStorageNotice("");
     setServicePhotos([]);
     setSavedDraft(null);
     setShowDraftPrompt(false);
@@ -13991,7 +14038,7 @@ export function CompletionPanel({
   // when the panel unmounted mid-flight (caller stops without touching
   // submitting state on the stale mount), else "done".
   function finishCompletionSuccess(result) {
-    draftSnapshotRef.current = null;
+    clearSavedDraft();
     sideEffectsRetryRef.current = 0;
     sideEffectsCommittedRef.current = false;
     lastSubmitBodyRef.current = null;
@@ -14002,7 +14049,6 @@ export function CompletionPanel({
     // clear the local artifacts, but never alert or onClose from a stale
     // mount (they'd target whichever visit the operator opened next).
     if (completionPanelClosedRef.current) {
-      localStorage.removeItem(completionDraftKey(service.id));
       clearCompletionResumeOwed(service.id);
       return "closed";
     }
@@ -14033,7 +14079,6 @@ export function CompletionPanel({
         `Service completed with the corrected duration, but the technician's linked job timer was NOT changed (${timerReason}) — it still shows the old span in Timesheets until corrected there.`,
       );
     }
-    localStorage.removeItem(completionDraftKey(service.id));
     clearCompletionResumeOwed(service.id);
     setCompletionResult(result || null);
     setSuccess(true);
@@ -14066,12 +14111,11 @@ export function CompletionPanel({
   // completed visit stops being reopenable, run the parent-equivalent
   // bookkeeping, and close out — never the generic failure path.
   function resolveCrossKeyCompleted() {
-    draftSnapshotRef.current = null;
+    clearSavedDraft();
     sideEffectsCommittedRef.current = false;
     lastSubmitBodyRef.current = null;
     setCommittedReplayReady(false);
     completionIdempotencyKeyRef.current = null;
-    localStorage.removeItem(completionDraftKey(service.id));
     clearCompletionResumeOwed(service.id);
     // Parent-equivalent success bookkeeping — onSubmit never resolved, so
     // the parent's own status flip / cache refresh never ran.
@@ -15531,6 +15575,18 @@ export function CompletionPanel({
     }
     setPhotoAnalyzing(false);
   }
+  const draftStorageStatus = (draftLoading || draftStorageNotice) && (
+    <div role="status" style={{ padding: 14, marginBottom: 16, fontSize: 14, lineHeight: 1.5 }}>
+      {draftLoading ? "Loading saved draft…" : draftStorageNotice}
+    </div>
+  );
+  if (draftLoading) return createPortal(
+    <div role="dialog" aria-label="Complete service" style={{ position: "fixed", inset: 0, zIndex: 10000,
+      padding: "calc(24px + env(safe-area-inset-top, 0px)) 24px", background: "#FAFAFA", color: "#111111" }}>
+      {draftStorageStatus}
+      <button type="button" onClick={() => onClose(false)} style={{ padding: 12, fontSize: 14 }}>Close</button>
+    </div>, document.body,
+  );
   // ────────────────────────────────────────────────────────────────────
   // Mobile admin render — follows reference_waves_admin_ui_system.md
   // Light mode only. Roboto body. No D.palette.
@@ -15934,6 +15990,7 @@ export function CompletionPanel({
                 <PestRecapCard serviceId={service.id} />
               </div>
             )}
+            {draftStorageStatus}
             {showDraftPrompt && (
               <div
                 style={{
@@ -18347,6 +18404,7 @@ export function CompletionPanel({
               onReviewChange={setCompletionPricing} reloadKey={pricingReloadKey}
               allowDiscounts={visitOutcome === "completed" && !backfillCloseout}
               disabled={submitting || committedReplayReady || isIncompleteVisit || backfillCloseout} />
+          {draftStorageStatus}
           {showDraftPrompt && (
             <div
               style={{

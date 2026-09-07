@@ -9,6 +9,9 @@ import {
   getCompletionResumeBody,
   pruneCompletionResumeBodies,
   putCompletionResumeBody,
+  putCompletionDraft,
+  getCompletionDraft,
+  deleteCompletionDraft,
 } from "./completion-resume-store";
 import {
   clearCompletionResumeOwed,
@@ -41,6 +44,22 @@ beforeEach(() => {
 });
 
 describe("completion resume store (IndexedDB)", () => {
+  it("orders draft writes and deletion while leaving a committed retry body intact", async () => {
+    await putCompletionResumeBody('svc-1', committedBody());
+    const first = putCompletionDraft('svc-1', { servicePhotos: [photo(1)] });
+    const second = putCompletionDraft('svc-1', { servicePhotos: [photo(2)] });
+    expect(await getCompletionDraft('svc-1')).toEqual({ servicePhotos: [photo(2)] });
+    const removed = deleteCompletionDraft('svc-1');
+    await Promise.all([first, second, removed]);
+    expect(await getCompletionDraft('svc-1')).toBeNull();
+    expect(await getCompletionResumeBody('svc-1')).toEqual(committedBody());
+  });
+
+  it("never prunes an unsubmitted photo draft as an unmarked retry body", async () => {
+    await putCompletionDraft('svc-1', { servicePhotos: [photo(1)] });
+    expect(await pruneCompletionResumeBodies(() => false, Date.now() + PRUNE_GRACE_MS + 1)).toBe(0);
+    expect(await getCompletionDraft('svc-1')).toEqual({ servicePhotos: [photo(1)] });
+  });
   it("round-trips a photo-bearing body byte-for-byte", async () => {
     const body = committedBody();
     expect(await putCompletionResumeBody("svc-1", body)).toBe(true);
