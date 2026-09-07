@@ -210,17 +210,24 @@ async function renderV3MovedBody({ firstName, serviceType, date, window, weather
   });
 }
 
-// The v3 row's body as it stands NOW — the one snapshot both the pre-move
-// cap and the send render from. Null = uncapped: the gate is dark (v2 is
-// the long copy that bills 4+ segments by design), or the row is missing /
-// disabled (the send path's own kill switch reports that outcome). A READ
-// FAILURE throws instead — treating it as uncapped would let a 3+ segment
-// text escape exactly while the DB blips (codex #4122 P2); callers fail
-// the move closed as note_cap_unavailable.
+// The v3 row as it stands NOW — the one observation both the pre-move cap
+// and the send act on. Null = the gate is dark (v2 is the long copy that
+// bills 4+ segments by design; env can't flip mid-request). Otherwise
+// { state: 'live', body } — the snapshot the cap measures and the send
+// renders from — or { state: 'disabled' } / { state: 'absent' }, which
+// commit() pins through the send so a row an admin enables or creates
+// between the check and the send cannot render a body the cap never saw
+// (codex #4122 r2 P2): the send honours the observed state (disabled →
+// no SMS, absent → the v2 fallback) exactly as it would have at check
+// time. A READ FAILURE throws — treating it as uncapped would let a 3+
+// segment text escape exactly while the DB blips (codex #4122 P2);
+// callers fail the move closed as note_cap_unavailable.
 async function v3TemplateSnapshot() {
   if (process.env.GATE_RAINOUT_MOVE_BANNER !== 'true') return null;
   const row = await db('sms_templates').where({ template_key: 'rain_out_moved_v3' }).first('body', 'is_active');
-  return row && row.is_active !== false && row.body ? String(row.body) : null;
+  if (!row) return { state: 'absent' };
+  if (row.is_active === false || !row.body) return { state: 'disabled' };
+  return { state: 'live', body: String(row.body) };
 }
 
 // Pre-move body for a PRESET reason's notice + note, measured against the
@@ -329,7 +336,8 @@ async function previewMovedSms({ serviceId, reasonCode, customMessage, target })
   let templateBody = null;
   if (!isCustom) {
     try {
-      templateBody = await v3TemplateSnapshot();
+      const snap = await v3TemplateSnapshot();
+      templateBody = snap?.state === 'live' ? snap.body : null;
     } catch (err) {
       logger.warn(`[rain-out] v3 template snapshot read failed for preview ${serviceId}: ${err.message}`);
       return { ok: false, reason: 'note_cap_unavailable' };
@@ -1391,14 +1399,18 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
   // Moved-first means the new slot is already booked — no confirmation
   // reply to ask for. Adjustments self-serve through the same tokenized
   // /reschedule link the 72h/24h reminders send. A capped move reuses what
-  // commit() built for its pre-move segment check — { url, body } for a
-  // custom move, { url } for a preset move with a note: templates are
-  // admin-editable and the shortener can fall back to the LONG url, so
-  // rebuilding either here could exceed the cap the check passed (codex
-  // pre-push P1 ×2) — the link that was measured is the link that sends.
-  const { url: rescheduleUrl } = prebuiltSms
+  // commit() built for its pre-move segment check. Custom: the exact
+  // { url, body } — templates are admin-editable and the shortener can
+  // fall back to the LONG url, so rebuilding either here could exceed the
+  // cap the check passed (codex pre-push P1). Preset with a note: the
+  // link is REBUILT here with the same existing code (reuseExisting — the
+  // check minted or reused it, so it is the oldest code on the visit) so
+  // the builder's grouped / frozen checks run on the POST-move state (a
+  // visit grouped in between must not get a link the page refuses — r2
+  // P2); the body can only shrink against the measurement.
+  const { url: rescheduleUrl } = prebuiltSms?.body
     ? { url: prebuiltSms.url }
-    : await buildRescheduleLink(serviceId, { customerId: customer.id });
+    : await buildRescheduleLink(serviceId, { customerId: customer.id, reuseExisting: !!prebuiltSms });
   // gate_locked carries the portal fix-it nudge ahead of the reschedule
   // clause on whichever rung renders — the customer must hear how to fix
   // next time's access even when v3 is absent and v2 falls in.
@@ -1517,26 +1529,37 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
     renderedKey = CUSTOM_TEMPLATE_KEY;
   }
   if (!body && process.env.GATE_RAINOUT_MOVE_BANNER === 'true') {
-    body = await renderV3MovedBody({
-      firstName: customer.first_name,
-      serviceType: job.service_type,
-      date: chosen.date,
-      window: chosen.window,
-      weatherLead,
-      reasonCode,
-      rescheduleUrl,
-      serviceId,
-      // The row snapshot the pre-move note cap measured, when there was
-      // one — the send never re-reads a row an edit could have grown.
-      templateBody: prebuiltSms?.templateBody || null,
-    });
-    if (body) {
-      renderedKey = 'rain_out_moved_v3';
-    } else {
-      const v3Row = await db('sms_templates').where({ template_key: 'rain_out_moved_v3' }).first('id');
-      if (v3Row) {
-        logger.warn(`[rain-out] rain_out_moved_v3 disabled — moved ${serviceId} without SMS`);
-        return { sent: false, reason: 'missing_template' };
+    // The v3 row state the pre-move note cap OBSERVED wins over a re-read:
+    // a disabled row stays the kill switch and an absent row stays the v2
+    // fallback even if an admin flipped it in between — a newly live row
+    // would render a body the cap never measured (r2 P2).
+    const pinnedState = prebuiltSms?.v3 || null;
+    if (pinnedState === 'disabled') {
+      logger.warn(`[rain-out] rain_out_moved_v3 disabled — moved ${serviceId} without SMS`);
+      return { sent: false, reason: 'missing_template' };
+    }
+    if (pinnedState !== 'absent') {
+      body = await renderV3MovedBody({
+        firstName: customer.first_name,
+        serviceType: job.service_type,
+        date: chosen.date,
+        window: chosen.window,
+        weatherLead,
+        reasonCode,
+        rescheduleUrl,
+        serviceId,
+        // The row snapshot the pre-move note cap measured, when there was
+        // one — the send never re-reads a row an edit could have grown.
+        templateBody: prebuiltSms?.templateBody || null,
+      });
+      if (body) {
+        renderedKey = 'rain_out_moved_v3';
+      } else {
+        const v3Row = await db('sms_templates').where({ template_key: 'rain_out_moved_v3' }).first('id');
+        if (v3Row) {
+          logger.warn(`[rain-out] rain_out_moved_v3 disabled — moved ${serviceId} without SMS`);
+          return { sent: false, reason: 'missing_template' };
+        }
       }
     }
   }
@@ -1785,33 +1808,42 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // so route scope measures the anchor's text — siblings get the
     // standard copy). Reject BEFORE the move so the dispatcher shortens
     // the note instead of the customer paying for a third segment. An
-    // uncapped rung (v3 gate dark, or its row missing/disabled) skips the
-    // check — the send path owns those outcomes. The send reuses the
-    // measured { url, templateBody }: a fresh mint or a shortener fallback
-    // to the LONG url, or a row an admin edit grew in between, could
-    // exceed the cap this check passed (codex pre-push P1 ×2). The send
-    // re-renders that snapshot with its two moving parts — the weather
-    // lead and a grouped stop's landed window — which were measured at
-    // their longest.
-    const url = await preMoveRescheduleUrl(serviceId, service);
-    prebuiltSms = { url };
-    let templateBody;
+    // uncapped rung (v3 gate dark) skips the check. The send acts on what
+    // was OBSERVED here, never on a re-read: it renders the measured row
+    // snapshot (a row an admin edit grew in between could exceed the cap —
+    // codex pre-push P1), honours a disabled / absent row the way this
+    // check saw it (a row enabled in between would render a body the cap
+    // never saw — r2 P2), and rebuilds the link with the SAME existing
+    // code through the builder's post-move eligibility checks (a visit
+    // grouped or frozen in between must not be handed a link the page
+    // refuses — r2 P2; the code is the one measured, so the body can only
+    // shrink). The two moving parts the send re-renders — the weather
+    // lead and a grouped stop's landed window — were measured at their
+    // longest.
+    let snap;
     try {
-      templateBody = await v3TemplateSnapshot();
+      snap = await v3TemplateSnapshot();
     } catch (err) {
-      // Fail closed: an unreadable snapshot is not an uncapped rung.
+      // Fail closed: an unreadable row is not an uncapped rung.
       logger.warn(`[rain-out] v3 template snapshot read failed for ${serviceId} — move refused: ${err.message}`);
       return { ok: false, reason: 'note_cap_unavailable' };
     }
-    if (templateBody) {
-      const body = await renderPresetMovedNotice({ service, reasonCode, target, note, rescheduleUrl: url, serviceId, templateBody });
-      // A live snapshot that fails to render (a transient renderer error —
-      // getTemplate swallows its own) is not an uncapped rung either.
-      if (!body) return { ok: false, reason: 'note_cap_unavailable' };
-      if (measureAsSent(body).segmentCount > MOVED_SMS_MAX_SEGMENTS) {
-        return { ok: false, reason: 'note_too_many_segments' };
+    if (snap) {
+      prebuiltSms = { v3: snap.state };
+      if (snap.state === 'live') {
+        const body = await renderPresetMovedNotice({
+          service, reasonCode, target, note, serviceId,
+          rescheduleUrl: await preMoveRescheduleUrl(serviceId, service),
+          templateBody: snap.body,
+        });
+        // A live snapshot that fails to render (a transient renderer error —
+        // getTemplate swallows its own) is not an uncapped rung either.
+        if (!body) return { ok: false, reason: 'note_cap_unavailable' };
+        if (measureAsSent(body).segmentCount > MOVED_SMS_MAX_SEGMENTS) {
+          return { ok: false, reason: 'note_too_many_segments' };
+        }
+        prebuiltSms.templateBody = snap.body;
       }
-      prebuiltSms.templateBody = templateBody;
     }
   }
   // "Running behind" can only push a same-day visit LATER. The generic
@@ -2233,9 +2265,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           actorUserId,
           forecastHealth,
           operatorInitiated,
-          // Capped move: send with the link (and, for Custom, the exact
-          // body) the pre-move segment check measured (see sendMovedSms
-          // header).
+          // Capped move: send from what the pre-move segment check
+          // observed — Custom: the exact { url, body }; preset: the v3 row
+          // state + snapshot (see sendMovedSms header).
           ...(job.id === serviceId && prebuiltSms
             ? { prebuiltSms }
             : {}),

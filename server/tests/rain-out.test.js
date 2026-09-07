@@ -376,7 +376,7 @@ describe('rain-out service', () => {
       // Moved-first: nothing to confirm by reply — the message carries only
       // the same tokenized self-serve link the 72h/24h reminders send.
       expect(vars.alt_clause).toBe(' Need a different time? Reschedule online: https://waves.test/r/tok123');
-      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1' });
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: false });
       expect(vars.forecast_clause).toContain('forecast.weather.gov/zipcity.php?inputstring=34202');
       expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     });
@@ -2914,12 +2914,14 @@ describe('rain-out service', () => {
       const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
 
       expect(result.ok).toBe(true);
-      // Built ONCE, through the link builder (grouped / frozen /
-      // dispatch-pending refusals apply) with the existing code preferred;
-      // a second build at send time could mint a longer code or fall back
-      // to the LONG url and exceed the cap the check passed.
-      expect(buildRescheduleLink).toHaveBeenCalledTimes(1);
-      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true, assumeConfirmed: true });
+      // Measured through the link builder (grouped / frozen refusals apply,
+      // the pending row judged on its landed state) with the existing code
+      // preferred; the send REBUILDS with the same existing code so the
+      // builder's checks run on the post-move state (r2 P2) — never a fresh
+      // mint or a LONG-url fallback that could exceed the measurement.
+      expect(buildRescheduleLink).toHaveBeenCalledTimes(2);
+      expect(buildRescheduleLink).toHaveBeenNthCalledWith(1, 'svc-1', { customerId: 'cust-1', reuseExisting: true, assumeConfirmed: true });
+      expect(buildRescheduleLink).toHaveBeenNthCalledWith(2, 'svc-1', { customerId: 'cust-1', reuseExisting: true });
       expect(sendCustomerMessage.mock.calls[0][0].body).toContain('https://waves.test/r/tok123');
       const v3Calls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_v3');
       expect(v3Calls).toHaveLength(2);
@@ -3008,17 +3010,50 @@ describe('rain-out service', () => {
       expect(preCheck.weather_lead.length).toBeGreaterThanOrEqual(send.weather_lead.length);
     });
 
-    test('gate on: a disabled v3 row is uncapped here — the send path owns that kill switch', async () => {
+    test('gate on: a disabled v3 row is uncapped here and PINNED — the send honours the kill switch even if the row is enabled in between', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
       wireSingle({}, { v3Row: { body: V3_BODY, is_active: false } });
 
       const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'x'.repeat(200) });
 
-      // No pre-move render, no snapshot handed to the send.
+      // Moved, no pre-move render, and the send never re-reads the row: a
+      // row enabled between check and send would render a body the cap
+      // never measured (r2 P2).
+      expect(result.ok).toBe(true);
+      expect(result.results[0]).toMatchObject({ ok: true, smsSent: false, smsReason: 'missing_template' });
+      expect(renderSmsTemplate).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate on: an absent v3 row is PINNED — the send falls to v2 even if the row is created in between', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle({}, { v3Row: null });
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'x'.repeat(200) });
+
       expect(result.ok).toBe(true);
       expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
-      expect(renderSmsTemplate.mock.calls[0][3]).toEqual({ noVariants: true });
+      expect(renderSmsTemplate.mock.calls[0][0]).toBe('rain_out_moved_v2');
+    });
+
+    test('gate on: the send rebuilds the link on the POST-move state — a visit grouped in between gets no link', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+      // Pre-check: eligible, existing code. Send: the builder now refuses
+      // (grouped / frozen in between) — the body shrinks, never grows.
+      buildRescheduleLink
+        .mockResolvedValueOnce({ url: 'https://waves.test/r/tok123', line: '' })
+        .mockResolvedValueOnce({ url: null, line: '' });
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
+
+      expect(result.ok).toBe(true);
+      const { body } = sendCustomerMessage.mock.calls[0][0];
+      expect(body).toContain(' Need a different time? Reply to this message.');
+      expect(body).not.toContain('waves.test');
     });
 
     test('gate off: the v2 rung is uncapped — a full-length note still moves and sends', async () => {
