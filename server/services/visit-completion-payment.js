@@ -55,7 +55,7 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
     .select('s.*', 'i.status as item_status', 'i.invoice_id', 'r.id as record_id',
       'r.status as record_status', 'r.customer_id as record_customer_id',
       'r.scheduled_service_id as record_service_id', 'r.structured_notes as record_notes');
-  if (members.length < 2 || members.some((member) => member.item_status !== 'done'
+  if (members.length < 1 || members.some((member) => member.item_status !== 'done'
       || member.visit_id !== visit.id || member.customer_id !== customer.id
       || member.record_customer_id !== customer.id || member.record_service_id !== member.id)) {
     refuse('member_identity_changed');

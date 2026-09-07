@@ -195,3 +195,17 @@ describe('MobileCheckoutSheet attached-invoice preview', () => {
     expect(screen.queryByRole('button', { name: 'Add Service' })).not.toBeInTheDocument();
   });
 });
+
+describe('MobileCheckoutSheet money lines', () => {
+  it('renders the base service price with cents, matching the total', () => {
+    render(
+      <MobileCheckoutSheet
+        service={{ ...BASE_SERVICE, estimatedPrice: 112.5 }}
+        onClose={() => {}}
+      />,
+    );
+    // The base row and the total both carry cents now (the row used to say $113).
+    expect(screen.getAllByText('$112.50').length).toBeGreaterThan(0);
+    expect(screen.queryByText('$113')).not.toBeInTheDocument();
+  });
+});

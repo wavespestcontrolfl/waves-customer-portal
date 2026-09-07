@@ -33,3 +33,14 @@ Commitment extraction, explicit deadlines, guarded delivery witnesses and staff 
 ## Deferred P2
 
 Automatic replay of analyzed messages needs reconciliation of previously audited writes and terminal extraction receipts. Changing a model version or correcting a body does not authorize replay. Keep the one-shot marker until receipt-aware reconciliation is implemented.
+
+
+Scheduled outbound SMS has one capture identity: the original queue row.
+The provider delivery row is excluded from capture when `metadata.scheduled_sms_log_id` identifies a scheduled outbound row for
+the same customer. This holds before and after settlement and when the
+provider log is missing. Distinct sends with identical text remain distinct;
+orphan/malformed links never suppress a source. The relationship is used
+only in database selection, outside model prompts. Conversation history keeps
+its existing endpoint-based selection so the actual delivered message remains
+available after a send-time phone or location-number refresh. Send/retry writers
+are unchanged. Outbound commitment capture remains a separate gated follow-up.

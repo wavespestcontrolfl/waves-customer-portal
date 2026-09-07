@@ -561,20 +561,23 @@ describe('Customer360ProfileV2 profile state', () => {
       expect(screen.getByRole('button', { name: 'Refund $202.00' })).toBeEnabled();
     });
 
-    it('swallows Escape while a refund is in flight so the profile-level handler cannot unmount it', async () => {
+    it('swallows Escape while a refund is in flight, then owns Escape itself so the profile never hears it', async () => {
       const pending = deferred();
       vi.stubGlobal('fetch', vi.fn(() => pending.promise));
-      // Stand-in for the profile-level window keydown handler that closes
-      // the whole Customer 360 on Escape unconditionally.
+      // Stand-in for the profile-level window keydown handler. The modal owns
+      // Escape while open (useModalFocus stops it at the document), so the
+      // profile's handler must never fire from inside a sub-modal — neither
+      // mid-request (swallowed) nor afterwards (closes the modal only).
       const profileEsc = vi.fn();
       const profileHandler = (e) => { if (e.key === 'Escape') profileEsc(); };
+      const onClose = vi.fn();
       window.addEventListener('keydown', profileHandler);
       try {
         render(
           <RefundPaymentModal
             customer={{ id: 'customer-a', firstName: 'Avery', lastName: 'Customer' }}
             payment={stripePayment()}
-            onClose={vi.fn()}
+            onClose={onClose}
             onDone={vi.fn().mockResolvedValue()}
           />,
         );
@@ -582,6 +585,7 @@ describe('Customer360ProfileV2 profile state', () => {
         fireEvent.click(screen.getByRole('button', { name: 'Refund $202.00' }));
         fireEvent.keyDown(document.body, { key: 'Escape' });
         expect(profileEsc).not.toHaveBeenCalled();
+        expect(onClose).not.toHaveBeenCalled();
 
         await act(async () => {
           pending.resolve(new Response(JSON.stringify({ id: 'pay-1', refund_issued_amount: '202.00' }), {
@@ -593,7 +597,8 @@ describe('Customer360ProfileV2 profile state', () => {
         expect(await screen.findByText(/Refund issued:/)).toBeInTheDocument();
 
         fireEvent.keyDown(document.body, { key: 'Escape' });
-        expect(profileEsc).toHaveBeenCalledTimes(1);
+        expect(onClose).toHaveBeenCalledTimes(1);
+        expect(profileEsc).not.toHaveBeenCalled();
       } finally {
         window.removeEventListener('keydown', profileHandler);
       }

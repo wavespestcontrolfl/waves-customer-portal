@@ -190,7 +190,7 @@ async function createVisitCompletionInvoice(packetId, database = db) {
       .select('s.*', 'r.id as record_id', 'r.status as record_status', 'r.structured_notes as record_notes',
         'r.customer_id as record_customer_id', 'r.scheduled_service_id as record_scheduled_service_id',
         'catalog.service_key', 'catalog.name as service_name');
-    if (members.length !== itemIds.length || members.length < 2
+    if (members.length !== itemIds.length || members.length < 1
         || members.some((member) => member.visit_id !== visit.id || member.customer_id !== customer.id
           || member.record_customer_id !== customer.id || member.record_scheduled_service_id !== member.id)) {
       throw new Error('Visit billing member identity mismatch');

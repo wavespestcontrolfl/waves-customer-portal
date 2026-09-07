@@ -69,7 +69,13 @@ const af = (p, o = {}) =>
       "Content-Type": "application/json",
       ...o.headers,
     },
-  }).then((r) => r.json());
+  }).then(async (r) => {
+    // A 401/429/500 JSON body is not data — throw so the callers' catch
+    // blocks render their error state instead of a blank table.
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+    return body;
+  });
 
 function adminRawFetch(p, o = {}) {
   return fetch(`${API_BASE}${p}`, {
