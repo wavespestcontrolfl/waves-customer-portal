@@ -45,12 +45,49 @@ test('retained coverage excludes prior-term visits using the selected Eastern ac
 test('an audit exception returns an explicit failure without aborting conversion', async () => {
   const checkStart = source.indexOf('    let recurringScheduleCheck =');
   const checkEnd = source.indexOf('    logger.info(', checkStart);
+  const auditTrx = {};
+  const transaction = jest.fn(async (callback) => callback(auditTrx));
+  const verifyAudit = jest.fn(async () => { throw new Error('query unavailable'); });
   const result = await vm.runInNewContext(`(async () => { ${source.slice(checkStart, checkEnd)} return recurringScheduleCheck; })()`, {
-    verifyAcceptedRecurringSchedule: async () => { throw new Error('query unavailable'); },
-    database: {},
+    verifyAcceptedRecurringSchedule: verifyAudit,
+    database: { transaction },
     estimateId: 'estimate-new',
     customerId: 'customer-1',
     logger: { warn: jest.fn() },
   });
+  expect(transaction).toHaveBeenCalledTimes(1);
+  expect(verifyAudit).toHaveBeenCalledWith(auditTrx, { estimateId: 'estimate-new', customerId: 'customer-1' });
   expect(result).toEqual({ ok: false, gaps: [], error: 'verification_failed' });
+});
+
+const postgresTest = process.env.DATABASE_URL ? test : test.skip;
+postgresTest('a PostgreSQL audit statement error rolls back its savepoint and preserves acceptance writes', async () => {
+  const url = new URL(process.env.DATABASE_URL);
+  if (!['localhost', '127.0.0.1'].includes(url.hostname)) {
+    throw new Error('This regression requires disposable local CI PostgreSQL');
+  }
+  const db = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL });
+  const checkStart = source.indexOf('    let recurringScheduleCheck =');
+  const checkEnd = source.indexOf('    logger.info(', checkStart);
+  try {
+    await db.transaction(async (trx) => {
+      await trx.raw('CREATE TEMP TABLE acceptance_audit_probe (id integer) ON COMMIT DROP');
+      await trx('acceptance_audit_probe').insert({ id: 1 });
+      const result = await vm.runInNewContext(`(async () => { ${source.slice(checkStart, checkEnd)} return recurringScheduleCheck; })()`, {
+        verifyAcceptedRecurringSchedule: async (auditTrx) => {
+          await auditTrx('acceptance_audit_probe').insert({ id: 2 });
+          await auditTrx.raw('SELECT 1 / 0');
+        },
+        database: trx,
+        estimateId: 'estimate-new',
+        customerId: 'customer-1',
+        logger: { warn: jest.fn() },
+      });
+      expect(result.error).toBe('verification_failed');
+      await trx('acceptance_audit_probe').insert({ id: 3 });
+      expect(await trx('acceptance_audit_probe').orderBy('id')).toEqual([{ id: 1 }, { id: 3 }]);
+    });
+  } finally {
+    await db.destroy();
+  }
 });

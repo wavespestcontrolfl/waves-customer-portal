@@ -3868,17 +3868,13 @@ async function verifyAcceptedRecurringSchedule(database, { estimateId, customerI
   }));
   if (!gaps.length) return { ok: true, gaps: [] };
   const metadata = { estimateId, customerId, gaps };
-  try {
-    await database('activity_log').insert({
-      customer_id: customerId,
-      estimate_id: estimateId,
-      action: 'recurring_schedule_missing_followups',
-      description: `Accepted estimate #${estimateId} has an incomplete recurring schedule (${gaps.map((gap) => `${gap.pattern || gap.serviceFamily}: ${gap.recordedVisits ?? 0}/${gap.expectedVisits ?? '?'}`).join(', ')}). Review before dispatch.`,
-      metadata: JSON.stringify(metadata),
-    });
-  } catch (err) {
-    logger.warn(`[estimate-converter] recurring schedule gap audit failed for estimate ${estimateId}: ${err.message}`);
-  }
+  await database('activity_log').insert({
+    customer_id: customerId,
+    estimate_id: estimateId,
+    action: 'recurring_schedule_missing_followups',
+    description: `Accepted estimate #${estimateId} has an incomplete recurring schedule (${gaps.map((gap) => `${gap.pattern || gap.serviceFamily}: ${gap.recordedVisits ?? 0}/${gap.expectedVisits ?? '?'}`).join(', ')}). Review before dispatch.`,
+    metadata: JSON.stringify(metadata),
+  });
   logger.error(`[estimate-converter] accepted estimate ${estimateId} has incomplete recurring schedule: ${JSON.stringify(metadata)}`);
   return { ok: false, gaps };
 }
@@ -7075,7 +7071,10 @@ const EstimateConverter = {
 
     let recurringScheduleCheck = { ok: true, gaps: [] };
     try {
-      recurringScheduleCheck = await verifyAcceptedRecurringSchedule(database, { estimateId, customerId });
+      // A nested Knex transaction uses a savepoint when acceptance owns the
+      // transaction, so an audit SQL error cannot poison later acceptance writes.
+      recurringScheduleCheck = await database.transaction((auditTrx) =>
+        verifyAcceptedRecurringSchedule(auditTrx, { estimateId, customerId }));
     } catch (err) {
       recurringScheduleCheck = { ok: false, gaps: [], error: 'verification_failed' };
       logger.warn(`[estimate-converter] recurring schedule verification failed for estimate ${estimateId}: ${err.message}`);
