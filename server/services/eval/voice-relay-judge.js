@@ -24,9 +24,10 @@ const logger = require('../logger');
 
 const JUDGE_PROMPT_VERSION = 'voice-relay-judge.v1';
 const JUDGE_MAX_TOKENS = 1200;
-// One chain (both legs) per verdict — the fallback budget split keeps a
-// stalled primary from starving the backup leg.
-const JUDGE_TIMEOUT_MS = 90000;
+// No explicit timeoutMs on the dispatch: an explicit budget hands the WHOLE
+// remainder to each leg in turn (llm/call.js keeps callers' original
+// semantics), so a stalled primary would starve the fallback. Without one the
+// dispatcher's DEFAULT_FALLBACK_BUDGET_MS is split evenly across the legs.
 
 // The rubric's automatic-fail categories the judge may name. The harness maps
 // each finding to one check; PR 9's self-audit maps the same names to finding
@@ -162,6 +163,7 @@ function buildJudgePrompt(spec = {}, transcript = '', { language = 'en', toolsAv
 
 const toBool = (v) => v === true || v === 'true' || v === 1;
 
+
 function stripFence(raw) {
   const s = String(raw || '').trim();
   const fenced = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -171,12 +173,31 @@ function stripFence(raw) {
   return start >= 0 && end > start ? s.slice(start, end + 1) : s;
 }
 
+const isBoolish = (v) => typeof v === 'boolean' || v === 'true' || v === 'false' || v === 0 || v === 1;
+// Every field the schema requires, with the type it must carry. A reply
+// missing any of them is NOT a verdict: counting it as judged would let a
+// garbage reply pass a scenario as "graded".
+const REQUIRED_FIELDS = Object.freeze({
+  pass: isBoolish,
+  forbidden_claims: Array.isArray,
+  required_facts_missing: Array.isArray,
+  prohibited_facts_stated: Array.isArray,
+  action_taken: (v) => typeof v === 'string',
+  action_ok: isBoolish,
+  transfer_ok: isBoolish,
+  empathy_ok: isBoolish,
+  brevity_ok: isBoolish,
+  tone: (v) => Number.isFinite(Number(v)),
+  rationale: (v) => typeof v === 'string',
+});
+
 /**
- * Tolerant verdict parser: accepts the parsed object, a JSON string, or a
- * fenced / prose-wrapped JSON blob; coerces booleans, clamps tone to 0-5,
- * keeps only known claim categories (anything else is filed as `other`) and
- * derives `pass` from the findings when the model omitted or contradicted it.
- * Returns null when nothing verdict-shaped can be recovered.
+ * Verdict parser: accepts the parsed object, a JSON string, or a fenced /
+ * prose-wrapped JSON blob, and tolerates cosmetic drift — boolean strings,
+ * an out-of-range tone (clamped to 0-5), an unknown claim category (filed as
+ * `other`). It does NOT tolerate a missing or mistyped required field: that
+ * is not a verdict, and the caller records the scenario as unjudged. `pass`
+ * is derived from the findings, never trusted on its own.
  */
 function parseVerdict(raw) {
   let obj = raw;
@@ -184,31 +205,33 @@ function parseVerdict(raw) {
     try { obj = JSON.parse(stripFence(raw)); } catch { return null; }
   }
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  for (const [field, valid] of Object.entries(REQUIRED_FIELDS)) {
+    if (!(field in obj) || !valid(obj[field])) return null;
+  }
   const claims = (Array.isArray(obj.forbidden_claims) ? obj.forbidden_claims : [])
     .map((c) => (c && typeof c === 'object'
       ? { category: FORBIDDEN_CLAIM_CATEGORIES.includes(c.category) ? c.category : 'other', quote: String(c.quote || '').slice(0, 300) }
       : (typeof c === 'string' ? { category: FORBIDDEN_CLAIM_CATEGORIES.includes(c) ? c : 'other', quote: '' } : null)))
     .filter(Boolean);
   const strings = (v) => (Array.isArray(v) ? v.map((x) => String(x).slice(0, 300)).filter(Boolean) : []);
-  const toneRaw = Number(obj.tone);
-  const tone = Number.isFinite(toneRaw) ? Math.max(0, Math.min(5, Math.round(toneRaw))) : null;
+  const tone = Math.max(0, Math.min(5, Math.round(Number(obj.tone))));
   const verdict = {
     forbidden_claims: claims,
     required_facts_missing: strings(obj.required_facts_missing),
     prohibited_facts_stated: strings(obj.prohibited_facts_stated),
-    action_taken: String(obj.action_taken || '').slice(0, 300),
+    action_taken: String(obj.action_taken).slice(0, 300),
     action_ok: toBool(obj.action_ok),
-    transfer_ok: obj.transfer_ok === undefined ? true : toBool(obj.transfer_ok),
-    empathy_ok: obj.empathy_ok === undefined ? true : toBool(obj.empathy_ok),
-    brevity_ok: obj.brevity_ok === undefined ? true : toBool(obj.brevity_ok),
+    transfer_ok: toBool(obj.transfer_ok),
+    empathy_ok: toBool(obj.empathy_ok),
+    brevity_ok: toBool(obj.brevity_ok),
     tone,
-    rationale: String(obj.rationale || '').slice(0, 1500),
+    rationale: String(obj.rationale).slice(0, 1500),
   };
   // pass is DERIVED, never trusted on its own: a "pass: true" beside a
   // forbidden claim is the contradiction this guards against.
   const clean = !verdict.forbidden_claims.length && !verdict.required_facts_missing.length
     && !verdict.prohibited_facts_stated.length && verdict.action_ok && verdict.transfer_ok;
-  verdict.pass = clean && (obj.pass === undefined || toBool(obj.pass));
+  verdict.pass = clean && toBool(obj.pass);
   return verdict;
 }
 
@@ -218,7 +241,7 @@ function parseVerdict(raw) {
  * or { ok: false, reason } when neither leg produced a parseable verdict.
  * `dispatch` is injectable for tests; production uses dispatchWithFallback.
  */
-async function judgeTranscript({ spec = {}, transcript = '', language = 'en', toolsAvailable = [], officeHours = null, callerBlock = null } = {}, { dispatch = null, timeoutMs = JUDGE_TIMEOUT_MS } = {}) {
+async function judgeTranscript({ spec = {}, transcript = '', language = 'en', toolsAvailable = [], officeHours = null, callerBlock = null } = {}, { dispatch = null } = {}) {
   const run = dispatch || require('../llm/call').dispatchWithFallback;
   const { system, text } = buildJudgePrompt(spec, transcript, { language, toolsAvailable, officeHours, callerBlock });
   let result;
@@ -231,7 +254,6 @@ async function judgeTranscript({ spec = {}, transcript = '', language = 'en', to
       jsonMode: true,
       jsonSchema: JUDGE_SCHEMA,
       maxTokens: JUDGE_MAX_TOKENS,
-      timeoutMs,
     });
   } catch (err) {
     logger.warn(`[voice-relay-judge] dispatch threw: ${err.message}`);
@@ -259,5 +281,5 @@ module.exports = {
   parseVerdict,
   judgeTranscript,
   judgePromptSha,
-  _internals: { SYSTEM_PROMPT, OFFICE_FACT, stripFence, JUDGE_MAX_TOKENS, JUDGE_TIMEOUT_MS },
+  _internals: { SYSTEM_PROMPT, OFFICE_FACT, REQUIRED_FIELDS, stripFence, JUDGE_MAX_TOKENS },
 };

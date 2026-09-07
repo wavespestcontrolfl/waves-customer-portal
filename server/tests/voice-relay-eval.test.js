@@ -245,6 +245,17 @@ describe('voice relay eval — the judge', () => {
     expect(judge.parseVerdict('not json at all')).toBeNull();
     expect(judge.parseVerdict(null)).toBeNull();
     expect(judge.parseVerdict([1, 2])).toBeNull();
+    // A reply that is not a complete verdict is no verdict at all: {} or a
+    // missing / mistyped required field reads as unjudged, never as graded.
+    expect(judge.parseVerdict({})).toBeNull();
+    for (const field of Object.keys(judge._internals.REQUIRED_FIELDS)) {
+      const missing = { ...base };
+      delete missing[field];
+      expect(judge.parseVerdict(missing)).toBeNull();
+    }
+    expect(judge.parseVerdict({ ...base, tone: 'calm' })).toBeNull();
+    expect(judge.parseVerdict({ ...base, forbidden_claims: 'none' })).toBeNull();
+    expect(judge.parseVerdict({ ...base, action_ok: 'yes' })).toBeNull();
   });
 
   test('buildJudgePrompt puts the spec and the transcript in the user turn and the rules in the system prompt', () => {
@@ -272,6 +283,9 @@ describe('voice relay eval — the judge', () => {
     const dispatch = jest.fn(async () => ({ ok: true, json: verdict, text: JSON.stringify(verdict), model: 'judge-model-x', provider: 'anthropic', fallbackUsed: false }));
     const out = await judge.judgeTranscript({ spec: {}, transcript: 'Caller: hi' }, { dispatch });
     expect(dispatch).toHaveBeenCalledWith(MODELS.TEXT_POLICIES.voiceJudge, expect.objectContaining({ laneId: 'voice_relay_judge', jsonMode: true, jsonSchema: judge.JUDGE_SCHEMA, promptVersion: judge.JUDGE_PROMPT_VERSION }));
+    // No explicit timeoutMs: an explicit budget would hand the whole remainder
+    // to the primary leg and starve the fallback (llm/call.js semantics).
+    expect(dispatch.mock.calls[0][1]).not.toHaveProperty('timeoutMs');
     expect(out).toMatchObject({ ok: true, judge_model: 'judge-model-x', judge_provider: 'anthropic', judge_fallback: false, judge_prompt_sha: judge.judgePromptSha() });
     expect(out.verdict.pass).toBe(true);
 
