@@ -197,11 +197,24 @@ async function stalePendingNormalizationForResource({
   return 0;
 }
 
+// Retire pending extraction proposals for a field an automatic writer has
+// just filled: approve would fail their before-value check anyway, and the
+// live value is the customer's own message. Same status the normalization
+// sweep uses when a live value moves under a proposal.
+async function stalePendingExtractionProposals({ trx = null, scope_id, field, source = 'message-extraction' }) {
+  const client = trx || db;
+  const updated = await client('data_hygiene_proposals')
+    .where({ resource_type: 'property_preferences', scope_type: 'customer', scope_id, field, source, status: 'pending' })
+    .update({ status: 'stale', updated_at: client.fn.now() });
+  return Number(updated) || 0;
+}
+
 module.exports = {
   buildIdempotencyKey,
   stableJson,
   upsertProposal,
   upsertSensitiveProposal,
   stalePendingNormalizationForResource,
+  stalePendingExtractionProposals,
   isSensitiveProposal,
 };
