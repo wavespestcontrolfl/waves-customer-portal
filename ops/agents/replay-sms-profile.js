@@ -4,7 +4,8 @@
 // MUTATES (dry-run default) — explicitly re-extract ONE analyzed inbound SMS
 // into the existing staff-review proposal queue. Preserves prior profile
 // writes, original analysis and receipts. No customer communications.
-// Dry run makes no LLM calls; --execute uses the existing gated extractor.
+// Preview uses the gated extractor and rolls back capture-state changes.
+// Both preview and --execute make an LLM call; only --execute persists results.
 // Usage: node ops/agents/replay-sms-profile.js --sms-log-id=<uuid> [--execute]
 // Supply the intended DATABASE_URL through the execution environment. Local
 // verification must use a verified dev/preview database and synthetic rows.

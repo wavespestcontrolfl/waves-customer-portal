@@ -105,7 +105,7 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(await listOpenCommitments(mockPg)).toEqual([]);
   });
 
-  test('explicit replay previews without extraction and offers a new typed fact for review only', async () => {
+  test('explicit replay previews actual changes without persisting them and keeps new typed facts in review', async () => {
     message.message_body = 'Lockbox code is #0123';
     await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
     await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
@@ -115,8 +115,12 @@ postgres('SMS operations on PostgreSQL', () => {
       quote: message.message_body, duration: 'durable', property_id: context.properties[0].id }] }));
     const args = { conn: mockPg, smsLogId: message.id, extract };
     expect(await replaySmsProfile(args)).toEqual({ dry_run: true, sms_log_id: message.id,
-      new_results: 'staff_review', preserved_fields: [], analysis_and_prior_receipts: 'preserved' });
-    expect(extract).not.toHaveBeenCalled();
+      applied: 0, proposed: 1, preserved: 0, unverified_count: 0, outcomes: [{ field: 'lockbox_code', action: 'create_proposal' }] });
+    expect(extract).toHaveBeenCalledTimes(1);
+    expect((await mockPg('sms_log').first()).operational_analysis).toEqual(original.operational_analysis);
+    expect(await mockPg('audit_log')).toHaveLength(0);
+    expect(await mockPg('data_hygiene_sensitive_vault')).toHaveLength(0);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     expect(await mockPg('data_hygiene_source_extractions')).toHaveLength(1);
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(0);
 
@@ -131,7 +135,7 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(audit).toMatchObject({ resource_id: message.id, actor_type: 'system' });
     expect(JSON.stringify(audit.metadata)).not.toContain('#0123');
     expect(await replaySmsProfile({ ...args, execute: true })).toEqual({ skipped: 'replay_receipt_terminal', receipt_status: 'ok' });
-    expect(extract).toHaveBeenCalledTimes(1);
+    expect(extract).toHaveBeenCalledTimes(2);
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
     // A corrected body is a different explicitly requested replay. An
     // identical proposed value must still leave the existing review intact.
@@ -151,12 +155,43 @@ postgres('SMS operations on PostgreSQL', () => {
     await recordMessageOperations(mockPg, message, extracted, context);
     await mockPg('property_preferences').where({ customer_id: message.customer_id }).update({ lockbox_code: null });
     const extract = jest.fn(async () => extracted);
-    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, extract })).toMatchObject({ preserved_fields: ['lockbox_code'] });
+    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, extract })).toMatchObject({ preserved: 1, outcomes: [{ field: 'lockbox_code', action: 'previously_applied' }] });
     expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, execute: true, extract }))
       .toEqual({ applied: 0, proposed: 0, preserved: 1 });
     expect((await mockPg('property_preferences').first()).lockbox_code).toBeNull();
     expect(await mockPg('data_hygiene_proposals')).toHaveLength(0);
     expect(await mockPg('audit_log').where({ action: 'sms.property_preference.updated' })).toHaveLength(1);
+  });
+
+  test.each(['pending', 'rejected'])('dry-run previews preservation of an identical %s proposal', async (status) => {
+    await recordMessageOperations(mockPg, message, result, context);
+    const proposal = await mockPg('data_hygiene_proposals').first();
+    await mockPg('data_hygiene_proposals').where({ id: proposal.id }).update({ status });
+    const before = await mockPg('sms_log').first();
+    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, extract: async () => result }))
+      .toMatchObject({ dry_run: true, outcomes: [{ field: 'irrigation_controller_location',
+        action: status === 'pending' ? 'preserve_pending' : 'superseded' }] });
+    expect(await mockPg('sms_log').first()).toEqual(before);
+    expect(await mockPg('data_hygiene_proposals').first()).toMatchObject({ id: proposal.id, status });
+    expect(await mockPg('data_hygiene_proposals')).toHaveLength(1);
+    expect(await mockPg('data_hygiene_source_extractions')).toHaveLength(1);
+  });
+
+  test('preview exposes validation dispositions without persisting an exception bell or failed receipt', async () => {
+    await recordMessageOperations(mockPg, message, { facts: [], dropped: 0 }, context);
+    const before = await mockPg('sms_log').first();
+    const extract = async () => ({ ...result, facts: [{ ...result.facts[0], duration: 'visit_only' }] });
+    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, extract }))
+      .toMatchObject({ dry_run: true, applied: 0, proposed: 0, outcomes: [
+        { field: 'irrigation_controller_location', action: 'temporary_instruction' },
+      ] });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(await mockPg('sms_log').first()).toEqual(before);
+    expect(await mockPg('data_hygiene_proposals')).toHaveLength(0);
+    expect(await mockPg('audit_log')).toHaveLength(0);
+    expect(await replaySmsProfile({ conn: mockPg, smsLogId: message.id, extract: async () => { throw new Error('provider unavailable'); } }))
+      .toEqual({ dry_run: true, failed: true });
+    expect(await mockPg('data_hygiene_source_extractions')).toHaveLength(1);
   });
 
   test.each(['pending', 'rejected'])('replaying an identical %s proposal preserves its disposition', async (status) => {
