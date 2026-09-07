@@ -70,7 +70,8 @@ function trailClause(text, matchIsLabel) {
 // excluded predicate ("fumigation is unavailable").
 const AFTER_NEGATION_RE = /^\s*(?:(?!(?:and|or|but)\b)[\w']+\s+){0,2}(?:not(?! only)|never|neither|nor|cannot)\b|^\s*(?:(?!(?:and|or|but)\b)[\w']+\s+){0,1}\w+n't\b|^\s*no\b|^\s*(?:(?:is|are|was|were|remains?|stays?)\s+)?(?:unavailable|excluded|off the (?:menu|table)|discontinued)\b/i;
 
-const LIST_MARKER_RE = /^[ \t]*(?:[-*+\u2022]|\d+[.)])[ \t]+/;
+// A numbered marker is 1–3 digits: "2024. Waves was …" is a year, not item 2024.
+const LIST_MARKER_RE = /^[ \t]*(?:[-*+\u2022]|\d{1,3}[.)])[ \t]+/;
 
 const URL_RE = /https?:\/\/[^\s)<>\]"']+|\btel:\+?[\d-]+|\bmailto:[^\s)>]+/gi;
 
@@ -114,13 +115,15 @@ function normalizeAnswer(text) {
   return { prose: lines.join('\n').replace(/:\n/g, ': ').replace(/:,\s*/g, ': '), urls: urls.join('\n') };
 }
 
-// An assertion only counts for or against Waves when Waves (or a pronoun
-// standing for it) is its subject. The subject is read from the clause after
-// comparison phrases are removed ("Unlike Waves, Orkin offers fumigation" is
-// about Orkin); a clause with no subject of its own ("… and is a franchise")
-// inherits the last subject named earlier in the sentence.
+// An assertion only counts for or against Waves when Waves is its subject.
+// The subject is the last NAMED party before the match (Waves / Adam / a
+// competitor from `other_entities`), read after comparison phrases are
+// removed ("Unlike Waves, Orkin offers fumigation" is about Orkin). A
+// pronoun ("it", "they") or a subject-less coordinated clause ("… and is a
+// franchise") inherits that last named subject, across sentences. With no
+// named party at all the answer is taken to be about Waves.
 const OTHER_ENTITY_RE = new RegExp(`\\b(?:${cohort.other_entities.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'gi');
-const WAVES_SUBJECT_RE = /\bwaves\b|\badam\b|\bbenetti\b|\bwe\b|\bour\b|\bit\b|\bits\b|\bthey\b|\btheir\b|\bthe (?:company|business|firm|llc|operator)\b/gi;
+const WAVES_NAMED_RE = /\bwaves\b|\badam\b|\bbenetti\b|\bwe\b|\bour\b/gi;
 const COMPARISON_PHRASE_RE = /\b(?:unlike|like|such as|compared (?:to|with)|versus|vs\.?|rather than|instead of)\s+[A-Z][\w'&-]+(?:\s+[A-Z][\w'&-]+){0,2},?/g;
 const COMPARISON_INTRO_RE = /\b(?:unlike|like|such as|compared (?:to|with)|versus|vs\.?|rather than|instead of)\s+[A-Z][\w'&-]+(?:\s+[A-Z][\w'&-]+){0,2},?\s*$/;
 
@@ -131,14 +134,10 @@ function lastIndexOfMatch(re, text) {
   return last;
 }
 
-function aboutAnotherEntity(beforeClause, sentencePrefix) {
+function aboutAnotherEntity(beforeClause, answerPrefix) {
   if (COMPARISON_INTRO_RE.test(beforeClause)) return true;
-  const clause = beforeClause.replace(COMPARISON_PHRASE_RE, ' ');
-  const otherInClause = lastIndexOfMatch(OTHER_ENTITY_RE, clause);
-  const wavesInClause = lastIndexOfMatch(WAVES_SUBJECT_RE, clause);
-  if (otherInClause >= 0 || wavesInClause >= 0) return otherInClause > wavesInClause;
-  const sentence = sentencePrefix.replace(COMPARISON_PHRASE_RE, ' ');
-  return lastIndexOfMatch(OTHER_ENTITY_RE, sentence) > lastIndexOfMatch(WAVES_SUBJECT_RE, sentence);
+  const named = answerPrefix.replace(COMPARISON_PHRASE_RE, ' ');
+  return lastIndexOfMatch(OTHER_ENTITY_RE, named) > lastIndexOfMatch(WAVES_NAMED_RE, named);
 }
 
 function matchesAnywhere(compiled, text) {
@@ -161,7 +160,7 @@ function asserted(compiled, answer) {
     const after = trailClause(answer.slice(end), before.trim() === '');
     // Facts and claims alike must be about Waves: "Orkin serves Manatee"
     // earns no footprint credit and "Orkin is a franchise" is no wrong claim.
-    if (aboutAnotherEntity(before, answer.slice(0, start).split(/[.!?;\n]/).pop())) continue;
+    if (aboutAnotherEntity(before, answer.slice(0, start))) continue;
     // A negation INSIDE the match ("bond is not optional") also denies it,
     // unless the pattern deliberately matched a negated phrase from its first
     // word ("not a franchise" as evidence of independence).

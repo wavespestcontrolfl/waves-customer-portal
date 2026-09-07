@@ -103,6 +103,18 @@ test('a claim about a competitor is not a wrong claim about Waves', () => {
   expect(score('E8', 'Orkin is a national chain and is a franchise.').forbidden.franchise).toBe(false);
   expect(score('E8', 'Waves is a national chain and is a franchise.').forbidden.franchise).toBe(true);
   expect(score('E8', 'Orkin is a franchise, but Waves is a franchise too.').forbidden.franchise).toBe(true);
+  expect(score('E6', 'Orkin is a national chain and it offers fumigation. Waves does not.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E5', 'Orkin is national. It serves Manatee County. Waves is based in Lakewood Ranch.')).toMatchObject({ expected: { manatee: false, hq_lakewood_ranch: true } });
+  expect(score('E6', 'Waves is family-owned. It offers pest control and lawn care.')).toMatchObject({ expected: { pest_control: true, lawn_care: true } });
+});
+
+test('the founding-year fact needs founding context, but a bare year answer still counts', () => {
+  expect(score('E4', 'Waves was founded in 2014, and its license was renewed in 2024.')).toMatchObject({ expected: { founded_2024: false }, forbidden: { wrong_founding_year: true } });
+  expect(score('E4', '2024.').expected.founded_2024).toBe(true);
+  expect(score('E4', '2024. Waves Pest Control, LLC was filed with the Florida Division of Corporations on February 6, 2024.').expected.founded_2024).toBe(true);
+  expect(score('E4', 'February 6, 2024 (LLC filing).').expected.founded_2024).toBe(true);
+  expect(score('E4', 'Founded: 2024').expected.founded_2024).toBe(true);
+  expect(score('E4', 'The company has been in business since 2024.').expected.founded_2024).toBe(true);
 });
 
 test('coordinated predicates and colon lists scope negation to the assertion it modifies', () => {
