@@ -135,6 +135,31 @@ const baseBody = {
 };
 
 describe('admin estimate persistence', () => {
+  test('a repeated create keeps the same draft and never rewrites it', async () => {
+    const fixture = makeDatabase({});
+    const body = { ...baseBody, leadId: null, clientDraftId: '01234567-89ab-4cde-8fab-0123456789ab' };
+    const create = () => createOrReuseAdminEstimate({ database: fixture.database, body,
+      technicianId: 'qa-admin', recompute: async () => ({ recomputed: false, reason: 'NO_INPUTS' }),
+    });
+    const first = await create();
+    const retry = await create();
+    expect(first.estimate.id).toBe(body.clientDraftId);
+    expect(retry).toMatchObject({ reused: true, estimate: { id: first.estimate.id } });
+    expect(fixture.inserts.filter((entry) => entry.table === 'estimates')).toHaveLength(1);
+    expect(fixture.updates).toHaveLength(0);
+  });
+
+  test('a retried draft identity cannot overwrite a different form', async () => {
+    const fixture = makeDatabase({});
+    const body = { ...baseBody, leadId: null, clientDraftId: '01234567-89ab-4cde-8fab-0123456789ab' };
+    const args = { database: fixture.database, body, technicianId: 'qa-admin', recompute: async () => ({ recomputed: false, reason: 'NO_INPUTS' }) };
+    await createOrReuseAdminEstimate(args);
+    await expect(createOrReuseAdminEstimate({ ...args, body: { ...body,
+      estimateData: { ...body.estimateData, inputs: { address: 'A different synthetic property' } },
+    } })).rejects.toMatchObject({ statusCode: 409 });
+    expect(fixture.updates).toHaveLength(0);
+  });
+
   beforeEach(() => {
     clearAllEstimatePricingCache();
   });
