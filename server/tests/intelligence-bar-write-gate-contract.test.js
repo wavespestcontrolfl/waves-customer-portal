@@ -73,7 +73,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'outcomes.js', 'task-context.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'

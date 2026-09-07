@@ -37,7 +37,7 @@
   "block_sender": {
     "module": "email-tools.js",
     "domain": "email",
-    "kind": "internal_write",
+    "kind": "external_action",
     "role": "admin",
     "approval": "ui_confirm"
   },
