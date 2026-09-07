@@ -9,7 +9,10 @@
  *    user-agent / the preflight pair cross, plus X-Forwarded-For from req.ip; raw POST body forwarded byte-for-byte;
  *    a gzip-encoded body arrives inflated WITHOUT a content-encoding label
  *  - upstream status/body/CORS headers pass through; set-cookie and
- *    content-encoding do not; CORP is cross-origin (hub loads array.js from here)
+ *    content-encoding do not; CORP is cross-origin (hub loads array.js from here);
+ *    the upstream body is STREAMED (a multi-chunk body arrives intact), capped in
+ *    size (over the cap → cut off, upstream cancelled, slot freed), and the slot
+ *    is held until the downstream write has finished
  *  - oversize body → 413, upstream failure → 502; the failure log never
  *    carries the caller-controlled path
  *  - per-IP limiter sits AFTER the gate: gate-off probes never spend budget,
@@ -253,6 +256,20 @@ describe('response boundary', () => {
     expect(res.headers['cross-origin-resource-policy']).toBe('cross-origin');
   });
 
+  test('a multi-chunk upstream body is streamed through intact', async () => {
+    const chunks = ['abc', 'def', 'ghi'.repeat(1000), 'end'];
+    fetchImpl = async () => new Response(new ReadableStream({
+      async start(ctl) {
+        for (const c of chunks) { ctl.enqueue(new TextEncoder().encode(c)); await new Promise((t) => setTimeout(t, 5)); }
+        ctl.close();
+      },
+    }), { status: 200, headers: { 'content-type': 'application/javascript' } });
+    const res = await request({ path: '/ingest/static/array.js' });
+    expect(res.status).toBe(200);
+    expect(res.body.toString()).toBe(chunks.join(''));
+    expect(res.headers['content-type']).toBe('application/javascript');
+  });
+
   test('preflight OPTIONS is forwarded and its answer returned', async () => {
     fetchImpl = async () => upstreamResponse({ status: 204, body: null, headers: { 'access-control-allow-methods': 'POST' } });
     const res = await request({ method: 'OPTIONS', path: '/ingest/e/', headers: { origin: 'https://pestcontrolparrish.com' } });
@@ -458,6 +475,74 @@ describe('per-IP limiter after the gate', () => {
       expect(await other).toBe(200);
       for (let i = 0; i < 50 && r.inFlightCount() > 0; i++) await new Promise((t) => setTimeout(t, 10));
       expect(r.inFlightCountFor('203.0.113.30')).toBe(0);
+      expect(r.inFlightCount()).toBe(0);
+    } finally {
+      await new Promise((done) => srv.close(done));
+    }
+  });
+
+  test('upstream response over the size cap is cut off, upstream cancelled, slot freed, nothing echoed', async () => {
+    let r;
+    jest.isolateModules(() => {
+      process.env.POSTHOG_INGEST_MAX_RESPONSE_BYTES = '2048';
+      r = require('../routes/posthog-ingest');
+      delete process.env.POSTHOG_INGEST_MAX_RESPONSE_BYTES;
+    });
+    const { srv, base } = await listen(r);
+    let cancelled = false;
+    fetchImpl = async (url, init) => new Response(new ReadableStream({
+      async pull(ctl) { ctl.enqueue(new Uint8Array(1024)); await new Promise((t) => setTimeout(t, 2)); },
+      cancel() { cancelled = true; },
+    }), { status: 200, headers: { 'content-type': 'application/octet-stream' } });
+    logger.warn.mockClear();
+    try {
+      const outcome = await new Promise((resolve) => {
+        const req = http.request(base + '/ingest/static/big.js', { method: 'GET', headers: { 'x-forwarded-for': '203.0.113.40' } }, (res) => {
+          let bytes = 0;
+          res.on('data', (c) => { bytes += c.length; });
+          res.on('end', () => resolve({ status: res.statusCode, bytes, ended: true }));
+          res.on('error', () => resolve({ status: res.statusCode, bytes, ended: false }));
+          res.on('aborted', () => resolve({ status: res.statusCode, bytes, ended: false }));
+        });
+        req.on('error', (e) => resolve({ error: e.code }));
+        req.end();
+      });
+      // Either the client saw a truncated/aborted body or a reset — never the full stream.
+      expect(outcome.bytes === undefined || outcome.bytes <= 4096).toBe(true);
+      for (let i = 0; i < 100 && r.inFlightCount() > 0; i++) await new Promise((t) => setTimeout(t, 10));
+      expect(r.inFlightCount()).toBe(0);
+      expect(cancelled).toBe(true);
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(String(logger.warn.mock.calls[0][0])).toContain('over 2048 bytes (static)');
+      expect(String(logger.warn.mock.calls[0][0])).not.toContain('big.js');
+    } finally {
+      await new Promise((done) => srv.close(done));
+    }
+  });
+
+  test('the slot is held until the downstream write has finished, not just until upstream answered', async () => {
+    let r;
+    jest.isolateModules(() => {
+      process.env.POSTHOG_INGEST_MAX_IN_FLIGHT = '1';
+      r = require('../routes/posthog-ingest');
+      delete process.env.POSTHOG_INGEST_MAX_IN_FLIGHT;
+    });
+    const { srv, base } = await listen(r);
+    let finishBody;
+    const gate = new Promise((resolve) => { finishBody = resolve; });
+    fetchImpl = async () => new Response(new ReadableStream({
+      async start(ctl) { ctl.enqueue(new TextEncoder().encode('head')); await gate; ctl.enqueue(new TextEncoder().encode('tail')); ctl.close(); },
+    }), { status: 200 });
+    try {
+      const first = get(base, '/ingest/flags/', '203.0.113.50');
+      for (let i = 0; i < 50 && fetchCalls.length < 1; i++) await new Promise((t) => setTimeout(t, 10));
+      await new Promise((t) => setTimeout(t, 50));
+      // Headers are out, body still streaming → slot still held → second request 503.
+      expect(r.inFlightCount()).toBe(1);
+      expect(await get(base, '/ingest/flags/', '203.0.113.51')).toBe(503);
+      finishBody();
+      expect(await first).toBe(200);
+      for (let i = 0; i < 50 && r.inFlightCount() > 0; i++) await new Promise((t) => setTimeout(t, 10));
       expect(r.inFlightCount()).toBe(0);
     } finally {
       await new Promise((done) => srv.close(done));

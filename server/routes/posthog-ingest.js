@@ -40,6 +40,8 @@
  *    caller can put anything in `/ingest/<segment>`); upstream failures log
  *    the method, a fixed route category and the error kind only.
  */
+const { Readable, Transform } = require('stream');
+const { pipeline } = require('stream/promises');
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { gateEnvValue } = require('../config/feature-gates');
@@ -50,6 +52,13 @@ const API_HOST = 'https://us.i.posthog.com';
 const ASSET_HOST = 'https://us-assets.i.posthog.com';
 const BODY_LIMIT = '2mb';
 const UPSTREAM_TIMEOUT_MS = 10000;
+// Upstream responses are STREAMED to the client with backpressure, never
+// materialised: a size cap (PostHog's biggest asset, array.full.js, is a
+// couple of MB) and a downstream write deadline bound what a slow or
+// abandoned reader can keep alive. The in-flight slot is held until the
+// downstream write has finished or the connection has closed.
+const MAX_RESPONSE_BYTES = Math.max(1024, parseInt(process.env.POSTHOG_INGEST_MAX_RESPONSE_BYTES, 10) || 8 * 1024 * 1024);
+const RESPONSE_WRITE_TIMEOUT_MS = Math.max(100, parseInt(process.env.POSTHOG_INGEST_RESPONSE_TIMEOUT_MS, 10) || 15000);
 const METHODS = new Set(['GET', 'POST', 'OPTIONS']);
 // posthog-js sends roughly 10–20 requests/min per active visitor (events,
 // replay batches every few seconds, flags); 300/min per IP leaves room for a
@@ -142,6 +151,24 @@ function releaseSlot(res) {
   }
 }
 
+// Passes bytes through untouched but fails the pipeline once the cap is
+// crossed, which tears down both ends (upstream stream cancelled, client
+// socket destroyed) instead of holding a growing buffer.
+function byteCap(limit) {
+  let seen = 0;
+  return new Transform({
+    transform(chunk, _enc, cb) {
+      seen += chunk.length;
+      if (seen > limit) {
+        const err = new Error('ingest response too large');
+        err.code = 'ERR_INGEST_RESPONSE_TOO_LARGE';
+        return cb(err);
+      }
+      return cb(null, chunk);
+    },
+  });
+}
+
 async function proxy(req, res) {
   // Body fully buffered — the upload deadline no longer applies.
   if (res.locals.ingestUploadTimer) {
@@ -155,11 +182,19 @@ async function proxy(req, res) {
     releaseSlot(res);
     return res.status(400).end();
   }
+  const category = url.startsWith(ASSET_HOST) ? 'static' : 'ingest';
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  // Phase 1 deadline: upstream must answer (headers) within UPSTREAM_TIMEOUT_MS.
+  let timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
   let clientGone = false;
-  const onClientGone = () => { if (!res.writableFinished) { clientGone = true; controller.abort(); } };
+  const onClientGone = () => {
+    if (!res.writableFinished) {
+      clientGone = true;
+      controller.abort();
+    }
+  };
   res.once('close', onClientGone);
+  let sizeExceeded = false;
   try {
     const hasBody = req.method === 'POST' && Buffer.isBuffer(req.body) && req.body.length > 0;
     const upstream = await fetch(url, {
@@ -169,7 +204,14 @@ async function proxy(req, res) {
       redirect: 'manual',
       signal: controller.signal,
     });
-    const body = Buffer.from(await upstream.arrayBuffer());
+    clearTimeout(timer);
+    // Phase 2 deadline: the whole downstream write must finish within
+    // RESPONSE_WRITE_TIMEOUT_MS — a reader that stops consuming is cut off,
+    // upstream cancelled with it.
+    timer = setTimeout(() => {
+      controller.abort();
+      res.destroy(new Error('ingest downstream write timeout'));
+    }, RESPONSE_WRITE_TIMEOUT_MS);
     res.status(upstream.status);
     upstream.headers.forEach((value, name) => {
       if (!DROP_RESPONSE_HEADERS.has(name)) res.setHeader(name, value);
@@ -177,13 +219,26 @@ async function proxy(req, res) {
     // The hub loads /ingest/static/array.js cross-origin (www → portal);
     // helmet's default CORP would refuse it, so say so explicitly here.
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-    res.end(body);
+    if (!upstream.body) {
+      res.end();
+      return;
+    }
+    const cap = byteCap(MAX_RESPONSE_BYTES);
+    cap.once('error', (e) => { if (e && e.code === 'ERR_INGEST_RESPONSE_TOO_LARGE') sizeExceeded = true; });
+    // pipeline() resolves only when `res` has finished, and rejects when
+    // either end goes away — so the slot (released in finally) outlives the
+    // downstream write, and a premature client close cancels upstream.
+    await pipeline(Readable.fromWeb(upstream.body), cap, res);
   } catch (e) {
-    if (!clientGone) {
+    if (sizeExceeded) {
+      controller.abort();
+      logger.warn(`[posthog-ingest] upstream response over ${MAX_RESPONSE_BYTES} bytes (${category}) — cut off`);
+      if (!res.headersSent) res.status(502).end(); else res.destroy();
+    } else if (!clientGone) {
       // Never echo the request: the path is caller-controlled free text.
       const kind = e && e.name === 'AbortError' ? 'timeout' : (e && e.code) || (e && e.name) || 'error';
-      logger.warn(`[posthog-ingest] upstream failed ${req.method} ${url.startsWith(ASSET_HOST) ? 'static' : 'ingest'}: ${kind}`);
-      if (!res.headersSent) res.status(502).end();
+      logger.warn(`[posthog-ingest] upstream failed ${req.method} ${category}: ${kind}`);
+      if (!res.headersSent) res.status(502).end(); else res.destroy();
     }
   } finally {
     clearTimeout(timer);

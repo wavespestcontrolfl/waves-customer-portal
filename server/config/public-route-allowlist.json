@@ -358,12 +358,12 @@
     {
       "router": "server/routes/posthog-ingest.js",
       "mount": "/ingest",
-      "reason": "First-party PostHog ingest proxy (docs/public-route-contracts.md `/ingest/*`): dark behind GATE_POSTHOG_INGEST_PROXY (404, read per request), fixed upstream hosts with origin assertion, GET/POST/OPTIONS only, per-IP limiter after the gate, in-flight cap (process-wide + per-IP share) + upload deadline before buffering, 2 MB / 10 s caps, request headers allowlisted (cookies/auth/referer/proxy-chain never cross), nothing from the request logged. Anonymous by design — the browser SDK on the hub and /book posts here instead of *.posthog.com.",
+      "reason": "First-party PostHog ingest proxy (docs/public-route-contracts.md `/ingest/*`): dark behind GATE_POSTHOG_INGEST_PROXY (404, read per request), fixed upstream hosts with origin assertion, GET/POST/OPTIONS only, per-IP limiter after the gate, in-flight cap (process-wide + per-IP share) + upload deadline before buffering, 2 MB / 10 s caps, streamed size-capped response with write deadline, request headers allowlisted (cookies/auth/referer/proxy-chain never cross), nothing from the request logged. Anonymous by design — the browser SDK on the hub and /book posts here instead of *.posthog.com.",
       "routes": [
         "ALL /ingest/*",
         "USE /ingest (express-rate-limit({ handler#8c637dbe }))",
-        "USE /ingest (inline function#145b4d3a)",
         "USE /ingest (inline function#3e44b7bf)",
+        "USE /ingest (inline function#3e8e0800)",
         "USE /ingest (inline function#5a3084b2)"
       ]
     },

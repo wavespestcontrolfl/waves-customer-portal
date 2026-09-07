@@ -627,7 +627,12 @@ a client disconnect aborts the upstream call and the slot is held until
 that call settles, so upload-and-hang-up loops cannot exceed the cap, and an
 upload deadline (`POSTHOG_INGEST_UPLOAD_TIMEOUT_MS`, default 15 s) tears down
 a body that has not fully arrived so stalled uploads cannot sit on the slots;
-2 MB raw body cap (413); 10 s upstream timeout (502).
+2 MB raw body cap (413); 10 s upstream timeout (502); the upstream response
+is STREAMED to the client with backpressure — never buffered — under a size
+cap (`POSTHOG_INGEST_MAX_RESPONSE_BYTES`, default 8 MB; over it the response
+is cut off and upstream cancelled) and a downstream write deadline
+(`POSTHOG_INGEST_RESPONSE_TIMEOUT_MS`, default 15 s), and the in-flight slot
+is held until the downstream write has finished or the connection closed.
 Inbound request headers are ALLOWLISTED — only `content-type`, `accept`,
 `accept-language`, `origin`, `user-agent` and the preflight
 `access-control-request-*` pair cross — so cookies, authorization, referer,
