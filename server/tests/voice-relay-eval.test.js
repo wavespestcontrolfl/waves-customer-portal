@@ -1138,6 +1138,33 @@ describe('voice relay eval — the harness', () => {
     expect(runCheck(exp('commitment_requires_receipt', true), rec).status).toBe('fail');
   });
 
+  test('a capture with no valid callback number is refused before any effect, as the live phone gate does; the caller ID stands in only when no number was given; spam is exempt', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const { runFixtureTool, runCheck } = replay._internals;
+    const s = replay.loadFixture(FIXTURE_PATH).scenarios.find((x) => x.id === 'office-closed-person-request');
+    const fresh = () => ({ ...record(), turn: 1, modelCalls: 1, toolUse: {}, toolResponseUse: {}, warnings: [] });
+    const call_summary = 'Wants to speak to a person tomorrow';
+    const junk = fresh();
+    const ctx = { markCaptured: jest.fn(), noteCallSummary: jest.fn() };
+    expect(await runFixtureTool({ scenario: s, record: junk }, 'capture_lead', { call_summary, callback_phone: '0177' }, ctx)).toMatch(/do not have a valid phone number/);
+    expect(junk.toolCalls.at(-1)).toMatchObject({ invalid: true, ok: false, receipt: false });
+    expect(ctx.markCaptured).not.toHaveBeenCalled();
+    junk.events.push({ kind: 'agent', text: 'A team member will call you tomorrow.', index: junk.events.length });
+    expect(runCheck(exp('commitment_requires_receipt', true), junk).status).toBe('fail');
+    expect(runCheck(exp('capture_lead_input_includes', { call_summary }), junk).status).toBe('fail');
+    // A spoken number in any 10-digit form is accepted; no number falls back to the caller ID.
+    for (const input of [{ call_summary, callback_phone: '941-555-0199' }, { call_summary, callback_phone: '(941) 555-0199' }, { call_summary }]) {
+      const rec = fresh();
+      expect(await runFixtureTool({ scenario: s, record: rec }, 'capture_lead', input, ctx)).toMatch(/Lead saved successfully/);
+      expect(rec.toolCalls.at(-1)).toMatchObject({ invalid: false, ok: true, receipt: true });
+    }
+    // A spam capture is suppressed before the number is read, as live.
+    const spam = fresh();
+    expect(await runFixtureTool({ scenario: s, record: spam }, 'capture_lead', { call_summary, lead_quality: 'spam', callback_phone: '0177' }, ctx)).toMatch(/Lead saved successfully/);
+    expect(spam.toolCalls.at(-1)).toMatchObject({ invalid: false, ok: true, receipt: false });
+  });
+
   test('an estimate capture is queued only once the office can send it: fields accumulate across captures like the live tool, and an incomplete capture is no receipt for the promise', async () => {
     mockSdk();
     const replay = require('../services/eval/voice-relay-replay');

@@ -437,6 +437,18 @@ function validateToolInput(name, input = {}, record) {
   return null;
 }
 
+// The live capture_lead's phone gate (relay-tools): a spam capture is
+// suppressed before any number is read; otherwise the number the caller gave
+// (callback_phone) is preferred over the caller ID WITHOUT falling back to it,
+// and a non-E.164 result saves nothing.
+const NO_CALLBACK_NUMBER_TEXT = 'I could not save the lead yet — we do not have a valid phone number to reach the caller. '
+  + 'Ask the caller for the best 10-digit number and call capture_lead again with callback_phone.';
+function noCallbackNumber(name, input, scenario) {
+  if (name !== 'capture_lead' || input.lead_quality === 'spam') return null;
+  const { toE164, isLikelyE164 } = require('../../utils/phone');
+  return isLikelyE164(toE164(input.callback_phone || scenario.caller?.from || '')) ? null : NO_CALLBACK_NUMBER_TEXT;
+}
+
 /** Does `input` satisfy a `when` matcher? Strings match case-insensitively as substrings, arrays as any-of, everything else strictly. */
 function inputMatches(input = {}, when = {}) {
   return Object.entries(when).every(([field, want]) => {
@@ -552,7 +564,7 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
   const answer = (text, ok) => { event.ok = ok; event.text = text; return text; };
   // The real tool's own refusals come first — a missing argument, a bad
   // enum, an invented ref — before any fixture answer, hanging or not.
-  const invalid = validateToolInput(name, input, record);
+  const invalid = validateToolInput(name, input, record) || noCallbackNumber(name, input, scenario);
   if (invalid) { event.invalid = true; return answer(invalid, false); }
   const picked = pickToolResponse(scenario, name, record.toolUse[name], matcherInput(record, event, name, input), record.toolResponseUse);
   if (!picked) {
