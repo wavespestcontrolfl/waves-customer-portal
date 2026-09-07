@@ -77,3 +77,13 @@ test('resolved cards do not offer another confirmation after a follow-up', () =>
   expect(screen.getByText('✓ Done')).toBeTruthy();
   expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
 });
+
+test('a recovered expired receipt asks for a fresh proposal without implying execution failed', () => {
+  render(<PendingActionsCard actions={[{ ...action, contract: { action_label: 'Save request', approval: { required: true, reason: 'Confirm to run' } }, receipt: { outcome: 'expired', result: null } }]} variant="light" />);
+  expect(screen.getByText('Expired proposal: Save request')).toBeTruthy();
+  expect(screen.getByText(/no longer confirmable/)).toBeTruthy();
+  expect(screen.queryByText(/Awaiting your confirmation/)).toBeNull();
+  expect(screen.queryByText('Confirm to run')).toBeNull();
+  expect(screen.queryByText('Failed')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
+});
