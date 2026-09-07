@@ -87,9 +87,11 @@ describe('assistant estimate refresh', () => {
  const mount = () => render(<MemoryRouter><IntelligenceBarPageDataProvider><AssistantOutcome /><EstimateToolViewV2 editEstimateId={source.id} /></IntelligenceBarPageDataProvider></MemoryRouter>);
  it('refreshes the matching saved editor and publishes only its current record identifiers', async () => {
   mount();await screen.findByDisplayValue('QA Contact');
-  expect(screen.getByRole('status', { name: 'Current assistant targets' })).toHaveTextContent('qa-property');
-  expect(screen.getByRole('status', { name: 'Current assistant targets' })).toHaveTextContent('qa-draft');
-  expect(screen.getByRole('status', { name: 'Current assistant targets' })).not.toHaveTextContent('QA Contact');
+  await waitFor(() => {
+   expect(screen.getByRole('status', { name: 'Current assistant targets' })).toHaveTextContent('qa-property');
+   expect(screen.getByRole('status', { name: 'Current assistant targets' })).toHaveTextContent('qa-draft');
+   expect(screen.getByRole('status', { name: 'Current assistant targets' })).not.toHaveTextContent('QA Contact');
+  });
   currentSource={...structuredClone(source),editVersion:'assistant-version',customerName:'QA Assistant Saved'};
   fireEvent.click(screen.getByRole('button',{name:'Assistant saved estimate'}));
   await screen.findByDisplayValue('QA Assistant Saved');
@@ -129,7 +131,7 @@ describe('assistant estimate refresh', () => {
   currentSource={...currentSource,customerId:'qa-customer-a'};
   const tree=id=><MemoryRouter><IntelligenceBarPageDataProvider><AssistantOutcome /><EstimateToolViewV2 editEstimateId={id} /></IntelligenceBarPageDataProvider></MemoryRouter>;
   const view=render(tree(source.id));await screen.findByDisplayValue('QA Contact');
-  expect(screen.getByRole('status',{name:'Current assistant targets'})).toHaveTextContent('qa-draft');
+  await waitFor(()=>expect(screen.getByRole('status',{name:'Current assistant targets'})).toHaveTextContent('qa-draft'));
   let finish;
   const original=fetcher.getMockImplementation();
   fetcher.mockImplementation((url,opts)=>String(url).endsWith('/edit-source')?new Promise(resolve=>{finish=resolve;}):original(url,opts));
@@ -141,8 +143,10 @@ describe('assistant estimate refresh', () => {
   expect(targets).not.toHaveTextContent('qa-customer-a');
   await act(async()=>finish(await response({...source,id:'qa-next-draft',customerId:'qa-customer-b',propertyId:'qa-property-b',customerName:'QA Next'})));
   await screen.findByDisplayValue('QA Next');
-  expect(targets).toHaveTextContent('qa-next-draft');
-  expect(targets).toHaveTextContent('qa-property-b');
-  expect(targets).toHaveTextContent('qa-customer-b');
+  await waitFor(()=>{
+   expect(targets).toHaveTextContent('qa-next-draft');
+   expect(targets).toHaveTextContent('qa-property-b');
+   expect(targets).toHaveTextContent('qa-customer-b');
+  });
  });
 });
