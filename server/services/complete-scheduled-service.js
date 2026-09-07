@@ -6157,10 +6157,14 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             serviceProducts: insertedServiceProducts,
             completionInput: {
               ...(lawnProtocolCompletion || {}),
-              // The validated visit area (or undefined when no consumer gate
-              // is on) and the validated (trimmed) skipped defaults — never
-              // the raw client fields.
-              treatedSqft: lawnCompletionArea,
+              // Under a consumer gate the writer receives the validated visit
+              // area, never the raw client field. With every gate off the
+              // spread keeps the legacy raw field exactly as before this lane
+              // (pre-push audit P1: overriding it with undefined made the
+              // WaveGuard writer substitute the planned area for a submitted
+              // one on a form opened before a gate rollback).
+              ...(lawnVisitAreaConsumed ? { treatedSqft: lawnCompletionArea } : {}),
+              // The validated (trimmed) skipped defaults — never the raw field.
               skippedProducts: lawnSkippedProducts,
               incompleteVisit: isIncompleteVisit,
               inventoryDeductions,
