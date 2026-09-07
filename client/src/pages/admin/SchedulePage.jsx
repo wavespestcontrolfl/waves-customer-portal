@@ -1534,6 +1534,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     technicianId: form.technicianId || undefined,
     excludeServiceIds: [service.id],
     pickedStart: form.windowStart,
+    pickedEnd: form.windowEnd,
     rangeFrom: etDateString(),
   });
   // Estimate provenance: if this appointment was scheduled from an accepted

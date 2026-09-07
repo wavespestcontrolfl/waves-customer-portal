@@ -129,6 +129,7 @@ export default function RescheduleConfirmModal({
     // display-only chips can't adopt a technician. No tech, no hint.
     enabled: open && technicianId != null,
     pickedStart: toStart || undefined,
+    pickedEnd: toEnd || undefined,
     rangeFrom: etDateString(),
   });
 

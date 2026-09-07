@@ -65,7 +65,7 @@ function mapSlot(s, scopedToTech) {
 export function useBestTimes({
   date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds,
   arrivalWindows = false, enabled = true, address, lat, lng,
-  pickedStart, rangeFrom, sameDayFloorMin,
+  pickedStart, pickedEnd, rangeFrom, sameDayFloorMin,
 }) {
   const [bestTimes, setBestTimes] = useState([]);
   const [picked, setPicked] = useState(null);
@@ -79,6 +79,9 @@ export function useBestTimes({
   // trim to HH:MM so the current hour is scored before the operator touches
   // the field.
   const pickedKey = /^\d{2}:\d{2}(:\d{2})?$/.test(String(pickedStart || '')) ? String(pickedStart).slice(0, 5) : '';
+  // The edit form's window end travels with the start so the picked hour
+  // is scored over the whole window, like the live conflict check.
+  const pickedEndKey = /^\d{2}:\d{2}(:\d{2})?$/.test(String(pickedEnd || '')) ? String(pickedEnd).slice(0, 5) : '';
   const rangeKey = YMD.test(String(rangeFrom || '')) ? String(rangeFrom) : '';
   useEffect(() => {
     setBestTimes([]);
@@ -126,7 +129,7 @@ export function useBestTimes({
       };
       try {
         const [day, range] = await Promise.all([
-          search({ dateFrom: date, dateTo: date, topN: 3, pickedStart: pickedKey || undefined }),
+          search({ dateFrom: date, dateTo: date, topN: 3, pickedStart: pickedKey || undefined, pickedEnd: (pickedKey && pickedEndKey) || undefined }),
           rangeKey ? search({ dateFrom: rangeKey, dateTo: addDays(rangeKey, RANGE_DAYS), topN: 1 }) : Promise.resolve(null),
         ]);
         if (!controller.signal.aborted) {
@@ -159,6 +162,6 @@ export function useBestTimes({
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, serviceId, customerId, durationMinutes, technicianId, excludeKey, arrivalWindows, address, lat, lng, pickedKey, rangeKey, sameDayFloorMin]);
+  }, [enabled, date, serviceId, customerId, durationMinutes, technicianId, excludeKey, arrivalWindows, address, lat, lng, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin]);
   return { bestTimes, picked, bestInRange, checking };
 }

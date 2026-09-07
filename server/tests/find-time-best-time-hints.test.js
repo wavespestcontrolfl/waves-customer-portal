@@ -358,6 +358,20 @@ test('pickedStart inside a gap answers that gap\'s drive-in leg, origin and deto
   expect(body.slots).toHaveLength(2);
 });
 
+test('pickedEnd past start + duration scores the whole window against the gap ceiling (edit form)', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  // Gap 09:00..latest start 13:00 for a 60-min search → last clear end 14:00.
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot({ latest_start_min: 13 * 60 })], evaluated: 1 });
+  const fits = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '11:00', pickedEnd: '14:00' })).json();
+  expect(fits.picked).toMatchObject({ start: '11:00', fits: true });
+  const miss = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '11:00', pickedEnd: '15:00' })).json();
+  expect(miss.picked).toEqual({ start: '11:00', fits: false });
+  // An end before start + duration never shrinks the window.
+  const short = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '13:00', pickedEnd: '13:30' })).json();
+  expect(short.picked).toMatchObject({ start: '13:00', fits: true });
+  expect((await post({ ...BASE, hint: true, pickedStart: '11:00', pickedEnd: 'noon' })).status).toBe(400);
+});
+
 test('pickedStart in the first gap reports the home base as the origin', async () => {
   process.env.GATE_BEST_TIME_HINTS = 'true';
   findAvailableSlots.mockResolvedValue({ slots: [gapSlot()], evaluated: 1 });

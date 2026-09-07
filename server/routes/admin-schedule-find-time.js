@@ -166,7 +166,7 @@ router.post('/', async (req, res) => {
       durationMinutes, dateFrom, dateTo,
       technicianId, topN,
       hint, serviceId, arrivalWindows, excludeServiceIds, slotStepMinutes,
-      pickedStart, sameDayFloorMin,
+      pickedStart, pickedEnd, sameDayFloorMin,
     } = req.body || {};
 
     // Best-time hint consumers go dark behind GATE_BEST_TIME_HINTS — read
@@ -199,6 +199,13 @@ router.post('/', async (req, res) => {
     // can say what THAT hour costs, not only which hours rank best.
     if (pickedStart !== undefined && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(pickedStart))) {
       throw httpError(400, 'pickedStart must be HH:MM');
+    }
+    // The edit form's window end is set independently of the service
+    // duration; when it runs past start + duration the picked hour is
+    // scored over the WHOLE window, matching the live conflict check and
+    // the save probe (pre-push P1).
+    if (pickedEnd !== undefined && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(pickedEnd))) {
+      throw httpError(400, 'pickedEnd must be HH:MM');
     }
     // A picker's own same-day floor (next top of the hour, or the
     // running-late target) in minutes from midnight — applied INSIDE the
@@ -347,11 +354,12 @@ router.post('/', async (req, res) => {
     // than the gap walk) — is absent from rawSlots for bounds reasons, not
     // route reasons: the edit picker allows 07:00, so it stays unscored.
     const dayEndMin = useArrivalWindows ? ADMIN_DAY_END_MINUTES : DAY_END_HOUR * 60;
-    const pickedOutOfBounds = pickedStart !== undefined
-      && (toMin(pickedStart) < DAY_START_HOUR * 60 || toMin(pickedStart) + spanMin > dayEndMin);
+    const pickedMin = pickedStart !== undefined ? toMin(pickedStart) : null;
+    const pickedEndMin = pickedMin == null ? null
+      : Math.max(pickedMin + spanMin, pickedEnd !== undefined ? toMin(pickedEnd) : 0);
+    const pickedOutOfBounds = pickedMin != null && (pickedMin < DAY_START_HOUR * 60 || pickedEndMin > dayEndMin);
     if (hint && pickedStart && !pickedTooSoon && !pickedOutOfBounds) {
-      const pickedMin = toMin(pickedStart);
-      const pickedWindow = { start: pickedStart, end: toHHMM(pickedMin + spanMin) };
+      const pickedWindow = { start: pickedStart, end: toHHMM(pickedEndMin) };
       if (useArrivalWindows) {
         // The arrival simulation answers "unverified" for grouped visits,
         // coordless stops, and in-progress routes, and the recommendation
@@ -380,7 +388,10 @@ router.post('/', async (req, res) => {
           if (s.date !== from) return false;
           const lo = toMin(s.start_time);
           const hi = Number.isFinite(s.latest_start_min) ? s.latest_start_min : lo;
-          return lo != null && lo <= pickedMin && pickedMin <= hi;
+          // latest_start_min is the last start whose END (start + the
+          // searched duration) still clears the drive out — compare the
+          // picked window's end against that same ceiling.
+          return lo != null && lo <= pickedMin && pickedEndMin <= hi + spanMin;
         });
         picked = { start: pickedStart, fits: false };
         if (gap) {

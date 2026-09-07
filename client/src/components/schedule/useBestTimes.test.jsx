@@ -42,9 +42,9 @@ it('scores the picked hour on the day and searches the next 3 days for the singl
 it('trims a stored HH:MM:SS window to the picked hour (edit form initial state)', async () => {
   const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ slots: [] }) });
   vi.stubGlobal('fetch', fetch);
-  renderHook(() => useBestTimes({ date: '2035-01-02', serviceId: 'fixture', technicianId: 'tech', pickedStart: '09:00:00' }));
+  renderHook(() => useBestTimes({ date: '2035-01-02', serviceId: 'fixture', technicianId: 'tech', pickedStart: '09:00:00', pickedEnd: '12:00:00' }));
   await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
-  expect(JSON.parse(fetch.mock.calls[0][1].body).pickedStart).toBe('09:00');
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({ pickedStart: '09:00', pickedEnd: '12:00' });
 });
 
 it('skips the range search without rangeFrom and never sends a half-typed picked hour', async () => {
