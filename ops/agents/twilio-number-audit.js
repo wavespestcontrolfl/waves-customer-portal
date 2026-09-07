@@ -77,9 +77,13 @@ function auditRouting(numbers, sandbox, ownedNumbers) {
     const reg = REGISTRY.findByNumber(n.phoneNumber)
       || (n.phoneNumber === REGISTRY.mainLine.number ? { type: 'main_line', label: REGISTRY.mainLine.label } : null);
     const drift = routingDrift(n);
-    console.log(`${n.phoneNumber}  "${n.friendlyName}"  ${reg ? [reg.type, reg.label, reg.domain].filter(Boolean).join(' / ') : 'NOT IN REGISTRY'}${drift.length ? `  DRIFT ${drift.map(f => `${f}=${short(n[f])}`).join(' ')}` : ''}`);
+    // Routing that matches the contract is worthless on a number Twilio will not
+    // deliver calls or texts to in the first place.
+    const missingCaps = ['voice', 'sms'].filter(c => !(n.capabilities || {})[c]);
+    console.log(`${n.phoneNumber}  "${n.friendlyName}"  ${reg ? [reg.type, reg.label, reg.domain].filter(Boolean).join(' / ') : 'NOT IN REGISTRY'}${drift.length ? `  DRIFT ${drift.map(f => `${f}=${short(n[f])}`).join(' ')}` : ''}${missingCaps.length ? `  NO ${missingCaps.join('/').toUpperCase()} CAPABILITY` : ''}`);
     if (!reg) defects.push(`${n.phoneNumber}  not in server/config/twilio-numbers.js — inbound SMS dropped, calls log as 'unknown'`);
     if (drift.length) defects.push(`${n.phoneNumber}  routing drift — ${drift.map(f => `${f}=${short(n[f])} (expected ${short(APP_ROUTING[f]) || 'empty'})`).join(', ')}`);
+    if (missingCaps.length) defects.push(`${n.phoneNumber}  Twilio reports no ${missingCaps.join(' / ')} capability — the routing contract cannot apply`);
   }
   // Ownership is checked against EVERY owned number — the sandbox line may
   // legitimately sit in the registry under `unassigned`.
@@ -149,10 +153,10 @@ async function auditMessaging(client, fleet, numberBySid) {
   const defects = [];
   console.log('\n=== MESSAGING ===');
   const brands = await client.messaging.v1.brandRegistrations.list({ limit: 20 });
-  for (const b of brands) console.log(`  brand ${b.sid}  status=${b.status}  identity=${b.identityStatus}  type=${b.brandType}`);
+  for (const b of brands) console.log(`  brand ${b.sid}  status=${b.status}  identity=${b.identityStatus}  type=${b.brandType}${b.mock ? '  MOCK' : ''}`);
   // Historical failed / deleted registrations stay on the account; only the
-  // absence of an approved brand is a defect.
-  if (!brands.some(b => b.status === 'APPROVED')) defects.push('brand  no APPROVED A2P brand registration');
+  // absence of an approved, non-mock brand is a defect (mock = Twilio test-only).
+  if (!brands.some(b => b.status === 'APPROVED' && !b.mock)) defects.push('brand  no APPROVED (non-mock) A2P brand registration');
   const registeredSenders = new Set();
   const poolAge = new Map(); // number → ms since it joined a campaign-verified pool
   for (const s of await client.messaging.v1.services.list({ limit: 50 })) {
@@ -160,8 +164,9 @@ async function auditMessaging(client, fleet, numberBySid) {
     const senders = pool.map(p => p.phoneNumber);
     const carriesFleet = senders.some(p => fleet.includes(p));
     const campaigns = await client.messaging.v1.services(s.sid).usAppToPerson.list({ limit: 20 });
-    const verified = campaigns.some(c => c.campaignStatus === 'VERIFIED');
-    console.log(`  service ${s.sid}  "${s.friendlyName}"  senders=${senders.length}  inbound_webhook_on_number=${s.useInboundWebhookOnNumber}  service_inbound=${short(s.inboundRequestUrl)} [${s.inboundMethod}]  campaigns=[${campaigns.map(c => `${c.sid}:${c.campaignStatus}/${c.usAppToPersonUsecase}`).join(',')}]`);
+    const liveCampaigns = campaigns.filter(c => c.campaignStatus === 'VERIFIED' && !c.mock); // mock = Twilio test-only, registers nothing
+    const verified = liveCampaigns.length > 0;
+    console.log(`  service ${s.sid}  "${s.friendlyName}"  senders=${senders.length}  inbound_webhook_on_number=${s.useInboundWebhookOnNumber}  service_inbound=${short(s.inboundRequestUrl)} [${s.inboundMethod}]  campaigns=[${campaigns.map(c => `${c.sid}:${c.campaignStatus}/${c.usAppToPersonUsecase}${c.mock ? '/MOCK' : ''}`).join(',')}]`);
     if (!carriesFleet) continue;
     // With useInboundWebhookOnNumber off, the SERVICE's inbound + fallback URL and
     // method replace every pool number's SMS fields — the per-number contract
@@ -176,7 +181,7 @@ async function auditMessaging(client, fleet, numberBySid) {
     // surface individually in the per-number verdict below.
     // Carrier registration starts at the LATER of the sender joining the pool and
     // the campaign becoming VERIFIED (a pool can predate its campaign by days).
-    const verifiedAt = Math.max(0, ...campaigns.filter(c => c.campaignStatus === 'VERIFIED').map(c => new Date(c.dateUpdated).getTime()));
+    const verifiedAt = Math.max(0, ...liveCampaigns.map(c => new Date(c.dateUpdated).getTime()));
     if (verified) pool.forEach(p => { registeredSenders.add(p.phoneNumber); poolAge.set(p.phoneNumber, Date.now() - Math.max(verifiedAt, new Date(p.dateCreated).getTime())); });
   }
   const verifications = await client.messaging.v1.tollfreeVerifications.list({ limit: 20 });
