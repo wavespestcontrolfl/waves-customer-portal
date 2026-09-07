@@ -1353,6 +1353,9 @@ async function runWeeklyIrrigationEmailSweep({ now = null, clock = null, maxSend
       const decisionInputs = weeklyInputsForCustomer(customer, {
         weekEnding, weekWeather, priorWeek, weekPlanEnabled, planWeekEnd, now: saved ? new Date(saved.planAsOf) : planAsOf,
       });
+      // Replay already validated this premise and the current settings. Keep
+      // its saved spelling so a formatting edit cannot change the claim hash.
+      if (frozen) decisionInputs.home = frozen.home;
       // Decide from last week's balance FIRST — the forecast only fills an
       // optional copy line and never changes shouldSend, so skipped customers
       // (balanced / rain-unknown) must not cost an Open-Meteo forecast call.

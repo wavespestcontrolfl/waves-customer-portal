@@ -166,7 +166,7 @@ const SKIP = !process.env.DATABASE_URL;
     }
   }, 30000);
 
-  test('a failed email cannot erase or replace the published app plan, and retry consumes the same decision', async () => {
+  test.each([null, { city: 'SARASOTA' }, { address_line1: '100 fixture lane' }])('a failed email keeps the plan and retries its decision after a harmless home-format edit (%j)', async (homeEdit) => {
     await resetDraft();
     EmailTemplateLibrary.sendTemplate.mockResolvedValueOnce({ sent: false, reason: 'synthetic-rejection' });
     const first = await runWeeklyIrrigationEmailSweep({ now });
@@ -175,6 +175,7 @@ const SKIP = !process.env.DATABASE_URL;
     expect(original.sent_at).toBeNull();
     const firstCall = EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
     await discardUnsentWeekPlan({ customerId, weekEnding: '2026-09-06', claimToken: original.claim_token });
+    if (homeEdit) await mockTransaction('customers').where({ id: customerId }).update(homeEdit);
     expect(await loadCustomerWateringPlan(customerId, { now })).not.toBeNull();
     // Simulate the existing email claim lease expiring; no new lease exists.
     await mockTransaction('irrigation_week_plans').where({ customer_id: customerId }).update({ claimed_at: new Date(Date.now() - 180000) });
