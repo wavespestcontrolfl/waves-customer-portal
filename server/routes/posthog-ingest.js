@@ -60,6 +60,10 @@ const RATE_MAX_PER_MIN = Math.max(1, parseInt(process.env.POSTHOG_INGEST_RATE_MA
 // and posthog-js simply retries later. Analytics is best-effort; the portal
 // serving customers is not.
 const MAX_IN_FLIGHT = Math.max(1, parseInt(process.env.POSTHOG_INGEST_MAX_IN_FLIGHT, 10) || 32);
+// A slot is reserved BEFORE the body is read, so a stalled upload must not
+// keep it: the whole request body has this long to arrive (posthog-js bodies
+// are at most a replay batch — well under a second on any real link).
+const UPLOAD_TIMEOUT_MS = Math.max(100, parseInt(process.env.POSTHOG_INGEST_UPLOAD_TIMEOUT_MS, 10) || 15000);
 let inFlight = 0;
 
 // Hop-by-hop headers plus everything that must not cross the boundary.
@@ -118,9 +122,18 @@ function releaseSlot(res) {
     res.locals.ingestSlot = false;
     inFlight -= 1;
   }
+  if (res.locals.ingestUploadTimer) {
+    clearTimeout(res.locals.ingestUploadTimer);
+    res.locals.ingestUploadTimer = null;
+  }
 }
 
 async function proxy(req, res) {
+  // Body fully buffered — the upload deadline no longer applies.
+  if (res.locals.ingestUploadTimer) {
+    clearTimeout(res.locals.ingestUploadTimer);
+    res.locals.ingestUploadTimer = null;
+  }
   let url;
   try {
     url = upstreamUrl(req);
@@ -196,6 +209,18 @@ router.use((req, res, next) => {
   if (inFlight >= MAX_IN_FLIGHT) return res.status(503).set('Retry-After', '5').end();
   inFlight += 1;
   res.locals.ingestSlot = true;
+  // Upload deadline: a body still incomplete when this fires is torn down,
+  // which surfaces in express.raw as an aborted-request error → the error
+  // handler below releases the slot. Cleared once the body is in (proxy()).
+  res.locals.ingestUploadTimer = setTimeout(() => {
+    res.locals.ingestUploadTimer = null;
+    if (!req.complete) req.destroy(new Error('ingest upload timeout'));
+  }, UPLOAD_TIMEOUT_MS);
+  // A connection that closes while the body is still being read never
+  // reaches proxy() and may not raise a parser error either — release here.
+  // proxy() takes over the slot lifecycle once the body is in (req.complete),
+  // so this only acts on the buffering phase.
+  res.once('close', () => { if (!req.complete) releaseSlot(res); });
   return next();
 });
 

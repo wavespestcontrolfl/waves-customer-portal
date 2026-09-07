@@ -622,7 +622,9 @@ spend budget; a process-wide in-flight cap (`POSTHOG_INGEST_MAX_IN_FLIGHT`,
 default 32; fast 503 + `Retry-After`) is checked BEFORE the body is buffered
 so concurrent bytes are bounded (32 × 2 MB), not just requests per minute —
 a client disconnect aborts the upstream call and the slot is held until
-that call settles, so upload-and-hang-up loops cannot exceed the cap;
+that call settles, so upload-and-hang-up loops cannot exceed the cap, and an
+upload deadline (`POSTHOG_INGEST_UPLOAD_TIMEOUT_MS`, default 15 s) tears down
+a body that has not fully arrived so stalled uploads cannot sit on the slots;
 2 MB raw body cap (413); 10 s upstream timeout (502).
 Inbound `cookie`, `authorization`, `referer`, `content-encoding` (the raw
 body parser has already inflated the bytes), hop-by-hop and client-IP

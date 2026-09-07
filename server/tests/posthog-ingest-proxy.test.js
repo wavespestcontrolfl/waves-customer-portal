@@ -16,7 +16,8 @@
  *    the (n+1)th enabled request in a minute is 429 and never reaches upstream,
  *    and IPv6 addresses in one /64 share a bucket (shared unauthenticated key);
  *    a process-wide in-flight cap answers 503 before buffering, frees on completion,
- *    and a client disconnect aborts upstream while the slot is held until it settles
+ *    and a client disconnect aborts upstream while the slot is held until it settles;
+ *    a stalled upload is torn down at the upload deadline and frees its slot
  *
  * Runs the real router on an ephemeral Express listener with global.fetch stubbed.
  */
@@ -380,6 +381,36 @@ describe('per-IP limiter after the gate', () => {
       fetchImpl = async () => upstreamResponse();
       expect(await get(base, '/ingest/flags/', '203.0.113.10')).toBe(200);
       releaseUpstream();
+    } finally {
+      await new Promise((done) => srv.close(done));
+    }
+  });
+
+  test('a stalled upload is torn down at the upload deadline and its slot comes back', async () => {
+    let r;
+    jest.isolateModules(() => {
+      process.env.POSTHOG_INGEST_MAX_IN_FLIGHT = '1';
+      process.env.POSTHOG_INGEST_UPLOAD_TIMEOUT_MS = '300';
+      r = require('../routes/posthog-ingest');
+      delete process.env.POSTHOG_INGEST_MAX_IN_FLIGHT;
+      delete process.env.POSTHOG_INGEST_UPLOAD_TIMEOUT_MS;
+    });
+    const { srv, base } = await listen(r);
+    try {
+      // Declare 100 bytes, send 10, then stall.
+      const stalled = http.request(base + '/ingest/e/', { method: 'POST', headers: { 'content-type': 'text/plain', 'content-length': '100', 'x-forwarded-for': '203.0.113.20' } });
+      stalled.on('error', () => {});
+      stalled.write('0123456789');
+      for (let i = 0; i < 50 && r.inFlightCount() < 1; i++) await new Promise((t) => setTimeout(t, 10));
+      expect(r.inFlightCount()).toBe(1);
+      // While it stalls, the only slot is taken.
+      expect(await get(base, '/ingest/flags/', '203.0.113.21')).toBe(503);
+      // Deadline passes → torn down → slot back, upstream never called for it.
+      for (let i = 0; i < 100 && r.inFlightCount() > 0; i++) await new Promise((t) => setTimeout(t, 10));
+      expect(r.inFlightCount()).toBe(0);
+      expect(fetchCalls).toHaveLength(0);
+      expect(await get(base, '/ingest/flags/', '203.0.113.22')).toBe(200);
+      stalled.destroy();
     } finally {
       await new Promise((done) => srv.close(done));
     }
