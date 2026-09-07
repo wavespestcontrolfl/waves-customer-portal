@@ -1469,11 +1469,23 @@ server, no SSE). Treat the auth ordering and the read-only tool surface as
 security-critical).
 `/api/client-errors` (POST; unauthenticated client error telemetry. An
 anonymous surface — /admin/login, a public token route, or any page — can
-crash in the browser, so the reporter cannot require auth. Hardened: per-IP
-rate limit (30/min), every field truncated server-side before it reaches
-Sentry (tagged `source=client`), and the client scrubs token-like path
-segments out of the reported URL. No reads, no PII persistence, no writes to
-app data — it only forwards to Sentry).
+crash in the browser, so the reporter cannot require auth. Error reports
+retain a per-IP limit (30/min) followed by a global error ceiling (60/min).
+The same limiters reserve separate keys for routine native diagnostics:
+10/min per IP, then 20/min globally; normal app activity cannot debit the
+error budgets. IP keys use the shared unauthenticated /64-collapsing helper.
+Legacy reports accept
+`name/context/route`: error names and contexts are allowlisted; the server
+reduces routes to known roots and allowlisted admin/tech page segments before
+forwarding to Sentry, tagged `source=client`. Optional native-link diagnostics
+use `{ context: 'native-links', nativeLink: { platform, source, outcome,
+route, target } }`. Every native field is an exact allowlisted label; route
+and target are only `home/shortlink/estimate/other/none`, never a URL, token,
+query, error message, stack or device identifier. Invalid native reports are
+discarded with 204; extra fields are ignored. Native failures report at error
+severity under the error budgets and normal handoff stages at info severity
+under the routine budgets. Existing reporters remain compatible. No reads, no PII persistence,
+no writes to app data — it only forwards to Sentry).
 `/api/public/mcp` (POST; ANONYMOUS read-only MCP JSON-RPC server for
 third-party AI agents — the surface the hub's /.well-known agent-readiness
 cards point at. No token BY DESIGN (the audience is anonymous agents);
