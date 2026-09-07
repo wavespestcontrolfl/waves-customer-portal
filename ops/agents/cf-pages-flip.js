@@ -9,13 +9,15 @@
 // the target project's current production env KEYS (values never printed —
 // KEY/TOKEN-named values show a prefix only), the live deploy, and exactly
 // which keys the vars file would add or overwrite.
-// --execute refuses while a newer production build is still in flight (it
-// would race the flip), PATCHes the production env (other keys untouched),
+// --execute refuses while ANY production build is still in flight (it would
+// race the flip; the deployment list is checked, not just the latest
+// deployment), PATCHes the production env (other keys untouched),
 // retries the LIVE production deployment (the canonical one — never the
 // branch head, so an env flip can never ship unreleased code), follows it to
 // a terminal state, and ROLLS THE ENV BACK to the previous values if the
 // deployment cannot be created, lands on a different commit, or fails — a
-// pending env change must not lie in wait for the next unrelated deploy. A
+// pending env change must not lie in wait for the next unrelated deploy; a
+// key someone else changed meanwhile is never overwritten by the rollback. A
 // build that outlives the 60-minute hard ceiling is deleted best-effort
 // before the rollback and the operator is told to verify in the dashboard.
 //
@@ -97,6 +99,19 @@ async function stopDeployment(cf, project, id, log) {
   }
 }
 
+// Non-terminal PRODUCTION deployments other than the live one, from the
+// project's deployment list (first pages, newest first — an in-flight build
+// is always recent).
+async function activeProductionDeployments(cf, project, liveId) {
+  const out = [];
+  for (let page = 1; page <= 3; page++) {
+    const rows = (await cf(`/${project}/deployments?env=production&page=${page}&per_page=25`)) || [];
+    for (const d of rows) if (d.id !== liveId && (d.environment || 'production') === 'production' && isInProgress(d)) out.push(d);
+    if (rows.length < 25) break;
+  }
+  return out;
+}
+
 function isInProgress(dep) {
   const status = dep && dep.latest_stage && dep.latest_stage.status;
   return Boolean(dep && dep.id) && !TERMINAL.has(status);
@@ -157,12 +172,14 @@ async function applyAndDeploy(cf, project, vars, { log = console.log, wait = wai
   if (refusal) throw new Error(`refused: ${refusal}`);
   const live = p.canonical_deployment;
   if (!live || !live.id) throw new Error('refused: project has no live production deployment to redeploy');
-  // A newer production build in flight would race the retry: it could end up
-  // replacing the flip with its older env snapshot, or the retry could roll
-  // production back under it. Refuse and let it finish first.
-  const newest = p.latest_deployment;
-  if (newest && newest.id !== live.id && (newest.environment || 'production') === 'production' && isInProgress(newest)) {
-    throw new Error(`refused: a newer production deployment (${newest.id}, commit ${deployCommit(newest) || '?'}, ${newest.latest_stage && newest.latest_stage.name}/${newest.latest_stage && newest.latest_stage.status}) is still building — wait for it, then re-run`);
+  // Any production build still in flight would race the retry: it could end
+  // up replacing the flip with its older env snapshot, or the retry could
+  // roll production back under it. latest_deployment alone can be a preview
+  // that hides one, so the production deployment LIST is checked.
+  const inflight = await activeProductionDeployments(cf, project, live.id);
+  if (inflight.length) {
+    const d = inflight[0];
+    throw new Error(`refused: ${inflight.length} production deployment(s) still building (${d.id}, commit ${deployCommit(d) || '?'}, ${d.latest_stage && d.latest_stage.name}/${d.latest_stage && d.latest_stage.status}) — wait for them, then re-run`);
   }
   const liveCommit = deployCommit(live);
   const previous = rollbackFragment(vars, prodEnv);
@@ -170,10 +187,25 @@ async function applyAndDeploy(cf, project, vars, { log = console.log, wait = wai
   for (const [k, v] of Object.entries(vars)) env_vars[k] = { type: 'plain_text', value: v };
   await cf(`/${project}`, { method: 'PATCH', body: JSON.stringify({ deployment_configs: { production: { env_vars } } }) });
   log('env PATCHed; redeploying live commit', liveCommit, 'from deployment', live.id);
+  // Restore only what this run wrote and that still holds our value — a key
+  // someone changed meanwhile (an emergency revoke, say) is left alone and
+  // reported, never overwritten with a stale snapshot.
   const rollback = async (why) => {
     log(`ROLLING BACK env (${why})`);
-    await cf(`/${project}`, { method: 'PATCH', body: JSON.stringify({ deployment_configs: { production: { env_vars: previous } } }) });
-    log('env restored to previous values');
+    const now = await cf(`/${project}`);
+    const current = (now.deployment_configs && now.deployment_configs.production && now.deployment_configs.production.env_vars) || {};
+    const restore = {};
+    const conflicts = [];
+    for (const [k, v] of Object.entries(vars)) {
+      const cur = current[k] ? current[k].value : undefined;
+      if (cur === v) restore[k] = previous[k];
+      else conflicts.push(`${k} (now ${cur === undefined ? 'absent' : 'changed by someone else'})`);
+    }
+    if (Object.keys(restore).length) {
+      await cf(`/${project}`, { method: 'PATCH', body: JSON.stringify({ deployment_configs: { production: { env_vars: restore } } }) });
+      log('env restored to previous values for:', Object.keys(restore).join(', '));
+    }
+    if (conflicts.length) log('NOT restored (changed concurrently — check by hand):', conflicts.join('; '));
   };
   let dep;
   let created = null;
@@ -225,7 +257,7 @@ async function main(argv, env) {
   await applyAndDeploy(cf, project, vars);
 }
 
-module.exports = { makeClient, refusalReason, rollbackFragment, waitForDeployment, applyAndDeploy, deployCommit, isInProgress, stopDeployment };
+module.exports = { makeClient, refusalReason, rollbackFragment, waitForDeployment, applyAndDeploy, deployCommit, isInProgress, stopDeployment, activeProductionDeployments };
 
 if (require.main === module) {
   main(process.argv.slice(2), process.env).catch((e) => { console.error('ERROR', e.message); process.exit(1); });

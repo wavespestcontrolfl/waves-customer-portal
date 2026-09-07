@@ -11,7 +11,7 @@
 const path = require('path');
 const flip = require(path.resolve(__dirname, '../../ops/agents/cf-pages-flip.js'));
 
-function fakeCloudflare({ liveCommit = 'abc123', retryCommit = 'abc123', retryFails = false, finalStatus = 'success', statuses = null, newerBuilding = false, newerSkipped = false } = {}) {
+function fakeCloudflare({ liveCommit = 'abc123', retryCommit = 'abc123', retryFails = false, finalStatus = 'success', statuses = null, newerBuilding = false, newerSkipped = false, hiddenProdBuild = false, concurrentEdit = null } = {}) {
   const calls = [];
   const project = {
     name: 'hub', production_branch: 'main',
@@ -24,13 +24,35 @@ function fakeCloudflare({ liveCommit = 'abc123', retryCommit = 'abc123', retryFa
         : { id: 'dep_live', environment: 'production', latest_stage: { name: 'deploy', status: 'success' }, deployment_trigger: { metadata: { commit_hash: liveCommit } } },
   };
   let polls = 0;
+  let patched = 0;
+  const listRows = () => {
+    const rows = [];
+    if (hiddenProdBuild) rows.push({ id: 'dep_preview', environment: 'preview', latest_stage: { name: 'deploy', status: 'success' } }, { id: 'dep_hidden', environment: 'production', latest_stage: { name: 'build', status: 'active' }, deployment_trigger: { metadata: { commit_hash: 'ddd777' } } });
+    if (newerBuilding) rows.push(project.latest_deployment);
+    if (newerSkipped) rows.push(project.latest_deployment);
+    rows.push(project.canonical_deployment);
+    return rows;
+  };
   const fetchImpl = async (url, init = {}) => {
     const method = init.method || 'GET';
     const p = url.replace(/^.*\/pages\/projects/, '');
     calls.push({ method, p, body: init.body ? JSON.parse(init.body) : undefined });
     const ok = (result) => ({ json: async () => ({ success: true, result }) });
-    if (method === 'GET' && p === '/hub') return ok(project);
-    if (method === 'PATCH' && p === '/hub') return ok(project);
+    if (method === 'GET' && p === '/hub') {
+      // After our PATCH, the project reflects what was written — unless a
+      // concurrent edit is being simulated for the rollback read.
+      if (patched && concurrentEdit) {
+        const env = { ...project.deployment_configs.production.env_vars, ...JSON.parse(JSON.stringify(calls.filter((c) => c.method === 'PATCH')[0].body.deployment_configs.production.env_vars)), ...concurrentEdit };
+        return ok({ ...project, deployment_configs: { production: { env_vars: env } } });
+      }
+      if (patched) {
+        const env = { ...project.deployment_configs.production.env_vars, ...calls.filter((c) => c.method === 'PATCH')[0].body.deployment_configs.production.env_vars };
+        return ok({ ...project, deployment_configs: { production: { env_vars: env } } });
+      }
+      return ok(project);
+    }
+    if (method === 'GET' && p.startsWith('/hub/deployments?env=production')) return ok(listRows());
+    if (method === 'PATCH' && p === '/hub') { patched += 1; return ok(project); }
     if (method === 'POST' && p === '/hub/deployments/dep_live/retry') {
       if (retryFails) return { json: async () => ({ success: false, errors: [{ message: 'retry refused' }] }) };
       return ok({ id: 'dep_new', deployment_trigger: { metadata: { commit_hash: retryCommit } } });
@@ -139,8 +161,23 @@ describe('applyAndDeploy', () => {
 
   test('a newer production deployment still building → refused before any write', async () => {
     const { cf, calls } = fakeCloudflare({ newerBuilding: true });
-    await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v' }, quiet)).rejects.toThrow(/newer production deployment \(dep_newer/);
+    await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v' }, quiet)).rejects.toThrow(/production deployment\(s\) still building \(dep_newer/);
     expect(patches(calls)).toEqual([]);
+  });
+
+  test('an in-flight production build hidden behind a newer preview deployment is still refused', async () => {
+    const { cf, calls } = fakeCloudflare({ hiddenProdBuild: true });
+    await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v' }, quiet)).rejects.toThrow(/still building \(dep_hidden/);
+    expect(patches(calls)).toEqual([]);
+  });
+
+  test('rollback restores only keys that still hold this run\'s value; a concurrent edit is left alone and reported', async () => {
+    const logs = [];
+    const { cf, calls } = fakeCloudflare({ retryFails: true, concurrentEdit: { PUBLIC_EXISTING: { type: 'plain_text', value: 'emergency' } } });
+    await expect(flip.applyAndDeploy(cf, 'hub', { PUBLIC_NEW: 'v', PUBLIC_EXISTING: 'new' }, { log: (...a) => logs.push(a.join(' ')) })).rejects.toThrow(/retry refused/);
+    // PUBLIC_NEW still ours → deleted; PUBLIC_EXISTING changed meanwhile → untouched.
+    expect(patches(calls)[1]).toEqual({ PUBLIC_NEW: null });
+    expect(logs.some((l) => /NOT restored .*PUBLIC_EXISTING \(now changed by someone else\)/.test(l))).toBe(true);
   });
 
   test('transient poll errors are retried, three in a row give up with a verify message', async () => {
