@@ -244,10 +244,34 @@ describe('profile safeguards independent of model labels', () => {
     'Temporarily use the side entrance.',
     'For this visit please park outside.',
     'While on vacation, leave the package outside.',
+    "While we're away, leave the side gate unlocked.",
+    'We’re out of town until the 12th.',
+    'Leave the gate open on March 12.',
+    'On 3/12 the gate will be open.',
+    'Back on Friday, keep the dog inside till then.',
+    'Please park on the street this weekend.',
+    'For the next two weeks use the side entrance.',
+    'We will be back in a couple of weeks.',
+    'Gate is broken right now, use the front door.',
+    'Use the side door during our renovation.',
+    'Leave the package by the pool through Sept 3rd.',
   ])('holds a durable-labelled temporary instruction: %s', (quote) => {
     expect(factVerdict(fact({ field: 'access_notes', quote, value: quote }), {
       properties, senderIsPrimary: true,
     })).toBe('temporary_instruction');
+  });
+
+  test.each([
+    'Come through the side gate and use the 2nd door on the left.',
+    'The controller is in the sun room beside the garage.',
+    'Keep the dog away from the pool.',
+    'Two friendly dogs in the yard, gate on the right.',
+    'Park on the street, our driveway is too narrow for the truck.',
+    'Text me when you are on the way.',
+  ])('applies a durable instruction without a time window: %s', (quote) => {
+    expect(factVerdict(fact({ field: 'access_notes', quote, value: quote }), {
+      properties, senderIsPrimary: true, messageBody: quote,
+    })).toBe('apply');
   });
 
   test('retains qualifiers from another sentence in the current SMS', () => {
@@ -306,6 +330,11 @@ describe('activation and intake', () => {
     delete process.env.GATE_SMS_COMMITMENT_FOLLOWUP;
     expect(eligibleMessage({ ...source('The controller is outside.', 'outbound'),
       from_phone: numbers.locations.parrish.number, message_type: 'manual', status: 'delivered' })).toBe(false);
+  });
+  test('loud tapbacks stored as ordinary inbound rows never reach extraction', () => {
+    expect(eligibleMessage({ ...source('Disliked “Park in the driveway”'), message_type: 'inbound' })).toBe(false);
+    expect(eligibleMessage({ ...source('Reacted ❤️ to “Park in the driveway”'), message_type: 'inbound' })).toBe(false);
+    expect(eligibleMessage({ ...source('Park in the driveway'), message_type: 'inbound' })).toBe(true);
   });
   test('excludes automated outbound messages, reactions and the AI number', () => {
     expect(eligibleMessage(source('Please send the estimate'))).toBe(true);

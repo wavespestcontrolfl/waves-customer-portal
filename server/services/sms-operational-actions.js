@@ -11,10 +11,12 @@ const { runExclusive } = require('../utils/cron-lock');
 const { recordAuditEvent } = require('./audit-log');
 const NotificationService = require('./notification-service');
 const { hashExtractionSource, recordExtractionAttempt } = require('./data-hygiene/source-extraction-store');
+const { stalePendingExtractionProposals } = require('./data-hygiene/proposal-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
 const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode } = require('./sms-operational-extractor');
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
+const { isSmsReaction } = require('./sms-intent');
 
 const enabled = () => gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS');
 const SOURCE_COLUMNS = ['id', 'customer_id', 'direction', 'message_body', 'message_type', 'created_at', 'from_phone', 'to_phone', 'status'];
@@ -27,12 +29,50 @@ function eligibleMessage(message = {}) {
     && tail(ourNumber) !== tail(numbers.tollFree.number)
     && !!numbers.findByNumber(ourNumber)
     && !EXCLUDED_TYPES.includes(message.message_type)
+    // Loud tapbacks are stored as ordinary inbound rows; the webhook's own
+    // detector keeps every reaction out of profile extraction.
+    && !isSmsReaction(message.message_body)
     && message.direction === 'inbound';
 }
 
-// Temporal qualifiers anywhere in the current SMS require staff review, even
-// if the model omits that sentence or labels the extracted fact durable.
-const TEMPORARY_INSTRUCTION = /\b(?:today|tomorrow|tonight|temporar(?:y|ily)|vacation|until|for now|this (?:time|visit|appointment|week|month)|next (?:visit|appointment)|one[- ]time|(?:just|only) (?:for|on)|(?:for|on) (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/i;
+// Explicit time windows anywhere in the current SMS require staff review,
+// independent of the model's duration label: relative windows, absences and
+// travel, seasons, weekdays and calendar dates all bound an instruction.
+// Movement "through" a gate or an ordinal door on its own does not.
+const WEEKDAY = String.raw`(?:(?:mon|tues|wednes|thurs|fri|satur|sun)days?\b|(?:mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)\.)`;
+const MONTH = String.raw`(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)`;
+const ORDINAL_DAY = String.raw`(?:[12]?\d|3[01])(?:st|nd|rd|th)`;
+const COUNT = String.raw`(?:\d+|an?|one|two|three|four|five|six|seven|several|(?:a )?few|(?:a )?couple(?: of)?)`;
+const TEMPORARY_INSTRUCTION = new RegExp([
+  String.raw`\b(?:today|tomorrow|tonight|temporar(?:y|ily)|for now|currently|right now|at the moment|in the meantime|one[- ]time|during|until|till|vacation|holiday|snowbird|travel(?:l)?ing)\b`,
+  String.raw`\bfor the (?:time being|moment|rest of)\b`,
+  String.raw`\b(?:just|only) (?:for|on|this|today|tomorrow|tonight|once)\b`,
+  String.raw`\bthis (?:time|once|visit|appointment|service|round|week(?:end)?|month|morning|afternoon|evening|summer|winter|spring|fall)\b`,
+  String.raw`\bnext (?:visit|appointment|service|time|week|month)\b`,
+  String.raw`\b(?:next|coming|following) (?:${COUNT} )?(?:days?|weeks?|months?|visits?)\b`,
+  String.raw`\bfor (?:the next |another )?${COUNT} (?:days?|weeks?|months?|nights?)\b`,
+  String.raw`\bover the (?:weekend|summer|winter|holidays?)\b`,
+  String.raw`\b(?:through|thru) (?:the (?:weekend|end of|summer|winter|spring|fall|holidays?|week|month)\b|${WEEKDAY}|${MONTH}\b)`,
+  String.raw`\bout of (?:town|the country|state)\b`,
+  String.raw`\bon (?:a |our |my )?(?:trip|cruise|honeymoon)\b`,
+  String.raw`\baway (?:until|till|through|thru|for|on|this|next|starting)\b`,
+  String.raw`\b(?:while|when|whilst) (?:(?:we|i|they)(?:[’']re| are|[’']m| am)? )?(?:away|gone|out of town)\b`,
+  String.raw`\b(?:we|i|they)(?:[’']re| are|[’']m| am|[’']ll be| will be|[’']ve| have) (?:away|gone|out|off|leaving|not (?:here|home|around|in town)|unavailable)\b`,
+  String.raw`\b(?:back|return(?:s|ing)?) in ${COUNT} (?:days?|weeks?|months?)\b`,
+  String.raw`\b${WEEKDAY}`,
+  String.raw`\b${MONTH}\.? ?(?:${ORDINAL_DAY}|\d{1,2})\b`,
+  String.raw`\b(?:${ORDINAL_DAY}|\d{1,2}) (?:of )?${MONTH}\b`,
+  String.raw`\b(?:on|by|until|till|before|after|around|starting) the ${ORDINAL_DAY}\b`,
+  String.raw`\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b`,
+  String.raw`\b\d{4}-\d{2}-\d{2}\b`,
+].join('|'), 'i');
+
+// A negated or uncertain report does not establish an active system or a
+// pet on site (next-stop alerts treat any pet_details as a pet). Keep these
+// as review exceptions before the shared write, whatever the model labelled.
+const NEGATED_OR_UNCERTAIN = /\b(?:no|not|never|without|none|unsure|uncertain|maybe|perhaps|might|removed|used to|anymore|any more|passed away|gone|lack(?:s|ing)?)\b|n['’]t/i;
+const REVIEW_ON_NEGATION = Object.freeze({ pet_details: 'pet_needs_review',
+  ...Object.fromEntries(IRRIGATION_INPUT_FIELDS.map((field) => [field, 'irrigation_needs_review'])) });
 
 function factVerdict(fact, { properties, current = {}, expectedCurrent = current, senderIsPrimary, messageBody = '' }) {
   if (!senderIsPrimary) return 'contact_authority';
@@ -58,15 +98,17 @@ async function applyFacts(trx, message, facts, context) {
   let persistedCurrent = context.current;
   for (const fact of facts) {
     const duplicateField = facts.filter((f) => f.field === fact.field).length > 1;
-    // A negated or uncertain report does not establish an active system.
-    // Keep these as review exceptions before the shared companion write.
-    const uncertainIrrigation = IRRIGATION_INPUT_FIELDS.includes(fact.field)
-      && /\b(?:no|not|never|without|unsure|uncertain|maybe|perhaps|might|removed|lack(?:s|ing)?)\b|n['’]t/i.test(message.message_body);
-    const verdict = duplicateField ? 'conflicting_facts' : uncertainIrrigation ? 'irrigation_needs_review' : factVerdict(fact, context);
+    const negatedReview = REVIEW_ON_NEGATION[fact.field];
+    const negated = negatedReview && NEGATED_OR_UNCERTAIN.test(message.message_body);
+    const verdict = duplicateField ? 'conflicting_facts' : negated ? negatedReview : factVerdict(fact, context);
     if (verdict !== 'apply') { outcomes.push({ ...fact, outcome: verdict }); continue; }
     const proposal = { scope_id: message.customer_id, field: fact.field, resource_id: persistedCurrent?.id || null };
     const target = await resolvePropertyPreferencesTarget({ trx, proposal, currentRaw: persistedCurrent?.[fact.field] ?? null });
     await applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw: fact.value });
+    // The admin extraction phase may already hold a pending proposal for this
+    // field; its approve would now fail the before-value check, so retire it
+    // here instead of leaving stale review work.
+    await stalePendingExtractionProposals({ trx, scope_id: message.customer_id, field: fact.field });
     await recordAuditEvent({ trx, critical: true, actor_type: 'system', action: 'sms.property_preference.updated',
       resource_type: 'property_preferences', resource_id: target.id,
       metadata: { sms_log_id: message.id, customer_id: message.customer_id, property_id: fact.property_id,

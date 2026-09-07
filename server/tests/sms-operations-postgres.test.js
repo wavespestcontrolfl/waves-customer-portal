@@ -21,7 +21,7 @@ const connection = process.env.SMS_OPERATIONS_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 const schema = `sms_operations_${randomUUID().replaceAll('-', '')}`;
 const TABLES = ['customers', 'customer_properties', 'property_preferences', 'sms_log', 'call_log',
-  'call_commitments', 'data_hygiene_source_extractions', 'notifications', 'audit_log',
+  'call_commitments', 'data_hygiene_source_extractions', 'data_hygiene_proposals', 'notifications', 'audit_log',
   'emails', 'email_messages', 'estimates', 'invoices', 'scheduled_services', 'job_status_history', 'system_settings'];
 let mockPg;
 let admin;
@@ -110,6 +110,52 @@ postgres('SMS operations on PostgreSQL', () => {
     expect((await mockPg('property_preferences').first()).irrigation_system).toBe(false);
     expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('irrigation_needs_review');
     expect(NotificationService.notifyAdmin).toHaveBeenCalled();
+  });
+
+  test('an automatic write retires the pending extraction proposal for that field only', async () => {
+    const proposal = (scope_id, field) => ({ rule_id: 'extract.access_notes', rule_version: '1',
+      resource_type: 'property_preferences', scope_type: 'customer', scope_id, field, source: 'message-extraction',
+      proposed_value: JSON.stringify('Use the side gate'), confidence: 0.8, tier: 'medium', is_sensitive: true,
+      status: 'pending', idempotency_key: randomUUID() });
+    const otherCustomer = randomUUID();
+    await mockPg('customers').insert({ id: otherCustomer, first_name: 'Other', last_name: 'Fixture',
+      phone: '+12025550199', address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236' });
+    await mockPg('data_hygiene_proposals').insert([
+      proposal(message.customer_id, 'access_notes'), proposal(message.customer_id, 'pet_details'),
+      proposal(otherCustomer, 'access_notes'),
+    ]);
+    message.message_body = 'Use the side gate.';
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
+    result.facts = [{ field: 'access_notes', value: message.message_body, quote: message.message_body,
+      duration: 'durable', property_id: context.properties[0].id }];
+    await recordMessageOperations(mockPg, message, result, context);
+    expect((await mockPg('property_preferences').first()).access_notes).toBe('Use the side gate.');
+    const stale = await mockPg('data_hygiene_proposals').where({ status: 'stale' }).select('scope_id', 'field');
+    expect(stale).toEqual([{ scope_id: message.customer_id, field: 'access_notes' }]);
+    expect(await mockPg('data_hygiene_proposals').where({ status: 'pending' })).toHaveLength(2);
+  });
+
+  test.each([
+    'We do not have any pets.', "We don't have a dog anymore.", 'No pets.',
+    'Our dog passed away.', 'Not sure whether the cat will be out.',
+  ])('a negated or uncertain pet report cannot become a pet alert: %s', async (quote) => {
+    message.message_body = quote;
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: quote });
+    result.facts = [{ field: 'pet_details', quote, value: quote, property_id: context.properties[0].id, duration: 'durable' }];
+    await recordMessageOperations(mockPg, message, result, context);
+    expect(await mockPg('property_preferences')).toHaveLength(0);
+    expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('pet_needs_review');
+    expect(NotificationService.notifyAdmin).toHaveBeenCalled();
+  });
+
+  test('a stated pet fills an empty pet field', async () => {
+    const quote = 'Two friendly dogs in the yard.';
+    message.message_body = quote;
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: quote });
+    result.facts = [{ field: 'pet_details', quote, value: quote, property_id: context.properties[0].id, duration: 'durable' }];
+    await recordMessageOperations(mockPg, message, result, context);
+    expect((await mockPg('property_preferences').first()).pet_details).toBe(quote);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
   test('access-code audits contain only ids and field provenance', async () => {
