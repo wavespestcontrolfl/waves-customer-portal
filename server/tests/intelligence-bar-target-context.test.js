@@ -16,10 +16,11 @@ beforeEach(() => {
     customers: [{ id: A, first_name: 'Synthetic', last_name: 'Person', version: '2026-09-01 12:00:00.123456+00' }, { id: B }],
   };
   db.mockReset().mockImplementation(table => {
-    let id;
+    let id, ids;
     const q = { where: (key, value) => { id = typeof key === 'object' ? key.id : value; return q; },
       first: async () => rows[table]?.find(row => row.id === id),
-      whereNull: () => q, whereIn: () => q, limit: () => q, select: async () => lookupRows };
+      whereNull: () => q, whereIn: (key, values) => { if (key === 'id') ids = values; return q; }, limit: () => q,
+      select: async () => ids ? (rows[table] || []).filter(row => ids.includes(row.id)) : lookupRows };
     return q;
   });
   db.raw = text => ({ text });
@@ -81,8 +82,9 @@ test.each(['this', 'that', 'selected'])('a deliberate %s review request uses the
   expect(await Context.validateRecordTarget({ review_id: REVIEW }, task)).toBeNull();
 });
 
-test.each(['missing', 'stats', 'removed'])('unavailable review (%s) cannot be drafted or posted', async kind => {
+test.each(['missing', 'stats', 'removed', 'dismissed'])('unavailable review (%s) cannot be drafted or posted', async kind => {
   if (kind === 'missing') rows.google_reviews = [];
+  if (kind === 'dismissed') rows.google_reviews[0].dismissed = true;
   if (kind === 'stats') rows.google_reviews[0].reviewer_name = '_stats';
   if (kind === 'removed') rows.google_reviews[0].missing_since = new Date().toISOString();
   expect((await Context.validateRecordTarget({ review_id: REVIEW }, context())).code).toBe('record_unavailable');
@@ -173,4 +175,27 @@ test('a compound communication request retains a narrowing appointment constrain
   const task = await Context.resolve({ prompt: 'Text this customer and reschedule that appointment', pageData: { appointment_id: viewed } });
   expect(await Context.validateRecordTarget({ appointment_id: viewed }, task)).toBeNull();
   expect((await Context.validateRecordTarget({ appointment_id: sibling }, task)).code).toBe('target_clarification_required');
+});
+
+
+test('selector-free customer reads inherit one resolved task target and never choose from a cohort', async () => {
+  const args = { toolName: 'get_call_log', schema: { properties: { customer_id: { type: 'string' } } } };
+  expect(await Context.prepareReadInput({ days_back: 7 }, context(), args)).toEqual({ input: { days_back: 7, customer_id: A } });
+  expect(await Context.prepareReadInput({ days_back: 7 }, context(null), args)).toEqual({ input: { days_back: 7 } });
+  const multiple = { ...context(), targets: [{ customer_id: A }, { customer_id: B }] };
+  expect((await Context.prepareReadInput({}, multiple, args)).code).toBe('target_clarification_required');
+  expect(await Context.prepareReadInput({ customer_id: B }, multiple, args)).toEqual({ input: { customer_id: B } });
+  expect((await Context.prepareReadInput({ customer_id: B }, context(), args)).code).toBe('target_clarification_required');
+  rows.customers[0].deleted_at = new Date();
+  expect((await Context.prepareReadInput({}, context(), args)).code).toBe('record_unavailable');
+});
+
+test('bulk references use one query per table while preserving absent-record rejection', async () => {
+  const leads = Array.from({ length: 500 }, (_, index) => ({ id: `50000000-0000-4000-8000-${String(index).padStart(12, '0')}`, customer_id: A }));
+  rows.leads = leads.slice().reverse();
+  expect(await Context.validateRecordTarget({ lead_ids: leads.map(row => row.id), customer_id: A }, context())).toBeNull();
+  expect(db.mock.calls.filter(([table]) => table === 'leads')).toHaveLength(1);
+  expect(db.mock.calls.filter(([table]) => table === 'customers')).toHaveLength(1);
+  rows.leads.pop();
+  expect((await Context.validateRecordTarget({ lead_ids: leads.map(row => row.id) }, context())).code).toBe('record_unavailable');
 });

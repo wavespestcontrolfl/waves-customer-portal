@@ -16,7 +16,7 @@ const RECORDS = {
   lead_id: { table: 'leads', fields: ['id', 'customer_id', 'first_name', 'last_name', 'updated_at', 'deleted_at'] },
   email_id: { table: 'emails', fields: ['id', 'customer_id', 'lead_id', 'from_address', 'updated_at'] },
   call_id: { table: 'call_log', fields: ['id', 'customer_id', 'updated_at'] },
-  review_id: { table: 'google_reviews', fields: ['id', 'customer_id', 'reviewer_name', 'missing_since', 'updated_at'] },
+  review_id: { table: 'google_reviews', fields: ['id', 'customer_id', 'reviewer_name', 'missing_since', 'dismissed', 'updated_at'] },
 };
 const COLLECTIONS = { customer_id: 'customer_ids', appointment_id: 'service_ids', lead_id: 'lead_ids' };
 const ALIASES = { customer_id: 'customerId', property_id: 'propertyId', appointment_id: 'appointmentId', estimate_id: 'estimateId', invoice_id: 'invoiceId', product_id: 'productId', lead_id: 'leadId', email_id: 'emailId', call_id: 'callId', review_id: 'reviewId' };
@@ -133,11 +133,23 @@ async function readReferences(input) {
     return [...new Set(values)].map(id => ({ kind, id, definition }));
   });
   if (references.some(r => !UUID_RE.test(String(r.id)))) return { error: 'A valid record identifier is required', code: 'invalid_target' };
-  const records = await Promise.all(references.map(async ({ kind, id, definition }) => {
-    const row = await db(definition.table).where('id', id).first(definition.fields);
-    return row && { ...row, kind };
+  const groups = new Map();
+  for (const reference of references) {
+    if (!groups.has(reference.kind)) groups.set(reference.kind, []);
+    groups.get(reference.kind).push(reference);
+  }
+  const batches = await Promise.all([...groups].map(async ([kind, group]) => {
+    const { definition } = group[0];
+    const rows = await db(definition.table).whereIn('id', group.map(r => r.id)).select(definition.fields);
+    return [kind, new Map(rows.map(row => [String(row.id).toLowerCase(), row]))];
   }));
-  if (records.some(r => !r || r.active === false || r.deleted_at || r.missing_since || r.reviewer_name === '_stats')) return { error: 'A referenced record is unavailable', code: 'record_unavailable' };
+  const byKind = new Map(batches);
+  // Preserve input order and missing-row slots: approval hashes depend on both.
+  const records = references.map(({ kind, id }) => {
+    const row = byKind.get(kind).get(String(id).toLowerCase());
+    return row && { ...row, kind };
+  });
+  if (records.some(r => !r || r.active === false || r.deleted_at || r.missing_since || r.dismissed || r.reviewer_name === '_stats')) return { error: 'A referenced record is unavailable', code: 'record_unavailable' };
   return { records };
 }
 
@@ -295,6 +307,12 @@ async function prepareReadInput(params, context, { toolName, schema }) {
     delete input.customer_name;
     if (params.phone && schema.properties.phone && customer.phone) input.phone = customer.phone;
     else delete input.phone;
+  }
+  if (schema.properties?.customer_id && !input.customer_id && context.targets?.length) {
+    if (context.targets.length !== 1) {
+      return { error: 'Select one of the task customers for this record lookup', code: 'target_clarification_required' };
+    }
+    input.customer_id = context.targets[0].customer_id;
   }
   const invalid = await validateRecordTarget(input, context, { toolName });
   return invalid || { input };
