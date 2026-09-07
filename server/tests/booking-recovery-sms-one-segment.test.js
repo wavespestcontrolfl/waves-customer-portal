@@ -5,7 +5,9 @@
  * stripped) with a real 10-character short code, every service label, the
  * longest names firstNameOf admits, and accented names — one GSM-7 segment
  * every time. A name that still spills the budget is replaced by the generic
- * greeting; nothing else about the body is touched.
+ * greeting; a body that still exceeds one segment is not sent (null → no
+ * claim → retried next tick). Both renders pin the base row (noVariants), the
+ * compact Bora-Care label is SMS-only, and the email's label is untouched.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -73,6 +75,22 @@ describe('booking recovery SMS — one segment', () => {
     expect(body).toMatch(/^Hello there! Your Bora-Care spot/);
     expect(countSegments(body).segmentCount).toBe(1);
     expect(smsTemplates.getTemplate).toHaveBeenCalledTimes(2);
+    // Both renders pin the base row so the comparison is the same body with a different greeting.
+    for (const call of smsTemplates.getTemplate.mock.calls) expect(call[3]).toEqual({ noVariants: true });
+  });
+
+  test('the compact Bora-Care label is SMS-only; the email keeps the canonical name', () => {
+    expect(_internals.SMS_SERVICE_LABELS).toEqual({ bora_care: 'Bora-Care' });
+    expect(_internals.SERVICE_LABELS.bora_care).toBe('Bora-Care Wood Treatment Service');
+  });
+
+  test('shortener down → full-length link → over budget even with the generic greeting → NOT sent (null), retried next tick', async () => {
+    const shortUrl = require('../services/short-url');
+    shortUrl.shortenOrPassthrough.mockRejectedValueOnce(new Error('shortener down'));
+    const logger = require('../services/logger');
+    const body = await _internals.renderOneSegmentSms(intent({ service_id: 'pest_control' }));
+    expect(body).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/would be 2 segments .*not sent; retried next tick/));
   });
 
   test('an /admin body with curly apostrophes is counted as it will leave (normalized), so the one-segment fallback is still found', async () => {
@@ -88,12 +106,12 @@ describe('booking recovery SMS — one segment', () => {
     expect(countSegments(normalizeGsmPunctuation(body))).toMatchObject({ encoding: 'GSM_7', segmentCount: 1 });
   });
 
-  test('a missing template still short-circuits (no claim), and a body that cannot be brought under one segment is sent as rendered', async () => {
+  test('a missing template still short-circuits (no claim), and an /admin body that outgrew one segment is not sent', async () => {
     smsTemplates.getTemplate = jest.fn(async () => null);
     expect(await _internals.renderOneSegmentSms(intent())).toBeNull();
     const logger = require('../services/logger');
     smsTemplates.getTemplate = jest.fn(async () => 'x'.repeat(200));
-    expect(await _internals.renderOneSegmentSms(intent())).toBe('x'.repeat(200));
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/renders as 2 segments/));
+    expect(await _internals.renderOneSegmentSms(intent())).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/would be 2 segments .*not sent/));
   });
 });

@@ -118,9 +118,12 @@ async function customerEmailDisabled(customerId) {
 async function renderSms(vars) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
+      // noVariants: the one-segment guard below pre-renders and may re-render
+      // with a generic greeting — both must be the SAME body (the rain-out
+      // custom rung pins the base row for the same reason).
       const body = await smsTemplatesRouter.getTemplate('booking_abandonment_recovery', vars, {
         workflow: 'booking_abandon_recovery', entity_type: 'booking_intent',
-      });
+      }, { noVariants: true });
       if (body) return body;
     }
   } catch (err) {
@@ -233,11 +236,16 @@ const SERVICE_LABELS = {
   tree_shrub: 'Tree & Shrub',
   termite: 'Termite Inspection',
   rodent: 'Rodent Control',
-  // Short enough to keep the recovery SMS in one segment (owner, 2026-09-07).
-  bora_care: 'Bora-Care',
+  bora_care: 'Bora-Care Wood Treatment Service',
 };
 function serviceLabelOf(intent) {
   return SERVICE_LABELS[String(intent.service_id || '').trim()] || 'your service';
+}
+// The recovery TEXT only (owner, 2026-09-07): the one label that cannot fit a
+// single segment. The email keeps the canonical name.
+const SMS_SERVICE_LABELS = { bora_care: 'Bora-Care' };
+function smsServiceLabelOf(intent) {
+  return SMS_SERVICE_LABELS[String(intent.service_id || '').trim()] || serviceLabelOf(intent);
 }
 
 async function bookingUrlFor(intent) {
@@ -271,8 +279,11 @@ async function bookingUrlFor(intent) {
 // deliver): the name is GSM-folded first (one non-GSM character would flip
 // the whole text to UCS-2 and three segments); if the render still spills
 // past a single segment the only variable part worth dropping is the name,
-// so it is re-rendered with the generic greeting. Beyond that the body is
-// what /admin holds — it goes out as rendered and the count is logged.
+// so it is re-rendered with the generic greeting. A body that still exceeds
+// one segment (the shortener down → full-length link; an /admin edit that
+// outgrew the budget) is NOT sent: null here means no claim, so the intent is
+// retried next tick — a recovered shortener fixes the first case by itself,
+// and the warning names the second for /admin.
 // Counts are taken on the body as it will leave (sendCustomerMessage
 // normalizes typographic punctuation first), so a curly quote in an /admin
 // edit does not make every candidate look like three UCS-2 segments.
@@ -280,7 +291,7 @@ const segmentsOf = (body) => countSegments(normalizeGsmPunctuation(body)).segmen
 async function renderOneSegmentSms(intent) {
   const vars = {
     first_name: gsmSafeName(firstNameOf(intent)),
-    service_type: serviceLabelOf(intent),
+    service_type: smsServiceLabelOf(intent),
     booking_url: await bookingUrlFor(intent),
   };
   let body = await renderSms(vars);
@@ -293,7 +304,10 @@ async function renderOneSegmentSms(intent) {
       segments = segmentsOf(body);
     }
   }
-  if (segments > 1) logger.warn(`[booking-recovery] SMS for intent ${intent.id} renders as ${segments} segments (${countSegments(normalizeGsmPunctuation(body)).encoding}) — check the template in /admin`);
+  if (segments > 1) {
+    logger.warn(`[booking-recovery] SMS for intent ${intent.id} would be ${segments} segments (${countSegments(normalizeGsmPunctuation(body)).encoding}) — not sent; retried next tick (shortener down, or the template in /admin outgrew one segment)`);
+    return null;
+  }
   return body;
 }
 
@@ -485,5 +499,5 @@ async function checkAbandoned(now = new Date()) {
 
 module.exports = {
   checkAbandoned,
-  _internals: { hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10, bookingUrlFor, SERVICE_LABELS, renderOneSegmentSms },
+  _internals: { hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10, bookingUrlFor, SERVICE_LABELS, SMS_SERVICE_LABELS, renderOneSegmentSms },
 };
