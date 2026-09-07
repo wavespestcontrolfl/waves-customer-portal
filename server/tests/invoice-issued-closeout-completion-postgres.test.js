@@ -29,7 +29,8 @@ const { chargeInvoiceWithSavedCard } = require('../services/stripe');
 const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
 const connection = process.env.VISIT_PACKET_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
-let mockPg;
+let database;
+let mockPg; // the per-test transaction while a test runs; the pool between tests
 let f;
 jest.setTimeout(90000);
 
@@ -64,9 +65,17 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     const privateQa = /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
     const ciTest = process.env.CI === 'true' && ['localhost', '127.0.0.1'].includes(url.hostname) && url.pathname === '/waves_test';
     if (!privateQa && !ciTest) throw new Error('Use a verified, task-private QA database or the isolated CI database');
-    mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 8 } });
+    database = knex({ client: 'pg', connection, pool: { min: 0, max: 8 } });
+    mockPg = database;
   });
-  afterAll(async () => { if (mockPg) await mockPg.destroy(); });
+  // Every fixture graph (customer, technician, catalog row, visit, invoice,
+  // and whatever the completion writes) lives inside one transaction that
+  // is rolled back — the catalog row in particular must never outlive the
+  // test: the serial CI run's completion-lane coverage contract reads the
+  // migrated catalog next and fails on a leaked `fixture_*` service.
+  beforeEach(async () => { mockPg = await database.transaction(); });
+  afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
+  afterAll(async () => { if (database) await database.destroy(); });
 
   async function fixture({ serviceType, category = 'pest_control', profile = null }) {
     f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(), invoiceId: randomUUID(), key: `fixture_${randomUUID().slice(0, 8)}` };
