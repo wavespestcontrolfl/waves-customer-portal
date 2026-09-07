@@ -71,12 +71,16 @@ const SMS_ROUTING = Object.freeze({
 
 // The relay sandbox line (VOICE_RELAY_SANDBOX_NUMBER) is the one owned number
 // that deliberately routes elsewhere: POST /relay-sandbox on the same portal.
+// It keeps the canonical status callback — /call-status owns the completed
+// status and duration of every call_log row, sandbox rows included.
 const SANDBOX_ROUTING = Object.freeze({
   voiceUrl: `${PORTAL_ORIGIN}/api/webhooks/twilio/relay-sandbox`,
   voiceMethod: 'POST',
   voiceReceiveMode: 'voice',
   voiceApplicationSid: '',
   trunkSid: '',
+  statusCallback: APP_ROUTING.statusCallback,
+  statusCallbackMethod: APP_ROUTING.statusCallbackMethod,
 });
 
 // Names of the contract's fields whose value on `resource` differs — exact
