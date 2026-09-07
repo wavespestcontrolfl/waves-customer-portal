@@ -11,7 +11,7 @@
  * variant="dark"  — D-palette inline styles (legacy IB surfaces)
  * variant="light" — Tailwind zinc (V2 IntelligenceBarShell)
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -49,6 +49,13 @@ function paramLines(params) {
 const TIER_LABEL = { yellow: "Confirm to run", red: "Owner confirm — exact effects", green: "Read" };
 const KIND_LABEL = { operational: "Operations", customer: "Customer record", billing: "Billing", comms: "Messages" };
 const KIND_ORDER = ["comms", "billing", "customer", "operational"];
+const RECEIPT_STATES = { completed: 'confirmed', partially_completed: 'partial', provider_accepted: 'accepted',
+  failed: 'failed', blocked: 'failed', canceled: 'cancelled', expired: 'failed', awaiting_approval: undefined, outcome_unknown: 'unknown' };
+
+function receiptState(receipt) {
+  const outcome = receipt.outcome || (receipt.success === true ? 'completed' : receipt.success === false ? 'failed' : 'outcome_unknown');
+  return Object.hasOwn(RECEIPT_STATES, outcome) ? RECEIPT_STATES[outcome] : 'unknown';
+}
 
 function groupEffects(effects) {
   const groups = new Map();
@@ -59,7 +66,7 @@ function groupEffects(effects) {
   return KIND_ORDER.filter((k) => groups.has(k)).map((k) => [k, groups.get(k)]);
 }
 
-function ContractView({ contract, dark }) {
+function ContractView({ contract, dark, showApproval = true }) {
   if (!contract) return null;
   const red = contract.tier === "red";
   const tierStyle = dark
@@ -76,7 +83,7 @@ function ContractView({ contract, dark }) {
       }`;
   return (
     <div style={dark ? { marginBottom: 10 } : undefined} className={dark ? undefined : "mb-2.5"}>
-      <div style={dark ? { display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" } : undefined}
+      {showApproval && <div style={dark ? { display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" } : undefined}
         className={dark ? undefined : "flex items-center gap-2 mb-1.5 flex-wrap"}>
         <span style={tierStyle} className={tierClass}>{TIER_LABEL[contract.tier] || contract.tier}</span>
         {contract.irreversible && (
@@ -91,7 +98,7 @@ function ContractView({ contract, dark }) {
             Contacts the customer
           </span>
         )}
-      </div>
+      </div>}
       {groupEffects(contract.effects).map(([kind, items]) => (
         <div key={kind} style={dark ? { marginBottom: 6 } : undefined} className={dark ? undefined : "mb-1.5"}>
           <div style={dark ? { fontSize: 14, color: D.muted, textTransform: "uppercase", letterSpacing: "0.04em" } : undefined}
@@ -130,6 +137,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
   // status per action id: undefined | 'confirming' | 'confirmed' | 'cancelling' | 'cancelled' | 'failed'
   const [statusById, setStatusById] = useState({});
   const [errorById, setErrorById] = useState({});
+  const inFlightRef = useRef(new Set());
 
   // Preserve existing card outcomes and expiry across clarification turns. Countdown
   // deadlines anchor on RECEIPT TIME + the server-computed expiresInMs, so a
@@ -139,16 +147,19 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
   const [deadlineById, setDeadlineById] = useState({});
   useEffect(() => {
     const received = Date.now();
-    const deadlines = {};
-    for (const a of actions || []) {
-      if (typeof a.expiresInMs === "number") {
-        deadlines[a.id] = (a.receivedAt ?? received) + a.expiresInMs;
-      } else if (a.expiresAt) {
-        const at = new Date(a.expiresAt).getTime();
-        if (Number.isFinite(at)) deadlines[a.id] = at;
+    setDeadlineById((previous) => {
+      const deadlines = { ...previous };
+      for (const a of actions || []) {
+        if (deadlines[a.id] !== undefined) continue;
+        if (typeof a.expiresInMs === "number") {
+          deadlines[a.id] = (a.receivedAt ?? received) + a.expiresInMs;
+        } else if (a.expiresAt) {
+          const at = new Date(a.expiresAt).getTime();
+          if (Number.isFinite(at)) deadlines[a.id] = at;
+        }
       }
-    }
-    setDeadlineById(previous => Object.fromEntries(Object.entries(deadlines).map(([id, deadline]) => [id, previous[id] ?? deadline])));
+      return deadlines;
+    });
   }, [actions]);
 
   // Tick for the expiry countdown — the server enforces the 10-minute TTL
@@ -176,7 +187,28 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     setErrorById((prev) => ({ ...prev, [id]: error || null }));
   };
 
+  const showReceipt = (action, body) => {
+    const state = receiptState(body);
+    const message = body.warning || body.result?.warning || body.result?.error || body.result?.message
+      || (state === "unknown" ? "The outcome is not established. Check status before taking further action."
+        : state === "failed" ? "The action could not be completed" : null);
+    setStatus(action.id, state, message);
+    return state;
+  };
+
+  const checkStatus = async (action) => {
+    try {
+      const receipt = await adminFetch(`/admin/intelligence-bar/actions/${encodeURIComponent(action.id)}`);
+      showReceipt(action, receipt);
+      onResolved?.(action, "status", receipt);
+    } catch {
+      setStatus(action.id, "unknown", "Status is unavailable. This does not mean the action was canceled or failed.");
+    }
+  };
+
   const decide = async (action, decision) => {
+    if (inFlightRef.current.has(action.id)) return;
+    inFlightRef.current.add(action.id);
     const inFlight = decision === "confirm" ? "confirming" : "cancelling";
     const done = decision === "confirm" ? "confirmed" : "cancelled";
     setStatus(action.id, inFlight);
@@ -191,18 +223,16 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
           ...(decision === "confirm" && action.contract_hash ? { contract_hash: action.contract_hash } : {}),
         }),
       });
-      if (decision === "confirm" && body.success === false) {
-        setStatus(action.id, "failed", body.result?.error || "The action could not be completed");
-      } else {
-        // A committed action can still carry a partial-failure warning
-        // (e.g. stops moved but some customers weren't texted) — surface it
-        // instead of a bare "Done".
-        setStatus(action.id, done, (decision === "confirm" && body.result?.warning) || null);
-      }
+      if (decision === "confirm") showReceipt(action, body);
+      else if (body.cancelled === true) setStatus(action.id, done);
+      else await checkStatus(action);
       if (onResolved) onResolved(action, decision, body);
-    } catch (err) {
-      setStatus(action.id, "failed", err.message);
-      if (onResolved) onResolved(action, decision, { success: false, result: { error: err.message } });
+    } catch {
+      // A dropped response can follow a successful commit. Read the durable
+      // receipt; never resubmit a send/order/payment on a network error.
+      await checkStatus(action);
+    } finally {
+      inFlightRef.current.delete(action.id);
     }
   };
 
@@ -212,6 +242,9 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
     confirming: "Confirming…",
     cancelling: "Cancelling…",
     confirmed: "✓ Done",
+    accepted: "Accepted by provider",
+    partial: "Partially completed",
+    unknown: "Outcome unknown",
     cancelled: "Cancelled",
   };
 
@@ -226,8 +259,11 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
       className={dark ? undefined : "mt-2 mb-3 flex flex-col gap-2"}
     >
       {actions.map((action) => {
-        const status = statusById[action.id] || action.resolvedStatus;
-        const settled = status === "confirmed" || status === "cancelled" || status === "failed";
+        const status = statusById[action.id] || action.resolvedStatus || (action.receipt ? receiptState(action.receipt) : undefined);
+        const receiptResult = action.receipt?.result;
+        const detail = errorById[action.id] || action.resolvedWarning || receiptResult?.warning || receiptResult?.error || receiptResult?.message
+          || (status === 'unknown' ? 'The outcome is not established. Check status before taking further action.' : null);
+        const settled = ["confirmed", "cancelled", "failed", "accepted", "partial", "unknown"].includes(status);
         const busy = status === "confirming" || status === "cancelling";
         const remaining = msLeft(action);
         const expired = !settled && !busy && remaining !== null && remaining <= 0;
@@ -249,10 +285,13 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
               style={dark ? { color: D.text, fontSize: 14, fontWeight: 500, marginBottom: 6 } : undefined}
               className={dark ? undefined : "text-[14px] text-zinc-900 font-medium mb-1.5"}
             >
-              {status === "confirmed" ? "✓ " : ""}Awaiting your confirmation: {action.contract?.action_label || action.tool}
+              {settled ? "Action result: " : "Awaiting your confirmation: "}{action.contract?.action_label || action.tool}
             </div>
 
-            <ContractView contract={action.contract} dark={dark} />
+            {settled ? <details style={{ marginBottom: 8, fontSize: 14 }}>
+              <summary style={{ cursor: 'pointer', minHeight: 44, paddingTop: 8 }}>Action details</summary>
+              <ContractView contract={action.contract} dark={dark} showApproval={false} />
+            </details> : <ContractView contract={action.contract} dark={dark} />}
 
             {action.summary && !action.contract && (
               <div
@@ -278,13 +317,21 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
             </div>
             )}
 
-            {(status === "failed" || (status === "confirmed" && (errorById[action.id] || action.resolvedWarning))) && (
+            {detail && (
               <div
                 style={dark ? { fontSize: 14, color: D.red, marginBottom: 8 } : undefined}
                 className={dark ? undefined : "text-[14px] text-alert-fg mb-2"}
               >
-                {(errorById[action.id] || action.resolvedWarning)}
+                {detail}
               </div>
+            )}
+
+            {status === "unknown" && (
+              <button type="button" onClick={() => checkStatus(action)}
+                style={dark ? { minHeight: 44, padding: "8px 12px", color: D.text, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8 } : undefined}
+                className={dark ? undefined : "min-h-11 px-3 py-2 border border-zinc-300 rounded-sm text-[14px]"}>
+                Check status
+              </button>
             )}
 
             {expired ? (
@@ -343,7 +390,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
                   status === "confirmed" ? "text-zinc-900" : status === "failed" ? "text-alert-fg" : "text-zinc-500"
                 }`}
               >
-                {status === "failed" ? "Failed — see error above" : statusLabel[status]}
+                {status === "failed" ? "Failed" : statusLabel[status]}
               </div>
             )}
           </div>

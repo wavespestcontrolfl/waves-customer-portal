@@ -73,7 +73,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'outcomes.js', 'task-context.js', 'tasks.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -93,8 +93,9 @@ function discoverAllTools() {
     const mod = require(path.join(TOOLS_DIR, file));
     const seen = new Map();
     for (const value of Object.values(mod)) {
-      if (!Array.isArray(value) || !value.length || !value.every(isToolShaped)) continue;
-      for (const tool of value) {
+      const definitions = isToolShaped(value) ? [value] : value;
+      if (!Array.isArray(definitions) || !definitions.length || !definitions.every(isToolShaped)) continue;
+      for (const tool of definitions) {
         if (!seen.has(tool.name)) seen.set(tool.name, tool);
       }
     }
@@ -202,6 +203,7 @@ const LEGACY_BARE_WRITES = [
 // (cancel_and_reschedule_far_out) belong here — they return content for the
 // operator, the corresponding send/submit tool is the write.
 const READ_ONLY = [
+  'discover_capabilities',
   'search_field_intelligence',
   'query_customers', 'find_overdue_customers', 'get_customer_detail', 'get_schedule_view',
   'query_revenue', 'compare_technicians', 'find_duplicates', 'draft_sms',

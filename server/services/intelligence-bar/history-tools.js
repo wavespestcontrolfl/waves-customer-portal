@@ -20,6 +20,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { threadsEnabled } = require('./threads');
+const { isToolFailure } = require('./outcomes');
 
 const DEFAULT_DAYS = 90;
 const MAX_DAYS = 400; // retention is 365 — nothing older exists
@@ -224,8 +225,7 @@ function receiptOutcome(row) {
   // Write tools signal a non-run three ways: { error }, { failed: true },
   // or { success: false, blocked: true } (e.g. duplicate-blocked estimate
   // drafts) — none of those wrote anything.
-  if (typeof result === 'object'
-    && (result.error || result.failed === true || result.success === false || result.blocked === true)) {
+  if (isToolFailure(result)) {
     return 'failed';
   }
   return 'executed';

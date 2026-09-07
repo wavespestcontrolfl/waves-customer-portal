@@ -1,5 +1,35 @@
 # Intelligence Bar — Tool Module Template
 
+## Platform actions
+
+With `GATE_IB_PLATFORM`, the server-owned `action-registry.js` discovers actions
+across pages. Add the module there and classify every action in
+`action-policy.json`; unknown policies fail closed. Do not add a second business
+writer or an arbitrary HTTP/SQL executor. Call the same authoritative operation
+as the corresponding portal action, including its route-owned validation and
+effects where those need extraction.
+
+Writes must also register in `write-gates.js` and the write-gate contract test.
+The model can prepare a proposal, never approve it. Bind target IDs, recipient,
+amount, quantity, scope, and current versions; check them under the domain lock
+at execution. The existing pending-action record is the durable receipt and
+dedupe authority. A provider timeout needs reconciliation, not another send.
+Task writes proceed one at a time after recorded successful predecessors.
+
+Map each new/changed portal request site in
+`docs/intelligence-bar-capabilities.json`, with the reviewed source fingerprint,
+role/approval/inputs/effects and actual outcome evidence. A tool-list assertion
+does not establish coverage. `npm run check:ib-coverage` rejects unmapped changes;
+dynamic endpoints and server-generated action variants must stay in scope.
+Reviewed exceptions require a concrete reason and review reference. Never reset
+the original baseline to hide missing actions.
+
+See `docs/intelligence-bar-platform-implementation.md` for rollout, verification,
+and remaining work. The wiring below describes the retained non-platform path;
+new platform-only tools do not need another branch in that legacy dispatcher.
+
+## Retained context modules
+
 How to add a new context-specific tool module. One file per context, six lines of wiring in the route, optional UI hookup.
 
 ## Step 1: Create the tool module

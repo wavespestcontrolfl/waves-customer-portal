@@ -120,6 +120,10 @@ jobs:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         working-directory: .
         run: npm run test:contracts
+      - name: Intelligence Bar real-database outcome regressions (scripted model)
+        env:
+          IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --runInBand server/tests/intelligence-bar-platform-db.test.js
 
   client:
     runs-on: ubuntu-latest
@@ -304,6 +308,8 @@ jobs:
         run: npm run check:portal-brand
       - name: Domain rules gate
         run: npm run check:domain-rules
+      - name: Intelligence Bar capability coverage drift
+        run: npm run check:ib-coverage
       - name: Local session supervisor lifecycle tests
         run: python3 -m unittest discover -s scripts/agents/tests -v
       - name: Lint changed files (errors-only, same scope as the pre-commit hook)

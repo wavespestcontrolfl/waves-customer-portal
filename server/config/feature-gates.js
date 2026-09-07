@@ -2326,6 +2326,11 @@ const gates = {
   // (gateEnvValue is a hoisted function declaration, safe to call here.)
   ibThreads: gateEnvValue('GATE_IB_THREADS'),
 
+  // Platform-wide IB discovery/execution. Dark in every environment until
+  // explicitly enabled; kill = unset. Existing confirmation and role gates
+  // remain mandatory. Runtime reads the same flag for each request.
+  ibPlatform: gateEnvValue('GATE_IB_PLATFORM'),
+
   // Tips from your tech (scope + owner decisions 2026-09-01): the completion
   // screen's searchable tip picker (replacing the free-text Observations /
   // Recommendations boxes) and, in a later PR, the quoted note on the live
