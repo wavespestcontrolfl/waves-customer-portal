@@ -175,7 +175,14 @@ function isRowVisitBlocked(row, visit) {
   return String(visit.status) !== 'dissolved';
 }
 
-async function lockStop(trx, baseKey) {
+async function lockStop(trx, baseKey, { noWait = false } = {}) {
+  if (noWait) {
+    const result = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked', ['visit.stop', baseKey]);
+    if (!result.rows[0]?.locked) {
+      throw Object.assign(new Error('This visit is being edited. Retry in a moment.'), { code: 'visit_busy' });
+    }
+    return;
+  }
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit.stop', baseKey]);
 }
 

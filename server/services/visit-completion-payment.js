@@ -18,9 +18,11 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
   const peek = await trx('visit_completion_packets as p').join('service_visits as v', 'v.id', 'p.visit_id')
     .where('p.id', packetId).first('v.id', 'v.stop_base_key');
   if (!peek) refuse('packet_missing');
-  await VisitGroups.lockStop(trx, peek.stop_base_key);
-  const visit = await trx('service_visits').where({ id: peek.id }).forUpdate().first();
-  const packet = await trx('visit_completion_packets').where({ id: packetId }).forUpdate().first();
+  // Schedule edits take the stop before the invoice. Collection already owns
+  // the invoice, so every subsequent visit lock must refuse contention.
+  await VisitGroups.lockStop(trx, peek.stop_base_key, { noWait: true });
+  const visit = await trx('service_visits').where({ id: peek.id }).forUpdate().noWait().first();
+  const packet = await trx('visit_completion_packets').where({ id: packetId }).forUpdate().noWait().first();
   if (!visit || visit.customer_id !== invoice.customer_id || visit.billing_hold
       || !['closing', 'closed'].includes(visit.status) || !['processing', 'done'].includes(packet?.status)) {
     refuse('visit_billing_held');
@@ -146,9 +148,16 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
   }
   const member = await database('scheduled_services').where({ visit_id: visit.id }).orderBy('id').first();
   const claim = await VisitGroups.claimVisitNotification(member, 'visit_payment');
+  let terminalReason = null;
   if (claim?.state !== 'owner') {
     const previous = await database('visit_effects').where({ visit_id: visit.id, effect_type: 'visit_payment' }).first();
-    return { state: previous?.last_error || (claim?.state === 'taken' ? 'payment_needed' : 'payment_pending'), invoiceId: invoice.id };
+    if (claim?.state !== 'taken' || previous?.status !== 'suppressed'
+        || !['payment_needed', 'payment_failed'].includes(previous.last_error)) {
+      return { state: previous?.last_error || (claim?.state === 'taken' ? 'payment_needed' : 'payment_pending'), invoiceId: invoice.id };
+    }
+    // A terminal automatic attempt cannot charge again. A later discount may
+    // still settle zero through the same locked, non-cash invoice authority.
+    terminalReason = previous.last_error;
   }
   const { customerOnAutopay, getChargeableAutopayMethod } = require('./autopay-eligibility');
   let outcome = 'suppressed';
@@ -170,6 +179,7 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
       outcome = 'sent';
       reason = null;
     } else {
+      if (terminalReason) return { state: terminalReason, invoiceId: invoice.id };
       const customer = await database('customers').where({ id: visit.customer_id }).first();
       const method = await getChargeableAutopayMethod(customer, database, { rethrow: true });
       if (method && await customerOnAutopay(customer, { db: database, failClosed: true })) {
@@ -197,6 +207,9 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
       reason = 'payment_pending';
     }
   }
+  // A failed zero-only replay must not turn the terminal attempt into a
+  // reclaimable lease that could charge a later positive balance.
+  if (terminalReason && outcome === 'retry') return { state: reason, invoiceId: invoice.id };
   const current = await database('invoices').where({ id: invoice.id }).first();
   const finalized = await VisitGroups.finalizeVisitNotification(visit.id, 'visit_payment', outcome, new Date(), claim.token, {
     lastError: reason, providerId: current.stripe_payment_intent_id || null,
