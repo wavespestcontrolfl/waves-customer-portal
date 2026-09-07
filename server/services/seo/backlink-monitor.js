@@ -881,7 +881,8 @@ class BacklinkMonitor {
       .where('prospect_status', 'unreviewed')
       .orderBy('source_domain_rating', 'desc')
       .limit(20);
-    const llmMentions = await db('seo_llm_mentions').orderBy('check_date', 'desc').limit(20);
+    const llmDashboard = await require('./llm-mention-prober').getDashboard();
+    const llmMentions = llmDashboard.grid.slice(0, 20);
     const citations = await db('seo_citations').orderBy('priority', 'asc');
 
     const recentlyLost = await db('seo_backlinks')
@@ -931,10 +932,7 @@ class BacklinkMonitor {
       velocity,
       newGapsSince7d,
       newHighValueGapsSince7d,
-      llmStats: {
-        total: llmMentions.length,
-        wavesMentioned: llmMentions.filter(m => m.waves_mentioned).length,
-      },
+      llmStats: llmDashboard.summary,
       citationStats: {
         total: citations.length,
         active: citations.filter(c => c.status === 'active').length,
