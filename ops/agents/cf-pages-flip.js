@@ -52,7 +52,15 @@ async function cf(path, init) {
   console.log('latest prod deploy:', p.latest_deployment?.id, p.latest_deployment?.latest_stage?.status, p.latest_deployment?.deployment_trigger?.metadata?.commit_hash);
   if (!varsFile) return;
   const vars = JSON.parse(fs.readFileSync(varsFile, 'utf8'));
-  for (const [k, v] of Object.entries(vars)) console.log(`  set ${k} = ${k.includes('KEY') ? v.slice(0, 6) + '…' : v}${k in prod ? ' (overwrites existing)' : ' (new)'}`);
+  // Scope guard BEFORE anything is logged or written: this tool only sets
+  // browser-exposed PUBLIC_* build variables as plain_text. A non-PUBLIC key,
+  // a non-string value, or a target that already exists as secret_text is a
+  // refusal — never print or overwrite a Pages secret.
+  const bad = Object.entries(vars).filter(([k, v]) => !/^PUBLIC_[A-Z0-9_]+$/.test(k) || typeof v !== 'string');
+  if (bad.length) { console.error('refused: vars must be a { PUBLIC_*: string } map; offending keys:', bad.map(([k]) => k).join(', ')); process.exit(2); }
+  const secretTargets = Object.keys(vars).filter((k) => prod[k] && prod[k].type && prod[k].type !== 'plain_text');
+  if (secretTargets.length) { console.error('refused: existing non-plain_text targets:', secretTargets.join(', ')); process.exit(2); }
+  for (const [k, v] of Object.entries(vars)) console.log(`  set ${k} = ${k.includes('KEY') || k.includes('TOKEN') ? v.slice(0, 6) + '…' : v}${k in prod ? ' (overwrites existing)' : ' (new)'}`);
   if (!execute) { console.log('\nDRY RUN — pass --execute to write + deploy'); return; }
   const env_vars = {};
   for (const [k, v] of Object.entries(vars)) env_vars[k] = { type: 'plain_text', value: v };
