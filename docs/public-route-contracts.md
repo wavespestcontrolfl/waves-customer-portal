@@ -615,7 +615,8 @@ FIXED constants (`https://us.i.posthog.com`; `/static/*` and `/array/*` →
 against them (400 otherwise) — leading `/` and `\` runs are collapsed to one
 `/` first, so a protocol-relative (`//evil.com/e/`) or backslash tail can
 never resolve off-host (SSRF, Codex r1 on #4027); GET/POST/OPTIONS only
-(405); a per-IP limiter (`POSTHOG_INGEST_RATE_MAX`/min, default 300; 429)
+(405); a per-IP limiter (`POSTHOG_INGEST_RATE_MAX`/min, default 300; 429;
+keyed by the shared `unauthenticatedAuthLimitKey`, so IPv6 collapses to /64)
 sits AFTER the gate so gate-off probes stay an unobservable 404 and never
 spend budget; 2 MB raw body cap (413); 10 s upstream timeout (502).
 Inbound `cookie`, `authorization`, `referer`, `content-encoding` (the raw

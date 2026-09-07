@@ -13,7 +13,8 @@
  *  - oversize body → 413, upstream failure → 502; the failure log never
  *    carries the caller-controlled path
  *  - per-IP limiter sits AFTER the gate: gate-off probes never spend budget,
- *    the (n+1)th enabled request in a minute is 429 and never reaches upstream
+ *    the (n+1)th enabled request in a minute is 429 and never reaches upstream,
+ *    and IPv6 addresses in one /64 share a bucket (shared unauthenticated key)
  *
  * Runs the real router on an ephemeral Express listener with global.fetch stubbed.
  */
@@ -296,6 +297,21 @@ describe('per-IP limiter after the gate', () => {
       expect(a).toEqual([200, 200, 429]);
       expect(fetchCalls).toHaveLength(2);
       expect(await get(base, '/ingest/flags/?v=2', '198.51.100.8')).toBe(200);
+      expect(fetchCalls).toHaveLength(3);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  test('IPv6 addresses inside one /64 share a bucket (shared unauthenticated key)', async () => {
+    const { srv, base } = await listen(isolatedRouter());
+    try {
+      expect(await get(base, '/ingest/flags/', '2001:db8:1:2::10')).toBe(200);
+      expect(await get(base, '/ingest/flags/', '2001:DB8:1:2:0:0:0:99')).toBe(200);
+      // Third address in the same /64 → same bucket → over budget.
+      expect(await get(base, '/ingest/flags/', '2001:db8:1:2:abcd::1')).toBe(429);
+      // A different /64 is a different bucket.
+      expect(await get(base, '/ingest/flags/', '2001:db8:1:3::10')).toBe(200);
       expect(fetchCalls).toHaveLength(3);
     } finally {
       await new Promise((r) => srv.close(r));

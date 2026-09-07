@@ -22,8 +22,9 @@
  *    Revoke = unset the gate AND revert the SDK host env on the caller (a
  *    live SDK pointed at a 404 host just drops events).
  *  - GET / POST / OPTIONS only; 2 MB body cap; 10 s upstream timeout; a
- *    per-IP limiter (POSTHOG_INGEST_RATE_MAX/min, default 300) sits AFTER the
- *    gate so gate-off probes stay an unobservable 404 and never spend budget.
+ *    per-IP limiter (POSTHOG_INGEST_RATE_MAX/min, default 300; IPv6 collapsed
+ *    to /64 via the shared unauthenticated key) sits AFTER the gate so
+ *    gate-off probes stay an unobservable 404 and never spend budget.
  *  - Cookies and Authorization never cross in either direction; Referer is
  *    dropped (a tokenized portal URL is not PostHog's business).
  *  - X-Forwarded-For carries the visitor IP (req.ip, trust-proxy aware) so
@@ -40,6 +41,7 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const { gateEnvValue } = require('../config/feature-gates');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 const logger = require('../services/logger');
 
 const API_HOST = 'https://us.i.posthog.com';
@@ -148,9 +150,12 @@ router.use((req, res, next) => {
 // Per-IP limiter AFTER the gate: a disabled route stays a plain 404 that
 // consumes nothing, and an enabled one cannot be used to flood PostHog or
 // tie up the portal with concurrent 2 MB / 10 s upstream holds.
+// Keyed like every other unauthenticated limiter in the app: raw req.ip would
+// hand an IPv6 client a fresh bucket per address inside its /64.
 router.use(rateLimit({
   windowMs: 60 * 1000,
   max: RATE_MAX_PER_MIN,
+  keyGenerator: unauthenticatedAuthLimitKey,
   standardHeaders: false,
   legacyHeaders: false,
   handler: (req, res) => res.status(429).end(),
