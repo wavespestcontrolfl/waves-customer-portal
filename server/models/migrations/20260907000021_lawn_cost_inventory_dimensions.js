@@ -22,6 +22,9 @@ exports.up = async function up(knex) {
     const matches = await knex('products_catalog').where({ name }).forUpdate();
     if (matches.length !== 1) throw new Error(`Expected one catalog product: ${name}`);
     const product = matches[0];
+    // Retired predecessors are excluded from operating protocols. The later
+    // canonical migration validates and fills their active keeper instead.
+    if (product.active === false) continue;
     const current = unitDefinition(product.inventory_unit);
     // Preserve an explicit admin choice. This migration only fills missing
     // dimensions on rows with no stock quantities to reinterpret.
