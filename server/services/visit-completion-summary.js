@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const VisitGroups = require('./visit-groups');
 const { portalUrl } = require('../utils/portal-url');
-const { getRecipientsForPurpose, getServiceReportEmailRecipients, withAccountPrimaryContact } = require('./customer-contact');
+const { getServiceContactSmsRecipient, getServiceReportEmailRecipients, withAccountPrimaryContact } = require('./customer-contact');
 
 const VISIT_SUMMARY_TOKEN_RE = /^[a-f0-9]{64}$/;
 
@@ -87,10 +87,10 @@ async function getVisitCompletionSummary(token, database = db) {
   };
 }
 
-async function sendSummarySms({ visit, member, customer, prefs, summaryUrl, requested }) {
+async function sendSummarySms({ visit, member, customer, summaryUrl, requested }) {
   const claim = await VisitGroups.claimVisitNotification(member, 'completion_sms');
   if (claim?.state !== 'owner') return;
-  const recipient = getRecipientsForPurpose(customer, prefs, 'service_report', 'sms')[0];
+  const recipient = getServiceContactSmsRecipient(customer);
   let dispatched = false;
   try {
     if (!requested || !recipient?.phone) {

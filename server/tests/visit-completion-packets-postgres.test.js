@@ -341,7 +341,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
       .toMatchObject({ payment_intent_id: 'pi_fixture_late' });
   });
 
-  test.each(['void', 'refunded'])('recovery parks a shared invoice reversed to %s before effects resume', async (status) => {
+  test.each(['void', 'refunded', 'canceled', 'cancelled'])('recovery parks a shared invoice reversed to %s before effects resume', async (status) => {
     const saved = await saveVisitCompletionPacket(submission());
     await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).update({ status });
     await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).update({ updated_at: new Date(0) });
@@ -355,6 +355,37 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
     expect(require('../services/review-request').enrollPostService).not.toHaveBeenCalled();
     expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+  });
+
+  test.each(['plan_resolution_failed', 'error'])('a late paid-invoice review %s remains on the existing packet recovery queue', async (reason) => {
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).update({ status: 'paid' });
+    const reviews = require('../services/review-request').enrollPostService;
+    reviews.mockResolvedValueOnce({ started: false, reason });
+    expect(await require('../services/visit-completion-packets').enrollVisitCompletionReview(saved.body.packetId))
+      .toMatchObject({ enrolled: false, retryable: true, reason });
+    expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first())
+      .toMatchObject({ status: 'processing', error: 'review_enrollment_pending' });
+    reviews.mockResolvedValueOnce({ started: false, reason });
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 202, body: { state: 'effects_pending' } });
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
+  });
+
+  test.each([false, true])('summary SMS uses the service-contact consent artifact: %s', async (consented) => {
+    const contactPhone = '+15555550199';
+    await mockPg('customers').where({ id: fixture.customerId }).update({
+      service_contact_name: 'Synthetic Contact', service_contact_phone: contactPhone,
+      service_contacts_consent_at: consented ? mockPg.fn.now() : null,
+    });
+    const customer = await mockPg('customers').where({ id: fixture.customerId }).first();
+    const saved = await saveVisitCompletionPacket(submission());
+    await runVisitCompletionPacketEffects(saved.body.packetId);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0].to).toBe(consented ? contactPhone : customer.phone);
   });
 
   test('the existing recovery worker retries a blocked pre-provider summary without repeating billing', async () => {

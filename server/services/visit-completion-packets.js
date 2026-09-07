@@ -213,9 +213,9 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
     const recurring = performed.find((member) => member.is_recurring || member.recurring_pattern);
     if (recurring) await require('./referral-engine').creditReferralOnFirstService({ customerId: recurring.customer_id, serviceId: recurring.id });
   }
-  await enrollVisitCompletionReview(packet.id, database);
+  const reviewEnrollment = await enrollVisitCompletionReview(packet.id, database);
   const paymentPending = ['payment_pending', 'processing'].includes(payment.state);
-  const pending = paymentPending || delivery.state === 'delivery_pending';
+  const pending = paymentPending || delivery.state === 'delivery_pending' || reviewEnrollment.retryable === true;
   const review = payment.state === 'office_required' || delivery.state === 'delivery_review';
   const state = pending ? 'effects_pending' : review ? 'office_required' : 'done';
   if (!pending) await database.transaction(async (trx) => {
@@ -272,6 +272,14 @@ async function enrollVisitCompletionReview(packetId, database = db) {
     completedAt: visit.completion_submitted_at, triggeredBy: 'auto',
     delayMinutes: require('./review-request').completionReviewDelay(first.structured_notes), legacyDelayMinutes: 120,
   });
+  if (result?.started === false && ['plan_resolution_failed', 'error'].includes(result.reason)) {
+    // A paid webhook can reach a packet already closed while awaiting
+    // payment. Put it back on the existing recovery worker's queue too.
+    await database('visit_completion_packets').where({ id: packet.id }).update({
+      status: 'processing', error: 'review_enrollment_pending', updated_at: database.fn.now(),
+    });
+    return { enrolled: false, retryable: true, reason: result.reason };
+  }
   return { enrolled: true, result };
 }
 

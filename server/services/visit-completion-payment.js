@@ -88,7 +88,7 @@ async function collectVisitCompletionInvoice(packetId, database = db) {
   const invoice = await database('invoices').where({ visit_completion_packet_id: packet.id }).first();
   if (visit.billing_hold) return { state: 'office_required', invoiceId: invoice?.id || null };
   if (!invoice) return { state: 'no_charge', invoiceId: null };
-  if (['void', 'refunded'].includes(invoice.status)) {
+  if (['void', 'refunded', 'canceled', 'cancelled'].includes(invoice.status)) {
     await database('service_visits').where({ id: visit.id }).update({
       billing_hold: true, updated_at: database.fn.now(),
     });
