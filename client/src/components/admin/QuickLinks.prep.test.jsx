@@ -34,9 +34,10 @@ async function selectGuide(props = {}) {
 }
 
 describe("Quick Links prep delivery", () => {
-  it("keeps every guide searchable when the link library fails, without sending on selection", () => {
+  it("keeps every guide searchable when the link library fails, without sending on selection", async () => {
     const onPick = vi.fn();
     render(<InsertLinkSheet open onClose={() => {}} links={[]} onPick={onPick} error="Library unavailable" />);
+    await waitFor(() => expect(screen.getByRole("searchbox")).toHaveFocus());
     fireEvent.click(screen.getByRole("button", { name: "Prep guides", exact: true }));
     for (const name of ["Flea treatment", "Bed bug treatment", "Cockroach treatment", "Interior pest treatment", "Rodent service", "Termite service", "Mosquito treatment", "Lawn treatment", "Sprinkler timer guide (lawn)"]) {
       expect(screen.getByRole("button", { name: new RegExp(`^${name.replace(/[()]/g, "\\$&")}`) })).toBeInTheDocument();
@@ -49,6 +50,7 @@ describe("Quick Links prep delivery", () => {
     expect(fetch).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Back to Quick Links" }));
     expect(screen.getByRole("searchbox")).toHaveValue("irrigation");
+    await waitFor(() => expect(screen.getByRole("searchbox")).toHaveFocus());
   });
 
   it.each([["Email only", "email", "Send by email"], ["Text only", "sms", "Send by text"], ["Email and text", "both", "Send email and text"]])("delivers only the selected %s channel through the existing sender", async (label, channel, action) => {

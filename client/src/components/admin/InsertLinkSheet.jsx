@@ -108,11 +108,15 @@ export default function InsertLinkSheet({
       setQuery("");
       setActiveCategory("all");
       setChannelRowKey(null);
-      const t = setTimeout(() => searchRef.current?.focus({ preventScroll: true }), 60);
-      return () => clearTimeout(t);
     }
-    return undefined;
   }, [open]);
+
+  // The list remounts after Back; focus only after its input exists.
+  useEffect(() => {
+    if (!open || prepGuide) return undefined;
+    const t = setTimeout(() => searchRef.current?.focus({ preventScroll: true }), 60);
+    return () => clearTimeout(t);
+  }, [open, prepGuide]);
 
   const groups = useMemo(
     () => buildLinkGroups([...(links || []), ...PREP_GUIDE_LINKS], query, activeCategory),
@@ -134,7 +138,7 @@ export default function InsertLinkSheet({
           onClick={close}
           disabled={prepSending}
           aria-label="Close"
-          className="w-8 h-8 rounded-full border-0 bg-zinc-100 text-zinc-600 hover:bg-zinc-200 u-focus-ring text-14"
+          className="w-8 h-8 rounded-full bg-zinc-100 text-zinc-600 hover:bg-zinc-200 u-focus-ring text-13"
         >
           ✕
         </button>
@@ -142,7 +146,7 @@ export default function InsertLinkSheet({
       {prepGuide ? (
         <SheetBody>
           <button type="button" disabled={prepSending}
-            onClick={() => { setPrepGuide(null); searchRef.current?.focus(); }}
+            onClick={() => setPrepGuide(null)}
             className="border-0 bg-transparent p-0 text-14 text-zinc-600 underline mb-4 u-focus-ring disabled:opacity-50">
             Back to Quick Links
           </button>
@@ -170,7 +174,7 @@ export default function InsertLinkSheet({
             aria-label="Search links"
             className={cn(
               "w-full h-11 bg-white border-hairline border-zinc-300 rounded-sm",
-              "text-16 md:text-14 text-zinc-900 pl-9 pr-3",
+              "text-16 md:text-13 text-zinc-900 pl-9 pr-3",
               "focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900",
             )}
           />
@@ -183,7 +187,7 @@ export default function InsertLinkSheet({
               aria-pressed={activeCategory === key}
               onClick={() => setActiveCategory(key)}
               className={cn(
-                "shrink-0 text-14 font-medium rounded-full px-3 py-1.5 border-solid border-hairline u-focus-ring",
+                "shrink-0 text-12 font-medium rounded-full px-3 py-1.5 border-hairline u-focus-ring",
                 activeCategory === key
                   ? "bg-zinc-900 border-zinc-900 text-white"
                   : "bg-white border-zinc-300 text-ink-secondary hover:bg-zinc-50",
@@ -201,11 +205,11 @@ export default function InsertLinkSheet({
             inserts down with it. The library's own state renders below. */}
         {groups.map(({ key, label, rows }) => (
             <div key={key}>
-              <div className="px-5 pt-3.5 pb-1 text-14 uppercase tracking-label font-medium text-ink-tertiary">
+              <div className="px-5 pt-3.5 pb-1 text-11 uppercase tracking-label font-medium text-ink-tertiary">
                 {label}
               </div>
               {!hasQuery && groupCaptions[key] && (
-                <div className="px-5 pb-1 text-14 text-ink-disabled leading-snug">
+                <div className="px-5 pb-1 text-11 text-ink-disabled leading-snug">
                   {groupCaptions[key]}
                 </div>
               )}
@@ -225,7 +229,7 @@ export default function InsertLinkSheet({
                     title={link.title || link.name}
                     aria-expanded={link.channels ? chooserOpen : undefined}
                     className={cn(
-                      "w-full flex items-center gap-3 text-left px-5 py-2.5 border-0 bg-transparent u-focus-ring",
+                      "w-full flex items-center gap-3 text-left px-5 py-2.5 u-focus-ring",
                       "hover:bg-zinc-50 disabled:opacity-60",
                       chooserOpen && "bg-zinc-50",
                     )}
@@ -234,17 +238,17 @@ export default function InsertLinkSheet({
                       {ICONS[link.category === "customer" ? "customer" : link.category === "reviews" ? "reviews" : "link"]}
                     </span>
                     <span className="flex-1 min-w-0">
-                      <span className="block text-14 font-medium text-zinc-900 truncate">{link.name}</span>
-                      <span className="block text-14 text-ink-tertiary truncate">
+                      <span className="block text-13 font-medium text-zinc-900 truncate">{link.name}</span>
+                      <span className="block text-11 text-ink-tertiary truncate">
                         {link.description || displayUrl(link.url) || "Personal link — looked up on insert"}
                       </span>
                     </span>
                     {busy ? (
-                      <span className="shrink-0 text-14 uppercase tracking-label font-medium text-ink-secondary bg-zinc-100 rounded-xs px-1.5 py-0.5">
+                      <span className="shrink-0 text-11 uppercase tracking-label font-bold text-ink-secondary bg-zinc-100 rounded-xs px-1.5 py-0.5">
                         Adding…
                       </span>
                     ) : link.dynamic ? (
-                      <span className="shrink-0 text-14 uppercase tracking-label font-medium text-zinc-700 bg-zinc-100 rounded-xs px-1.5 py-0.5">
+                      <span className="shrink-0 text-11 uppercase tracking-label font-bold text-waves-blue-dark bg-waves-blue-light rounded-xs px-1.5 py-0.5">
                         This customer
                       </span>
                     ) : null}
@@ -262,8 +266,8 @@ export default function InsertLinkSheet({
                             "hover:bg-zinc-100 disabled:opacity-60",
                           )}
                         >
-                          <span className="text-14 font-medium text-zinc-900 w-11 shrink-0">{label}</span>
-                          <span className="text-14 text-ink-secondary">{hint}</span>
+                          <span className="text-13 font-medium text-zinc-900 w-11 shrink-0">{label}</span>
+                          <span className="text-12 text-ink-secondary">{hint}</span>
                         </button>
                       ))}
                     </div>
@@ -274,10 +278,10 @@ export default function InsertLinkSheet({
             </div>
           ))}
         {loading && (
-          <div className="px-5 py-4 text-14 text-ink-secondary">Loading the link library…</div>
+          <div className="px-5 py-4 text-13 text-ink-secondary">Loading the link library…</div>
         )}
         {!loading && error && (
-          <div className="px-5 py-4 text-14">
+          <div className="px-5 py-4 text-13">
             <span className="text-alert-fg">{error}</span>{" "}
             {onRetry && (
               <button type="button" onClick={onRetry} className="underline text-zinc-900 u-focus-ring">
@@ -287,7 +291,7 @@ export default function InsertLinkSheet({
           </div>
         )}
         {!loading && !error && !groups.length && (
-          <div className="px-5 py-6 text-14 text-ink-secondary leading-relaxed">
+          <div className="px-5 py-6 text-13 text-ink-secondary leading-relaxed">
             No links match &ldquo;{query.trim()}&rdquo;.
             <br />
             Add it under Settings &rsaquo; Link Library and it shows up here.
