@@ -854,8 +854,8 @@ if (config.nodeEnv === 'production') {
     {
       prefix: '/admin',
       manifest: '/admin-manifest.json',
-      title: 'Waves Admin',
-      appleTitle: 'Waves Admin',
+      title: 'Waves',
+      appleTitle: 'Waves',
       themeColor: '#18181B',
       // html.admin-app scopes the admin form/font CSS (index.css) and marks
       // the document as already-admin for the SPA's bookmark-meta snapshot.
