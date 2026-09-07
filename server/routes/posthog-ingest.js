@@ -53,6 +53,14 @@ const METHODS = new Set(['GET', 'POST', 'OPTIONS']);
 // replay batches every few seconds, flags); 300/min per IP leaves room for a
 // shared office NAT while bounding a flood of 2 MB × 10 s upstream holds.
 const RATE_MAX_PER_MIN = Math.max(1, parseInt(process.env.POSTHOG_INGEST_RATE_MAX, 10) || 300);
+// Process-wide in-flight cap, checked BEFORE the body is buffered: the
+// per-IP limiter bounds requests per minute, not concurrent bytes — 300
+// simultaneous 2 MB bodies held for a 10 s upstream call would be ~600 MB.
+// 32 × 2 MB caps that at 64 MB; the (n+1)th concurrent request is a fast 503
+// and posthog-js simply retries later. Analytics is best-effort; the portal
+// serving customers is not.
+const MAX_IN_FLIGHT = Math.max(1, parseInt(process.env.POSTHOG_INGEST_MAX_IN_FLIGHT, 10) || 32);
+let inFlight = 0;
 
 // Hop-by-hop headers plus everything that must not cross the boundary.
 // content-encoding: express.raw() inflates a gzip/deflate request body before
@@ -161,6 +169,18 @@ router.use(rateLimit({
   handler: (req, res) => res.status(429).end(),
 }));
 
+// Concurrency bound before any byte is buffered. Released on 'close' so an
+// aborted upload frees its slot too.
+router.use((req, res, next) => {
+  if (inFlight >= MAX_IN_FLIGHT) return res.status(503).set('Retry-After', '5').end();
+  inFlight += 1;
+  let released = false;
+  const release = () => { if (!released) { released = true; inFlight -= 1; } };
+  res.once('finish', release);
+  res.once('close', release);
+  return next();
+});
+
 // Buffer whatever content-type posthog-js uses (text/plain, form-urlencoded,
 // JSON, gzip-js binary) — the global parsers never see this router.
 router.use(express.raw({ type: () => true, limit: BODY_LIMIT }));
@@ -177,3 +197,4 @@ module.exports = router;
 module.exports.upstreamUrl = upstreamUrl;
 module.exports.API_HOST = API_HOST;
 module.exports.ASSET_HOST = ASSET_HOST;
+module.exports.inFlightCount = () => inFlight;

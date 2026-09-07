@@ -14,7 +14,8 @@
  *    carries the caller-controlled path
  *  - per-IP limiter sits AFTER the gate: gate-off probes never spend budget,
  *    the (n+1)th enabled request in a minute is 429 and never reaches upstream,
- *    and IPv6 addresses in one /64 share a bucket (shared unauthenticated key)
+ *    and IPv6 addresses in one /64 share a bucket (shared unauthenticated key);
+ *    a process-wide in-flight cap answers 503 before buffering and frees on completion
  *
  * Runs the real router on an ephemeral Express listener with global.fetch stubbed.
  */
@@ -315,6 +316,35 @@ describe('per-IP limiter after the gate', () => {
       expect(fetchCalls).toHaveLength(3);
     } finally {
       await new Promise((r) => srv.close(r));
+    }
+  });
+
+  test('in-flight cap: the (n+1)th concurrent request is a fast 503 before buffering; slots free on completion', async () => {
+    let r;
+    jest.isolateModules(() => {
+      process.env.POSTHOG_INGEST_MAX_IN_FLIGHT = '1';
+      r = require('../routes/posthog-ingest');
+      delete process.env.POSTHOG_INGEST_MAX_IN_FLIGHT;
+    });
+    const { srv, base } = await listen(r);
+    let releaseUpstream;
+    const held = new Promise((resolve) => { releaseUpstream = resolve; });
+    fetchImpl = async () => { await held; return upstreamResponse(); };
+    try {
+      const first = get(base, '/ingest/flags/', '203.0.113.1');
+      // Wait until the first request is inside the proxy (holding the slot).
+      for (let i = 0; i < 50 && r.inFlightCount() < 1; i++) await new Promise((t) => setTimeout(t, 10));
+      expect(r.inFlightCount()).toBe(1);
+      const second = await get(base, '/ingest/flags/', '203.0.113.2');
+      expect(second).toBe(503);
+      expect(fetchCalls).toHaveLength(1);
+      releaseUpstream();
+      expect(await first).toBe(200);
+      for (let i = 0; i < 50 && r.inFlightCount() > 0; i++) await new Promise((t) => setTimeout(t, 10));
+      expect(r.inFlightCount()).toBe(0);
+      expect(await get(base, '/ingest/flags/', '203.0.113.3')).toBe(200);
+    } finally {
+      await new Promise((done) => srv.close(done));
     }
   });
 

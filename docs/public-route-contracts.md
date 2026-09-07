@@ -618,7 +618,10 @@ never resolve off-host (SSRF, Codex r1 on #4027); GET/POST/OPTIONS only
 (405); a per-IP limiter (`POSTHOG_INGEST_RATE_MAX`/min, default 300; 429;
 keyed by the shared `unauthenticatedAuthLimitKey`, so IPv6 collapses to /64)
 sits AFTER the gate so gate-off probes stay an unobservable 404 and never
-spend budget; 2 MB raw body cap (413); 10 s upstream timeout (502).
+spend budget; a process-wide in-flight cap (`POSTHOG_INGEST_MAX_IN_FLIGHT`,
+default 32; fast 503 + `Retry-After`) is checked BEFORE the body is buffered
+so concurrent bytes are bounded (32 × 2 MB), not just requests per minute;
+2 MB raw body cap (413); 10 s upstream timeout (502).
 Inbound `cookie`, `authorization`, `referer`, `content-encoding` (the raw
 body parser has already inflated the bytes), hop-by-hop and client-IP
 headers are stripped and `X-Forwarded-For` is set to `req.ip`
