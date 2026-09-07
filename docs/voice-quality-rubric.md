@@ -121,8 +121,9 @@ no alert. Repeated failure preserves the result and produces one admin
 `eval_regression` bell plus the existing ops digest/email channel. An inconclusive
 retry retains the first observed failure; an initial inconclusive attempt is reported
 without a retry. The same notification path reports a crashed or timed-out child.
-The three-hour child ceiling covers the bounded conversation and judge budgets
-plus one retry; a hung child is killed before releasing its exclusive lock.
+The eight-hour child ceiling covers every allowed model round (up to six
+20-second streams per caller turn), judge budgets and one retry, with time
+left for fixture-tool timeouts; a hung child is killed before releasing its exclusive lock.
 
 Operational delivery reuses the call-extraction eval helpers and `deliverOpsDigest`.
 `EVAL_REGRESSION_EMAIL=off` disables the email/digest channel. A failed bell insert

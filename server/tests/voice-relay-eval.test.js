@@ -1481,7 +1481,11 @@ describe('voice relay eval — scheduled wrapper and child process', () => {
     const child = (code, stdout, stderr = '') => (file, args, opts, cb) => {
       expect(file).toBe(process.execPath);
       expect(args).toEqual([expect.stringMatching(/run-voice-relay-eval\.js$/), '--json', '--judge', '--notify']);
-      expect(opts.timeout).toBeGreaterThan(0);
+      const fixture = replay.loadFixture(FIXTURE_PATH);
+      const turns = fixture.scenarios.reduce((n, s) => n + s.turns.length, 0);
+      const modelBudget = turns * 6 * 20_000;
+      const judgeBudget = Math.ceil(fixture.scenarios.length / replay._internals.JUDGE_CONCURRENCY) * 4 * 60_000;
+      expect(opts.timeout).toBeGreaterThan(2 * (modelBudget + judgeBudget));
       const err = code === 0 ? null : Object.assign(new Error(`exit ${code}`), { code });
       cb(err, stdout, stderr);
     };

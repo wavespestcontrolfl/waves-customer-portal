@@ -52,16 +52,14 @@ const SCRIPT_PATH = path.join(__dirname, '..', '..', 'scripts', 'run-voice-relay
 const MANUAL_RERUN = 'node server/scripts/run-voice-relay-eval.js --json --judge';
 const OPS_KEY = 'voice-relay-eval';
 const OPS_HEADING = 'Voice relay conversation eval';
-// The child ceiling covers the bounded WORST case, not the typical run — a
-// primary-provider outage is exactly what the two-leg judge exists for, so
-// the ceiling must outlast it: conversations run one at a time (a stalled
-// Sandy model costs the relay's 20 s stream bound per turn, ≈ 80 s for a
-// four-turn scenario, ≈ 45 min over 34), verdicts run JUDGE_CONCURRENCY at a
-// time (each chain ≤ the dispatcher's 4-minute split budget, ≈ 34 min for
-// 34 scenarios four-wide), and the wrapper retries a failed run once. Three
-// hours holds twice that with margin; a wedged run still cannot hold the
-// runExclusive lock past it.
-const CHILD_TIMEOUT_MS = 3 * 60 * 60 * 1000;
+// Operational ceiling for the shipped fixture plus one retry. Every caller
+// turn may use all six 20-second streams (relay-conversation MAX_TOOL_ROUNDS /
+// STREAM_TIMEOUT_MS), not merely one. Ninety turns can therefore spend three
+// hours on Sandy per attempt. Thirty-four judge chains, four-wide at the
+// dispatcher's four-minute budget, add 36 minutes. Twice that is 7h12m;
+// eight hours leaves 48 minutes for fixture-tool timeouts and other overhead.
+// Keep the child-bound test aligned if the live bounds or fixture grow.
+const CHILD_TIMEOUT_MS = 8 * 60 * 60 * 1000;
 const JUDGE_CONCURRENCY = 4;
 // scenario.gates key → the env var the relay reads at call time. Every one of
 // these is read per call (no module-top reads), so a scenario may flip them
