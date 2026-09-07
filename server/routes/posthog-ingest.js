@@ -18,7 +18,9 @@
  *  - GATE_POSTHOG_INGEST_PROXY off → 404, the dark-surface contract every other
  *    gated public route uses. Revoke = unset the gate AND revert the SDK host
  *    env on the caller (a live SDK pointed at a 404 host just drops events).
- *  - GET / POST / OPTIONS only; 2 MB body cap; 10 s upstream timeout.
+ *  - GET / POST / OPTIONS only; 2 MB body cap; 10 s upstream timeout; a
+ *    per-IP limiter (POSTHOG_INGEST_RATE_MAX/min, default 300) sits AFTER the
+ *    gate so gate-off probes stay an unobservable 404 and never spend budget.
  *  - Cookies and Authorization never cross in either direction; Referer is
  *    dropped (a tokenized portal URL is not PostHog's business).
  *  - X-Forwarded-For carries the visitor IP (req.ip, trust-proxy aware) so
@@ -28,9 +30,12 @@
  *    own CORS headers pass through verbatim (it reflects any origin), so spoke
  *    domains work without widening the portal allowlist, and helmet's
  *    same-origin CORP never blocks the hub from loading array.js from here.
- *  - Bodies are never logged; only upstream failures (status + path).
+ *  - Nothing from the request is ever logged — not the body, not the path (a
+ *    caller can put anything in `/ingest/<segment>`); upstream failures log
+ *    the method, a fixed route category and the error kind only.
  */
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const featureGates = require('../config/feature-gates');
 const logger = require('../services/logger');
 
@@ -39,6 +44,10 @@ const ASSET_HOST = 'https://us-assets.i.posthog.com';
 const BODY_LIMIT = '2mb';
 const UPSTREAM_TIMEOUT_MS = 10000;
 const METHODS = new Set(['GET', 'POST', 'OPTIONS']);
+// posthog-js sends roughly 10–20 requests/min per active visitor (events,
+// replay batches every few seconds, flags); 300/min per IP leaves room for a
+// shared office NAT while bounding a flood of 2 MB × 10 s upstream holds.
+const RATE_MAX_PER_MIN = Math.max(1, parseInt(process.env.POSTHOG_INGEST_RATE_MAX, 10) || 300);
 
 // Hop-by-hop headers plus everything that must not cross the boundary.
 const DROP_REQUEST_HEADERS = new Set([
@@ -108,7 +117,9 @@ async function proxy(req, res) {
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.end(body);
   } catch (e) {
-    logger.warn(`[posthog-ingest] upstream failed ${req.method} ${req.path}: ${e && e.name === 'AbortError' ? 'timeout' : (e && e.message)}`);
+    // Never echo the request: the path is caller-controlled free text.
+    const kind = e && e.name === 'AbortError' ? 'timeout' : (e && e.code) || (e && e.name) || 'error';
+    logger.warn(`[posthog-ingest] upstream failed ${req.method} ${url.startsWith(ASSET_HOST) ? 'static' : 'ingest'}: ${kind}`);
     if (!res.headersSent) res.status(502).end();
   } finally {
     clearTimeout(timer);
@@ -122,6 +133,17 @@ router.use((req, res, next) => {
   if (!METHODS.has(req.method)) return res.status(405).set('Allow', 'GET, POST, OPTIONS').end();
   return next();
 });
+
+// Per-IP limiter AFTER the gate: a disabled route stays a plain 404 that
+// consumes nothing, and an enabled one cannot be used to flood PostHog or
+// tie up the portal with concurrent 2 MB / 10 s upstream holds.
+router.use(rateLimit({
+  windowMs: 60 * 1000,
+  max: RATE_MAX_PER_MIN,
+  standardHeaders: false,
+  legacyHeaders: false,
+  handler: (req, res) => res.status(429).end(),
+}));
 
 // Buffer whatever content-type posthog-js uses (text/plain, form-urlencoded,
 // JSON, gzip-js binary) — the global parsers never see this router.

@@ -613,7 +613,9 @@ FIXED constants (`https://us.i.posthog.com`; `/static/*` →
 against them (400 otherwise) — leading `/` and `\` runs are collapsed to one
 `/` first, so a protocol-relative (`//evil.com/e/`) or backslash tail can
 never resolve off-host (SSRF, Codex r1 on #4027); GET/POST/OPTIONS only
-(405); 2 MB raw body cap (413); 10 s upstream timeout (502).
+(405); a per-IP limiter (`POSTHOG_INGEST_RATE_MAX`/min, default 300; 429)
+sits AFTER the gate so gate-off probes stay an unobservable 404 and never
+spend budget; 2 MB raw body cap (413); 10 s upstream timeout (502).
 Inbound `cookie`, `authorization`, `referer`, hop-by-hop and client-IP
 headers are stripped and `X-Forwarded-For` is set to `req.ip`
 (trust-proxy aware) so PostHog GeoIP survives; `origin` and `content-type`
@@ -621,10 +623,12 @@ pass through so PostHog's own CORS reflection answers the browser (spoke
 origins never touch the portal allowlist). Outbound `set-cookie`,
 `content-encoding`, `content-length` and HSTS are dropped and
 `Cross-Origin-Resource-Policy: cross-origin` is set so the hub can load
-`array.js` cross-origin. Bodies are never logged (upstream failures only).
-The global `/api/` limiter does not apply (different prefix, mounted above
-it); abuse is bounded to forwarding to PostHog's public ingest, which the
-public project key already permits directly. Kill = unset the gate AND
+`array.js` cross-origin. Nothing from the request is logged — not the body
+and not the path (caller-controlled free text; an upstream failure logs the
+method, a fixed `static`/`ingest` category and the error kind only). The
+global `/api/` limiter does not apply (different prefix, mounted above it),
+hence the route limiter; abuse is bounded to forwarding to PostHog's public
+ingest, which the public project key already permits directly. Kill = unset the gate AND
 revert the caller's host env (hub `PUBLIC_POSTHOG_HOST`, portal
 `VITE_POSTHOG_HOST`) — an SDK pointed at a 404 just drops events.)
 `/api/public/services/menu` (read-only catalog-derived product menu the

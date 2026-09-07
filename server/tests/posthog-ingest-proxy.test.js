@@ -8,7 +8,10 @@
  *    do; X-Forwarded-For carries the visitor IP; raw POST body forwarded byte-for-byte
  *  - upstream status/body/CORS headers pass through; set-cookie and
  *    content-encoding do not; CORP is cross-origin (hub loads array.js from here)
- *  - oversize body → 413, upstream failure → 502
+ *  - oversize body → 413, upstream failure → 502; the failure log never
+ *    carries the caller-controlled path
+ *  - per-IP limiter sits AFTER the gate: gate-off probes never spend budget,
+ *    the (n+1)th enabled request in a minute is 429 and never reaches upstream
  *
  * Runs the real router on an ephemeral Express listener with global.fetch stubbed.
  */
@@ -18,6 +21,7 @@ const express = require('express');
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const featureGates = require('../config/feature-gates');
+const logger = require('../services/logger');
 const router = require('../routes/posthog-ingest');
 
 let server;
@@ -206,9 +210,77 @@ describe('response boundary', () => {
     expect(fetchCalls[0].init.method).toBe('OPTIONS');
   });
 
-  test('upstream failure → 502', async () => {
+  test('upstream failure → 502, and the log never carries the caller-controlled path', async () => {
     fetchImpl = async () => { throw new Error('ECONNRESET'); };
-    const res = await request({ method: 'POST', path: '/ingest/e/', headers: { 'content-type': 'text/plain', 'content-length': '2' }, body: '{}' });
+    logger.warn.mockClear();
+    const res = await request({ method: 'POST', path: '/ingest/e/jane.doe%40example.com/941-555-0100', headers: { 'content-type': 'text/plain', 'content-length': '2' }, body: '{}' });
     expect(res.status).toBe(502);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    const line = String(logger.warn.mock.calls[0][0]);
+    expect(line).toContain('[posthog-ingest] upstream failed POST ingest');
+    expect(line).not.toContain('jane');
+    expect(line).not.toContain('941');
+    expect(line).not.toContain('/e/');
+  });
+});
+
+describe('per-IP limiter after the gate', () => {
+  // Two isolated router instances with a 2/min budget so the (n+1)th request
+  // is observable without 300 round trips. Each isolated require resolves its
+  // own feature-gates copy, which reads GATE_POSTHOG_INGEST_PROXY at load.
+  function isolatedRouter(gateOn) {
+    let r;
+    jest.isolateModules(() => {
+      process.env.POSTHOG_INGEST_RATE_MAX = '2';
+      process.env.GATE_POSTHOG_INGEST_PROXY = gateOn ? 'true' : '';
+      r = require('../routes/posthog-ingest');
+      delete process.env.POSTHOG_INGEST_RATE_MAX;
+      delete process.env.GATE_POSTHOG_INGEST_PROXY;
+    });
+    return r;
+  }
+
+  function listen(r) {
+    return new Promise((resolve) => {
+      const app = express();
+      app.set('trust proxy', true);
+      app.use('/ingest', r);
+      const srv = app.listen(0, '127.0.0.1', () => resolve({ srv, base: `http://127.0.0.1:${srv.address().port}` }));
+    });
+  }
+
+  const get = (base, path, ip) => new Promise((resolve, reject) => {
+    const req = http.request(base + path, { method: 'GET', headers: { 'x-forwarded-for': ip } }, (res) => {
+      res.resume();
+      res.on('end', () => resolve(res.statusCode));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+
+  test('enabled: the (n+1)th request per IP in a minute is 429 and never reaches upstream; another IP is unaffected', async () => {
+    const { srv, base } = await listen(isolatedRouter(true));
+    try {
+      const a = [];
+      for (let i = 0; i < 3; i++) a.push(await get(base, '/ingest/flags/?v=2', '198.51.100.7'));
+      expect(a).toEqual([200, 200, 429]);
+      expect(fetchCalls).toHaveLength(2);
+      expect(await get(base, '/ingest/flags/?v=2', '198.51.100.8')).toBe(200);
+      expect(fetchCalls).toHaveLength(3);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
+  });
+
+  test('gate off: probes stay 404 past the budget — the limiter sits after the gate', async () => {
+    const { srv, base } = await listen(isolatedRouter(false));
+    try {
+      const probes = [];
+      for (let i = 0; i < 4; i++) probes.push(await get(base, '/ingest/e/', '198.51.100.9'));
+      expect(probes).toEqual([404, 404, 404, 404]);
+      expect(fetchCalls).toHaveLength(0);
+    } finally {
+      await new Promise((r) => srv.close(r));
+    }
   });
 });
