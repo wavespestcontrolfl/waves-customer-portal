@@ -251,7 +251,7 @@ function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, se
       row.recurring_interval_days, row.recurring_ongoing, row.date_exception, formatDateOnly(row.date_exception_cadence_date),
       row.recurring_nth, row.recurring_weekday, row.skip_weekends, row.weekend_shift,
       // A correction followed by the SAME bad state must be a new incident.
-      row.updated_at, row.property_id, formatDateOnly(row.scheduled_date)]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+      row.row_revision, row.property_id, formatDateOnly(row.scheduled_date)]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
   })).digest('hex').slice(0, 20);
   return { estimateId: estimate.id, customerId: estimate.customer_id, serviceFamily: family,
     pattern, expectedVisits, recordedVisits: live.length, issues, evidenceKey,
@@ -325,9 +325,12 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
     .whereIn('s.customer_id', customerIds)
     .select('s.id', 's.customer_id', 's.property_id', 's.source_estimate_id', 's.recurring_parent_id',
       's.service_type', 's.service_key_snapshot', 's.is_callback', 's.followup_included',
-      's.status', 's.is_recurring', 's.recurring_pattern', 's.recurring_ongoing', 's.updated_at',
+      's.status', 's.is_recurring', 's.recurring_pattern', 's.recurring_ongoing',
       's.date_exception', 's.recurring_nth', 's.recurring_weekday', 's.recurring_interval_days', 's.skip_weekends', 's.weekend_shift',
       'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type',
+      // Some existing writers omit updated_at. xmin tracks the actual tuple
+      // transaction, so a later repair/regression gets fresh alert evidence.
+      conn.raw('s.xmin::text as row_revision'),
       conn.raw("to_char(s.date_exception_cadence_date, 'YYYY-MM-DD') as date_exception_cadence_date"),
       conn.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as scheduled_date"));
   const retainedSeries = await conn('activity_log').whereIn('customer_id', customerIds)

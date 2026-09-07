@@ -143,12 +143,13 @@ test('the same evidence dedupes and a repaired-then-regressed schedule gets a ne
 test('cadence-only repairs and later regressions on the same rows refresh alert evidence', () => {
   const e = estimate({ estimate_data: { result: { recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9 }] } } } });
   const rows = series('every_6_weeks', 9).map((row) => ({ ...row, service_type: 'Lawn Care', catalog_service_key: 'lawn_program',
-    service_key_snapshot: 'lawn_program', recurring_pattern: 'custom', recurring_interval_days: 60, updated_at: '2040-01-01T12:00:00Z' }));
+    service_key_snapshot: 'lawn_program', recurring_pattern: 'custom', recurring_interval_days: 60,
+    updated_at: '2040-01-01T12:00:00Z', row_revision: '100' }));
   const before = check(e, rows)[0];
   expect(check(e, rows)[0].evidenceKey).toBe(before.evidenceKey);
-  const repaired = rows.map((row) => ({ ...row, recurring_interval_days: 42, updated_at: '2040-01-02T12:00:00Z' }));
+  const repaired = rows.map((row) => ({ ...row, recurring_interval_days: 42, row_revision: '101' }));
   expect(check(e, repaired)).toEqual([]);
-  const regressed = repaired.map((row) => ({ ...row, recurring_interval_days: 60, updated_at: '2040-01-03T12:00:00Z' }));
+  const regressed = repaired.map((row) => ({ ...row, recurring_interval_days: 60, row_revision: '102' }));
   expect(check(e, regressed)[0].evidenceKey).not.toBe(before.evidenceKey);
   expect(check(e, rows.map((row) => ({ ...row, recurring_interval_days: 61 })))[0].evidenceKey).not.toBe(before.evidenceKey);
   expect(check(e, rows.map((row) => ({ ...row, date_exception: true })))[0].evidenceKey).not.toBe(before.evidenceKey);

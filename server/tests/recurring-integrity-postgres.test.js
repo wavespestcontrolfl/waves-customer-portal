@@ -140,6 +140,22 @@ postgres('recurring integrity against migrated PostgreSQL', () => {
     expect(await findings()).toEqual([]);
   });
 
+  test('cadence changes without updated_at writes still get a new incident revision', async () => {
+    const root = await visit({ recurring_pattern: 'quarterly' });
+    for (let month = 2; month <= 12; month += 1) {
+      await visit({ recurring_parent_id: root.id, scheduled_date: `2040-${String(month).padStart(2, '0')}-15` });
+    }
+    const original = (await findings())[0];
+    expect(original.issues).toContain('cadence_differs_from_acceptance');
+    // Separate savepoints create distinct tuple transaction versions while
+    // the enclosing synthetic fixture is still rolled back after the test.
+    await trx.transaction((sp) => sp('scheduled_services').where({ id: root.id }).update({ recurring_pattern: 'monthly' }));
+    expect(await findings()).toEqual([]);
+    await trx.transaction((sp) => sp('scheduled_services').where({ id: root.id }).update({ recurring_pattern: 'quarterly' }));
+    expect((await findings())[0].evidenceKey).not.toBe(original.evidenceKey);
+    expect((await trx('scheduled_services').where({ id: root.id }).first()).updated_at).toEqual(root.updated_at);
+  });
+
   test('active holds suppress only their own accepted family until resume', async () => {
     await trx('estimates').where({ id: estimateId }).update({ estimate_data: { result: { recurring: {
       services: [{ service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 6 }],
@@ -164,6 +180,19 @@ postgres('recurring integrity against migrated PostgreSQL', () => {
     const notifications = require('../services/notification-service');
     expect(notifications.notifyAdmin).toHaveBeenCalledWith('alert', expect.any(String), expect.any(String),
       expect.objectContaining({ metadata: expect.objectContaining({ scheduled_service_id: child.id, issue: 'manual_series_stamp_missing' }) }));
+    const key = () => notifications.notifyAdmin.mock.calls.filter((call) => call[3].metadata?.scheduled_service_id === child.id
+      && call[3].metadata?.issue === 'manual_series_stamp_missing').at(-1)[3].metadata.dedupeKey;
+    const originalKey = key();
+    await trx.transaction((sp) => sp('scheduled_services').where({ id: child.id }).update({
+      prepaid_amount: 100, prepaid_method: 'check', prepaid_at: paidAt,
+    }));
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
+    await trx.transaction((sp) => sp('scheduled_services').where({ id: child.id }).update({
+      prepaid_amount: null, prepaid_method: null, prepaid_at: null,
+    }));
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
+    expect(key()).not.toBe(originalKey);
+    expect((await trx('scheduled_services').where({ id: child.id }).first()).updated_at).toEqual(child.updated_at);
   });
 
   test('payment-only refund changes refresh the same annual visit\'s alert evidence', async () => {
@@ -185,11 +214,9 @@ postgres('recurring integrity against migrated PostgreSQL', () => {
       && call[3].metadata?.issue === 'annual_coverage_unverified').at(-1)[3].metadata.dedupeKey;
     expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
     const originalKey = key();
-    await trx('payments').where({ id: paymentId }).update({ status: 'paid', refund_status: null,
-      updated_at: new Date('2040-01-02T12:00:00Z') });
+    await trx.transaction((sp) => sp('payments').where({ id: paymentId }).update({ status: 'paid', refund_status: null }));
     expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
-    await trx('payments').where({ id: paymentId }).update({ status: 'refunded', refund_status: 'full',
-      updated_at: new Date('2040-01-03T12:00:00Z') });
+    await trx.transaction((sp) => sp('payments').where({ id: paymentId }).update({ status: 'refunded', refund_status: 'full' }));
     expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
     expect(key()).not.toBe(originalKey);
   });
