@@ -7451,13 +7451,17 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                 </div>{" "}
                 {/* Appointment windows ALWAYS start on the hour (owner
                     directive) — an hour select instead of a free time input
-                    so an off-hour start can't be submitted. */}
+                    so an off-hour start can't be submitted. 06:00–19:00: the
+                    admin day ends at 20:00 (window-rules), so a 19:00 start
+                    is the last one the save accepts and the last one the
+                    arrival-window hints can recommend — an option the select
+                    lacks would show 06:00 while holding the picked value. */}
                 <select
                   value={manualTime}
                   onChange={(e) => setManualTime(e.target.value)}
                   style={inputSt}
                 >
-                  {Array.from({ length: 13 }, (_, i) => {
+                  {Array.from({ length: 14 }, (_, i) => {
                     const h = i + 6;
                     const value = `${String(h).padStart(2, "0")}:00`;
                     const label = `${h % 12 || 12}:00 ${h >= 12 ? "PM" : "AM"}`;
