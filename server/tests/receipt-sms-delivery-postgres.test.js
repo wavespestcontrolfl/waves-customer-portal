@@ -6,7 +6,9 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: (gate) => gate === 'composerReceiptLinks' }));
+// gateEnvValue: the send path reads GATE_CUSTOMER_APP_NOTIFICATIONS at call
+// time (push-channel-routing.js, #4057); off keeps every send on SMS.
+jest.mock('../config/feature-gates', () => ({ isEnabled: (gate) => gate === 'composerReceiptLinks', gateEnvValue: () => false }));
 jest.mock('../services/messaging/validators/consent', () => ({
   loadContactState: jest.fn(async () => ({})),
   checkConsentForPurpose: jest.fn(() => ({ ok: true })),
