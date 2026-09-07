@@ -194,9 +194,12 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       if (type === 'customer' && isNativeApp()) {
         const result = await requestNativePushPermission();
         if (result !== 'granted') {
-          throw new Error(result === 'denied'
-            ? 'Notifications are off. Enable them for Waves in your device Settings, then try again.'
-            : 'This device could not connect for app notifications. Check your connection and try again.');
+          const errors = {
+            denied: 'Notifications are off. Enable them for Waves in your device Settings, then try again.',
+            setup_unavailable: 'The Waves app did not respond to notification setup. Close and reopen the app, then try again.',
+            permission_unavailable: 'Waves could not finish checking notification permission. Check Waves in your device’s notification Settings, then try again.',
+          };
+          throw new Error(errors[result] || 'This device could not connect for app notifications. Check your connection and try again.');
         }
         setPushOn(true);
         return;
@@ -678,7 +681,7 @@ function PushEnableStrip({ admin, enabling, error, onClick }) {
         {enabling ? 'Enabling…' : 'Enable push'}
       </button>
       {error && (
-        <div style={{ marginTop: 8, color: '#C8312F', fontSize: 12, lineHeight: 1.4 }}>
+        <div style={{ marginTop: 8, color: '#C8312F', fontSize: 14, lineHeight: 1.4 }}>
           {error}
         </div>
       )}

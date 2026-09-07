@@ -21,6 +21,7 @@
 import api, { tokenSessionIdentity, sameRequestSession } from '../utils/api';
 import { isNativeApp, nativePlatform } from './platform';
 import { navigateToCustomerUrl } from './nativeLinks';
+import { reportError } from '../lib/reportError';
 
 export { isNativeApp };
 
@@ -168,32 +169,52 @@ export async function nativePushPermissionState() {
  */
 export async function requestNativePushPermission() {
   if (!isNativeApp()) return 'unavailable';
-  try {
+  let settled = false;
+  let failureState = 'setup_unavailable';
+  let finish;
+  // Start the existing deadline before ANY bridge work. A plugin load,
+  // listener bind, or permission call can stall before register() is reached.
+  const confirmation = new Promise((resolve) => {
+    finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      registrationWaiters.delete(finish);
+      resolve(result);
+    };
+    const timeout = setTimeout(() => {
+      reportError({ name: 'TimeoutError' });
+      finish(failureState);
+    }, 15000);
+  });
+  void (async () => {
     const PushNotifications = await pushPlugin();
+    if (settled) return;
     await bindPushListeners(PushNotifications);
+    if (settled) return;
+    failureState = 'permission_unavailable';
     let state = permissionValue(await PushNotifications.checkPermissions());
+    if (settled) return;
     if (state === 'prompt' || state === 'prompt-with-rationale') {
       state = permissionValue(await PushNotifications.requestPermissions());
+      if (settled) return;
     }
-    if (state === 'granted') {
-      let finish;
-      const confirmation = new Promise((resolve) => {
-        finish = (result) => { clearTimeout(timeout); registrationWaiters.delete(finish); resolve(result); };
-        const timeout = setTimeout(() => finish('registration_unavailable'), 15000);
-        registrationWaiters.add(finish);
-      });
-      // The native bridge can leave register() pending even after a token
-      // event or our deadline. Completion belongs to the event/timeout,
-      // and a late bridge rejection must not fail a newer retry's waiters.
-      void Promise.resolve().then(() => PushNotifications.register())
-        .catch(() => finish('registration_unavailable'));
-      return await confirmation;
+    if (state !== 'granted') {
+      finish(state);
+      return;
     }
-    return state;
-  } catch (err) {
+    failureState = 'registration_unavailable';
+    registrationWaiters.add(finish);
+    // This task is detached: the event/deadline completes the action even if
+    // register() never resolves. A late failure belongs only to this attempt.
+    await PushNotifications.register();
+  })().catch((err) => {
+    if (settled) return;
     console.error('[nativePush] permission request failed:', err?.message || err);
-    return 'unavailable';
-  }
+    reportError(err);
+    finish(failureState);
+  });
+  return confirmation;
 }
 
 /** Confirm this device's registration, separately from its OS permission. */

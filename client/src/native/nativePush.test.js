@@ -16,12 +16,14 @@ const nativeMocks = vi.hoisted(() => {
 });
 
 const navigateToCustomerUrl = vi.hoisted(() => vi.fn());
+const reportError = vi.hoisted(() => vi.fn());
 
 vi.mock('./platform', () => ({
   isNativeApp: () => true,
   nativePlatform: () => 'ios',
 }));
 vi.mock('./nativeLinks', () => ({ navigateToCustomerUrl }));
+vi.mock('../lib/reportError', () => ({ reportError }));
 vi.mock('../utils/api', async (importOriginal) => ({ ...await importOriginal(), default: { request: vi.fn(async () => ({})) } }));
 vi.mock('@capacitor/push-notifications', () => ({
   PushNotifications: nativeMocks.PushNotifications,
@@ -43,6 +45,7 @@ beforeEach(() => {
   nativeMocks.state.permission = 'prompt';
   nativeMocks.state.requestResult = 'granted';
   navigateToCustomerUrl.mockClear();
+  reportError.mockClear();
   nativeMocks.PushNotifications.checkPermissions.mockClear();
   nativeMocks.PushNotifications.requestPermissions.mockClear();
   nativeMocks.PushNotifications.register.mockClear();
@@ -90,6 +93,25 @@ describe('nativePush permission and tap handling', () => {
   it('does not report a signed-out registration as connected', async () => {
     await expect(requestNativePushPermission()).resolves.toBe('registration_unavailable');
   });
+
+  it.each(['checkPermissions', 'requestPermissions'])('bounds a stalled %s and prevents a late result from continuing enrollment', async (method) => {
+    vi.useFakeTimers();
+    let complete;
+    nativeMocks.PushNotifications[method].mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    let result;
+    requestNativePushPermission().then((value) => { result = value; });
+
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(result).toBe('permission_unavailable');
+    expect(reportError).toHaveBeenCalledWith(expect.objectContaining({ name: 'TimeoutError' }));
+
+    complete({ receive: method === 'checkPermissions' ? 'prompt' : 'granted' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(nativeMocks.PushNotifications.register).not.toHaveBeenCalled();
+    if (method === 'checkPermissions') expect(nativeMocks.PushNotifications.requestPermissions).not.toHaveBeenCalled();
+    await expect(requestNativePushPermission()).resolves.toBe('registration_unavailable');
+  });
+
 
   it('waits for the registration event and backend confirmation', async () => {
     localStorage.setItem('waves_token', 'test-customer-session');
@@ -248,4 +270,23 @@ it('revokes permission on native foreground even when the settings page is close
   nativeMocks.state.listeners.appStateChange({ isActive: true });
   await vi.waitFor(() => expect(localStorage.getItem('waves_native_push_token')).toBeNull());
   expect(api.request).toHaveBeenLastCalledWith('/push/native-unsubscribe', expect.objectContaining({ method: 'POST' }));
+});
+
+it('bounds initial listener setup before any permission request', async () => {
+  vi.useFakeTimers();
+  vi.resetModules();
+  const freshNativePush = await import('./nativePush');
+  let complete;
+  nativeMocks.PushNotifications.addListener.mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+  let result;
+  freshNativePush.requestNativePushPermission().then((value) => { result = value; });
+
+  await vi.advanceTimersByTimeAsync(15000);
+  expect(result).toBe('setup_unavailable');
+  expect(reportError).toHaveBeenCalledWith(expect.objectContaining({ name: 'TimeoutError' }));
+  complete({ remove: vi.fn() });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(nativeMocks.PushNotifications.checkPermissions).not.toHaveBeenCalled();
+  expect(nativeMocks.PushNotifications.requestPermissions).not.toHaveBeenCalled();
+  expect(nativeMocks.PushNotifications.register).not.toHaveBeenCalled();
 });
