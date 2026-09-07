@@ -359,10 +359,10 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           // full-screen panel (no glass theme mounted on /admin).
           <div ref={attachPanelRef} role="dialog" aria-modal="true" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
             position: 'fixed',
-            top: isDark ? 56 : 'calc(env(safe-area-inset-top, 0px) + 8px)',
+            top: isDark ? 'calc(56px + env(safe-area-inset-top, 0px))' : 'calc(env(safe-area-inset-top, 0px) + 8px)',
             left: isDark ? 0 : 10,
             right: isDark ? 0 : 10,
-            bottom: isDark ? 56 : 'calc(env(safe-area-inset-bottom, 0px) + 78px)',
+            bottom: isDark ? 'calc(56px + env(safe-area-inset-bottom, 0px))' : 'calc(env(safe-area-inset-bottom, 0px) + 78px)',
             background: '#FFFFFF', zIndex: 9999,
             borderRadius: isDark ? 0 : 24,
             border: isDark ? 'none' : '1px solid #E7E2D7',

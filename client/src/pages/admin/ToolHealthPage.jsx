@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import useIsMobile from "../../hooks/useIsMobile";
 import { Link } from "react-router-dom";
 import { Activity, CalendarDays, Clock, RefreshCw, Timer } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -470,11 +471,11 @@ export default function ToolHealthPage() {
               </div>{" "}
             </div>
             {isOpen && (
+              <div style={{ overflowX: "auto", marginTop: 14 }}>
               <table
                 style={{
                   width: "100%",
                   borderCollapse: "collapse",
-                  marginTop: 14,
                 }}
               >
                 {" "}
@@ -581,6 +582,7 @@ export default function ToolHealthPage() {
                     ))}
                 </tbody>{" "}
               </table>
+              </div>
             )}
           </div>
         );
@@ -661,6 +663,7 @@ function Metric({ label, value }) {
 }
 
 function RecentErrorRow({ err, isLast }) {
+  const isMobile = useIsMobile(720);
   const [open, setOpen] = useState(false);
   const msg = err.errorMessage || "(no message)";
   const canExpand = msg.length > 120 || msg.includes("\n");
@@ -672,8 +675,9 @@ function RecentErrorRow({ err, isLast }) {
         padding: "7px 14px",
         borderBottom: isLast ? "none" : `1px solid ${D.border}`,
         display: "grid",
-        gridTemplateColumns: "80px 170px 1fr",
+        gridTemplateColumns: isMobile ? "1fr" : "80px 170px 1fr",
         columnGap: 14,
+        rowGap: isMobile ? 4 : 0,
         alignItems: "start",
         cursor: canExpand ? "pointer" : "default",
       }}
