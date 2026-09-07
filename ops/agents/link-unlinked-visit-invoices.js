@@ -258,6 +258,16 @@ function readPlan(file) {
       for (const visitId of [...new Set(reviewed.map((p) => String(p.visitId)))].sort()) {
         await acquireScheduledInvoiceMintLock(trx, visitId);
       }
+      // Then every reviewed INVOICE row, sorted, before any customer lock
+      // (pre-push r7 P1): credit settlement locks an invoice row and then
+      // waits on its customer, so a second reviewed invoice of a customer
+      // whose row we already hold FOR UPDATE would deadlock with it. Any
+      // order inversion this ladder still misses is caught by Postgres
+      // deadlock detection, which aborts the ONE batch transaction —
+      // nothing half-written; re-run the reviewed plan.
+      for (const invoiceId of [...new Set(reviewed.map((p) => String(p.invoiceId)))].sort()) {
+        await trx('invoices').where({ id: invoiceId }).forUpdate().first('id');
+      }
       for (const p of reviewed) {
         const again = await evaluate(trx, p.invoiceId, catalogNames, { lock: true });
         const same = again.pairing && String(again.pairing.visitId) === String(p.visitId)
