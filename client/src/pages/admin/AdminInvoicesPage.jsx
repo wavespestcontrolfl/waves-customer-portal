@@ -4992,6 +4992,13 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
   // completion reuses it instead of minting a second one.
   const [openVisits, setOpenVisits] = useState([]);
   const [selectedOpenVisit, setSelectedOpenVisit] = useState(null);
+  // The linked visit left the open list on a reload (completed or prepaid
+  // between the preview and the create). The link is kept — never silently
+  // dropped into an unlinked create, which would bypass invoice adoption
+  // and the prepaid guards — and Create is blocked until the operator picks
+  // again with the visit's new state in view.
+  const linkedVisitGone =
+    !!selectedOpenVisit && !openVisits.some((v) => v.id === selectedOpenVisit.id);
   const [serviceDate, setServiceDate] = useState(defaultServiceDate);
   const [lineItems, setLineItems] = useState(() => [newLineItem()]);
   const [notes, setNotes] = useState("");
@@ -5551,6 +5558,12 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       showToast("Choose a review request time");
       return;
     }
+    if (linkedVisitGone) {
+      showToast(
+        "The linked visit is no longer open (completed or prepaid since) — re-check the visit link before creating.",
+      );
+      return;
+    }
     setSaving(true);
 
     try {
@@ -5694,10 +5707,13 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       if (e.code === "DEPOSIT_CREDIT_CHANGED" && selectedOpenVisit && selectedCustomer) {
         // Nothing was created — the deposit moved between the preview and
         // the create. Reload the visit so the summary shows the credit that
-        // will actually apply before the operator tries again.
+        // will actually apply before the operator tries again. A visit that
+        // left the open list stays selected: linkedVisitGone then blocks
+        // Create instead of retrying unlinked.
         try {
           const visits = await loadVisitPicker(selectedCustomer.id);
-          setSelectedOpenVisit(visits.find((v) => v.id === selectedOpenVisit.id) || null);
+          const refreshed = visits.find((v) => v.id === selectedOpenVisit.id);
+          if (refreshed) setSelectedOpenVisit(refreshed);
         } catch {
           /* the toast already asks for a reload */
         }
@@ -6206,7 +6222,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
             </div>
           )}
         </div>
-        {!editMode && (serviceRecords.length > 0 || openVisits.length > 0) && (
+        {!editMode && (serviceRecords.length > 0 || openVisits.length > 0 || linkedVisitGone) && (
           <div style={panelStyle()}>
             {sectionHeader("Link to visit")}
             <select
@@ -6237,6 +6253,13 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
               style={sInput(isMobile)}
             >
               <option value="">No visit linked</option>
+              {linkedVisitGone && (
+                <option value={`visit:${selectedOpenVisit.id}`} disabled>
+                  {selectedOpenVisit.service_type} --{" "}
+                  {new Date(selectedOpenVisit.scheduled_date + "T12:00:00").toLocaleDateString()}{" "}
+                  -- no longer open
+                </option>
+              )}
               {openVisits.length > 0 && (
                 <optgroup label="Open visits (not yet completed)">
                   {openVisits.map((v) => (
@@ -6260,9 +6283,14 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                 </optgroup>
               )}
             </select>
-            {selectedOpenVisit && (
+            {selectedOpenVisit && !linkedVisitGone && (
               <div style={{ color: D.muted, fontSize: 14, marginTop: 8 }}>
                 Linked to the open visit — when it is completed, this invoice is reused instead of a new one being created.
+              </div>
+            )}
+            {linkedVisitGone && (
+              <div style={{ color: D.text, fontSize: 14, marginTop: 8 }}>
+                This visit is no longer open — it was completed or prepaid since you picked it. Check the customer's invoices before creating another; pick a visit above to continue.
               </div>
             )}
           </div>
