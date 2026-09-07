@@ -637,7 +637,7 @@ describe('the series creators consume the guard (source guards)', () => {
     // Bare raw-inference gating (the pre-fix shape) must not come back.
     expect(converterSrc).not.toMatch(/if \(pattern\) \{\s*\n\s*const \{ matches/);
     // Skip-with-note on every guarded path; fail-open log retained.
-    expect((converterSrc.match(/action: 'recurring_series_skipped'/g) || []).length).toBe(3);
+    expect((converterSrc.match(/\.insert\(\{[^}]*action: 'recurring_series_skipped'/g) || []).length).toBe(3);
     expect(converterSrc).toContain('duplicate-series guard failed (scheduling proceeds)');
     // A caller-provided transaction is reused (the lock then holds to THEIR
     // commit); otherwise each seeding step opens its own.

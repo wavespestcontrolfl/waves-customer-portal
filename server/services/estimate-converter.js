@@ -3823,7 +3823,7 @@ async function registerSeededFollowUpReminders(rows = [], customerId) {
 // missing child must never be hidden by a successful invoice/acceptance.
 async function verifyAcceptedRecurringSchedule(database, { estimateId, customerId }) {
   const estimate = await database('estimates').where({ id: estimateId, customer_id: customerId })
-    .select('id', 'customer_id', 'property_id', 'estimate_data', 'accepted_service_mode', 'monthly_total', 'annual_total', 'onetime_total')
+    .select('id', 'customer_id', 'property_id', 'estimate_data', 'accepted_at', 'accepted_service_mode', 'monthly_total', 'annual_total', 'onetime_total')
     .first();
   if (!estimate) return { ok: true, gaps: [] };
   const retainedEvents = await database('activity_log')
@@ -3849,7 +3849,7 @@ async function verifyAcceptedRecurringSchedule(database, { estimateId, customerI
       'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type');
   const { acceptedScheduleFindings, formatDateOnly } = require('./recurring-schedule-audit');
   const reservedServiceIds = new Set(retained.map((metadata) => metadata.reservedServiceId).filter(Boolean));
-  const acceptedDay = formatDateOnly(estimate.accepted_at);
+  const acceptedDay = estimate.accepted_at ? etDateString(estimate.accepted_at) : null;
   const retainedRootSet = new Set(retainedParentIds);
   // Property linkage runs after the caller commits this transaction. Avoid
   // reporting that known post-commit invariant in the immediate check.
