@@ -5,7 +5,7 @@ function fixture() {
     context: { isLawn: true, propertyId: 'property', propertyMatchesProfile: true, history: { rows: [] } },
     plan: {
       serviceId: 'visit', appointmentAssignment: {},
-      propertyGate: { serviceTier: 'Silver', trackKey: 'st_augustine', blocks: [] },
+      propertyGate: { serviceTier: 'Silver', trackKey: 'st_augustine', blocks: [], propertyMatchesProfile: true },
       protocol: { structured: {
         status: 'active', grassTrack: 'st_augustine', protocolKey: 'protocol', version: '1', window: { key: 'june' },
         products: [{ productId: 'product', defaultInPlan: true, gates: {}, applicationMode: 'broadcast' }],
@@ -138,11 +138,15 @@ test.each([
   ['nonmember whose assignment the plan resolved', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, null, true],
   ['member whose assignment the plan did NOT resolve (defaults gate off → calendar protocol)', { protocolKey: 'protocol', protocolVersion: '2', windowKey: 'september' }, 'Silver', false],
   ['assignment on a plan with no structured window', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, 'Silver', 'no-window'],
+  ['member whose turf profile does NOT prove this property', {}, 'Silver', 'unproven'],
+  ['member with the property proof never evaluated (defaults gates off)', {}, 'Silver', 'unevaluated'],
 ])('ledger attribution — %s', (_label, assignment, tier, expected) => {
   const { plan } = fixture();
   plan.appointmentAssignment = assignment;
   plan.propertyGate.serviceTier = tier;
   if (expected === 'no-window') { plan.protocol.structured = null; expected = false; }
+  if (expected === 'unproven') { plan.propertyGate.propertyMatchesProfile = false; expected = false; }
+  if (expected === 'unevaluated') { plan.propertyGate.propertyMatchesProfile = null; expected = false; }
   expect(lawnPlanAttributesVisit(plan)).toBe(expected);
   expect(lawnPlanAttributesVisit(null)).toBe(false);
 });

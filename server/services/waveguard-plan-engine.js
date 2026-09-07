@@ -1619,6 +1619,9 @@ async function buildPlanForService(serviceId, options = {}) {
       month,
       visit: visit?.visit || null,
       lawnSqft: completionContext ? lawnSqft || null : profile?.lawn_sqft || null,
+      // true = the saved turf profile proves THIS service property; false =
+      // it does not; null = not evaluated (completion-defaults gates off).
+      propertyMatchesProfile: completionContext ? completionContext.propertyMatchesProfile === true : null,
       municipality: resolvedOrdinanceCity,
       county: profile?.county || null,
       ordinanceStatus: ordinanceSummary.activeWindows.length ? 'restricted_window_active' : 'no_active_blackout',

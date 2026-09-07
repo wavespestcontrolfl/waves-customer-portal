@@ -248,6 +248,35 @@ describe('recordLawnProtocolCompletion under GATE_LAWN_ACTUALS_LEDGER', () => {
     expect(JSON.parse(actuals[1].metadata)).toEqual({ source: 'tech_closeout', reasonSupplied: false });
   });
 
+  test('gate on: a removed substitute resolves to its original protocol product', async () => {
+    process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+    const protocolRow = { id: 'pp-1', product_id: 'orig-1', catalog_product_name: 'Original iron', role: 'micronutrient', rate_per_1000: 3, rate_unit: 'fl oz' };
+    const trx = (table) => ({
+      columnInfo: () => Promise.resolve({}),
+      where: () => ({ first: () => Promise.resolve({ id: 'row-1' }), del: () => Promise.resolve(0) }),
+      leftJoin: () => ({ where: () => ({ select: () => Promise.resolve([protocolRow]) }) }),
+      insert: (row) => {
+        if (String(table).startsWith('lawn_protocol_service_completions')) {
+          return { onConflict: () => ({ merge: () => ({ returning: () => Promise.resolve([{ id: 'completion-10', ...row }]) }) }) };
+        }
+        actualsOut.push(row);
+        return Promise.resolve([row]);
+      },
+    });
+    const actualsOut = [];
+    await recordLawnProtocolCompletion(trx, {
+      service: oneTimeVisit, serviceRecord: { id: 'record-5' }, serviceProducts: [],
+      plan: {
+        protocol: { structured: { protocolKey: 'st_augustine', version: 1, window: { key: 'summer_insect', title: 'Summer', requiredTasks: [] } } },
+        mixCalculator: { lawnSqft: 5000, carrierGalPer1000: 1, items: [{ substitution: { originalProductId: 'orig-1', substituteProductId: 'sub-1', reason: 'out of stock' } }] },
+      },
+      completionInput: { skippedProducts: [{ productId: 'sub-1', productName: 'Substitute iron' }] },
+    });
+    expect(actualsOut).toHaveLength(1);
+    expect(actualsOut[0]).toMatchObject({ status: 'skipped', product_id: 'sub-1', protocol_product_id: 'pp-1', role: 'micronutrient', planned_rate_per_1000: 3 });
+    expect(JSON.parse(actualsOut[0].metadata).substitution).toEqual({ originalProductId: 'orig-1', substituteProductId: 'sub-1', reason: 'out of stock' });
+  });
+
   test('gate on: a missing visit area stays NULL instead of the planned turf area, and a plan-attributed visit keeps its protocol', async () => {
     process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
     const completions = [];

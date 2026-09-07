@@ -312,9 +312,16 @@ async function recordLawnProtocolCompletion(trx, {
   }
 
   for (const skipped of normalizeSkippedProducts(completionInput.skippedProducts || completionInput.skipped_products)) {
+    // A removed default may be an approved substitute: the closeout knows the
+    // substitute catalog id, the protocol row holds the original. Resolve
+    // through the plan's substitution map so the skipped row keeps its
+    // protocol identity, role, planned rate and substitution relationship.
+    const substitution = skipped.productId ? substitutionBySubstituteProductId.get(String(skipped.productId)) : null;
     const protocolProduct = skipped.protocolProductId
       ? protocolProducts.find((row) => String(row.id) === String(skipped.protocolProductId))
-      : matchProtocolProduct(protocolProducts, skipped);
+      : substitution?.originalProductId
+        ? protocolProducts.find((row) => String(row.product_id || '') === String(substitution.originalProductId))
+        : matchProtocolProduct(protocolProducts, skipped);
     await trx('lawn_protocol_product_actuals').insert({
       lawn_protocol_service_completion_id: completion.id,
       protocol_product_id: protocolProduct?.id || null,
@@ -325,7 +332,7 @@ async function recordLawnProtocolCompletion(trx, {
       planned_rate_per_1000: protocolProduct?.rate_per_1000 || null,
       planned_rate_unit: protocolProduct?.rate_unit || null,
       skip_reason: skipped.reason,
-      metadata: JSON.stringify({ source: 'tech_closeout', reasonSupplied: skipped.reasonSupplied }),
+      metadata: JSON.stringify({ source: 'tech_closeout', reasonSupplied: skipped.reasonSupplied, substitution: substitution || null }),
     });
   }
 
