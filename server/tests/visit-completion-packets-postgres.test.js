@@ -10,7 +10,8 @@ jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
 jest.mock('../services/service-report/application-conditions', () => ({ fetchApplicationConditions: jest.fn(async () => null) }));
 jest.mock('../services/recap-visit-context', () => ({ buildRecapVisitContext: jest.fn(async () => '') }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
-jest.mock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn() }));
+jest.mock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn(),
+  savedCardChargeSuppressesAlternateCollection: jest.fn((err) => err?.code === 'STRIPE_AMBIGUOUS_OUTCOME') }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
 
 const knex = require('knex');
@@ -24,6 +25,7 @@ const { chargeInvoiceWithSavedCard } = require('../services/stripe');
 const InvoiceService = require('../services/invoice');
 const { acquireScheduledInvoiceMintLock, mintScheduledServiceInvoiceWithDeposit } = require('../services/scheduled-invoice-mint');
 const { createVisitCompletionInvoice } = require('../services/visit-completion-invoice');
+const { collectVisitCompletionInvoice, assertVisitCompletionCharge } = require('../services/visit-completion-payment');
 const connection = process.env.VISIT_PACKET_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 let mockPg;
@@ -52,6 +54,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
   afterAll(async () => { if (mockPg) await mockPg.destroy(); });
   beforeEach(async () => {
     jest.clearAllMocks();
+    chargeInvoiceWithSavedCard.mockReset();
     fixture = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), productId: randomUUID(),
       visitId: randomUUID(), serviceIds: [randomUUID(), randomUUID()].sort(), key: randomUUID(), estimateIds: [] };
     const date = etDateString();
@@ -109,6 +112,139 @@ postgres('visit completion packet records on PostgreSQL', () => {
       service_type: 'Combined service visit', tech_notes: null, products_applied: [], service_photos: [],
     });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test.each(['per_application', 'monthly_membership', 'annual_prepay'])('%s recap-only records need no invoice or billing hold', async (billingMode) => {
+    await mockPg('customers').where({ id: fixture.customerId }).update({ billing_mode: billingMode });
+    const input = submission();
+    for (const item of input.items) item.body.oneTimeRecapOnly = true;
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved.body.billing).toMatchObject({ state: 'no_charge', invoiceId: null });
+    expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: false });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+    expect((await saveVisitCompletionPacket(input)).body.billing).toMatchObject({ state: 'no_charge' });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'no_charge' });
+  });
+
+  test.each([
+    ['deposit', false], ['deposit', true], ['discount', false], ['discount', true],
+  ])('%s covering the whole invoice settles without collection (Auto Pay %s)', async (coverage, autopay) => {
+    if (autopay) {
+      const methodId = randomUUID();
+      await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,
+        processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_fixture_visit',
+        is_default: true, autopay_enabled: true, exp_month: 12, exp_year: new Date().getUTCFullYear() + 1 });
+      await mockPg('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true, autopay_payment_method_id: methodId });
+    }
+    if (coverage === 'deposit') {
+      const estimateId = randomUUID();
+      fixture.estimateIds.push(estimateId);
+      await mockPg('estimates').insert({ id: estimateId, customer_id: fixture.customerId, status: 'accepted' });
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ source_estimate_id: estimateId });
+      await mockPg('estimate_deposits').insert({ estimate_id: estimateId, customer_id: fixture.customerId,
+        amount: 240, status: 'received', stripe_payment_intent_id: `pi_fixture_${randomUUID()}` });
+    } else {
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({
+        discount_type: 'fixed_amount', discount_amount: 120, discount_dollars: 120, discount_name: 'Synthetic full discount',
+      });
+    }
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', total: 0 });
+    const invoiceId = saved.body.billing.invoiceId;
+    // Billing starts only after the member-effect stage has finished each
+    // record. This prerequisite exercises that persisted boundary directly.
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    const attempts = await Promise.all([
+      collectVisitCompletionInvoice(saved.body.packetId), collectVisitCompletionInvoice(saved.body.packetId),
+    ]);
+    expect(attempts.some((result) => result.state === 'prepaid')).toBe(true);
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'prepaid', invoiceId });
+    const invoice = await mockPg('invoices').where({ id: invoiceId }).first();
+    expect(invoice).toMatchObject({ status: 'prepaid', prepaid_prev_status: 'draft', stripe_payment_intent_id: null, scheduled_send_at: null });
+    expect(Number(invoice.credit_applied)).toBe(0);
+    expect(invoice.paid_at).not.toBeNull();
+    expect(await mockPg('payments').where({ customer_id: fixture.customerId })).toHaveLength(0);
+    expect(await mockPg('customer_credit_ledger').where({ customer_id: fixture.customerId })).toHaveLength(0);
+    expect(await mockPg('audit_log').where({ resource_id: invoiceId, action: 'invoice.zero_balance_settled' })).toHaveLength(1);
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+      .toMatchObject({ status: 'sent' });
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(1);
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    if (coverage === 'deposit') {
+      expect(Number((await mockPg('estimate_deposits').where({ estimate_id: fixture.estimateIds[0] }).first()).credited_amount)).toBe(240);
+      await InvoiceService.voidInvoice(invoiceId);
+      expect(Number((await mockPg('estimate_deposits').where({ estimate_id: fixture.estimateIds[0] }).first()).credited_amount)).toBe(0);
+      expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'office_required' });
+    }
+  });
+
+  test('zero-balance settlement rechecks a concurrent price edit under the invoice lock', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('invoices').where({ id: invoiceId }).update({ total: 0 });
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    const editor = await mockPg.transaction();
+    await editor('invoices').where({ id: invoiceId }).forUpdate().first();
+    let observed;
+    const waiting = new Promise((resolve) => { observed = resolve; });
+    const onQuery = (query) => {
+      if (/select.*"invoices".*for update/i.test(query.sql)) observed();
+    };
+    mockPg.on('query', onQuery);
+    const collection = collectVisitCompletionInvoice(saved.body.packetId);
+    try {
+      await waiting;
+      await editor('invoices').where({ id: invoiceId }).update({ total: 240 });
+      await editor.commit();
+      expect(await collection).toMatchObject({ state: 'office_required' });
+      expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+      expect((await mockPg('invoices').where({ id: invoiceId }).first()).status).toBe('draft');
+    } finally {
+      mockPg.off('query', onQuery);
+      if (!editor.isCompleted()) await editor.rollback();
+      await collection;
+    }
+  });
+
+  test('positive shared-invoice collection remains singular and replays its paid state', async () => {
+    const methodId = randomUUID();
+    await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,
+      processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_fixture_visit',
+      is_default: true, autopay_enabled: true, exp_month: 12, exp_year: new Date().getUTCFullYear() + 1 });
+    await mockPg('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true, autopay_payment_method_id: methodId });
+    chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId, selectedMethod, options) => {
+      expect(selectedMethod).toBe(methodId);
+      expect(options).toMatchObject({ requireAutopayForCustomerId: fixture.customerId, refuseWhenDunningStopped: true });
+      await mockPg.transaction(async (trx) => {
+        const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+        await trx('customers').where({ id: fixture.customerId }).forUpdate().first();
+        await assertVisitCompletionCharge(trx, invoice, options.requireVisitCompletionPacketId);
+        await trx('invoices').where({ id: invoiceId }).update({ status: 'paid', stripe_payment_intent_id: 'pi_fixture_visit' });
+      });
+    });
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    await Promise.all([collectVisitCompletionInvoice(saved.body.packetId), collectVisitCompletionInvoice(saved.body.packetId)]);
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'paid' });
+    expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+    const status = await require('../services/closeout-status').getCloseoutStatus(fixture.serviceIds[1], { knex: mockPg });
+    expect(status.facts.invoice).toMatchObject({ state: 'done', invoiceId: saved.body.billing.invoiceId, status: 'paid' });
+    await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).update({ status: 'refunded' });
+    expect((await require('../services/closeout-status').getCloseoutStatus(fixture.serviceIds[1], { knex: mockPg })).facts.invoice)
+      .toMatchObject({ reason: 'parked_manual_refunded_invoice', refundedInvoiceId: saved.body.billing.invoiceId });
+  });
+
+  test('a zero balance with an existing payment session stays for office reconciliation', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('invoices').where({ id: invoiceId }).update({ total: 0, stripe_payment_intent_id: 'pi_fixture_existing' });
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'office_required', invoiceId });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'office_required', invoiceId });
+    expect((await mockPg('invoices').where({ id: invoiceId }).first()).status).toBe('draft');
+    expect(await mockPg('audit_log').where({ resource_id: invoiceId, action: 'invoice.zero_balance_settled' })).toHaveLength(0);
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
   });
 

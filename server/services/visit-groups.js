@@ -1359,6 +1359,7 @@ const EFFECT_TYPE_BY_KIND = Object.freeze({
   on_site: 'tracker_arrived',
   reminder_72h: 'reminder_72h',
   reminder_24h: 'reminder_24h',
+  visit_payment: 'visit_payment',
 });
 const REMINDER_EFFECT_TYPES = new Set(['reminder_72h', 'reminder_24h']);
 function effectTypeForKind(kind) {
@@ -1384,18 +1385,26 @@ function dedupeKeyFor(visit, effectType) {
 async function claimVisitNotification(row, kind) {
   if (!row || !row.visit_id) return null;
   const effectType = effectTypeForKind(kind);
+  const packetEffect = effectType === 'visit_payment';
+  const eligibleStatuses = packetEffect ? ['closing', 'closed'] : ['open'];
   const logger = require('./logger');
   const token = require('crypto').randomBytes(16).toString('hex');
   try {
     return await db.transaction(async (t) => {
       let visit = await t('service_visits').where({ id: row.visit_id }).first();
-      if (!visit || String(visit.status) !== 'open') return { state: 'detached', token: null };
+      if (!visit || !eligibleStatuses.includes(String(visit.status))) return { state: 'detached', token: null };
       await lockStop(t, visit.stop_base_key);
       // Re-read the parent AFTER the lock (codex #3603 r14): a whole-visit
       // reassignment / window recompute that committed while we waited
       // must be judged on the current parent, not the pre-lock snapshot.
       visit = await t('service_visits').where({ id: row.visit_id }).first();
-      if (!visit || String(visit.status) !== 'open') return { state: 'detached', token: null };
+      if (!visit || !eligibleStatuses.includes(String(visit.status))) return { state: 'detached', token: null };
+      if (packetEffect) {
+        const packet = await t('visit_completion_packets').where({ visit_id: visit.id }).first('id', 'status');
+        if (!packet || !['processing', 'done'].includes(packet.status)) return { state: 'detached', token: null };
+        const pending = await t('visit_completion_packet_items').where({ packet_id: packet.id }).whereNot('status', 'done').first('id');
+        if (pending) return { state: 'in_flight', token: null };
+      }
       // Full stop tuple, not just the id (codex r9): a same-day window move
       // whose detach seam has not run yet still carries the old visit_id.
       const fresh = await t('scheduled_services').where({ id: row.id }).forUpdate()
