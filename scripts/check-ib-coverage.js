@@ -94,7 +94,8 @@ function frontendSourceCensus(source, relative) {
       if (![verbCall, requestCall, localExport, endpoint].some(Boolean)) return;
       // Dynamic admin request sites must remain in the denominator. A verb
       // such as Map.get alone is not an HTTP request; require a request wrapper.
-      const unresolved = !endpoint && (requestCall || verbRequest) && relative.includes('/admin/');
+      const adminWrapper = /^admin(?:\.|_)?(?:fetch|request|get|post|put|patch|delete)(?:Strict)?$/i.test(callee);
+      const unresolved = !endpoint && (adminWrapper || ((requestCall || verbRequest) && relative.includes('/admin/')));
       if (![endpoint, unresolved, localExport].some(Boolean)) return;
       const method = localExport ? 'LOCAL_EXPORT' : verbCall ? verbCall[1].toUpperCase()
         : (expressionText(property(node.arguments[1], 'method')) || 'GET').toUpperCase();

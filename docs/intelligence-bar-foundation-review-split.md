@@ -81,3 +81,9 @@ request sites, retaining 1,739 cumulative sites as unsupported/unverified in A.
 Their baseline fingerprints are proved against that already-merged main
 revision. The former Communications handlers remain recorded as historical
 sites; moving the UI does not remove work from the capability denominator.
+
+Shared-wrapper remediation in A detects known admin requests regardless of
+source directory. Five existing dispatch, equipment and Terminal request sites
+are proved against merged main and retained as unsupported, for 1,744 cumulative
+sites. Generic lookup verbs cannot turn an unsupported capability into a match.
+The final catalog/coverage suites pass 23 tests.

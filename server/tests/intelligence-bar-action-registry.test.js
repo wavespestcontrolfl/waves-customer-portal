@@ -172,3 +172,13 @@ test('discovery requires meaningful whole-word matches instead of stopword subst
 test('appointment cancellation declares its possible Stripe follow-through effect', () => {
   expect(registry.actions.get('cancel_appointment')).toMatchObject({ kind: 'external_action', approval: 'ui_confirm' });
 });
+
+
+test('generic lookup verbs cannot make an unsupported capability appear discovered', () => {
+  for (const verb of ['get', 'find', 'show', 'search', 'list']) {
+    expect(registry.discover({ query: `${verb} a frobnicate` }, { role: 'admin', context: 'customers' }))
+      .toMatchObject({ definitions: [], result: { status: 'capability_unimplemented' } });
+  }
+  expect(registry.discover({ query: 'get inventory stock' }, { role: 'admin', context: 'customers' })
+    .definitions.length).toBeGreaterThan(0);
+});

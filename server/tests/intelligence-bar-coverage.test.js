@@ -89,3 +89,20 @@ test('stale or incomplete reviewed metadata cannot use an otherwise valid baseli
     { status: 'reviewed_exception', exception: { reason: 'fixture', review: 'fixture' }, reviewedFingerprint: 'stale' },
   ]) expect(checkCoverage([action], { actions: [{ ...base, ...extra }] }, { save: {} }, proof)).toHaveLength(1);
 });
+
+
+test('shared admin wrappers with variable endpoints stay covered outside admin directories', () => {
+  const shared = frontendSourceCensus(`
+    async function load() {
+      await adminFetch(url);
+      await adminPost(endpoint, body);
+      await adminRequest?.(path, { method: 'DELETE' });
+      await fetch(publicUrl);
+      cache.get(key);
+    }
+  `, 'client/src/components/equipment/Fixture.jsx');
+  expect(shared).toHaveLength(3);
+  expect(shared.map(row => row.operation.method).sort()).toEqual(['DELETE', 'GET', 'POST']);
+  expect(shared.every(row => row.operation.resolution === 'unresolved')).toBe(true);
+  expect(checkCoverage(shared, { actions: [] }, {})).toHaveLength(3);
+});
