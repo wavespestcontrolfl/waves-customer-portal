@@ -1170,7 +1170,7 @@ function extractUnitReply(body, { bareOk = false } = {}) {
  * Returns { handled } — handled=true means the reply answered a clarify
  * and the caller should skip its own general estimator trigger.
  */
-async function handleClarifyReply({ phone, body }) {
+async function handleClarifyReply({ phone, body, triggerSmsLogId }) {
   try {
     if (!clarifyAsksEnabled()) return { handled: false };
     const allDigits = String(phone || '').replace(/\D/g, '');
@@ -1566,6 +1566,7 @@ async function handleClarifyReply({ phone, body }) {
           const started = await startSmsThreadDraft({
             phone,
             triggerBody: body,
+            triggerSmsLogId,
             skipIntentGate: true,
             skipCooldown: true,
             ...(supersedeEstimateId

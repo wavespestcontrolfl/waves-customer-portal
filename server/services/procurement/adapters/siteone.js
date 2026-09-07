@@ -568,8 +568,26 @@ function requestPermitted(url, pinned) {
   try { return /^https:\/\//i.test(String(url)) && filler.requestAllowed({ url, allowedHosts: pinned }) === true; } catch { return false; }
 }
 
+// SiteOne's edge (Akamai) resets the HTTP/2 connection of any client whose
+// user agent reads "HeadlessChrome" — reproduced 2026-09-07 from two
+// networks: the login page fails page.goto with ERR_HTTP2_PROTOCOL_ERROR in
+// ~250 ms pinned or unpinned, disabling HTTP/2 only turns the reset into a
+// 45 s hang, and the same Chromium gets a 200 the moment its UA is the plain
+// Chrome string. The bot therefore identifies as the Chrome build it really
+// is: same major (Chrome's own UA reduction freezes the rest to .0.0.0),
+// same engine tokens, the platform it runs on. Nothing else about the
+// session changes. Only a browser that cannot report its version (test
+// fakes) falls back to a fixed major.
+const FALLBACK_CHROME_MAJOR = 141;
+function browserUserAgent(browser) {
+  const reported = typeof browser.version === 'function' ? String(browser.version() || '') : '';
+  const major = parseInt(reported.split('.')[0], 10);
+  const os = process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7' : 'X11; Linux x86_64';
+  return `Mozilla/5.0 (${os}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${Number.isFinite(major) && major > 0 ? major : FALLBACK_CHROME_MAJOR}.0.0.0 Safari/537.36`;
+}
+
 async function lockContext(browser, evidence, pinned) {
-  const context = await browser.newContext({ serviceWorkers: 'block' });
+  const context = await browser.newContext({ serviceWorkers: 'block', userAgent: browserUserAgent(browser) });
   // Fail CLOSED (Codex r7 P1): a context that cannot intercept HTTP or
   // WebSocket traffic cannot be locked, so the bot must not sign in on it —
   // a missing API or a failing registration propagates to openLockedBrowser,
@@ -1340,5 +1358,5 @@ module.exports = {
   quote: () => null,
   place,
   RefusedError,
-  _internals: { SELECTORS, isTrustedSiteOneUrl, allowedHosts, parseMoney, normalizeSku, requestPermitted, orderNumberIn, orderNumbersIn, fillLoginForm, EVIDENCE_PREFIX },
+  _internals: { SELECTORS, isTrustedSiteOneUrl, allowedHosts, parseMoney, normalizeSku, requestPermitted, orderNumberIn, orderNumbersIn, fillLoginForm, browserUserAgent, EVIDENCE_PREFIX },
 };

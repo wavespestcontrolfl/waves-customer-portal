@@ -69,7 +69,7 @@ jobs:
         working-directory: server
         env:
           SMS_OPERATIONS_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/sms-operations-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/sms-operations-postgres.test.js tests/sms-inbound-consumers-postgres.test.js
       - name: SMS copy migration transaction tests
         working-directory: server
         env:

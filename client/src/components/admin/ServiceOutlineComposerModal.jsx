@@ -397,7 +397,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
             </div>
           </aside>
 
-          <main className="min-h-0 overflow-y-auto px-5 py-4">
+          <div className="min-h-0 overflow-y-auto px-5 py-4">
             {loading && <div className="text-sm text-zinc-500">Building outline preview...</div>}
             {!loading && outline?.title && (
               <article>
@@ -425,7 +425,7 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
                 )}
               </article>
             )}
-          </main>
+          </div>
 
           <aside className="border-t border-zinc-200 bg-zinc-50 p-4 lg:border-l lg:border-t-0">
             <div className="rounded-md border border-zinc-200 bg-white p-3">

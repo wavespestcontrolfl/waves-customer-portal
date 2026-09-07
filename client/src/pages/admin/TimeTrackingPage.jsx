@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import { createPortal } from "react-dom";
+import { useSearchParams } from "react-router-dom";
+import StaffDocumentLibrary from "../../components/staffDocuments/Library";
+import useStaffDocumentsAvailable from "../../hooks/useStaffDocumentsAvailable";
 import {
   BarChart3,
   CheckCircle2,
@@ -172,7 +175,15 @@ const STAFF_LEAF_BY_KEY = Object.fromEntries(
 );
 
 export default function TimeTrackingPage() {
-  const [tab, setTab] = useState("dashboard");
+  const controlledDocumentsAvailable = useStaffDocumentsAvailable();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
+  const setTab = (value) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", value);
+    if (value !== "documents") { next.delete("document"); next.delete("version"); }
+    setSearchParams(next);
+  };
   const activeGroup =
     TIMETRACKING_TAB_GROUPS.find((g) => g.tabs.includes(tab)) ||
     TIMETRACKING_TAB_GROUPS[0];
@@ -254,7 +265,13 @@ export default function TimeTrackingPage() {
       {tab === "entries" && <EntriesTab showToast={showToast} />}
       {tab === "analytics" && <AnalyticsTab />}
       {tab === "team" && <TeamTab showToast={showToast} />}
-      {tab === "documents" && <DocumentsTab showToast={showToast} />}
+      {tab === "documents" && (controlledDocumentsAvailable ? <>
+        <StaffDocumentLibrary manage />
+        <details style={{ marginTop: 24 }}>
+          <summary style={{ fontSize: 16, fontWeight: 700, padding: "16px 0", cursor: "pointer" }}>Uploaded files and historical attachments</summary>
+          <DocumentsTab showToast={showToast} />
+        </details>
+      </> : <DocumentsTab showToast={showToast} />)}
       <div
         style={{
           position: "fixed",

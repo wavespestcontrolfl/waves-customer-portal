@@ -46,12 +46,12 @@ describe("useAdminBookmarkMeta", () => {
     );
     expect(
       document.querySelector('meta[name="apple-mobile-web-app-title"]'),
-    ).toHaveAttribute("content", "Waves Admin");
+    ).toHaveAttribute("content", "Waves");
     expect(document.querySelector('meta[name="theme-color"]')).toHaveAttribute(
       "content",
       "#18181B",
     );
-    expect(document.title).toBe("Waves Admin");
+    expect(document.title).toBe("Waves");
 
     view.unmount();
     expect(document.documentElement).not.toHaveClass("admin-app");
@@ -109,7 +109,7 @@ describe("useAdminBookmarkMeta", () => {
     const view = render(<Harness active={false} />);
     view.rerender(<Harness active />);
     expect(document.documentElement).toHaveClass("admin-app");
-    expect(document.title).toBe("Waves Admin");
+    expect(document.title).toBe("Waves");
 
     view.rerender(<Harness active={false} />);
     expect(document.documentElement).not.toHaveClass("admin-app");
@@ -135,15 +135,15 @@ describe("useAdminBookmarkMeta", () => {
     document.documentElement.classList.add("admin-app");
     seedHead({
       manifest: "/admin-manifest.json",
-      appTitle: "Waves Admin",
+      appTitle: "Waves",
       description: "Admin portal",
       themeColor: "#18181B",
-      title: "Waves Admin",
+      title: "Waves",
     });
 
     const view = render(<Harness active />);
     expect(document.documentElement).toHaveClass("admin-app");
-    expect(document.title).toBe("Waves Admin");
+    expect(document.title).toBe("Waves");
 
     view.rerender(<Harness active={false} />);
     expect(document.documentElement).not.toHaveClass("admin-app");
