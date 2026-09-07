@@ -13,6 +13,7 @@ const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 const SKIP = !process.env.DATABASE_URL;
 const quoteMigration = require('../models/migrations/20260907000019_approved_iron_supplier_cost');
+const linkMigration = require('../models/migrations/20260907000022_iron_supplier_quote_link');
 const dimensionsMigration = require('../models/migrations/20260907000021_lawn_cost_inventory_dimensions');
 const canonicalMigration = require('../models/migrations/20260907000100_canonical_lawn_cost_dimensions');
 const { costLineFromUsage } = require('../services/product-costing');
@@ -20,6 +21,7 @@ const TABLES = ['products_catalog', 'vendors', 'vendor_pricing', 'price_history'
 const SOURCE = 'migration.20260907000019.iron_supplier_quote';
 const LEGACY = 'LESCO 12-0-0 Chelated Iron Plus';
 const KEEPER = 'LESCO Chelated Iron Plus';
+const LISTING_URL = 'https://www.siteone.com/en/9999903964-lesco-chelated-iron-plus-12-0-0-6fe-2mn-all-purpose-liquid-fertilizer/p/571634';
 let database;
 let mockPg;
 let productId;
@@ -52,7 +54,10 @@ jest.setTimeout(60000);
   afterAll(async () => { await database?.destroy(); });
 
   const product = () => mockPg('products_catalog').where({ id: productId }).first();
-  const apply = () => mockPg.transaction(trx => quoteMigration.up(trx));
+  const apply = () => mockPg.transaction(async (trx) => {
+    await quoteMigration.up(trx);
+    await linkMigration.up(trx);
+  });
   const counts = async () => {
     const result = {};
     for (const table of TABLES) result[table] = Number((await mockPg(table).count('* as count').first()).count);
@@ -81,6 +86,7 @@ jest.setTimeout(60000);
   const migrationNames = [
     '20260907000019_approved_iron_supplier_cost.js',
     '20260907000021_lawn_cost_inventory_dimensions.js',
+    '20260907000022_iron_supplier_quote_link.js',
     '20260907000100_canonical_lawn_cost_dimensions.js',
   ];
   const migrationSource = names => ({
@@ -94,7 +100,8 @@ jest.setTimeout(60000);
   test.each([true, null])('repairs stale cost for active=%s and records the quoted price once', async (active) => {
     await mockPg('products_catalog').where({ id: productId }).update({ active });
     const before = await product();
-    await existingQuote({ normalized_unit_price: 9, price_per_oz: 9, landed_unit_price: 99, unit_normalized: 'oz' });
+    await existingQuote({ normalized_unit_price: 9, price_per_oz: 9, landed_unit_price: 99, unit_normalized: 'oz',
+      vendor_product_url: LISTING_URL });
     await apply();
     const after = await product();
     expect(after).toMatchObject({ best_price: '36.15', cost_per_unit: '0.1130', cost_unit: 'fl_oz',
@@ -102,10 +109,12 @@ jest.setTimeout(60000);
       default_rate_per_1000: before.default_rate_per_1000, rate_unit: before.rate_unit,
       inventory_on_hand: before.inventory_on_hand, low_stock_threshold: before.low_stock_threshold });
     const vendor = await mockPg('vendor_pricing').where({ product_id: productId }).first();
-    expect(vendor).toMatchObject({ price: '36.15', quantity: '2.5 gal', vendor_sku: '9999903964',
+    expect(vendor).toMatchObject({ price: '36.15', quantity: '2.5 gal', vendor_sku: '084043', vendor_product_url: LISTING_URL,
       previous_price: '32.00', unit_normalized: 'fl_oz', is_best_price: true, landed_unit_price: null });
     expect(after.best_vendor_pricing_id).toBe(vendor.id);
-    expect((await mockPg('price_snapshots').first()).id).toBe(vendor.latest_snapshot_id);
+    expect(await mockPg('price_snapshots').where({ id: vendor.latest_snapshot_id }).first()).toMatchObject({
+      source_url: LISTING_URL, metadata: { familyCode: '9999903964', sku: '084043' },
+    });
     expect((await mockPg('audit_log').where({ action: SOURCE }).first()).metadata).toMatchObject({
       packagePrice: 36.15, priorCostPerUnit: '0.2500', priorCostUnit: 'oz', costPerUnit: 0.113,
     });
@@ -113,6 +122,7 @@ jest.setTimeout(60000);
     const firstCounts = await counts();
     await apply();
     await quoteMigration.down(mockPg);
+    await linkMigration.down(mockPg);
     expect(await counts()).toEqual(firstCounts);
     expect(await product()).toEqual(after);
   });
@@ -205,16 +215,42 @@ jest.setTimeout(60000);
     expect((await mockPg('products_catalog')).every(row => row.inventory_unit)).toBe(true);
   });
 
-  test.each([false, true])('Knex runs the repair when the dimension migrations were already recorded=%s', async (alreadyRun) => {
+  test('the link correction preserves a subsequent manual quote and its URL', async () => {
+    await quoteMigration.up(mockPg);
+    await mockPg('vendor_pricing').where({ product_id: productId }).update({
+      last_checked_at: '2026-09-07T10:00:00Z', vendor_product_url: 'https://www.siteone.com/owner-reviewed-link',
+    });
+    const before = await mockPg('vendor_pricing');
+    const beforeCounts = await counts();
+    await linkMigration.up(mockPg);
+    expect(await mockPg('vendor_pricing')).toEqual(before);
+    expect(await counts()).toEqual(beforeCounts);
+  });
+
+  test('a source-correction audit failure preserves the original quote and snapshot', async () => {
+    await quoteMigration.up(mockPg);
+    const before = await mockPg('vendor_pricing');
+    const snapshots = await mockPg('price_snapshots');
+    await mockPg.raw("CREATE FUNCTION iron_link_audit_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture link audit failure'; END; $$");
+    await mockPg.raw('CREATE TRIGGER iron_link_audit_failure BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION iron_link_audit_failure()');
+    await expect(mockPg.transaction(trx => linkMigration.up(trx))).rejects.toThrow('fixture link audit failure');
+    expect(await mockPg('vendor_pricing')).toEqual(before);
+    expect(await mockPg('price_snapshots')).toEqual(snapshots);
+  });
+
+  test.each(['none', 'dimensions', 'first_quote'])('Knex runs remaining repairs with recorded history=%s', async (history) => {
     await otherProducts();
-    if (alreadyRun) {
+    const recorded = history === 'none' ? [] : migrationNames.filter(name => !name.includes('000022')
+      && (history === 'first_quote' || !name.includes('000019')));
+    if (recorded.length) {
       await mockPg('products_catalog').where({ id: productId }).update({ cost_per_unit: 0.1 });
-      await migrate(migrationNames.slice(1));
-      await mockPg('products_catalog').where({ id: productId }).update({ cost_per_unit: 0.25 });
+      await migrate(recorded);
+      if (history === 'dimensions') await mockPg('products_catalog').where({ id: productId }).update({ cost_per_unit: 0.25 });
     }
     const [, ran] = await migrate(migrationNames);
-    expect(ran).toEqual(alreadyRun ? migrationNames.slice(0, 1) : migrationNames);
+    expect(ran).toEqual(migrationNames.filter(name => !recorded.includes(name)));
     expect(await product()).toMatchObject({ best_price: '36.15', cost_per_unit: '0.1130', inventory_unit: 'fl_oz' });
+    expect(await mockPg('vendor_pricing').where({ product_id: productId }).first()).toMatchObject({ vendor_sku: '084043', vendor_product_url: LISTING_URL });
     expect((await mockPg('products_catalog')).every(row => row.inventory_unit)).toBe(true);
     const [, repeated] = await migrate(migrationNames);
     expect(repeated).toEqual([]);
