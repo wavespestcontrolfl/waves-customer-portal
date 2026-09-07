@@ -64,6 +64,73 @@ async function open(message) {
 }
 
 describe("Email draft and navigation preservation", () => {
+  it("preserves recipient, thread and HTML body fields for replies and new messages", async () => {
+    mount();
+    fireEvent.change(await open(a), { target: { value: "First line\nSecond line" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send Reply", exact: true }));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Reply" })).toHaveValue(""));
+    const dialog = await compose();
+    fireEvent.change(screen.getByLabelText("To *"), { target: { value: "  recipient@example.invalid  " } });
+    fireEvent.change(screen.getByLabelText("Subject"), { target: { value: "  " } });
+    fireEvent.change(screen.getByLabelText("Message *"), { target: { value: "New first line\nNew second line" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Send", exact: true }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const sends = fetch.mock.calls.filter(([url]) => url.endsWith("/email/send")).map(([, options]) => options);
+    expect(sends.map(({ body }) => JSON.parse(body))).toEqual([
+      { to: a.from_address, subject: `Re: ${a.subject}`, body: "First line<br>Second line", threadId: a.gmail_thread_id },
+      { to: "recipient@example.invalid", subject: "(no subject)", body: "New first line<br>New second line" },
+    ]);
+    for (const options of sends) expect(options).toMatchObject({ method: "POST", headers: { Authorization: "Bearer fixture-token", "Content-Type": "application/json" } });
+  });
+
+  it("keeps filter, pagination, search and archive parameters on the inbox contract", async () => {
+    loadResponses.inbox = () => response({ emails: inbox, total: 101 });
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Next", exact: true }));
+    const latestInbox = () => new URL(fetch.mock.calls.filter(([url]) => url.includes("/email/inbox?")).at(-1)[0], "https://fixture.invalid").searchParams;
+    await waitFor(() => expect(latestInbox().get("page")).toBe("2"));
+    for (const [label, category] of [["Unread", "unread"], ["Starred", "starred"], ["Leads", "leads"], ["Invoices", "invoices"], ["Customer", "customer"], ["Complaints", "complaints"], ["Vendor", "vendor"], ["All", null]]) {
+      fireEvent.click(screen.getByRole("button", { name: new RegExp(`^${label}( \\(\\d+\\))?$`) }));
+      await waitFor(() => expect(latestInbox().get("category")).toBe(category));
+      expect(latestInbox().get("page")).toBe("1");
+    }
+    fireEvent.change(screen.getByPlaceholderText("Search emails..."), { target: { value: "fixture & notes" } });
+    fireEvent.click(screen.getByRole("button", { name: "Archived", exact: true }));
+    await waitFor(() => expect(Object.fromEntries(latestInbox())).toEqual({ page: "1", limit: "50", is_archived: "true", search: "fixture & notes" }));
+  });
+
+  it.each(["object", "json", "malformed"])("renders %s classification data without losing the message or reply", async (format) => {
+    const details = { urgency: "high", person_name: "Fixture sender", phone: "9415550101", service_interest: "Synthetic service", invoice_amount: 42, vendor_name: "Fixture vendor" };
+    const message = { ...a, classification: "vendor_invoice", extracted_data: format === "object" ? details : format === "json" ? JSON.stringify(details) : "{invalid fixture json" };
+    inbox = [message];
+    mount(); await open(message);
+    expect(await screen.findByText(a.body_text)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Reply" })).toHaveValue("");
+    if (format === "malformed") {
+      expect(screen.queryByText("AI classification:")).not.toBeInTheDocument();
+      return;
+    }
+    for (const value of ["Urgency: high", "Fixture sender", "9415550101", "Synthetic service", "$42", "Fixture vendor"]) {
+      expect(screen.getByText(value, { exact: true })).toBeInTheDocument();
+    }
+    expect(screen.getByText(/Expense logged/)).toBeInTheDocument();
+  });
+
+  it.each([
+    [{ spam_blocked: 3 }, true],
+    [{ spam_quarantined: 3, spam_blocked: 9 }, true],
+    [{ spam_quarantined: 0, spam_blocked: 9 }, false],
+  ])("preserves digest counters and the legacy spam fallback for %j", async (spam, visible) => {
+    loadResponses["daily-digest"] = () => response({ total_received: 17, leads_created: 2, invoices_processed: 4, domains_blocked_today: 0, ...spam });
+    mount();
+    expect(await screen.findByText("received")).toHaveTextContent("17 received");
+    expect(screen.getByText("leads created")).toHaveTextContent("2leads created");
+    expect(screen.getByText("invoices", { exact: true })).toHaveTextContent("4invoices");
+    expect(screen.queryByText("domains blocked")).not.toBeInTheDocument();
+    if (visible) expect(screen.getByText("spam quarantined")).toHaveTextContent("3spam quarantined");
+    else expect(screen.queryByText("spam quarantined")).not.toBeInTheDocument();
+  });
+
   it("recovers compose after unmount and supports explicit discard", async () => {
     const view = mount(); await compose(); view.unmount();
     mount(); fireEvent.click(await screen.findByRole("button", { name: "Resume draft" }));

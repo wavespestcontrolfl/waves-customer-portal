@@ -372,3 +372,30 @@ existing structural deferral now records EmailPage complexity **65** versus
 reviewed desktop/mobile screenshots include
 `email-linked-inbox-desktop-1440.png` and `email-reconnected-mobile-390.png`.
 Local migrations and live provider workflows were not run.
+
+## Structural follow-up
+
+The deferred EmailPage lifecycle work now separates mailbox loading and
+selection (`email/useEmailInbox.js`) from draft/send operations
+(`email/useEmailEditor.js`). The existing `emailDrafts.js` session store remains
+the authority for recoverable text, per-message edit revisions and send locks.
+Composer lookup/focus and reply controls live alongside their own views;
+EmailPage composes the connection state, mailbox and editors.
+
+This removes duplication: five request-order implementations share one loader;
+archive/trash share removal handling; star/reclassification share list/selection
+updates; compose/reply share send locking, transport and error handling. Filter
+parameters, digest/classification rows and repeated UI state checks also have
+one rendering rule. EmailPage complexity falls from 65 to 15, and all functions
+in the extracted files stay at or below 20. Across the full extracted surface,
+the lint decision count falls from 244 to 201; the change does not just relocate
+the original branches. Thread timestamps explicitly use America/New_York.
+
+Verification on Node 20: **273 client suites / 2,611 tests**, including eight
+additional send/filter/display contract cases; **16 synthetic browser scenarios**;
+production build and all prebuild gates; scoped lint with zero errors or
+warnings. Seven added display/filter cases also pass against the original page.
+Desktop and mobile screenshots preserve the existing layout; the mobile
+composer matches the pre-refactor screenshot pixel for pixel. Logs are
+`.tmp/email-refactor-{client,build,lint,final-browser}.log`. All browser API
+requests were intercepted. Local migrations and live provider flows were not run.
