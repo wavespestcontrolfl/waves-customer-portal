@@ -129,6 +129,26 @@ describe('CustomersPageV2 workflow state', () => {
     });
   });
 
+  it('keeps the selected profile while workspace search changes and preserves the opt-in when switching customers', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 });
+    const second = { ...list.customers[0], id: 'customer-b', firstName: 'Blake' };
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.includes('/admin/customers?') && path.includes('search=missing')) return response({ customers: [], total: 0, totalPages: 1 });
+      return path.includes('/admin/customers?') ? response({ customers: [...list.customers, second], total: 2, totalPages: 1 }) : response({});
+    }));
+    render(<MemoryRouter initialEntries={['/admin/customers?customer360=workspace&customerId=customer-a']}><CustomersPageV2 /></MemoryRouter>);
+    const workspace = within(await screen.findByRole('region', { name: 'Customer 360 workspace' }));
+    fireEvent.click(workspace.getByRole('button', { name: /Blake Customer/ }));
+    expect(workspace.getByTestId('customer-profile')).toHaveTextContent('customer-b');
+    fireEvent.change(workspace.getByRole('searchbox', { name: 'Find a customer' }), { target: { value: 'missing' } });
+    await screen.findByText('No matching customers.');
+    expect(workspace.getByTestId('customer-profile')).toHaveTextContent('customer-b');
+    fireEvent.click(workspace.getByRole('button', { name: 'All customers', exact: true }));
+    expect(screen.queryByRole('region', { name: 'Customer 360 workspace' })).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Search customers...')).toHaveValue('missing');
+  });
+
   it('replaces and clears address line 2 from desktop autocomplete selections', async () => {
     vi.stubGlobal('fetch', vi.fn((url) => (
       String(url).includes('/admin/customers?') ? response(list) : response({})

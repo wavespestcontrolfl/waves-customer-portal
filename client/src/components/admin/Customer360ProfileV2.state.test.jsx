@@ -5,7 +5,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Customer360ProfileV2, { CancelSignupModal, RefundPaymentModal } from './Customer360ProfileV2';
 
-vi.mock('./StickyActionBar', () => ({ CustomerActionBar: () => null }));
+vi.mock('./StickyActionBar', async (importOriginal) => ({
+  ...await importOriginal(),
+  CustomerActionBar: () => null,
+}));
 vi.mock('./AuthenticatedCallAudio', () => ({ default: () => null }));
 vi.mock('./CustomerRequestsPanel', () => ({ default: () => null }));
 vi.mock('./CallBridgeLink', () => ({
@@ -77,6 +80,46 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(screen.queryByText('Could not load customer history.')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Retry customer history' })).not.toBeInTheDocument();
     expect(screen.queryByText('Timeline (0)')).not.toBeInTheDocument();
+  });
+
+  it('renders the workspace in its parent and keeps older activity available', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const timeline = Array.from({ length: 46 }, (_, index) => ({ type: 'interaction', title: `History entry ${index + 1}`, date: '2024-07-02T16:00:00Z' }));
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/timeline')) return response({ timeline });
+      if (path.endsWith('/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+      return response({});
+    }));
+    const onClose = vi.fn();
+    const { container } = render(<Customer360ProfileV2 customerId="customer-a" onClose={onClose} embedded />);
+    const name = await screen.findByRole('heading', { name: 'Avery Customer' });
+    expect(container).toContainElement(name);
+    expect(screen.getByText('History entry 46')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'More customer actions' }));
+    const estimateLink = screen.getByRole('link', { name: 'Estimate', exact: true });
+    const estimateParams = new URL(estimateLink.href).searchParams;
+    expect(estimateParams.get('customerName')).toBe('Avery Customer');
+    expect(estimateParams.get('address')).toContain('Unit 4');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit customer' }));
+    expect(screen.getByRole('dialog', { name: 'Edit customer' })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit customer' })).not.toBeInTheDocument());
+    expect(name).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('keeps workspace history and admin actions unavailable to technicians', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => String(url).endsWith('/customer-a')
+      ? response(customerDetail('customer-a', 'Avery'))
+      : response({})));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded />);
+    await screen.findByRole('heading', { name: 'Avery Customer' });
+    fireEvent.click(screen.getByRole('button', { name: 'More customer actions' }));
+    expect(screen.queryByRole('button', { name: 'Edit customer' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Prepay invoice' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Customer activity history' })).not.toBeInTheDocument();
+    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/timeline'))).toBe(false);
   });
 
   it.each([{ events: [] }, { events: [{ type: 'interaction', title: 'Recovered fixture note' }] }])(

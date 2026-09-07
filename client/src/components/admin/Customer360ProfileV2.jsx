@@ -61,13 +61,19 @@ import {
   Mail,
   MessageSquare,
   MoreHorizontal,
+  MapPin,
+  Phone,
   PenLine,
   RotateCcw,
   ShieldCheck,
   Trash2,
   XCircle,
 } from "lucide-react";
-import { CustomerActionBar } from "./StickyActionBar";
+import { CustomerActionBar, customerEstimateHref } from "./StickyActionBar";
+import Customer360Sections, { CUSTOMER_360_SECTIONS } from "./Customer360Sections";
+import Customer360Activity from "./Customer360Activity";
+import { formatETDateOnly } from "../../lib/timezone";
+import useModalFocus from "../../hooks/useModalFocus";
 import AuthenticatedCallAudio from "./AuthenticatedCallAudio";
 import OwedCommitmentsSummary from "./OwedCommitmentsSummary";
 import { formatAddress } from "../../utils/format-address";
@@ -1165,7 +1171,7 @@ function ElectronicAuthorizationContractV2({
   };
 
   return (
-    <div>
+    <div className="c360-contracts-content">
       {" "}
       <div className="mb-5 rounded-sm border-hairline border-zinc-200 bg-white">
         {" "}
@@ -5132,12 +5138,62 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
+function CustomerWorkspaceHeader({ c, balanceOwed, nextService, isAdmin, onEdit, onPrepayInvoice, onPrepayRecord, onTab, menuOpen, setMenuOpen, menuRef }) {
+  const menuId = useId();
+  const name = [c.firstName, c.lastName].filter(Boolean).join(" ").trim() || "Unnamed customer";
+  const address = c.address ? formatAddress(c.address) : "";
+  const contacts = ["", "2", "3"].map((suffix) => ({
+    name: c[`serviceContact${suffix}Name`],
+    phone: c[`serviceContact${suffix}Phone`],
+    email: c[`serviceContact${suffix}Email`],
+  })).filter((contact) => contact.phone || contact.email);
+  const actions = [
+    { label: "Book appointment", href: `/admin/schedule?customer=${c.id}` },
+    { label: "Invoice", href: `/admin/invoices?customer=${c.id}` },
+    { label: "Estimate", href: customerEstimateHref({ ...c, address }) },
+    { label: "Add note", onClick: () => onTab("comms") },
+    { label: "Edit customer", onClick: onEdit, adminOnly: true },
+    { label: "Prepay invoice", onClick: onPrepayInvoice, adminOnly: true },
+    { label: "Record collected prepay", onClick: onPrepayRecord, adminOnly: true },
+  ].filter((action) => !action.adminOnly || isAdmin);
+  const stats = [
+    { label: "Lifetime revenue", value: fmtCurrency(c.lifetimeRevenue) },
+    { label: "Annual value", value: fmtCurrency(c.annualValue) },
+    { label: "Balance owed", value: fmtCurrency(balanceOwed), alert: balanceOwed > 0 },
+    { label: "Next service", value: nextService ? formatETDateOnly(nextService.scheduled_date, { month: "short", day: "numeric" }) : "—" },
+  ];
+  return <header className="c360-workspace-header">
+    <div className="c360-workspace-identity">
+      <span className="c360-avatar" aria-hidden="true">{`${c.firstName?.[0] || ""}${c.lastName?.[0] || ""}` || "?"}</span>
+      <div className="c360-workspace-name">
+        <div className="c360-workspace-name-row"><h1>{name}</h1><StageBadgeV2 stage={c.pipelineStage} /></div>
+        <div className="c360-workspace-meta"><TierBadgeV2 tier={c.tier} />{c.memberSince && <span>Customer since {formatETDateOnly(c.memberSince, { month: "short", year: "numeric" })}</span>}{c.profileLabel && <Badge className="normal-case tracking-normal">{c.profileLabel}</Badge>}{c.contactRole && c.contactRole !== "owner" && <Badge className="normal-case tracking-normal" title={contactRoleTitle(c.contactRole)}>{contactRoleLabel(c.contactRole)}</Badge>}</div>
+      </div>
+    </div>
+    <div className="c360-workspace-actions">
+      {c.phone && <><Button variant="secondary" onClick={() => callViaBridge(c.phone, name)}><Phone size={16} />Call</Button><a className="c360-text-action u-focus-ring" href={`/admin/communications?phone=${encodeURIComponent(c.phone)}&action=sms`}><MessageSquare size={16} />Text</a></>}
+      <div className="c360-more-action" ref={menuRef} onKeyDown={(event) => { if (event.key === "Escape" && menuOpen) { event.stopPropagation(); setMenuOpen(false); menuRef.current?.querySelector("button")?.focus(); } }}>
+        <Button variant="ghost" className="c360-icon-button" aria-label="More customer actions" aria-expanded={menuOpen} aria-controls={menuId} onClick={() => setMenuOpen((open) => !open)}><MoreHorizontal size={20} /></Button>
+        {menuOpen && <div id={menuId} className="c360-workspace-action-menu">{actions.map((action) => action.href ? <a key={action.label} className="u-focus-ring" href={action.href}>{action.label}</a> : <button key={action.label} type="button" className="u-focus-ring" onClick={() => { menuRef.current?.querySelector("button")?.focus(); setMenuOpen(false); action.onClick(); }}>{action.label}</button>)}</div>}
+      </div>
+    </div>
+    <div className="c360-workspace-contact">
+      {c.phone && <CallBridgeLink phone={c.phone} customerName={name}><Phone size={15} />{c.phone}</CallBridgeLink>}
+      {c.email && <a href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`} target="_blank" rel="noopener noreferrer"><Mail size={15} />{c.email}</a>}
+      {address && <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`} target="_blank" rel="noopener noreferrer"><MapPin size={15} />{address}</a>}
+    </div>
+    {contacts.length > 0 && <details className="c360-additional-contacts"><summary>Service contacts ({contacts.length})</summary>{contacts.map((contact, index) => <div key={index}><span>{contact.name || `Service contact ${index + 1}`}</span>{contact.phone && <CallBridgeLink phone={contact.phone} customerName={contact.name || name}>{contact.phone}</CallBridgeLink>}{contact.email && <a href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(contact.email)}`} target="_blank" rel="noopener noreferrer">{contact.email}</a>}</div>)}</details>}
+    <div className="c360-workspace-stats">{stats.map((stat) => <div key={stat.label} className={cn("c360-workspace-stat", stat.alert && "is-alert")}><span>{stat.label}</span><strong>{stat.value}</strong></div>)}</div>
+  </header>;
+}
+
 export default function Customer360ProfileV2({
   customerId,
   onClose,
   onSelectCustomer,
   initialTab = "overview",
   initialScheduledServiceId = null,
+  embedded = false,
 }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -5184,6 +5240,9 @@ export default function Customer360ProfileV2({
   const [newPayerError, setNewPayerError] = useState("");
   const [newPayerNotice, setNewPayerNotice] = useState("");
   const panelRef = useRef(null);
+  const editModalRef = useModalFocus(editOpen, () => { if (!savingEdit) setEditOpen(false); });
+  const tabsAnchorRef = useRef(null);
+  const profileContentId = useId();
   const menuRef = useRef(null);
   const commsSeqRef = useRef(0);
   const commsAbortRef = useRef(null);
@@ -5478,12 +5537,13 @@ export default function Customer360ProfileV2({
   );
 
   useEffect(() => {
+    if (embedded) return undefined;
     const handler = (e) => {
       if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [onClose]);
+  }, [onClose, embedded]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -5512,14 +5572,25 @@ export default function Customer360ProfileV2({
     data?.notificationPrefs?.billing_email,
   ]);
 
+  const renderProfile = (content) => embedded ? content : createPortal(content, document.body);
+  const wrapperClass = embedded ? "c360-embedded" : "admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans";
+  const changeWorkspaceTab = (next) => {
+    setActiveTab(next);
+    requestAnimationFrame(() => {
+      if (panelRef.current && tabsAnchorRef.current) {
+        panelRef.current.scrollTo({ top: tabsAnchorRef.current.offsetTop, behavior: "instant" });
+      }
+    });
+  };
+
   const loadedCustomerMatches = data?.customer
     && String(data.customer.id) === String(customerId);
 
   if (loading || (data?.customer && !loadedCustomerMatches))
-    return createPortal(
+    return renderProfile(
       <div
-        className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end"
-        onClick={onClose}
+        className={wrapperClass}
+        onClick={embedded ? undefined : onClose}
       >
         {" "}
         <div
@@ -5532,13 +5603,13 @@ export default function Customer360ProfileV2({
           </div>{" "}
         </div>{" "}
       </div>
-    , document.body);
+    );
 
   if (!data || !data.customer)
-    return createPortal(
+    return renderProfile(
       <div
-        className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end"
-        onClick={onClose}
+        className={wrapperClass}
+        onClick={embedded ? undefined : onClose}
       >
         {" "}
         <div
@@ -5564,7 +5635,7 @@ export default function Customer360ProfileV2({
           </div>{" "}
         </div>{" "}
       </div>
-    , document.body);
+    );
 
   const c = data.customer;
   // Single seeding path for the edit-customer modal — the desktop pill, the
@@ -5888,23 +5959,15 @@ export default function Customer360ProfileV2({
     return mins ? `${mins}m ${secs}s` : `${secs}s`;
   };
 
-  const TABS = [
-    { key: "overview", label: "Overview" },
-    { key: "services", label: "Services" },
-    { key: "billing", label: "Billing" },
-    { key: "contracts", label: "Contracts" },
-    { key: "comms", label: "Comms" },
-    { key: "property", label: "Property" },
-    { key: "compliance", label: "Compliance" },
-  ];
 
-  return createPortal(
+
+  return renderProfile(
     <div
       // Portaled to <body>, so the overlay leaves the admin shell's DOM
       // scope — restate .admin-shell-v2 here to keep the forced-Roboto and
       // border-box form-control rules from index.css applying inside it.
-      className="admin-shell-v2 fixed inset-0 bg-black/70 z-[1000] flex justify-end font-sans"
-      onClick={onClose}
+      className={wrapperClass}
+      onClick={embedded ? undefined : onClose}
     >
       {" "}
       <div
@@ -5928,6 +5991,7 @@ export default function Customer360ProfileV2({
           .c360-mobile-actionbar { display: none; }
           .c360-mobile-footer-spacer { display: none; }
         `}</style>
+        {embedded ? <CustomerWorkspaceHeader c={c} balanceOwed={balanceOwed} nextService={upcomingFuture[0]} isAdmin={isAdmin} onEdit={openEditModal} onPrepayInvoice={() => setAnnualPrepayInvoiceOpen(true)} onPrepayRecord={() => setAnnualPrepayOpen(true)} onTab={changeWorkspaceTab} menuOpen={menuOpen} setMenuOpen={setMenuOpen} menuRef={menuRef} /> : <>
         {/* ZONE 1 — STICKY HEADER */}
         <div className="sticky top-0 z-10 bg-white border-b border-hairline border-zinc-200">
           {/* Desktop header (>= 768px) */}
@@ -6239,9 +6303,10 @@ export default function Customer360ProfileV2({
             </div>{" "}
           </div>{" "}
         </div>
+        </>}
         {/* ZONE 2 — ALERT BANNERS */}
         {alerts.length > 0 && (
-          <div className="flex flex-wrap gap-2 px-6 py-3 bg-zinc-50 border-b border-hairline border-zinc-200">
+          <div className="c360-alerts flex flex-wrap gap-2 px-6 py-3 bg-zinc-50 border-b border-hairline border-zinc-200">
             {alerts.map((a, i) => (
               <div
                 key={i}
@@ -6261,12 +6326,13 @@ export default function Customer360ProfileV2({
             ))}
           </div>
         )}
+        {embedded ? <><div ref={tabsAnchorRef} className="c360-tabs-anchor" /><Customer360Sections active={activeTab} onChange={changeWorkspaceTab} contentId={profileContentId} /></> : <>
         {/* ZONE 3 — TAB BAR */}
         {/* shrink-0: this is an overflow-x scroll container, so its flex
             auto-minimum-size is 0 — without it the column flex collapses the
             bar to ~0px on mobile (tall content), hiding every section tab. */}
         <div className="flex shrink-0 bg-white border-b border-hairline border-zinc-200 px-6 overflow-x-auto">
-          {TABS.map((t) => (
+          {CUSTOMER_360_SECTIONS.map((t) => (
             <button
               key={t.key}
               onClick={() => setActiveTab(t.key)}
@@ -6281,8 +6347,9 @@ export default function Customer360ProfileV2({
             </button>
           ))}
         </div>
+        </>}
         {/* TAB CONTENT */}
-        <div className="p-6 flex-1">
+        <div className="c360-tab-content p-6 flex-1" id={profileContentId} role={embedded ? "tabpanel" : undefined} aria-label={embedded ? CUSTOMER_360_SECTIONS.find((section) => section.key === activeTab)?.label : undefined}>
           {profileActionErr && (
             <div role="alert" className="mb-4 px-3 py-2 text-14 text-alert-fg bg-red-50 border-hairline border-red-200 rounded-sm">
               {profileActionErr}
@@ -6290,7 +6357,7 @@ export default function Customer360ProfileV2({
           )}
           {/* OVERVIEW */}
           {activeTab === "overview" && (
-            <div>
+            <div className="c360-overview-content">
               <CustomerRequestsPanel customerId={customerId} />
               {/* both customer-scoped zone endpoints are requireAdmin — a
                   technician session would only 403 on expand */}
@@ -6476,7 +6543,7 @@ export default function Customer360ProfileV2({
               </div>{" "}
               <div className="c360-overview-grid grid grid-cols-3 gap-5">
                 {/* Col 1: Services */}
-                <div>
+                <div className="c360-overview-services">
                   {" "}
                   <SectionTitle>
                     Upcoming Appointments ({upcomingFuture.length})
@@ -6485,7 +6552,7 @@ export default function Customer360ProfileV2({
                     upcomingFuture.slice(0, 3).map((s, i) => (
                       <div
                         key={i}
-                        className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
+                        className="c360-upcoming-appointment bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
                       >
                         {" "}
                         <div className="text-13 font-medium text-zinc-900">
@@ -6509,7 +6576,7 @@ export default function Customer360ProfileV2({
                     return (
                       <div
                         key={i}
-                        className="py-1.5 text-12 border-b border-hairline border-zinc-200/60 flex justify-between gap-3"
+                        className="c360-recent-service py-1.5 text-12 border-b border-hairline border-zinc-200/60 flex justify-between gap-3"
                       >
                         {" "}
                         <span className="text-zinc-900 flex items-center gap-1.5">
@@ -6531,7 +6598,7 @@ export default function Customer360ProfileV2({
                   )}
                 </div>
                 {/* Col 2: Billing snapshot */}
-                <div>
+                <div className="c360-overview-billing">
                   {" "}
                   <SectionTitle>Billing Summary</SectionTitle>{" "}
                   {c.servicePausedAt && (
@@ -6763,10 +6830,10 @@ export default function Customer360ProfileV2({
                   ))}
                 </div>
                 {/* Col 3: Health + Referral + Discounts */}
-                <div>
+                <div className="c360-overview-health">
+                  {embedded && <div className="c360-health-heading"><HealthCircle score={score} /><div><strong>Customer health</strong><span>{score == null ? "No score available" : `${score} out of 100`}</span></div></div>}
                   {" "}
-                  <SectionTitle>Health Radar</SectionTitle>{" "}
-                  <RadarChart data={radarData} />
+                  {embedded ? <div className="c360-health-factors" aria-label="Health factors">{radarData.map((factor) => <div key={factor.label}><span>{factor.label}</span><div role="meter" aria-label={factor.label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={factor.value}><span style={{ width: `${factor.value}%` }} /></div></div>)}</div> : <><SectionTitle>Health Radar</SectionTitle><RadarChart data={radarData} /></>}
                   {score != null && (
                     <div className="text-center text-12 text-ink-secondary mt-1">
                       Score:{" "}
@@ -6834,6 +6901,7 @@ export default function Customer360ProfileV2({
                     </div>
                   )}
                 </div>{" "}
+                {embedded && isAdmin && <Customer360Activity timeline={timeline} filter={timelineFilter} onFilter={setTimelineFilter} error={timelineError} retrying={timelineRetrying} onRetry={retryTimeline} />}
               </div>{" "}
             </div>
           )}
@@ -7943,7 +8011,8 @@ export default function Customer360ProfileV2({
           )}
         </div>
         {/* ZONE 4 — TIMELINE (admin-only endpoint) */}
-        {isAdmin && <div className="border-t border-hairline border-zinc-200 px-6 py-4 bg-zinc-50">
+        {embedded && isAdmin && activeTab !== "overview" && <div className="c360-activity-after-tab"><Customer360Activity timeline={timeline} filter={timelineFilter} onFilter={setTimelineFilter} error={timelineError} retrying={timelineRetrying} onRetry={retryTimeline} /></div>}
+        {!embedded && isAdmin && <div className="border-t border-hairline border-zinc-200 px-6 py-4 bg-zinc-50">
           {" "}
           <div className="flex justify-between items-center mb-2.5 flex-wrap gap-2">
             {" "}
@@ -8037,6 +8106,7 @@ export default function Customer360ProfileV2({
             )}
           </div>{" "}
         </div>}
+        {embedded ? <footer className="c360-workspace-profile-footer">Waves Pest Control</footer> : <>
         {/* Mobile spacer for sticky action bar — tracks the same keyboard
             inset as the bar itself so content still scrolls clear of it. */}
         <div
@@ -8047,7 +8117,9 @@ export default function Customer360ProfileV2({
           }}
           aria-hidden="true"
         />{" "}
+        </>}
       </div>
+      {!embedded && <>
       {/* Mobile sticky action bar (mirrors desktop pills) */}
       {/* Mobile top action bar — rendered here as a sibling of the scrolling
           .c360-panel (NOT inside it), exactly like the fixed bottom
@@ -8189,6 +8261,7 @@ export default function Customer360ProfileV2({
         }}
         standalone
       />
+      </>}
       {annualPrepayOpen && (
         <AnnualPrepayModal
           customer={c}
@@ -8239,6 +8312,10 @@ export default function Customer360ProfileV2({
         >
           {" "}
           <div
+            ref={editModalRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Edit customer"
             className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[560px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
             onClick={(e) => e.stopPropagation()}
           >
@@ -8470,5 +8547,5 @@ export default function Customer360ProfileV2({
         </div>
       )}
     </div>
-  , document.body);
+  );
 }

@@ -2092,3 +2092,14 @@ Everything else from the day's hardening stands: image-first visuals, pair-verif
 **Context.** PR #4014 put an unread-conversation count on the global Messages nav item (desktop sidebar and mobile bottom bar), styled as the §5.7 inbox marker: dark, not colored. Adam asked for the red badge from the reference mockup, for unread SMS only, on mobile and desktop.
 
 **Decisions.** (1) The badge background is `alert.fg` (`#C8312F`) with white text. An unread inbound text is a genuine alert under the alert-fg rule — a customer is waiting on a reply and nobody has read it — so this is not decoration and does not open the door to colored chrome elsewhere. The §5.7 unread dot on inbox rows stays dark. (2) Nothing else moves: the count is still `GET /admin/communications/unread-count` (inbound SMS only, per conversation, admin phones excluded), still hidden at zero, capped at 99+, 30 s poll plus the read event, one `UnreadBadge` component shared by both breakpoints.
+
+
+## 2026-09-07 — Customer 360 workspace inside the admin shell
+
+**Context.** Adam approved the live directory-and-profile design and requested the implementation, including Safari and the bookmarked admin app on phones.
+
+**Decisions.** The Customers route opts in with `?customer360=workspace`; selecting a customer retains that parameter and adds the existing `customerId`. Removing `customer360` is the kill switch. Customer 360 embeds in the admin content area, with a persistent directory at wide desktop widths and a customer drawer below 1280px. Other entry points retain the existing profile sheet. The seven sections use a sticky, horizontally scrollable strip. The Activity list renders every event returned by the existing timeline endpoint, with category filtering and expandable descriptions; no source, date cutoff, or backend contract changes. Existing customer actions, billing controls, metrics, authorization checks, and loading/error paths remain authoritative.
+
+**Safari.** The workspace inherits the admin shell's `useAdminViewport` sizing. The directory drawer accounts for visual viewport offsets and safe areas; form inputs are at least 16px. Contract forms respond to the profile container width so the Waves sidebar does not force tablet overflow.
+
+**Verification.** Synthetic fixtures rendered the real Customers route and Waves shell at desktop, phone, and tablet widths in Chromium and WebKit. All sections, full history, directory selection/filtering, modal dismissal, and simulated keyboard viewport changes passed; screenshots were inspected. Focused client tests and the production build passed. No migrations or database integration checks were run. Physical iPhone home-screen behavior was not device-tested. This entry records a local implementation, not a deployment.

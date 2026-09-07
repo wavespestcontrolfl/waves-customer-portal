@@ -50,6 +50,7 @@ import {
   Users,
 } from "lucide-react";
 import Customer360Profile from "../../components/admin/Customer360ProfileV2";
+import Customer360Workspace from "../../components/admin/Customer360Workspace";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import MobileNewCustomerSheet from "../../components/admin/MobileNewCustomerSheet";
 import AddressAutocomplete from "../../components/AddressAutocomplete";
@@ -1117,6 +1118,9 @@ export default function CustomersPageV2() {
     const id = searchParams.get("customerId");
     return id || null;
   });
+  // Query-gated rollout: opt in with ?customer360=workspace. Existing deep
+  // links and profile sheets on other surfaces keep their current presentation.
+  const workspaceOpen = searchParams.get("customer360") === "workspace" && !!selected360Id;
   usePublishIntelligenceBarPageData({ customer_id: selected360Id });
   const [page, setPage] = useState(1);
   const [totalCustomers, setTotalCustomers] = useState(0);
@@ -1487,7 +1491,8 @@ export default function CustomersPageV2() {
     (filterHasBalance ? 1 : 0);
 
   return (
-    <div>
+    <div className={workspaceOpen ? "c360-workspace-page" : undefined}>
+      {!workspaceOpen && <>
       {/* ======================= HEADER ======================= */}
       <CustomersCommandHeader
         view={view}
@@ -1605,137 +1610,6 @@ export default function CustomersPageV2() {
           <div className="u-nums text-11 text-ink-tertiary text-right mb-3 mt-3">
             {totalCustomers} result{totalCustomers !== 1 ? "s" : ""}
           </div>
-          {/* Filters dialog */}
-          <Dialog
-            open={showFilters}
-            onClose={() => setShowFilters(false)}
-          >
-            {" "}
-            <DialogHeader onClose={() => setShowFilters(false)}>
-              {" "}
-              <DialogTitle>Filter customers</DialogTitle>{" "}
-            </DialogHeader>{" "}
-            <DialogBody>
-              {" "}
-              <div className="mb-4">
-                {" "}
-                <div className="u-label text-ink-tertiary mb-1.5">
-                  Last visited
-                </div>{" "}
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  {[
-                    { v: "all", l: "Any" },
-                    { v: "30", l: "≤ 30 days" },
-                    { v: "90", l: "≤ 90 days" },
-                    { v: "180", l: "≤ 180 days" },
-                    { v: "never", l: "Never" },
-                  ].map((o) => (
-                    <FilterPill
-                      key={o.v}
-                      active={filterLastVisited === o.v}
-                      onClick={() => setFilterLastVisited(o.v)}
-                    >
-                      {o.l}
-                    </FilterPill>
-                  ))}
-                </div>{" "}
-              </div>{" "}
-              <div className="mb-4">
-                {" "}
-                <div className="u-label text-ink-tertiary mb-1.5">
-                  Cards on file
-                </div>{" "}
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  {[
-                    { v: "all", l: "Any" },
-                    { v: "has", l: "Has card" },
-                    { v: "none", l: "No card" },
-                  ].map((o) => (
-                    <FilterPill
-                      key={o.v}
-                      active={filterCards === o.v}
-                      onClick={() => setFilterCards(o.v)}
-                    >
-                      {o.l}
-                    </FilterPill>
-                  ))}
-                </div>{" "}
-              </div>{" "}
-              <div className="mb-4">
-                {" "}
-                <div className="u-label text-ink-tertiary mb-1.5">
-                  Status
-                </div>{" "}
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  {[
-                    { v: "all", l: "All" },
-                    { v: "active_customer", l: "Active" },
-                    { v: "new_lead", l: "New Lead" },
-                    { v: "at_risk", l: "At Risk", alert: true },
-                  ].map((s) => (
-                    <FilterPill
-                      key={s.v}
-                      active={filterStage === s.v}
-                      alert={s.alert}
-                      onClick={() => setFilterStage(s.v)}
-                    >
-                      {s.l}
-                    </FilterPill>
-                  ))}
-                  <FilterPill
-                    active={filterHasBalance}
-                    alert
-                    onClick={() => setFilterHasBalance(!filterHasBalance)}
-                  >
-                    Has Balance
-                  </FilterPill>{" "}
-                </div>{" "}
-              </div>{" "}
-              <div>
-                {" "}
-                <div className="u-label text-ink-tertiary mb-1.5">
-                  Tier
-                </div>{" "}
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  {[
-                    { v: "all", l: "All Tiers" },
-                    { v: "Platinum", l: "Platinum" },
-                    { v: "Gold", l: "Gold" },
-                    { v: "Silver", l: "Silver" },
-                    { v: "Bronze", l: "Bronze" },
-                    { v: "One-Time", l: "One-Time" },
-                    { v: "none", l: "No Plan" },
-                  ].map((t) => (
-                    <FilterPill
-                      key={t.v}
-                      active={filterTier === t.v}
-                      onClick={() => setFilterTier(t.v)}
-                    >
-                      {t.l}
-                    </FilterPill>
-                  ))}
-                </div>{" "}
-              </div>{" "}
-            </DialogBody>{" "}
-            <DialogFooter>
-              {" "}
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  setFilterTier("all");
-                  setFilterStage("all");
-                  setFilterLastVisited("all");
-                  setFilterCards("all");
-                  setFilterHasBalance(false);
-                }}
-              >
-                Clear all
-              </Button>{" "}
-              <Button variant="primary" onClick={() => setShowFilters(false)}>
-                Done
-              </Button>{" "}
-            </DialogFooter>{" "}
-          </Dialog>
           {/* Desktop table header */}
           {!isMobile && (
             <div
@@ -2331,6 +2205,160 @@ export default function CustomersPageV2() {
         </div>
       )}
 
+      </>}
+      {workspaceOpen && <Customer360Workspace
+        selectedId={selected360Id}
+        onSelect={openCustomerProfile}
+        onClose={closeCustomerProfile}
+        customers={filteredSorted}
+        search={search}
+        onSearch={setSearch}
+        loading={loading}
+        error={error}
+        onRetry={() => loadCustomers()}
+        total={totalCustomers}
+        page={page}
+        totalPages={totalPages}
+        onPageChange={(nextPage) => { setPage(nextPage); loadCustomers(nextPage); }}
+        onAdd={isAdmin ? () => openAddCustomer() : undefined}
+        onFilters={() => setShowFilters(true)}
+        activeFilterCount={activeFilterCount}
+        stage={filterStage}
+        onStageChange={setFilterStage}
+        stages={STAGES}
+      />}
+          {/* Filters dialog */}
+          <Dialog
+            open={showFilters}
+            onClose={() => setShowFilters(false)}
+          >
+            {" "}
+            <DialogHeader onClose={() => setShowFilters(false)}>
+              {" "}
+              <DialogTitle>Filter customers</DialogTitle>{" "}
+            </DialogHeader>{" "}
+            <DialogBody>
+              {" "}
+              <div className="mb-4">
+                {" "}
+                <div className="u-label text-ink-tertiary mb-1.5">
+                  Last visited
+                </div>{" "}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {[
+                    { v: "all", l: "Any" },
+                    { v: "30", l: "≤ 30 days" },
+                    { v: "90", l: "≤ 90 days" },
+                    { v: "180", l: "≤ 180 days" },
+                    { v: "never", l: "Never" },
+                  ].map((o) => (
+                    <FilterPill
+                      key={o.v}
+                      active={filterLastVisited === o.v}
+                      onClick={() => setFilterLastVisited(o.v)}
+                    >
+                      {o.l}
+                    </FilterPill>
+                  ))}
+                </div>{" "}
+              </div>{" "}
+              <div className="mb-4">
+                {" "}
+                <div className="u-label text-ink-tertiary mb-1.5">
+                  Cards on file
+                </div>{" "}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {[
+                    { v: "all", l: "Any" },
+                    { v: "has", l: "Has card" },
+                    { v: "none", l: "No card" },
+                  ].map((o) => (
+                    <FilterPill
+                      key={o.v}
+                      active={filterCards === o.v}
+                      onClick={() => setFilterCards(o.v)}
+                    >
+                      {o.l}
+                    </FilterPill>
+                  ))}
+                </div>{" "}
+              </div>{" "}
+              <div className="mb-4">
+                {" "}
+                <div className="u-label text-ink-tertiary mb-1.5">
+                  Status
+                </div>{" "}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {[
+                    { v: "all", l: "All" },
+                    { v: "active_customer", l: "Active" },
+                    { v: "new_lead", l: "New Lead" },
+                    { v: "at_risk", l: "At Risk", alert: true },
+                  ].map((s) => (
+                    <FilterPill
+                      key={s.v}
+                      active={filterStage === s.v}
+                      alert={s.alert}
+                      onClick={() => setFilterStage(s.v)}
+                    >
+                      {s.l}
+                    </FilterPill>
+                  ))}
+                  <FilterPill
+                    active={filterHasBalance}
+                    alert
+                    onClick={() => setFilterHasBalance(!filterHasBalance)}
+                  >
+                    Has Balance
+                  </FilterPill>{" "}
+                </div>{" "}
+              </div>{" "}
+              <div>
+                {" "}
+                <div className="u-label text-ink-tertiary mb-1.5">
+                  Tier
+                </div>{" "}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {[
+                    { v: "all", l: "All Tiers" },
+                    { v: "Platinum", l: "Platinum" },
+                    { v: "Gold", l: "Gold" },
+                    { v: "Silver", l: "Silver" },
+                    { v: "Bronze", l: "Bronze" },
+                    { v: "One-Time", l: "One-Time" },
+                    { v: "none", l: "No Plan" },
+                  ].map((t) => (
+                    <FilterPill
+                      key={t.v}
+                      active={filterTier === t.v}
+                      onClick={() => setFilterTier(t.v)}
+                    >
+                      {t.l}
+                    </FilterPill>
+                  ))}
+                </div>{" "}
+              </div>{" "}
+            </DialogBody>{" "}
+            <DialogFooter>
+              {" "}
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  setFilterTier("all");
+                  setFilterStage("all");
+                  setFilterLastVisited("all");
+                  setFilterCards("all");
+                  setFilterHasBalance(false);
+                }}
+              >
+                Clear all
+              </Button>{" "}
+              <Button variant="primary" onClick={() => setShowFilters(false)}>
+                Done
+              </Button>{" "}
+            </DialogFooter>{" "}
+          </Dialog>
+
       {/* ======================= QUICK ADD (desktop modal / mobile Square sheet) ======================= */}
       {!isMobile && (
         <QuickAddModalV2
@@ -2359,7 +2387,7 @@ export default function CustomersPageV2() {
       )}
 
       {/* ======================= CUSTOMER 360 (V1) ======================= */}
-      {selected360Id && (
+      {selected360Id && !workspaceOpen && (
         <Customer360Profile
           key={selected360Id}
           customerId={selected360Id}
