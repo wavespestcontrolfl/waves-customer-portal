@@ -289,6 +289,43 @@ describe('waveguard-plan-engine helpers', () => {
     expect(product.name).toBe('LESCO 12-0-0 Chelated Iron Plus');
   });
 
+  test.each([[36.15, 1.53], [39, 1.65], [32, 1.35]])(
+    'iron protocol lines keep their selection rules and use the current $%s package cost', (packagePrice, expectedCost) => {
+      const protocols = require('../config/protocols.json');
+      const product = { id: 'iron', name: 'LESCO Chelated Iron Plus', default_rate_per_1000: 3,
+        rate_unit: 'fl_oz', cost_unit: 'fl_oz', cost_per_unit: Number((packagePrice / 320).toFixed(4)) };
+      const lines = Object.values(protocols.lawn).flatMap(track => track.visits.flatMap(visit => [
+        ...parseProtocolLines(visit.primary, 'base'), ...parseProtocolLines(visit.secondary, 'conditional'),
+      ])).filter(line => /\bChelated Iron Plus\b/.test(line.raw));
+      expect(lines).toHaveLength(15);
+      for (const line of lines) {
+        expect(line.raw).not.toMatch(/\$/);
+        expect(matchCatalogProduct(line, [product]).id).toBe('iron');
+        expect(classifyProtocolLine(line.raw, line.role)).toEqual(classifyProtocolLine(`${line.raw} ($1.52)`, line.role));
+      }
+      const mix = calculateProductAmount({ product, lawnSqft: 4500, carrierGalPer1000: 1 });
+      expect(mix).toMatchObject({ amount: 13.5, amountUnit: 'fl_oz', materialCost: expectedCost,
+        materialCostSource: 'inventory_cost_per_unit' });
+      expect(summarizeMaterialCost([{ selected: true, product, mix }]).total).toBe(expectedCost);
+      const ornamentalLines = protocols.tree_shrub.visits.flatMap(visit => `${visit.primary}\n${visit.secondary}`.split('\n'))
+        .filter(line => /\bIron Plus\b|\bFe\/Mn micros\b/.test(line));
+      expect(ornamentalLines.length).toBeGreaterThan(0);
+      expect(ornamentalLines.every(line => !line.includes('$'))).toBe(true);
+    },
+  );
+
+  test('every CSV alias of the quoted iron product carries the same package and unit price', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const { parse } = require('csv-parse/sync');
+    const rows = parse(fs.readFileSync(path.join(__dirname, '../data/pricing.csv')), { relax_column_count: true })
+      .filter(row => row[0]?.startsWith('LESCO Chelated Iron Plus'));
+    expect(rows).toHaveLength(6);
+    for (const row of rows) {
+      expect(row.slice(5)).toEqual(['SiteOne', '2.5 gal', 'Owner quote 2026-09-07 item 084043 family 9999903964', '', '$36.15', '$0.1130/fl oz']);
+    }
+  });
+
   test('matchCatalogProduct uses configured catalog aliases', () => {
     const product = matchCatalogProduct(
       { raw: 'LESCO 24-0-11 75% PolyPlus fert ($8.68)' },

@@ -57,9 +57,19 @@ the same quote only while its original timestamp and snapshot provenance match.
 A subsequent manual quote wins. Price, stock and historical snapshots remain
 unchanged, and a critical audit event makes the source correction atomic.
 
-The two CSV rows matching the supplied 6%Fe/2%Mn product are updated as a
-mirror. Customer rate grids, treatment rates, protocols, product registrations,
-purchase records and customer communications are outside this correction.
+All six CSV aliases of the supplied product carry the same package and cost;
+the verified label also identifies the 4% sulfur variant in those aliases.
+The field reference removes fixed iron cost annotations from its lawn and
+tree/shrub instructions, including the combined iron/manganese annotations.
+The existing plan engine calculates material cost from the selected catalog
+price and quantity. Keeping a second fixed amount in the instructions would
+become wrong again when a newer quote or cheaper eligible vendor wins.
+Product matching and selection rules are preserved. The operating tables hold
+rates, gates and windows, with costs read from the catalog; no treatment
+definition changes are needed. Customer rate grids, treatment rates, product
+registrations, purchase records and customer communications are outside this
+correction. The separately labeled legacy aggregate allowances remain the
+unverified assumptions documented in `docs/lawn-material-audit.md`.
 
 ## Verification
 
@@ -85,6 +95,16 @@ tracking tables. No production database was accessed.
   back without changing the supplier quote.
 - 64 existing inventory-costing, canonical-dimension and migration-state
   regressions passed. Scoped lint and whitespace checks passed.
+- 95 protocol, matcher and tree/shrub checks passed. The new cases cover every
+  CSV alias, all lawn iron lines, unchanged selection rules and catalog-derived
+  cost for the supplied price, a newer price and a cheaper eligible price.
+- The real ProtocolPanel rendered with synthetic local API fixtures at 1440 and
+  390 pixels. Lawn mix quantities, calendar instructions and tree/shrub iron
+  instructions retained their content without fixed iron prices. Closing and
+  reopening worked; there were no browser errors, unexpected API requests or
+  horizontal overflow. Screenshots were inspected with the actual admin font
+  scope. Existing typography and warning styles are unchanged. This is fixture
+  UI verification, separate from the PostgreSQL migration checks.
 
 The new PostgreSQL suite joins the existing DB-gated CI discovery mechanism.
 These development checks establish migration behavior against the repository

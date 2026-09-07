@@ -33,7 +33,7 @@
         {
           "visit": 2,
           "month": "Feb",
-          "primary": "LESCO 24-0-11 75% PolyPlus fert ($8.68)\nChelated Iron Plus foliar ($1.52)\nHigh Mn Combo micros ($1.33)",
+          "primary": "LESCO 24-0-11 75% PolyPlus fert ($8.68)\nChelated Iron Plus foliar\nHigh Mn Combo micros ($1.33)",
           "secondary": "★ Medallion SC (FRAC 12) if large patch active ($8.90)\nIRRIGATION AUDIT #1: probe 3\" depth, VWC >40% = reduce 20%",
           "material_cost": "25.71",
           "labor_cost": "26.96",
@@ -81,7 +81,7 @@
         {
           "visit": 5,
           "month": "May",
-          "primary": "★ IF P index <80: LESCO 24-2-11 ($7.43)\n★ IF P index ≥80: LESCO 24-0-11 ($8.68)\nCarbonPro-L biostimulant ($14.24)\nChelated Iron Plus ($1.52)",
+          "primary": "★ IF P index <80: LESCO 24-2-11 ($7.43)\n★ IF P index ≥80: LESCO 24-0-11 ($8.68)\nCarbonPro-L biostimulant ($14.24)\nChelated Iron Plus",
           "secondary": "Dismiss if sedge ($4.36)\nHydretain drought prep Premium ($10.59)",
           "material_cost": "90.59",
           "labor_cost": "26.96",
@@ -161,7 +161,7 @@
         {
           "visit": 10,
           "month": "Oct",
-          "primary": "LESCO 24-0-11 75% PolyPlus fert ($8.68)\n★ Torque SC (FRAC 3) fungicide ($7.50)\nChelated Iron Plus ($1.52)",
+          "primary": "LESCO 24-0-11 75% PolyPlus fert ($8.68)\n★ Torque SC (FRAC 3) fungicide ($7.50)\nChelated Iron Plus",
           "secondary": "Headway ONLY if severe ($26.13) — resets FRAC 11 clock\nSoil re-test problem props — OPTIONAL on request\n★ THATCH MEASUREMENT #2: compare to Mar",
           "material_cost": "39.69",
           "labor_cost": "26.96",
@@ -193,7 +193,7 @@
         {
           "visit": 12,
           "month": "Dec",
-          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO Elite 0-0-28 ($20.42)\nPremium: Chelated Iron Plus ($1.52)\nPremium: CarbonPro-L ($14.24)",
+          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO Elite 0-0-28 ($20.42)\nPremium: Chelated Iron Plus\nPremium: CarbonPro-L ($14.24)",
           "secondary": "★ OPTIONAL Basic/Std: Door hanger + irrigation winterize check\n★ OPTIONAL: Annual report on request (simplified for Basic)\n⚠ Atrazine backup if Nov too hot",
           "material_cost": "84.29",
           "labor_cost": "26.96",
@@ -249,7 +249,7 @@
         {
           "visit": 2,
           "month": "Feb",
-          "primary": "LESCO 24-0-11 PolyPlus fert ($8.68)\nChelated Iron Plus ($1.52)\nHigh Mn Combo ($1.33)",
+          "primary": "LESCO 24-0-11 PolyPlus fert ($8.68)\nChelated Iron Plus\nHigh Mn Combo ($1.33)",
           "secondary": "★ Armada 50 WDG if SDS damage documented Jan ($12.41)\nEarly green-up monitoring\n★ IRRIGATION AUDIT #1: probe 3\" VWC >40% = reduce 20%",
           "material_cost": "25.71",
           "labor_cost": "26.96",
@@ -298,7 +298,7 @@
           "visit": 5,
           "month": "May",
           "primary": "★ IF P index <80: LESCO 24-2-11 ($7.43)\n★ IF P ≥80: LESCO 24-0-11 ($8.68)\nCarbonPro-L biostimulant ($14.24)\nPrimo Maxx PGR ($1.91)",
-          "secondary": "Chelated Iron Plus ($1.52)\nDismiss if sedge ($4.36)\n★ Document PGR response — adjust rate if needed",
+          "secondary": "Chelated Iron Plus\nDismiss if sedge ($4.36)\n★ Document PGR response — adjust rate if needed",
           "material_cost": "44.1",
           "labor_cost": "26.96",
           "tiers": {
@@ -409,7 +409,7 @@
         {
           "visit": 12,
           "month": "Dec",
-          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO Elite 0-0-28 ($20.42)\nPremium: Chelated Iron Plus ($1.52)\nPremium: CarbonPro-L ($14.24)",
+          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO Elite 0-0-28 ($20.42)\nPremium: Chelated Iron Plus\nPremium: CarbonPro-L ($14.24)",
           "secondary": "★ OPTIONAL Basic/Std: Door hanger + dormancy expectations\n★ OPTIONAL: Annual report on request\nDormancy is NORMAL — set expectations\n★ Bermuda color loss = not a problem, it's biology",
           "material_cost": "84.29",
           "labor_cost": "26.96",
@@ -458,7 +458,7 @@
         {
           "visit": 2,
           "month": "Feb",
-          "primary": "Chelated Iron Plus foliar ($1.52)\nHigh Mn Combo micros ($1.33)\nGreen Flo 6-0-0 Ca ($1.39)",
+          "primary": "Chelated Iron Plus foliar\nHigh Mn Combo micros ($1.33)\nGreen Flo 6-0-0 Ca ($1.39)",
           "secondary": "★ Medallion SC (FRAC 12) if large patch active ($8.90)\nOR Velista (FRAC 7) if Jan slot was FRAC 11+3 ($67.50)\n★ IRRIGATION AUDIT #1: VWC >40% = reduce 20%",
           "material_cost": "6.87",
           "labor_cost": "26.96",
@@ -506,7 +506,7 @@
         {
           "visit": 5,
           "month": "May",
-          "primary": "★ IF P index <80: LESCO 24-2-11 ($7.43)\n★ IF P ≥80: LESCO 24-0-11 ($8.68)\nCarbonPro-L biostimulant ($14.24)\nChelated Iron Plus ($1.52)",
+          "primary": "★ IF P index <80: LESCO 24-2-11 ($7.43)\n★ IF P ≥80: LESCO 24-0-11 ($8.68)\nCarbonPro-L biostimulant ($14.24)\nChelated Iron Plus",
           "secondary": "Dismiss if sedge ($4.36)\nPrimo Maxx PGR conservative ($1.91)\n★ Document PGR response",
           "material_cost": "38.61",
           "labor_cost": "26.96",
@@ -586,7 +586,7 @@
         {
           "visit": 10,
           "month": "Oct",
-          "primary": "LESCO 24-0-11 PolyPlus fert ($8.68)\n★ Headway G SC PREVENTIVE (FRAC 11+3) ($17.16)\nChelated Iron Plus ($1.52)",
+          "primary": "LESCO 24-0-11 PolyPlus fert ($8.68)\n★ Headway G SC PREVENTIVE (FRAC 11+3) ($17.16)\nChelated Iron Plus",
           "secondary": "SpeedZone + NIS ($5.95) — safe again <85°F\n★ LARGE PATCH PREVENTION #1 — NON-NEGOTIABLE\n★ THATCH MEASUREMENT #2: compare to Mar, >0.5\" = dethatch",
           "material_cost": "91.25",
           "labor_cost": "26.96",
@@ -618,7 +618,7 @@
         {
           "visit": 12,
           "month": "Dec",
-          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO 0-0-18 Bio KMAG ($7.21)\nPremium: Chelated Iron Plus ($1.52)",
+          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO 0-0-18 Bio KMAG ($7.21)\nPremium: Chelated Iron Plus",
           "secondary": "★ Velista (FRAC 7) large patch #3 if large patch active ($67.50)\n★ OPTIONAL Basic/Std: Door hanger + irrigation winterize\n★ OPTIONAL: Annual report on request\n★ FRAC rotation: Velista (7) follows Medallion (12)\nThatch assessment for spring mechanical work",
           "material_cost": "18.3",
           "labor_cost": "26.96",
@@ -670,7 +670,7 @@
         {
           "visit": 2,
           "month": "Feb",
-          "primary": "Chelated Iron Plus foliar ($1.52)\nHigh Mn Combo micros ($1.33)",
+          "primary": "Chelated Iron Plus foliar\nHigh Mn Combo micros ($1.33)",
           "secondary": "★ MOLE CRICKET SOAP FLUSH #1:\n2 tbsp dish soap/gallon, pour over 2 sq ft\nCount nymphs surfacing in 3 min\nThreshold: ≥2 per 2 sq ft = TREAT\n★ Irrigation check (if irrigated)",
           "material_cost": "4.59",
           "labor_cost": "26.96",
@@ -718,7 +718,7 @@
         {
           "visit": 5,
           "month": "May",
-          "primary": "Chelated Iron Plus ($1.52)\nChelated AM + Micros ($1.40)\n★ IRRIGATED: K-Flow 0-0-25 ($2.18)\n★ NON-IRRIGATED: Fe+micros only, skip K-Flow",
+          "primary": "Chelated Iron Plus\nChelated AM + Micros ($1.40)\n★ IRRIGATED: K-Flow 0-0-25 ($2.18)\n★ NON-IRRIGATED: Fe+micros only, skip K-Flow",
           "secondary": "Dismiss if sedge ($4.36)\n★ Crabgrass check — if pre-em breaking down:\nNO bahia-safe post-emergent curative for crabgrass\nRely on pre-em timing + scout/manual; nonselective spot only where turf loss is acceptable",
           "material_cost": "9.12",
           "labor_cost": "26.96",
@@ -798,7 +798,7 @@
         {
           "visit": 10,
           "month": "Oct",
-          "primary": "LESCO 24-0-11 PolyPlus fert ($8.68)\n★ T-Storm CONDITIONAL — ONLY if dollar spot active ($6.15)\nChelated Iron Plus ($1.52)",
+          "primary": "LESCO 24-0-11 PolyPlus fert ($8.68)\n★ T-Storm CONDITIONAL — ONLY if dollar spot active ($6.15)\nChelated Iron Plus",
           "secondary": "★ Mole cricket: Dylox 420 SL fall curative if tunneling ($12.53)\n★ Topchoice fall app ONLY if spring Topchoice not applied ($8.22)\nSoil re-test problem props — OPTIONAL on request",
           "material_cost": "24.38",
           "labor_cost": "26.96",
@@ -830,7 +830,7 @@
         {
           "visit": 12,
           "month": "Dec",
-          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO 0-0-18 Bio KMAG ($7.21)\nPremium: Chelated Iron Plus ($1.52)",
+          "primary": "★ OPTIONAL: Winter wellness touchpoint if requested\nPremium: LESCO 0-0-18 Bio KMAG ($7.21)\nPremium: Chelated Iron Plus",
           "secondary": "★ OPTIONAL Basic/Std: Door hanger + dormancy expectations\n★ OPTIONAL: Annual report on request (simplified for Basic)\n★ OPTIONAL CUSTOMER EXPECTATION TALK #3 — DORMANCY:\n\"Bahia goes dormant earlier and longer than St. Aug.\nBrown ",
           "material_cost": "10.49",
           "labor_cost": "26.96",
@@ -1000,7 +1000,7 @@
         "month": "Feb",
         "visit_type": "Foliar PHC visit",
         "main_goal": "Clean up scale/mites/whitefly pressure, correct micros, and avoid unnecessary systemics.",
-        "primary": "TriTek spray oil: 1.0% standard, 1.5% only with active scale/mites and safe weather ($6.08)\nIron Plus: label rate ($1.52)\nMn Combo: label rate ($1.33)\nKelp/humates via NutriRoot drench — premium/stressed accounts only ($5.65)",
+        "primary": "TriTek spray oil: 1.0% standard, 1.5% only with active scale/mites and safe weather ($6.08)\nIron Plus: label rate\nMn Combo: label rate ($1.33)\nKelp/humates via NutriRoot drench — premium/stressed accounts only ($5.65)",
         "secondary": "Conserve SC 0.1-0.2 fl oz/gal for caterpillars where labeled ($4.05)\nEDDHA iron (Sequestar 6% Fe) for high-pH chlorosis ($1.73)\nFloramite 4-8 fl oz/100 gal for confirmed mites ($6.02)\nLabeled ornamental fungicide only when disease/history warrants ($2.11)",
         "material_cost": "8.93",
         "labor_cost": "standard",
@@ -1042,7 +1042,7 @@
         "month": "May",
         "visit_type": "Nutrition + systemic PHC",
         "main_goal": "Finish legal nutrition before June blackout in Sarasota/Manatee and use non-neonic systemic rotation.",
-        "primary": "Kontos: 1.7-3.4 fl oz/100 gal, IRAC 23 ($13.52)\nMainspring GNL: 4-8 fl oz/100 gal if target pest/resistance history fits ($26.98)\nIron Plus + Mn Combo: label rate ($2.85)\n8-2-12 palm fertilizer and 13-0-13 ornamental fertilizer only if needed and legal before blackout ($9.63)",
+        "primary": "Kontos: 1.7-3.4 fl oz/100 gal, IRAC 23 ($13.52)\nMainspring GNL: 4-8 fl oz/100 gal if target pest/resistance history fits ($26.98)\nIron Plus + Mn Combo: label rate\n8-2-12 palm fertilizer and 13-0-13 ornamental fertilizer only if needed and legal before blackout ($9.63)",
         "secondary": "Floramite for confirmed mites ($6.02)\nEDDHA iron (Sequestar 6% Fe) for high-pH chlorosis ($1.73)\nPalm weevil inspection and diagnostic/injection quote if crown, trunk wound, or decline symptoms support it\nSuperThrive/root drench only for premium/stressed accounts ($2.50 est)",
         "material_cost": "16.37",
         "labor_cost": "standard",
@@ -1056,7 +1056,7 @@
         "month": "Jun",
         "visit_type": "Foliar PHC + scout",
         "main_goal": "Begin Sarasota/Manatee N/P blackout, manage summer pest/disease pressure, and avoid heat injury.",
-        "primary": "TriTek spray oil: 1.0% early morning only when plant/weather safe ($6.08)\nKPHITE 7LP: 1-2 qt/100 gal, FRAC P07 where root/oomycete risk is justified ($4.68)\nLiquid copper (Southern Ag 27.15%): 1-2 tsp/gal for labeled leaf spot/bacterial disease, separate from oil ($11.35)\nFe/Mn micros: label rate where deficiency symptoms justify ($2.85)",
+        "primary": "TriTek spray oil: 1.0% early morning only when plant/weather safe ($6.08)\nKPHITE 7LP: 1-2 qt/100 gal, FRAC P07 where root/oomycete risk is justified ($4.68)\nLiquid copper (Southern Ag 27.15%): 1-2 tsp/gal for labeled leaf spot/bacterial disease, separate from oil ($11.35)\nFe/Mn micros: label rate where deficiency symptoms justify",
         "secondary": "Conserve or Mainspring for caterpillars ($4.05)\nDistance or Talus for whitefly/scale nymphs ($16.52)\nFloramite for confirmed mites ($6.02)\nScout/photo/customer note when heat stress makes chemistry the wrong move",
         "material_cost": "6.08",
         "labor_cost": "standard",
@@ -1098,7 +1098,7 @@
         "month": "Sep",
         "visit_type": "Foliar PHC + scout",
         "main_goal": "Break late-summer scale/whitefly life cycles and prepare fall nutrition without N/P until October in Sarasota/Manatee.",
-        "primary": "Talus IGR: label rate for whitefly/scale nymphs, IRAC 16 ($4.69)\nDistance IGR: 6-8 fl oz/100 gal if rotation calls for IRAC 7C ($16.52)\nIron Plus + Mn Combo: label rate ($2.85)\nTriTek spray oil: 1.0% only if crawlers are present and safe ($6.08)",
+        "primary": "Talus IGR: label rate for whitefly/scale nymphs, IRAC 16 ($4.69)\nDistance IGR: 6-8 fl oz/100 gal if rotation calls for IRAC 7C ($16.52)\nIron Plus + Mn Combo: label rate\nTriTek spray oil: 1.0% only if crawlers are present and safe ($6.08)",
         "secondary": "Headway only for labeled ornamental disease and only if FRAC history allows ($6.41)\nShortstop PGR add-on only on healthy established hedges ($26.56)\n4A/neonic systemic only if documented and annual 4A log allows ($4.25)\nDiagnose palm K/Mg/Mn/Fe before treating",
         "material_cost": "2.85",
         "labor_cost": "standard",
