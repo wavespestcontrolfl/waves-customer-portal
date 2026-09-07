@@ -2362,7 +2362,7 @@ export default function CustomersPageV2() {
       {/* ======================= CUSTOMER 360 (V1) ======================= */}
       {selected360Id && (
         <Customer360Profile
-          key={`${selected360Id}:${searchParams.get("tab") === "comms" ? "comms" : "overview"}`}
+          key={`${selected360Id}:${searchParams.get("tab") === "comms" ? location.key : "overview"}`}
           customerId={selected360Id}
           initialTab={searchParams.get("tab") === "comms" ? "comms" : "overview"}
           onSelectCustomer={openCustomerProfile}

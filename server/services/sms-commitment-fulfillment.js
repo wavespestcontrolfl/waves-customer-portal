@@ -6,7 +6,7 @@ const { dispatchWithFallback } = require('./llm/call');
 const { scrubSegments } = require('../utils/pan-scrub');
 const { VERSION, stringifySmsEvidence } = require('./sms-operational-extractor');
 const { hashExtractionSource } = require('./data-hygiene/source-extraction-store');
-const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey } = require('./estimate-property-linkage');
+const { normalizedEstimateStreet, normalizedStampedStreet, sameScopeKey, scopeKeysShareLocality, scopeKeyLacksLocality } = require('./estimate-property-linkage');
 const { handedOffWithin, handoffOrder, HANDOFF_COLS, witnessAt, whereEstimateCustomerOwnership } = require('./call-commitments');
 
 const LIMIT = 50;
@@ -104,8 +104,11 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         .select('id', 'address_line1', 'address_line2', 'city', 'zip');
       for (const row of unlinked) {
         const key = normalizedEstimateStreet(row.address);
-        const matches = properties.filter((p) => sameScopeKey(key,
-          normalizedStampedStreet(p.address_line1, p.address_line2, p.city, p.zip)));
+        const matches = properties.filter((p) => {
+          const propertyKey = normalizedStampedStreet(p.address_line1, p.address_line2, p.city, p.zip);
+          return sameScopeKey(key, propertyKey) && (scopeKeysShareLocality(key, propertyKey)
+            || (scopeKeyLacksLocality(key) && scopeKeyLacksLocality(propertyKey)));
+        });
         row.address_property_id = matches.length === 1 ? matches[0].id : null;
       }
     } catch { failures.push('estimate_property'); }

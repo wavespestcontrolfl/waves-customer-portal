@@ -746,7 +746,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     const data = { deliveryState: { lastDeliveredAt: after.toISOString() }, ...(link === 'mirror' ? { lead_id: lead.id } : {}) };
     const [estimate] = await mockPg('estimates').insert({ customer_id: null, property_id: null,
       customer_phone: message.from_phone, status: 'sent', service_interest: 'Commercial lawn',
-      address: '100 Example Lane', estimate_data: data }).returning('id');
+      address: '100 Example Lane, Sarasota, FL 34236', estimate_data: data }).returning('id');
     if (link === 'fk') await mockPg('leads').where({ id: lead.id }).update({ estimate_id: estimate.id });
     if (conflict) await mockPg('leads').insert({ customer_id: null, phone: message.from_phone,
       status: 'estimate_sent', estimate_id: estimate.id });
@@ -894,6 +894,25 @@ postgres('SMS commitments on PostgreSQL', () => {
     ['100 Example Lane, Another City, FL 34236', false],
     ['100 Example Lane, Unit 2, Sarasota, FL 34236', false],
   ])('formatted estimate address is property scoped: %s', async (address, allowed) => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id,
+      address, service_interest: 'Lawn', estimate_data: { deliveryState: { lastDeliveredAt: after.toISOString() } } }).returning('id');
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, {}, message, new Date(after.getTime() + 1000));
+    expect(evidence.failures).toEqual([]);
+    expect(admissibleWitness(evidence.records.find((r) => r.id === estimate.id), { kind: 'send_estimate',
+      sms_context: { source_at: message.created_at, property_id: context.properties[0].id } })).toBe(allowed);
+  });
+
+  test.each([
+    ['100 Example Lane, Sarasota, FL', null, '34285', false],
+    ['100 Example Lane, FL, 34236', 'Sarasota', null, false],
+    ['100 Example Lane', 'Sarasota', '34236', false],
+    ['100 Example Lane, Sarasota, FL', null, null, false],
+    ['100 Example Lane, Sarasota, FL', 'Sarasota', null, true],
+    ['100 Example Lane, FL, 34236', null, '34236', true],
+    ['100 Example Lane', null, null, true],
+  ])('estimate locality needs shared evidence: %s / %s / %s', async (address, city, zip, allowed) => {
+    await mockPg('customer_properties').where({ id: context.properties[0].id }).update({ city, zip });
     const after = new Date(message.created_at.getTime() + 1000);
     const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id,
       address, service_interest: 'Lawn', estimate_data: { deliveryState: { lastDeliveredAt: after.toISOString() } } }).returning('id');
