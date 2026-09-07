@@ -106,7 +106,9 @@ function normalizeAnswer(text) {
     // A blank line between an intro and its items, or between items, does
     // not end the governed list; only a following non-item line does.
     if (!line) continue;
-    if (isItem && governed) { lines[lines.length - 1] += `, ${line}`; continue; }
+    // Items under a negated intro join as one comma list; an item's own
+    // trailing period must not end the clause the intro governs.
+    if (isItem && governed) { lines[lines.length - 1] += `, ${line.replace(/[.;!?]+$/, '')}`; continue; }
     if (!isItem) {
       const intro = line.replace(/:\s*$/, '');
       governed = /:\s*$/.test(line) && LIST_INTRO_RE.test(intro) && NEGATION_RE.test(intro.slice(-40));
@@ -129,7 +131,9 @@ const OTHER_ENTITY_RE = new RegExp(`\\b(?:${cohort.other_entities.map(name => na
 const WAVES_NAMED_RE = /\bwaves\b|\badam\b|\bbenetti\b|\bwe\b|\bour\b/gi;
 // Sentence-initial capitalization is accepted for the intro word; the
 // compared party must still be a proper name.
-const COMPARISON_PHRASE_RE = /\b(?:[Uu]nlike|[Ll]ike|[Ss]uch as|[Cc]ompared (?:to|with)|[Vv]ersus|[Vv]s\.?|[Rr]ather than|[Ii]nstead of)\s+[A-Z][\w'&-]+(?:\s+[A-Z][\w'&-]+){0,2},?/g;
+// A compared party that governs a following relative clause ("unlike Orkin,
+// which was founded in 1901") stays in the text as that clause's subject.
+const COMPARISON_PHRASE_RE = /\b(?:[Uu]nlike|[Ll]ike|[Ss]uch as|[Cc]ompared (?:to|with)|[Vv]ersus|[Vv]s\.?|[Rr]ather than|[Ii]nstead of)\s+[A-Z][\w'&-]+\b(?:\s+[A-Z][\w'&-]+\b){0,2},?(?!\s*,?\s*(?:which|who|that|whose)\b)/g;
 const COMPARISON_INTRO_RE = /\b(?:[Uu]nlike|[Ll]ike|[Ss]uch as|[Cc]ompared (?:to|with)|[Vv]ersus|[Vv]s\.?|[Rr]ather than|[Ii]nstead of)\s+[A-Z][\w'&-]+(?:\s+[A-Z][\w'&-]+){0,2},?\s*$/;
 
 function lastIndexOfMatch(re, text) {
