@@ -266,3 +266,24 @@ it('resolves the live customer phone before messaging from a reopened estimate',
   fireEvent.click(screen.getByRole('button', { name: 'Message contact' }));
   await waitFor(() => expect(openMessages).toHaveBeenCalledWith({ id: OWNER.id, firstName: 'QA', lastName: 'Current', phone: '+19415550199' }));
 });
+
+it('retains Wasp service but clears all previous nest scope on the next estimate', async () => {
+  const base = fetchMock.getMockImplementation();
+  fetchMock.mockImplementation((url, options) => String(url).endsWith('/edit-source')
+    ? Promise.resolve(jsonResponse({ ...SOURCE, inputs: { ...SOURCE.inputs, svcWasp: true, stingSpecies: 'YELLOW', stingTier: '4', stingRemoval: 'LARGE', stingAggressive: 'HIGH', stingHeight: 'HIGH', stingConfined: 'YES' } }))
+    : base(url, options));
+  function Workspace() {
+    const [editId, setEditId] = useState(SOURCE.id);
+    return <EstimateToolViewV2 editEstimateId={editId} onStartNew={() => setEditId('')} />;
+  }
+  render(<MemoryRouter><Workspace /></MemoryRouter>);
+  await screen.findByDisplayValue('QA Contact');
+  expect(screen.getByLabelText('Scope tier')).toHaveValue('4');
+  fireEvent.click(screen.getByRole('button', { name: 'Next estimate (keep services)' }));
+  expect(screen.getByLabelText('Species')).toHaveValue('PAPER_WASP');
+  expect(screen.getByLabelText('Scope tier')).toHaveValue('2');
+  expect(screen.getByLabelText('Nest removal')).toHaveValue('NONE');
+  expect(screen.getByLabelText('Aggressiveness')).toHaveValue('NO');
+  expect(screen.getByLabelText('Access height')).toHaveValue('GROUND');
+  expect(screen.getByLabelText('Confined space')).toHaveValue('NO');
+});

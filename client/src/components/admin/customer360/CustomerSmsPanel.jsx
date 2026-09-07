@@ -150,7 +150,10 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, lead
   const sendingRef = useRef(false);
   const listRef = useRef(null);
   const knownIdsRef = useRef(new Set());
-  const panelRef = useModalFocus(open, onClose);
+  const close = useCallback(() => {
+    if (!sendingRef.current) onClose();
+  }, [onClose]);
+  const panelRef = useModalFocus(open, close);
 
   // Drop everything that belonged to the previous customer the moment the
   // id changes — a late response for the old customer is discarded by seq.
@@ -316,12 +319,13 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, lead
           <div className="text-16 font-medium text-zinc-900 truncate">{name}</div>
           <div className="u-nums text-14 text-ink-secondary truncate">{phone || "No mobile number on file"}</div>
         </div>
-        <Link to={fullConversationHref} className="text-14 text-zinc-900 underline underline-offset-2 whitespace-nowrap u-focus-ring rounded-xs">
+        <Link to={fullConversationHref} aria-disabled={sending || undefined} onClick={(event) => { if (sendingRef.current) event.preventDefault(); }} className="text-14 text-zinc-900 underline underline-offset-2 whitespace-nowrap u-focus-ring rounded-xs">
           Open full conversation
         </Link>
         <button
           type="button"
-          onClick={onClose}
+          onClick={close}
+          disabled={sending}
           aria-label="Close messages"
           className="inline-flex items-center justify-center h-11 w-11 rounded-sm border-0 bg-transparent text-zinc-900 hover:bg-zinc-50 u-focus-ring"
         >
@@ -399,7 +403,7 @@ export default function CustomerSmsPanel({ customer, open, onClose, onSent, lead
 
   return createPortal(
     <>
-      {isMobile ? null : <div className="fixed inset-0 z-[1049] bg-zinc-900/20" onClick={onClose} aria-hidden />}
+      {isMobile ? null : <div className="fixed inset-0 z-[1049] bg-zinc-900/20" onClick={close} aria-hidden />}
       {panel}
     </>,
     document.body,

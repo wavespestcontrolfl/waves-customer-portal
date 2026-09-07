@@ -191,4 +191,27 @@ describe("CustomerSmsPanel", () => {
     expect(adminFetch.mock.calls.some(([path]) => path === "/admin/communications/sms")).toBe(false);
   });
 
+  it("keeps the panel mounted through a pending send across close, Escape, backdrop and navigation", async () => {
+    const pending = deferred();
+    adminFetch.mockImplementation((path) => path.endsWith("/sms") ? pending.promise : Promise.resolve({ comms: [] }));
+    const onClose = vi.fn();
+    const onSent = vi.fn();
+    render(<CustomerSmsPanel customer={CUSTOMER_A} open onClose={onClose} onSent={onSent} />);
+    fireEvent.change(await screen.findByLabelText(/Message to Avery/), { target: { value: "One request only" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send text" }));
+    const close = screen.getByRole("button", { name: "Close messages" });
+    expect(close).toBeDisabled();
+    fireEvent.click(close);
+    fireEvent.keyDown(document.activeElement, { key: "Escape" });
+    fireEvent.click(document.querySelector('div[aria-hidden="true"]'));
+    expect(fireEvent.click(screen.getByRole("link", { name: "Open full conversation" }))).toBe(false);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(adminFetch.mock.calls.filter(([path]) => path.endsWith("/sms"))).toHaveLength(1);
+    await act(async () => pending.resolve({ sent: true, providerMessageId: "SM_qa_pending" }));
+    await waitFor(() => expect(onSent).toHaveBeenCalledTimes(1));
+    expect(close).not.toBeDisabled();
+    fireEvent.click(close);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
 });

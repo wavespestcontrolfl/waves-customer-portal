@@ -273,3 +273,15 @@ The third completed review found one P1 and four P2s. The property-link P1 and t
 309 server tests across four suites and 30 client tests across four files passed. The isolated real PostgreSQL/API proof confirmed both linked/unlinked international candidates, excluded a domestic same-suffix lead, rejected an unowned property link before insert, and distinguished verified staff preview from an unauthenticated copied marker; the staff preview caused no row mutation. Desktop/mobile browser checks confirmed the editor's live phone and the two public-preview states. Screenshots were visually inspected. Build/prebuild gates passed. The nine-file production lint pass retained 207 warnings and no errors, including pre-existing warnings in the large public estimate module. No migrations or external provider requests ran.
 
 Deferred P2: `client/src/pages/admin/CommercialProposalPage.jsx:863` still has its separate send flow without the shared reviewed versions. Migrating this separate builder requires its save/PDF/SMS/email review flow to be validated together. That page is outside this diff; hosted commercial PDF/email validation is already an explicit external gap. The ordinary Pipeline save/review/send flow is covered; this deferral means the PR does not claim that every standalone commercial send caller has migrated.
+
+### Fourth review: source drills, job scope, and pending sends
+
+The fourth completed review found four P2s and no P0/P1. Three local fixes are covered:
+
+- The existing prospect scope always qualifies the lead status, including its default alias. A real PostgreSQL source drill reproduced the ambiguous-column 500 before the fix and returned matching rows after it.
+- Next estimate resets all six stinging-insect job fields to their defaults while retaining the selected service.
+- Close, Escape, backdrop dismissal, and full-conversation navigation are guarded while a message request is pending. Closing becomes available again after completion.
+
+215 server tests across the lead-link and attribution suites and 22 client tests across the panel and property lifecycle suites passed. Desktop (1440px) and mobile (390px) browser proofs loaded the source drill and held a synthetic text request pending: dismissal attempts preserved the panel, exactly one POST occurred, and closing resumed after the provider-stub response. Four screenshots were visually inspected. Build/prebuild gates passed; targeted lint reported no errors. All runtime proof used the isolated local PostgreSQL/API and synthetic transport; no migrations or external customer messages ran.
+
+Deferred P2: `server/services/admin-estimate-persistence.js:46` hashes the full estimate row, so customer view telemetry can conservatively reject a pending save/send with 409. Narrowing this to offer fields needs a separately validated concurrency contract across save, send, view, and terminal transitions. The current behavior refuses stale writes and requires reload; it does not silently overwrite the offer.

@@ -118,7 +118,7 @@ const WON_DESCENDANT_SQL = wonDescendantSql('leads');
 // sources summary builds over an unaliased `leads` (GET /leads/sources).
 const PROSPECT_SCOPE_SQL = `leads.status NOT IN (${NON_ENGAGED_LEAD_STATUSES.map((s) => `'${s}'`).join(', ')}) AND ${SECOND_WIN_SQL} AND ${WON_DESCENDANT_SQL}`;
 function scopeToProspects(qb, alias = 'leads') {
-  return qb.whereNotIn(alias === 'leads' ? 'status' : `${alias}.status`, NON_ENGAGED_LEAD_STATUSES).whereRaw(secondWinSql(alias)).whereRaw(wonDescendantSql(alias));
+  return qb.whereNotIn(`${alias}.status`, NON_ENGAGED_LEAD_STATUSES).whereRaw(secondWinSql(alias)).whereRaw(wonDescendantSql(alias));
 }
 
 module.exports = {

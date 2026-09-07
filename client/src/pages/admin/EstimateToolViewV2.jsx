@@ -574,6 +574,7 @@ const PROPERTY_FORM_FIELDS = [
   "palmDiagnosisConfirmed", "palmLicensedApplicator", "palmHighDose", "palmLargeDiameter",
   "palmNonstandardProduct", "_termiteFootprintAuto", "_trenchingPerimeterAuto",
   "_boracareSqftAuto", "_preslabSqftAuto", "_palmCountAuto",
+  "stingSpecies", "stingTier", "stingRemoval", "stingAggressive", "stingHeight", "stingConfined",
 ];
 const SEND_FIELDS = new Set(["scheduleSend", "scheduledAt"]);
 const DELIVERY_OPTION_FIELDS = new Set(["showOneTimeOption", "billByInvoice"]);
