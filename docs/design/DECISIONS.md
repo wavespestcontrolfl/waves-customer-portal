@@ -2174,3 +2174,15 @@ history-only PDF invalidation, authenticated pin tampering and rejection after a
 history or gate change. Exact local/CI/preview and deployment results belong in
 the PR body. No test invokes confirm or completion routes against real customers;
 no customer communications are sent by this work.
+
+Review verification also covers empty scoped/global resets (both preserve null
+baseline IDs and permit the next confirm) and every portal dashboard date field.
+The PDF history identity includes the sorted eligible visit IDs, including visits
+with only water or mowing evidence; the render uses that same resolved set.
+A reassignment of an ancillary-only visit therefore invalidates the cached PDF.
+
+The specified SET NULL reset FK needs follow-up before activation: deleting a
+property currently converts its scoped reset to a legacy/global reset. The
+approved P6 rollback retains per-property flags and the unordered legacy
+customer-wide baseline lookup; rollback does not collapse those flags. Both
+limitations are explicit in the PR review, and the gate remains off.

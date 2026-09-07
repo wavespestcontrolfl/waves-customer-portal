@@ -149,7 +149,9 @@ router.get('/:customerId', async (req, res, next) => {
     );
 
     // Get all confirmed assessments
-    const assessments = propertyHistoryEnabled ? await historyReader.latestForCustomer(customerId, {}, db) : await db('lawn_assessments')
+    const assessments = propertyHistoryEnabled
+      ? (await historyReader.latestForCustomer(customerId, {}, db)).map((row) => ({ ...row, service_date: row.visit_date }))
+      : await db('lawn_assessments')
       .where({ customer_id: customerId, confirmed_by_tech: true })
       .orderBy('service_date', 'asc');
 

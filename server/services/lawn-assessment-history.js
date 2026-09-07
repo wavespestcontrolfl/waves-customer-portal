@@ -223,9 +223,10 @@ function progress(rows, current) {
   };
 }
 
-function historyIdentity(scope, reset, rows) {
+function historyIdentity(scope, reset, rows, eligibleIds = []) {
   return crypto.createHash('sha1').update(JSON.stringify({
     version: RESOLVER_VERSION, scope, reset: reset ? [reset.id, reset.boundary, reset.created_at] : null,
+    eligibleVisitIds: [...eligibleIds].sort(),
     rows: rows.map((row) => [row.id, row.visit_identity, row.visit_date, row.history_confirmed_order || row.confirmed_at,
       row.updated_at, row.is_baseline, row.turf_density, row.weed_suppression, row.color_health,
       row.fungus_control, row.thatch_level, row.stress_damage, row.overall_score]),
@@ -244,10 +245,12 @@ async function historyForAssessment(row, { pinned = false, knex = db } = {}) {
   if (!rows.some((candidate) => candidate.visit_identity === visit.identity)) rows = installedRows([joined]);
   const current = rows.find((candidate) => candidate.visit_identity === visit.identity) || null;
   const index = rows.indexOf(current);
+  const eligibleIds = await eligibleVisitIds(scope, knex);
   return {
     scope, reset, rows, current, previous: index > 0 ? rows[index - 1] : null,
     baseline: rows[0] || null, isBaseline: !!current && current.id === rows[0]?.id,
-    progress: progress(rows, current), identity: historyIdentity(scope, reset, rows),
+    eligibleVisitIds: eligibleIds,
+    progress: progress(rows, current), identity: historyIdentity(scope, reset, rows, eligibleIds),
   };
 }
 
@@ -256,7 +259,8 @@ async function historyForReport(service, { assessment, pinned = false } = {}, kn
   const visitId = service.scheduled_service_id || service.service_id;
   const visit = visitId ? await knex('scheduled_services').where({ id: visitId, customer_id: service.customer_id }).first() : null;
   const scope = await scopeForAssessment({ ...visitEvidence(service.customer_id, visit), service_id: visitId }, knex);
-  return { scope, reset: null, current: null, rows: [], previous: null, baseline: null, isBaseline: false, identity: historyIdentity(scope, null, []) };
+  const eligibleIds = await eligibleVisitIds(scope, knex);
+  return { scope, reset: null, current: null, rows: [], previous: null, baseline: null, isBaseline: false, eligibleVisitIds: eligibleIds, identity: historyIdentity(scope, null, [], eligibleIds) };
 }
 
 /** A visit being assessed has no installed current row yet. Its prior context

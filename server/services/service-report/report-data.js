@@ -3319,8 +3319,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   if (opts.pinnedLawnHistoryIdentity && (!propertyHistoryEnabled || lawnHistory?.identity !== opts.pinnedLawnHistoryIdentity)) {
     throw new PinnedAssessmentUnavailable(opts.pinnedLawnAssessmentId);
   }
-  const lawnEligibleVisitIds = lawnHistory
-    ? await require('../lawn-assessment-history').eligibleVisitIds(lawnHistory.scope, knex) : undefined;
+  const lawnEligibleVisitIds = lawnHistory?.eligibleVisitIds;
   const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex, {
     propertyHistoryEnabled, lawnHistory,
     pinnedAssessmentId: opts.pinnedLawnAssessmentId || null,

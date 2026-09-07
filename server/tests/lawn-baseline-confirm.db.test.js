@@ -81,6 +81,17 @@ describeDb('confirmed lawn baseline transactions', () => {
     expect((await knex('lawn_assessments').where({ id: old.id }).first()).is_baseline).toBe(false);
   });
 
+  test.each([true, false])('empty-history reset records null baselines and permits the next confirm (scoped=%s)', async (scoped) => {
+    const f = await fixture(knex);
+    await expect(resetBaseline(f.customerId, 'fixture', 'Fixture reset', {
+      knex, propertyId: scoped ? f.property.id : undefined, propertyHistoryEnabled: true,
+    })).resolves.toEqual({ oldBaselineId: undefined, newBaselineId: undefined });
+    const reset = await knex('lawn_baseline_resets').where({ customer_id: f.customerId }).first();
+    expect(reset).toMatchObject({ property_id: scoped ? f.property.id : null, old_baseline_id: null, new_baseline_id: null });
+    const next = await f.assessment(await f.visit(0), { confirmed_by_tech: false });
+    expect((await confirm(next)).is_baseline).toBe(true);
+  });
+
   test('a move during assessment invalidates a sole-property fallback at confirmation', async () => {
     const f = await fixture(knex);
     const visit = await f.visit(-1, { property_id: null });

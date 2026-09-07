@@ -54,6 +54,29 @@ describeDb('report property history projections', () => {
     expect(after.lawnHistory.identity).not.toBe(before.lawnHistory.identity);
   });
 
+  test.each([true, false])('ancillary-only visit reassignment invalidates the PDF identity (current assessment=%s)', async (withAssessment) => {
+    const f = await fixture(knex);
+    const earlierVisit = await f.visit(-20);
+    const earlierRecord = await f.record(earlierVisit);
+    await knex('lawn_water_intake_snapshots').insert({ customer_id: f.customerId, service_id: earlierVisit.id, service_record_id: earlierRecord.id, service_date: earlierVisit.scheduled_date, water_gap_inches: 0.5 });
+    await knex('turf_height_readings').insert({ customer_id: f.customerId, service_record_id: earlierRecord.id, grass_type: 'st_augustine', manual_height_in: 3, target_min_in: 3, target_max_in: 4, range_status: 'in_range', measured_at: new Date(), created_by: require('crypto').randomUUID() });
+    const [otherProperty] = await knex('customer_properties').insert({ customer_id: f.customerId }).returning('*');
+    const visit = await f.visit(-1);
+    const record = await f.record(visit);
+    if (withAssessment) await f.assessment(visit, { service_record_id: record.id });
+    const service = { ...record, service_line: 'lawn' };
+    const options = { propertyHistoryEnabled: true };
+    const before = await resolveCanonicalLawnRender(service, knex, options);
+    expect(before.lawnHistory.eligibleVisitIds).toContain(earlierVisit.id);
+    expect((await resolveCanonicalLawnRender(service, knex, options)).signature).toBe(before.signature);
+    await knex('scheduled_services').where({ id: earlierVisit.id }).update({ property_id: otherProperty.id });
+    const after = await resolveCanonicalLawnRender(service, knex, options);
+    expect(after.pin).toBe(before.pin);
+    expect(after.lawnHistory.rows.map((row) => row.id)).toEqual(before.lawnHistory.rows.map((row) => row.id));
+    expect(after.lawnHistory.eligibleVisitIds).not.toContain(earlierVisit.id);
+    expect(after.signature).not.toBe(before.signature);
+  });
+
   test('mowing and water histories use the same visit inclusion, including conflicting record rejection', async () => {
     const f = await fixture(knex);
     const ownVisit = await f.visit(-5);
