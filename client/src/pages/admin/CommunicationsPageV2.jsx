@@ -68,6 +68,7 @@ import {
   Headphones,
   Inbox,
   Loader2,
+  Mail,
   MessageSquare,
   Mic,
   MicOff,
@@ -76,7 +77,8 @@ import {
   Zap,
   ClipboardList,
 } from "lucide-react";
-import { useOutletContext } from "react-router-dom";
+import { useLocation, useNavigate, useOutletContext } from "react-router-dom";
+import EmailPage from "./EmailPage";
 import { ALL_NUMBERS, NUMBER_LABEL_MAP } from "./CommunicationsPage";
 import CallLogTabV2 from "./CallLogTabV2";
 import TriageInboxTabV2 from "./TriageInboxTabV2";
@@ -224,6 +226,7 @@ const TABS = [
     Icon: Zap,
   },
   { key: "sms", label: "SMS", Icon: MessageSquare },
+  { key: "email", label: "Email", Icon: Mail, adminOnly: true },
   { key: "calls", label: "Calls", Icon: PhoneCall },
   { key: "triage", label: "Triage", Icon: Inbox },
   // Open promises across calls (call_commitments) — staff-wide like Calls.
@@ -785,7 +788,7 @@ export function libraryLinkClause(link) {
   return `${prefix}: ${link.url}`;
 }
 
-function SmsTab() {
+function SmsTab({ active }) {
   // Prep-guide sender lives with the composer's other outbound actions.
   const [prepSendOpen, setPrepSendOpen] = useState(false);
   // Server-verified role: draft APPROVAL is owner-only (PUT /approve and
@@ -847,6 +850,9 @@ function SmsTab() {
   });
   const { listening, supported: dictationSupported, toggle: toggleDictation } =
     dictation;
+  useEffect(() => {
+    if (!active && listening) toggleDictation();
+  }, [active, listening, toggleDictation]);
   const fileInputRef = useRef(null);
   const cameraInputRef = useRef(null);
   const [showAttachSheet, setShowAttachSheet] = useState(false);
@@ -928,16 +934,13 @@ function SmsTab() {
   }, []);
 
   useEffect(() => {
-    loadData();
-  }, [loadData]);
-
-  useEffect(() => {
     smsSearchRef.current = smsSearch.trim();
+    if (!active) return;
     const t = setTimeout(() => {
       loadData(smsSearch.trim());
     }, 300);
     return () => clearTimeout(t);
-  }, [smsSearch, loadData]);
+  }, [active, smsSearch, loadData]);
 
   const markMessagesRead = useCallback(
     async (thread) => {
@@ -2132,6 +2135,7 @@ function SmsTab() {
   // into the conversation view once the message log has loaded. Runs once.
   const threadDeepLinkDone = useRef(false);
   useEffect(() => {
+    if (!active) return;
     if (threadDeepLinkDone.current) return;
     const threadCustomerId = new URLSearchParams(window.location.search).get("thread");
     if (!threadCustomerId) {
@@ -2159,7 +2163,7 @@ function SmsTab() {
       });
     }
     markMessagesRead(openedThread);
-  }, [threads, markMessagesRead]);
+  }, [active, threads, markMessagesRead]);
 
   const filteredThreads = threads.filter((t) => {
     // PR 4 — status filter chips (stacked on top of message-type smsFilter).
@@ -2851,11 +2855,11 @@ function SmsTab() {
           </Button>
         </div>
         <PrepSendDialog
-          open={prepSendOpen}
+          open={active && prepSendOpen}
           onClose={() => setPrepSendOpen(false)}
         />
         <InsertLinkSheet
-          open={showLinkSheet}
+          open={active && showLinkSheet}
           onClose={() => setShowLinkSheet(false)}
           links={insertSheetLinks}
           loading={libraryLoading}
@@ -3166,7 +3170,7 @@ function SmsTab() {
         </Card>
       )}
 
-      {selected360Id && (
+      {active && selected360Id && (
         <Customer360ProfileV2
           customerId={selected360Id}
           onClose={() => setSelected360Id(null)}
@@ -3425,7 +3429,11 @@ const TEMPLATE_KINDS = [
 ];
 
 export default function CommunicationsPageV2() {
-  const [tab, setTab] = useState("sms");
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [tab, setTab] = useState(() => new URLSearchParams(location.hash.replace(/^#/, "")).get("tab") || "sms");
+  const [smsVisited, setSmsVisited] = useState(tab === "sms");
+  const [emailVisited, setEmailVisited] = useState(tab === "email");
   // SMS / Email are sub-views of the single Message Templates tab.
   const [templateKind, setTemplateKind] = useState("sms");
   // Server-verified role from the shell's Outlet context (never localStorage).
@@ -3438,6 +3446,25 @@ export default function CommunicationsPageV2() {
     () => TABS.filter((t) => !t.adminOnly || isAdminRole),
     [isAdminRole],
   );
+  const activeTab = tabs.some((item) => item.key === tab) ? tab : "sms";
+  const smsParams = new URLSearchParams(location.search);
+  const smsTarget = ["thread", "phone", "fromNumber", "draftId", "draft"].map((key) => smsParams.get(key) || "");
+  const smsTargetKey = smsTarget.some(Boolean) ? JSON.stringify(smsTarget) : "";
+  const [openedSmsTarget, setOpenedSmsTarget] = useState(smsTargetKey);
+  // Preserve the composer on channel switches, but initialize a new explicit
+  // SMS destination just as the previously unmounted tab did. Email query
+  // changes and targets received while SMS is hidden must not reset its draft.
+  useEffect(() => {
+    if (activeTab === "sms" && smsTargetKey) setOpenedSmsTarget(smsTargetKey);
+  }, [activeTab, smsTargetKey]);
+  useEffect(() => { if (activeTab === "sms") setSmsVisited(true); }, [activeTab]);
+  useEffect(() => { if (activeTab === "email") setEmailVisited(true); }, [activeTab]);
+  const selectTab = (nextTab) => {
+    setTab(nextTab);
+    const params = new URLSearchParams(location.hash.replace(/^#/, ""));
+    params.set("tab", nextTab);
+    navigate({ pathname: location.pathname, search: location.search, hash: `#${params}` });
+  };
 
   // A hash deep link (or stale state) to a hidden management tab must not
   // strand a non-admin on a blank/unauthorized view.
@@ -3448,7 +3475,7 @@ export default function CommunicationsPageV2() {
   useEffect(() => {
     const applyHashTab = () => {
       const raw = window.location.hash.replace(/^#/, "");
-      if (!raw) return;
+      if (!raw) { setTab("sms"); return; }
       const params = new URLSearchParams(raw);
       const nextTab = params.get("tab");
       if (!nextTab) return;
@@ -3460,43 +3487,45 @@ export default function CommunicationsPageV2() {
         return;
       }
       if (nextTab === "templates") setTemplateKind("sms");
-      if (tabs.some((item) => item.key === nextTab)) setTab(nextTab);
+      setTab(tabs.some((item) => item.key === nextTab) ? nextTab : "sms");
     };
     applyHashTab();
     window.addEventListener("hashchange", applyHashTab);
     return () => window.removeEventListener("hashchange", applyHashTab);
-  }, [tabs]);
+    // Router transitions can skip an intermediate channel URL. A new query
+    // with the same final hash still needs to synchronize the rendered tab.
+  }, [tabs, location]);
 
-  // Usage beacon for the leaf that actually RENDERS. Tab state here never
-  // reaches the router — header clicks are state-only, and cross-tab deep
-  // links arrive via raw window.location.hash (#tab=…, hashTo in
-  // NotificationEventsTabV2), which react-router (and so the layout's
-  // raw-URL beacon) never observes (Codex #2961 r14).
-  useRenderedTabBeacon("/admin/communications", usageLeafFor(tab, templateKind));
+  // Record the leaf that actually renders, including role fallbacks and the
+  // raw hash links from NotificationEventsTabV2 that bypass router navigation.
+  useRenderedTabBeacon("/admin/communications", usageLeafFor(activeTab, templateKind));
+
+  const navigation = {
+    title: "Communications", icon: MessageSquare, sections: tabs,
+    activeKey: activeTab, onSectionChange: selectTab,
+    ariaLabel: "Communications section", navGridClassName: "grid-cols-2 md:grid-cols-7",
+  };
 
   return (
     <div className="bg-surface-page min-h-full font-sans text-zinc-900 max-w-[1300px] mx-auto">
       {" "}
-      <AdminCommandHeader
-        title="Communications"
-        icon={MessageSquare}
-        sections={tabs}
-        activeKey={tab}
-        onSectionChange={setTab}
-        ariaLabel="Communications section"
-        navGridClassName="grid-cols-2 md:grid-cols-7"
+      {isAdminRole && emailVisited && <div hidden={activeTab !== "email"}>
+        <EmailPage key={outletContext.user.id} active={activeTab === "email"} navigation={navigation} />
+      </div>}
+      {activeTab !== "email" && <AdminCommandHeader
+        {...navigation}
         secondarySections={tab === "templates" ? TEMPLATE_KINDS : []}
         secondaryActiveKey={templateKind}
         onSecondaryChange={setTemplateKind}
         secondaryAriaLabel="Template kind"
         secondaryNavGridClassName="grid-cols-2"
-      />
-      {tab === "events" && <NotificationEventsTabV2 />}
-      {tab === "sms" && <SmsTab />}
-      {tab === "calls" && <CallLogTabV2 />}
-      {tab === "triage" && <TriageInboxTabV2 />}
-      {tab === "owed" && <OwedTabV2 />}
-      {tab === "templates" && (
+      />}
+      {activeTab === "events" && <NotificationEventsTabV2 />}
+      {smsVisited && <div hidden={activeTab !== "sms"}><SmsTab key={openedSmsTarget} active={activeTab === "sms"} /></div>}
+      {activeTab === "calls" && <CallLogTabV2 />}
+      {activeTab === "triage" && <TriageInboxTabV2 />}
+      {activeTab === "owed" && <OwedTabV2 />}
+      {activeTab === "templates" && (
         <>
           {templateKind === "sms" ? (
             <SmsTemplatesTabV2 />
@@ -3505,9 +3534,9 @@ export default function CommunicationsPageV2() {
           )}
         </>
       )}
-      {tab === "csr" && <CSRCoachTabV2 />}
-      {tab === "call_routing" && <CallRoutingSettingsV2 />}
-      {tab === "notifications" && <PushSettingsV2 />}
+      {activeTab === "csr" && <CSRCoachTabV2 />}
+      {activeTab === "call_routing" && <CallRoutingSettingsV2 />}
+      {activeTab === "notifications" && <PushSettingsV2 />}
     </div>
   );
 }
