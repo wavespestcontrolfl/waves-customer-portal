@@ -25,6 +25,7 @@ const NAV_ITEMS = [
   // for technician logins (the estimate APIs 403 them regardless).
   { path: '/tech/estimate', icon: '📋', label: 'Estimate', adminOnly: true },
   { path: '/tech/protocols', icon: '📖', label: 'Protocols' },
+  { path: '/tech/documents', icon: '📄', label: 'Documents' },
 ];
 
 export default function TechLayout() {
@@ -312,7 +313,7 @@ export default function TechLayout() {
             >
               <span style={{ fontSize: 22 }}>{item.icon}</span>
               <span style={{
-                fontSize: 12, fontWeight: active ? 700 : 500,
+                fontSize: 14, fontWeight: active ? 700 : 500,
                 fontFamily: "'Montserrat', sans-serif",
               }}>{item.label}</span>
             </Link>

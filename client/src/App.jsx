@@ -7,6 +7,7 @@ import { CUSTOMER_SURFACE } from './theme-customer';
 import { useGlassSurface } from './glass/glass-engine';
 import Icon from './components/Icon';
 import CustomerDialogHost from './components/brand/CustomerDialogHost';
+const StaffDocumentLibrary = React.lazy(() => import('./components/staffDocuments/Library'));
 
 function CustomerFailureScreen({ title, message, onRetry }) {
   useGlassSurface(true);
@@ -556,6 +557,7 @@ export default function App() {
                 posted the wrong request shape, so it could show “sent” after a 400. */}
             <Route path="estimate" element={<Navigate to="/admin/pipeline?tab=new" replace />} />
             <Route path="protocols" element={<Suspense fallback={<RouteFallback label="Loading protocols..." />}><TechProtocolsPage /></Suspense>} />
+            <Route path="documents" element={<Suspense fallback={<RouteFallback label="Loading documents..." />}><StaffDocumentLibrary /></Suspense>} />
             <Route path="lawn-diagnostic" element={<Suspense fallback={<RouteFallback label="Loading lawn diagnostic..." />}><TechLawnDiagnosticPage /></Suspense>} />
             <Route path="social-post" element={<Suspense fallback={<RouteFallback label="Loading social post..." />}><TechSocialPostPage /></Suspense>} />
           </Route>
