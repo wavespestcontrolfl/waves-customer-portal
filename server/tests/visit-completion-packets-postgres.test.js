@@ -261,6 +261,32 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await mockPg('dispatch_alerts').where({ job_id: fixture.serviceIds[0], type: 'visit_closeout_review' })).toHaveLength(1);
   });
 
+  test('a concurrent coordinator keeps an active summary send pending until the provider returns', async () => {
+    let entered;
+    let release;
+    const started = new Promise((resolve) => { entered = resolve; });
+    const provider = new Promise((resolve) => { release = resolve; });
+    sendCustomerMessage.mockImplementation(async (input) => {
+      expect((await input.preDispatchCheck()).ok).toBe(true);
+      entered();
+      await provider;
+      return { sent: true };
+    });
+    const saved = await saveVisitCompletionPacket(submission());
+    const first = runVisitCompletionPacketEffects(saved.body.packetId);
+    await started;
+    try {
+      expect(await runVisitCompletionPacketEffects(saved.body.packetId))
+        .toMatchObject({ status: 202, body: { state: 'effects_pending', delivery: { state: 'delivery_pending' } } });
+      expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first())
+        .toMatchObject({ status: 'processing' });
+    } finally { release(); }
+    expect(await first).toMatchObject({ status: 200, body: { state: 'done' } });
+    expect(await mockPg('dispatch_alerts').where({ job_id: fixture.serviceIds[0], type: 'visit_closeout_review' })).toHaveLength(0);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(require('../services/email-template-library').sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
 
   test('a declined shared charge is not attempted again by a closeout retry', async () => {
     const methodId = randomUUID();

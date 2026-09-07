@@ -109,11 +109,14 @@ async function sendSummarySms({ visit, member, customer, prefs, summaryUrl, requ
     });
     // Once handed to a non-idempotent provider, an ambiguous result stays
     // unknown for office reconciliation. Never reclaim it after a timeout.
-    if (!result.sent && !result.blocked && dispatched) return;
+    if (!result.sent && !result.blocked && dispatched) {
+      await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', 'unknown_delivery', new Date(), claim.token);
+      return;
+    }
     const outcome = result.sent ? 'sent' : result.retryable ? 'retry' : 'suppressed';
     await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', outcome, new Date(), claim.token);
   } catch {
-    if (!dispatched) await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', 'retry', new Date(), claim.token);
+    await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', dispatched ? 'unknown_delivery' : 'retry', new Date(), claim.token);
   }
 }
 
@@ -145,11 +148,14 @@ async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, vi
         },
       });
       if (result.sent) sent = true;
-      else if (!result.blocked) return;
+      else if (!result.blocked) {
+        if (dispatched) await VisitGroups.finalizeVisitNotification(visit.id, 'completion_email', 'unknown_delivery', new Date(), claim.token);
+        return;
+      }
     }
     await VisitGroups.finalizeVisitNotification(visit.id, 'completion_email', sent ? 'sent' : 'suppressed', new Date(), claim.token);
   } catch {
-    if (!dispatched) await VisitGroups.finalizeVisitNotification(visit.id, 'completion_email', 'retry', new Date(), claim.token);
+    await VisitGroups.finalizeVisitNotification(visit.id, 'completion_email', dispatched ? 'unknown_delivery' : 'retry', new Date(), claim.token);
   }
 }
 
@@ -169,7 +175,12 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   await sendSummaryEmail(context);
   const effects = await database('visit_effects').where({ visit_id: visit.id })
     .whereIn('effect_type', ['completion_sms', 'completion_email']);
-  const unknown = effects.some((effect) => effect.status === 'unknown_delivery');
+  // The durable handoff is deliberately unreclaimable while the provider is
+  // running. Another coordinator keeps it pending until the owner reports
+  // ambiguity, or the existing lease expires after a process loss.
+  const unknown = effects.some((effect) => effect.status === 'unknown_delivery'
+    && (effect.last_error === 'provider_outcome_unknown'
+      || new Date(effect.claimed_at).getTime() <= Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS));
   const complete = effects.length === 2 && effects.every((effect) => ['sent', 'suppressed'].includes(effect.status));
   return { state: unknown ? 'delivery_review' : complete ? 'delivered' : 'delivery_pending' };
 }

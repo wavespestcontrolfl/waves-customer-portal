@@ -1473,7 +1473,7 @@ async function beginVisitNotificationDispatch(visitId, kind, token, { dedupeKey 
     this.where('status', 'unknown_delivery').orWhere(function liveClaim() {
       this.where('status', 'claimed').where('claimed_at', '>', new Date(Date.now() - NOTIFICATION_CLAIM_LEASE_MS));
     });
-  }).update({ status: 'unknown_delivery', claimed_at: db.fn.now(), updated_at: db.fn.now() }).returning('id');
+  }).update({ status: 'unknown_delivery', last_error: null, claimed_at: db.fn.now(), updated_at: db.fn.now() }).returning('id');
   return rows.length > 0;
 }
 
@@ -1518,7 +1518,7 @@ async function otherLiveMembers(t, visitId, rowId) {
 async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Date(), token = null, { dedupeKey = null } = {}) {
   const effectType = effectTypeForKind(kind);
   if (!visitId || !NOTIFICATION_ATTEMPT_OUTCOMES.has(String(smsOutcome))) return { ok: true, skipped: true, effectType, status: null };
-  const status = smsOutcome === 'sent' ? 'sent' : smsOutcome === 'retry' ? 'failed' : 'suppressed';
+  const status = ['sent', 'unknown_delivery'].includes(smsOutcome) ? smsOutcome : smsOutcome === 'retry' ? 'failed' : 'suppressed';
   // Reminder kinds MUST pass the claim's key (it carries the visit date);
   // tracker call sites keep the historical default untouched.
   const key = dedupeKey || `${visitId}:${effectType}`;
@@ -1530,6 +1530,7 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
         dedupe_key: key,
         status,
         attempts: 1,
+        last_error: status === 'unknown_delivery' ? 'provider_outcome_unknown' : null,
         sent_at: status === 'sent' ? at : null,
       })
       .onConflict(['visit_id', 'effect_type', 'dedupe_key'])
@@ -1538,6 +1539,7 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
         attempts: db.raw('?? + 1', ['visit_effects.attempts']),
         sent_at: status === 'sent' ? at : null,
         updated_at: at,
+        last_error: status === 'unknown_delivery' ? 'provider_outcome_unknown' : null,
       })
       .where('visit_effects.status', '<>', 'sent')
       // Only the current claim owner finalizes (codex r10): a stale owner's
@@ -1562,7 +1564,7 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
   }
 }
 
-const NOTIFICATION_ATTEMPT_OUTCOMES = new Set(['sent', 'suppressed', 'retry', 'gate_off']);
+const NOTIFICATION_ATTEMPT_OUTCOMES = new Set(['sent', 'suppressed', 'retry', 'gate_off', 'unknown_delivery']);
 // A claim is a lease: a `claimed` row older than this is reclaimable (its
 // owner's finalize failed or its process died). Sized well above any
 // plausible send (a multi-contact Twilio loop takes seconds, not minutes);
@@ -3187,6 +3189,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
 }
 
 module.exports = {
+  NOTIFICATION_CLAIM_LEASE_MS,
   dateOnly,
   toMinutes,
   // Pure key builder, exported for the reminder cron's visit-scoped email
