@@ -55,6 +55,24 @@ test('bindingQuote = the latest identical single-item order on the account, vend
   expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl: fakeFetch({ 'GET /api/orders': { orders: [{ number: 'X', total: '100', lines: [] }] } }).fetchImpl })).toBeNull();
 });
 
+test('every call goes to www.stickermule.com/api — api.stickermule.com does not resolve (verified 2026-09-06)', async () => {
+  const { fetchImpl } = fakeFetch(happy());
+  await sm.place({ vendorSku: '4242', quantity: 500 }, { fetchImpl });
+  const hosts = new Set(fetchImpl.mock.calls.map(([url]) => new URL(url).host));
+  expect([...hosts]).toEqual(['www.stickermule.com']);
+  expect(fetchImpl.mock.calls.map(([url]) => new URL(url).pathname).every((p) => p.startsWith('/api/'))).toBe(true);
+  expect(sm._internals.BASE_URL).toBe('https://www.stickermule.com');
+});
+
+test('bindingQuote orders history by the live `placedAt` stamp', async () => {
+  const orders = { orders: [
+    { number: 'SM-NEW', total: '330.00', placedAt: '2026-09-01T00:00:00Z', items: [{ id: 4242, quantity: 500 }] },
+    { number: 'SM-OLD', total: '318.40', placedAt: '2026-07-01T00:00:00Z', items: [{ id: 4242, quantity: 500 }] },
+  ] };
+  const { fetchImpl } = fakeFetch({ 'GET /api/orders': orders });
+  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl })).toEqual({ cents: 33000, source: 'order SM-NEW' });
+});
+
 test('no API key → refused before any call', async () => {
   delete process.env.STICKERMULE_API_KEY;
   const { fetchImpl } = fakeFetch(happy());

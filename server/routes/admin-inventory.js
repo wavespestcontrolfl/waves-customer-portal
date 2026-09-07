@@ -2132,9 +2132,19 @@ router.put('/:productId/pricing', async (req, res, next) => {
       availability,
       branchLocation,
       expiresAt,
+      vendorSku,
     } = req.body;
     const productId = req.params.productId;
     if (!UUID_RE.test(String(vendorId || ''))) return res.status(400).json({ error: 'vendorId must be a uuid' });
+    // The vendor's own item identifier (SiteOne item number, Sticker Mule item
+    // id) — the order dispatcher never orders a row without one. Optional:
+    // omitted leaves the stored SKU untouched; present must fit the column.
+    let skuColumn = {};
+    if (vendorSku !== undefined && vendorSku !== null) {
+      const sku = String(vendorSku).trim();
+      if (!sku || sku.length > 50) return res.status(400).json({ error: 'vendorSku must be 1-50 characters' });
+      skuColumn = { vendor_sku: sku };
+    }
     const priceNum = Number(price);
     if (!Number.isFinite(priceNum) || priceNum <= 0) return res.status(400).json({ error: 'price must be greater than 0' });
     // Robust parser (GH r3 P1): normalizeQuantityToOz alone drops supported
@@ -2167,6 +2177,7 @@ router.put('/:productId/pricing', async (req, res, next) => {
     // landed_cost / price_per_oz stale next to a fresh price (costing reads
     // those columns).
     const priceColumns = {
+      ...skuColumn,
       shipping_cost: shippingCost || null,
       tax_rate: taxRate || null,
       landed_cost: landed,
