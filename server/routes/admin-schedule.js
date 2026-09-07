@@ -7271,6 +7271,11 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
           case 'mark_prepaid': {
             const amt = Number(payload?.totalAmount);
             if (!Number.isFinite(amt) || amt <= 0) throw Object.assign(new Error('totalAmount must be a positive number'), { isValidation: true });
+            const svc = await db('scheduled_services').where({ id }).first('annual_prepay_term_id', 'prepaid_method');
+            if (!svc) throw Object.assign(new Error('Scheduled service not found'), { isValidation: true });
+            if (svc.annual_prepay_term_id || svc.prepaid_method === 'annual_prepay_invoice') {
+              throw Object.assign(new Error('Visit has annual prepay coverage; reconcile that term before recording a manual prepayment'), { isValidation: true });
+            }
             await db('scheduled_services').where({ id }).update({
               prepaid_amount: amt,
               prepaid_method: payload?.method || 'cash',

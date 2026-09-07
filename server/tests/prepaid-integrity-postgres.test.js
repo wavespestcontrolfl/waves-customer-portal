@@ -198,7 +198,7 @@ postgres('prepaid series integrity against migrated PostgreSQL', () => {
       expect.objectContaining({ metadata: expect.objectContaining({ scheduled_service_id: root.id, issue: 'annual_coverage_unverified' }) }));
     await trx('scheduled_services').where({ id: root.id }).update({ prepaid_method: 'cash', prepaid_amount: 10 });
     expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
-    await trx('scheduled_services').where({ id: root.id }).update({ prepaid_amount: 100 });
+    await trx('scheduled_services').where({ id: root.id }).update({ prepaid_amount: 120 });
     expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
     await trx('scheduled_services').where({ id: root.id }).update({ prepaid_method: 'annual_prepay_invoice' });
     expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
@@ -262,9 +262,8 @@ postgres('prepaid series integrity against migrated PostgreSQL', () => {
     // no surviving positive stamps and no current recurrence flag.
     await trx('scheduled_services').where({ id: root.id }).update({ prepaid_amount: null, prepaid_method: null, prepaid_at: null });
     expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
-    await trx('scheduled_services').where({ id: root.id }).update({ prepaid_amount: 10, prepaid_method: 'cash', prepaid_at: stamp.updatedRows[0].prepaid_at });
-    expect((await runInner({ now })).prepayCoverageGaps).toBe(1);
-    await trx('scheduled_services').where({ id: root.id }).update({ prepaid_amount: 100 });
+    await stampSeriesPrepaid(trx, { anchorServiceId: root.id, totalAmount: 120, method: 'check', useExistingTransaction: true });
+    expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
     expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
     await trx('scheduled_services').whereIn('id', stamp.updatedRows.map((row) => row.id))
       .update({ prepaid_amount: null, prepaid_method: null, prepaid_at: null });
@@ -279,7 +278,7 @@ postgres('prepaid series integrity against migrated PostgreSQL', () => {
     expect(await clearSeriesPrepaid(trx, root)).toMatchObject({ success: true, clearedCount: count - 1 });
     expect((await runInner({ now })).prepayCoverageGaps).toBe(0);
     expect(await trx('audit_log').where({ action: 'prepaid_series.allocated' })
-      .whereRaw("metadata->>'customer_id' = ?", [customerId])).toHaveLength(count * 2);
+      .whereRaw("metadata->>'customer_id' = ?", [customerId])).toHaveLength(count * 3);
   });
 
   test('allocation audit failure rolls back both the series stamps and its clear', async () => {

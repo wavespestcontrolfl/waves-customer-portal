@@ -172,17 +172,15 @@ async function stampSeriesPrepaid(db, {
       err.isOperational = true;
       throw err;
     }
-    // An edit of a healthy series is a new allocation. Retire its previous
-    // audit evidence only when every eligible visit still has a live stamp;
-    // a partially cleared family must retain the old evidence so the
-    // watchdog can reconcile the missing slice.
-    if (eligible.every((row) => Number(row.prepaid_amount) > 0)) {
-      await retireActiveAllocationAudits(trx, {
-        customerId: anchor.customer_id,
-        parentId,
-        ids: eligible.map((row) => row.id),
-      });
-    }
+    // An explicit series restamp is an amendment, including a repair after a
+    // visit was cleared. Retire the prior allocation evidence atomically
+    // before writing the replacement; a single-visit clear remains the path
+    // that intentionally leaves evidence for reconciliation.
+    await retireActiveAllocationAudits(trx, {
+      customerId: anchor.customer_id,
+      parentId,
+      ids: eligible.map((row) => row.id),
+    });
     slices = splitTotalAcrossVisits(amount, eligible.length);
     for (let i = 0; i < eligible.length; i++) {
       const row = eligible[i];

@@ -114,9 +114,10 @@ describe('prepaid-series helpers', () => {
       ];
       const updates = [];
       let call = 0;
-      const trx = jest.fn(() => {
+      const trx = jest.fn((table) => {
         call += 1;
         const builder = {
+          _table: table,
           where(arg) {
             if (typeof arg === 'function') arg.call(builder);
             this.whereArg = arg;
@@ -124,6 +125,10 @@ describe('prepaid-series helpers', () => {
           },
           orWhere() { return this; },
           whereNotIn() { return this; },
+          whereIn() { return this; },
+          whereRaw() { return this; },
+          whereNotExists() { return this; },
+          select() { return this; },
           orderBy() { return this; },
           forUpdate() { this.locked = true; return this; },
           first: jest.fn(async () => rows[0]),
@@ -136,7 +141,7 @@ describe('prepaid-series helpers', () => {
             prepaid_amount: builder.update.mock.calls.at(-1)?.[0]?.prepaid_amount,
           }]),
           then(resolve, reject) {
-            return Promise.resolve(rows).then(resolve, reject);
+            return Promise.resolve(builder._table === 'audit_log' ? [] : rows).then(resolve, reject);
           },
         };
         if (call === 1) builder.then = undefined;
@@ -173,25 +178,30 @@ describe('prepaid-series helpers', () => {
       ];
       const updates = [];
       const familyReads = [];
-      const makeBuilder = () => {
+      const makeBuilder = (table) => {
         const builder = {
+          _table: table,
           where(arg) { if (typeof arg === 'function') arg.call(builder); this.whereArg = arg; return this; },
           orWhere() { return this; },
           whereNotIn(col, vals) { this.notIn = [col, vals]; return this; },
+          whereIn() { return this; },
+          whereRaw() { return this; },
+          whereNotExists() { return this; },
+          select() { return this; },
           orderBy() { return this; },
           forUpdate() { this.locked = true; return this; },
           first: jest.fn(async () => anchor),
           update: jest.fn((patch) => { updates.push({ id: builder.whereArg?.id, patch }); return builder; }),
           returning: jest.fn(async () => [{ id: builder.whereArg?.id }]),
           then(resolve, reject) {
-            familyReads.push({ locked: builder.locked === true, terminalExcluded: builder.notIn?.[0] === 'status' && builder.notIn[1].includes('cancelled') });
-            return Promise.resolve(lockedFamily).then(resolve, reject);
+            if (!String(builder._table || '').startsWith('audit_log')) familyReads.push({ locked: builder.locked === true, terminalExcluded: builder.notIn?.[0] === 'status' && builder.notIn[1].includes('cancelled') });
+            return Promise.resolve(builder._table === 'audit_log' ? [] : lockedFamily).then(resolve, reject);
           },
         };
         return builder;
       };
-      const trx = jest.fn(() => makeBuilder());
-      const db = jest.fn(() => makeBuilder());
+      const trx = jest.fn((table) => makeBuilder(table));
+      const db = jest.fn((table) => makeBuilder(table));
       db.transaction = jest.fn(async (handler) => handler(trx));
 
       const result = await stampSeriesPrepaid(db, { anchorServiceId: 'svc-1', totalAmount: 200, method: 'cash' });

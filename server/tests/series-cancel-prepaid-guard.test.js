@@ -57,6 +57,7 @@ jest.mock('../models/db', () => {
       whereNotNull() { return b; },
       leftJoin() { return b; },
       whereRaw() { return b; },
+      whereNotExists() { return b; },
       orderBy() { return b; },
       forUpdate() { b._locked = true; return b; },
       modify(cb) { cb(b); return b; },
