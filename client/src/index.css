@@ -204,7 +204,8 @@ html.admin-app *,
   text-decoration: none;
 }
 .admin-shell-v2 .admin-skip-link:focus-visible {
-  top: 16px;
+  /* Standalone iOS PWA (viewport-fit=cover): stay below the status bar / Dynamic Island. */
+  top: calc(16px + env(safe-area-inset-top, 0px));
   outline: 2px solid var(--surface-page, #fff);
   outline-offset: 2px;
 }
