@@ -2449,6 +2449,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     let completionPhotoUploadResult = { uploaded: 0, failed: 0, errors: [] };
     let completionPhotosUploadedBeforeCommit = false;
     let preCommitCompletionPhotoRows = [];
+    const promotedPhotoIds = new Set();
     let completionReviewDelayMinutes;
     try {
       completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(completionInput.body || {});
@@ -5679,11 +5680,14 @@ async function completeScheduledService(completionInput, packetRecord = null) {
         // Before/progress photos captured from Tech Home predate the immutable
         // service_record. Attach them inside this transaction so a failed
         // completion leaves the staged rows intact for the technician's retry.
-        await promoteStagedServicePhotos({
+        const promotedPhotos = await promoteStagedServicePhotos({
           scheduledServiceId: svc.id,
           serviceRecordId: record.id,
           knex: trx,
         });
+        // Dedupe can return these existing objects for submitted image bytes.
+        // A rollback restores their staging rows, so cleanup must retain them.
+        for (const photo of promotedPhotos || []) promotedPhotoIds.add(photo.id);
 
         // Gauge reading. Both the height and the on-site lawn-length photo are
         // OPTIONAL — persist a row whenever EITHER is present (a photo-only visit
@@ -6309,7 +6313,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
         if (packetRecord) await persistRecord(db);
         else await db.transaction(persistRecord);
         if (packetRecord) {
-          packetRecord.uploadedPhotoRows.push(...preCommitCompletionPhotoRows);
+          packetRecord.uploadedPhotoRows.push(...preCommitCompletionPhotoRows.filter((photo) => !promotedPhotoIds.has(photo.id)));
           return { status: 202, body: { serviceRecordId: record.id } };
         }
         durableCompletionCommitted = true;
@@ -6333,7 +6337,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
       }
       } catch (err) {
         if (preCommitCompletionPhotoRows.length) {
-          await cleanupUploadedServicePhotoObjects(preCommitCompletionPhotoRows);
+          await cleanupUploadedServicePhotoObjects(preCommitCompletionPhotoRows.filter((photo) => !promotedPhotoIds.has(photo.id)));
           preCommitCompletionPhotoRows = [];
         }
         if (err && err.message && err.message.includes('not in state')) {

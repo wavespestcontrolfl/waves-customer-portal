@@ -766,6 +766,46 @@ postgres('visit completion packet records on PostgreSQL', () => {
     }
   });
 
+  test.each(['completionPhotos', 'gaugePhoto'])('deduplicated staged %s survive rollback and retry', async (field) => {
+    const config = require('../config');
+    const priorBucket = config.s3.bucket;
+    config.s3.bucket = 'fixture-photo-bucket';
+    const send = jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send').mockResolvedValue({});
+    const flags = require('../services/feature-flags').isUserFeatureEnabled;
+    const input = submission();
+    const bytes = Buffer.from('synthetic staged photo');
+    const photo = { data: `data:image/png;base64,${bytes.toString('base64')}`, name: 'fixture.png' };
+    const photoKey = `fixture/${fixture.serviceIds[0]}/staged.png`;
+    if (field === 'gaugePhoto') {
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ service_type: 'WaveGuard Lawn Care' });
+      flags.mockImplementation(async (_id, flag) => flag === 'turf-height-capture');
+    }
+    try {
+      await mockPg('scheduled_service_photo_staging').insert({
+        scheduled_service_id: fixture.serviceIds[0], technician_id: fixture.techId,
+        photo_type: 'progress', s3_key: photoKey,
+        image_sha256: require('crypto').createHash('sha256').update(bytes).digest('hex'),
+      });
+      input.items[0].body[field] = field === 'completionPhotos' ? [photo] : photo;
+      input.items[1].body.clientPestRating = 99;
+      expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 400, body: { code: 'client_pest_rating_invalid' } });
+      expect(await mockPg('scheduled_service_photo_staging').where({ s3_key: photoKey })).toHaveLength(1);
+      expect(await mockPg('service_photos').where({ s3_key: photoKey })).toHaveLength(0);
+      expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
+      expect(send).not.toHaveBeenCalled();
+
+      delete input.items[1].body.clientPestRating;
+      expect(await saveVisitCompletionPacket(input)).toMatchObject({ status: 202 });
+      expect(await mockPg('scheduled_service_photo_staging').where({ s3_key: photoKey })).toHaveLength(0);
+      expect(await mockPg('service_photos').where({ s3_key: photoKey })).toHaveLength(1);
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      send.mockRestore();
+      config.s3.bucket = priorBucket;
+      flags.mockImplementation(async () => false);
+    }
+  });
+
   test.each(['completionPhotos', 'gaugePhoto'])('a later %s upload failure rolls back the packet and cleans up earlier objects', async (field) => {
     const config = require('../config');
     const priorBucket = config.s3.bucket;
