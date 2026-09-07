@@ -106,17 +106,23 @@ test('selected defaults with counter or safety metadata remain defaults; plan bl
   expect(buildLawnCompletionDefaults(plan, context).items).toHaveLength(0);
 });
 
-test('an archived recipe accepts derived-rate defaults and still pins stored rates', () => {
+test('an archived recipe accepts derived-rate defaults only inside the archived target, and still pins stored rates', () => {
   const archived = (product) => ({ status: 'archived', products: [{ productId: 'srn', defaultInPlan: true, applicationMode: 'broadcast', ...product }] });
   const item = (mix) => [{ selected: true, product: { id: 'srn' }, mix }];
-  const derivedN = { ratePer1000: null, rateUnit: 'lb_n', gates: { targetN: '0.50 lb N/1000' } };
-  expect(archivedLawnRecipeMatches(archived(derivedN), item({ ratePer1000: 3.3, rateUnit: 'lb', rateSource: 'target_n_analysis' }))).toBe(true);
-  expect(archivedLawnRecipeMatches(archived(derivedN), item({ ratePer1000: 3, rateUnit: 'fl_oz', rateSource: 'catalog_default_rate' }))).toBe(false);
+  const derivedN = { ratePer1000: null, rateUnit: 'lb_n', gates: { targetN: '0.35-0.50 lb N/1000' } };
+  const nMix = (targetNPer1000) => ({ ratePer1000: 3.3, rateUnit: 'lb', rateSource: 'target_n_analysis', targetNPer1000 });
+  expect(archivedLawnRecipeMatches(archived(derivedN), item(nMix(0.5)))).toBe(true);
+  expect(archivedLawnRecipeMatches(archived(derivedN), item(nMix(0.35)))).toBe(true);
+  expect(archivedLawnRecipeMatches(archived(derivedN), item(nMix(1)))).toBe(false);
+  expect(archivedLawnRecipeMatches(archived(derivedN), item(nMix(undefined)))).toBe(false);
   expect(archivedLawnRecipeMatches(archived(derivedN), item({ ratePer1000: null, rateUnit: 'lb_n', rateSource: 'missing_rate' }))).toBe(true);
-  expect(archivedLawnRecipeMatches(archived(derivedN), item({ ratePer1000: 2, rateUnit: 'lb', rateSource: 'target_k_analysis' }))).toBe(false);
-  expect(archivedLawnRecipeMatches(archived({ ...derivedN, gates: {} }), item({ ratePer1000: 3.3, rateUnit: 'lb', rateSource: 'target_n_analysis' }))).toBe(false);
+  expect(archivedLawnRecipeMatches(archived(derivedN), item({ ratePer1000: 3, rateUnit: 'fl_oz', rateSource: 'catalog_default_rate' }))).toBe(false);
+  expect(archivedLawnRecipeMatches(archived(derivedN), item({ ratePer1000: 2, rateUnit: 'lb', rateSource: 'target_k_analysis', targetKPer1000: 0.5 }))).toBe(false);
+  expect(archivedLawnRecipeMatches(archived({ ...derivedN, gates: {} }), item(nMix(0.5)))).toBe(false);
   const derivedK = { ratePer1000: null, rateUnit: 'lb_k2o', gates: { soilKGatePpmBelow: 80 } };
-  expect(archivedLawnRecipeMatches(archived(derivedK), item({ ratePer1000: 2, rateUnit: 'lb', rateSource: 'target_k_analysis' }))).toBe(true);
+  expect(archivedLawnRecipeMatches(archived(derivedK), item({ ratePer1000: 2, rateUnit: 'lb', rateSource: 'target_k_analysis', targetKPer1000: 0.5 }))).toBe(false);
+  expect(archivedLawnRecipeMatches(archived({ ...derivedK, gates: { targetK: '0.50 lb K2O/1000' } }), item({ ratePer1000: 2, rateUnit: 'lb', rateSource: 'target_k_analysis', targetKPer1000: 0.5 }))).toBe(true);
+  expect(archivedLawnRecipeMatches(archived(derivedK), item({ ratePer1000: null, rateUnit: 'lb_k2o', rateSource: 'missing_rate' }))).toBe(true);
   const stored = { ratePer1000: 3, rateUnit: 'fl oz', gates: {} };
   expect(archivedLawnRecipeMatches(archived(stored), item({ ratePer1000: 3, rateUnit: 'fl oz', rateSource: 'catalog_default_rate' }))).toBe(true);
   expect(archivedLawnRecipeMatches(archived(stored), item({ ratePer1000: 2.5, rateUnit: 'fl oz', rateSource: 'catalog_default_rate' }))).toBe(false);

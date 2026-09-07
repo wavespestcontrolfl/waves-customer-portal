@@ -71,21 +71,32 @@ function matchesLawnCompletionProtocol(protocol, assigned, trackKey) {
 }
 
 // A stored protocol rate must reproduce exactly. A null rate on a nutrient
-// row (`lb_n` with a targetN gate, or `lb_k*`) is a derived-rate default —
-// the operating layer seeds nutrition rows that way, and the planner derives
-// the rate from the visit's nutrient target — so that recipe is matched on
-// the derivation (or on the withheld quantity when no target was given),
-// never on a number the archived row never stored. A null rate anywhere else
-// is drift.
+// row (`lb_n` / `lb_k*`) is a derived-rate default — the operating layer
+// seeds nutrition rows that way and the planner derives the rate from the
+// visit's nutrient target — so that recipe is matched on the derivation: the
+// visit's target must sit inside the archived gate's target range (or the
+// quantity stays withheld when no target was given). A null rate anywhere
+// else, or a target the archived gate cannot verify, is drift.
+function targetRange(text) {
+  // Drop the per-area denominator ('/1000', 'per 1K') before reading the target numbers.
+  const numbers = String(text ?? '').replace(/(?:\/|per)\s*1(?:,?000|k)\b/gi, '').match(/\d+(?:\.\d+)?/g)?.map(Number).filter(Number.isFinite) || [];
+  return numbers.length ? [Math.min(...numbers), Math.max(...numbers)] : null;
+}
+
 function archivedRateMatches(product, mix) {
   if (product.ratePer1000 != null) {
     return Number(product.ratePer1000) > 0 && Number(product.ratePer1000) === mix?.ratePer1000 && product.rateUnit === mix?.rateUnit;
   }
   const unit = String(product.rateUnit || '').toLowerCase();
-  const nutrient = unit === 'lb_n' && product.gates?.targetN != null ? 'target_n_analysis'
-    : unit.startsWith('lb_k') ? 'target_k_analysis' : null;
+  const nutrient = unit === 'lb_n' ? ['target_n_analysis', 'targetN', 'targetNPer1000']
+    : unit.startsWith('lb_k') ? ['target_k_analysis', 'targetK', 'targetKPer1000'] : null;
   if (!nutrient) return false;
-  return (mix?.rateSource === nutrient && Number(mix.ratePer1000) > 0) || mix?.rateSource === 'missing_rate';
+  if (mix?.rateSource === 'missing_rate') return true;
+  const [source, gateKey, mixKey] = nutrient;
+  const range = targetRange(product.gates?.[gateKey]);
+  const target = Number(mix?.[mixKey]);
+  return mix?.rateSource === source && Number(mix.ratePer1000) > 0 && !!range
+    && Number.isFinite(target) && target >= range[0] - 1e-6 && target <= range[1] + 1e-6;
 }
 
 function archivedLawnRecipeMatches(protocol, items) {
