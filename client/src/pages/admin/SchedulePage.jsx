@@ -627,7 +627,7 @@ export function derivedTotalAmount(rate, areaSqft) {
   return Math.round(r * (a / 1000) * 100) / 100;
 }
 
-function createCompletionIdempotencyKey(serviceId) {
+export function createCompletionIdempotencyKey(serviceId) {
   const randomPart =
     window.crypto?.randomUUID?.() ||
     `${Date.now()}-${Math.random().toString(36).slice(2)}`;

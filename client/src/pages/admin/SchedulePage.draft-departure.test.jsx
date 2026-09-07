@@ -2,7 +2,7 @@
 import { StrictMode } from 'react';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CompletionPanel } from './SchedulePage';
+import { CompletionPanel, createCompletionIdempotencyKey } from './SchedulePage';
 
 vi.mock('../../hooks/useFeatureFlag', () => ({
   useFeatureFlagReady: () => ({ enabled: false, ready: true }),
@@ -42,6 +42,14 @@ afterEach(() => {
 });
 
 describe('completion draft departure', () => {
+  it('creates a usable completion key when WebKit has no randomUUID', () => {
+    vi.stubGlobal('crypto', {});
+    const first = createCompletionIdempotencyKey(service.id);
+    const second = createCompletionIdempotencyKey(service.id);
+    expect(first).toMatch(/^complete_draft-test-visit_\d+-[a-z0-9]+$/);
+    expect(first).not.toBe(second);
+    expect(first.length).toBeLessThanOrEqual(120);
+  });
   it('prepares the canonical form and restores its photos without completing a service', async () => {
     const onSubmit = vi.fn();
     const onPrepared = vi.fn().mockResolvedValue(undefined);

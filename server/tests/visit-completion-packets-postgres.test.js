@@ -6,6 +6,9 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/weather-forecast', () => ({
+  ...jest.requireActual('../services/weather-forecast'), getDailyRainOutlookBounded: jest.fn(async () => null),
+}));
 jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
 jest.mock('../services/service-report/application-conditions', () => ({ fetchApplicationConditions: jest.fn(async () => null) }));
 jest.mock('../services/recap-visit-context', () => ({ buildRecapVisitContext: jest.fn(async () => '') }));
@@ -143,6 +146,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     const app = require('express')();
     app.use(require('express').json());
     app.use('/api/admin/visit-closeouts', require('../routes/admin-visit-closeouts'));
+    app.use('/api/admin/schedule', require('../routes/admin-schedule'));
     app.use('/api/visit-summary', require('../routes/visit-summary-public'));
     fixture.httpServer = await new Promise((resolve) => {
       const server = app.listen(0, '127.0.0.1', () => resolve(server));
@@ -163,11 +167,23 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect((await request(path, { method: 'POST', auth, body: { ...submission(), actor: { techRole: 'admin' } } })).status).toBe(403);
     expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
     await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ technician_id: fixture.techId });
+    const date = dateOnly((await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).first()).scheduled_date);
+    const week = await request(`/api/admin/schedule/week?start=${date}`, { auth });
+    expect(week.status).toBe(200);
+    expect(week.body.days.flatMap((day) => day.services)).toEqual(expect.arrayContaining(fixture.serviceIds.map((id) => (
+      expect.objectContaining({ id, visitId: fixture.visitId, visitCloseoutEnabled: true, visitCloseoutPacket: null })
+    ))));
     const result = await request(path, { method: 'POST', auth, body: { items: submission().items } });
     expect(result.status).toBe(200);
     expect(result.body).toMatchObject({ state: 'done', payment: { state: 'payment_needed' } });
     expect(result.headers['cache-control']).toContain('no-store');
     process.env.GATE_VISIT_CLOSEOUT = 'false';
+    const savedWeek = await request(`/api/admin/schedule/week?start=${date}`, { auth });
+    expect(savedWeek.status).toBe(200);
+    expect(savedWeek.body.days.flatMap((day) => day.services)).toEqual(expect.arrayContaining(fixture.serviceIds.map((id) => (
+      expect.objectContaining({ id, visitId: fixture.visitId, visitCloseoutEnabled: false,
+        visitCloseoutPacket: { id: result.body.packetId, status: 'done' } })
+    ))));
     const detail = await request(path, { auth });
     expect(detail.body).toMatchObject({ packet: { status: 'done' }, invoice: { total: 240, status: 'scheduled' } });
     expect((await request(`${path}/resume`, { method: 'POST', auth, body: { items: [], actor: { techRole: 'admin' } } })).status).toBe(200);

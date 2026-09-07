@@ -4071,6 +4071,7 @@ router.get('/', async (req, res, next) => {
 // GET /api/admin/schedule/week
 router.get('/week', async (req, res, next) => {
   try {
+    const visitCloseoutEnabled = isEnabled('visitCloseout');
     const startDate = req.query.start || etDateString();
     const start = new Date(startDate + 'T12:00:00');
     const days = [];
@@ -4100,11 +4101,13 @@ router.get('/week', async (req, res, next) => {
         .where({ scheduled_date: dateStr })
         .modify((q) => scopeToAssignedTech(req, q))
         // See day endpoint for why 'rescheduled' is excluded.
-        .whereNotIn('status', ['cancelled', 'rescheduled'])
+        .whereNotIn('scheduled_services.status', ['cancelled', 'rescheduled'])
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+        .leftJoin('visit_completion_packets as closeout_packet', 'closeout_packet.visit_id', 'scheduled_services.visit_id')
         .joinRaw(`LEFT JOIN payers AS bill_to_payer ON bill_to_payer.id = ${effectiveBillToSql} AND bill_to_payer.active = true`)
         .select('scheduled_services.id', 'scheduled_services.customer_id',
+          'scheduled_services.visit_id', 'closeout_packet.id as closeout_packet_id', 'closeout_packet.status as closeout_packet_status',
           'bill_to_payer.id as billed_to_payer_id',
           'bill_to_payer.display_name as billed_to_payer_name',
           'bill_to_payer.company_name as billed_to_payer_company',
@@ -4440,6 +4443,9 @@ router.get('/week', async (req, res, next) => {
           // onto the service too so the mobile detail sheet (date display +
           // rain-out gating) behaves identically in week view.
           scheduledDate: dateStr,
+          visitId: s.visit_id || null,
+          visitCloseoutEnabled,
+          visitCloseoutPacket: s.closeout_packet_id ? { id: s.closeout_packet_id, status: s.closeout_packet_status } : null,
         };
       }));
 
@@ -4465,7 +4471,7 @@ router.get('/week', async (req, res, next) => {
       for (const day of days) day.rainChance = null;
     }
 
-    res.json({ startDate, days });
+    res.json({ startDate, days, visitCloseout: visitCloseoutEnabled });
   } catch (err) { next(err); }
 });
 

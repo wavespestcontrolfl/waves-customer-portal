@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, CheckCircle2, ClipboardList } from 'lucide-react';
 import { Button, Sheet, SheetBody, SheetFooter, SheetHeader } from '../ui';
-import { CompletionPanel } from '../../pages/admin/SchedulePage';
+import { CompletionPanel, createCompletionIdempotencyKey } from '../../pages/admin/SchedulePage';
 import { adminFetch } from '../../utils/admin-fetch';
 import { getCompletionResumeBody, putCompletionResumeBody, deleteCompletionResumeBody } from '../../lib/completion-resume-store';
 
@@ -29,13 +29,15 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
       adminFetch(`/admin/visit-closeouts/${visitId}`),
       getCompletionResumeBody(storageKey),
     ]).then(async ([detail, stored]) => {
+      // A lost final response can leave a draft after the server finished.
+      if (detail.packet?.status === 'done') await deleteCompletionResumeBody(storageKey);
       const day = await adminFetch(`/admin/schedule?date=${encodeURIComponent(detail.serviceDate)}`);
       const rows = detail.members.map((member) => (day.services || []).find((service) => service.id === member.id));
       if (rows.some((row) => !row || row.visitId !== visitId)) throw new Error('The service list changed. Refresh the schedule before closing this visit.');
       if (!live) return;
       setVisit(detail);
       setServices(rows);
-      setDraft(stored?.visitId === visitId ? stored : { visitId, key: crypto.randomUUID(), forms: {} });
+      setDraft(stored?.visitId === visitId ? stored : { visitId, key: createCompletionIdempotencyKey(visitId), forms: {} });
     }).catch((err) => { if (live) setError(err.message || 'Could not load the visit.'); });
     return () => { live = false; };
   }, [visitId, storageKey, reload]);

@@ -844,7 +844,7 @@ export default function DispatchPageV2({
       setCompletingService(service);
       return;
     }
-    if (service.visitId && (data?.visitCloseout === true || service.visitCloseoutPacket)) {
+    if (service.visitId && (data?.visitCloseout === true || service.visitCloseoutEnabled === true || service.visitCloseoutPacket)) {
       setClosingVisitId(service.visitId);
       return;
     }

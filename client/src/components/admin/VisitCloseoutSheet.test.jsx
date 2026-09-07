@@ -10,6 +10,7 @@ import { getCompletionResumeBody } from '../../lib/completion-resume-store';
 
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn() }));
 vi.mock('../../pages/admin/SchedulePage', () => ({
+  createCompletionIdempotencyKey: (id) => `fixture_${id}`,
   CompletionPanel: ({ service, onPrepared }) => <button onClick={() => onPrepared(service.id, {
     visitOutcome: service.id === 'one' ? 'completed' : 'incomplete',
     completionPhotos: [{ data: 'data:image/jpeg;base64,c3ludGhldGlj', capturedAt: '2020-01-01T12:00:00Z' }],
@@ -60,6 +61,17 @@ it('requires every form and preserves the exact photo bodies and key across a re
   expect(submitted[0]).toBe('/admin/visit-closeouts/visit');
   expect(submitted[1].headers['Idempotency-Key']).toBe(saved.key);
   expect(JSON.parse(submitted[1].body).items).toEqual(services.map((service) => ({ serviceId: service.id, body: saved.forms[service.id].body })));
+});
+
+it('clears photo drafts when reopening a packet already finished by the server', async () => {
+  const view = mount();
+  await prepareBoth();
+  expect(await getCompletionResumeBody('visit:visit')).not.toBeNull();
+  view.unmount();
+  packet = { id: 'packet', status: 'done' };
+  mount();
+  await screen.findByText('Visit closeout is complete.');
+  await waitFor(async () => expect(await getCompletionResumeBody('visit:visit')).toBeNull());
 });
 
 it('discovers a packet after a lost response and resumes the saved server closeout', async () => {
