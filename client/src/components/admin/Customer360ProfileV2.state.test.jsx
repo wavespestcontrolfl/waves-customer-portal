@@ -4,6 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Customer360ProfileV2, { CancelSignupModal, RefundPaymentModal } from './Customer360ProfileV2';
+import { IntelligenceBarPageDataProvider, useIntelligenceBarActions } from '../../hooks/useIntelligenceBarPageData';
 
 vi.mock('./StickyActionBar', () => ({ CustomerActionBar: () => null }));
 vi.mock('./AuthenticatedCallAudio', () => ({ default: () => null }));
@@ -55,6 +56,11 @@ function customerDetail(id, firstName) {
   };
 }
 
+function MutationTrigger({ customerId }) {
+  const { notifyMutation } = useIntelligenceBarActions();
+  return <button onClick={() => notifyMutation({ id: 'saved-operation', customer_id: customerId })}>Saved fixture</button>;
+}
+
 describe('Customer360ProfileV2 profile state', () => {
   afterEach(() => {
     cleanup();
@@ -65,6 +71,30 @@ describe('Customer360ProfileV2 profile state', () => {
     localStorage.clear();
     localStorage.setItem('waves_admin_token', 'test-token');
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
+  });
+
+  it('opens the shell bar and refreshes only a matching customer after its verified property change', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    let name = 'Before';
+    const fetchMock = vi.fn(url => String(url).endsWith('/customer-a')
+      ? response(customerDetail('customer-a', name)) : response({ timeline: [], payers: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const open = vi.fn();
+    const tree = id => <IntelligenceBarPageDataProvider open={open}>
+      <MutationTrigger customerId={id} /><Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />
+    </IntelligenceBarPageDataProvider>;
+    const view = render(tree('customer-b'));
+    await screen.findAllByText('Before Customer');
+    fireEvent.click(screen.getByRole('button', { name: 'Intelligence Bar', exact: true }));
+    expect(open).toHaveBeenCalledOnce();
+    const reads = () => fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/customer-a')).length;
+    const before = reads(); name = 'After';
+    fireEvent.click(screen.getByRole('button', { name: 'Saved fixture' }));
+    expect(reads()).toBe(before);
+    view.rerender(tree('customer-a'));
+    fireEvent.click(screen.getByRole('button', { name: 'Saved fixture' }));
+    await screen.findAllByText('After Customer');
+    expect(reads()).toBe(before + 1);
   });
 
   it('does not request or offer admin-only history to a technician', async () => {
@@ -78,6 +108,38 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(screen.queryByRole('button', { name: 'Retry customer history' })).not.toBeInTheDocument();
     expect(screen.queryByText('Timeline (0)')).not.toBeInTheDocument();
   });
+
+  it.each(['initial load', 'earlier refresh'])(
+    'keeps the newest saved profile when the %s finishes late', async (pendingKind) => {
+      localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+      const older = deferred();
+      const newer = deferred();
+      let reads = 0;
+      vi.stubGlobal('fetch', vi.fn(url => {
+        if (!String(url).endsWith('/customer-a')) return response({ timeline: [], payers: [] });
+        reads += 1;
+        if (pendingKind === 'earlier refresh' && reads === 1) return response(customerDetail('customer-a', 'Before'));
+        return reads === (pendingKind === 'initial load' ? 1 : 2) ? older.promise : newer.promise;
+      }));
+      render(<IntelligenceBarPageDataProvider>
+        <MutationTrigger customerId="customer-a" /><Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />
+      </IntelligenceBarPageDataProvider>);
+      if (pendingKind === 'earlier refresh') {
+        await screen.findAllByText('Before Customer');
+        fireEvent.click(screen.getByRole('button', { name: 'Saved fixture' }));
+      }
+      fireEvent.click(screen.getByRole('button', { name: 'Saved fixture' }));
+      await act(async () => {
+        newer.resolve(await response(customerDetail('customer-a', 'Newest')));
+      });
+      await screen.findAllByText('Newest Customer');
+      await act(async () => {
+        older.resolve(await response(customerDetail('customer-a', 'Stale')));
+      });
+      expect(screen.queryByText('Stale Customer')).not.toBeInTheDocument();
+      expect(screen.getAllByText('Newest Customer')).toHaveLength(2);
+    },
+  );
 
   it.each([{ events: [] }, { events: [{ type: 'interaction', title: 'Recovered fixture note' }] }])(
     'distinguishes unavailable history from successful empty/nonempty history after retry (%j)',
@@ -376,6 +438,30 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(screen.queryByText('Edit customer')).not.toBeInTheDocument();
     expect(await screen.findAllByText('Blair Customer')).toHaveLength(2);
     expect(screen.queryByText('Edit customer')).not.toBeInTheDocument();
+  });
+
+  it('does not let a completed A save start a profile refresh after switching to B', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const savedA = deferred();
+    const loadedB = deferred();
+    vi.stubGlobal('fetch', vi.fn((url, options = {}) => {
+      const path = String(url);
+      if (path.endsWith('/customer-a') && options.method === 'PUT') return savedA.promise;
+      if (path.endsWith('/customer-a')) return response(customerDetail('customer-a', 'Avery'));
+      if (path.endsWith('/customer-b')) return loadedB.promise;
+      return response({ timeline: [], payers: [] });
+    }));
+    const view = render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByDisplayValue('Naples'), { target: { value: 'Parrish' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    view.rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} />);
+    await act(async () => { savedA.resolve(await response({ success: true })); });
+    await act(async () => { loadedB.resolve(await response(customerDetail('customer-b', 'Blair'))); });
+    await screen.findAllByText('Blair Customer');
+    expect(screen.queryByText('Avery Customer')).not.toBeInTheDocument();
+    expect(fetch.mock.calls.filter(([url, options]) => String(url).endsWith('/customer-a') && !options.method)).toHaveLength(1);
   });
 
   it('surfaces a failed refresh after a successful signup cancellation', async () => {

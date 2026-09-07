@@ -205,6 +205,9 @@ const PII_TOOL_NAMES = new Set([
   'create_customer',
   'switch_appointment_property',
   'update_property_access',
+  'add_customer_property',
+  'update_customer_property',
+  'set_primary_property',
   // cancel_plan previews/results echo the customer's name and free-text note.
   'cancel_plan',
   'get_stop_details',
@@ -2981,6 +2984,9 @@ router.post('/confirm-action', async (req, res, next) => {
           return res.status(409).json(result);
         }
         if (action.tool_name === 'switch_appointment_property') execParams._verified_address_fingerprint = approvedTwoStep;
+        if (['add_customer_property', 'update_customer_property', 'set_primary_property'].includes(action.tool_name)) {
+          execParams._verified_property_version = livePreview._version;
+        }
         // The fingerprint just bound this preview to the card, so its stop
         // sets ARE the approved ones — hand them to the executor to reassert
         // under its locks (swap_tech_assignments, assign_technician).

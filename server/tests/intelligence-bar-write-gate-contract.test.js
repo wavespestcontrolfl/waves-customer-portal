@@ -58,11 +58,15 @@ const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
 // here: the contract under test is "no mutation without confirmed", which
 // only the live path can prove.
 const ORIGINAL_CANCEL_GATE = process.env.GATE_CANCEL_FLOW_V2;
+const ORIGINAL_PLATFORM_GATE = process.env.GATE_IB_PLATFORM;
 beforeAll(() => {
   delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  process.env.GATE_IB_PLATFORM = 'true';
 });
 afterAll(() => {
+  if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
+  else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
   if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
   if (ORIGINAL_CANCEL_GATE === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
@@ -116,6 +120,9 @@ function discoverAllTools() {
 // attaches confirmed server-side; the boolean is NOT in any model-facing
 // schema. New writes go here + write-gates.js.
 const WRITE_TWO_STEP = [
+  'add_customer_property',
+  'update_customer_property',
+  'set_primary_property',
   'switch_appointment_property',
   'create_agent_estimate_draft',
   'set_estimate_presentation',
@@ -460,7 +467,14 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
   };
 
   // Minimal valid inputs per tool, deliberately WITHOUT confirmed.
+  const propertySeed = { customers: [{ id: 'cust-property', first_name: 'Fixture' }],
+    customer_properties: [{ id: 'prop-saved', customer_id: 'cust-property', active: true,
+      address_line1: '1 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201', occupancy_type: 'unknown' }] };
   const UNCONFIRMED_CALLS = [
+    ['property-tools', 'executePropertyTool', 'add_customer_property', { customer_id: 'cust-property',
+      address_line1: '2 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201' }, propertySeed],
+    ['property-tools', 'executePropertyTool', 'update_customer_property', { customer_id: 'cust-property', property_id: 'prop-saved', label: 'Family' }, propertySeed],
+    ['property-tools', 'executePropertyTool', 'set_primary_property', { customer_id: 'cust-property', property_id: 'prop-saved' }, propertySeed],
     ['schedule-tools', 'executeScheduleTool', 'switch_appointment_property', {
       appointment_id: '00000000-0000-0000-0000-000000000001', property_id: '00000000-0000-0000-0000-000000000002',
     }, {

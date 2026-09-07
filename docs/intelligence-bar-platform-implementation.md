@@ -137,15 +137,17 @@ communication was performed. `GATE_IB_PLATFORM` defaults off.
 
 ## Outstanding implementation
 
-Phase 2 property creation/labels/primary switching, shared inventory operations,
-and existing-customer estimates are next. Phase 3 remaining domain operations
+Phase 2 saved-property creation, labels/occupancy and primary switching are
+implemented in `intelligence-bar-property-workflows.md`. Shared inventory
+operations and existing-customer estimates remain next. Phase 3 remaining domain operations
 are enumerated in `intelligence-bar-remaining-capabilities.md`; this is engineering
 work, not a credential blocker. Compound workflow and comprehensive adversarial
 verification remain incomplete.
 
-Browser review also found that Customer 360's modal covers the global touch
-opener; keyboard activation works. A touch entry inside record overlays and
-refresh of affected views remain required. Real iOS keyboard/safe-area behavior,
+Customer 360 now has an overlay touch opener and matching-record refresh for
+verified property mutations; the scoped context survives overlay open/close.
+The property browser run supersedes the earlier unstyled harness screenshots.
+Affected-view refresh for remaining domains is still required. Real iOS keyboard/safe-area behavior,
 voice permission/error states, attachment failure, full live-model behavior,
 and performance checks have not been verified. No full-parity completion claim
 is supported by this foundation checkpoint.

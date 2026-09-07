@@ -18,6 +18,43 @@ describe('CustomerPropertiesPanelV2', () => {
     vi.unstubAllGlobals();
   });
 
+  it('previews primary impacts, confirms the version and refreshes the parent after saving', async () => {
+    const preview = { _version: 'opaque-version', primary_property: { address: '20 Oak St' },
+      effects: ['Keeps existing appointment locations.', 'Keeps existing invoice addresses.'] };
+    const onChanged = vi.fn();
+    const fetchMock = vi.fn((url, opts = {}) => {
+      if (url.endsWith('/primary-preview')) return jsonResponse(preview);
+      if (opts.method === 'POST') return jsonResponse({ properties: [{ ...PRIMARY, is_primary: false }, { ...SECOND, is_primary: true }] });
+      return jsonResponse({ properties: [PRIMARY, SECOND], canChangePrimary: true });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<CustomerPropertiesPanelV2 customerId="c1" canEdit onChanged={onChanged} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Make primary' }));
+    expect(await screen.findByText('Keeps existing invoice addresses.')).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([, o]) => o?.method === 'POST')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm primary property' }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledOnce());
+    const post = fetchMock.mock.calls.find(([, o]) => o?.method === 'POST');
+    expect(post[0]).toBe('/api/admin/customers/c1/properties/p2/primary');
+    expect(JSON.parse(post[1].body)).toEqual({ expectedVersion: 'opaque-version' });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getAllByTestId('customer-property-row')[1]).toHaveTextContent('Primary');
+  });
+
+  it('drops a late primary preview after switching customers', async () => {
+    let finishPreview;
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      if (url.endsWith('/primary-preview')) return new Promise(resolve => { finishPreview = resolve; });
+      return jsonResponse({ properties: [PRIMARY, SECOND], canChangePrimary: true });
+    }));
+    const view = render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Make primary' }));
+    view.rerender(<CustomerPropertiesPanelV2 customerId="c2" canEdit />);
+    finishPreview(await jsonResponse({ _version: 'old', primary_property: { address: 'Old customer address' }, effects: [] }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Make primary' })).toBeEnabled());
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
   it('lists properties and labels the primary as the DEFAULT address for a property manager', async () => {
     const fetchMock = vi.fn(() => jsonResponse({ properties: [PRIMARY, SECOND] }));
     vi.stubGlobal('fetch', fetchMock);

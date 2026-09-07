@@ -121,9 +121,9 @@ function isNewAddress(existingProps, candidate = {}) {
 }
 
 /** Active properties for a customer, primary first. */
-async function listProperties(customerId) {
+async function listProperties(customerId, conn = db) {
   if (!customerId) return [];
-  return db('customer_properties')
+  return conn('customer_properties')
     .where({ customer_id: customerId, active: true })
     .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }]);
 }
@@ -363,7 +363,7 @@ async function recordCallProperty({ customerId, address_line1, address_line2, ci
  * corrupt the primary's identity and make the later secondary insert dedup against
  * the now-mutated primary. The unit-bearing call is handled by recordCallProperty.
  */
-async function completePrimaryFromCall(customerId, call = {}, { claimFence = null } = {}) {
+async function completePrimaryFromCall(customerId, call = {}, { claimFence = null, conn = null } = {}) {
   if (!customerId || !String(call.address_line1 || '').trim()) return undefined;
   // Optional processing-claim fence (#3418 r18): same shape as
   // recordCallProperty's — FOR UPDATE on the call_log row inside one
@@ -386,7 +386,7 @@ async function completePrimaryFromCall(customerId, call = {}, { claimFence = nul
       return completePrimaryCore(customerId, call, trx);
     });
   }
-  return completePrimaryCore(customerId, call, db);
+  return completePrimaryCore(customerId, call, conn && conn.isTransaction ? conn : db);
 }
 
 async function completePrimaryCore(customerId, call, conn) {
@@ -562,7 +562,191 @@ async function anchorSoleProperty(target, cols, conn = db) {
   target.property_id = await soleActivePropertyId(target.customer_id, conn);
 }
 
+const PROPERTY_FIELD_LIMITS = Object.freeze({ address_line1: 200, address_line2: 100, city: 50, zip: 10, label: 100 });
+
+function propertyActionError(message, statusCode = 400, code = 'invalid_property') {
+  return Object.assign(new Error(message), { statusCode, status: statusCode, isOperational: true, code });
+}
+
+function manualPropertyFields(kind, input = {}) {
+  for (const [field, max] of Object.entries(PROPERTY_FIELD_LIMITS)) {
+    if (input[field] == null) continue;
+    if (typeof input[field] !== 'string') throw propertyActionError(`${field} must be text`);
+    if (input[field].length > max) throw propertyActionError(`${field} must be ${max} characters or fewer`);
+  }
+  const changes = {};
+  if (input.label !== undefined) changes.label = input.label || null;
+  if (input.occupancy_type !== undefined) {
+    if (!OCCUPANCY_TYPES.includes(input.occupancy_type)) throw propertyActionError('invalid occupancy_type');
+    changes.occupancy_type = input.occupancy_type;
+  }
+  if (kind !== 'add') return changes;
+  if (!String(input.address_line1 || '').trim()) throw propertyActionError('address_line1 is required');
+  if (!String(input.city || '').trim() || !String(input.zip || '').trim()) throw propertyActionError('city and zip are required');
+  const state = String(input.state || '').trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(state)) throw propertyActionError('state is required as a two-letter code');
+  return { address_line1: input.address_line1.trim(), address_line2: input.address_line2 || null,
+    city: input.city.trim(), state, zip: input.zip.trim(), occupancy_type: 'unknown', label: null, ...changes };
+}
+
+async function manualPropertyContext(customerId, conn = db, lock = false) {
+  let customerQuery = conn('customers').where({ id: customerId }).whereNull('deleted_at')
+    .select('*', conn.raw('updated_at::text as row_version'));
+  if (lock) customerQuery = customerQuery.forUpdate();
+  const customer = await customerQuery.first();
+  if (!customer) throw propertyActionError('Customer not found', 404, 'customer_not_found');
+  let propertyQuery = conn('customer_properties').where({ customer_id: customerId }).orderBy('id')
+    .select('*', conn.raw('updated_at::text as row_version'));
+  if (lock) propertyQuery = propertyQuery.forUpdate();
+  return { customer, properties: await propertyQuery };
+}
+
+function propertyAddressLabel(property) {
+  return [property.address_line1, property.address_line2, property.city, property.state, property.zip].filter(Boolean).join(', ');
+}
+
+// Shared read-only preview for the property editor and IB. The opaque version
+// binds the normalized action to the full-precision customer/portfolio versions.
+async function previewManualPropertyChange(customerId, kind, input = {}, propertyId = null, conn = db, loaded = null) {
+  const { customer, properties } = loaded || await manualPropertyContext(customerId, conn);
+  const changes = manualPropertyFields(kind, input);
+  const target = propertyId && properties.find(p => p.id === propertyId && p.active);
+  const primary = properties.find(p => p.is_primary && p.active);
+  const base = { proposal: true, customer: { id: customerId, name: [customer.first_name, customer.last_name].filter(Boolean).join(' ') } };
+  let preview;
+  if (kind === 'add') {
+    if (!isNewAddress(properties, changes) || addressKey(customer) === addressKey(changes)) {
+      throw propertyActionError('A property with that street already exists for this customer', 409, 'property_exists');
+    }
+    const firstProperty = !properties.some(p => p.is_primary) && !customer.address_line1;
+    if (firstProperty && !changes.label) changes.label = 'Primary';
+    preview = { ...base, address: propertyAddressLabel(changes), changes,
+      effects: !firstProperty
+        ? 'Saves an additional property. Registers the existing account address as primary if needed. Existing appointments, recurring services and invoices keep their locations.'
+        : 'Saves the first property as primary and fills the empty account address. No appointments are created and no messages are sent.' };
+  } else {
+    if (!target) throw propertyActionError('property not found', 404, 'property_not_found');
+    if (kind === 'edit') {
+      if (!Object.keys(changes).length) throw propertyActionError('nothing to update');
+      preview = { ...base, property: { id: target.id, address: propertyAddressLabel(target) },
+        before: Object.fromEntries(Object.keys(changes).map(key => [key, target[key]])), changes,
+        effects: 'Updates only this saved property’s label or occupancy. Account, billing, appointment and recurring-service addresses are unchanged.' };
+    } else if (kind === 'primary') {
+      preview = { ...base, ...await previewPrimaryPropertyChange(conn, customerId, target, primary, customer) };
+    } else throw propertyActionError('Unknown property operation');
+  }
+  preview._version = require('crypto').createHash('sha256').update(JSON.stringify([
+    kind, customerId, propertyId, changes, customer.row_version,
+    properties.map(p => [p.id, p.row_version]), preview._invoice_ids || [],
+  ])).digest('hex');
+  return preview;
+}
+
+async function previewPrimaryPropertyChange(conn, customerId, target, primary, customer) {
+  if (target.is_primary) throw propertyActionError('This property is already primary', 409, 'already_primary');
+  if (require('./pricing-engine/commercial-helpers').normalizePropertyType(target.property_type) === 'commercial'
+    || !['owner_occupied', 'unknown'].includes(normalizeOccupancy(target.occupancy_type))) {
+    throw propertyActionError('The existing primary-residence workflow requires an owner-occupied or unclassified residential property', 409, 'primary_role_unavailable');
+  }
+  if (!['address_line1', 'city', 'state', 'zip'].every(field => String(target[field] || '').trim())) {
+    throw propertyActionError('Complete the saved property’s street, city, state and ZIP before making it primary', 409, 'property_incomplete');
+  }
+  const invoices = await conn('invoices').where({ customer_id: customerId }).whereNull('customer_address_snapshot').orderBy('id').select('id');
+  const oldAddress = primary || (customer.address_line1 ? customer : null);
+  return { previous_primary: oldAddress ? { id: primary?.id || null, address: propertyAddressLabel(oldAddress) } : null,
+    primary_property: { id: target.id, address: propertyAddressLabel(target) },
+    protected_invoice_count: invoices.length, _invoice_ids: invoices.map(row => row.id),
+    effects: [
+      'Makes this property primary and mirrors its address, coordinates and saved property measurements onto the customer profile.',
+      'Registers the existing account address as a saved property if needed. Preserves existing appointment and recurring-service locations. Historical service records stay unchanged.',
+      'Preserves the displayed address on existing invoices and receipts. Third-party billing addresses and all amounts stay unchanged.',
+      'The new primary is owner-occupied; custom labels are retained. Sprinkler settings require review for the new property. Sends no messages.',
+    ] };
+}
+
+async function writeManualProperty(customerId, kind, input, propertyId, options, apply) {
+  const changes = manualPropertyFields(kind, input);
+  return db.transaction(async trx => {
+    await require('../utils/customer-comms-lock').lockCustomerComms(trx, customerId);
+    const loaded = await manualPropertyContext(customerId, trx, true);
+    if (kind === 'primary') {
+      // Credit application locks invoice -> customer, while merge undo locks
+      // comms -> customer -> invoice. Never wait on invoices while holding the
+      // property operation's customer lock: NOWAIT safely refuses contention
+      // and rolls back, avoiding a cycle with either existing workflow.
+      try {
+        await trx('invoices').where({ customer_id: customerId }).orderBy('id').forUpdate().noWait().select('id');
+      } catch (err) {
+        if (err.code === '55P03') throw propertyActionError('Billing records are being updated. Try the primary-property change again after that operation finishes.', 409, 'property_busy');
+        throw err;
+      }
+    }
+    const preview = await previewManualPropertyChange(customerId, kind, changes, propertyId, trx, loaded);
+    if (options.expectedVersion && options.expectedVersion !== preview._version) {
+      throw propertyActionError('The customer or properties changed. Request a fresh preview.', 409, 'preview_changed');
+    }
+    const savedId = await apply(trx, loaded, changes);
+    const auditId = await require('./audit-log').recordAuditEvent({
+      actor_type: 'admin', actor_id: options.actorId || null, action: `customer_property_${kind}`,
+      resource_type: 'customer_property', resource_id: savedId, metadata: { customer_id: customerId, fields: Object.keys(changes) },
+      critical: true, trx,
+    });
+    const properties = await listProperties(customerId, trx);
+    const saved = properties.find(p => p.id === savedId);
+    const matches = saved && Object.entries(preview.changes || {}).every(([key, value]) => saved[key] === value);
+    if (!matches || (kind === 'primary' && !saved.is_primary)) throw propertyActionError('The saved property did not match the requested change', 409, 'verification_failed');
+    if (saved.is_primary && kind !== 'edit') {
+      const account = await trx('customers').where({ id: customerId }).first();
+      if (addressKey(account) !== addressKey(saved)) throw propertyActionError('The primary property and account address did not match', 409, 'verification_failed');
+    }
+    return { success: true, propertyId: savedId, customer_id: customerId, properties, audit_id: auditId,
+      verification: { property_id: savedId, persisted: true, fields_match: true },
+      href: `/admin/customers?customerId=${encodeURIComponent(customerId)}` };
+  });
+}
+
+async function addManualProperty(customerId, input, options = {}) {
+  return writeManualProperty(customerId, 'add', input, null, options, async (trx, _loaded, changes) => {
+    await completePrimaryFromCall(customerId, changes, { conn: trx });
+    await ensurePrimaryProperty(customerId, { conn: trx });
+    const result = await recordCallProperty({ customerId, ...changes, occupancyType: changes.occupancy_type, source: 'manual', conn: trx });
+    if (!result.created) throw propertyActionError('A property with that street already exists for this customer', 409, 'property_exists');
+    return result.propertyId;
+  });
+}
+
+async function editManualProperty(customerId, propertyId, input, options = {}) {
+  return writeManualProperty(customerId, 'edit', input, propertyId, options, async (trx, _loaded, changes) => {
+    await trx('customer_properties').where({ id: propertyId, customer_id: customerId, active: true })
+      .update({ ...changes, updated_at: trx.fn.now() });
+    return propertyId;
+  });
+}
+
+async function changePrimaryProperty(customerId, propertyId, options = {}) {
+  if (!options.expectedVersion) throw propertyActionError('Review the primary-property preview first', 409, 'preview_required');
+  return writeManualProperty(customerId, 'primary', {}, propertyId, options, async (trx, { customer, properties }) => {
+    await ensurePrimaryProperty(customer, { conn: trx });
+    const primary = await trx('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first();
+    if (customer.address_line1 && !primary) throw propertyActionError('The existing account property could not be preserved. Review the saved properties before changing the primary.', 409, 'primary_missing');
+    const target = properties.find(p => p.id === propertyId);
+    await require('./invoice-address').freezeCustomerInvoiceAddresses(trx, customer);
+    const result = await require('./property-role-proposals').applyPropertyRoleProposals(trx, { customerId, proposals: [{
+      kind: 'primary_flip', new_primary_property_id: propertyId, new_primary_address_key: addressKey(target),
+      old_primary_property_id: primary?.id || null, old_primary_address_key: primary ? addressKey(primary) : null,
+    }] });
+    if (result.applied !== 1 || result.skipped) throw propertyActionError('The primary property could not be changed. Request a fresh preview.', 409, 'preview_changed');
+    return propertyId;
+  });
+}
+
 module.exports = {
+  PROPERTY_FIELD_LIMITS,
+  manualPropertyFields,
+  previewManualPropertyChange,
+  addManualProperty,
+  editManualProperty,
+  changePrimaryProperty,
   soleActivePropertyId,
   anchorSoleProperty,
   OCCUPANCY_TYPES,

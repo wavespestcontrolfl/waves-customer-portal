@@ -1651,6 +1651,8 @@ const InvoiceService = {
           token,
           invoice_number: invoiceNumber,
           customer_id: customerId,
+          ...(require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM')
+            ? { customer_address_snapshot: require('./invoice-address').invoiceAddressSnapshot(customer) } : {}),
           title,
           line_items: JSON.stringify(items),
           subtotal,
@@ -2337,7 +2339,7 @@ const InvoiceService = {
     return {
       ...invoice,
       ...updates,
-      customer,
+      customer: require('./invoice-address').invoiceCustomerAddress(invoice, customer),
       annual_prepay,
       // Amount the customer actually pays = total − applied account credit. The
       // pay page renders this (and a credit line) so the displayed amount matches
@@ -3602,7 +3604,12 @@ const InvoiceService = {
         "waveguard_tier",
         // Saved-card state rides along so a deep-linked invoice row keeps
         // its card badge and Charge-card action (Codex PR #3476 r20 P2).
-        "card_on_file",
+        db.raw(`(
+          SELECT json_build_object('brand', card_brand, 'last_four', last_four)
+          FROM payment_methods
+          WHERE customer_id = customers.id AND is_default = true
+          LIMIT 1
+        ) AS card_on_file`),
         "address_line1",
         "city",
         "state",
@@ -3625,7 +3632,7 @@ const InvoiceService = {
     const annualPrepayTerm = await loadAnnualPrepayTermForInvoice(invoice.id);
     return {
       ...invoice,
-      customer,
+      customer: require('./invoice-address').invoiceCustomerAddress(invoice, customer),
       active_payment_plan: activePaymentPlan,
       annual_prepay,
       annual_prepay_term: annualPrepayTerm,

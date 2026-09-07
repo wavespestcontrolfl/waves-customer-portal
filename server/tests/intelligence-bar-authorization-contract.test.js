@@ -61,6 +61,12 @@ test('move_stops_to_day: customer contact only when notify_customers is true', (
   expect(loud.effects.some((e) => e.label === 'Customer will be contacted')).toBe(true);
 });
 
+test('clearing a saved property label is an explicit approved effect', () => {
+  const contract = buildContract({ toolName: 'update_customer_property', params: { label: null },
+    displayParams: { label: null }, preview: { before: { label: 'Family home' }, changes: { label: null } } });
+  expect(contract.effects).toContainEqual(expect.objectContaining({ label: 'label: (cleared)', before: 'Family home', after: null }));
+});
+
 test('nested display params flatten one level; arrays join; undefined dropped; null in updates renders as a clear', () => {
   const c = buildContract({
     toolName: 'update_customer',

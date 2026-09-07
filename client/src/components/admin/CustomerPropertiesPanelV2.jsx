@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import AddressAutocomplete, { sameAutocompleteAddress } from "../AddressAutocomplete";
-import { Button, Card, CardBody } from "../ui";
+import { Button, Card, CardBody, Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter } from "../ui";
 import { OCCUPANCY_OPTIONS } from "../../lib/contact-roles";
 import { adminFetch } from "../../utils/admin-fetch";
 
@@ -65,6 +65,10 @@ export default function CustomerPropertiesPanelV2({
   const [saveErr, setSaveErr] = useState("");
   const [rowBusy, setRowBusy] = useState(null);
   const [rowErr, setRowErr] = useState("");
+  const [canChangePrimary, setCanChangePrimary] = useState(false);
+  const [primaryPreview, setPrimaryPreview] = useState(null);
+  const activeCustomer = useRef(customerId);
+  activeCustomer.current = customerId;
   // Inline label editing: { id, value } while a row's label input is open.
   const [labelEdit, setLabelEdit] = useState(null);
   // ONE write lock for additions and row edits: every response replaces the
@@ -77,9 +81,14 @@ export default function CustomerPropertiesPanelV2({
     let cancelled = false;
     setLoading(true);
     setLoadErr("");
+    setCanChangePrimary(false);
+    setPrimaryPreview(null);
     adminFetch(`/admin/customers/${customerId}/properties`)
       .then((d) => {
-        if (!cancelled) setProperties(Array.isArray(d.properties) ? d.properties : []);
+        if (!cancelled) {
+          setProperties(Array.isArray(d.properties) ? d.properties : []);
+          setCanChangePrimary(d.canChangePrimary === true);
+        }
       })
       .catch((e) => {
         if (!cancelled) setLoadErr(e.message || "Could not load properties");
@@ -168,7 +177,47 @@ export default function CustomerPropertiesPanelV2({
     await patchRow(id, { label: next || null });
   };
 
-  const isManager = contactRole === "property_manager";
+  const previewPrimary = async (propertyId) => {
+    if (writeBusy) return;
+    setRowBusy(propertyId);
+    setRowErr("");
+    try {
+      const preview = await adminFetch(`/admin/customers/${customerId}/properties/${propertyId}/primary-preview`);
+      if (activeCustomer.current === customerId) setPrimaryPreview({ ...preview, customerId, propertyId });
+    } catch (err) {
+      if (activeCustomer.current === customerId) setRowErr(err.message || "Could not preview the primary change");
+    } finally {
+      setRowBusy(null);
+    }
+  };
+
+  const confirmPrimary = async () => {
+    if (writeBusy || !primaryPreview || primaryPreview.customerId !== customerId) return;
+    setRowBusy(primaryPreview.propertyId);
+    setRowErr("");
+    try {
+      const d = await adminFetch(`/admin/customers/${customerId}/properties/${primaryPreview.propertyId}/primary`, {
+        method: "POST", body: JSON.stringify({ expectedVersion: primaryPreview._version }),
+      });
+      if (activeCustomer.current !== customerId) return;
+      setProperties(Array.isArray(d.properties) ? d.properties : []);
+      setPrimaryPreview(null);
+      if (typeof onChanged === "function") {
+        try { await onChanged(); } catch { /* saved list is already current */ }
+      }
+    } catch (err) {
+      if (activeCustomer.current === customerId) {
+        setPrimaryPreview(null);
+        setRowErr(err.message || "Could not change the primary property. Refresh to check its saved state.");
+      }
+    } finally {
+      setRowBusy(null);
+    }
+  };
+
+  const primaryCopy = contactRole === "property_manager"
+    ? { label: "Default", title: "Default service address", description: "This contact is a property manager — the primary row is the default service address on the profile, not a residence." }
+    : { label: "Primary", title: "Address on the profile", description: "The primary row is the address on the profile; every other row is an additional serviced property." };
   const inputCls =
     "w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring";
 
@@ -186,9 +235,7 @@ export default function CustomerPropertiesPanelV2({
           )}
         </div>
         <div className="text-12 text-ink-secondary mb-3">
-          {isManager
-            ? "This contact is a property manager — the primary row is the default service address on the profile, not a residence."
-            : "The primary row is the address on the profile; every other row is an additional serviced property."}
+          {primaryCopy.description}
         </div>
 
         {loading && <div className="text-12 text-ink-secondary">Loading…</div>}
@@ -209,9 +256,9 @@ export default function CustomerPropertiesPanelV2({
                     {p.is_primary && (
                       <span
                         className="text-10 uppercase tracking-label text-ink-tertiary mr-1.5"
-                        title={isManager ? "Default service address" : "Address on the profile"}
+                        title={primaryCopy.title}
                       >
-                        {isManager ? "Default" : "Primary"}
+                        {primaryCopy.label}
                       </span>
                     )}
                     {formatPropertyAddress(p)}
@@ -270,6 +317,11 @@ export default function CustomerPropertiesPanelV2({
                     </option>
                   ))}
                 </select>
+                {canEdit && canChangePrimary && !p.is_primary && (
+                  <Button variant="secondary" size="sm" className="text-14" disabled={writeBusy} onClick={() => previewPrimary(p.id)}>
+                    Make primary
+                  </Button>
+                )}
               </div>
             ))}
             {properties.length === 0 && (
@@ -428,6 +480,19 @@ export default function CustomerPropertiesPanelV2({
           </form>
         )}
       </CardBody>
+      {primaryPreview && <Dialog open style={{ zIndex: 1100 }} onClose={() => { if (!writeBusy) setPrimaryPreview(null); }}>
+        <DialogHeader><DialogTitle>Change primary property</DialogTitle></DialogHeader>
+        <DialogBody className="text-14 space-y-3">
+          <p className="font-medium">{primaryPreview.primary_property.address}</p>
+          <ul className="list-disc pl-5 space-y-2">
+            {primaryPreview.effects.map(effect => <li key={effect}>{effect}</li>)}
+          </ul>
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="secondary" className="text-14" disabled={writeBusy} onClick={() => setPrimaryPreview(null)}>Cancel</Button>
+          <Button className="text-14" disabled={writeBusy} onClick={confirmPrimary}>{writeBusy ? "Saving…" : "Confirm primary property"}</Button>
+        </DialogFooter>
+      </Dialog>}
     </Card>
   );
 }

@@ -1,4 +1,4 @@
-import { useIntelligenceBarPageData } from '../../hooks/useIntelligenceBarPageData';
+import { useIntelligenceBarPageData, useIntelligenceBarActions } from '../../hooks/useIntelligenceBarPageData';
 /**
  * Global Command Palette (⌘K / mobile bottom sheet)
  * client/src/components/admin/GlobalCommandPalette.jsx
@@ -353,12 +353,12 @@ function GlobalCommandPalette(_props, ref) {
   const attachmentsLoadingRef = useRef(false);
   const location = useLocation();
   const isMobile = useIsMobile(768);
-  // Dialog semantics: trap Tab focus inside the palette while open and restore
-  // focus to the opener on close. Escape stays handled by the palette's own
-  // key handlers, so no onEscape is passed here.
-  const paletteRef = useModalFocus(open);
+  // The shared modal stack consumes Escape before an underlying customer
+  // drawer can see it; closing the bar must leave that record open.
+  const paletteRef = useModalFocus(open, () => setOpen(false));
 
   const ibPageData = useIntelligenceBarPageData();
+  const { notifyMutation } = useIntelligenceBarActions();
   const context = detectContext(location.pathname, location.search);
   const accentColor = CONTEXT_COLORS[context] || D.teal;
   const contextLabel = CONTEXT_LABELS[context] || "Admin";
@@ -380,13 +380,10 @@ function GlobalCommandPalette(_props, ref) {
         e.preventDefault();
         setOpen((prev) => !prev);
       }
-      if (e.key === "Escape" && open) {
-        setOpen(false);
-      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [open]);
+  }, []);
 
   // Focus input when opening + refresh recents
   useEffect(() => {
@@ -644,6 +641,9 @@ function GlobalCommandPalette(_props, ref) {
 
   const actionEpoch = threadEpochRef.current;
   const onActionResolved = (action, decision, body) => {
+    if (body?.success && body?.result?.verification?.persisted && body.result.customer_id) {
+      notifyMutation?.({ id: action.id, customer_id: body.result.customer_id });
+    }
     if (threadEpochRef.current !== actionEpoch) return;
     setPendingActions(previous => previous.map(item => item.id === action.id
       ? { ...item, receipt: body, resolvedStatus: decision === 'cancel' && body.cancelled ? 'cancelled' : undefined } : item));

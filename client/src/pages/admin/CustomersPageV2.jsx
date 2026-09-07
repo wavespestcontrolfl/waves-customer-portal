@@ -1,4 +1,3 @@
-import { usePublishIntelligenceBarPageData } from '../../hooks/useIntelligenceBarPageData';
 // client/src/pages/admin/CustomersPageV2.jsx
 // Monochrome V2 of CustomersPage. Strict 1:1 on data, endpoints, behavior:
 //   - GET  /admin/customers?search=&stage=&tier=&city=&page=&limit=100
@@ -1117,7 +1116,6 @@ export default function CustomersPageV2() {
     const id = searchParams.get("customerId");
     return id || null;
   });
-  usePublishIntelligenceBarPageData({ customer_id: selected360Id });
   const [page, setPage] = useState(1);
   const [totalCustomers, setTotalCustomers] = useState(0);
   const [totalPages, setTotalPages] = useState(1);

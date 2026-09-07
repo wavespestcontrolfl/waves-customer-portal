@@ -25,6 +25,13 @@ headers" = `Cache-Control: no-store`, `X-Robots-Tag: noindex`,
 
 ## Routes
 
+Invoice/receipt address preservation: a saved `invoices.customer_address_snapshot`
+supplies the displayed customer address on `/api/pay/:token`, `/invoice.pdf`,
+`/api/receipt/:token` and its PDF. Legacy rows retain their existing address
+fallback until an approved manual primary-property change freezes it. Contact
+recipients, third-party Bill-To authority, amounts, and permanent receipt tokens
+are unchanged; snapshots remain authoritative when the rollout gate is off.
+
 `/api/pay/:token`
 (+ `/setup`, `/quote`, `/finalize`, `/confirm`, `/consent`,
 `/capture-setup`, `/setup-complete`, `/update-amount`, `/error`,
