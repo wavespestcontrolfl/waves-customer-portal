@@ -1,5 +1,5 @@
-// no-cost-visit-types: the always-free service-type patterns match on WORD
-// BOUNDARIES. As bare substrings, 're service' matched "Lawn Ca-re Service",
+// no-cost-visit-types: the always-free service-type terms match as WHOLE
+// WORDS ('-', ' ' and '_' are separators). As bare substrings, 're service' matched "Lawn Ca-re Service",
 // so every "Monthly / Every 6 Weeks Lawn Care Service" visit read as
 // always-free from 2026-06-19 (#1926): skipped by the completion billing
 // gates, excluded from the billing-recovery leak queue, and flagged by the
@@ -17,6 +17,8 @@ const BILLABLE = [
   'Termite Treatment',
   'Lawn Care',
   'Estimated Pricing Review', // 'estimate' is not a prefix match either
+  'lawn_care_service', // key-shaped: '_' is a separator, and 'care service' still is not a re-service
+  'Prestimate', // no suffix match either
 ];
 const ALWAYS_FREE = [
   'Pest Control Re-Service',
@@ -31,6 +33,13 @@ const ALWAYS_FREE = [
   'Estimate',
   'Waves Pest Control Appointment Service',
   'ESTIMATE VISIT',
+  // key-shaped forms (the helper's header documents general_appointment)
+  'general_appointment',
+  'pest_re_service',
+  'follow_up',
+  're_visit',
+  'estimate_visit',
+  'Re_Service',
 ];
 
 describe('isAlwaysFreeServiceType', () => {
