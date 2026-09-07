@@ -7,6 +7,11 @@ if (process.env.WAVES_LOCAL_DEV !== '1' || process.env.RAILWAY_DEPLOYMENT_ID || 
 if (new URL(process.env.DATABASE_URL).pathname !== `/waves_qa_${process.env.WAVES_WORKTREE_ID.replaceAll('-', '')}`) {
   throw new Error('QA server requires the worktree-owned database.');
 }
+// Keep production application behavior while using the verified dev connection.
+// This entry point has already rejected deployed and non-worktree databases.
+const knexConfig = require('../../server/knexfile');
+knexConfig.production.connection = knexConfig.development.connection;
+
 const fixture = JSON.parse(fs.readFileSync(process.env.QA_FIXTURE_FILE, 'utf8'));
 const captureFile = process.env.QA_CAPTURE_FILE;
 function capture(kind, detail) {
