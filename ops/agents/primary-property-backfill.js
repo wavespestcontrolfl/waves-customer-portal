@@ -23,10 +23,16 @@
 // an address) so the exact set can be checked before --execute.
 //
 // Reversible: the run prints the exact ids it created and a DELETE scoped
-// to those ids (still source='backfill' and unreferenced by any visit or
-// estimate — a row a booking has since anchored to must not vanish under
-// it). Nothing else is touched (customers.address_* is the source, not a
-// target).
+// to those ids that also requires (a) source='backfill', (b) the row's
+// staff-editable fields to fingerprint exactly as they did right after the
+// insert (a label / occupancy / relationship / address edit since then is
+// work that must survive — the properties PATCH keeps source='backfill',
+// so the fingerprint is the only thing that can tell), and (c) no FK
+// reference from any table (a row a booking has since anchored to must
+// not vanish under it). Coordinates are deliberately NOT in the
+// fingerprint: the booking-time re-geocode mirrors them onto the primary
+// and that is system upkeep, not an edit. Nothing else is touched
+// (customers.address_* is the source, not a target).
 //
 // Usage (repo root):
 //   railway run --service Postgres -- node ops/agents/primary-property-backfill.js            # dry run
@@ -91,7 +97,17 @@ if (limitIdx > -1) {
     return;
   }
 
-  const createdIds = [];
+  // Fingerprint of the staff-editable fields, read INSIDE each insert
+  // transaction so the rollback baseline is the row as created — an edit
+  // made while later candidates are still processing must not become the
+  // baseline (relationship is guarded when the column exists —
+  // schema-drift-safe like the migration).
+  const cols = await db('customer_properties').columnInfo();
+  const fpCols = ['label', 'occupancy_type', 'address_key', 'active', 'is_primary', 'address_line1', 'address_line2', 'city', 'zip']
+    .concat(cols.relationship ? ['relationship'] : []);
+  const fpExpr = `md5(concat_ws('|', ${fpCols.map((c) => `${c}::text`).join(', ')}))`;
+
+  const created = []; // { id, fp } per row this run inserted
   let skipped = 0;
   let failed = 0;
   for (const c of candidates) {
@@ -106,11 +122,14 @@ if (limitIdx > -1) {
         if (!row || row.deleted_at || !String(row.address_line1 || '').trim()) return { created: false };
         const any = await trx('customer_properties').where({ customer_id: c.id }).first('id');
         if (any) return { created: false };
-        return ensurePrimaryProperty(c.id, { source: 'backfill', conn: trx });
+        const ensured = await ensurePrimaryProperty(c.id, { source: 'backfill', conn: trx });
+        if (!ensured.created) return ensured;
+        const snap = await trx('customer_properties').where({ id: ensured.propertyId }).first(db.raw(`${fpExpr} AS fp`));
+        return { ...ensured, fp: snap.fp };
       });
       // created=false here means the re-check found the customer no longer
       // eligible (or lost the primary race) — count it as skipped.
-      if (r.created) createdIds.push(r.propertyId); else skipped += 1;
+      if (r.created) created.push({ id: r.propertyId, fp: r.fp }); else skipped += 1;
     } catch (e) {
       failed += 1;
       // Customer id + error code only: a knex error message embeds the SQL
@@ -118,9 +137,14 @@ if (limitIdx > -1) {
       console.error(`[primary-property-backfill] ${c.id}: insert failed (${e.code || 'no code'})`);
     }
   }
-  console.log(`[primary-property-backfill] done — created ${createdIds.length}, skipped ${skipped}, failed ${failed} (started ${startedAt.toISOString()})`);
-  if (createdIds.length) {
+  console.log(`[primary-property-backfill] done — created ${created.length}, skipped ${skipped}, failed ${failed} (started ${startedAt.toISOString()})`);
+  // An incomplete backfill must not exit 0 — the caller (or a later
+  // operator) has to see it; the created ids + rollback still print.
+  if (failed > 0) process.exitCode = 1;
+  if (created.length) {
+    const createdIds = created.map((r) => r.id);
     console.log(`[primary-property-backfill] created property ids: ${createdIds.join(',')}`);
+    const values = created.map((r) => `('${r.id}'::uuid, '${r.fp}')`).join(', ');
     // Every FK that points at customer_properties(id), read from the
     // catalog at run time so a table added later is guarded too: the
     // rollback must not erase a property association some row picked up
@@ -140,9 +164,10 @@ if (limitIdx > -1) {
     // it) or waits behind it until COMMIT — a plain DELETE would instead
     // wait on the FK lock and then SET NULL the freshly committed link.
     const ids = `'{${createdIds.join(',')}}'::uuid[]`;
-    console.log(`[primary-property-backfill] rollback (this run's rows only, unreferenced by any of ${refs.rows.length} FK(s); run as ONE transaction): `
+    console.log(`[primary-property-backfill] rollback (this run's rows only, unedited since insert, unreferenced by any of ${refs.rows.length} FK(s); run as ONE transaction): `
       + `BEGIN; SELECT 1 FROM customer_properties WHERE id = ANY(${ids}) FOR UPDATE; `
-      + `DELETE FROM customer_properties WHERE id = ANY(${ids}) AND source='backfill'${guards}; COMMIT;`);
+      + `DELETE FROM customer_properties USING (VALUES ${values}) AS snap(id, fp) `
+      + `WHERE customer_properties.id = snap.id AND customer_properties.source='backfill' AND ${fpExpr} = snap.fp${guards}; COMMIT;`);
   }
 })()
   .catch((e) => { console.error('[primary-property-backfill] failed:', e.message); process.exitCode = 1; })
