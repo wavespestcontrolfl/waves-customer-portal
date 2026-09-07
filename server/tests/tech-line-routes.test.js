@@ -223,6 +223,8 @@ describe('tech-click calls never auto-book (codex #4072 r1 P1)', () => {
     expect(scorable).toContain("call.source !== 'tech-click'");
     // …and the approved-but-unbooked audit never opens a card for one (codex #4072 r6 P2).
     expect(proc).toContain("if (!bookedServiceId && call.source !== 'tech-click' && !heldReasons.has(appointmentResult?.skippedReason)) {");
+    // …nor the unbooked-call "collect the email" advisory (codex #4072 r7 P2).
+    expect(proc).toContain("if (customerId && !appointmentResult?.scheduleCreated && call.source !== 'tech-click') {");
     const route = fs.readFileSync(path.join(__dirname, '../routes/tech-line.js'), 'utf8');
     expect(route).toContain("source: 'tech-click'");
   });

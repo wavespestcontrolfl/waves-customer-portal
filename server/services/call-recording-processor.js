@@ -14939,7 +14939,10 @@ const CallRecordingProcessor = {
     // preferred_date_time — or only a vague time — leaves every branch above
     // unentered, so appointmentResult stays undefined and requiring it
     // skipped exactly the held bookings the office has to finish by hand.
-    if (customerId && !appointmentResult?.scheduleCreated) {
+    // A tech's own-line call (source tech-click) never books, so "no schedule
+    // row" is its normal outcome, not an unfinished booking: no "collect the
+    // email" card for a routine field follow-up (codex #4072 r7 P2).
+    if (customerId && !appointmentResult?.scheduleCreated && call.source !== 'tech-click') {
       try {
         const unbookedCustomer = await db('customers').where({ id: customerId }).first();
         if (unbookedCustomer
