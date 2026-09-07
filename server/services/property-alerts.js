@@ -225,7 +225,8 @@ async function weeklyPlanStillCurrent(candidate, { now = new Date(), knex = db }
     .first('weather_alerts', 'quiet_hours_start', 'quiet_hours_end');
   if (prefs && (prefs.weather_alerts === false || inCustomerQuietHours(prefs, now))) return false;
   const plan = await loadCustomerWateringPlan(candidate.customerId, { now });
-  return !!plan && plan.weekEnding === candidate.payload.weekEnding && plan.availableAt === candidate.payload.availableAt;
+  return plan?.notificationEligible === true
+    && plan.weekEnding === candidate.payload.weekEnding && plan.availableAt === candidate.payload.availableAt;
 }
 
 // ---------------------------------------------------------------------------
