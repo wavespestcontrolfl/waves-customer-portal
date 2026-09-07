@@ -459,20 +459,28 @@ function pickToolResponse(scenario, name, n, input = {}, used = {}) {
 function applyToolSideEffects(response, { input, ctx, scenario }) {
   const text = response.text || '';
   if (response.ok === false) return { text, receipt: false };
+  const ctxCall = (fn, ...args) => (typeof ctx[fn] === 'function' ? ctx[fn](...args) : undefined);
   let receipt = false;
   if (response.capture) {
-    if (typeof ctx.markCaptured === 'function') ctx.markCaptured(response.capture === true ? {} : response.capture);
-    if (input.call_summary && typeof ctx.noteCallSummary === 'function') ctx.noteCallSummary(input.call_summary);
+    ctxCall('markCaptured', response.capture === true ? {} : response.capture);
+    if (input.call_summary) ctxCall('noteCallSummary', input.call_summary);
     receipt = input.lead_quality !== 'spam'; // the live spam branch suppresses capture without writing a lead or callback
   }
-  if (response.booking) { if (typeof ctx.markBookingRequested === 'function') ctx.markBookingRequested(null); receipt = true; }
-  if (response.reservice) { if (typeof ctx.markReserviceFiled === 'function') ctx.markReserviceFiled(); receipt = true; }
+  if (response.booking) { ctxCall('markBookingRequested', null); receipt = true; }
+  if (response.reservice) {
+    // The live tool latches capture too (relay-reservice: the call's artifact
+    // is a ticket, no lead) — so the session ends after the goodbye as in
+    // production instead of taking turns production would ignore.
+    ctxCall('markCaptured', { leadCreated: false });
+    ctxCall('markReserviceFiled');
+    receipt = true;
+  }
   if (!response.transfer) return { text, receipt };
-  if (typeof ctx.transferRequested === 'function' && ctx.transferRequested() === true) return { text: TRANSFER_IN_PROGRESS_TEXT, receipt: false };
-  if (typeof ctx.markTransferRequested === 'function') ctx.markTransferRequested();
+  if (ctxCall('transferRequested') === true) return { text: TRANSFER_IN_PROGRESS_TEXT, receipt: false };
+  ctxCall('markTransferRequested');
   const { copy } = require('../voice-agent/relay-language');
-  if (typeof ctx.say === 'function') ctx.say(copy('transferring', scenario.language === 'es' ? 'es-US' : null));
-  if (typeof ctx.endForTransfer === 'function') ctx.endForTransfer();
+  ctxCall('say', copy('transferring', scenario.language === 'es' ? 'es-US' : null));
+  ctxCall('endForTransfer');
   return { text: text || TRANSFER_TEXT, receipt: true };
 }
 

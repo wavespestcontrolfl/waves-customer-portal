@@ -789,6 +789,20 @@ describe('voice relay eval — the harness', () => {
     expect(result.checks.find((c) => c.check === 'no_model_text_before_tool').status).toBe('pass');
   });
 
+  test('a performed re-service latches capture like the live tool: the session ends after the goodbye and later turns are ignored', async () => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    const fixture = replay.loadFixture(FIXTURE_PATH).scenarios.find((s) => s.id === 'reservice-matched');
+    script.push(toolUse('request_reservice', { lane: 'pest', issue: 'Ants back in the kitchen a month after the visit' }), say('Filed — a team member will follow up to schedule it.'), say('You are welcome.'));
+    const result = await replay.runScenario({ ...fixture, expect: [exp('end_session_called', { reason: 'agent_complete' }, 'critical')] });
+    expect(result.error).toBeUndefined();
+    expect(result.toolCalls[0]).toMatchObject({ name: 'request_reservice', ok: true, receipt: true });
+    expect(result.endSession).toMatchObject({ reason: 'agent_complete', captured: true });
+    expect(result.events.filter((e) => e.kind === 'caller')[1].ignored).toBe(true);
+    expect(result.status).toBe('pass');
+    expect(require('../models/db')).not.toHaveBeenCalled();
+  });
+
   test.each(['booking-happy-path', 'slot-gone', 'second-booking-refused', 'reconnect-resumed'])('%s refuses next-week slots for a request for tomorrow', async (id) => {
     mockSdk();
     const replay = require('../services/eval/voice-relay-replay');
