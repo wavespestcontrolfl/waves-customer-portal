@@ -153,6 +153,8 @@ describeDb('controlled staff documents on PostgreSQL', () => {
   });
   test('completed records and their source-version identity cannot be edited', async () => {
     const payload = { id: record.id, base_updated_at: record.updated_at.toISOString(), content_hash: procedure.version.content_hash, owner_id: tech.id, due_at: at(60), answers: {}, completed_steps: ['first', 'second'], complete: true };
+    await expect(documents.saveRecord(procedure.version.id, payload, admin)).rejects.toMatchObject({ status: 403 });
+    expect((await db('staff_document_records').where({ id: record.id }).first()).completed_at).toBeNull();
     const completed = await documents.saveRecord(procedure.version.id, payload, tech);
     expect(completed.content_hash).toBe(procedure.version.content_hash);
     expect(completed.completed_at).toBeInstanceOf(Date);
@@ -204,6 +206,34 @@ describeDb('controlled staff documents on PostgreSQL', () => {
     const refreshed = await documents.preview(draft.document.id, draft.version.id, effective, admin);
     expect(refreshed.rendered.body).toContain('100 hours');
     expect((await documents.publish(draft.document.id, draft.version.id, effective, refreshed.preview_hash, admin)).content_snapshot.body).toBe(refreshed.rendered.body);
+  });
+
+  test('a scheduled procedure with no policy bindings does not block shared values', async () => {
+    const draft = await documents.saveDraft({ key: `qa-${run}-unbound-future`, kind: 'procedure', access: 'staff', source: source('## Scope {#scope}\nSynthetic procedure with no shared terms.') }, admin);
+    await issue(draft.document.id, draft.version.id, at(600), admin);
+    policy = (await documents.updatePolicy({ base_revision_id: policy.id, values: values(110) }, at(240), admin)).policy;
+    expect(policy.values.pto_accrual[0].hours_per_year).toBe(110);
+  });
+  test('a future unbound replacement cannot hide currently bound wording from a policy change', async () => {
+    const original = await documents.saveDraft({ key: `qa-${run}-remove-bindings`, kind: 'policy', access: 'staff', source: source() }, admin);
+    await issue(original.document.id, original.version.id, at(300), admin);
+    const next = await documents.saveDraft({ id: original.document.id, base_version_id: original.version.id, source: source('## Scope {#scope}\nNo shared values in this later version.') }, admin);
+    await issue(original.document.id, next.version.id, at(600), admin);
+    const before = await db('document_template_versions').count('* as n').first();
+    await expect(documents.updatePolicy({ base_revision_id: policy.id, values: values(120) }, at(420), admin)).rejects.toMatchObject({ status: 409 });
+    expect((await db('policy_values').orderBy('revision', 'desc').first()).id).toBe(policy.id);
+    expect((await db('document_template_versions').count('* as n').first()).n).toBe(before.n);
+  });
+  test('an intervening future bound version cannot be hidden by its unbound replacement', async () => {
+    policy = (await documents.updatePolicy({ base_revision_id: policy.id, values: values(120) }, at(700), admin)).policy;
+    const original = await documents.saveDraft({ key: `qa-${run}-middle-bindings`, kind: 'policy', access: 'staff', source: source('## Scope {#scope}\nNo shared terms yet.') }, admin);
+    await issue(original.document.id, original.version.id, at(710), admin);
+    const bound = await documents.saveDraft({ id: original.document.id, base_version_id: original.version.id, source: source() }, admin);
+    await issue(original.document.id, bound.version.id, at(800), admin);
+    const last = await documents.saveDraft({ id: original.document.id, base_version_id: bound.version.id, source: source('## Scope {#scope}\nNo shared terms later.') }, admin);
+    await issue(original.document.id, last.version.id, at(900), admin);
+    await expect(documents.updatePolicy({ base_revision_id: policy.id, values: values(130) }, at(750), admin)).rejects.toMatchObject({ status: 409 });
+    expect((await db('policy_values').orderBy('revision', 'desc').first()).id).toBe(policy.id);
   });
 
 });

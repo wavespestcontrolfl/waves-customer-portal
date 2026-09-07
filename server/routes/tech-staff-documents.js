@@ -91,6 +91,13 @@ router.get('/:id/pdf', handle(async (req, res) => {
   validate(uuid.required(), req.params.id);
   validate(uuid.required(), req.query.version);
   const detail = await documents.detail(req.params.id, actor(req), req.query.version);
+  if (!detail.version.content_hash) {
+    validate(Joi.string().hex().length(64).required(), req.query.preview_hash);
+    const preview = await documents.preview(req.params.id, req.query.version, instant(req.query.effective_at, true), actor(req));
+    if (preview.preview_hash !== req.query.preview_hash) reject('The wording changed since preview. Refresh the wording before exporting.', 409);
+    detail.rendered = preview.rendered;
+    detail.preview_effective_at = preview.effective_at;
+  }
   let acknowledgment = null;
   let record = null;
   if (req.query.acknowledgment) {

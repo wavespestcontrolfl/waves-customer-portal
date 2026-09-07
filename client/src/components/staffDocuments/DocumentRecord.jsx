@@ -54,7 +54,8 @@ export default function DocumentRecord({ detail, people, selfId, manage, canWrit
         if (field.type === 'checkbox') return <label key={field.id} style={{ ...row, marginBottom: 18 }}><input type="checkbox" checked={answers[field.id] === true} onChange={e => setAnswers({ ...answers, [field.id]: e.target.checked })} />{label}</label>;
         return <Field key={field.id} label={label}>{field.type === 'textarea' ? <textarea rows={4} style={inputStyle} value={answers[field.id] || ''} onChange={e => setAnswers({ ...answers, [field.id]: e.target.value })} /> : <input type={field.type === 'date' ? 'date' : 'text'} style={inputStyle} value={answers[field.id] || ''} onChange={e => setAnswers({ ...answers, [field.id]: e.target.value })} />}</Field>;
       })}
-      {!locked && <div style={row}><button type="button" style={buttonStyle} onClick={() => save(false)}>Save open record</button><button type="button" style={primaryStyle} onClick={() => save(true)}>Complete record</button></div>}
+      {!locked && <div style={row}><button type="button" style={buttonStyle} onClick={() => save(false)}>Save open record</button><button type="button" disabled={owner !== selfId} style={primaryStyle} onClick={() => save(true)}>Complete record</button></div>}
+      {!locked && owner !== selfId && <p>The assigned owner must complete this record.</p>}
     </fieldset>
     {record?.completed_at && <p>Completed {dateLabel(record.completed_at)}. Record {record.id}.</p>}
     {record && <button disabled={busy} type="button" style={buttonStyle} onClick={download}>Export record PDF</button>}

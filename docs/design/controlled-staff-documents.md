@@ -23,6 +23,7 @@ role guard. Authoring, policy-value changes and issuance additionally require ad
 - **Form:** a version declares typed fields and completion requirements. Open
   records have an owner and next-action deadline; completed records are immutable.
   Admins can assign records; technicians can create and update their own records.
+  Only the assigned owner can complete a record, including when an admin saves it.
   Completed records can be exported with their field values and version identity.
 
 Every issued snapshot contains the accountable owner role, next-review date, bound
@@ -45,7 +46,10 @@ Concurrent draft or value changes require reload through a base-revision check.
 Future effective versions are selected by time, without a second cron mechanism.
 The issuance preview resolves values for the selected Eastern effective time.
 Changing that time clears approval; issuance verifies the reviewed wording and
-policy revision under the same library lock and rejects a stale preview.
+policy revision under the same library lock and rejects a stale preview. Draft
+PDF exports carry that effective time and preview hash too. A shared-value
+change refuses to cross any scheduled bound version or a later replacement
+that would hide currently bound wording.
 
 ## Authoring and reviews
 
@@ -57,6 +61,8 @@ service-report browser launcher and the existing estimate-document capacity limi
 (two concurrent browser exports by default, shared between both renderers).
 PDFs include version and full hash in the footer;
 an acknowledgment export includes the actual recorded signer and timestamp.
+Effective, acknowledgment, due and completion times print in Eastern time.
+Only procedure records include clause checklists; forms print their typed answers.
 
 Bindings are restricted to `{{policy.pay_frequency}}`, `{{policy.pay_schedule}}`,
 `{{policy.pto_accrual}}`, `{{policy.paid_holidays}}`,

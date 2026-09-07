@@ -72,3 +72,25 @@ test('historical form records remain readable and exportable with editing disabl
   expect(screen.getByRole('button', { name: 'Export record PDF' })).toBeEnabled();
   expect(screen.queryByRole('button', { name: 'Complete record' })).not.toBeInTheDocument();
 });
+
+test('draft PDF export uses the selected effective time and exact reviewed wording', async () => {
+  request.mockImplementation(path => path.endsWith('/preview') ? Promise.resolve({ rendered: wording('Future terms'), preview_hash: 'reviewed-hash' }) : Promise.reject(new Error('QA download captured')));
+  render(<DocumentReader {...props(draft())} />);
+  fireEvent.change(screen.getByLabelText('Effective date and time (Eastern)'), { target: { value: '2099-01-03T09:00' } });
+  await screen.findByText('Future terms');
+  fireEvent.click(screen.getByRole('button', { name: 'Export PDF', exact: true }));
+  await screen.findByRole('alert');
+  const [path] = request.mock.calls.find(([path]) => path.includes('/pdf?'));
+  const query = new URLSearchParams(path.split('?')[1]);
+  expect(query.get('effective_at')).toBe('2099-01-03T09:00');
+  expect(query.get('preview_hash')).toBe('reviewed-hash');
+});
+
+test('admins can save an assigned record but only its owner can complete it', () => {
+  const detail = draft(); detail.document.staff_kind = 'form'; detail.rendered.kind = 'form'; detail.version.content_hash = 'issued'; detail.current_version_id = 'v1';
+  render(<DocumentReader {...props(detail)} people={[{ id: 'tech', name: 'QA Staff' }, { id: 'other', name: 'QA Other' }]} />);
+  fireEvent.change(screen.getByLabelText('Record owner'), { target: { value: 'other' } });
+  expect(screen.getByRole('button', { name: 'Save open record' })).toBeEnabled();
+  expect(screen.getByRole('button', { name: 'Complete record' })).toBeDisabled();
+  expect(screen.getByText('The assigned owner must complete this record.')).toBeInTheDocument();
+});

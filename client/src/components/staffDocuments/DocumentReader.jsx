@@ -44,13 +44,16 @@ export default function DocumentReader({ detail, people, selfId, manage, onVersi
     finally { setBusy(false); }
   }
   async function download(ack = null) {
-    const blob = await request(`/${document.id}/pdf?version=${version.id}${ack ? `&acknowledgment=${ack.id}` : ''}`);
+    const query = new URLSearchParams({ version: version.id });
+    if (ack) query.set('acknowledgment', ack.id);
+    if (needsPreview) { query.set('effective_at', effective); query.set('preview_hash', preview.preview_hash); }
+    const blob = await request(`/${document.id}/pdf?${query}`);
     const url = URL.createObjectURL(blob); const link = globalThis.document.createElement('a');
     link.href = url; link.download = `${document.template_key}-v${version.version_number}${ack ? '-acknowledged' : ''}.pdf`; link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   return <article style={box}>
-    <div style={{ ...row, justifyContent: 'space-between' }}><span style={{ textTransform: 'capitalize', color: D.muted }}>{document.staff_kind} · {version.content_hash ? 'Issued' : 'Draft — not issued'}</span><button disabled={busy} style={buttonStyle} onClick={() => act(() => download())}>Export PDF</button></div>
+    <div style={{ ...row, justifyContent: 'space-between' }}><span style={{ textTransform: 'capitalize', color: D.muted }}>{document.staff_kind} · {version.content_hash ? 'Issued' : 'Draft — not issued'}</span><button disabled={busy || (needsPreview && !previewReady)} style={buttonStyle} onClick={() => act(() => download())}>Export PDF</button></div>
     <h1 style={{ fontSize: 26, lineHeight: 1.2, fontFamily: 'inherit', fontWeight: 700 }}>{rendered.title}</h1>
     <p>Owner role: {rendered.metadata.owner_role || 'Unassigned'} · Next review: {reviewLabel(rendered.metadata.review_on)}</p>
     <p>Effective: {dateLabel(version.effective_at)} (Eastern)</p>

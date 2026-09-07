@@ -135,9 +135,13 @@ async function updatePolicy(input, at, actor) {
     const documents = await trx('document_templates').where({ audience: 'staff' }).orderBy('id');
     const revised = [];
     for (const document of documents) {
-      const version = await trx('document_template_versions').where({ template_id: document.id }).whereNotNull('published_at').orderBy('effective_at', 'desc').first();
-      if (!version?.content_snapshot.used_variables.length) continue;
-      if (new Date(version.effective_at) >= new Date(at)) reject(`Policy change must follow the scheduled version of ${document.name}.`, 409);
+      const issued = await trx('document_template_versions').where({ template_id: document.id }).whereNotNull('published_at').orderBy('effective_at', 'desc');
+      const version = issued.find(item => new Date(item.effective_at) <= new Date(at));
+      const scheduled = issued.filter(item => new Date(item.effective_at) >= new Date(at));
+      // A scheduled unbound replacement must not hide the current bindings,
+      // nor may an intervening bound version retain stale future values.
+      if (![version, ...scheduled].some(item => item?.content_snapshot.used_variables.length)) continue;
+      if (scheduled.length) reject(`Policy change must follow the scheduled version of ${document.name}.`, 409);
       const draft = await insertVersion(trx, document, sourceOf(version), actor);
       revised.push(await issueVersion(trx, document, draft, policy, at, actor));
     }
@@ -237,6 +241,7 @@ async function saveRecord(versionId, input, actor) {
     if (input.content_hash !== version.content_hash) reject('The displayed hash does not match this version.', 409);
     await activeOwner(trx, input.owner_id);
     if (!isAdmin(actor) && input.owner_id !== actor.id) reject('Only an admin may assign a record to another staff member.', 403);
+    if (input.complete && input.owner_id !== actor.id) reject('Only the assigned owner may complete this record.', 403);
     const values = { ...recordAnswers(version, input), owner_id: input.owner_id, due_at: input.due_at,
       updated_at: trx.fn.now(), completed_at: input.complete ? trx.fn.now() : null };
     let row;
