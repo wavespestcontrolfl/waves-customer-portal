@@ -514,6 +514,23 @@ describe('POST /admin/communications/customer-link', () => {
   // accepted must not read as "try again" (GH Codex #3856 r8 P2).
   describe('POST /send-prep', () => {
     const { sendPrepToCustomer } = require('../services/prep-guide-sender');
+    test.each(['sms', 'email'])('a partial standalone guide does not promise a blocked %s retry', async (failedChannel) => {
+      sendPrepToCustomer.mockResolvedValueOnce({
+        ok: true, reason: 'partial', pestType: 'sprinkler_timer', label: 'Sprinkler Timer Guide', failedChannel,
+        emailSent: failedChannel === 'sms', smsSent: failedChannel === 'email',
+        emailAddress: 'recipient@example.com', phone: '+19415550101',
+      });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, 'send-prep', { customerId: CUSTOMER_UUID, pestType: 'sprinkler_timer', channel: 'both' });
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.partial).toBe(true);
+        expect(body.message).toContain(`${failedChannel === 'sms' ? 'Text' : 'Email'} delivery was not confirmed.`);
+        expect(body.message).toContain('this one-time guide cannot be retried with Send prep guide');
+        expect(body.message).not.toMatch(/send it again|try again/);
+      });
+    });
+
     test('no leg confirmed + an uncertain leg → check the log, not try again', async () => {
       sendPrepToCustomer.mockResolvedValueOnce({ ok: false, reason: 'send_failed', label: 'Flea', emailSent: false, emailUncertain: true, smsSent: false });
       await withServer(async (baseUrl) => {
