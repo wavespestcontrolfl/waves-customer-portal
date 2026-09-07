@@ -27,9 +27,10 @@
 // staff-editable fields to fingerprint exactly as they did right after the
 // insert (a label / occupancy / relationship / address edit since then is
 // work that must survive — the properties PATCH keeps source='backfill',
-// so the fingerprint is the only thing that can tell), and (c) no FK
-// reference from any table (a row a booking has since anchored to must
-// not vanish under it). Coordinates are deliberately NOT in the
+// so the fingerprint is the only thing that can tell), and (c) no
+// reference from any table — every FK the catalog declares plus the one
+// FK-less column, visual_service_moments.property_id (a row a booking has
+// since anchored to must not vanish under it). Coordinates are deliberately NOT in the
 // fingerprint: the booking-time re-geocode mirrors them onto the primary
 // and that is system upkeep, not an edit. Nothing else is touched
 // (customers.address_* is the source, not a target).
@@ -161,7 +162,11 @@ if (limitIdx > -1) {
       FROM pg_constraint c
       JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)
       WHERE c.contype = 'f' AND c.confrelid = 'customer_properties'::regclass`);
-    const guards = refs.rows
+    // The catalog cannot see visual_service_moments.property_id: declared
+    // without a foreign key (20260613000002) but populated from the visit's
+    // property_id, i.e. a customer_properties id. Guarded by name.
+    const guardRefs = [...refs.rows, { tbl: 'visual_service_moments', col: 'property_id' }];
+    const guards = guardRefs
       .map(({ tbl, col }) => ` AND NOT EXISTS (SELECT 1 FROM ${tbl} r WHERE r.${col} = customer_properties.id)`)
       .join('');
     // One transaction: FOR UPDATE on the candidates first. A booking's FK
@@ -170,7 +175,7 @@ if (limitIdx > -1) {
     // it) or waits behind it until COMMIT — a plain DELETE would instead
     // wait on the FK lock and then SET NULL the freshly committed link.
     const ids = `'{${createdIds.join(',')}}'::uuid[]`;
-    console.log(`[primary-property-backfill] rollback (this run's rows only, unedited since insert, unreferenced by any of ${refs.rows.length} FK(s); run as ONE transaction): `
+    console.log(`[primary-property-backfill] rollback (this run's rows only, unedited since insert, unreferenced by any of ${guardRefs.length} reference(s) — ${refs.rows.length} FK(s) + visual_service_moments.property_id; run as ONE transaction): `
       + `BEGIN; SELECT 1 FROM customer_properties WHERE id = ANY(${ids}) FOR UPDATE; `
       + `DELETE FROM customer_properties USING (VALUES ${values}) AS snap(id, fp) `
       + `WHERE customer_properties.id = snap.id AND customer_properties.source='backfill' AND ${fpExpr} = snap.fp${guards}; COMMIT;`);

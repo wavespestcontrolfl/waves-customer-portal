@@ -177,7 +177,10 @@ async function ensurePrimaryCore(customerOrId, { occupancyType, source } = {}, c
   const customer = typeof customerOrId === 'string'
     ? await conn('customers').where({ id: customerOrId }).first()
     : customerOrId;
-  if (!customer || !customer.id) return { created: false, propertyId: null };
+  // An archived customer never grows a primary: a merge loser keeps its
+  // address after its property rows move to the winner, and a row created
+  // here would collide on a merge undo (same guard as the ops backfill).
+  if (!customer || !customer.id || customer.deleted_at) return { created: false, propertyId: null };
 
   const existing = await conn('customer_properties').where({ customer_id: customer.id, is_primary: true }).first();
   if (existing) return { created: false, propertyId: existing.id };

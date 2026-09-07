@@ -198,6 +198,11 @@ describe('soleActivePropertyId (GH #3699 r3: property anchor for the visit-group
     expect(await soleActivePropertyId('c1', conn)).toBeNull();
     expect(conn.state.inserted).toHaveLength(0);
   });
+  test('an archived customer (a merge loser keeps its address) never grows a primary → null', async () => {
+    const conn = fakeConn({ customer: { ...addressed, deleted_at: '2026-09-01T00:00:00.000Z' } });
+    expect(await soleActivePropertyId('c1', conn)).toBeNull();
+    expect(conn.state.inserted).toHaveLength(0);
+  });
   test('an inactive-only primary is a deliberate deactivation — not recreated, null', async () => {
     const conn = fakeConn({ customer: addressed });
     conn.state.rows = []; // active read finds nothing …
