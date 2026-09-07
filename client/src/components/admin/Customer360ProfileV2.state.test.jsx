@@ -86,7 +86,7 @@ describe('Customer360ProfileV2 profile state', () => {
     const { container } = render(<MemoryRouter><Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded /></MemoryRouter>);
     await screen.findByRole('heading', { name: 'Avery Customer' });
     container.querySelector('.c360-panel').scrollTo = vi.fn();
-    fireEvent.click(screen.getByRole('button', { name: 'Text', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Message', exact: true }));
     const field = await screen.findByRole('textbox', { name: 'Text message' }, { timeout: 5000 });
     fireEvent.change(field, { target: { value: 'Service update' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send', exact: true }));
@@ -95,6 +95,33 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(sends).toHaveLength(1);
     expect(JSON.parse(sends[0][1].body)).toMatchObject({ customerId: 'customer-a', to: '+19415550100', body: 'Service update' });
     expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/timeline'))).toBe(false);
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/unread-count'))).toBe(false);
+  });
+
+  it('shows this customer\'s unread count beside Message and clears it after reading', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    let read = false;
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.includes('/unread-count?customerId=customer-a')) return response({ conversations: read ? 0 : 2, messages: 5 });
+      if (path.endsWith('/customer-a')) {
+        const detail = customerDetail('customer-a', 'Avery');
+        detail.customer.phone = '+19415550100';
+        return response(detail);
+      }
+      if (path.endsWith('/comms')) return response({ comms: [{ id: 'message-a', channel: 'sms', direction: 'inbound', body: 'Service update', contactPhone: '+19415550100', createdAt: '2024-08-01T16:00:00Z', isRead: read }] });
+      if (path.endsWith('/messages/read')) { read = true; return response({ success: true }); }
+      return response({});
+    }));
+    const { container } = render(<MemoryRouter><Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded /></MemoryRouter>);
+    await screen.findByLabelText('2 unread conversations');
+    container.querySelector('.c360-panel').scrollTo = vi.fn();
+    fireEvent.click(screen.getByRole('button', { name: /Message.*2 unread conversations/ }));
+    await screen.findByRole('textbox', { name: 'Text message' }, { timeout: 5000 });
+    await waitFor(() => expect(screen.queryByLabelText('2 unread conversations')).not.toBeInTheDocument());
+    expect(read).toBe(true);
+    expect(screen.getByRole('heading', { name: 'Avery Customer' })).toBeInTheDocument();
   });
 
   it('does not request or offer admin-only history to a technician', async () => {
@@ -122,9 +149,12 @@ describe('Customer360ProfileV2 profile state', () => {
     const { container } = render(<Customer360ProfileV2 customerId="customer-a" onClose={onClose} embedded />);
     const name = await screen.findByRole('heading', { name: 'Avery Customer' });
     expect(container).toContainElement(name);
+    expect(screen.queryByText('History entry 46')).not.toBeInTheDocument();
+    container.querySelector('.c360-panel').scrollTo = vi.fn();
+    fireEvent.click(screen.getByRole('tab', { name: 'Activity', exact: true }));
     expect(screen.getByText('History entry 46')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'More customer actions' }));
-    const estimateLink = screen.getByRole('link', { name: 'Estimate', exact: true });
+    expect(screen.getAllByRole('region', { name: 'Customer activity history' })).toHaveLength(1);
+    const estimateLink = screen.getByRole('link', { name: 'Create estimate', exact: true });
     const estimateParams = new URL(estimateLink.href).searchParams;
     expect(estimateParams.get('customerName')).toBe('Avery Customer');
     expect(estimateParams.get('address')).toContain('Unit 4');

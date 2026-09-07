@@ -108,6 +108,7 @@ import {
 } from "../../components/ui";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
+import { notifyUnreadChanged } from "../../hooks/useUnreadConversations";
 import {
   MMS_TOTAL_BUDGET_BYTES,
   fitImagesToBudget,
@@ -1006,12 +1007,19 @@ export function SmsTab({ active, customer = null, customerMessages = [], onSent 
             readBefore,
           }),
         });
+        notifyUnreadChanged();
       } catch {
         loadData(smsSearch.trim());
       }
     },
     [loadData, smsSearch],
   );
+
+  useEffect(() => {
+    if (!active || !customer) return;
+    const unread = customerMessages.filter((message) => message.channel === "sms" && message.direction === "inbound" && !message.isRead);
+    if (unread.length) void markMessagesRead({ messages: unread });
+  }, [active, customer?.id, customerMessages, markMessagesRead]);
 
   useEffect(() => {
     if (customer) return;

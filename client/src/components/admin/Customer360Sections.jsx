@@ -13,6 +13,13 @@ export const CUSTOMER_360_SECTIONS = [
   { key: "compliance", label: "Compliance" },
 ];
 
+export const CUSTOMER_WORKSPACE_SECTIONS = [
+  { key: "overview", label: "Summary" },
+  { key: "comms", label: "Activity" },
+  { key: "billing", label: "Billing" },
+  { key: "property", label: "Details" },
+];
+
 export default function Customer360Sections({ active, onChange, contentId }) {
   const strip = useRef(null);
   const id = useId();
@@ -43,11 +50,11 @@ export default function Customer360Sections({ active, onChange, contentId }) {
     <div ref={strip} className="c360-section-strip" onScroll={measure}>
       <Tabs value={active} onValueChange={onChange}>
         <TabList className="c360-section-list" aria-label="Customer sections">
-          {CUSTOMER_360_SECTIONS.map((section, index) => <Tab key={section.key} value={section.key} id={`${id}-${section.key}`} aria-controls={contentId} tabIndex={active === section.key ? 0 : -1} className="c360-section-tab" onKeyDown={(event) => {
+          {CUSTOMER_WORKSPACE_SECTIONS.map((section, index) => <Tab key={section.key} value={section.key} id={`${id}-${section.key}`} aria-controls={contentId} tabIndex={active === section.key ? 0 : -1} className="c360-section-tab" onKeyDown={(event) => {
             if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
             event.preventDefault();
-            const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? CUSTOMER_360_SECTIONS.length - 1 : (index + (event.key === "ArrowRight" ? 1 : CUSTOMER_360_SECTIONS.length - 1)) % CUSTOMER_360_SECTIONS.length;
-            const next = CUSTOMER_360_SECTIONS[nextIndex];
+            const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? CUSTOMER_WORKSPACE_SECTIONS.length - 1 : (index + (event.key === "ArrowRight" ? 1 : CUSTOMER_WORKSPACE_SECTIONS.length - 1)) % CUSTOMER_WORKSPACE_SECTIONS.length;
+            const next = CUSTOMER_WORKSPACE_SECTIONS[nextIndex];
             onChange(next.key);
             document.getElementById(`${id}-${next.key}`)?.focus({ preventScroll: true });
           }}>{section.label}</Tab>)}

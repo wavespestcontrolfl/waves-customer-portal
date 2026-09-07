@@ -51,6 +51,7 @@ import { createPortal } from "react-dom";
 import "./customer360-workspace.css";
 import AddressAutocomplete, { sameAutocompleteAddress } from "../AddressAutocomplete";
 import {
+  ArrowUpRight,
   ChevronDown,
   Bell,
   CheckCircle2,
@@ -72,9 +73,10 @@ import {
   XCircle,
 } from "lucide-react";
 import { CustomerActionBar, customerEstimateHref } from "./StickyActionBar";
-import Customer360Sections, { CUSTOMER_360_SECTIONS } from "./Customer360Sections";
+import Customer360Sections, { CUSTOMER_360_SECTIONS, CUSTOMER_WORKSPACE_SECTIONS } from "./Customer360Sections";
 import Customer360Activity from "./Customer360Activity";
 import Customer360Estimates from "./Customer360Estimates";
+import useUnreadConversations from "../../hooks/useUnreadConversations";
 import { formatETDateOnly } from "../../lib/timezone";
 import useModalFocus from "../../hooks/useModalFocus";
 import AuthenticatedCallAudio from "./AuthenticatedCallAudio";
@@ -5135,7 +5137,7 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
 // ============================================================================
 // MAIN COMPONENT
 // ============================================================================
-function CustomerWorkspaceHeader({ c, balanceOwed, nextService, isAdmin, onEdit, onPrepayInvoice, onPrepayRecord, onTab, menuOpen, setMenuOpen, menuRef }) {
+function CustomerWorkspaceHeader({ c, isAdmin, unreadConversations, onEdit, onTab, menuOpen, setMenuOpen, menuRef }) {
   const menuId = useId();
   const name = [c.firstName, c.lastName].filter(Boolean).join(" ").trim() || "Unnamed customer";
   const address = c.address ? formatAddress(c.address) : "";
@@ -5146,41 +5148,31 @@ function CustomerWorkspaceHeader({ c, balanceOwed, nextService, isAdmin, onEdit,
   })).filter((contact) => contact.phone || contact.email);
   const actions = [
     { label: "Book appointment", href: `/admin/schedule?customer=${c.id}` },
-    { label: "Invoice", href: `/admin/invoices?customer=${c.id}` },
-    { label: "Estimate", href: customerEstimateHref({ ...c, address }) },
-    { label: "Add note", onClick: () => onTab("comms") },
-    { label: "Edit customer", onClick: onEdit, adminOnly: true },
-    { label: "Prepay invoice", onClick: onPrepayInvoice, adminOnly: true },
-    { label: "Record collected prepay", onClick: onPrepayRecord, adminOnly: true },
-  ].filter((action) => !action.adminOnly || isAdmin);
-  const stats = [
-    { label: "Lifetime revenue", value: fmtCurrency(c.lifetimeRevenue) },
-    { label: "Annual value", value: fmtCurrency(c.annualValue) },
-    { label: "Balance owed", value: fmtCurrency(balanceOwed), alert: balanceOwed > 0 },
-    { label: "Next service", value: nextService ? formatETDateOnly(nextService.scheduled_date, { month: "short", day: "numeric" }) : "—" },
+    { label: "Invoices", href: `/admin/invoices?customer=${c.id}` },
+    { label: "Notes & interactions", onClick: () => onTab("comms") },
   ];
   return <header className="c360-workspace-header">
     <div className="c360-workspace-identity">
-      <span className="c360-avatar" aria-hidden="true">{`${c.firstName?.[0] || ""}${c.lastName?.[0] || ""}` || "?"}</span>
       <div className="c360-workspace-name">
         <div className="c360-workspace-name-row"><h1>{name}</h1><StageBadgeV2 stage={c.pipelineStage} /></div>
         <div className="c360-workspace-meta"><TierBadgeV2 tier={c.tier} />{c.memberSince && <span>Customer since {formatETDateOnly(c.memberSince, { month: "short", year: "numeric" })}</span>}{c.profileLabel && <Badge className="normal-case tracking-normal">{c.profileLabel}</Badge>}{c.contactRole && c.contactRole !== "owner" && <Badge className="normal-case tracking-normal" title={contactRoleTitle(c.contactRole)}>{contactRoleLabel(c.contactRole)}</Badge>}</div>
       </div>
     </div>
     <div className="c360-workspace-actions">
-      {c.phone && <><Button variant="secondary" onClick={() => callViaBridge(c.phone, name)}><Phone size={16} />Call</Button><Button variant="secondary" className="c360-text-action" onClick={() => onTab("comms")}><MessageSquare size={16} />Text</Button></>}
-      {c.email && <a className="u-focus-ring" href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`} target="_blank" rel="noopener noreferrer"><Mail size={16} />Email</a>}
-      {address && <a className="u-focus-ring" href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`} target="_blank" rel="noopener noreferrer"><MapPin size={16} />Address</a>}
+      {c.phone && <Button variant="secondary" className="c360-message-action" onClick={() => onTab("comms")}><MessageSquare size={16} />Message{unreadConversations > 0 && <span className="c360-unread-count" aria-label={`${unreadConversations} unread conversations`}>{unreadConversations}</span>}</Button>}
+      <a className="u-focus-ring" href={customerEstimateHref({ ...c, address })}><FileText size={16} />Create estimate</a>
+      {isAdmin && <Button variant="secondary" aria-label="Edit customer" onClick={onEdit}><PenLine size={16} />Edit</Button>}
       <div className="c360-more-action" ref={menuRef} onKeyDown={(event) => { if (event.key === "Escape" && menuOpen) { event.stopPropagation(); setMenuOpen(false); menuRef.current?.querySelector("button")?.focus(); } }}>
-        <Button variant="ghost" className="c360-icon-button" aria-label="More customer actions" aria-expanded={menuOpen} aria-controls={menuId} onClick={() => setMenuOpen((open) => !open)}><MoreHorizontal size={20} /></Button>
+        <Button variant="ghost" className="c360-icon-button" aria-label="More customer actions" aria-expanded={menuOpen} aria-controls={menuId} onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); setMenuOpen((open) => !open); }}><MoreHorizontal size={20} /></Button>
         {menuOpen && <div id={menuId} className="c360-workspace-action-menu">{actions.map((action) => action.href ? <a key={action.label} className="u-focus-ring" href={action.href}>{action.label}</a> : <button key={action.label} type="button" className="u-focus-ring" onClick={() => { menuRef.current?.querySelector("button")?.focus(); setMenuOpen(false); action.onClick(); }}>{action.label}</button>)}</div>}
       </div>
     </div>
     <div className="c360-workspace-contact" aria-label="Contact details">
-      {[c.phone, c.email, address].filter(Boolean).map((detail, index) => <span key={index}>{detail}</span>)}
+      {c.phone && <div><Button variant="secondary" onClick={() => callViaBridge(c.phone, name)}><Phone size={16} />Call</Button><span>{c.phone}</span></div>}
+      {c.email && <div><a className="c360-outline-link u-focus-ring" href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(c.email)}`} target="_blank" rel="noopener noreferrer"><Mail size={16} />Email</a><span>{c.email}</span></div>}
+      {address && <div><a className="c360-outline-link u-focus-ring" href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`} target="_blank" rel="noopener noreferrer"><MapPin size={16} />Address</a><span>{address}</span></div>}
     </div>
     {contacts.length > 0 && <details className="c360-additional-contacts"><summary>Service contacts ({contacts.length})</summary>{contacts.map((contact, index) => <div key={index}><span>{contact.name || `Service contact ${index + 1}`}</span>{contact.phone && <CallBridgeLink phone={contact.phone} customerName={contact.name || name}>{contact.phone}</CallBridgeLink>}{contact.email && <a href={`https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(contact.email)}`} target="_blank" rel="noopener noreferrer">{contact.email}</a>}</div>)}</details>}
-    <div className="c360-workspace-stats">{stats.map((stat) => <div key={stat.label} className={cn("c360-workspace-stat", stat.alert && "is-alert")}><span>{stat.label}</span><strong>{stat.value}</strong></div>)}</div>
   </header>;
 }
 
@@ -5250,6 +5242,7 @@ export default function Customer360ProfileV2({
   const customerIdRef = useRef(customerId);
   customerIdRef.current = customerId;
   const isAdmin = getAdminRole() === "admin";
+  const unreadConversations = useUnreadConversations(embedded && isAdmin, customerId);
 
   // Bumped on every successful profile reload. The properties panel keys its
   // refetch on this, NOT on the address tuple: the PUT path re-syncs the
@@ -5963,6 +5956,587 @@ export default function Customer360ProfileV2({
 
 
 
+  const billingSummary = (
+    <div className="c360-overview-billing">
+                  {" "}
+                  <SectionTitle>{embedded ? "Billing status & prepay" : "Billing Summary"}</SectionTitle>{" "}
+                  {c.servicePausedAt && (
+                    <div
+                      role="alert"
+                      className="mb-3 rounded border border-hairline p-2.5"
+                    >
+                      <div className="text-12 font-medium text-alert-fg">
+                        {/* servicePausedOn is the ET calendar date; the raw
+                            servicePausedAt timestamp would render in the
+                            browser's timezone and land on the wrong day. */}
+                        Billing paused since{" "}
+                        {fmtDate(c.servicePausedOn || c.servicePausedAt)}
+                      </div>
+                      <div className="text-12 text-ink-secondary mt-0.5">
+                        Monthly dues are not being collected
+                        {c.servicePauseReason === "autopay_final_failure"
+                          ? " — autopay failed three times"
+                          : ""}
+                        . Visits are unaffected.{" "}
+                        {c.servicePauseReason === "autopay_final_failure"
+                          ? "The pause clears on its own when a payment from this customer succeeds; clearing"
+                          : "This pause was set manually and only clears manually; clearing"}{" "}
+                        it removes this block only — other billing guards
+                        (autopay state, plan type, prepaid coverage) still
+                        apply — and the paused months are never back-billed.
+                      </div>
+                      {isAdmin && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="mt-2"
+                          onClick={resumeBilling}
+                          disabled={resumingBilling}
+                        >
+                          {resumingBilling ? "Clearing…" : "Clear billing pause"}
+                        </Button>
+                      )}
+                      {resumeBillingErr && (
+                        <div className="text-12 text-alert-fg mt-1">
+                          {resumeBillingErr}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {/* Outside the banner: the pause is cleared by now, so the
+                      banner is gone, but dues still will not run and that is
+                      the whole reason someone clicked. */}
+                  {resumeBillingNote && (
+                    <div
+                      role="status"
+                      className="mb-3 rounded border border-hairline p-2.5 text-12 text-ink-secondary"
+                    >
+                      {resumeBillingNote}
+                    </div>
+                  )}
+                  {!embedded && <>
+                  <div className="grid grid-cols-2 gap-2 mb-3">
+                    {" "}
+                    <StatCardV2
+                      label="Balance Owed"
+                      value={fmtCurrency(balanceOwed)}
+                      alert={balanceOwed > 0}
+                    />{" "}
+                    <StatCardV2
+                      label="Lifetime Rev"
+                      value={fmtCurrency(c.lifetimeRevenue)}
+                    />{" "}
+                  </div>
+                  <div className="text-12 text-ink-secondary mb-1.5">
+                    {cards.length > 0
+                      ? `Card on file: ${cards[0].card_brand} ending ${cards[0].last_four}${cards.length > 1 ? ` · +${cards.length - 1} more` : ""}`
+                      : "No card on file"}
+                  </div>
+                  <div className="mb-3">
+                    <SectionTitle>
+                      Recent Transactions ({payments.length})
+                    </SectionTitle>
+                    {payments.length > 0 ? (
+                      payments.slice(0, 3).map((p, i) => {
+                        // Grey only FULLY refunded rows — a partial refund
+                        // still holds collected money (status stays 'paid') —
+                        // but flag partials with a chip so the gross amount
+                        // doesn't read as fully collected.
+                        const rowRefund = paymentRefundState(p);
+                        const isRefund = rowRefund.full;
+                        // Non-collected rows (upcoming/processing/failed) were
+                        // indistinguishable from paid ones, so the list read as
+                        // more collected revenue than Lifetime Rev counts.
+                        const isCollected = !p.status || p.status === "paid";
+                        return (
+                          <div
+                            key={i}
+                            className="py-1 text-12 border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-2"
+                          >
+                            {" "}
+                            <span
+                              className={cn(
+                                "u-nums flex-shrink-0",
+                                isRefund || !isCollected
+                                  ? "text-ink-secondary"
+                                  : "text-zinc-900",
+                              )}
+                            >
+                              {fmtCurrency(p.amount)}
+                            </span>{" "}
+                            {(rowRefund.partial ||
+                              (!isCollected && !isRefund)) && (
+                              <span className="flex-shrink-0 rounded-sm border border-hairline border-zinc-300 bg-surface-sunken px-1 text-11 text-ink-secondary uppercase">
+                                {rowRefund.partial
+                                  ? `${fmtCurrency(rowRefund.refundedCents / 100)} refunded`
+                                  : p.status}
+                              </span>
+                            )}{" "}
+                            <span className="text-ink-secondary truncate">
+                              {p.card_brand
+                                ? `${p.card_brand} …${p.last_four}`
+                                : p.method || p.processor || ""}
+                            </span>{" "}
+                            <span className="text-ink-secondary flex-shrink-0">
+                              {fmtDate(p.payment_date)}
+                            </span>{" "}
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="text-12 text-ink-secondary">
+                        No transactions yet
+                      </div>
+                    )}
+                  </div>
+                  </>}
+                  {displayedAnnualPrepayTerm && (
+                    <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-3">
+                      <div className="text-12 font-medium text-zinc-900">
+                        {displayedAnnualPrepayTerm.planLabel || "Annual Prepay"}
+                      </div>
+                      <div className="text-11 text-ink-secondary mt-0.5">
+                        Term ends {fmtDate(displayedAnnualPrepayTerm.termEnd)}
+                        {" · "}
+                        {String(displayedAnnualPrepayTerm.status || "").replace(/_/g, " ")}
+                        {displayedAnnualPrepayTerm.lastScheduledServiceDate
+                          ? ` · last scheduled ${fmtDate(displayedAnnualPrepayTerm.lastScheduledServiceDate)}`
+                          : ""}
+                      </div>
+                      {displayedAnnualPrepayTerm.renewalDecision && (
+                        <div className="text-11 text-ink-secondary mt-0.5">
+                          Decision:{" "}
+                          {displayedAnnualPrepayTerm.renewalDecision.replace(
+                            "_",
+                            " ",
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {isAdmin && (
+                    <Button
+                      size="sm"
+                      onClick={() => setAnnualPrepayOpen(true)}
+                      className="mb-3"
+                    >
+                      Record annual prepay
+                    </Button>
+                  )}
+                  {Array.isArray(data.prepaidPlans) && data.prepaidPlans.length > 0 && (
+                    <div className="mb-3">
+                      <SectionTitle>Prepaid Plans</SectionTitle>
+                      {data.prepaidPlans.map((plan) => (
+                        <div
+                          key={plan.seriesParentId}
+                          className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="text-12 font-medium text-zinc-900 truncate">
+                              {plan.serviceType}
+                              {plan.recurringPattern ? ` · ${plan.recurringPattern}` : ""}
+                            </div>
+                            <span
+                              className="inline-flex items-center rounded-full text-10 font-medium uppercase tracking-label"
+                              style={{
+                                height: 18,
+                                padding: "0 8px",
+                                background: plan.remainingVisits > 0 ? "#DCFCE7" : "#F4F4F5",
+                                color: plan.remainingVisits > 0 ? "#166534" : "#52525B",
+                              }}
+                            >
+                              {plan.remainingVisits > 0 ? "Active" : "Used"}
+                            </span>
+                          </div>
+                          <div className="text-11 text-ink-secondary mt-1">
+                            {plan.usedVisits} of {plan.paidVisits} used
+                            {plan.remainingVisits > 0
+                              ? ` · ${plan.remainingVisits} remaining`
+                              : ""}
+                            {" · "}${plan.perVisitAmount.toFixed(2)}/visit
+                          </div>
+                          <div className="text-11 text-ink-secondary mt-0.5">
+                            Total ${plan.seriesTotal.toFixed(2)}
+                            {plan.method ? ` · ${plan.method.replace(/_/g, " ")}` : ""}
+                            {plan.nextVisitDate ? ` · next ${fmtDate(plan.nextVisitDate)}` : ""}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {!embedded && <>
+                  <SectionTitle>Recent Invoices</SectionTitle>
+                  {invoices.slice(0, 3).map((inv, i) => (
+                    <div
+                      key={i}
+                      className="py-1 text-12 border-b border-hairline border-zinc-200/60 flex justify-between"
+                    >
+                      {" "}
+                      <span className="u-nums text-zinc-900">
+                        {fmtCurrency(inv.amount_due)}
+                      </span>{" "}
+                      <span
+                        className={cn(
+                          "font-medium uppercase tracking-label text-10",
+                          inv.status === "paid"
+                            ? "text-zinc-900"
+                            : "text-alert-fg",
+                        )}
+                      >
+                        {inv.status}
+                      </span>{" "}
+                      <span className="text-ink-secondary">
+                        {fmtDate(inv.created_at)}
+                      </span>{" "}
+                    </div>
+                  ))}
+                  </>}
+                </div>
+  );
+
+  const recipientDetails = (
+    <div className="mt-4">
+                {" "}
+                <SectionTitle>Contacts &amp; Recipients</SectionTitle>{" "}
+                <div className="px-3 py-3 mb-3 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
+                  <div className="text-10 uppercase tracking-label text-ink-tertiary mb-1">
+                    Default Bill-To (third-party payer)
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <select
+                      value={c.payerId ? String(c.payerId) : ""}
+                      disabled={payerSaving || !isAdmin}
+                      onChange={(e) => handlePayerSelect(e.target.value)}
+                      className="h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm min-w-[16rem] disabled:bg-zinc-100"
+                    >
+                      <option value="">Customer pays (self)</option>
+                      {payers.map((p) => (
+                        <option key={p.id} value={String(p.id)}>
+                          {p.display_name}
+                          {p.company_name && p.company_name !== p.display_name
+                            ? ` — ${p.company_name}`
+                            : ""}
+                        </option>
+                      ))}
+                      {isAdmin && <option value="__new__">＋ New payer…</option>}
+                    </select>
+                    {payerSaving && (
+                      <span className="text-12 text-ink-tertiary">Saving…</span>
+                    )}
+                  </div>
+                  {showNewPayer && isAdmin && (
+                    <div className="mt-2 px-3 py-3 bg-white border-hairline border-zinc-300 rounded-sm max-w-md">
+                      <div className="text-12 font-medium text-zinc-900 mb-2">
+                        New payer
+                      </div>
+                      <label className="block mb-2">
+                        <span className="u-label text-ink-tertiary block mb-1">
+                          Payer name *
+                        </span>
+                        <input
+                          type="text"
+                          value={newPayer.displayName}
+                          onChange={(e) => setNewPayer((p) => ({ ...p, displayName: e.target.value }))}
+                          placeholder="e.g. tenant, builder, or property manager name"
+                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                        />
+                      </label>
+                      <label className="block mb-2">
+                        <span className="u-label text-ink-tertiary block mb-1">
+                          Company (optional)
+                        </span>
+                        <input
+                          type="text"
+                          value={newPayer.companyName}
+                          onChange={(e) => setNewPayer((p) => ({ ...p, companyName: e.target.value }))}
+                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                        />
+                      </label>
+                      <label className="block mb-1">
+                        <span className="u-label text-ink-tertiary block mb-1">
+                          Invoice email (AP)
+                        </span>
+                        <input
+                          type="email"
+                          value={newPayer.apEmail}
+                          onChange={(e) => setNewPayer((p) => ({ ...p, apEmail: e.target.value }))}
+                          placeholder="Where this payer's invoices are emailed"
+                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                        />
+                      </label>
+                      <div className="text-12 text-ink-secondary mb-2">
+                        Without an email, invoices to this payer can’t be
+                        delivered until one is added in Finance → Payers.
+                      </div>
+                      <label className="block mb-2">
+                        <span className="u-label text-ink-tertiary block mb-1">
+                          Phone (optional)
+                        </span>
+                        <input
+                          type="tel"
+                          value={newPayer.apPhone}
+                          onChange={(e) => setNewPayer((p) => ({ ...p, apPhone: e.target.value }))}
+                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
+                        />
+                      </label>
+                      {newPayerError && (
+                        <div className="text-12 text-alert-fg mb-2">{newPayerError}</div>
+                      )}
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={saveNewPayer}
+                          disabled={newPayerSaving || !newPayer.displayName.trim()}
+                          className="h-9 px-3 text-13 font-medium bg-zinc-900 text-white rounded-sm disabled:opacity-50"
+                        >
+                          {newPayerSaving ? "Saving…" : "Create & select"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowNewPayer(false);
+                            setNewPayerError("");
+                          }}
+                          className="h-9 px-3 text-13 text-ink-secondary border-hairline border-zinc-300 rounded-sm bg-white"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {newPayerNotice && (
+                    <div className="text-12 text-ink-secondary mt-1.5">
+                      {newPayerNotice}
+                    </div>
+                  )}
+                  <div className="text-12 text-ink-secondary mt-1.5">
+                    Routes every invoice for this account to a builder /
+                    property manager instead of the customer. A single job can
+                    override this on the appointment. Manage payers in Finance →
+                    Payers.
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-3">
+                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
+                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
+                      Account owner / payer
+                    </div>
+                    <div className="text-12 font-medium text-zinc-900 mt-1">
+                      {[c.firstName, c.lastName].filter(Boolean).join(" ") ||
+                        c.companyName ||
+                        "Customer"}
+                    </div>
+                    <div className="text-12 text-ink-secondary break-all">
+                      {c.email || "No email"}
+                    </div>
+                  </div>
+                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
+                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
+                      On-location contact
+                    </div>
+                    <div className="text-12 font-medium text-zinc-900 mt-1">
+                      {c.serviceContactName || "Primary customer"}
+                    </div>
+                    <div className="text-12 text-ink-secondary break-all">
+                      {c.serviceContactEmail ||
+                        c.serviceContactPhone ||
+                        c.email ||
+                        "No contact"}
+                    </div>
+                  </div>
+                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
+                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
+                      Invoice email
+                    </div>
+                    <div className="text-12 font-medium text-zinc-900 mt-1">
+                      {recipientPrefsDraft.billingContactName || "Billing recipient"}
+                    </div>
+                    <div className="text-12 text-ink-secondary break-all">
+                      {recipientPrefsDraft.billingEmail || c.email || "No email"}
+                    </div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
+                  <label className="block">
+                    <span className="u-label text-ink-tertiary block mb-1">
+                      Billing contact name
+                    </span>
+                    <input
+                      id="c360-billing-contact-name"
+                      name="billingContactName"
+                      value={recipientPrefsDraft.billingContactName}
+                      disabled={!isAdmin}
+                      onChange={(e) =>
+                        setRecipientPrefsDraft((prev) => ({
+                          ...prev,
+                          billingContactName: e.target.value,
+                        }))
+                      }
+                      placeholder="Landlord, AP contact, property manager"
+                      className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="u-label text-ink-tertiary block mb-1">
+                      Billing recipient email
+                    </span>
+                    <input
+                      id="c360-billing-recipient-email"
+                      name="billingEmail"
+                      value={recipientPrefsDraft.billingEmail}
+                      disabled={!isAdmin}
+                      onChange={(e) =>
+                        setRecipientPrefsDraft((prev) => ({
+                          ...prev,
+                          billingEmail: e.target.value,
+                        }))
+                      }
+                      type="email"
+                      placeholder={c.email || "billing@example.com"}
+                      className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
+                    />
+                  </label>
+                </div>
+                <div className="flex items-center justify-between gap-3 mb-3">
+                  <div className="text-12 text-ink-secondary">
+                    Invoices and receipts use the billing email when set.
+                    Appointment reminders and service reports use the
+                    on-location contact when present.
+                  </div>
+                  <Button
+                    onClick={saveRecipientPrefs}
+                    disabled={recipientPrefsSaving || !isAdmin}
+                    className="shrink-0"
+                  >
+                    {recipientPrefsSaving ? "Saving..." : "Save Recipients"}
+                  </Button>
+                </div>
+                {recipientPrefsErr && (
+                  <div className="mb-3 text-12 text-alert-fg">
+                    {recipientPrefsErr}
+                  </div>
+                )}
+                {!embedded && <>
+                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
+                  {" "}
+                  <input
+                    id="c360-appointment-notify-primary"
+                    name="appointmentNotifyPrimary"
+                    type="checkbox"
+                    disabled={!isAdmin}
+                    className="mt-0.5"
+                    checked={notificationPrefs.appointment_notify_primary !== false}
+                    onChange={(e) =>
+                      updateNotificationPrefs({
+                        appointmentNotifyPrimary: e.target.checked,
+                        appointment_notify_primary: e.target.checked,
+                      })
+                    }
+                  />{" "}
+                  <div>
+                    {" "}
+                    <div className="text-12 font-medium text-zinc-900">
+                      Also send appointment SMS to the account owner
+                    </div>{" "}
+                    <div className="text-12 text-ink-secondary">
+                      On by default. On-location contacts receive appointment
+                      reminders too. Turn this off only if the account owner
+                      should stop receiving them.
+                    </div>{" "}
+                  </div>{" "}
+                </label>{" "}
+                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
+                  {" "}
+                  <input
+                    id="c360-service-report-notify-primary"
+                    name="serviceReportNotifyPrimary"
+                    type="checkbox"
+                    disabled={!isAdmin}
+                    className="mt-0.5"
+                    checked={notificationPrefs.service_report_notify_primary !== false}
+                    onChange={(e) =>
+                      updateNotificationPrefs({
+                        serviceReportNotifyPrimary: e.target.checked,
+                        service_report_notify_primary: e.target.checked,
+                      })
+                    }
+                  />{" "}
+                  <div>
+                    {" "}
+                    <div className="text-12 font-medium text-zinc-900">
+                      Also email service reports to the account owner
+                    </div>{" "}
+                    <div className="text-12 text-ink-secondary">
+                      On by default. Turn this off only if the account owner
+                      should stop receiving reports — a distinct
+                      service-contact email then receives them instead.
+                    </div>{" "}
+                  </div>{" "}
+                </label>{" "}
+                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
+                  {" "}
+                  <input
+                    id="c360-service-report-notify-billing"
+                    name="serviceReportNotifyBilling"
+                    type="checkbox"
+                    disabled={!isAdmin}
+                    className="mt-0.5"
+                    checked={notificationPrefs.service_report_notify_billing === true}
+                    onChange={(e) =>
+                      updateNotificationPrefs({
+                        serviceReportNotifyBilling: e.target.checked,
+                        service_report_notify_billing: e.target.checked,
+                      })
+                    }
+                  />{" "}
+                  <div>
+                    {" "}
+                    <div className="text-12 font-medium text-zinc-900">
+                      Also email service reports to the billing recipient
+                    </div>{" "}
+                    <div className="text-12 text-ink-secondary">
+                      Copies the billing recipient email (landlord, AP contact)
+                      on post-service reports. Requires a billing recipient
+                      email above; invoices are unaffected.
+                    </div>{" "}
+                  </div>{" "}
+                </label>{" "}
+                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
+                  {" "}
+                  <input
+                    id="c360-auto-flip-en-route"
+                    name="autoFlipEnRoute"
+                    type="checkbox"
+                    disabled={!isAdmin}
+                    className="mt-0.5"
+                    checked={
+                      notificationPrefs.auto_flip_en_route !== false
+                    }
+                    onChange={(e) => {
+                      const next = e.target.checked;
+                      updateNotificationPrefs({
+                        autoFlipEnRoute: next,
+                        auto_flip_en_route: next,
+                      });
+                    }}
+                  />{" "}
+                  <div>
+                    {" "}
+                    <div className="text-12 font-medium text-zinc-900">
+                      Auto-flip en route SMS
+                    </div>{" "}
+                    <div className="text-12 text-ink-secondary">
+                      When the tech&apos;s vehicle leaves a previous job area
+                      and the next job is this customer, fire the &quot;on the
+                      way&quot; SMS automatically. Off here = customer keeps
+                      manual en-route SMS but skips auto-flip.
+                    </div>{" "}
+                  </div>{" "}
+                </label>{" "}
+                </>}
+              </div>
+  );
+
   return renderProfile(
     <div
       // Portaled to <body>, so the overlay leaves the admin shell's DOM
@@ -5993,7 +6567,7 @@ export default function Customer360ProfileV2({
           .c360-mobile-actionbar { display: none; }
           .c360-mobile-footer-spacer { display: none; }
         `}</style>
-        {embedded ? <CustomerWorkspaceHeader c={c} balanceOwed={balanceOwed} nextService={upcomingFuture[0]} isAdmin={isAdmin} onEdit={openEditModal} onPrepayInvoice={() => setAnnualPrepayInvoiceOpen(true)} onPrepayRecord={() => setAnnualPrepayOpen(true)} onTab={changeWorkspaceTab} menuOpen={menuOpen} setMenuOpen={setMenuOpen} menuRef={menuRef} /> : <>
+        {embedded ? <CustomerWorkspaceHeader c={c} isAdmin={isAdmin} unreadConversations={unreadConversations} onEdit={openEditModal} onTab={changeWorkspaceTab} menuOpen={menuOpen} setMenuOpen={setMenuOpen} menuRef={menuRef} /> : <>
         {/* ZONE 1 — STICKY HEADER */}
         <div className="sticky top-0 z-10 bg-white border-b border-hairline border-zinc-200">
           {/* Desktop header (>= 768px) */}
@@ -6351,7 +6925,7 @@ export default function Customer360ProfileV2({
         </div>
         </>}
         {/* TAB CONTENT */}
-        <div className="c360-tab-content p-6 flex-1" id={profileContentId} role={embedded ? "tabpanel" : undefined} aria-label={embedded ? CUSTOMER_360_SECTIONS.find((section) => section.key === activeTab)?.label : undefined}>
+        <div className="c360-tab-content p-6 flex-1" id={profileContentId} role={embedded ? "tabpanel" : undefined} aria-label={embedded ? CUSTOMER_WORKSPACE_SECTIONS.find((section) => section.key === activeTab)?.label : undefined}>
           {profileActionErr && (
             <div role="alert" className="mb-4 px-3 py-2 text-14 text-alert-fg bg-red-50 border-hairline border-red-200 rounded-sm">
               {profileActionErr}
@@ -6600,237 +7174,7 @@ export default function Customer360ProfileV2({
                   )}
                 </div>
                 {/* Col 2: Billing snapshot */}
-                <div className="c360-overview-billing">
-                  {" "}
-                  <SectionTitle>Billing Summary</SectionTitle>{" "}
-                  {c.servicePausedAt && (
-                    <div
-                      role="alert"
-                      className="mb-3 rounded border border-hairline p-2.5"
-                    >
-                      <div className="text-12 font-medium text-alert-fg">
-                        {/* servicePausedOn is the ET calendar date; the raw
-                            servicePausedAt timestamp would render in the
-                            browser's timezone and land on the wrong day. */}
-                        Billing paused since{" "}
-                        {fmtDate(c.servicePausedOn || c.servicePausedAt)}
-                      </div>
-                      <div className="text-12 text-ink-secondary mt-0.5">
-                        Monthly dues are not being collected
-                        {c.servicePauseReason === "autopay_final_failure"
-                          ? " — autopay failed three times"
-                          : ""}
-                        . Visits are unaffected.{" "}
-                        {c.servicePauseReason === "autopay_final_failure"
-                          ? "The pause clears on its own when a payment from this customer succeeds; clearing"
-                          : "This pause was set manually and only clears manually; clearing"}{" "}
-                        it removes this block only — other billing guards
-                        (autopay state, plan type, prepaid coverage) still
-                        apply — and the paused months are never back-billed.
-                      </div>
-                      {isAdmin && (
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          className="mt-2"
-                          onClick={resumeBilling}
-                          disabled={resumingBilling}
-                        >
-                          {resumingBilling ? "Clearing…" : "Clear billing pause"}
-                        </Button>
-                      )}
-                      {resumeBillingErr && (
-                        <div className="text-12 text-alert-fg mt-1">
-                          {resumeBillingErr}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {/* Outside the banner: the pause is cleared by now, so the
-                      banner is gone, but dues still will not run and that is
-                      the whole reason someone clicked. */}
-                  {resumeBillingNote && (
-                    <div
-                      role="status"
-                      className="mb-3 rounded border border-hairline p-2.5 text-12 text-ink-secondary"
-                    >
-                      {resumeBillingNote}
-                    </div>
-                  )}
-                  <div className="grid grid-cols-2 gap-2 mb-3">
-                    {" "}
-                    <StatCardV2
-                      label="Balance Owed"
-                      value={fmtCurrency(balanceOwed)}
-                      alert={balanceOwed > 0}
-                    />{" "}
-                    <StatCardV2
-                      label="Lifetime Rev"
-                      value={fmtCurrency(c.lifetimeRevenue)}
-                    />{" "}
-                  </div>
-                  <div className="text-12 text-ink-secondary mb-1.5">
-                    {cards.length > 0
-                      ? `Card on file: ${cards[0].card_brand} ending ${cards[0].last_four}${cards.length > 1 ? ` · +${cards.length - 1} more` : ""}`
-                      : "No card on file"}
-                  </div>
-                  <div className="mb-3">
-                    <SectionTitle>
-                      Recent Transactions ({payments.length})
-                    </SectionTitle>
-                    {payments.length > 0 ? (
-                      payments.slice(0, 3).map((p, i) => {
-                        // Grey only FULLY refunded rows — a partial refund
-                        // still holds collected money (status stays 'paid') —
-                        // but flag partials with a chip so the gross amount
-                        // doesn't read as fully collected.
-                        const rowRefund = paymentRefundState(p);
-                        const isRefund = rowRefund.full;
-                        // Non-collected rows (upcoming/processing/failed) were
-                        // indistinguishable from paid ones, so the list read as
-                        // more collected revenue than Lifetime Rev counts.
-                        const isCollected = !p.status || p.status === "paid";
-                        return (
-                          <div
-                            key={i}
-                            className="py-1 text-12 border-b border-hairline border-zinc-200/60 flex justify-between items-center gap-2"
-                          >
-                            {" "}
-                            <span
-                              className={cn(
-                                "u-nums flex-shrink-0",
-                                isRefund || !isCollected
-                                  ? "text-ink-secondary"
-                                  : "text-zinc-900",
-                              )}
-                            >
-                              {fmtCurrency(p.amount)}
-                            </span>{" "}
-                            {(rowRefund.partial ||
-                              (!isCollected && !isRefund)) && (
-                              <span className="flex-shrink-0 rounded-sm border border-hairline border-zinc-300 bg-surface-sunken px-1 text-11 text-ink-secondary uppercase">
-                                {rowRefund.partial
-                                  ? `${fmtCurrency(rowRefund.refundedCents / 100)} refunded`
-                                  : p.status}
-                              </span>
-                            )}{" "}
-                            <span className="text-ink-secondary truncate">
-                              {p.card_brand
-                                ? `${p.card_brand} …${p.last_four}`
-                                : p.method || p.processor || ""}
-                            </span>{" "}
-                            <span className="text-ink-secondary flex-shrink-0">
-                              {fmtDate(p.payment_date)}
-                            </span>{" "}
-                          </div>
-                        );
-                      })
-                    ) : (
-                      <div className="text-12 text-ink-secondary">
-                        No transactions yet
-                      </div>
-                    )}
-                  </div>
-                  {displayedAnnualPrepayTerm && (
-                    <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-3">
-                      <div className="text-12 font-medium text-zinc-900">
-                        {displayedAnnualPrepayTerm.planLabel || "Annual Prepay"}
-                      </div>
-                      <div className="text-11 text-ink-secondary mt-0.5">
-                        Term ends {fmtDate(displayedAnnualPrepayTerm.termEnd)}
-                        {" · "}
-                        {String(displayedAnnualPrepayTerm.status || "").replace(/_/g, " ")}
-                        {displayedAnnualPrepayTerm.lastScheduledServiceDate
-                          ? ` · last scheduled ${fmtDate(displayedAnnualPrepayTerm.lastScheduledServiceDate)}`
-                          : ""}
-                      </div>
-                      {displayedAnnualPrepayTerm.renewalDecision && (
-                        <div className="text-11 text-ink-secondary mt-0.5">
-                          Decision:{" "}
-                          {displayedAnnualPrepayTerm.renewalDecision.replace(
-                            "_",
-                            " ",
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {isAdmin && (
-                    <Button
-                      size="sm"
-                      onClick={() => setAnnualPrepayOpen(true)}
-                      className="mb-3"
-                    >
-                      Record annual prepay
-                    </Button>
-                  )}
-                  {Array.isArray(data.prepaidPlans) && data.prepaidPlans.length > 0 && (
-                    <div className="mb-3">
-                      <SectionTitle>Prepaid Plans</SectionTitle>
-                      {data.prepaidPlans.map((plan) => (
-                        <div
-                          key={plan.seriesParentId}
-                          className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm p-2.5 mb-2"
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="text-12 font-medium text-zinc-900 truncate">
-                              {plan.serviceType}
-                              {plan.recurringPattern ? ` · ${plan.recurringPattern}` : ""}
-                            </div>
-                            <span
-                              className="inline-flex items-center rounded-full text-10 font-medium uppercase tracking-label"
-                              style={{
-                                height: 18,
-                                padding: "0 8px",
-                                background: plan.remainingVisits > 0 ? "#DCFCE7" : "#F4F4F5",
-                                color: plan.remainingVisits > 0 ? "#166534" : "#52525B",
-                              }}
-                            >
-                              {plan.remainingVisits > 0 ? "Active" : "Used"}
-                            </span>
-                          </div>
-                          <div className="text-11 text-ink-secondary mt-1">
-                            {plan.usedVisits} of {plan.paidVisits} used
-                            {plan.remainingVisits > 0
-                              ? ` · ${plan.remainingVisits} remaining`
-                              : ""}
-                            {" · "}${plan.perVisitAmount.toFixed(2)}/visit
-                          </div>
-                          <div className="text-11 text-ink-secondary mt-0.5">
-                            Total ${plan.seriesTotal.toFixed(2)}
-                            {plan.method ? ` · ${plan.method.replace(/_/g, " ")}` : ""}
-                            {plan.nextVisitDate ? ` · next ${fmtDate(plan.nextVisitDate)}` : ""}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  <SectionTitle>Recent Invoices</SectionTitle>
-                  {invoices.slice(0, 3).map((inv, i) => (
-                    <div
-                      key={i}
-                      className="py-1 text-12 border-b border-hairline border-zinc-200/60 flex justify-between"
-                    >
-                      {" "}
-                      <span className="u-nums text-zinc-900">
-                        {fmtCurrency(inv.amount_due)}
-                      </span>{" "}
-                      <span
-                        className={cn(
-                          "font-medium uppercase tracking-label text-10",
-                          inv.status === "paid"
-                            ? "text-zinc-900"
-                            : "text-alert-fg",
-                        )}
-                      >
-                        {inv.status}
-                      </span>{" "}
-                      <span className="text-ink-secondary">
-                        {fmtDate(inv.created_at)}
-                      </span>{" "}
-                    </div>
-                  ))}
-                </div>
+                {!embedded && billingSummary}
                 {/* Col 3: Health + Referral + Discounts */}
                 <div className="c360-overview-health">
                   {embedded && <div className="c360-health-heading"><HealthCircle score={score} /><div><strong>Customer health</strong><span>{score == null ? "No score available" : `${score} out of 100`}</span></div></div>}
@@ -6903,97 +7247,9 @@ export default function Customer360ProfileV2({
                     </div>
                   )}
                 </div>{" "}
-                {embedded && isAdmin && <Customer360Activity timeline={timeline} filter={timelineFilter} onFilter={setTimelineFilter} search={timelineSearch} onSearch={setTimelineSearch} error={timelineError} retrying={timelineRetrying} onRetry={retryTimeline} />}
               </div>{" "}
             </div>
           )}
-
-          {/* SERVICES */}
-          {activeTab === "services" && (
-            <div>
-              {" "}
-              <SectionTitle>Service History ({services.length})</SectionTitle>
-              {services.length === 0 ? (
-                <div className="text-13 text-ink-secondary">
-                  No service records
-                </div>
-              ) : (
-                <div className="flex flex-col">
-                  {services.map((s, i) => (
-                    <ServiceRowV2
-                      key={i}
-                      service={s}
-                      initiallyExpanded={
-                        !!initialScheduledServiceId &&
-                        String(s.scheduled_service_id || "") ===
-                          String(initialScheduledServiceId)
-                      }
-                    />
-                  ))}
-                </div>
-              )}
-              {upcomingScheduled.length > 0 && (
-                <div className="mt-5">
-                  {" "}
-                  <SectionTitle>
-                    Scheduled Services ({upcomingScheduled.length})
-                  </SectionTitle>
-                  {upcomingScheduled.map((s, i) => (
-                    <div
-                      key={i}
-                      className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 flex justify-between text-13"
-                    >
-                      {" "}
-                      <span className="font-medium text-zinc-900">
-                        {s.service_type}
-                      </span>{" "}
-                      <span className="text-ink-secondary">
-                        {fmtDate(s.scheduled_date)}
-                      </span>{" "}
-                      <span
-                        className={cn(
-                          "text-11 uppercase tracking-label font-medium",
-                          s.status === "confirmed"
-                            ? "text-zinc-900"
-                            : "text-ink-secondary",
-                        )}
-                      >
-                        {s.status}
-                      </span>{" "}
-                    </div>
-                  ))}
-                </div>
-              )}
-              {photos.length > 0 && (
-                <div className="mt-5">
-                  {" "}
-                  <SectionTitle>
-                    Service Photos ({photos.length})
-                  </SectionTitle>{" "}
-                  <div className="grid grid-cols-[repeat(auto-fill,minmax(100px,1fr))] gap-2">
-                    {photos.map((p, i) => (
-                      <div
-                        key={i}
-                        className="rounded-sm overflow-hidden bg-zinc-50 border-hairline border-zinc-200 aspect-square"
-                      >
-                        {" "}
-                        <img
-                          src={p.url || ""}
-                          alt={p.caption || ""}
-                          className="w-full h-full object-cover"
-                          onError={(e) => {
-                            e.target.style.display = "none";
-                          }}
-                        />{" "}
-                      </div>
-                    ))}
-                  </div>{" "}
-                </div>
-              )}
-            </div>
-          )}
-
-          {embedded && activeTab === "estimates" && <Customer360Estimates estimates={data.estimates || []} />}
 
           {/* BILLING */}
           {activeTab === "billing" && (
@@ -7019,6 +7275,14 @@ export default function Customer360ProfileV2({
                   value={fmtCurrency(c.lifetimeRevenue)}
                 />{" "}
               </div>{" "}
+              {embedded && <>
+                <div className="c360-billing-actions">
+                  <a className="c360-outline-link u-focus-ring" href={`/admin/invoices?customer=${c.id}`}>Manage invoices<ArrowUpRight size={15} /></a>
+                  {isAdmin && <Button variant="secondary" onClick={() => setAnnualPrepayInvoiceOpen(true)}>Create prepay invoice</Button>}
+                </div>
+                {billingSummary}
+                <Customer360Estimates estimates={data.estimates || []} />
+              </>}
               <BillingLanePanelV2
                 customerId={c.id}
                 billingMode={c.billingMode}
@@ -7210,17 +7474,6 @@ export default function Customer360ProfileV2({
             </div>
           )}
 
-          {/* CONTRACTS */}
-          {activeTab === "contracts" && (
-            <ElectronicAuthorizationContractV2
-              customer={c}
-              consents={paymentMethodConsents}
-              cards={cards}
-              contracts={contracts}
-              onRefresh={reloadCustomer}
-            />
-          )}
-
           {/* COMMS */}
           {(activeTab === "comms" || (embedded && commsComposerReady)) && (
             <div className={activeTab === "comms" ? "flex flex-col h-full" : "hidden"}>
@@ -7364,348 +7617,7 @@ export default function Customer360ProfileV2({
                   )}
                 </div>
               )}
-              {/* Notification preferences — admin override for routing fields
-                  ops needs to manage landlord / tenant / AP-contact accounts. */}
-              <div className="mt-4">
-                {" "}
-                <SectionTitle>Contacts &amp; Recipients</SectionTitle>{" "}
-                <div className="px-3 py-3 mb-3 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
-                  <div className="text-10 uppercase tracking-label text-ink-tertiary mb-1">
-                    Default Bill-To (third-party payer)
-                  </div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <select
-                      value={c.payerId ? String(c.payerId) : ""}
-                      disabled={payerSaving || !isAdmin}
-                      onChange={(e) => handlePayerSelect(e.target.value)}
-                      className="h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm min-w-[16rem] disabled:bg-zinc-100"
-                    >
-                      <option value="">Customer pays (self)</option>
-                      {payers.map((p) => (
-                        <option key={p.id} value={String(p.id)}>
-                          {p.display_name}
-                          {p.company_name && p.company_name !== p.display_name
-                            ? ` — ${p.company_name}`
-                            : ""}
-                        </option>
-                      ))}
-                      {isAdmin && <option value="__new__">＋ New payer…</option>}
-                    </select>
-                    {payerSaving && (
-                      <span className="text-12 text-ink-tertiary">Saving…</span>
-                    )}
-                  </div>
-                  {showNewPayer && isAdmin && (
-                    <div className="mt-2 px-3 py-3 bg-white border-hairline border-zinc-300 rounded-sm max-w-md">
-                      <div className="text-12 font-medium text-zinc-900 mb-2">
-                        New payer
-                      </div>
-                      <label className="block mb-2">
-                        <span className="u-label text-ink-tertiary block mb-1">
-                          Payer name *
-                        </span>
-                        <input
-                          type="text"
-                          value={newPayer.displayName}
-                          onChange={(e) => setNewPayer((p) => ({ ...p, displayName: e.target.value }))}
-                          placeholder="e.g. tenant, builder, or property manager name"
-                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
-                        />
-                      </label>
-                      <label className="block mb-2">
-                        <span className="u-label text-ink-tertiary block mb-1">
-                          Company (optional)
-                        </span>
-                        <input
-                          type="text"
-                          value={newPayer.companyName}
-                          onChange={(e) => setNewPayer((p) => ({ ...p, companyName: e.target.value }))}
-                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
-                        />
-                      </label>
-                      <label className="block mb-1">
-                        <span className="u-label text-ink-tertiary block mb-1">
-                          Invoice email (AP)
-                        </span>
-                        <input
-                          type="email"
-                          value={newPayer.apEmail}
-                          onChange={(e) => setNewPayer((p) => ({ ...p, apEmail: e.target.value }))}
-                          placeholder="Where this payer's invoices are emailed"
-                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
-                        />
-                      </label>
-                      <div className="text-12 text-ink-secondary mb-2">
-                        Without an email, invoices to this payer can’t be
-                        delivered until one is added in Finance → Payers.
-                      </div>
-                      <label className="block mb-2">
-                        <span className="u-label text-ink-tertiary block mb-1">
-                          Phone (optional)
-                        </span>
-                        <input
-                          type="tel"
-                          value={newPayer.apPhone}
-                          onChange={(e) => setNewPayer((p) => ({ ...p, apPhone: e.target.value }))}
-                          className="w-full h-9 px-3 text-13 bg-white border-hairline border-zinc-300 rounded-sm"
-                        />
-                      </label>
-                      {newPayerError && (
-                        <div className="text-12 text-alert-fg mb-2">{newPayerError}</div>
-                      )}
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={saveNewPayer}
-                          disabled={newPayerSaving || !newPayer.displayName.trim()}
-                          className="h-9 px-3 text-13 font-medium bg-zinc-900 text-white rounded-sm disabled:opacity-50"
-                        >
-                          {newPayerSaving ? "Saving…" : "Create & select"}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setShowNewPayer(false);
-                            setNewPayerError("");
-                          }}
-                          className="h-9 px-3 text-13 text-ink-secondary border-hairline border-zinc-300 rounded-sm bg-white"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  {newPayerNotice && (
-                    <div className="text-12 text-ink-secondary mt-1.5">
-                      {newPayerNotice}
-                    </div>
-                  )}
-                  <div className="text-12 text-ink-secondary mt-1.5">
-                    Routes every invoice for this account to a builder /
-                    property manager instead of the customer. A single job can
-                    override this on the appointment. Manage payers in Finance →
-                    Payers.
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-3">
-                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
-                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
-                      Account owner / payer
-                    </div>
-                    <div className="text-12 font-medium text-zinc-900 mt-1">
-                      {[c.firstName, c.lastName].filter(Boolean).join(" ") ||
-                        c.companyName ||
-                        "Customer"}
-                    </div>
-                    <div className="text-12 text-ink-secondary break-all">
-                      {c.email || "No email"}
-                    </div>
-                  </div>
-                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
-                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
-                      On-location contact
-                    </div>
-                    <div className="text-12 font-medium text-zinc-900 mt-1">
-                      {c.serviceContactName || "Primary customer"}
-                    </div>
-                    <div className="text-12 text-ink-secondary break-all">
-                      {c.serviceContactEmail ||
-                        c.serviceContactPhone ||
-                        c.email ||
-                        "No contact"}
-                    </div>
-                  </div>
-                  <div className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm">
-                    <div className="text-10 uppercase tracking-label text-ink-tertiary">
-                      Invoice email
-                    </div>
-                    <div className="text-12 font-medium text-zinc-900 mt-1">
-                      {recipientPrefsDraft.billingContactName || "Billing recipient"}
-                    </div>
-                    <div className="text-12 text-ink-secondary break-all">
-                      {recipientPrefsDraft.billingEmail || c.email || "No email"}
-                    </div>
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-3">
-                  <label className="block">
-                    <span className="u-label text-ink-tertiary block mb-1">
-                      Billing contact name
-                    </span>
-                    <input
-                      id="c360-billing-contact-name"
-                      name="billingContactName"
-                      value={recipientPrefsDraft.billingContactName}
-                      disabled={!isAdmin}
-                      onChange={(e) =>
-                        setRecipientPrefsDraft((prev) => ({
-                          ...prev,
-                          billingContactName: e.target.value,
-                        }))
-                      }
-                      placeholder="Landlord, AP contact, property manager"
-                      className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
-                    />
-                  </label>
-                  <label className="block">
-                    <span className="u-label text-ink-tertiary block mb-1">
-                      Billing recipient email
-                    </span>
-                    <input
-                      id="c360-billing-recipient-email"
-                      name="billingEmail"
-                      value={recipientPrefsDraft.billingEmail}
-                      disabled={!isAdmin}
-                      onChange={(e) =>
-                        setRecipientPrefsDraft((prev) => ({
-                          ...prev,
-                          billingEmail: e.target.value,
-                        }))
-                      }
-                      type="email"
-                      placeholder={c.email || "billing@example.com"}
-                      className="block w-full bg-white text-13 text-ink-primary border-hairline border-zinc-300 rounded-sm h-9 px-2.5 focus:outline-none focus:border-zinc-900"
-                    />
-                  </label>
-                </div>
-                <div className="flex items-center justify-between gap-3 mb-3">
-                  <div className="text-12 text-ink-secondary">
-                    Invoices and receipts use the billing email when set.
-                    Appointment reminders and service reports use the
-                    on-location contact when present.
-                  </div>
-                  <Button
-                    onClick={saveRecipientPrefs}
-                    disabled={recipientPrefsSaving || !isAdmin}
-                    className="shrink-0"
-                  >
-                    {recipientPrefsSaving ? "Saving..." : "Save Recipients"}
-                  </Button>
-                </div>
-                {recipientPrefsErr && (
-                  <div className="mb-3 text-12 text-alert-fg">
-                    {recipientPrefsErr}
-                  </div>
-                )}
-                {!embedded && <>
-                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
-                  {" "}
-                  <input
-                    id="c360-appointment-notify-primary"
-                    name="appointmentNotifyPrimary"
-                    type="checkbox"
-                    disabled={!isAdmin}
-                    className="mt-0.5"
-                    checked={notificationPrefs.appointment_notify_primary !== false}
-                    onChange={(e) =>
-                      updateNotificationPrefs({
-                        appointmentNotifyPrimary: e.target.checked,
-                        appointment_notify_primary: e.target.checked,
-                      })
-                    }
-                  />{" "}
-                  <div>
-                    {" "}
-                    <div className="text-12 font-medium text-zinc-900">
-                      Also send appointment SMS to the account owner
-                    </div>{" "}
-                    <div className="text-12 text-ink-secondary">
-                      On by default. On-location contacts receive appointment
-                      reminders too. Turn this off only if the account owner
-                      should stop receiving them.
-                    </div>{" "}
-                  </div>{" "}
-                </label>{" "}
-                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
-                  {" "}
-                  <input
-                    id="c360-service-report-notify-primary"
-                    name="serviceReportNotifyPrimary"
-                    type="checkbox"
-                    disabled={!isAdmin}
-                    className="mt-0.5"
-                    checked={notificationPrefs.service_report_notify_primary !== false}
-                    onChange={(e) =>
-                      updateNotificationPrefs({
-                        serviceReportNotifyPrimary: e.target.checked,
-                        service_report_notify_primary: e.target.checked,
-                      })
-                    }
-                  />{" "}
-                  <div>
-                    {" "}
-                    <div className="text-12 font-medium text-zinc-900">
-                      Also email service reports to the account owner
-                    </div>{" "}
-                    <div className="text-12 text-ink-secondary">
-                      On by default. Turn this off only if the account owner
-                      should stop receiving reports — a distinct
-                      service-contact email then receives them instead.
-                    </div>{" "}
-                  </div>{" "}
-                </label>{" "}
-                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
-                  {" "}
-                  <input
-                    id="c360-service-report-notify-billing"
-                    name="serviceReportNotifyBilling"
-                    type="checkbox"
-                    disabled={!isAdmin}
-                    className="mt-0.5"
-                    checked={notificationPrefs.service_report_notify_billing === true}
-                    onChange={(e) =>
-                      updateNotificationPrefs({
-                        serviceReportNotifyBilling: e.target.checked,
-                        service_report_notify_billing: e.target.checked,
-                      })
-                    }
-                  />{" "}
-                  <div>
-                    {" "}
-                    <div className="text-12 font-medium text-zinc-900">
-                      Also email service reports to the billing recipient
-                    </div>{" "}
-                    <div className="text-12 text-ink-secondary">
-                      Copies the billing recipient email (landlord, AP contact)
-                      on post-service reports. Requires a billing recipient
-                      email above; invoices are unaffected.
-                    </div>{" "}
-                  </div>{" "}
-                </label>{" "}
-                <label className="flex items-start gap-2 px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 cursor-pointer">
-                  {" "}
-                  <input
-                    id="c360-auto-flip-en-route"
-                    name="autoFlipEnRoute"
-                    type="checkbox"
-                    disabled={!isAdmin}
-                    className="mt-0.5"
-                    checked={
-                      notificationPrefs.auto_flip_en_route !== false
-                    }
-                    onChange={(e) => {
-                      const next = e.target.checked;
-                      updateNotificationPrefs({
-                        autoFlipEnRoute: next,
-                        auto_flip_en_route: next,
-                      });
-                    }}
-                  />{" "}
-                  <div>
-                    {" "}
-                    <div className="text-12 font-medium text-zinc-900">
-                      Auto-flip en route SMS
-                    </div>{" "}
-                    <div className="text-12 text-ink-secondary">
-                      When the tech&apos;s vehicle leaves a previous job area
-                      and the next job is this customer, fire the &quot;on the
-                      way&quot; SMS automatically. Off here = customer keeps
-                      manual en-route SMS but skips auto-flip.
-                    </div>{" "}
-                  </div>{" "}
-                </label>{" "}
-                </>}
-              </div>{" "}
+              {!embedded && recipientDetails}
               <div className="mt-4">
                 {" "}
                 <SectionTitle>
@@ -7737,9 +7649,97 @@ export default function Customer360ProfileV2({
             </div>
           )}
 
+          {embedded && isAdmin && activeTab === "comms" && <Customer360Activity timeline={timeline} filter={timelineFilter} onFilter={setTimelineFilter} search={timelineSearch} onSearch={setTimelineSearch} error={timelineError} retrying={timelineRetrying} onRetry={retryTimeline} />}
+
+          {/* SERVICES */}
+          {(embedded ? activeTab === "comms" : activeTab === "services") && (
+            <div>
+              {" "}
+              <SectionTitle>Service History ({services.length})</SectionTitle>
+              {services.length === 0 ? (
+                <div className="text-13 text-ink-secondary">
+                  No service records
+                </div>
+              ) : (
+                <div className="flex flex-col">
+                  {services.map((s, i) => (
+                    <ServiceRowV2
+                      key={i}
+                      service={s}
+                      initiallyExpanded={
+                        !!initialScheduledServiceId &&
+                        String(s.scheduled_service_id || "") ===
+                          String(initialScheduledServiceId)
+                      }
+                    />
+                  ))}
+                </div>
+              )}
+              {upcomingScheduled.length > 0 && (
+                <div className="mt-5">
+                  {" "}
+                  <SectionTitle>
+                    Scheduled Services ({upcomingScheduled.length})
+                  </SectionTitle>
+                  {upcomingScheduled.map((s, i) => (
+                    <div
+                      key={i}
+                      className="px-3 py-2 bg-zinc-50 border-hairline border-zinc-200 rounded-sm mb-1.5 flex justify-between text-13"
+                    >
+                      {" "}
+                      <span className="font-medium text-zinc-900">
+                        {s.service_type}
+                      </span>{" "}
+                      <span className="text-ink-secondary">
+                        {fmtDate(s.scheduled_date)}
+                      </span>{" "}
+                      <span
+                        className={cn(
+                          "text-11 uppercase tracking-label font-medium",
+                          s.status === "confirmed"
+                            ? "text-zinc-900"
+                            : "text-ink-secondary",
+                        )}
+                      >
+                        {s.status}
+                      </span>{" "}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {photos.length > 0 && (
+                <div className="mt-5">
+                  {" "}
+                  <SectionTitle>
+                    Service Photos ({photos.length})
+                  </SectionTitle>{" "}
+                  <div className="grid grid-cols-[repeat(auto-fill,minmax(100px,1fr))] gap-2">
+                    {photos.map((p, i) => (
+                      <div
+                        key={i}
+                        className="rounded-sm overflow-hidden bg-zinc-50 border-hairline border-zinc-200 aspect-square"
+                      >
+                        {" "}
+                        <img
+                          src={p.url || ""}
+                          alt={p.caption || ""}
+                          className="w-full h-full object-cover"
+                          onError={(e) => {
+                            e.target.style.display = "none";
+                          }}
+                        />{" "}
+                      </div>
+                    ))}
+                  </div>{" "}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* PROPERTY */}
           {activeTab === "property" && (
-            <div>
+            <div className="c360-details-content">
+              {embedded && recipientDetails}
               {/* Admin-only: GET /admin/customers/:id/properties is requireAdmin
                   (it lists every address on the account), so a technician
                   token would only ever see a 403 card here. */}
@@ -7856,7 +7856,7 @@ export default function Customer360ProfileV2({
           )}
 
           {/* COMPLIANCE */}
-          {activeTab === "compliance" && (
+          {(embedded ? activeTab === "property" : activeTab === "compliance") && (
             <div>
               {" "}
               <SectionTitle>Nutrient Ledger YTD</SectionTitle>{" "}
@@ -8027,9 +8027,19 @@ export default function Customer360ProfileV2({
               </Card>{" "}
             </div>
           )}
+          {/* CONTRACTS */}
+          {(embedded ? activeTab === "property" : activeTab === "contracts") && (
+            <ElectronicAuthorizationContractV2
+              customer={c}
+              consents={paymentMethodConsents}
+              cards={cards}
+              contracts={contracts}
+              onRefresh={reloadCustomer}
+            />
+          )}
+
         </div>
         {/* ZONE 4 — TIMELINE (admin-only endpoint) */}
-        {embedded && isAdmin && activeTab !== "overview" && <div className="c360-activity-after-tab"><Customer360Activity timeline={timeline} filter={timelineFilter} onFilter={setTimelineFilter} search={timelineSearch} onSearch={setTimelineSearch} error={timelineError} retrying={timelineRetrying} onRetry={retryTimeline} /></div>}
         {!embedded && isAdmin && <div className="border-t border-hairline border-zinc-200 px-6 py-4 bg-zinc-50">
           {" "}
           <div className="flex justify-between items-center mb-2.5 flex-wrap gap-2">

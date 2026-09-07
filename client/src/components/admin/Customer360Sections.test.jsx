@@ -14,17 +14,17 @@ function Sections() {
 
 it("makes every section reachable by keyboard with one selected tab in the tab order", () => {
   render(<Sections />);
-  const overview = screen.getByRole("tab", { name: "Overview" });
+  const overview = screen.getByRole("tab", { name: "Summary" });
   overview.focus();
   fireEvent.keyDown(overview, { key: "End" });
-  const compliance = screen.getByRole("tab", { name: "Compliance" });
+  const compliance = screen.getByRole("tab", { name: "Details" });
   expect(compliance).toHaveFocus();
   expect(compliance).toHaveAttribute("aria-selected", "true");
-  expect(screen.getByRole("tabpanel")).toHaveTextContent("compliance");
+  expect(screen.getByRole("tabpanel")).toHaveTextContent("property");
   expect(screen.getAllByRole("tab").filter((tab) => tab.tabIndex === 0)).toEqual([compliance]);
   fireEvent.keyDown(compliance, { key: "ArrowRight" });
   expect(overview).toHaveFocus();
   expect(overview).toHaveAttribute("aria-selected", "true");
   fireEvent.keyDown(overview, { key: "ArrowRight" });
-  expect(screen.getByRole("tabpanel")).toHaveTextContent("services");
+  expect(screen.getByRole("tabpanel")).toHaveTextContent("comms");
 });

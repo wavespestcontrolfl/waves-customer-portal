@@ -1549,11 +1549,15 @@ router.post('/messages/read', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Same conversation count consumed by Customer 360's one global badge.
+// Shared inbox count; Customer 360 may scope it to the selected customer.
 router.get('/unread-count', requireAdmin, async (req, res, next) => {
   try {
+    const { customerId } = req.query;
+    if (customerId !== undefined && (typeof customerId !== 'string' || !UUID_RE.test(customerId))) {
+      return res.status(400).json({ error: 'Invalid customer id' });
+    }
     const { countUnreadInboundSms } = require('../services/inbound-sms-read');
-    res.json(await countUnreadInboundSms({ excludePhones: ADMIN_PHONES }));
+    res.json(await countUnreadInboundSms({ excludePhones: ADMIN_PHONES, customerId }));
   } catch (err) { next(err); }
 });
 
