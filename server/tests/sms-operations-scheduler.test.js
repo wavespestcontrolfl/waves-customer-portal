@@ -17,6 +17,7 @@ jest.mock('../config/feature-gates', () => ({
 }));
 jest.mock('../utils/cron-lock', () => ({
   runExclusive: jest.fn(async (_name, run) => run()),
+  settleDeadRunningJobs: jest.fn(async () => ({})),
   recordJobStart: jest.fn(async () => {}), recordJobEnd: jest.fn(async () => {}),
 }));
 jest.mock('../services/sms-operational-actions', () => ({
