@@ -175,6 +175,94 @@ postgres('SMS commitments on PostgreSQL', () => {
     }
   });
 
+  test.each(['provider-first', 'queue-first', 'missing-provider'])(
+    'one scheduled promise creates one obligation and bell with %s', async (order) => {
+      await mockPg('sms_log').where({ id: message.id }).update({ operational_analysis: { version: 'already-analyzed' } });
+      const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
+        message_body: 'I will call tomorrow at 10 AM.', from_phone: message.to_phone, to_phone: message.from_phone,
+        created_at: new Date(message.created_at.getTime() - 600), scheduled_for: new Date(message.created_at.getTime() - 800),
+        status: order === 'provider-first' ? 'sending' : 'sent' };
+      const provider = { ...queue, id: randomUUID(), scheduled_for: null, status: 'sent',
+        created_at: new Date(message.created_at.getTime() - 500), metadata: { scheduled_sms_log_id: queue.id } };
+      await mockPg('sms_log').insert(queue);
+      const due = require('../utils/datetime-et').parseQuotedETDeadline('tomorrow at 10 AM', queue.created_at);
+      const extracted = { facts: [], dropped: 0, obligations: [{ party: 'waves', kind: 'callback', description: 'call',
+        quote: queue.message_body, basis: 'promise', property_id: context.properties[0].id,
+        due_text: 'tomorrow at 10 AM', due_at: due.toISOString() }] };
+      const extract = jest.fn(async () => extracted);
+      const run = () => runSmsOperationalActions({ conn: mockPg, extract });
+      if (order === 'provider-first') {
+        await mockPg('sms_log').insert(provider);
+        await run();
+        expect(extract).not.toHaveBeenCalled();
+        await mockPg('sms_log').where({ id: queue.id }).update({ status: 'sent' });
+      } else if (order === 'queue-first') {
+        await run();
+        await mockPg('sms_log').insert(provider);
+      }
+      await run(); await run();
+      expect(extract).toHaveBeenCalledTimes(1);
+      expect(extract.mock.calls[0][0].message.id).toBe(queue.id);
+      expect(extract.mock.calls[0][0].message).not.toHaveProperty('metadata');
+      const rows = await mockPg('call_commitments');
+      expect(rows).toHaveLength(1);
+      expect(rows[0].sms_log_id).toBe(queue.id);
+      expect(await mockPg('data_hygiene_source_extractions').whereIn('source_id', [queue.id, provider.id])).toHaveLength(1);
+      // A direct caller cannot bypass the same canonical-source guard under lock.
+      if (order !== 'missing-provider') {
+        expect(await recordMessageOperations(mockPg, provider, extracted, await loadMessageContext(mockPg, provider)))
+          .toEqual({ skipped: 'source_changed' });
+      }
+      NotificationService.notifyAdmin.mockClear();
+      await refreshSmsCommitments({ conn: mockPg, now: new Date(due.getTime() + 1000), verify: async () => ({ verdict: 'open' }) });
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+      expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata).toMatchObject({ sms_log_id: queue.id, commitment_id: rows[0].id });
+    },
+  );
+
+  test('separate scheduled sends with identical text keep separate obligations', async () => {
+    await mockPg('sms_log').where({ id: message.id }).update({ operational_analysis: { version: 'already-analyzed' } });
+    const rows = [1, 2].map(() => ({ ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
+      message_body: 'I will call.', from_phone: message.to_phone, to_phone: message.from_phone,
+      created_at: new Date(message.created_at.getTime() - 600), scheduled_for: new Date(message.created_at.getTime() - 800), status: 'sent' }));
+    await mockPg('sms_log').insert(rows);
+    const extract = async () => ({ facts: [], dropped: 0, obligations: [{ party: 'waves', kind: 'callback', description: 'call',
+      quote: 'I will call.', basis: 'promise', property_id: context.properties[0].id, due_text: null, due_at: null }] });
+    await runSmsOperationalActions({ conn: mockPg, extract });
+    expect(await mockPg('call_commitments')).toHaveLength(2);
+  });
+
+  test.each(['failed', 'undelivered'])('a queued source cannot hide its %s provider delivery', async (status) => {
+    message = { ...message, direction: 'outbound', message_type: 'manual', status: 'sent',
+      from_phone: message.to_phone, to_phone: message.from_phone, scheduled_for: new Date() };
+    await mockPg('sms_log').where({ id: message.id }).update(message);
+    const provider = { ...message, id: randomUUID(), scheduled_for: null, status, metadata: { scheduled_sms_log_id: message.id } };
+    await mockPg('sms_log').insert(provider);
+    const extract = jest.fn();
+    expect(await runSmsOperationalActions({ conn: mockPg, extract })).toMatchObject({ processed: 0, skipped: 1 });
+    expect(extract).not.toHaveBeenCalled();
+    expect(await mockPg('data_hygiene_source_extractions')).toHaveLength(0);
+    context = await loadMessageContext(mockPg, message);
+    expect(await recordMessageOperations(mockPg, message, result, context)).toEqual({ skipped: 'source_changed' });
+    expect(await mockPg('call_commitments')).toHaveLength(0);
+  });
+
+  test('a later provider failure preserves the one already captured scheduled promise', async () => {
+    message = { ...message, direction: 'outbound', message_type: 'manual', status: 'sent',
+      from_phone: message.to_phone, to_phone: message.from_phone, scheduled_for: new Date() };
+    await mockPg('sms_log').where({ id: message.id }).update(message);
+    const provider = { ...message, id: randomUUID(), scheduled_for: null, metadata: { scheduled_sms_log_id: message.id } };
+    await mockPg('sms_log').insert(provider);
+    context = await loadMessageContext(mockPg, message);
+    result.facts = [];
+    await recordMessageOperations(mockPg, message, result, context);
+    await mockPg('sms_log').where({ id: provider.id }).update({ status: 'undelivered' });
+    const rows = await listSmsCommitments(mockPg, { customerId: message.customer_id });
+    expect(rows).toHaveLength(1);
+    await applySmsCommitmentUpdate(mockPg, rows[0].id, { customerId: message.customer_id, action: 'dismiss', reviewedBy: randomUUID() });
+    expect(await mockPg('call_commitments').first()).toMatchObject({ status: 'dismissed' });
+  });
+
   test('profile-only processing does not call a provider for human outbound SMS', async () => {
     delete process.env.GATE_SMS_COMMITMENT_FOLLOWUP;
     await mockPg('sms_log').where({ id: message.id }).update({ direction: 'outbound',

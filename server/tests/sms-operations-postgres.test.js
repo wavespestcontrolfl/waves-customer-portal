@@ -83,6 +83,73 @@ postgres('SMS operations on PostgreSQL', () => {
     if (admin) { await admin.schema.dropSchemaIfExists(schema, true); await admin.destroy(); }
   });
 
+  test.each(['provider-first', 'queue-first', 'missing-provider'])(
+    'scheduled SMS keeps one source through %s capture order', async (order) => {
+      const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
+        twilio_sid: null, from_phone: message.to_phone, to_phone: message.from_phone,
+        message_body: 'I will call with an update.', created_at: new Date(message.created_at.getTime() - 600),
+        scheduled_for: new Date(message.created_at.getTime() - 800), status: order === 'provider-first' ? 'sending' : 'sent' };
+      const provider = { ...queue, id: randomUUID(), twilio_sid: `SM${randomUUID().replaceAll('-', '')}`,
+        scheduled_for: null, status: 'sent', created_at: new Date(message.created_at.getTime() - 500),
+        metadata: { scheduled_sms_log_id: queue.id, media_urls: ['https://invalid.example/private'] } };
+      await mockPg('sms_log').insert(queue);
+      const extract = jest.fn(async () => ({ facts: [], dropped: 0 }));
+      const run = () => runSmsOperationalActions({ conn: mockPg, extract });
+      if (order === 'provider-first') {
+        await mockPg('sms_log').insert(provider);
+        await run();
+        expect(await mockPg('data_hygiene_source_extractions').whereIn('source_id', [queue.id, provider.id])).toHaveLength(0);
+        await mockPg('sms_log').where({ id: queue.id }).update({ status: 'sent' });
+      } else if (order === 'queue-first') {
+        await run();
+        await mockPg('sms_log').insert(provider);
+      }
+      await run();
+      await run();
+      // Main's profile-only lane records one outbound no-fields receipt;
+      // the commitment child will use this same source selection for work.
+      const receipts = await mockPg('data_hygiene_source_extractions').whereIn('source_id', [queue.id, provider.id]);
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0].source_id).toBe(queue.id);
+      const loaded = await loadMessageContext(mockPg, message);
+      expect(loaded.history.map((entry) => entry.id)).toEqual(order === 'missing-provider' ? [queue.id] : [queue.id, provider.id]);
+      expect(JSON.stringify(loaded)).not.toContain('scheduled_sms_log_id');
+      expect(JSON.stringify(loaded)).not.toContain('invalid.example');
+    },
+  );
+
+  test('conversation history keeps provider evidence when scheduled send endpoints refresh', async () => {
+    const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
+      twilio_sid: null, from_phone: numbers.locations.bradenton.number, to_phone: '+12025550199',
+      created_at: new Date(message.created_at.getTime() - 600),
+      scheduled_for: new Date(message.created_at.getTime() - 800), status: 'sent' };
+    const provider = { ...queue, id: randomUUID(), twilio_sid: `SM${randomUUID().replaceAll('-', '')}`,
+      from_phone: message.to_phone, to_phone: message.from_phone, scheduled_for: null,
+      created_at: new Date(message.created_at.getTime() - 500), metadata: { scheduled_sms_log_id: queue.id } };
+    await mockPg('sms_log').insert([queue, provider]);
+    const loaded = await loadMessageContext(mockPg, message);
+    expect(loaded.history.map((entry) => entry.id)).toEqual([provider.id]);
+    expect(loaded.history[0]).not.toHaveProperty('metadata');
+  });
+
+  test('identical separate sends and orphan or mismatched provider links stay distinct', async () => {
+    const base = { ...message, direction: 'outbound', message_type: 'manual',
+      from_phone: message.to_phone, to_phone: message.from_phone, message_body: 'I will call with an update.',
+      created_at: new Date(message.created_at.getTime() - 500), status: 'sent' };
+    const rows = [
+      { metadata: {} }, { metadata: {} },
+      { metadata: { scheduled_sms_log_id: randomUUID() } },
+      { metadata: { scheduled_sms_log_id: 'malformed-link' } },
+      // An inbound row is never the scheduled source of an outbound delivery.
+      { metadata: { scheduled_sms_log_id: message.id } },
+    ].map((data) => ({ ...base, ...data, id: randomUUID(), twilio_sid: `SM${randomUUID().replaceAll('-', '')}` }));
+    await mockPg('sms_log').insert(rows);
+    await runSmsOperationalActions({ conn: mockPg, extract: async () => ({ facts: [], dropped: 0 }) });
+    expect(await mockPg('data_hygiene_source_extractions').whereIn('source_id', rows.map((row) => row.id))).toHaveLength(rows.length);
+    const loaded = await loadMessageContext(mockPg, message);
+    expect(new Set(loaded.history.map((entry) => entry.id))).toEqual(new Set(rows.map((row) => row.id)));
+  });
+
   test('concurrent retries commit one free-form proposal and extraction receipt', async () => {
     await Promise.all([
       recordMessageOperations(mockPg, message, result, context),
