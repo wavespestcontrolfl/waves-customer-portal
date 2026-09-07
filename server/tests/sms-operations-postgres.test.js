@@ -21,7 +21,8 @@ const connection = process.env.SMS_OPERATIONS_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 const schema = `sms_operations_${randomUUID().replaceAll('-', '')}`;
 const TABLES = ['customers', 'customer_properties', 'property_preferences', 'sms_log', 'call_log',
-  'call_commitments', 'data_hygiene_source_extractions', 'data_hygiene_proposals', 'notifications', 'audit_log',
+  'call_commitments', 'data_hygiene_source_extractions', 'data_hygiene_proposals', 'data_hygiene_sensitive_vault',
+  'notifications', 'audit_log',
   'emails', 'email_messages', 'estimates', 'invoices', 'scheduled_services', 'job_status_history', 'system_settings'];
 let mockPg;
 let admin;
@@ -35,9 +36,14 @@ postgres('SMS operations on PostgreSQL', () => {
     if (!/^\/(waves_test|waves_qa_[a-f0-9]+)$/.test(new URL(connection).pathname)) {
       throw new Error('Use an explicitly selected synthetic Waves QA database');
     }
+    process.env.DATA_HYGIENE_VAULT_KEY = 'sms-operations-synthetic-key';
     admin = knex({ client: 'pg', connection });
     await admin.schema.createSchema(schema);
     mockPg = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 5 } });
+    // pgcrypto lives in public. Expose the two vault functions inside the private
+    // schema so the search path stays isolated (an uncloned table is still an error).
+    await admin.raw('CREATE FUNCTION ??.pgp_sym_encrypt(text, text) RETURNS bytea LANGUAGE sql AS $$ SELECT public.pgp_sym_encrypt($1, $2) $$', [schema]);
+    await admin.raw('CREATE FUNCTION ??.pgp_sym_decrypt(bytea, text) RETURNS text LANGUAGE sql AS $$ SELECT public.pgp_sym_decrypt($1, $2) $$', [schema]);
     // Clone the MIGRATED schema, never application records. This catches real
     // column/type/CHECK drift; no simplified hand-written table definitions.
     for (const table of TABLES) {
@@ -68,31 +74,55 @@ postgres('SMS operations on PostgreSQL', () => {
   afterAll(async () => {
     delete process.env.GATE_SMS_OPERATIONAL_ACTIONS;
     delete process.env.GATE_SMS_OPERATIONAL_ACTIONS_SINCE;
+    delete process.env.DATA_HYGIENE_VAULT_KEY;
     if (mockPg) await mockPg.destroy();
     if (admin) { await admin.schema.dropSchemaIfExists(schema, true); await admin.destroy(); }
   });
 
-  test('concurrent retries commit one profile update and extraction receipt', async () => {
+  test('concurrent retries commit one free-form proposal and extraction receipt', async () => {
     await Promise.all([
       recordMessageOperations(mockPg, message, result, context),
       recordMessageOperations(mockPg, message, result, context),
     ]);
     expect(await mockPg('call_commitments')).toHaveLength(0);
     expect(await mockPg('data_hygiene_source_extractions')).toHaveLength(1);
-    expect(await mockPg('audit_log')).toHaveLength(1);
-    expect((await mockPg('property_preferences').first()).irrigation_controller_location).toBe('The controller is beside the garage');
-    expect((await mockPg('sms_log').first()).operational_analysis.facts[0].outcome).toBe('applied');
+    expect(await mockPg('audit_log')).toHaveLength(0);
+    expect(await mockPg('property_preferences')).toHaveLength(0);
+    const proposals = await mockPg('data_hygiene_proposals');
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]).toMatchObject({ field: 'irrigation_controller_location', status: 'pending', is_sensitive: true,
+      source: 'message-extraction', resource_type: 'property_preferences', resource_id: null, scope_id: message.customer_id });
+    expect(proposals[0].evidence.sms_log_id).toBe(message.id);
+    expect((await mockPg('sms_log').first()).operational_analysis.facts[0])
+      .toMatchObject({ outcome: 'proposed', proposal_id: proposals[0].id });
     // Existing Owed/call readers remain call-scoped. No new portal queue.
     expect(await listOpenCommitments(mockPg)).toEqual([]);
   });
 
-  test('an irrigation fact turns on a legacy false irrigation flag atomically', async () => {
-    await mockPg('property_preferences').insert({ customer_id: message.customer_id, irrigation_system: false });
+  test('an irrigation fact is proposed against the existing row and leaves the flag to approval', async () => {
+    const [row] = await mockPg('property_preferences').insert({ customer_id: message.customer_id, irrigation_system: false }).returning('*');
     context = await loadMessageContext(mockPg, message);
     await recordMessageOperations(mockPg, message, result, context);
-    expect(await mockPg('property_preferences').first()).toMatchObject({
-      irrigation_system: true, irrigation_controller_location: result.facts[0].value,
+    expect(await mockPg('property_preferences').first()).toMatchObject({ irrigation_system: false, irrigation_controller_location: null });
+    expect(await mockPg('data_hygiene_proposals').first()).toMatchObject({
+      field: 'irrigation_controller_location', resource_id: row.id, status: 'pending',
     });
+  });
+
+  test('a free-form fact for a customer without a preferences row becomes a vaulted proposal', async () => {
+    const quote = 'Please text before you arrive.';
+    message.message_body = quote;
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: quote });
+    result.facts = [{ field: 'special_instructions', quote, value: quote, property_id: context.properties[0].id, duration: 'durable' }];
+    await recordMessageOperations(mockPg, message, result, context);
+    expect(await mockPg('property_preferences')).toHaveLength(0);
+    const [proposal] = await mockPg('data_hygiene_proposals');
+    expect(proposal).toMatchObject({ field: 'special_instructions', resource_id: null, status: 'pending', is_sensitive: true });
+    expect(proposal.proposed_value).toMatchObject({ length: quote.length });
+    const [vault] = await mockPg('data_hygiene_sensitive_vault').where({ proposal_id: proposal.id });
+    const decrypted = await mockPg.raw('SELECT pgp_sym_decrypt(?::bytea, ?) AS raw', [vault.after_encrypted, process.env.DATA_HYGIENE_VAULT_KEY]);
+    expect(JSON.parse(decrypted.rows[0].raw)).toBe(quote);
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
   test.each([
@@ -113,7 +143,7 @@ postgres('SMS operations on PostgreSQL', () => {
   });
 
   test('an automatic write retires the pending extraction proposal for that field only', async () => {
-    const proposal = (scope_id, field) => ({ rule_id: 'extract.access_notes', rule_version: '1',
+    const proposal = (scope_id, field) => ({ rule_id: `extract.${field}`, rule_version: '1',
       resource_type: 'property_preferences', scope_type: 'customer', scope_id, field, source: 'message-extraction',
       proposed_value: JSON.stringify('Use the side gate'), confidence: 0.8, tier: 'medium', is_sensitive: true,
       status: 'pending', idempotency_key: randomUUID() });
@@ -121,17 +151,17 @@ postgres('SMS operations on PostgreSQL', () => {
     await mockPg('customers').insert({ id: otherCustomer, first_name: 'Other', last_name: 'Fixture',
       phone: '+12025550199', address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236' });
     await mockPg('data_hygiene_proposals').insert([
-      proposal(message.customer_id, 'access_notes'), proposal(message.customer_id, 'pet_details'),
-      proposal(otherCustomer, 'access_notes'),
+      proposal(message.customer_id, 'lockbox_code'), proposal(message.customer_id, 'pet_details'),
+      proposal(otherCustomer, 'lockbox_code'),
     ]);
-    message.message_body = 'Use the side gate.';
+    message.message_body = 'Lockbox code is #4321';
     await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
-    result.facts = [{ field: 'access_notes', value: message.message_body, quote: message.message_body,
+    result.facts = [{ field: 'lockbox_code', value: '#4321', quote: message.message_body,
       duration: 'durable', property_id: context.properties[0].id }];
     await recordMessageOperations(mockPg, message, result, context);
-    expect((await mockPg('property_preferences').first()).access_notes).toBe('Use the side gate.');
+    expect((await mockPg('property_preferences').first()).lockbox_code).toBe('#4321');
     const stale = await mockPg('data_hygiene_proposals').where({ status: 'stale' }).select('scope_id', 'field');
-    expect(stale).toEqual([{ scope_id: message.customer_id, field: 'access_notes' }]);
+    expect(stale).toEqual([{ scope_id: message.customer_id, field: 'lockbox_code' }]);
     expect(await mockPg('data_hygiene_proposals').where({ status: 'pending' })).toHaveLength(2);
   });
 
@@ -148,13 +178,14 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalled();
   });
 
-  test('a stated pet fills an empty pet field', async () => {
+  test('a stated pet becomes a pending proposal instead of a direct write', async () => {
     const quote = 'Two friendly dogs in the yard.';
     message.message_body = quote;
     await mockPg('sms_log').where({ id: message.id }).update({ message_body: quote });
     result.facts = [{ field: 'pet_details', quote, value: quote, property_id: context.properties[0].id, duration: 'durable' }];
     await recordMessageOperations(mockPg, message, result, context);
-    expect((await mockPg('property_preferences').first()).pet_details).toBe(quote);
+    expect(await mockPg('property_preferences')).toHaveLength(0);
+    expect(await mockPg('data_hygiene_proposals').first()).toMatchObject({ field: 'pet_details', status: 'pending', is_sensitive: true });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
@@ -265,6 +296,10 @@ postgres('SMS operations on PostgreSQL', () => {
   });
 
   test('a failed critical audit rolls back profile and processed marker together', async () => {
+    message.message_body = 'Lockbox code is #0123';
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
+    result.facts = [{ field: 'lockbox_code', value: '#0123', quote: message.message_body,
+      duration: 'durable', property_id: context.properties[0].id }];
     await mockPg.schema.renameTable('audit_log', 'audit_log_unavailable');
     try {
       await expect(recordMessageOperations(mockPg, message, result, context)).rejects.toThrow();
@@ -291,10 +326,14 @@ postgres('SMS operations on PostgreSQL', () => {
       await mockPg('sms_log').where({ id: message.id }).update({ message_body: message.message_body });
       result.facts = first ? [preference, ...result.facts] : [...result.facts, preference];
       await recordMessageOperations(mockPg, message, result, context);
-      expect(await mockPg('property_preferences').first()).toMatchObject({
-        contact_preference: value, irrigation_controller_location: 'The controller is beside the garage',
-      });
-      expect((await mockPg('sms_log').first()).operational_analysis.facts.every((fact) => fact.outcome === 'applied')).toBe(true);
+      const row = await mockPg('property_preferences').first();
+      expect(row).toMatchObject({ contact_preference: value, irrigation_controller_location: null });
+      const outcomes = (await mockPg('sms_log').first()).operational_analysis.facts.map((fact) => [fact.field, fact.outcome]);
+      expect(outcomes).toEqual(expect.arrayContaining([['contact_preference', 'applied'], ['irrigation_controller_location', 'proposed']]));
+      const [proposal] = await mockPg('data_hygiene_proposals');
+      expect(proposal).toMatchObject({ field: 'irrigation_controller_location', status: 'pending', scope_id: message.customer_id });
+      // A row created earlier in the same batch is the proposal's target; otherwise create-on-apply.
+      expect(proposal.resource_id).toBe(first ? row.id : null);
       expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     },
   );

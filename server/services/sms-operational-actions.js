@@ -11,7 +11,8 @@ const { runExclusive } = require('../utils/cron-lock');
 const { recordAuditEvent } = require('./audit-log');
 const NotificationService = require('./notification-service');
 const { hashExtractionSource, recordExtractionAttempt } = require('./data-hygiene/source-extraction-store');
-const { stalePendingExtractionProposals } = require('./data-hygiene/proposal-store');
+const { stalePendingExtractionProposals, upsertSensitiveProposal } = require('./data-hygiene/proposal-store');
+const { redactExcerpt } = require('./data-hygiene/message-extractor');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
 const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode } = require('./sms-operational-extractor');
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
@@ -21,6 +22,11 @@ const { isSmsReaction } = require('./sms-intent');
 const enabled = () => gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS');
 const SOURCE_COLUMNS = ['id', 'customer_id', 'direction', 'message_body', 'message_type', 'created_at', 'from_phone', 'to_phone', 'status'];
 const EXCLUDED_TYPES = ['opt_out', 'opt_in', 'sms_reaction', 'help_request'];
+// Owner decision 2026-09-07: only bounded typed fields auto-apply, each behind
+// its strict validator. Free-form text becomes a pending proposal in the
+// existing data-hygiene queue (vault, audit and revert included), so a missed
+// backstop can at most propose, never write.
+const AUTO_APPLY_FIELDS = new Set(['contact_preference', 'neighborhood_gate_code', 'property_gate_code', 'lockbox_code', 'garage_code']);
 const tail = (v) => String(v || '').replace(/\D/g, '').slice(-10);
 function eligibleMessage(message = {}) {
   const ourNumber = message.direction === 'inbound' ? message.to_phone : message.from_phone;
@@ -94,6 +100,23 @@ function factVerdict(fact, { properties, current = {}, expectedCurrent = current
   return 'apply';
 }
 
+// A grounded free-form fact for an empty field is offered to staff through the
+// existing sensitive-proposal path: the same row shape, vault and approve
+// route the data-hygiene extraction phase uses (create-on-apply when the
+// customer has no preferences row yet).
+async function proposeFact(trx, message, fact, current) {
+  const proposal = await upsertSensitiveProposal({
+    rule_id: 'extract.sms_profile', rule_version: VERSION, resource_type: 'property_preferences',
+    resource_id: current?.id || null, scope_type: 'customer', scope_id: message.customer_id, field: fact.field,
+    current_value: current?.[fact.field] ?? null, proposed_value: fact.value,
+    source: 'message-extraction', confidence: 0.9, tier: 'medium', is_sensitive: true,
+    evidence: { evidence_source_type: 'message', evidence_source_id: message.id, sms_log_id: message.id,
+      property_id: fact.property_id, extractor_version: VERSION,
+      source_excerpt: redactExcerpt(message.message_body, fact.value) },
+  }, { trx });
+  return proposal.id;
+}
+
 async function applyFacts(trx, message, facts, context) {
   const outcomes = [];
   let persistedCurrent = context.current;
@@ -103,6 +126,11 @@ async function applyFacts(trx, message, facts, context) {
     const negated = negatedReview && NEGATED_OR_UNCERTAIN.test(message.message_body);
     const verdict = duplicateField ? 'conflicting_facts' : negated ? negatedReview : factVerdict(fact, context);
     if (verdict !== 'apply') { outcomes.push({ ...fact, outcome: verdict }); continue; }
+    if (!AUTO_APPLY_FIELDS.has(fact.field)) {
+      const proposalId = await proposeFact(trx, message, fact, persistedCurrent);
+      outcomes.push({ ...fact, outcome: 'proposed', proposal_id: proposalId });
+      continue;
+    }
     const proposal = { scope_id: message.customer_id, field: fact.field, resource_id: persistedCurrent?.id || null };
     const target = await resolvePropertyPreferencesTarget({ trx, proposal, currentRaw: persistedCurrent?.[fact.field] ?? null });
     await applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw: fact.value });
@@ -163,7 +191,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
     await trx('sms_log').where({ id: message.id }).update({ operational_analysis: analysis });
     await recordExtractionAttempt({ trx, source_type: 'message', source_id: message.id, extractor_version: VERSION,
       source_hash: hashExtractionSource(message.message_body), status: 'ok', proposal_count: facts.length });
-    const exceptions = facts.filter((f) => !['applied', 'unchanged'].includes(f.outcome));
+    const exceptions = facts.filter((f) => !['applied', 'unchanged', 'proposed'].includes(f.outcome));
     if (exceptions.length + extracted.dropped) {
       const notif = await NotificationService.notifyAdmin('alert', 'SMS instructions need review',
         'Part of this message needs an evidence, property, or existing-value check. Open the customer profile to review the source conversation.',

@@ -48,6 +48,8 @@ describe('SMS operational evidence and ownership', () => {
     'The controller is outside\nIs it beside the garage',
     'May we park in the driveway', 'Please can we park in the driveway',
     'Ok to park in the driveway', 'Mind if we park in the driveway',
+    'I was wondering if you could leave the side gate open', 'Just wondering if we can park in the driveway',
+    'We wanted to ask whether the dogs can stay out', 'Any chance you could use the side door',
   ])('unpunctuated and Unicode questions require review: %s', (quote) => {
     expect(groundExtraction(extracted([], [fact({ field: 'pet_details', quote, value: quote })]), {
       message: source(quote), properties,

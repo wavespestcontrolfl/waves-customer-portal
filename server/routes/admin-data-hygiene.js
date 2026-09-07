@@ -36,6 +36,11 @@ const PROPERTY_PREF_APPLY_FIELDS = new Set([
   'parking_notes',
   'access_notes',
   'pet_details',
+  // Free-form fields the SMS profile lane proposes for review.
+  'special_instructions',
+  'irrigation_controller_location',
+  'irrigation_schedule_notes',
+  'irrigation_issues',
 ]);
 
 router.get('/proposals', async (req, res, next) => {
