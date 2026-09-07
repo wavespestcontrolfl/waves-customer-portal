@@ -2,11 +2,24 @@
 
 The refreshed repository SMS library reconstructs to **132 templates**. Before this change, the base sample is **70 one-segment / 61 two-segment / 1 three-segment**. After universal HTTPS display-prefix removal and seven copy trims, it is **73 / 59 / 0**. With longer personalization and conditional clauses, three-segment templates fall from **seven to four**. The separate review-outreach registry contains 13 bodies; all fit one segment with the base sample.
 
-**These are source-model counts, not production database counts or sent-message counts.** Templates and active variants are editable in the database. No production database was queried. A read-only Twilio Messages API request returned HTTP 401, so actual delivery rates, billed segments, registration state, and carrier filtering remain unverified. No SMS or email was sent.
+**These are source-model counts, not production database counts or sent-message counts.** Templates and active variants are editable in the database. No production database was queried. The local Twilio credentials initially returned HTTP 401; a subsequent read using the deployed credentials succeeded. Actual provider outcomes are reported separately below. No production database connection was made. No SMS or email was sent.
 
 Audit baseline: refreshed `origin/main`, SHA `aa1e0d15d` (September 7). The initial checkout count of 129 was superseded when remote main was refreshed: three newer templates are included here. Secure-card samples now use the actual 22-character bearer shape, and prep-guide links use 32-character tokens. Local implementation is on `codex/sms-audit-20260907`; deployment is not verified.
 
 The [template-by-template CSV](sms-template-audit-2026-09-07.csv) includes every modeled template, sample renders, segment counts before/after link formatting and copy changes, and its source file. The reproduction command also writes `.tmp/sms-audit/evidence.json` with every sample variable and scenario. Generated catalogue/evidence JSON is kept out of the diff; the CSV and source evaluator are committed.
+
+**Actual Twilio outcomes**
+
+Read-only Messages API inventory, `DateSent > 2026-08-08` through September 7 at 07:52 UTC, fully paginated (two pages). These are actual sends, distinct from the template examples above. Only aggregate counts were retained in the [provider evidence](sms-template-audit-2026-09-07-delivery.json); no recipients, bodies, credentials, or message identifiers were saved.
+
+- **1,465 outbound SMS: 1,457 delivered (99.45%), five failed, three undelivered.**
+- Provider segment distribution: **1,048 one-segment / 414 two-segment / 3 three-segment** SMS. All three three-segment messages delivered. The segment field is provider-reported; it is not a billing reconciliation.
+- Seven additional outbound MMS all delivered and are excluded from the SMS counts.
+- Four errors were [21610: recipient opted out](https://www.twilio.com/docs/api/errors/21610); three were [30006: landline or unreachable carrier](https://www.twilio.com/docs/api/errors/30006); one was [21266: sender and recipient numbers were the same](https://www.twilio.com/docs/api/errors/21266).
+- No 30007 filtering or 30034 unregistered-sender errors appeared in this window.
+- One Messaging Service has a `VERIFIED` A2P campaign. All 30 SMS-capable local numbers belong to that service; none were outside it. This verifies campaign status and service membership, not individual handset receipt or every carrier's registration state. [Twilio campaign status API](https://www.twilio.com/docs/messaging/api/usapptoperson-resource).
+
+The observed failures do not point to message length or spam filtering as the current problem. The three long-message observations are too few to establish a general delivery guarantee. Keep honoring opt-outs, avoid repeat attempts to landlines, and check the self-addressed-send path. Existing suppression/Lookup guards remain; this PR changes formatting/copy, not recipient policy.
 
 **How the counts were calculated**
 
@@ -60,7 +73,7 @@ The new copy-only migration uses exact-body comparisons for base rows and varian
 
 6. **Existing safeguards should be retained.** GSM punctuation normalization already runs at `server/services/twilio.js`; meaningful non-GSM names can still require Unicode. Measure final output instead of treating `.length` as segments. Maintain consent, STOP suppression, appropriate cadence, and sender identification. Twilio distinguishes informational consent from promotional consent and requires sender identification except in ongoing conversations; first messages need an opt-out instruction. This is a delivery-policy review, not a finding that live Waves consent is defective. [Twilio Messaging Policy](https://www.twilio.com/en-us/legal/messaging-policy).
 
-7. **Measure carrier outcomes once read access is restored.** Review a full recent period of outbound SMS by `delivered`, `undelivered`, `failed`, actual provider `num_segments`, sender, link host, and error code. The application audit currently records its own estimate (`server/services/messaging/audit.js:62`), while the status callback reads status/error fields (`server/routes/twilio-webhook.js:1384`). Correlate long messages with failures before blaming segmentation. Specifically check [30007 filtering](https://www.twilio.com/docs/api/errors/30007) and [30034 unregistered senders](https://www.twilio.com/docs/api/errors/30034), and verify every outbound local number belongs to the approved A2P campaign. Queue acceptance and final delivery are separate outcomes. [Twilio status lifecycle](https://www.twilio.com/docs/messaging/guides/outbound-message-status-in-status-callbacks).
+7. **Continue measuring provider outcomes.** Read access is restored and the 30-day results above show no filtering/unregistered-sender errors. Track `delivered`, `undelivered`, `failed`, provider `num_segments`, and error codes over time; correlate length with outcomes before attributing failures to it. The application audit records its own segment estimate, while the status callback records status/error fields. Queue acceptance and final delivery are separate outcomes. [Twilio status lifecycle](https://www.twilio.com/docs/messaging/guides/outbound-message-status-in-status-callbacks).
 
 **Local implementation and validation**
 
