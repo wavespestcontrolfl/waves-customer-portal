@@ -43,7 +43,10 @@ function estimateViewUrl(token) {
 // A content witness also catches writers that do not stamp updated_at.
 // JSONB is read with stable key ordering by pg; only database rows feed this.
 function estimateEditVersion(row) {
-  return crypto.createHash('sha256').update(JSON.stringify(row)).digest('hex');
+  // Repeat opens do not change the offer. Keep first-view status/data and
+  // every delivery/selection field in the witness so those still require review.
+  const { view_count: _viewCount, last_viewed_at: _lastViewedAt, ...content } = row;
+  return crypto.createHash('sha256').update(JSON.stringify(content)).digest('hex');
 }
 
 // Standard send-time expiry window. Also consumed by the expiration cron
