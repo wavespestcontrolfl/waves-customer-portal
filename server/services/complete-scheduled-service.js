@@ -4161,7 +4161,12 @@ async function completeScheduledService(completionInput, packetRecord = null) {
       treeShrubCloseoutWarnings = typedCompliance.warnings || [];
     }
 
-    if (claim.action === 'proceed' && !isIncompleteVisit && isWaveGuardLawnCompletion(svc)) {
+    // An invoice-issued closeout carries no application evidence: no plan
+    // is built, so no lawn_protocol_service_completions row, no planned
+    // treated_sqft / carrier / response stamps, and no protocol assignment
+    // on the visit (GitHub r3 P1 #4127) — the same exclusion as the
+    // assessment form gate.
+    if (claim.action === 'proceed' && !isIncompleteVisit && isWaveGuardLawnCompletion(svc) && !issuedInvoiceCloseout) {
       const plan = await buildPlanForService(svc.id, {
         db,
         equipmentSystemId: waveguardEquipmentSystemId || null,
@@ -4975,7 +4980,10 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             ...(isBackfillCompletion ? { backfill: true } : {}),
             // Provenance of an invoice-issued closeout (which invoice, sent
             // or paid) — the reason this record exists without a form.
-            ...(issuedInvoiceCloseout ? { issuedInvoiceCloseout: { invoiceId: issuedInvoiceCloseout.invoiceId, trigger: issuedInvoiceCloseout.trigger } } : {}),
+            // completedAt: the lifecycle end this transaction committed —
+            // the anchor a crash-resumed retry reuses for the tracker stamp
+            // (GitHub r3 P2 #4127) instead of the retry's own clock.
+            ...(issuedInvoiceCloseout ? { issuedInvoiceCloseout: { invoiceId: issuedInvoiceCloseout.invoiceId, trigger: issuedInvoiceCloseout.trigger, completedAt: completionLifecycleAt.toISOString() } } : {}),
             // Durable audit marker: this duration is an admin-typed override
             // of the running timer, not the timer itself (or a mid-flight
             // correction this finalization preserved — codex round 15). No
@@ -5743,6 +5751,23 @@ async function completeScheduledService(completionInput, packetRecord = null) {
         // old (customer_id, technician_id, service_date) soft-join
         // collided on same-day same-customer-same-tech double visits.
         [record] = await trx('service_records').insert(recordInsert).returning('*');
+        // Invoice-issued closeout: the issued invoice's record link lands in
+        // THIS transaction, beside the record it names (GitHub r3 P1 #4127).
+        // The post-commit suppressor lookup is best-effort by contract, so a
+        // transient miss there would leave a completed visit whose sent /
+        // paid invoice never points at its record — and no retry could
+        // repair it, since the succeeded attempt makes the completed visit
+        // a refusal. The invoice row is already locked FOR UPDATE above.
+        if (issuedInvoiceCloseout) {
+          await trx('invoices')
+            .where({ id: issuedInvoiceCloseout.invoiceId, scheduled_service_id: svc.id })
+            .whereNull('service_record_id')
+            .update({
+              service_record_id: record.id,
+              ...(svc.technician_id ? { technician_id: svc.technician_id } : {}),
+              updated_at: new Date(),
+            });
+        }
 
         // Park the owed follow-up's dispatch alert ATOMICALLY with the
         // completion (same trx — a completion that commits can never lack
@@ -6530,10 +6555,12 @@ async function completeScheduledService(completionInput, packetRecord = null) {
         effectiveTimeOnSite,
         svc,
         // Same-day (invoice-issued) closeout: the transaction's own wall
-        // clock, so the tracker agrees with the committed lifecycle stamp;
-        // a crash-resumed retry has no anchor in this process and takes the
-        // resume's clock (still that day, never the future).
-        { now: completionWallClockAt || new Date() },
+        // clock, so the tracker agrees with the committed lifecycle stamp.
+        // A crash-resumed retry has no clock in this process and reuses the
+        // end instant the original transaction froze on the record (GitHub
+        // r3 P2 #4127) — never the retry's clock, which would move
+        // completed_at forward or, after midnight, to ET noon.
+        { now: completionWallClockAt || finiteDate(parseJsonObject(record?.structured_notes)?.issuedInvoiceCloseout?.completedAt) || null },
       )
       // Live admin override (codex P2 #3152 round 10): the tracker's
       // completed_at must carry the corrected end too — date-window readers

@@ -749,6 +749,9 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
         reference: zelleRef,
         note: notice.memo ? `Zelle memo: ${notice.memo}` : '',
         recordedBy,
+        // The operator tapped Apply: the invoice-issued closeout writes them
+        // up as the actor of the visit transition (GitHub r3 P2 #4127).
+        recordedByTechnicianId: req.technicianId || null,
         sendReceipt: true,
         via: 'both',
         // Atomic with the paid flip: the exact-cent check above is advisory

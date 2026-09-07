@@ -77,11 +77,11 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
   afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
   afterAll(async () => { if (database) await database.destroy(); });
 
-  async function fixture({ serviceType, category = 'pest_control', profile = null }) {
+  async function fixture({ serviceType, category = 'pest_control', profile = null, customer = {} }) {
     f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(), invoiceId: randomUUID(), key: `fixture_${randomUUID().slice(0, 8)}` };
     const date = etDateString();
     await mockPg('customers').insert({ id: f.customerId, first_name: 'Fixture', last_name: 'Issued', phone: '+12025550123',
-      email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false, billing_mode: 'per_application' });
+      email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false, billing_mode: 'per_application', ...customer });
     await mockPg('technicians').insert({ id: f.techId, name: 'Fixture Technician', role: 'technician', active: true });
     await mockPg('services').insert({ id: f.catalogId, name: serviceType, service_key: f.key, category, is_active: true });
     if (profile) await mockPg('service_completion_profiles').insert({ service_key: f.key, ...profile });
@@ -267,6 +267,20 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('confirmed');
     expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(0);
     expect(await mockPg('service_completion_attempts').where({ service_id: f.serviceId })).toHaveLength(0);
+  });
+
+  test('a WaveGuard lawn visit closes with NO lawn protocol completion and no protocol assignment — there is no application evidence', async () => {
+    await fixture({ serviceType: 'Fixture Monthly Lawn Care Service', category: 'lawn', customer: { waveguard_tier: 'Gold' } });
+    await expectQuietCompletion(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg }));
+    expect(await mockPg('lawn_protocol_service_completions').where({ scheduled_service_id: f.serviceId })).toHaveLength(0);
+    const visit = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
+    expect(visit.lawn_protocol_key).toBeNull();
+    expect(visit.lawn_protocol_assignment_source).toBeNull();
+    // The issued invoice's record link is written in the completion
+    // transaction itself, never left to the post-commit lookup.
+    const [record] = await mockPg('service_records').where({ scheduled_service_id: f.serviceId });
+    expect((await mockPg('invoices').where({ id: f.invoiceId }).first()).service_record_id).toBe(record.id);
+    expect(new Date(record.structured_notes.issuedInvoiceCloseout.completedAt).getTime()).toBeLessThanOrEqual(Date.now() + 1000);
   });
 
   test('a second send is idempotent — the visit is already completed, nothing else changes', async () => {

@@ -3082,6 +3082,10 @@ const InvoiceService = {
       payUrl = null,
       requestReview = null,
       reviewDelayMinutes = null,
+      // The operator behind the delivery (GitHub r3 P2 #4127): the
+      // invoice-issued closeout below writes them up as the actor of the
+      // visit transition; null = an automated finalization (the system).
+      actorTechnicianId = null,
     } = {},
   ) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
@@ -3200,7 +3204,7 @@ const InvoiceService = {
 
       const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
 
-      await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent" });
+      await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
 
     }
 
