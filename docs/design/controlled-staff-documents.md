@@ -50,7 +50,9 @@ Changing that time clears approval; issuance verifies the reviewed wording and
 policy revision under the same library lock and rejects a stale preview. Draft
 PDF exports carry that effective time and preview hash too. A shared-value
 change refuses to cross any scheduled bound version or a later replacement
-that would hide currently bound wording.
+that would hide currently bound wording. A newer pending draft on an affected
+document must be reviewed and issued before changing shared policy values;
+the change never silently displaces that draft.
 
 ## Authoring and reviews
 

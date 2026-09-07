@@ -144,6 +144,8 @@ async function updatePolicy(input, at, actor) {
       // nor may an intervening bound version retain stale future values.
       if (![version, ...scheduled].some(item => item?.content_snapshot.used_variables.length)) continue;
       if (scheduled.length) reject(`Policy change must follow the scheduled version of ${document.name}.`, 409);
+      const latest = await trx('document_template_versions').where({ template_id: document.id }).orderBy('version_number', 'desc').first('published_at');
+      if (!latest.published_at) reject(`Issue the pending draft of ${document.name} before changing shared policy values.`, 409);
       const draft = await insertVersion(trx, document, sourceOf(version), actor);
       revised.push(await issueVersion(trx, document, draft, policy, at, actor));
     }

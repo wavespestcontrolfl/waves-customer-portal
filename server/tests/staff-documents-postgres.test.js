@@ -249,4 +249,22 @@ describeDb('controlled staff documents on PostgreSQL', () => {
     expect(completed.completed_at).toBeInstanceOf(Date);
   });
 
+  test('shared policy changes preserve pending drafts until review while ignoring superseded drafts', async () => {
+    const original = await documents.saveDraft({ key: `qa-${run}-pending-review`, kind: 'policy', access: 'staff', source: source() }, admin);
+    const reviewed = await documents.saveDraft({ id: original.document.id, base_version_id: original.version.id, source: source() }, admin);
+    await issue(original.document.id, reviewed.version.id, at(1000), admin);
+    const pending = await documents.saveDraft({ id: original.document.id, base_version_id: reviewed.version.id, source: source('## PTO {#pto-accrual}\nPending reviewed wording: {{policy.pto_accrual}}') }, admin);
+    const before = await db('document_template_versions').count('* as n').first();
+    await expect(documents.updatePolicy({ base_revision_id: policy.id, values: values(140) }, at(1100), admin)).rejects.toThrow(/Issue the pending draft/);
+    expect((await db('policy_values').orderBy('revision', 'desc').first()).id).toBe(policy.id);
+    expect((await db('document_template_versions').count('* as n').first()).n).toBe(before.n);
+    expect((await documents.list(admin)).find(document => document.id === original.document.id).version_id).toBe(pending.version.id);
+    const published = await issue(original.document.id, pending.version.id, at(1050), admin);
+    expect(published.content_snapshot.body).toContain('Pending reviewed wording');
+    policy = (await documents.updatePolicy({ base_revision_id: policy.id, values: values(140) }, at(1100), admin)).policy;
+    const latest = (await db('document_template_versions').where({ template_id: original.document.id }).orderBy('version_number', 'desc').first()).content_snapshot;
+    expect(latest.body).toContain('Pending reviewed wording');
+    expect(latest.body).toContain('140 hours');
+  });
+
 });
