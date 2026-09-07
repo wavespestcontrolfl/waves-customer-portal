@@ -53,8 +53,10 @@ function roleLabel(role) {
   return role.charAt(0).toUpperCase() + role.slice(1);
 }
 
-// Dark, not colored: the spec's unread marker for the inbox (§5.7). Hidden at
-// zero; capped so a backlog never widens the tab.
+// Alert red (owner ruling 2026-09-07, DECISIONS.md): an unread inbound text is
+// a genuine alert — a customer is waiting on a reply — so the Messages badge
+// takes `alert-fg`, not the inbox row's dark dot (§5.7). Hidden at zero;
+// capped so a backlog never widens the tab.
 function UnreadBadge({ count, style }) {
   if (!(count > 0)) return null;
   const label = count > 99 ? "99+" : String(count);
@@ -69,8 +71,8 @@ function UnreadBadge({ count, style }) {
           height: 18,
           padding: "0 5px",
           borderRadius: 9,
-          background: "var(--text-primary)",
-          color: "var(--surface-primary)",
+          background: "#C8312F", // tailwind `alert.fg`
+          color: "#FFFFFF",
           fontSize: 11,
           fontWeight: 500,
           lineHeight: 1,
