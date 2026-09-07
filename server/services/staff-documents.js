@@ -153,12 +153,13 @@ async function list(actor, { at = new Date(), search = '', asOf = false } = {}) 
   return result;
 }
 
-async function detail(id, actor, versionId = null, at = new Date()) {
+async function detail(id, actor, versionId = null, at = null) {
   const document = await loadDocument(db, id, actor);
   const versions = await db('document_template_versions').where({ template_id: id }).modify(q => {
     if (!isAdmin(actor)) q.whereNotNull('published_at').where('effective_at', '<=', new Date());
   }).orderBy('version_number', 'desc');
-  const version = versionId ? versions.find(v => v.id === versionId) : versions.find(v => v.effective_at && new Date(v.effective_at) <= new Date(at)) || (isAdmin(actor) ? versions[0] : null);
+  const inForceAt = at || new Date();
+  const version = versionId ? versions.find(v => v.id === versionId) : versions.find(v => v.effective_at && new Date(v.effective_at) <= new Date(inForceAt)) || (isAdmin(actor) && !at ? versions[0] : null);
   if (!version) reject('Version not found', 404);
   const policy = await policyAt(db, version.effective_at || new Date());
   const rendered = version.content_snapshot || renderSource(sourceOf(version), policy?.values);

@@ -65,7 +65,7 @@ router.post('/drafts', requireAdmin, handle(async (req, res) => {
 router.get('/:id', handle(async (req, res) => {
   validate(uuid.required(), req.params.id);
   if (req.query.version) validate(uuid.required(), req.query.version);
-  res.json(await documents.detail(req.params.id, actor(req), req.query.version, req.query.at ? instant(req.query.at) : new Date()));
+  res.json(await documents.detail(req.params.id, actor(req), req.query.version, req.query.at ? instant(req.query.at) : null));
 }));
 router.post('/:id/issue', requireAdmin, handle(async (req, res) => {
   validate(uuid.required(), req.params.id);

@@ -88,6 +88,7 @@ describeDb('controlled staff documents on PostgreSQL', () => {
     expect(first.content_snapshot.metadata.owner_role).toBe('Office Manager');
     expect(first.content_snapshot).not.toHaveProperty('owner_name');
     expect(first.approved_by).toBe(admin.id);
+    await expect(documents.detail(handbook.document.id, admin, null, at(-30))).rejects.toMatchObject({ status: 404 });
     previousHash = first.content_hash;
     await expect(db('document_template_versions').where({ id: first.id }).update({ body: 'tampered' })).rejects.toThrow(/immutable/);
     await expect(db('document_template_versions').where({ id: first.id }).del()).rejects.toThrow(/immutable/);

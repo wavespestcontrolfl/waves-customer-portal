@@ -35,6 +35,9 @@ const policySchema = Joi.object({
   paid_holidays: Joi.array().max(30).items(Joi.string().trim().max(100)).unique().required(),
   unpaid_holidays: Joi.array().max(30).items(Joi.string().trim().max(100)).unique().required(),
   equipment_deduction_terms: Joi.string().trim().max(4000).required(),
+}).custom((values, helpers) => {
+  if (/\[DECISION:|\{\{/.test(JSON.stringify(values))) return helpers.message('Resolve placeholders before issuing shared policy values.');
+  return values;
 });
 
 function reject(message, status = 400) {
@@ -112,7 +115,7 @@ function renderSource(source, policyValues) {
   return {
     title: source.title, body: rendered.rendered, sections: clauses,
     metadata: source.metadata, used_variables: rendered.usedVariables,
-    unresolved: [...rendered.unresolvedVariables, ...(source.body.match(/\[DECISION:[^\]]+\]/g) || [])],
+    unresolved: [...rendered.unresolvedVariables, ...(rendered.rendered.match(/\[DECISION:[^\]]+\]/g) || [])],
   };
 }
 

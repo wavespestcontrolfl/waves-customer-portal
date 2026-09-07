@@ -1,4 +1,4 @@
-const { sourceSchema, validate, renderSource, checkRelease, hash } = require('../services/staff-document-source');
+const { sourceSchema, policySchema, validate, renderSource, checkRelease, hash } = require('../services/staff-document-source');
 const { recordAnswers } = require('../services/staff-documents');
 const { validateTemplatePayload } = require('../services/document-template-library');
 const starters = require('../services/staff-document-starters');
@@ -31,6 +31,14 @@ test('unresolved shared values and owner decisions fail issuance', () => {
   expect(() => checkRelease(source(), renderSource(source()), new Date())).toThrow(/Resolve/);
   const decision = source('## Authority {#authority}\n[DECISION: choose the approver]');
   expect(() => checkRelease(decision, renderSource(decision), new Date())).toThrow(/approver/);
+});
+test('shared values cannot issue with embedded decision markers or merge placeholders', () => {
+  for (const pay_schedule of ['[DECISION: approve the pay dates]', '{{approved.pay_dates}}']) {
+    expect(() => validate(policySchema, { ...values, pay_schedule })).toThrow(/Resolve placeholders/);
+  }
+  const draft = source('## Pay dates {#pay-dates}\n{{policy.pay_schedule}}');
+  const rendered = renderSource(draft, { ...values, pay_schedule: '[DECISION: approve pay dates]' });
+  expect(() => checkRelease(draft, rendered, new Date())).toThrow(/Resolve/);
 });
 test('HTML, scripts, images and unsafe links cannot become executable content', () => {
   const html = renderSource(source('## Example {#example}\n<img src=x onerror=alert(1)> [bad](javascript:alert) [good](https://example.com/?q="x") **Bold**')).sections[0].html;
