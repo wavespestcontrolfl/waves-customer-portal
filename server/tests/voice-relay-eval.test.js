@@ -506,6 +506,9 @@ describe('voice relay eval — each expect key', () => {
     'We will call you back if you would like.',
     "We'll text you the details if that works for you.",
     'Le llamaremos si quiere.',
+    'No le llamaremos.', 'No se comunicará nadie con usted.', 'Nunca le llamaremos sin su permiso.',
+    'A Waves team member will not call you unless you request it.',
+    'Someone will never call you about this.', 'A team member will no longer call you.',
   ])('a callback offer or an unrelated question is not a definite callback promise: %s', (text) => {
     expect(runCheck(exp('commitment_requires_receipt', true), record({ agent: [text] })).status).toBe('pass');
   });
@@ -524,6 +527,9 @@ describe('voice relay eval — each expect key', () => {
       "I cannot quote a price; we'll call you back.", "I cannot quote a price, but we'll call you back.",
       'I cannot access your schedule, so we will call you back.', "I can't see the account and we'll call you back.",
       "We'll call you back tomorrow if the office is open.",
+      // A bare "no" that does not govern the promise verb excuses nothing.
+      'No worries, we will call you back.', 'No, we will call you back.', 'No hay problema, le llamaremos.',
+      'A Waves team member will call you unless you would rather not.',
     ]) {
       expect(runCheck(exp('commitment_requires_receipt', true), record({ agent: [text] })).status).toBe('fail');
     }

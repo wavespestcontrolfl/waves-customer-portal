@@ -74,14 +74,22 @@ const PROMISE_RE = /\b(?:(?:will|going to|gonna) (?:call|text|email|reach out|fo
 // back" still commits), and a trailing offer condition ("… if you would
 // like") makes the clause an offer, not a commitment.
 const COMMITMENT_CLAUSE_SPLIT_RE = /[.!?;]|\b(?:but|however|though|although|so|because|since|and|then)\b/i;
-const NON_COMMITMENT_PREFIX_RE = /\b(?:cannot|can['’]?t|won['’]?t|not|never|unable|if|whether|would you like|si|no puedo|no podemos)\b/i;
+// A Spanish bare "no" negates only the verb it precedes ("No le llamaremos"),
+// so it counts at the end of the prefix alone — "No worries, we will call
+// you" keeps its promise.
+const NON_COMMITMENT_PREFIX_RE = /\b(?:cannot|can['’]?t|won['’]?t|not|never|unable|if|whether|would you like|si|no puedo|no podemos|nunca|jamás|no(?=\s*$))\b/i;
+// The promise forms that end in the modal ("someone will", "a team member
+// will") can be negated right after it: "A team member will not call you".
+const NEGATED_AFTER_MODAL_RE = /^\s*(?:not|never|no longer)\b/i;
 const CONDITIONAL_OFFER_SUFFIX_RE = /\b(?:if (?:you|that|it)(?:['’]d| would| want| prefer| like|['’]s| is| works| helps)|should you (?:want|wish|prefer|like)|si (?:quiere|desea|gusta|prefiere|le parece))\b/i;
 function isCommitment(text) {
   return String(text).split(COMMITMENT_CLAUSE_SPLIT_RE).some((clause) => {
     const match = PROMISE_RE.exec(clause);
-    return !!match
-      && !NON_COMMITMENT_PREFIX_RE.test(clause.slice(0, match.index))
-      && !CONDITIONAL_OFFER_SUFFIX_RE.test(clause.slice(match.index + match[0].length));
+    if (!match) return false;
+    const after = clause.slice(match.index + match[0].length);
+    return !NON_COMMITMENT_PREFIX_RE.test(clause.slice(0, match.index))
+      && !NEGATED_AFTER_MODAL_RE.test(after)
+      && !CONDITIONAL_OFFER_SUFFIX_RE.test(after);
   });
 }
 const DEFAULT_TOOL_TEXT = 'That information is not available on this call. Tell the caller a Waves team member will follow up with the details.';
