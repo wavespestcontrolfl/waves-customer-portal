@@ -18,6 +18,7 @@ let defaultsEnabled;
 let failPlan;
 let withdrawDefaults;
 let catalog;
+let optionalOptions;
 beforeEach(async () => {
   history = [{ confirmed_by_tech: true, service_date: '2026-07-10', overall_score: 81 }];
   improvementsEnabled = true;
@@ -25,6 +26,7 @@ beforeEach(async () => {
   failPlan = false;
   withdrawDefaults = false;
   catalog = products;
+  optionalOptions = [];
   localStorage.clear();
   localStorage.setItem('waves_admin_token', 'test-token');
   localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
@@ -54,7 +56,8 @@ beforeEach(async () => {
         const previous = { id: 'previous', date: '2026-08-01', overall_score: 81 };
         data.plan.mixCalculator.items = items;
         data.plan.completionDefaults = { enabled: true, serviceId: visitId, propertyId: 'property-a', lawnSqft: sqft,
-          items, options: items, propertyMatchesProfile: true,
+          // Optional protocol rows reach the client as id/name only (server options), never as defaults.
+          items, options: [...items, ...optionalOptions.map((product) => ({ product: { id: product.id, name: product.name } }))], propertyMatchesProfile: true,
           history: { available: true, rows: [baseline, previous], current: null, baseline, previous, progress: { baselineDelta: 21 } } };
       }
     }
@@ -405,4 +408,21 @@ it('a plan refresh that changes the products drops an untouched generated report
   await waitFor(() => expect(screen.queryAllByPlaceholderText('Total')).toHaveLength(0));
   expect(notes.value).not.toContain('Applied the old products.');
   expect(notes.value).toContain('Hand notes before generating.');
+});
+
+it('an "Additional work" protocol option is built from the catalog product, not its bare id/name', async () => {
+  enableDefaults();
+  const optional = { id: 'test-hydretain', name: 'Hydretain', category: 'adjuvant', rate_unit: 'fl_oz', default_rate_per_1000: 6 };
+  optionalOptions = [optional];
+  render(<CompletionPanel service={service} products={[...catalog, optional]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.change(screen.getByText('Add protocol action...').parentElement, { target: { value: `lawn-plan-${optional.id}` } });
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  const selects = within(totals()[2].parentElement).getAllByRole('combobox');
+  // Rate unit, amount unit and method come from the catalog row (Codex r6 P1:
+  // a bare { id, name } read Hydretain's fl_oz as oz and broke the inventory
+  // conversion). The quantity itself stays an actual for the tech to enter.
+  expect(selects.slice(0, 3).map((select) => select.value)).toEqual(['fl_oz', 'fl_oz', 'broadcast_spray']);
+  expect(totals()[2].value).toBe('');
+  expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('');
 });
