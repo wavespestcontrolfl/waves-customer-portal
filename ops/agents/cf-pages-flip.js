@@ -11,15 +11,23 @@
 // which keys the vars file would add or overwrite.
 // --execute refuses while ANY production build is still in flight (it would
 // race the flip; the deployment list is checked, not just the latest
-// deployment), PATCHes the production env (other keys untouched),
-// retries the LIVE production deployment (the canonical one — never the
-// branch head, so an env flip can never ship unreleased code), follows it to
-// a terminal state, and ROLLS THE ENV BACK to the previous values if the
-// deployment cannot be created, lands on a different commit, or fails — a
-// pending env change must not lie in wait for the next unrelated deploy; a
-// key someone else changed meanwhile is never overwritten by the rollback. A
-// build that outlives the 60-minute hard ceiling is deleted best-effort
-// before the rollback and the operator is told to verify in the dashboard.
+// deployment, and checked AGAIN right after the env write so a build that
+// started in between is caught while the rollback is still clean),
+// PATCHes the production env (other keys untouched; the targets are
+// re-read and re-validated — value AND type — immediately before the
+// write), retries the LIVE production deployment (the canonical one — never
+// the branch head, so an env flip can never ship unreleased code), follows
+// it to a terminal state, and ROLLS THE ENV BACK to the previous values if
+// the deployment cannot be created, lands on a different commit, or fails —
+// a pending env change must not lie in wait for the next unrelated deploy; a
+// key someone else changed meanwhile is never overwritten by the rollback.
+// The env is only ever restored once every deployment this run created is
+// SETTLED: deleted, or followed to a terminal state. A deployment that can be
+// neither deleted nor observed leaves the env flipped and the error says so,
+// because restoring under a build that may still go live with the flipped
+// values would be the pending-change trap in reverse. A build that outlives
+// the 60-minute hard ceiling is deleted before the rollback and the operator
+// is told to verify in the dashboard.
 //
 // Scope guard: only a { PUBLIC_*: string } map is accepted, and a target that
 // already exists as a non-plain_text variable is refused before anything is
@@ -44,12 +52,14 @@ const fs = require('fs');
 // Soft timeout: after this we say so, but keep following the deployment —
 // it has already snapshotted the new env, so abandoning it would let it
 // activate the flip AFTER we reported a rollback. Hard ceiling: give up,
-// try to delete the deployment, roll the env back, and tell the operator to
-// verify in the dashboard.
+// delete the deployment, roll the env back, and tell the operator to verify
+// in the dashboard.
 const DEPLOY_TIMEOUT_MS = 20 * 60 * 1000;
 const DEPLOY_HARD_CEILING_MS = 60 * 60 * 1000;
 const POLL_MS = 20 * 1000;
+const LIST_ATTEMPTS = 3;
 const TERMINAL = new Set(['success', 'failure', 'canceled', 'skipped']);
+const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function makeClient({ token, account, fetchImpl = fetch }) {
   const base = `https://api.cloudflare.com/client/v4/accounts/${account}/pages/projects`;
@@ -87,16 +97,33 @@ function deployCommit(dep) {
   return dep && dep.deployment_trigger && dep.deployment_trigger.metadata && dep.deployment_trigger.metadata.commit_hash;
 }
 
-// Best-effort stop of a deployment that already snapshotted the flipped env.
-// Cloudflare has no cancel call; a forced delete is the closest thing, and the
-// operator is always told to verify.
+function describe(dep) {
+  return `${dep.id} (commit ${deployCommit(dep) || '?'}, ${dep.latest_stage && dep.latest_stage.name}/${dep.latest_stage && dep.latest_stage.status})`;
+}
+
+// Stop of a deployment that already snapshotted the flipped env. Cloudflare
+// has no cancel call; a forced delete is the closest thing. Returns whether
+// Cloudflare accepted it — a refused delete means the deployment can still
+// go live, and every caller acts on that.
 async function stopDeployment(cf, project, id, log) {
   try {
     await cf(`/${project}/deployments/${id}?force=true`, { method: 'DELETE' });
-    log(`deleted deployment ${id} (best effort)`);
+    log(`deleted deployment ${id}`);
+    return true;
   } catch (e) {
     log(`could not delete deployment ${id}: ${e.message}`);
+    return false;
   }
+}
+
+// A listing that backs a decision is retried; a listing that still fails
+// throws — an unknown state is never read as "no deployments".
+async function listWithRetry(fn, { attempts = LIST_ATTEMPTS, pollMs = POLL_MS, sleep = defaultSleep } = {}) {
+  let last;
+  for (let i = 1; i <= attempts; i++) {
+    try { return await fn(); } catch (e) { last = e; if (i < attempts) await sleep(pollMs); }
+  }
+  throw new Error(`deployment list unavailable after ${attempts} attempts: ${last.message}`);
 }
 
 // Non-terminal PRODUCTION deployments other than the live one, from the
@@ -117,11 +144,11 @@ function isInProgress(dep) {
   return Boolean(dep && dep.id) && !TERMINAL.has(status);
 }
 
-// Follows a deployment to a TERMINAL state. A transient poll error is retried
-// (three in a row is a failure); the soft timeout only logs. Past the hard
-// ceiling the deployment is deleted best-effort and the error says the
-// operator must verify in the dashboard, because it may still complete.
-async function waitForDeployment(cf, project, id, { timeoutMs = DEPLOY_TIMEOUT_MS, hardCeilingMs = DEPLOY_HARD_CEILING_MS, pollMs = POLL_MS, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), log = console.log } = {}) {
+// Follows a deployment to a TERMINAL state and returns it on success. Throws
+// err.terminal on failure/canceled/skipped, err.lost after three poll
+// failures in a row, err.ceiling past the hard ceiling — in the last two the
+// deployment may still finish. Never deletes anything.
+async function followDeployment(cf, project, id, { timeoutMs = DEPLOY_TIMEOUT_MS, hardCeilingMs = DEPLOY_HARD_CEILING_MS, pollMs = POLL_MS, sleep = defaultSleep, log = console.log } = {}) {
   const start = Date.now();
   let warned = false;
   let pollErrors = 0;
@@ -133,11 +160,8 @@ async function waitForDeployment(cf, project, id, { timeoutMs = DEPLOY_TIMEOUT_M
     } catch (e) {
       pollErrors += 1;
       if (pollErrors >= 3) {
-        // The deployment is still out there with the flipped env snapshotted:
-        // stop it before the caller rolls the env back.
-        await stopDeployment(cf, project, id, log);
-        const err = new Error(`lost track of deployment ${id} (3 poll failures: ${e.message}) — deleted best-effort; VERIFY in the Cloudflare dashboard`);
-        err.stopped = true;
+        const err = new Error(`lost track of deployment ${id} (3 poll failures: ${e.message})`);
+        err.lost = true;
         throw err;
       }
       await sleep(pollMs);
@@ -153,9 +177,8 @@ async function waitForDeployment(cf, project, id, { timeoutMs = DEPLOY_TIMEOUT_M
     }
     const elapsed = Date.now() - start;
     if (elapsed > hardCeilingMs) {
-      await stopDeployment(cf, project, id, log);
-      const err = new Error(`deployment ${id} still ${stage}/${status} after ${Math.round(hardCeilingMs / 60000)} min — deleted best-effort; VERIFY in the Cloudflare dashboard that it did not go live with the flipped env`);
-      err.stopped = true;
+      const err = new Error(`deployment ${id} still ${stage}/${status} after ${Math.round(hardCeilingMs / 60000)} min`);
+      err.ceiling = true;
       throw err;
     }
     if (!warned && elapsed > timeoutMs) { warned = true; log(`deployment ${id} still ${stage}/${status} after ${Math.round(timeoutMs / 60000)} min — following it to a terminal state (hard ceiling ${Math.round(hardCeilingMs / 60000)} min)`); }
@@ -163,19 +186,60 @@ async function waitForDeployment(cf, project, id, { timeoutMs = DEPLOY_TIMEOUT_M
   }
 }
 
+// Follows OUR deployment; when it can no longer be followed (lost / over the
+// ceiling) it is deleted so the env can be restored. err.stopped says the
+// deployment is settled; err.unsettled says it is NOT — Cloudflare refused
+// the delete and the deployment may still go live with the flipped env.
+async function waitForDeployment(cf, project, id, opts = {}) {
+  const log = opts.log || console.log;
+  try {
+    return await followDeployment(cf, project, id, opts);
+  } catch (e) {
+    if (e.terminal) throw e;
+    if (await stopDeployment(cf, project, id, log)) {
+      e.stopped = true;
+      e.message += ' — deleted; VERIFY in the Cloudflare dashboard that it did not go live with the flipped env';
+    } else {
+      e.unsettled = true;
+      e.message += ' — and it could NOT be deleted';
+    }
+    throw e;
+  }
+}
+
+// Settles a deployment that snapshotted the flipped env before the env may
+// be restored: delete it, or — when Cloudflare refuses — follow it to a
+// terminal state so it can no longer go live afterwards. Returns whether it
+// is settled; false means the env must NOT be restored.
+async function settleDeployment(cf, project, id, log, followOpts) {
+  if (await stopDeployment(cf, project, id, log)) return true;
+  log(`following deployment ${id} to a terminal state before touching the env`);
+  try {
+    await followDeployment(cf, project, id, { ...followOpts, log });
+    log(`WARNING: deployment ${id} went LIVE with the flipped env — verify or roll it back in the Cloudflare dashboard`);
+    return true;
+  } catch (e) {
+    if (e.terminal) { log(`deployment ${id} ended: ${e.message}`); return true; }
+    log(`could not settle deployment ${id}: ${e.message}`);
+    return false;
+  }
+}
+
 function prodEnvOf(p) {
   return (p.deployment_configs && p.deployment_configs.production && p.deployment_configs.production.env_vars) || {};
 }
 
-// The values this run expects to find for its keys (undefined = absent).
+// What this run expects to find for its keys right before writing: type AND
+// value (a secret's hidden value would otherwise compare equal to "absent"),
+// undefined = absent.
 function snapshotOf(vars, env) {
   const out = {};
-  for (const k of Object.keys(vars)) out[k] = env[k] ? env[k].value : undefined;
+  for (const k of Object.keys(vars)) out[k] = env[k] ? `${env[k].type || 'plain_text'}:${env[k].value}` : undefined;
   return out;
 }
 
 // Phase 1 — read, refuse, plan. No writes.
-async function planFlip(cf, project, vars) {
+async function planFlip(cf, project, vars, poll) {
   const p = await cf(`/${project}`);
   const env = prodEnvOf(p);
   const refusal = refusalReason(vars, env);
@@ -186,11 +250,8 @@ async function planFlip(cf, project, vars) {
   // up replacing the flip with its older env snapshot, or the retry could
   // roll production back under it. latest_deployment alone can be a preview
   // that hides one, so the production deployment LIST is checked.
-  const inflight = await activeProductionDeployments(cf, project, live.id);
-  if (inflight.length) {
-    const d = inflight[0];
-    throw new Error(`refused: ${inflight.length} production deployment(s) still building (${d.id}, commit ${deployCommit(d) || '?'}, ${d.latest_stage && d.latest_stage.name}/${d.latest_stage && d.latest_stage.status}) — wait for them, then re-run`);
-  }
+  const inflight = await listWithRetry(() => activeProductionDeployments(cf, project, live.id), poll);
+  if (inflight.length) throw new Error(`refused: ${inflight.length} production deployment(s) still building (${describe(inflight[0])}) — wait for them, then re-run`);
   return { live, liveCommit: deployCommit(live), planned: snapshotOf(vars, env) };
 }
 
@@ -215,12 +276,16 @@ async function restoreOurs(cf, project, vars, previous, log, why) {
   if (conflicts.length) log('NOT restored (changed concurrently — check by hand):', conflicts.join('; '));
 }
 
-// Phase 2 — revalidate immediately before writing, then PATCH. A PATCH whose
-// answer is lost may still have been applied, so it is undone the same
-// conditional way before the error surfaces.
+// Phase 2 — re-read, re-validate (type and value) immediately before
+// writing, then PATCH. A PATCH whose answer is lost may still have been
+// applied, so it is undone the same conditional way before the error
+// surfaces.
 async function writeEnv(cf, project, vars, planned, log) {
   const env = prodEnvOf(await cf(`/${project}`));
-  const drift = Object.keys(vars).filter((k) => (env[k] ? env[k].value : undefined) !== planned[k]);
+  const refusal = refusalReason(vars, env);
+  if (refusal) throw new Error(`refused: ${refusal} (changed since planning)`);
+  const now = snapshotOf(vars, env);
+  const drift = Object.keys(vars).filter((k) => now[k] !== planned[k]);
   if (drift.length) throw new Error(`refused: ${drift.join(', ')} changed since planning — re-run`);
   const previous = rollbackFragment(vars, env);
   const env_vars = {};
@@ -237,20 +302,30 @@ async function writeEnv(cf, project, vars, planned, log) {
 }
 
 // Phase 3 — retry the LIVE deployment. A lost answer may still have created
-// one: reconcile from the production list and stop anything in flight.
-async function redeployLive(cf, project, live, liveCommit, log) {
+// one: reconcile from the production list (retried; an unknown list is
+// err.unsettled, never "nothing was created") and settle anything in flight.
+async function redeployLive(cf, project, live, liveCommit, log, poll) {
   let dep;
   try {
     dep = await cf(`/${project}/deployments/${live.id}/retry`, { method: 'POST' });
   } catch (e) {
-    const strays = await activeProductionDeployments(cf, project, live.id).catch(() => []);
-    for (const d of strays) await stopDeployment(cf, project, d.id, log);
-    throw new Error(`retry failed ambiguously (${e.message}); stopped ${strays.length} in-flight production deployment(s) best-effort — VERIFY in the Cloudflare dashboard`);
+    let strays;
+    try {
+      strays = await listWithRetry(() => activeProductionDeployments(cf, project, live.id), poll);
+    } catch (listErr) {
+      const err = new Error(`retry failed ambiguously (${e.message}) and the deployment list could not be read to reconcile it (${listErr.message})`);
+      err.unsettled = true;
+      throw err;
+    }
+    let settled = true;
+    for (const d of strays) settled = (await settleDeployment(cf, project, d.id, log, poll)) && settled;
+    const err = new Error(`retry failed ambiguously (${e.message}); ${strays.length} in-flight production deployment(s) ${settled ? 'settled' : 'NOT settled'} — VERIFY in the Cloudflare dashboard`);
+    if (settled) err.stopped = true; else err.unsettled = true;
+    throw err;
   }
   if (liveCommit && deployCommit(dep) && deployCommit(dep) !== liveCommit) {
-    await stopDeployment(cf, project, dep.id, log);
     const err = new Error(`new deployment ${dep.id} is on commit ${deployCommit(dep)}, not the live ${liveCommit}`);
-    err.stopped = true;
+    if (await settleDeployment(cf, project, dep.id, log, poll)) err.stopped = true; else err.unsettled = true;
     throw err;
   }
   log('deployment created:', dep.id, 'commit=', deployCommit(dep), 'from live', live.id);
@@ -265,28 +340,51 @@ async function deploymentsSince(cf, project, sinceIso, excludeIds) {
 }
 
 // Apply vars, redeploy the live commit, and undo the env change on any
-// failure. Returns the finished deployment.
-async function applyAndDeploy(cf, project, vars, { log = console.log, wait = waitForDeployment } = {}) {
-  const plan = await planFlip(cf, project, vars);
+// failure once every deployment this run created is settled. Returns the
+// finished deployment. `poll` = { pollMs, sleep } for the listing retries and
+// the settle follow (tests shorten it).
+async function applyAndDeploy(cf, project, vars, { log = console.log, wait = waitForDeployment, poll = {} } = {}) {
+  const plan = await planFlip(cf, project, vars, poll);
   const { previous, patchedAt } = await writeEnv(cf, project, vars, plan.planned, log);
   let created = null;
   try {
-    const dep = await redeployLive(cf, project, plan.live, plan.liveCommit, log);
+    // A build that started between the planning check and the PATCH holds
+    // the OLD env and would publish it after ours: re-check now, while the
+    // rollback is still clean (nothing of ours has been created).
+    const inflight = await listWithRetry(() => activeProductionDeployments(cf, project, plan.live.id), poll);
+    if (inflight.length) throw new Error(`refused: ${inflight.length} production deployment(s) started while the env was being written (${describe(inflight[0])}) — wait for them, then re-run`);
+    const dep = await redeployLive(cf, project, plan.live, plan.liveCommit, log, poll);
     created = dep.id;
-    const done = await wait(cf, project, dep.id, { log });
+    const done = await wait(cf, project, dep.id, { log, ...poll });
     log('deployment finished:', done.id, done.latest_stage && done.latest_stage.status, 'url=', done.url);
+    // Last look before reporting success: a build that started before the env
+    // change and is still running would replace ours with the old values.
+    let stale = null;
+    try { stale = (await listWithRetry(() => activeProductionDeployments(cf, project, plan.live.id), poll)).filter((d) => d.id !== created && d.created_on && d.created_on < patchedAt); } catch (e) { log(`WARNING: could not re-check the deployment list after success (${e.message}) — verify in the Cloudflare dashboard that no older build is still running`); }
+    for (const d of stale || []) log(`WARNING: production deployment ${describe(d)} started BEFORE the env change and is still building — if it goes live it carries the OLD values; re-run this flip once it finishes`);
     return done;
   } catch (e) {
     // Never restore the env while a deployment could still finish with the
-    // flipped values snapshotted: a terminal one is done, the wait loop already
-    // stopped a lost/over-ceiling one, redeployLive stopped its own strays.
-    if (created && !e.terminal && !e.stopped) await stopDeployment(cf, project, created, log);
-    const others = await deploymentsSince(cf, project, patchedAt, [created, plan.live.id]).catch(() => []);
-    for (const d of others) {
-      log(`WARNING: production deployment ${d.id} (commit ${deployCommit(d) || '?'}, ${d.latest_stage && d.latest_stage.name}/${d.latest_stage && d.latest_stage.status}) started after the env change and carries the flipped values — verify or roll it back in the Cloudflare dashboard`);
+    // flipped values snapshotted: a terminal one is done, the wait loop and
+    // redeployLive settled theirs (or say they could not), anything else of
+    // ours is settled here.
+    let settled = !e.unsettled;
+    if (created && !e.terminal && !e.stopped && !e.unsettled) settled = await settleDeployment(cf, project, created, log, poll);
+    let others = [];
+    try {
+      others = await listWithRetry(() => deploymentsSince(cf, project, patchedAt, [created, plan.live.id]), poll);
+    } catch (listErr) {
+      log(`WARNING: could not list deployments started after the env change (${listErr.message}) — verify in the Cloudflare dashboard`);
+      e.message += ' — deployments started after the env change could not be listed; VERIFY in the Cloudflare dashboard';
+    }
+    for (const d of others) log(`WARNING: production deployment ${describe(d)} started after the env change and carries the flipped values — verify or roll it back in the Cloudflare dashboard`);
+    if (others.length) e.message += ` — and ${others.length} other production deployment(s) started after the env change carry the flipped values (see log)`;
+    if (!settled) {
+      log('env NOT rolled back: a deployment that snapshotted the flipped values could be neither deleted nor followed to a terminal state — restore by hand once it settles');
+      e.message += ' — env NOT rolled back; VERIFY in the Cloudflare dashboard and restore by hand once the deployment settles';
+      throw e;
     }
     await restoreOurs(cf, project, vars, previous, log, e.message);
-    if (others.length) e.message += ` — and ${others.length} other production deployment(s) started after the env change carry the flipped values (see log)`;
     throw e;
   }
 }
@@ -318,7 +416,7 @@ async function main(argv, env) {
   await applyAndDeploy(cf, project, vars);
 }
 
-module.exports = { makeClient, refusalReason, rollbackFragment, waitForDeployment, applyAndDeploy, deployCommit, isInProgress, stopDeployment, activeProductionDeployments, planFlip, writeEnv, redeployLive, restoreOurs, deploymentsSince };
+module.exports = { makeClient, refusalReason, rollbackFragment, followDeployment, waitForDeployment, settleDeployment, applyAndDeploy, deployCommit, isInProgress, stopDeployment, activeProductionDeployments, listWithRetry, planFlip, writeEnv, redeployLive, restoreOurs, deploymentsSince };
 
 if (require.main === module) {
   main(process.argv.slice(2), process.env).catch((e) => { console.error('ERROR', e.message); process.exit(1); });
