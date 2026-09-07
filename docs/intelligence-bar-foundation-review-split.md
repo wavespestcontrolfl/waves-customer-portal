@@ -152,3 +152,17 @@ B1 independent review also closed incidental page/note authority for unlinked
 leads and estimates and normalized UUID comparisons to PostgreSQL identity.
 The final scope passes 147 distinct unit/write-boundary cases and five isolated
 PostgreSQL cases. No provider adapter or live action ran in those checks.
+
+Shared-wrapper remediation in A detects known admin requests regardless of
+source directory. Five existing dispatch, equipment and Terminal request sites
+are proved against merged main and retained as unsupported, for 1,744 cumulative
+sites. Generic lookup verbs cannot turn an unsupported capability into a match.
+The final catalog/coverage suites pass 23 tests.
+
+B1 fresh name authority queries up to two normalized matches before accepting an
+unlinked lead or estimate. A duplicate inserted after resolution invalidates
+both model-proposed IDs; explicit viewed-record selection still distinguishes
+them. Linked and other-status duplicates count, while deleted leads do not.
+The final checks pass 148 unit/write-boundary tests and 13 real PostgreSQL tests.
+Generic action-object refusal hints (3947287736) remain deferred: recipient
+parsing must preserve earlier explicit targets across compound clauses.
