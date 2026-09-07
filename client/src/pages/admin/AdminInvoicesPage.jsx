@@ -5558,11 +5558,13 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
         customerId: selectedCustomer.id,
         serviceRecordId: selectedService?.id || null,
         scheduledServiceId: selectedOpenVisit?.id || null,
-        // The deposit credit the summary previewed: the server refuses the
-        // create (409 DEPOSIT_CREDIT_CHANGED) when the credit it would
-        // actually apply differs, so the customer is never sent an amount
-        // the operator did not see — nothing is created, nothing is sent.
-        ...(selectedOpenVisit ? { expectedDepositCredit: depositCredit } : {}),
+        // The PENDING deposit the summary previewed (uncapped — the server
+        // caps it at ITS total, which carries tax exemptions and county
+        // rates this preview does not): the server refuses the create (409
+        // DEPOSIT_CREDIT_CHANGED) when the deposit moved since, so the
+        // customer is never sent a balance the operator did not see —
+        // nothing is created, nothing is sent.
+        ...(selectedOpenVisit ? { expectedDepositCredit: Math.max(0, Number(selectedOpenVisit.deposit_credit) || 0) } : {}),
         serviceDate,
         lineItems: lineItems
           .filter((i) => i.description && Number(i.unit_price) !== 0)

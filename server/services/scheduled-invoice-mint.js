@@ -172,14 +172,19 @@ async function adoptScheduledInvoiceUnderMintLock(trx, scheduledServiceId) {
 // tier-extension apply holds FOR UPDATE on the rows it rewrites) between the
 // caller's read and this lock — retrying re-reads and bills the current
 // price instead of silently minting the stale one.
-// expectedDepositCredit: the deposit credit the caller previewed to the
-// operator (the Invoices page "Balance due"). The credit the mint actually
-// applies must match it to the cent, or the customer is sent a different
-// amount than the operator approved (GitHub P1 #4131: another invoice
-// consumed the deposit, a refund moved it, or the uncredited final attempt
-// below). A mismatch is terminal — 409 DEPOSIT_CREDIT_CHANGED thrown inside
-// the transaction, so nothing is minted and nothing is consumed; the caller
-// re-previews and tries again. Null = no expectation (every other caller).
+// expectedDepositCredit: the PENDING estimate deposit the caller previewed
+// to the operator (the Invoices page "Balance due" credits it, capped at
+// the total). The pending amount read under the lock must match it to the
+// cent, or the customer is sent a different balance than the operator
+// approved (GitHub P1 #4131: another invoice consumed the deposit, a refund
+// moved it, or the uncredited final attempt below applies none). It is the
+// deposit that is compared — never the applied (total-capped) credit: the
+// server total carries verified tax exemptions and county rates the form
+// preview does not, so a cap comparison would refuse a tax-exempt customer
+// on every retry (pre-push P1). A mismatch is terminal — 409
+// DEPOSIT_CREDIT_CHANGED thrown inside the transaction before anything is
+// created; the caller re-previews and tries again. Null = no expectation
+// (every other caller).
 async function mintScheduledServiceInvoiceWithDeposit({
   svc, buildCreateParams, assertEligibleInTrx = null, allowPriceMovement = false, expectedDepositCredit = null,
 }) {
@@ -222,6 +227,16 @@ async function mintScheduledServiceInvoiceWithDeposit({
         const depositCredit = withDeposit
           ? await pendingDepositCredit(sourceEstimateId, trx)
           : null;
+        const pendingAmount = depositCredit ? Number(depositCredit.amount) || 0 : 0;
+        if (expectedDepositCredit != null
+          && Math.round(pendingAmount * 100) !== Math.round(Number(expectedDepositCredit) * 100)) {
+          const e = new Error(`The deposit credit changed while this invoice was being created (previewed $${Number(expectedDepositCredit).toFixed(2)}, now $${pendingAmount.toFixed(2)}) — nothing was created. Reload the visit and try again.`);
+          e.status = 409;
+          e.code = 'DEPOSIT_CREDIT_CHANGED';
+          e.expectedDepositCredit = Number(expectedDepositCredit);
+          e.pendingDepositCredit = pendingAmount;
+          throw e;
+        }
         const created = await InvoiceService.create({
           ...buildCreateParams(),
           database: trx,
@@ -230,15 +245,6 @@ async function mintScheduledServiceInvoiceWithDeposit({
             : {}),
         });
         const effective = Number(created?.applied_deposit_credit) || 0;
-        if (expectedDepositCredit != null
-          && Math.round(effective * 100) !== Math.round(Number(expectedDepositCredit) * 100)) {
-          const e = new Error(`The deposit credit changed while this invoice was being created (previewed $${Number(expectedDepositCredit).toFixed(2)}, now $${effective.toFixed(2)}) — nothing was created. Reload the visit and try again.`);
-          e.status = 409;
-          e.code = 'DEPOSIT_CREDIT_CHANGED';
-          e.expectedDepositCredit = Number(expectedDepositCredit);
-          e.appliedDepositCredit = effective;
-          throw e;
-        }
         if (effective > 0) {
           const allocated = await consumeDepositCredit({
             estimateId: sourceEstimateId,

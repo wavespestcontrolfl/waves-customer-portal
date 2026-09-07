@@ -189,8 +189,20 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
     expect(mockTrigger).not.toHaveBeenCalled();
   });
 
-  describe('expectedDepositCredit (the operator-previewed credit)', () => {
-    it('mints when the applied credit matches the preview to the cent', async () => {
+  describe('expectedDepositCredit (the operator-previewed PENDING deposit)', () => {
+    it('mints when the pending deposit still matches the preview even though the applied credit is capped at a smaller server total (tax-exempt customer)', async () => {
+      programTransactions(makeTrx());
+      mockPending.mockResolvedValueOnce({ amount: 150 });
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1', applied_deposit_credit: 100 });
+      mockConsume.mockResolvedValueOnce(100);
+
+      const result = await mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 150 });
+
+      expect(result).toEqual({ invoice: { id: 'inv-1', applied_deposit_credit: 100 }, reused: false });
+      expect(mockConsume).toHaveBeenCalledWith(expect.objectContaining({ amount: 100 }));
+    });
+
+    it('mints when the pending deposit matches the preview to the cent', async () => {
       programTransactions(makeTrx());
       mockPending.mockResolvedValueOnce({ amount: 49 });
       mockCreate.mockResolvedValueOnce({ id: 'inv-1', applied_deposit_credit: 49 });
@@ -209,8 +221,8 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
 
       await expect(
         mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 49 }),
-      ).rejects.toMatchObject({ status: 409, code: 'DEPOSIT_CREDIT_CHANGED', expectedDepositCredit: 49, appliedDepositCredit: 20 });
-      expect(mockCreate).toHaveBeenCalledTimes(1);
+      ).rejects.toMatchObject({ status: 409, code: 'DEPOSIT_CREDIT_CHANGED', expectedDepositCredit: 49, pendingDepositCredit: 20 });
+      expect(mockCreate).not.toHaveBeenCalled(); // refused before anything is created
       expect(mockConsume).not.toHaveBeenCalled();
       expect(mockTrigger).not.toHaveBeenCalled();
     });
@@ -218,11 +230,11 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
     it('a zero preview refuses a credit that appeared since — the customer would be sent less than the operator approved', async () => {
       programTransactions(makeTrx());
       mockPending.mockResolvedValueOnce({ amount: 49 });
-      mockCreate.mockResolvedValueOnce({ id: 'inv-1', applied_deposit_credit: 49 });
 
       await expect(
         mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 0 }),
-      ).rejects.toMatchObject({ status: 409, code: 'DEPOSIT_CREDIT_CHANGED' });
+      ).rejects.toMatchObject({ status: 409, code: 'DEPOSIT_CREDIT_CHANGED', pendingDepositCredit: 49 });
+      expect(mockCreate).not.toHaveBeenCalled();
       expect(mockConsume).not.toHaveBeenCalled();
     });
 
@@ -231,14 +243,13 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
       mockPending.mockResolvedValue({ amount: 49 });
       mockCreate
         .mockResolvedValueOnce({ id: 'inv-a', applied_deposit_credit: 49 })
-        .mockResolvedValueOnce({ id: 'inv-b', applied_deposit_credit: 49 })
-        .mockResolvedValueOnce({ id: 'inv-c', applied_deposit_credit: 0 });
+        .mockResolvedValueOnce({ id: 'inv-b', applied_deposit_credit: 49 });
       mockConsume.mockResolvedValue(20);
 
       await expect(
         mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 49 }),
-      ).rejects.toMatchObject({ status: 409, code: 'DEPOSIT_CREDIT_CHANGED', appliedDepositCredit: 0 });
-      expect(mockCreate).toHaveBeenCalledTimes(3);
+      ).rejects.toMatchObject({ status: 409, code: 'DEPOSIT_CREDIT_CHANGED', pendingDepositCredit: 0 });
+      expect(mockCreate).toHaveBeenCalledTimes(2); // the uncredited third attempt is refused before create
       expect(mockTrigger).toHaveBeenCalledTimes(1); // the reconcile alert still goes out
     });
   });

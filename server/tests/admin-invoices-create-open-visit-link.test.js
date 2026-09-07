@@ -207,7 +207,7 @@ describe('POST /admin/invoices with an open visit link', () => {
     });
     mintScheduledServiceInvoiceWithDeposit.mockRejectedValueOnce(Object.assign(
       new Error('The deposit credit changed while this invoice was being created (previewed $50.00, now $0.00) — nothing was created. Reload the visit and try again.'),
-      { status: 409, code: 'DEPOSIT_CREDIT_CHANGED', expectedDepositCredit: 50, appliedDepositCredit: 0 },
+      { status: 409, code: 'DEPOSIT_CREDIT_CHANGED', expectedDepositCredit: 50, pendingDepositCredit: 0 },
     ));
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { scheduledServiceId: VISIT, expectedDepositCredit: 50 });
