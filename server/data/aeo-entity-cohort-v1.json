@@ -59,9 +59,13 @@
       "label": "Rodent",
       "pattern": "\\brodent|\\brats?\\b|\\bmice\\b"
     },
-    "bond_optional_renewable": {
-      "label": "Bond is optional and renewed annually",
-      "pattern": "(optional|annual|renewable|yearly|renew)[^.]{0,60}(bond|warranty)|(bond|warranty)[^.]{0,60}(optional|annual|renewable|yearly|renew)"
+    "bond_optional": {
+      "label": "Bond is optional (bought separately)",
+      "pattern": "(?:optional|elective|add-on|opt-in|separately|separate purchase)[^.]{0,60}(?:bond|warranty)|(?:bond|warranty)[^.]{0,60}(?:optional|elective|add-on|opt-in|separately|separate purchase)"
+    },
+    "bond_renewable": {
+      "label": "Bond renews annually",
+      "pattern": "(?:annual|annually|yearly|renew\\w*|each year|per year|every year)[^.]{0,60}(?:bond|warranty)|(?:bond|warranty)[^.]{0,60}(?:annual|annually|yearly|renew\\w*|each year|per year|every year)"
     },
     "independent": {
       "label": "Independently or family owned",
@@ -210,7 +214,8 @@
       "source": "Termite copy rulings (waves-content skill); owner ruling 2026-09-07",
       "expect": [
         "termite",
-        "bond_optional_renewable"
+        "bond_optional",
+        "bond_renewable"
       ],
       "forbid": [
         "damage_repair_coverage",

@@ -33,8 +33,28 @@ function compile(def) {
 // it offers fumigation" still flags fumigation. "no-contract" and "not only"
 // are not negations.
 const NEGATION_RE = /\b(?:not(?! only)|no(?!-)|never|none|nor|without|except|excluding|other than|aside from|outside of|rather than|instead of|doesn'?t|does not|do not|don'?t|isn'?t|is not|aren'?t|are not|wasn'?t|was not|cannot|can'?t|won'?t|will not|shouldn'?t|should not|neither)\b/i;
-const CLAUSE_BOUNDARY_RE = /[.!?;:\n]|,?\s+(?:but|however|whereas|although|though|yet)\b/i;
+// Clause boundaries: sentence punctuation, a contrastive conjunction, or a
+// coordinating "and"/"or" that starts a new predicate ("is a franchise and
+// does not offer fumigation"). A bare "or" inside a noun list ("insulation or
+// fumigation") is not a boundary, so a negated list stays negated.
+const CLAUSE_BOUNDARY_RE = /[.!?;\n]|,?\s+(?:but|however|whereas|although|though|yet)\b|,?\s+(?:and|or)\s+(?=(?:\w+\s+){0,2}(?:is|are|was|were|does|do|did|offers?|provides?|has|have|will|can|covers?|includes?|charges?|treats?|serves?|handles?|performs?|operates?|holds?)\b)/i;
+// "does not offer: fumigation, insulation" — a negated verb right before a
+// colon governs the list that follows; "is not a franchise: it offers …" does not.
+const LIST_INTRO_RE = /\b(?:offer|offers|include|includes|provide|provides|cover|covers|do|does|perform|performs|treat|treats|handle|handles|sell|sells|service|services|are|is)\s*$/i;
 const CLAUSE_WINDOW = 80;
+
+function leadClause(text) {
+  const clause = text.split(CLAUSE_BOUNDARY_RE).pop();
+  const colon = clause.lastIndexOf(':');
+  if (colon < 0) return clause;
+  const head = clause.slice(0, colon);
+  const list = clause.slice(colon + 1);
+  return LIST_INTRO_RE.test(head) && NEGATION_RE.test(head.slice(-40)) ? `${head.slice(-40)} ${list}` : list;
+}
+
+function trailClause(text) {
+  return text.split(CLAUSE_BOUNDARY_RE)[0].split(':')[0];
+}
 
 // Engines emit typographic apostrophes; the contraction patterns expect '.
 function normalizeAnswer(text) {
@@ -46,8 +66,8 @@ function asserted(compiled, answer) {
     if (compiled.rejectValue !== undefined && match[1] === compiled.rejectValue) continue;
     const start = match.index;
     const end = start + match[0].length;
-    const before = answer.slice(Math.max(0, start - CLAUSE_WINDOW), start).split(CLAUSE_BOUNDARY_RE).pop();
-    const after = answer.slice(end, end + CLAUSE_WINDOW).split(CLAUSE_BOUNDARY_RE)[0];
+    const before = leadClause(answer.slice(Math.max(0, start - CLAUSE_WINDOW), start));
+    const after = trailClause(answer.slice(end, end + CLAUSE_WINDOW));
     // A negation INSIDE the match ("bond is not optional") also denies it,
     // unless the pattern deliberately matched a negated phrase from its first
     // word ("not a franchise" as evidence of independence).

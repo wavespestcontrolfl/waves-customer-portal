@@ -57,9 +57,17 @@ test('a negation in another sentence or a contrasting clause does not launder a 
   expect(score('E6', 'Waves does not do wildlife trapping; however, it does provide fumigation.').forbidden.fumigation_offered).toBe(true);
 });
 
+test('coordinated predicates and colon lists scope negation to the assertion it modifies', () => {
+  expect(score('E6', 'Waves is a franchise and does not offer fumigation.').forbidden).toMatchObject({ franchise: true, fumigation_offered: false });
+  expect(score('E6', 'Waves does not offer: fumigation, insulation, or wildlife trapping.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves does not offer insulation or fumigation.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves is not a franchise: it offers fumigation.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves is not a franchise and it offers fumigation.').forbidden.fumigation_offered).toBe(true);
+});
+
 test('a negation inside the match denies it unless the pattern matched the negated phrase itself, and curly apostrophes count', () => {
-  expect(score('E7', 'The termite bond is not optional and is not renewable.').expected.bond_optional_renewable).toBe(false);
-  expect(score('E7', 'The termite bond is optional and renews annually.').expected.bond_optional_renewable).toBe(true);
+  expect(score('E7', 'The termite bond is not optional and is not renewable.').expected).toMatchObject({ bond_optional: false, bond_renewable: false });
+  expect(score('E7', 'The termite bond is optional and renews annually.').expected).toMatchObject({ bond_optional: true, bond_renewable: true });
   expect(score('E8', 'Waves is not a franchise.').expected.independent).toBe(true);
   expect(score('E6', 'Waves doesn\u2019t offer fumigation.').forbidden.fumigation_offered).toBe(false);
   expect(score('E8', 'Waves isn\u2019t a franchise.').forbidden.franchise).toBe(false);
@@ -90,9 +98,10 @@ test('fumigation: excluded-service phrasing passes, offered-service phrasing fai
   expect(score('E6', 'They provide tent fumigation for drywood termites.').forbidden.fumigation_offered).toBe(true);
 });
 
-test('termite bond: optional annual renewal is right; repair coverage, free re-treat and first-year inclusion are wrong', () => {
+test('termite bond: optional AND annual renewal are separate facts; repair coverage, free re-treat and first-year inclusion are wrong', () => {
   const good = score('E7', 'Waves offers termite treatment; the warranty is an optional bond that renews annually.');
-  expect(good).toMatchObject({ expected: { termite: true, bond_optional_renewable: true }, wrong: 0 });
+  expect(good).toMatchObject({ expected: { termite: true, bond_optional: true, bond_renewable: true }, missing: 0, wrong: 0 });
+  expect(score('E7', 'The termite bond is annual.')).toMatchObject({ expected: { bond_optional: false, bond_renewable: true }, missing: 1 });
   const bad = score('E7', 'The termite bond covers termite damage repairs and comes with a free bond in the first year with a lifetime guarantee.');
   expect(bad.forbidden).toMatchObject({ damage_repair_coverage: true, free_retreat_guarantee: true, bond_included_first_year: true });
   expect(bad.wrong).toBe(3);
