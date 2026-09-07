@@ -234,7 +234,7 @@ async function geminiSuggest(model, base64Png, prompt) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ parts: [{ inline_data: { mime_type: 'image/png', data: base64Png } }, { text: prompt }] }],
-      generationConfig: { temperature: 0.1, maxOutputTokens: 900 },
+      generationConfig: { temperature: 0.1, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
     }),
   });
   if (!response.ok) {

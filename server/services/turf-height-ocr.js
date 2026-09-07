@@ -86,7 +86,7 @@ async function callGeminiGaugeOcr(base64Image, mimeType) {
             { text: GAUGE_OCR_PROMPT },
           ],
         }],
-        generationConfig: { temperature: 0.1, maxOutputTokens: 200 },
+        generationConfig: { temperature: 0.1, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
       }),
     });
     if (!response.ok) return null;

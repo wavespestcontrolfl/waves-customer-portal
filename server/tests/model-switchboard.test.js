@@ -215,6 +215,22 @@ describe('model-switchboard', () => {
     }
   });
 
+  it('an unguarded ladder keeps a fallback that resolves to the same model (video_gen calls every leg)', () => {
+    const prev = { MODEL_GEMINI_VIDEO: process.env.MODEL_GEMINI_VIDEO, MODEL_GEMINI_VIDEO_QUALITY: process.env.MODEL_GEMINI_VIDEO_QUALITY };
+    try {
+      process.env.MODEL_GEMINI_VIDEO = 'veo-9.9-same';
+      process.env.MODEL_GEMINI_VIDEO_QUALITY = 'veo-9.9-same';
+      jest.resetModules();
+      const { lanes } = require('../services/model-switchboard').getSwitchboard();
+      const video = lanes.find((l) => l.id === 'video_gen');
+      expect(video.primary.model).toBe('veo-9.9-same');
+      expect(video.fallback.model).toBe('veo-9.9-same');
+    } finally {
+      for (const [k, v] of Object.entries(prev)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+      jest.resetModules();
+    }
+  });
+
   it('a split GEMINI_VISION_FALLBACK_MODEL re-arms the retry leg on every photo ladder', () => {
     const prev = process.env.GEMINI_VISION_FALLBACK_MODEL;
     try {

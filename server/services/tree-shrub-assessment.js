@@ -174,7 +174,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ parts: [{ inline_data: { mime_type: mimeType, data: base64Image } }, { text: VISION_PROMPT }] }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 500 },
+      generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
     }),
   });
   if (!response.ok) {

@@ -100,7 +100,7 @@ async function extractImageIntent(images) {
   const text = 'Extract the analytical intent the user wants, from the attached image(s).';
   let res;
   try {
-    res = await callGemini({ laneId: 'chart_builder_image', model: GEMINI_VISION_BEST, system, text, images: imgs, jsonMode: true, maxTokens: 400 });
+    res = await callGemini({ laneId: 'chart_builder_image', model: GEMINI_VISION_BEST, system, text, images: imgs, jsonMode: true, maxTokens: 2048 }); // thinking spend counts against this ceiling (Gemini 3.x)
     if (!res || !res.ok || !res.json) {
       logger.warn(`[ai-chart-builder] Gemini intent miss (${res?.reason}); falling back to Claude`);
       res = await callAnthropic({ laneId: 'chart_builder_image', model: FLAGSHIP, system, text, images: imgs, jsonMode: true, maxTokens: 400 });

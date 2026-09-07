@@ -186,7 +186,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType, context = {}) {
           { text: buildVisionPrompt(context) },
         ],
       }],
-      generationConfig: { temperature: 0.2, maxOutputTokens: 500 },
+      generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
     }),
   });
 

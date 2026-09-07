@@ -213,7 +213,7 @@ class SatelliteAnalyzer {
             { text: VISION_PROMPT },
           ],
         }],
-        generationConfig: { temperature: 0.2, maxOutputTokens: 1000 },
+        generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }, // thinking spend counts against this ceiling (Gemini 3.x)
       }),
     });
 
