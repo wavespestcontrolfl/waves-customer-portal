@@ -892,12 +892,12 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
           }
         }
         await runCapture(trx);
-        // The takeover waits on this transaction's call-row lock. Its resume
-        // read must see a committed lead even if this socket is still waiting
-        // for post-commit work and already appended its close segment.
-        if (opts.sessionKey && process.env.GATE_VOICE_RELAY_RECOVERY === 'true') {
+        // A keyed takeover waits on this transaction's call-row lock. An
+        // unverified floor may also record its summary ownership, but only
+        // while the call is still unclaimed (the stamp enforces that atomically).
+        if ((opts.sessionKey || writtenFloorSummary) && process.env.GATE_VOICE_RELAY_RECOVERY === 'true') {
           const { stampCallLeadLinkage } = require('./voice-agent/relay-context');
-          await stampCallLeadLinkage(opts.callSid, leadId, { trx, floorSummary: writtenFloorSummary });
+          await stampCallLeadLinkage(opts.callSid, leadId, { trx, sessionKey: opts.sessionKey, floorSummary: writtenFloorSummary });
         }
       });
       if (superseded) {

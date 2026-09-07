@@ -237,9 +237,9 @@ async function stampCallLeadLinkage(callSid, leadId, { trx = null, sessionKey = 
   try {
     const db = trx || require('../../models/db');
     const query = db('call_log').where({ twilio_call_sid: callSid });
-    // Transactional capture already holds the owner-checked row lock. A
-    // post-capture stamp must not overwrite a replacement socket's linkage.
-    if (!trx) query.whereRaw("(metadata->>'relay_session_claim_owner' IS NULL OR metadata->>'relay_session_claim_owner' = ?)", [sessionKey]);
+    // A keyed capture holds the owner-checked row lock. Unverified capture
+    // may stamp only an unclaimed call, including inside its transaction.
+    query.whereRaw("(metadata->>'relay_session_claim_owner' IS NULL OR metadata->>'relay_session_claim_owner' = ?)", [sessionKey]);
     const rows = await query.update({
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ relay_lead_id: String(leadId),
         ...(trx && floorSummary ? { relay_floor_summary: { lead_id: String(leadId),

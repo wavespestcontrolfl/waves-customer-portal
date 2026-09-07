@@ -2201,6 +2201,7 @@ class RelayConversation {
         WRITE_DRAIN_TIMEOUT_MS,
       );
     }
+    const detachedWrites = [...this._inFlightWrites.values()];
 
     // Finish this owner's bounded capture before sealing its close record so
     // persisted capture flags describe the artifact that actually committed.
@@ -2529,12 +2530,14 @@ class RelayConversation {
     } catch (err) {
       logger.warn(`[voice-relay] outcome reconcile failed callSid=${this.callSid}: ${err.message}`);
     } finally {
-      if (recoveryOn && this._captureFloorWrite) {
-        // A floor can settle after its close snapshot or after takeover. Its
-        // committed linkage repairs reporting without mutating sealed evidence.
-        void this._captureFloorWrite.then(async (landed) => {
-          if (landed) await this._reconcileLateSegment();
-        }).catch((err) => logger.warn(`[voice-relay] late floor repair failed callSid=${maskSid(this.callSid)}: ${err.message}`));
+      if (recoveryOn) {
+        // Observe each write independently after finalization, including one
+        // that settled during close. Repair reads durable evidence, so failed
+        // writes cannot claim success and another wedged write cannot delay it.
+        for (const write of [...detachedWrites, this._captureFloorWrite].filter(Boolean)) {
+          void write.then(() => this._reconcileLateSegment())
+            .catch((err) => logger.warn(`[voice-relay] late artifact repair failed callSid=${maskSid(this.callSid)}: ${err.message}`));
+        }
       }
       if (recoveryOn && !deferTranscript) {
         await this._refreshFloorLeadSummary();
