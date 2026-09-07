@@ -72,6 +72,8 @@ const TRANSCRIPTION_PROVIDER = 'conversation_relay';
 // Cap the stored transcript. A 15-minute hard-capped call cannot realistically
 // reach this, but a runaway loop must never write an unbounded text column.
 const MAX_TRANSCRIPT_CHARS = 60000;
+const AI_HEADER = '[AI segment]\n';
+const AI_TRUNCATED = '\n[AI transcript truncated]';
 const MAX_SUMMARY_CHARS = 2000;
 const MAX_TURN_CHARS = 4000;
 
@@ -209,7 +211,30 @@ function buildTranscriptText(turns = []) {
     // they can never be mistaken for spoken words.
     else if (turn.role === 'tool') lines.push(`[tool] ${text}`);
   }
-  return lines.join('\n').slice(0, MAX_TRANSCRIPT_CHARS);
+  return Array.from(lines.join('\n')).slice(0, MAX_TRANSCRIPT_CHARS).join('');
+}
+
+/** Reserve the entire recorded section, including its header, before AI text.
+ * If the recorded section plus headers/notice exceeds the limit, keep it
+ * intact and omit AI text. Durable relay segments retain the omitted text.
+ */
+function composeRelayTranscript(aiText, recordedSection = '') {
+  const ai = Array.from(String(aiText || ''));
+  const recorded = String(recordedSection || '');
+  const budget = Math.max(0, MAX_TRANSCRIPT_CHARS - AI_HEADER.length - Array.from(recorded).length);
+  const text = ai.length <= budget ? ai.join('')
+    : ai.slice(0, Math.max(0, budget - AI_TRUNCATED.length)).join('') + AI_TRUNCATED;
+  return AI_HEADER + text + recorded;
+}
+
+/** The same budget inside a row-locked UPDATE, using PostgreSQL characters. */
+function composeRelayTranscriptSql(db, aiText, recordedSection) {
+  return db.raw(`(SELECT ? || CASE WHEN char_length(ai) <= budget THEN ai
+      ELSE left(ai, GREATEST(0, budget - ?)) || ? END || recorded
+    FROM (SELECT ai, recorded, GREATEST(0, ? - char_length(recorded)) AS budget
+      FROM (SELECT COALESCE(?::text, '') AS ai, COALESCE(?::text, '') AS recorded) AS relay_parts
+    ) AS relay_budget)`,
+  [AI_HEADER, AI_TRUNCATED.length, AI_TRUNCATED, MAX_TRANSCRIPT_CHARS - AI_HEADER.length, aiText, recordedSection]);
 }
 
 /**
@@ -408,6 +433,8 @@ function summarizeTurnStats(stats = []) {
 
 module.exports = {
   buildTranscriptText,
+  composeRelayTranscript,
+  composeRelayTranscriptSql,
   scrubForStorage,
   scrubTurnsForStorage,
   buildCallSummary,

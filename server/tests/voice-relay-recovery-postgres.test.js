@@ -63,6 +63,7 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
       t.jsonb('metadata'); t.timestamp('created_at').defaultTo(mockPg.fn.now());
     });
     await mockPg.schema.createTable('artifacts', (t) => { t.text('id').primary(); });
+    await mockPg.schema.createTable('leads', (t) => { t.text('id').primary(); t.text('twilio_call_sid'); t.text('transcript_summary'); t.timestamp('updated_at'); });
     await mockPg.schema.createTable('triage_items', (t) => {
       t.text('id').primary(); t.text('call_log_id'); t.text('reason_code'); t.text('status'); t.jsonb('payload');
       t.timestamp('created_at').defaultTo(mockPg.fn.now()); t.timestamp('updated_at');
@@ -93,6 +94,7 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     await mockPg('notifications').delete();
     await mockPg('service_requests').delete();
     await mockPg('artifacts').delete();
+    await mockPg('leads').delete();
     await mockPg('triage_items').delete();
     await mockPg('call_log').delete();
     await mockPg('call_log').insert({ id: 'call-1', twilio_call_sid: callSid, metadata: {
@@ -115,6 +117,102 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     const row = await mockPg('call_log').first();
     expect(row.voicemail_callback_alerted_at).toBeTruthy();
     expect(row.metadata.relay_failure_callback_filed_at).toBeTruthy();
+  });
+
+  test('callback compensation survives a row lock beyond the caller deadline', async () => {
+    let receipt;
+    await NotificationService.notifyAdmin('voicemail_callback', 'Callback fixture', 'Callback required', {
+      dedupeKey: `relay-failure:${callSid}`, relayFailureCall: { callSid, owner: 'old', onCommitted: (value) => { receipt = value; } },
+    });
+    const trx = await mockPg.transaction();
+    let compensation;
+    let completed = false;
+    try {
+      await trx('call_log').where('twilio_call_sid', callSid).forUpdate().first();
+      compensation = NotificationService.revertRelayFailureCallback(receipt).then(() => { completed = true; });
+      await waitForBlockedClaim();
+      await new Promise((resolve) => setTimeout(resolve, 2100));
+      expect(completed).toBe(false);
+      expect(await mockPg('notifications')).toHaveLength(1);
+      expect((await mockPg('call_log').first()).metadata.relay_failure_callback_filed_at).toBe(receipt.callbackStamp);
+    } finally { await trx.rollback(); if (compensation) await compensation; }
+    expect(await mockPg('notifications')).toHaveLength(0);
+    expect((await mockPg('call_log').first()).voicemail_callback_alerted_at).toBeNull();
+  });
+
+  test.each(['floor', 'staff', 'legacy'])('late close refreshes only the complete %s-owned lead summary', async (source) => {
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    const partial = 'Inbound voice call (auto-captured on hangup). Caller said: second';
+    const placeholder = 'Inbound voice call (auto-captured on hangup). No transcript captured.';
+    await mockPg('leads').insert({ id: 'lead-1', twilio_call_sid: callSid, transcript_summary: source === 'legacy' ? placeholder : partial });
+    const meta = { relay_segment_owners: ['old', 'new'], relay_segments: [{ session_key: 'new', generation: 2, text: 'Caller: second' }] };
+    await mockPg('call_log').where('id', 'call-1').update({ metadata: meta });
+    await mockPg.transaction(async (trx) => {
+      await trx('call_log').where('id', 'call-1').forUpdate().first();
+      await stampCallLeadLinkage(callSid, 'lead-1', { trx, floorSummary: source === 'legacy' ? null : partial });
+    });
+    const convo = Object.assign(Object.create(RelayConversation.prototype), { callSid });
+    expect(await convo._refreshFloorLeadSummary()).toBe(false); // not all owners have closed
+    if (source === 'staff') await mockPg('leads').where('id', 'lead-1').update({ transcript_summary: 'Staff-authored fixture summary' });
+    const trx = await mockPg.transaction();
+    let repair;
+    try {
+      const call = await trx('call_log').where('id', 'call-1').forUpdate().first();
+      const complete = { ...call.metadata, relay_segments: [...meta.relay_segments, { session_key: 'old', generation: 1, text: 'Caller: first' }] };
+      await trx('call_log').where('id', 'call-1').update({ metadata: complete });
+      repair = convo._refreshFloorLeadSummary();
+      await waitForBlockedClaim();
+      await trx.commit();
+      expect(await repair).toBe(source !== 'staff');
+    } finally { if (!trx.isCompleted()) await trx.rollback(); if (repair) await repair; }
+    expect((await mockPg('leads').first()).transcript_summary).toBe(source === 'staff'
+      ? 'Staff-authored fixture summary' : 'Inbound voice call (auto-captured on hangup). Caller said: first | second');
+  });
+
+  test.each(['recording', 'capture'])('floor repair serializes with the %s lock order without a deadlock', async (writer) => {
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    const partial = 'Inbound voice call (auto-captured on hangup). Caller said: second';
+    await mockPg('leads').insert({ id: 'lead-1', twilio_call_sid: callSid, transcript_summary: partial });
+    await mockPg('call_log').where('id', 'call-1').update({ metadata: {
+      relay_segment_owners: ['old'], relay_segments: [{ session_key: 'old', text: 'Caller: complete fixture' }],
+    } });
+    await mockPg.transaction((trx) => stampCallLeadLinkage(callSid, 'lead-1', { trx, floorSummary: partial }));
+    const trx = await mockPg.transaction();
+    const convo = Object.assign(Object.create(RelayConversation.prototype), { callSid });
+    let repair;
+    try {
+      if (writer === 'capture') {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['voice-lead-capture', callSid]);
+        await trx('call_log').where('id', 'call-1').forUpdate().first();
+      } else await trx('leads').where('id', 'lead-1').forUpdate().first();
+      repair = convo._refreshFloorLeadSummary();
+      await waitForBlockedClaim();
+      // Finish the other writer's normal second lock. The old call -> lead
+      // repair order deadlocked here against the recording reconciler.
+      await trx(writer === 'capture' ? 'leads' : 'call_log').where('id', writer === 'capture' ? 'lead-1' : 'call-1').forUpdate().first();
+      await trx.commit();
+      expect(await repair).toBe(true);
+      expect((await mockPg('leads').first()).transcript_summary).toContain('complete fixture');
+    } finally { if (!trx.isCompleted()) await trx.rollback(); if (repair) await repair; }
+  });
+
+  test('a moved linkage while waiting for the lead lock cannot rewrite the old lead', async () => {
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    await mockPg('leads').insert({ id: 'lead-1', twilio_call_sid: callSid,
+      transcript_summary: 'Inbound voice call (auto-captured on hangup). No transcript captured.' });
+    await mockPg('call_log').where('id', 'call-1').update({ metadata: { relay_lead_id: 'lead-1',
+      relay_segments: [{ text: 'Caller: complete fixture' }] } });
+    const trx = await mockPg.transaction();
+    let repair;
+    try {
+      await trx('leads').where('id', 'lead-1').forUpdate().first();
+      repair = RelayConversation.prototype._refreshFloorLeadSummary.call({ callSid });
+      await waitForBlockedClaim();
+      await trx('call_log').where('id', 'call-1').update({ metadata: { relay_lead_id: 'replacement' } });
+      await trx.commit();
+      expect(await repair).toBe(false);
+      expect((await mockPg('leads').first()).transcript_summary).toContain('No transcript captured.');
+    } finally { if (!trx.isCompleted()) await trx.rollback(); if (repair) await repair; }
   });
 
   test('end-frame compensation removes exactly its committed callback and is idempotent', async () => {
@@ -377,13 +475,14 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
     try {
       expect(await claimOwnedElsewhere(trx, callSid, 'old')).toBe(false);
       await trx('artifacts').insert({ id: 'lead-1' });
-      await stampCallLeadLinkage(callSid, 'lead-1', { trx });
+      await stampCallLeadLinkage(callSid, 'lead-1', { trx, sessionKey: 'old', floorSummary: 'Synthetic floor summary' });
       takeover = beginRelaySessionClaim(callSid, 'new', 2);
       await waitForBlockedClaim();
       if (commit) await trx.commit(); else await trx.rollback();
       expect(await takeover).toBe(true);
       const row = await mockPg('call_log').where('twilio_call_sid', callSid).first('metadata');
       expect(row.metadata.relay_lead_id || null).toBe(commit ? 'lead-1' : null);
+      expect(row.metadata.relay_floor_summary?.lead_id || null).toBe(commit ? 'lead-1' : null);
       expect(await mockPg('artifacts').select('id')).toHaveLength(commit ? 1 : 0);
       // A detached old write resolving after both sockets close cannot now
       // commit a second artifact: the transaction sees the new owner.
@@ -401,11 +500,20 @@ postgres('PostgreSQL capture transaction versus reconnect takeover', () => {
       expect(await claimOwnedElsewhere(trx, callSid, 'old')).toBe(false);
       await trx('artifacts').insert({ id: 'lead-1' });
       await trx.schema.alterTable('call_log', (t) => t.renameColumn('metadata', 'unavailable_metadata'));
-      await stampCallLeadLinkage(callSid, 'lead-1', { trx });
+      await stampCallLeadLinkage(callSid, 'lead-1', { trx, sessionKey: 'old' });
     })).rejects.toThrow();
     expect(await mockPg('artifacts').select('id')).toEqual([]);
     expect(await beginRelaySessionClaim(callSid, 'new', 2)).toBe(true);
     expect((await mockPg('call_log').where('twilio_call_sid', callSid).first('metadata')).metadata.relay_lead_id).toBeUndefined();
+  });
+  test.each([null, 'another-session'])('an unverified transactional floor stamps only an unclaimed call (owner=%s)', async (owner) => {
+    await mockPg('call_log').where('id', 'call-1').update({ metadata: { relay_session_claim_owner: owner } });
+    expect(await mockPg.transaction((trx) => stampCallLeadLinkage(callSid, 'lead-1', {
+      trx, floorSummary: 'Synthetic unverified floor',
+    }))).toBe(owner === null);
+    const row = await mockPg('call_log').where('id', 'call-1').first();
+    expect(row.metadata.relay_floor_summary?.lead_id || null).toBe(owner === null ? 'lead-1' : null);
+    expect(row.metadata.relay_lead_id || null).toBe(owner === null ? 'lead-1' : null);
   });
   test('the production re-service writer commits its recovery evidence with the ticket', async () => {
     process.env.GATE_VOICE_RELAY_RECOVERY = 'true';

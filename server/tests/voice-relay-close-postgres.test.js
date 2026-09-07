@@ -44,16 +44,46 @@ postgres('atomic relay segment append and composition', () => {
   });
   beforeEach(async () => { await db('call_commitments').delete(); await db('call_log').delete(); });
 
+  test.each([20000, 70000])('a transfer close preserves a %s-character recording under the shared budget', async (length) => {
+    const { RelayConversation } = require('../services/voice-agent/relay-conversation');
+    const { buildTranscriptText, composeRelayTranscript } = require('../services/voice-agent/relay-transcript');
+    const priorGate = process.env.GATE_VOICE_RELAY_RECOVERY;
+    process.env.GATE_VOICE_RELAY_RECOVERY = 'false';
+    const recorded = '🌊'.repeat(length);
+    await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', call_outcome: 'voicemail',
+      transcription: recorded, transcription_provider: 'fixture-recording', transcription_metadata: { source: 'fixture-recording' },
+      metadata: { relay_handoff: { intent: 'office' } }, transcript_structured: { recorded: true } });
+    const convo = new RelayConversation({ callSid: 'CA-fixture', sessionKey: 'first', send: jest.fn() });
+    convo.leadCaptured = true;
+    convo._transferRequested = true;
+    convo._sessionSuperseded = jest.fn(async () => false);
+    convo._recordCommitments = jest.fn(async () => {});
+    convo._transcript = Array.from({ length: 20 }, () => ({ role: 'caller', text: 'x'.repeat(3900) }));
+    try {
+      await convo.end('transfer');
+      const row = await db('call_log').first();
+      expect(row.transcription).toBe(composeRelayTranscript(buildTranscriptText(convo._transcript), '\n\n[Voicemail segment]\n' + recorded));
+      expect(row.transcription_provider).toBe('fixture-recording');
+      expect(row.transcription_metadata.source).toBe('fixture-recording');
+      expect(row.transcript_structured).toBeNull();
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_VOICE_RELAY_RECOVERY;
+      else process.env.GATE_VOICE_RELAY_RECOVERY = priorGate;
+    }
+  });
+
   test.each(['conversation_relay', 'recorded_fixture'])('late close metrics cover both sockets without replacing %s provenance', async (provider) => {
     const { RelayConversation } = require('../services/voice-agent/relay-conversation');
     const makeLeg = (key, generation, firstSendAt) => buildSegment({ sessionKey: key, generation,
       text: `Caller: segment ${generation}`, startedAt: Date.now() - 10000,
+      reason: 'fixture-close', model: 'relay-fixture-model', versions: { prompt: 'fixture-v2' },
       turnCounts: { caller_turns: 1, agent_turns: 2, tool_calls: 3 },
       turnStats: [{ promptAt: 0, firstSendAt, toolMs: 40, modelMs: 100 }],
     });
     const later = makeLeg('second', 2, 900);
     const prior = { relay_segment_owners: ['first', 'second'], relay_segments: [later] };
-    const complete = { ...prior, relay_segments: [later, makeLeg('first', 1, 100)] };
+    const complete = { ...prior, relay_lead_id: 'lead-fixture', relay_reservice_filed: true,
+      relay_segments: [later, makeLeg('first', 1, 100)] };
     await db('call_log').insert({ id: 'fixture', twilio_call_sid: 'CA-fixture', metadata: complete,
       transcription_provider: provider, call_summary: 'Owner-authored summary',
       transcription_metadata: { source: 'existing', model: 'fixture-model', caller_turns: 99, summary_source: 'model' },
@@ -63,9 +93,11 @@ postgres('atomic relay segment append and composition', () => {
     let row = await db('call_log').first();
     const metrics = provider === 'conversation_relay' ? row.transcription_metadata : row.transcription_metadata.relay;
     expect(metrics).toMatchObject({ caller_turns: 2, agent_turns: 4, tool_calls: 6,
+      lead_captured: true, reservice_filed: true, end_reason: 'fixture-close', model: 'relay-fixture-model', versions: { prompt: 'fixture-v2' },
       latency: { turns: 2, prompt_to_first_send_p95: 900, tool_ms_total: 80 },
       segments: { count: 2, complete: true, telemetry_complete: true } });
-    expect(row.transcription_metadata).toMatchObject({ source: 'existing', model: 'fixture-model' });
+    expect(row.transcription_metadata).toMatchObject({ source: 'existing', model: provider === 'conversation_relay' ? 'relay-fixture-model' : 'fixture-model' });
+    expect(row.transcription_model).toBe(provider === 'conversation_relay' ? 'relay-fixture-model' : null);
     expect(row.call_summary).toBe('Owner-authored summary');
     if (provider !== 'conversation_relay') expect(row.transcription_metadata.caller_turns).toBe(99);
     await convo._refreshCallSummary(prior, false); // a stale in-flight repair cannot regress the aggregate
