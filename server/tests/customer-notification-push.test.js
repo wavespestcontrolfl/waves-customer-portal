@@ -152,6 +152,26 @@ describe('customer notification native push dispatch', () => {
     expect(logger.warn).toHaveBeenCalledWith('[notifications] Customer push dispatch failed: provider unavailable');
   });
 
+  test('awaited advisory returns sanitized provider acceptance and passes the final-send guard', async () => {
+    setupDb();
+    const shouldContinue = async () => true;
+    PushService.sendToCustomer.mockResolvedValue({ subscriptions: 3, sent: 1, failed: 1, expired: 1, skipped: 0, results: ['provider-private-detail'] });
+    const result = await NotificationService.notifyCustomer('customer-1', 'lawn_health', 'Plan', 'Conditional instructions', {
+      preferenceKey: 'weather_alerts', dedupeKey: 'weekly:week-1', awaitPush: true,
+      pushOptions: { ephemeral: true, shouldContinue },
+    });
+    expect(result.push).toEqual({ queued: true, subscriptions: 3, accepted: 1, failed: 1, expired: 1, skipped: 0 });
+    expect(PushService.sendToCustomer).toHaveBeenCalledWith('customer-1', expect.objectContaining({ ephemeral: true }), { ephemeral: true, shouldContinue, notificationId: 'notification-1' });
+  });
+
+  test('an awaited provider rejection preserves the bell and records failure without claiming acceptance', async () => {
+    setupDb();
+    PushService.sendToCustomer.mockRejectedValue(new Error('offline'));
+    const result = await NotificationService.notifyCustomer('customer-1', 'lawn_health', 'Plan', 'Body', { awaitPush: true });
+    expect(result).toMatchObject({ id: 'notification-1', push: { queued: true, error: 'dispatch_failed' } });
+    expect(result.push).not.toHaveProperty('accepted');
+  });
+
   test('fails closed when an unknown preference key is supplied', async () => {
     const { notifQ } = setupDb();
 

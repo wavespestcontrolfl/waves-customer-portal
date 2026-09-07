@@ -382,7 +382,7 @@ async function attemptPushFirst({ customerId, to, body, messageType, fromNumber,
     // accepting-but-silent token must not become the "delivery" that
     // suppresses the SMS while a fresh device failed.
     const { delivered } = explicitPushOnly
-      ? { delivered: appNotification?.push?.accepted === true }
+      ? { delivered: Number(appNotification?.push?.accepted) > 0 }
       : await sendPush(customerId, messageType, body, {
         shouldContinue: windowGuardFrom(preSendCheck),
         minUpdatedAt: heartbeatCutoff(),

@@ -343,12 +343,24 @@ const NotificationService = {
         category,
         notificationId: String(notification.id),
         tag: dedupeKey || `customer-notification:${notification.id}`,
+        ...(pushOptions.ephemeral ? { ephemeral: true } : {}),
       }, { ...pushOptions, ...(dedupeKey ? { notificationId: notification.id } : {}) });
-      if (awaitPush) {
-        const stats = await dispatch;
-        return { ...notification, deduped, push: { ...stats, accepted: stats.sent > 0 } };
-      }
       pushQueued = true;
+      // Scheduled advisories can record provider acceptance separately from
+      // bell creation. Request-path callers retain the asynchronous dispatch.
+      if (awaitPush) {
+        const outcome = await dispatch;
+        return { ...notification, deduped, push: {
+          queued: true,
+          subscriptions: outcome.subscriptions,
+          accepted: outcome.sent,
+          failed: outcome.failed,
+          expired: outcome.expired,
+          skipped: outcome.skipped,
+          ...(outcome.reason ? { reason: outcome.reason } : {}),
+          ...(outcome.deduped ? { deduped: true } : {}),
+        } };
+      }
       // The bell is already durable, and request paths such as status changes
       // and estimate acceptance must not wait on external push providers.
       void Promise.resolve(dispatch).catch((err) => {
@@ -358,7 +370,7 @@ const NotificationService = {
       // Preserve the successful bell even if dispatch fails synchronously.
       logger.warn(`[notifications] Customer push dispatch failed: ${err.message}`);
     }
-    return { ...notification, push: { queued: pushQueued } };
+    return { ...notification, push: { queued: pushQueued, ...(awaitPush ? { error: 'dispatch_failed' } : {}) } };
   },
 
   // Get notifications for admin

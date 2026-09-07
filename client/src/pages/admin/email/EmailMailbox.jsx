@@ -320,7 +320,7 @@ export function BlockedSenders({ mailbox }) {
   );
 }
 
-function EmailMessage({ email, mailbox, editor }) {
+function EmailMessage({ active, email, mailbox, editor }) {
   const {
     selectedEmail,
     thread,
@@ -753,14 +753,14 @@ function EmailMessage({ email, mailbox, editor }) {
               )}
             </div>
           ))}
-          <EmailReply sender={sender} mailbox={mailbox} editor={editor} />{" "}
+          <EmailReply active={active} sender={sender} mailbox={mailbox} editor={editor} />{" "}
         </div>
       )}
     </div>
   );
 }
 
-export function EmailInbox({ mailbox, editor }) {
+export function EmailInbox({ active, mailbox, editor }) {
   const {
     stats,
     total,
@@ -892,6 +892,7 @@ export function EmailInbox({ mailbox, editor }) {
         ) : (
           visibleEmails.map((email) => (
             <EmailMessage
+              active={active}
               key={email.id}
               email={email}
               mailbox={mailbox}

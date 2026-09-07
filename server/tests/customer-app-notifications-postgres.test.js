@@ -153,7 +153,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     process.env.GATE_CUSTOMER_APP_NOTIFICATIONS = 'false';
     const notification = await Notifications.notifyCustomer(property, 'service', 'QA update', 'Fixture', { dedupeKey: 'qa-off', awaitPush: true });
     expect(notification.id).toBeTruthy();
-    expect(notification.push).toMatchObject({ accepted: false, reason: 'push_disabled' });
+    expect(notification.push).toMatchObject({ accepted: 0, reason: 'push_disabled' });
     expect(apns.send).not.toHaveBeenCalled();
     expect(await mockPg('notifications').where({ recipient_id: property }).count('* as count').first()).toEqual({ count: '1' });
   });
@@ -173,17 +173,17 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     const sub = await device();
     apns.send.mockResolvedValueOnce({ ok: false, expired: true, reason: 'Unregistered' });
     const first = await Notifications.notifyCustomer(property, 'service', 'QA update', 'Fixture', { dedupeKey: 'qa-retry', awaitPush: true });
-    expect(first.push.accepted).toBe(false);
+    expect(first.push.accepted).toBe(0);
     expect((await mockPg('push_subscriptions').where({ id: sub.id }).first()).active).toBe(false);
     await device();
     const second = await Notifications.notifyCustomer(property, 'service', 'QA update', 'Fixture', { dedupeKey: 'qa-retry', awaitPush: true });
     expect(second.id).toBe(first.id);
-    expect(second.push.accepted).toBe(true);
+    expect(second.push.accepted).toBe(1);
     const third = await Notifications.notifyCustomer(property, 'service', 'QA update', 'Fixture', { dedupeKey: 'qa-retry', awaitPush: true });
-    expect(third.push).toMatchObject({ accepted: true, deduped: true });
+    expect(third.push).toMatchObject({ accepted: 1, deduped: true });
     await mockPg('notification_prefs').where({ customer_id: owner }).update({ push_enabled: false });
     const afterOptOut = await Notifications.notifyCustomer(property, 'service', 'QA update', 'Fixture', { dedupeKey: 'qa-retry', awaitPush: true });
-    expect(afterOptOut.push).toMatchObject({ accepted: true, deduped: true });
+    expect(afterOptOut.push).toMatchObject({ accepted: 1, deduped: true });
     expect(apns.send).toHaveBeenCalledTimes(2);
   });
 
@@ -196,9 +196,9 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     const first = Notifications.notifyCustomer(property, 'service', 'QA update', 'Fixture', { dedupeKey: 'qa-race', awaitPush: true });
     await entered;
     const second = await Notifications.notifyCustomer(property, 'service', 'QA update', 'Fixture', { dedupeKey: 'qa-race', awaitPush: true });
-    expect(second.push).toMatchObject({ accepted: false, deduped: true, reason: 'push_in_flight' });
+    expect(second.push).toMatchObject({ accepted: 0, deduped: true, reason: 'push_in_flight' });
     release({ ok: true });
-    expect((await first).push.accepted).toBe(true);
+    expect((await first).push.accepted).toBe(1);
     expect(apns.send).toHaveBeenCalledTimes(1);
     expect((await mockPg('notifications').count('* as count').first()).count).toBe('1');
   });
@@ -214,7 +214,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     } });
     const retry = await Notifications.notifyCustomer(property, 'service', 'QA update', 'Fixture', { dedupeKey: 'qa-abandoned', awaitPush: true });
     expect(retry.id).toBe(bell.id);
-    expect(retry.push.accepted).toBe(true);
+    expect(retry.push.accepted).toBe(1);
     expect(apns.send).toHaveBeenCalledTimes(1);
     expect((await mockPg('notifications').where({ id: bell.id }).first()).metadata).toMatchObject({ pushState: 'accepted' });
   });
