@@ -20,7 +20,7 @@ export const CUSTOMER_WORKSPACE_SECTIONS = [
   { key: "property", label: "Details" },
 ];
 
-export default function Customer360Sections({ active, onChange, contentId }) {
+export default function Customer360Sections({ active, onChange, contentId, sections }) {
   const strip = useRef(null);
   const id = useId();
   const [edges, setEdges] = useState({ overflow: false, left: false, right: false });
@@ -43,18 +43,18 @@ export default function Customer360Sections({ active, onChange, contentId }) {
     observer.observe(strip.current);
     return () => observer.disconnect();
   }, []);
-  useEffect(revealSelected, [active, edges.overflow]);
+  useEffect(revealSelected, [active, edges.overflow, sections.length]);
 
   return <nav className="c360-section-navigation" aria-label="Customer sections">
     {edges.overflow && <Button variant="ghost" className="c360-section-arrow" aria-label="Scroll sections left" disabled={!edges.left} onClick={() => strip.current.scrollBy({ left: -220, behavior: "instant" })}><ChevronLeft size={18} /></Button>}
     <div ref={strip} className="c360-section-strip" onScroll={measure}>
       <Tabs value={active} onValueChange={onChange}>
         <TabList className="c360-section-list" aria-label="Customer sections">
-          {CUSTOMER_WORKSPACE_SECTIONS.map((section, index) => <Tab key={section.key} value={section.key} id={`${id}-${section.key}`} aria-controls={contentId} tabIndex={active === section.key ? 0 : -1} className="c360-section-tab" onKeyDown={(event) => {
+          {sections.map((section, index) => <Tab key={section.key} value={section.key} id={`${id}-${section.key}`} aria-controls={contentId} tabIndex={active === section.key ? 0 : -1} className="c360-section-tab" onKeyDown={(event) => {
             if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
             event.preventDefault();
-            const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? CUSTOMER_WORKSPACE_SECTIONS.length - 1 : (index + (event.key === "ArrowRight" ? 1 : CUSTOMER_WORKSPACE_SECTIONS.length - 1)) % CUSTOMER_WORKSPACE_SECTIONS.length;
-            const next = CUSTOMER_WORKSPACE_SECTIONS[nextIndex];
+            const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? sections.length - 1 : (index + (event.key === "ArrowRight" ? 1 : sections.length - 1)) % sections.length;
+            const next = sections[nextIndex];
             onChange(next.key);
             document.getElementById(`${id}-${next.key}`)?.focus({ preventScroll: true });
           }}>{section.label}</Tab>)}

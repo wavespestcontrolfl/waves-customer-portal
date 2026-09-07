@@ -5121,7 +5121,7 @@ export default function Customer360ProfileV2({
   const [profileLoadError, setProfileLoadError] = useState("");
   const [profileReloadKey, setProfileReloadKey] = useState(0);
   const [profileActionErr, setProfileActionErr] = useState("");
-  const [activeTab, setActiveTab] = useState(initialTab);
+  const [requestedTab, setActiveTab] = useState(initialTab);
   const [timelineFilter, setTimelineFilter] = useState("all");
   const [timelineSearch, setTimelineSearch] = useState("");
   const [timeline, setTimeline] = useState([]);
@@ -5129,6 +5129,7 @@ export default function Customer360ProfileV2({
   const [timelineError, setTimelineError] = useState(false);
   const [timelineRetrying, setTimelineRetrying] = useState(false);
   const [comms, setComms] = useState([]);
+  const [commsReadScope, setCommsReadScope] = useState(null);
   const [commsLoaded, setCommsLoaded] = useState(false);
   const [commsComposerReady, setCommsComposerReady] = useState(false);
   const [commsLoading, setCommsLoading] = useState(false);
@@ -5139,7 +5140,7 @@ export default function Customer360ProfileV2({
   const [messageOpen, setMessageOpen] = useState(false);
   const [messageOpened, setMessageOpened] = useState(false);
   const [linkRequest, setLinkRequest] = useState(0);
-  const openMessages = () => { if (commsErr) setCommsLoaded(false); setMessageOpened(true); setMessageOpen(true); };
+  const openMessages = () => { setCommsLoaded(false); setMessageOpened(true); setMessageOpen(true); };
   const [menuOpen, setMenuOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [annualPrepayOpen, setAnnualPrepayOpen] = useState(false);
@@ -5180,6 +5181,8 @@ export default function Customer360ProfileV2({
   const customerIdRef = useRef(customerId);
   customerIdRef.current = customerId;
   const isAdmin = getAdminRole() === "admin";
+  const workspaceSections = CUSTOMER_WORKSPACE_SECTIONS.filter((section) => isAdmin || section.key !== "billing");
+  const activeTab = embedded && !isAdmin && requestedTab === "billing" ? "overview" : requestedTab;
   const unreadConversations = useUnreadConversations(embedded && isAdmin, customerId);
 
   // Bumped on every successful profile reload. The properties panel keys its
@@ -5382,6 +5385,7 @@ export default function Customer360ProfileV2({
     setTimelineRetrying(false);
     setProfileActionErr("");
     setCommsLoading(false);
+    setCommsReadScope(null);
     setMenuOpen(false);
     setEditOpen(false);
     setEditForm({});
@@ -5452,6 +5456,7 @@ export default function Customer360ProfileV2({
       .then((data) => {
         if (seq !== commsSeqRef.current) return;
         setComms(data.comms || []);
+        setCommsReadScope(data.readScope || null);
         setCommsLoaded(true);
         setCommsComposerReady(true);
       })
@@ -5864,6 +5869,7 @@ export default function Customer360ProfileV2({
       ]);
       setData(fresh);
       setComms(freshComms.comms || []);
+      setCommsReadScope(freshComms.readScope || null);
       setCommsLoaded(true);
     } catch (err) {
       setSmsErr(err.message || "SMS failed to send");
@@ -6567,7 +6573,7 @@ export default function Customer360ProfileV2({
                   )}
               </div>
               {embedded && c.phone && (commsComposerReady || !isAdmin) && <Suspense fallback={<p className="py-3 text-14 text-ink-secondary">Loading message tools…</p>}>
-                <CustomerSmsComposer key={`${c.id}:${c.phone}`} active={embedded ? messageOpen : activeTab === "comms"} linkRequest={linkRequest} customer={c} customerMessages={comms} onSent={async () => {
+                <CustomerSmsComposer key={`${c.id}:${c.phone}`} active={embedded ? messageOpen : activeTab === "comms"} linkRequest={linkRequest} customer={c} customerMessages={comms} customerReadScope={commsReadScope} onSent={async () => {
                   setCommsLoaded(false);
                   await Promise.allSettled([reloadCustomer(), ...(isAdmin ? [retryTimeline()] : [])]);
                 }} />
@@ -7003,7 +7009,7 @@ export default function Customer360ProfileV2({
             ))}
           </div>
         )}
-        {embedded ? <><div ref={tabsAnchorRef} className="c360-tabs-anchor" /><div className="c360-sticky-identity">{c.firstName} {c.lastName}</div><Customer360Sections active={activeTab} onChange={changeWorkspaceTab} contentId={profileContentId} /></> : <>
+        {embedded ? <><div ref={tabsAnchorRef} className="c360-tabs-anchor" /><div className="c360-sticky-identity">{c.firstName} {c.lastName}</div><Customer360Sections active={activeTab} onChange={changeWorkspaceTab} contentId={profileContentId} sections={workspaceSections} /></> : <>
         {/* ZONE 3 — TAB BAR */}
         {/* shrink-0: this is an overflow-x scroll container, so its flex
             auto-minimum-size is 0 — without it the column flex collapses the

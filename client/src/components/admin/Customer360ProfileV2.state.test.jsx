@@ -102,6 +102,7 @@ describe('Customer360ProfileV2 profile state', () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
     let read = false;
+    const readScope = { conversationIds: ['conversation-a', 'older-conversation-a'], readBefore: '2024-08-01T17:00:00Z' };
     vi.stubGlobal('fetch', vi.fn((url) => {
       const path = String(url);
       if (path.includes('/unread-count?customerId=customer-a')) return response({ conversations: read ? 0 : 2, messages: 5 });
@@ -110,7 +111,7 @@ describe('Customer360ProfileV2 profile state', () => {
         detail.customer.phone = '+19415550100';
         return response(detail);
       }
-      if (path.endsWith('/comms')) return response({ comms: [{ id: 'message-a', channel: 'sms', direction: 'inbound', body: 'Service update', contactPhone: '+19415550100', createdAt: '2024-08-01T16:00:00Z', isRead: read }] });
+      if (path.endsWith('/comms')) return response({ readScope, comms: [{ id: 'message-a', conversationId: 'conversation-a', channel: 'sms', direction: 'inbound', body: 'Service update', contactPhone: '+19415550100', createdAt: '2024-08-01T16:00:00Z', isRead: read }] });
       if (path.endsWith('/messages/read')) { read = true; return response({ success: true }); }
       return response({});
     }));
@@ -122,6 +123,8 @@ describe('Customer360ProfileV2 profile state', () => {
     await screen.findByRole('textbox', { name: 'Text message' }, { timeout: 5000 });
     await waitFor(() => expect(screen.queryByLabelText('2 unread conversations')).not.toBeInTheDocument());
     expect(read).toBe(true);
+    const readCall = fetch.mock.calls.find(([url]) => String(url).endsWith('/messages/read'));
+    expect(JSON.parse(readCall[1].body)).toEqual({ messageIds: ['message-a'], ...readScope });
     const draft = screen.getByRole('textbox', { name: 'Text message' });
     fireEvent.change(draft, { target: { value: 'Keep this draft' } });
     fireEvent.click(screen.getByRole('button', { name: 'Back to customer' }));
@@ -190,6 +193,7 @@ describe('Customer360ProfileV2 profile state', () => {
     expect(screen.getAllByRole('region', { name: 'Customer activity history' })).toHaveLength(1);
     const estimateLink = screen.getByRole('link', { name: 'Create estimate', exact: true });
     const estimateParams = new URL(estimateLink.href).searchParams;
+    expect(estimateParams.get('customerId')).toBe('customer-a');
     expect(estimateParams.get('customerName')).toBe('Avery Customer');
     expect(estimateParams.get('address')).toContain('Unit 4');
     fireEvent.click(screen.getByRole('button', { name: 'More customer actions' }));
@@ -206,8 +210,11 @@ describe('Customer360ProfileV2 profile state', () => {
     vi.stubGlobal('fetch', vi.fn((url) => String(url).endsWith('/customer-a')
       ? response(customerDetail('customer-a', 'Avery'))
       : response({})));
-    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} embedded />);
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} initialTab="billing" embedded />);
     await screen.findByRole('heading', { name: 'Avery Customer' });
+    expect(screen.queryByRole('tab', { name: 'Billing', exact: true })).not.toBeInTheDocument();
+    expect(screen.getByRole('tabpanel', { name: 'Summary', exact: true })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /^(Manage invoices|All invoices)$/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'More customer actions' }));
     expect(screen.queryByRole('link', { name: 'Invoices', exact: true })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Edit customer' })).not.toBeInTheDocument();

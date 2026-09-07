@@ -8,11 +8,11 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../services/notification-service', () => ({}));
+jest.mock('../services/notification-service', () => ({ markInboundSmsReadAdmin: jest.fn().mockResolvedValue(0) }));
 const { randomUUID, randomBytes } = require('node:crypto');
 const { etDateString } = require('../utils/datetime-et');
 const router = require('../routes/admin-customers');
-const { countUnreadInboundSms } = require('../services/inbound-sms-read');
+const { countUnreadInboundSms, markInboundSmsRead } = require('../services/inbound-sms-read');
 const { openBalanceSummary } = require('../services/open-balance');
 const connection = process.env.C360_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -137,5 +137,27 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     expect(await countUnreadInboundSms({ customerId: ids[0] })).toEqual({ conversations: 1, messages: 1 });
     expect(await countUnreadInboundSms({ customerId: ids[3] })).toEqual({ conversations: 0, messages: 0 });
     expect(await openBalanceSummary(ids[0], { displayLimit: 0 })).toMatchObject({ total: 150, overdueTotal: 100, overdueCount: 1, count: 2, complete: true, invoices: [] });
+  }, 30000);
+
+  test('customer thread read scope covers older unread history while preserving later arrivals and other customers', async () => {
+    const recentConversation = randomUUID();
+    const olderConversation = randomUUID();
+    const olderMessage = randomUUID();
+    const laterMessage = randomUUID();
+    await mockPg('conversations').insert([recentConversation, olderConversation].map((id, index) => ({ id, customer_id: ids[2], channel: 'sms', contact_phone: '+19415550102', our_endpoint_id: `+1941555019${index}` })));
+    await mockPg('messages').insert(Array.from({ length: 100 }, () => ({ conversation_id: recentConversation, channel: 'sms', direction: 'inbound', author_type: 'customer', is_read: true, body: 'Read synthetic message', created_at: new Date(Date.now() - 60000) })));
+    await mockPg('messages').insert({ id: olderMessage, conversation_id: olderConversation, channel: 'sms', direction: 'inbound', author_type: 'customer', is_read: false, body: 'Older unread synthetic message', created_at: new Date(Date.now() - 86400000) });
+
+    const thread = await read('/:id/comms', {}, { params: { id: ids[2] } });
+    expect(thread.comms).toHaveLength(100);
+    expect(thread.comms.every(message => message.isRead && message.conversationId === recentConversation)).toBe(true);
+    expect(thread.readScope.conversationIds.sort()).toEqual([recentConversation, olderConversation].sort());
+    const readBefore = new Date(thread.readScope.readBefore);
+    await mockPg('messages').insert({ id: laterMessage, conversation_id: recentConversation, channel: 'sms', direction: 'inbound', author_type: 'customer', is_read: false, body: 'Later synthetic message', created_at: new Date(readBefore.getTime() + 1000) });
+
+    expect(await markInboundSmsRead({ conversationIds: thread.readScope.conversationIds, readBefore, role: 'admin' })).toMatchObject({ updated: 1 });
+    expect((await mockPg('messages').where({ id: olderMessage }).first()).is_read).toBe(true);
+    expect((await mockPg('messages').where({ id: laterMessage }).first()).is_read).toBe(false);
+    expect(await countUnreadInboundSms({ customerId: ids[1] })).toEqual({ conversations: 1, messages: 1 });
   }, 30000);
 });

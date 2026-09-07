@@ -111,6 +111,8 @@ function ActionColumn({ action }) {
 
 export function customerEstimateHref(customer) {
   const params = new URLSearchParams();
+  const customerId = customer?.id || customer?.customerId;
+  if (customerId) params.set("customerId", customerId);
   const fullName = `${customer?.firstName || ""} ${customer?.lastName || ""}`.trim() || customer?.name || "";
   if (customer?.address) params.set("address", customer.address);
   if (fullName) params.set("customerName", fullName);

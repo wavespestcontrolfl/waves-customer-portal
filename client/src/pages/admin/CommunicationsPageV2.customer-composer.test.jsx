@@ -135,3 +135,13 @@ it("schedules text for 8 AM Eastern tomorrow through the existing scheduler", as
   await waitFor(() => expect(onSent).toHaveBeenCalledOnce());
   expect(requests("/admin/communications/sms")).toHaveLength(0);
 });
+
+it("reads older customer conversations through the loaded snapshot even when the displayed messages are already read", async () => {
+  const readScope = { conversationIds: ["recent-conversation", "older-conversation"], readBefore: "2024-07-02T12:01:00Z" };
+  const messages = [{ id: "recent-message", conversationId: "recent-conversation", channel: "sms", direction: "inbound", isRead: true, createdAt: "2024-07-02T12:00:00Z" }];
+  const view = render(<SmsTab active={false} customer={customer} customerMessages={messages} customerReadScope={readScope} />, { wrapper: MemoryRouter });
+  expect(requests("/admin/communications/messages/read")).toHaveLength(0);
+  view.rerender(<SmsTab active customer={customer} customerMessages={messages} customerReadScope={readScope} />);
+  await waitFor(() => expect(requests("/admin/communications/messages/read")).toHaveLength(1));
+  expect(bodyOf("/admin/communications/messages/read")).toEqual({ messageIds: [], conversationIds: readScope.conversationIds, readBefore: readScope.readBefore });
+});

@@ -755,7 +755,7 @@ export function buildCustomerLinkPrefill({ firstName, clause }) {
 // With a customer, render the same composer used by Messages, locked to that
 // profile. The caller keys it by customer id/phone to discard another person's
 // draft, attachments, and minted links when the selected record changes.
-export function SmsTab({ active, customer = null, customerMessages = [], onSent, linkRequest = 0 }) {
+export function SmsTab({ active, customer = null, customerMessages = [], customerReadScope = null, onSent, linkRequest = 0 }) {
   // Server-verified role: draft APPROVAL is owner-only (PUT /approve and
   // /revise 403 for technicians). A tech following a draftId deep link
   // still gets the prefilled text/recipient, but sends as a plain manual
@@ -926,7 +926,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], onSent,
         .map((m) => m.id)
         .filter(Boolean);
       const conversationIds = [
-        ...new Set(threadMessages.map((m) => m.conversationId).filter(Boolean)),
+        ...new Set([...(thread?.conversationIds || []), ...threadMessages.map((m) => m.conversationId)].filter(Boolean)),
       ];
       const readBefore =
         thread?.lastTimestamp ||
@@ -974,9 +974,11 @@ export function SmsTab({ active, customer = null, customerMessages = [], onSent,
 
   useEffect(() => {
     if (!active || !customer) return;
-    const unread = customerMessages.filter((message) => message.channel === "sms" && message.direction === "inbound" && !message.isRead);
-    if (unread.length) void markMessagesRead({ messages: unread });
-  }, [active, customer?.id, customerMessages, markMessagesRead]);
+    const messages = customerMessages.filter((message) => message.channel === "sms");
+    // The read boundary comes from the loaded customer thread, including its
+    // older conversations; SMS arriving after that snapshot remain unread.
+    if (messages.length || customerReadScope?.conversationIds?.length) void markMessagesRead({ messages, conversationIds: customerReadScope?.conversationIds, lastTimestamp: customerReadScope?.readBefore });
+  }, [active, customer?.id, customerMessages, customerReadScope, markMessagesRead]);
 
   useEffect(() => {
     if (customer) return;

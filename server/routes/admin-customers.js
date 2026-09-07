@@ -2706,6 +2706,7 @@ router.get('/:id/timeline', requireAdmin, async (req, res, next) => {
 // fed the Comms tab from `data.smsLog`. Email lands in PR 5.
 router.get('/:id/comms', requireAdmin, async (req, res, next) => {
   try {
+    const readBefore = new Date();
     const customerId = req.params.id;
     const limit = Math.min(parseInt(req.query.limit) || 100, 500);
 
@@ -2716,8 +2717,9 @@ router.get('/:id/comms', requireAdmin, async (req, res, next) => {
       .leftJoin('conversations', 'messages.conversation_id', 'conversations.id')
       .where('conversations.customer_id', customerId)
       .whereIn('messages.channel', ['sms', 'voice'])
+      .where('messages.created_at', '<=', readBefore)
       .select(
-        'messages.id', 'messages.channel', 'messages.direction', 'messages.body',
+        'messages.id', 'messages.conversation_id', 'messages.channel', 'messages.direction', 'messages.body',
         'messages.ai_summary', 'messages.message_type', 'messages.duration_seconds',
         'messages.media', 'messages.answered_by', 'messages.is_read',
         'messages.delivery_status', 'messages.recording_sid', 'messages.created_at',
@@ -2725,6 +2727,10 @@ router.get('/:id/comms', requireAdmin, async (req, res, next) => {
       )
       .orderBy('messages.created_at', 'desc')
       .limit(limit);
+
+    // The drawer reads the whole customer thread even when its display page
+    // contains only recent/read messages. Reuse the existing bounded writer.
+    const conversationIds = await db('conversations').where({ customer_id: customerId }).pluck('id');
 
     // Resolve the friendly label (location / domain) for each Waves number
     // hit by this customer, so the UI can show e.g. "Lakewood Ranch — HQ"
@@ -2738,6 +2744,7 @@ router.get('/:id/comms', requireAdmin, async (req, res, next) => {
       try { media = typeof m.media === 'string' ? JSON.parse(m.media) : (m.media || []); } catch { media = []; }
       return {
         id: m.id,
+        conversationId: m.conversation_id,
         channel: m.channel,
         direction: m.direction,
         body: m.body,
@@ -2756,7 +2763,7 @@ router.get('/:id/comms', requireAdmin, async (req, res, next) => {
       };
     });
 
-    res.json({ comms, total: comms.length });
+    res.json({ comms, total: comms.length, readScope: { conversationIds, readBefore } });
   } catch (err) { next(err); }
 });
 
