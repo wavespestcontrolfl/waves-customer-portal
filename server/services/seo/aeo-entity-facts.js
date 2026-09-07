@@ -52,13 +52,28 @@ function leadClause(text) {
   return LIST_INTRO_RE.test(head) && NEGATION_RE.test(head.slice(-40)) ? `${head.slice(-40)} ${list}` : list;
 }
 
-function trailClause(text) {
-  return text.split(CLAUSE_BOUNDARY_RE)[0].split(':')[0];
+// Text after the match up to the clause end. A colon normally starts a new
+// clause ("is a franchise: it does not …"), except in label-value form where
+// the match IS the label ("Fumigation: not offered by Waves").
+function trailClause(text, matchIsLabel) {
+  const clause = text.split(CLAUSE_BOUNDARY_RE)[0];
+  return matchIsLabel ? clause.replace(/^\s*:/, ' ') : clause.split(':')[0];
 }
 
-// Engines emit typographic apostrophes; the contraction patterns expect '.
+// Engines answer in Markdown with typographic quotes. Scoring reads plain
+// prose: emphasis and headings are stripped, a link keeps its text AND its
+// URL, and a bulleted or numbered list becomes a comma list on one line so a
+// negated list intro ("does not offer:") still governs every item.
 function normalizeAnswer(text) {
-  return String(text || '').replace(/[\u2018\u2019\u02BC\u2032]/g, "'");
+  return String(text || '')
+    .replace(/[\u2018\u2019\u02BC\u2032]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
+    .replace(/^[ \t]*#{1,6}[ \t]+/gm, '')
+    .replace(/(^|\n)[ \t]*(?:[-*+\u2022]|\d+[.)])[ \t]+/g, (match, start, offset, whole) => (offset === 0 || whole[offset - 1] === undefined ? '' : ', '))
+    .replace(/[*`~]+/g, '')
+    .replace(/(^|[\s(])_+|_+(?=[\s).,;:!?]|$)/g, '$1')
+    .replace(/:\s*,\s*/g, ': ');
 }
 
 function asserted(compiled, answer) {
@@ -67,7 +82,7 @@ function asserted(compiled, answer) {
     const start = match.index;
     const end = start + match[0].length;
     const before = leadClause(answer.slice(Math.max(0, start - CLAUSE_WINDOW), start));
-    const after = trailClause(answer.slice(end, end + CLAUSE_WINDOW));
+    const after = trailClause(answer.slice(end, end + CLAUSE_WINDOW), before.trim() === '');
     // A negation INSIDE the match ("bond is not optional") also denies it,
     // unless the pattern deliberately matched a negated phrase from its first
     // word ("not a franchise" as evidence of independence).

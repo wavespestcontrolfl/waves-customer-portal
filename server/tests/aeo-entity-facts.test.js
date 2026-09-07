@@ -57,6 +57,17 @@ test('a negation in another sentence or a contrasting clause does not launder a 
   expect(score('E6', 'Waves does not do wildlife trapping; however, it does provide fumigation.').forbidden.fumigation_offered).toBe(true);
 });
 
+test('markdown, bulleted lists and label-value answers score like plain prose', () => {
+  expect(score('E4', 'Waves Pest Control was founded in **2014**.').forbidden.wrong_founding_year).toBe(true);
+  expect(score('E4', '**Founded:** 2014').forbidden.wrong_founding_year).toBe(true);
+  expect(score('E1', '**Adam Benetti** founded [Waves Pest Control](https://www.wavespestcontrol.com/).')).toMatchObject({ expected: { founder: true }, wrong: 0 });
+  expect(score('E10', 'Call [(941) 297-5749](tel:+19412975749) or [visit the site](https://www.wavespestcontrol.com/).')).toMatchObject({ right: 2 });
+  expect(score('E6', 'Waves does not offer:\n- Fumigation\n- Insulation\n- Wildlife trapping').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Services include:\n1. Pest control\n2. Fumigation').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Fumigation: not offered by Waves Pest Control.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', '- Fumigation: not offered.\n- Termite: offered.').forbidden.fumigation_offered).toBe(false);
+});
+
 test('coordinated predicates and colon lists scope negation to the assertion it modifies', () => {
   expect(score('E6', 'Waves is a franchise and does not offer fumigation.').forbidden).toMatchObject({ franchise: true, fumigation_offered: false });
   expect(score('E6', 'Waves does not offer: fumigation, insulation, or wildlife trapping.').forbidden.fumigation_offered).toBe(false);

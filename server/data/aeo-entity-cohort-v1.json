@@ -87,7 +87,7 @@
   "claims": {
     "wrong_founding_year": {
       "label": "Founding year other than 2024",
-      "pattern": "(?:founded|established|started|opened|operating|in business|serving)\\s+(?:in|since)\\s+((?:19|20)\\d\\d)",
+      "pattern": "(?:founded|established|started|opened|operating|in business|serving|founding year|founded in|year founded)\\s*(?:in|since|:)?\\s*((?:19|20)\\d\\d)",
       "reject_value": "2024"
     },
     "wrong_founder": {
