@@ -257,7 +257,16 @@ async function searchEmails({ search, from, category, days_back = 30, has_attach
   }
 }
 
-async function getEmailThread({ thread_id, from_name, from_email, subject_search }) {
+function emailReadTargetFailure(messages, customerIds = []) {
+  if (!customerIds.length) return null;
+  const linked = messages.map(message => message.customer_id).filter(Boolean);
+  if (!linked.some(id => customerIds.includes(id)) || linked.some(id => !customerIds.includes(id))) {
+    return { error: 'This email thread is not linked exclusively to the selected task customer. Select the intended thread or correct its customer link.', code: 'target_clarification_required' };
+  }
+  return null;
+}
+
+async function getEmailThread({ thread_id, from_name, from_email, subject_search }, customerIds = []) {
   try {
     let threadId = thread_id;
 
@@ -277,6 +286,8 @@ async function getEmailThread({ thread_id, from_name, from_email, subject_search
       .orderBy('received_at', 'asc')
       .select('id', 'from_name', 'from_address', 'to_address', 'subject',
         'body_text', 'received_at', 'classification', 'has_attachments', 'customer_id');
+    const targetFailure = emailReadTargetFailure(messages, customerIds);
+    if (targetFailure) return targetFailure;
 
     // Get attachments
     const emailIds = messages.map(m => m.id);
@@ -297,7 +308,7 @@ async function getEmailThread({ thread_id, from_name, from_email, subject_search
   }
 }
 
-async function draftEmailReply(emailId, threadId, fromName, instructions) {
+async function draftEmailReply(emailId, threadId, fromName, instructions, customerIds = []) {
   try {
     // Find the email
     let email;
@@ -314,7 +325,9 @@ async function draftEmailReply(emailId, threadId, fromName, instructions) {
     const thread = await db('emails')
       .where('gmail_thread_id', email.gmail_thread_id)
       .orderBy('received_at', 'asc')
-      .select('from_name', 'from_address', 'subject', 'body_text', 'received_at');
+      .select('from_name', 'from_address', 'subject', 'body_text', 'received_at', 'customer_id');
+    const targetFailure = emailReadTargetFailure([email, ...thread], customerIds);
+    if (targetFailure) return targetFailure;
 
     // Load customer context if matched
     let customerContext = '';
@@ -747,13 +760,13 @@ async function blockSender({ email_address, domain }) {
 
 // ─── Tool execution router ───────────────────────────────────────
 
-async function executeEmailTool(toolName, input) {
+async function executeEmailTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'get_inbox_summary': return await getInboxSummary(input);
       case 'search_emails': return await searchEmails(input);
-      case 'get_email_thread': return await getEmailThread(input);
-      case 'draft_email_reply': return await draftEmailReply(input.email_id, input.thread_id, input.from_name, input.instructions);
+      case 'get_email_thread': return await getEmailThread(input, actionContext.readCustomerIds);
+      case 'draft_email_reply': return await draftEmailReply(input.email_id, input.thread_id, input.from_name, input.instructions, actionContext.readCustomerIds);
       case 'send_email_reply': return await sendEmailReply(input);
       case 'reply_via_sms': return await replyViaSms(input);
       case 'get_vendor_invoices': return await getVendorInvoices(input);

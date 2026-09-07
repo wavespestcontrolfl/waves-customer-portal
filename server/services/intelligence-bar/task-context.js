@@ -15,9 +15,10 @@ const RECORDS = {
   product_id: { table: 'products_catalog', fields: ['id', 'name', 'updated_at'] },
   lead_id: { table: 'leads', fields: ['id', 'customer_id', 'first_name', 'last_name', 'updated_at', 'deleted_at'] },
   email_id: { table: 'emails', fields: ['id', 'customer_id', 'lead_id', 'from_address', 'updated_at'] },
+  call_id: { table: 'call_log', fields: ['id', 'customer_id', 'updated_at'] },
 };
 const COLLECTIONS = { customer_id: 'customer_ids', appointment_id: 'service_ids', lead_id: 'lead_ids' };
-const ALIASES = { customer_id: 'customerId', property_id: 'propertyId', appointment_id: 'appointmentId', estimate_id: 'estimateId', invoice_id: 'invoiceId', product_id: 'productId', lead_id: 'leadId', email_id: 'emailId' };
+const ALIASES = { customer_id: 'customerId', property_id: 'propertyId', appointment_id: 'appointmentId', estimate_id: 'estimateId', invoice_id: 'invoiceId', product_id: 'productId', lead_id: 'leadId', email_id: 'emailId', call_id: 'callId' };
 const normalizeName = value => String(value || '').toLowerCase().replace(/[’']/g, "'").replace(/'s\b/g, '')
   .replace(/[^\p{L}\p{N}\s'-]/gu, ' ').replace(/\s+/g, ' ').trim();
 const PERSON_REFERENCE = /\b(?:for|customer|named|change|update|email|text|message|contact|quote|send|notify|schedule)\s+([\p{L}'-]+)\b/gu;
@@ -107,7 +108,7 @@ async function namedCustomers(prompt) {
   return db('customers').whereNull('deleted_at').whereIn(db.raw('lower(first_name)'), firstNames).limit(10).select(columns);
 }
 
-// Shared whitelist reader for page context and mutation relationships. It
+// Shared whitelist reader for page context and read/write relationships. It
 // accepts record IDs only; callers cannot choose a table or query expression.
 async function readReferences(input) {
   const references = Object.entries(RECORDS).flatMap(([kind, definition]) => {
@@ -178,6 +179,7 @@ async function resolve({ prompt, pageData, selectedTarget }) {
 
 function unlinkedRecordIsReferenced(record, context) {
   if (record.customer_id) return true;
+  if (record.kind === 'call_id' && context.targets?.length) return false;
   if (!['lead_id', 'email_id', 'estimate_id'].includes(record.kind)) return true;
   if (context.page?.ids?.[record.kind] === record.id) return true;
   if (record.kind === 'email_id') return context.explicitEmails?.includes(normalizeEmail(record.from_address)) || false;
@@ -195,8 +197,9 @@ function relationshipFailure(records, params, toolName) {
   return null;
 }
 
-async function validateMutationTarget(params, context = {}, { toolName } = {}) {
+async function validateRecordTarget(params, context = {}, { toolName } = {}) {
   const references = { ...params };
+  if (['get_closeout_status', 'get_stop_details'].includes(toolName) && params.service_id) references.appointment_id = params.service_id;
   if (params.estimate_identifier) references.estimate_id = params.estimate_identifier;
   const resolved = await readReferences(references);
   if (resolved.error) return resolved;
@@ -225,4 +228,30 @@ async function validateMutationTarget(params, context = {}, { toolName } = {}) {
   return null;
 }
 
-module.exports = { pageIds, resolve, validateMutationTarget, customerById, customerTarget, namedCustomers, namesRequested };
+// Resolve name/phone selectors to one of the task's known customers, then pass
+// the immutable ID to existing readers. Broad searches without a selector stay
+// broad. No fuzzy result or model-selected alternate contact becomes authority.
+async function prepareReadInput(params, context, { toolName, schema }) {
+  const input = { ...params };
+  if (schema.properties?.customer_id && (params.customer_name || params.phone)) {
+    const permitted = new Set(context.targets.map(target => target.customer_id));
+    const matches = params.customer_name ? await namedCustomers(`for ${params.customer_name}`)
+      : await db('customers').whereNull('deleted_at')
+        .whereRaw("RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = ?", [String(params.phone).replace(/\D/g, '').slice(-10)])
+        .select(CUSTOMER_FIELDS);
+    const selected = matches.filter(customer => permitted.has(customer.id));
+    const customer = selected.length === 1 ? await customerById(selected[0].id) : null;
+    const phoneMatches = !params.phone || (customer && String(customer.phone || '').replace(/\D/g, '').slice(-10) === String(params.phone).replace(/\D/g, '').slice(-10));
+    if (!customer || !phoneMatches || (params.customer_id && params.customer_id !== customer.id)) {
+      return { error: 'Use the resolved task customer for this record lookup', code: 'target_clarification_required' };
+    }
+    input.customer_id = customer.id;
+    delete input.customer_name;
+    if (schema.properties.phone && customer.phone) input.phone = customer.phone;
+    else delete input.phone;
+  }
+  const invalid = await validateRecordTarget(input, context, { toolName });
+  return invalid || { input };
+}
+
+module.exports = { pageIds, resolve, validateRecordTarget, prepareReadInput, customerById, customerTarget, namedCustomers, namesRequested };

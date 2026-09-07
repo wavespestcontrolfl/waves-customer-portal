@@ -16,7 +16,7 @@ import {
   toggleFavorite as toggleFavoriteStorage,
 } from '../utils/ibStorage';
 import { filesToImageParts, MAX_ATTACHMENTS } from '../utils/ibImages';
-import { ibSessionId } from '../utils/ibSession';
+import { ibRequestIdentity, ibSessionId } from '../utils/ibSession';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -136,7 +136,7 @@ export function useIntelligenceBar({
 
     setRecentPrompts(addRecent(context, q));
 
-    const body = { prompt: q, conversationHistory, session_id: sessionIdRef.current, request_key: crypto.randomUUID() };
+    const body = { prompt: q, conversationHistory, ...ibRequestIdentity(sessionIdRef.current) };
     if (context) body.context = context;
     if (attachments.length) {
       body.images = attachments.map(({ mediaType, data }) => ({ mediaType, data }));

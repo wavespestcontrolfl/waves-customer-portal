@@ -26,7 +26,7 @@ import useModalFocus from "../../hooks/useModalFocus";
 import DictationButton from "../tech/DictationButton";
 import PendingActionsCard from "./PendingActionsCard";
 import IntelligenceTaskCard from "./IntelligenceTaskCard";
-import { ibSessionId } from "../../utils/ibSession";
+import { ibRequestIdentity, ibSessionId } from "../../utils/ibSession";
 import ToolActivityList from "./ToolActivityList";
 import { filesToImageParts, MAX_ATTACHMENTS } from "../../utils/ibImages";
 import { formatETDateTime } from "../../lib/timezone";
@@ -558,8 +558,7 @@ function GlobalCommandPalette({ user }, ref) {
             prompt: q,
             conversationHistory,
             context,
-            session_id: sessionIdRef.current,
-            request_key: crypto.randomUUID(),
+            ...ibRequestIdentity(sessionIdRef.current),
             ...(selectedTarget ? { selected_target: selectedTarget } : {}),
             ...(threadId
               ? {

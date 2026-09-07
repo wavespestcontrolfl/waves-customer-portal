@@ -1288,7 +1288,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   }
 
   if (task) {
-    const invalidTarget = await TaskContext.validateMutationTarget(params, taskContext, { toolName: toolUse.name });
+    const invalidTarget = await TaskContext.validateRecordTarget(params, taskContext, { toolName: toolUse.name });
     if (invalidTarget) return { failed: true, modelResult: invalidTarget };
     params._ib_task_context = taskContext;
     if (toolUse.name === 'update_customer') {
@@ -2355,7 +2355,16 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         let errorMessage = null;
         let proposedCard = false; // a UI-gated write became a confirmation card
         const toolStartedAt = Date.now();
-        const validationFailure = platformEnabled ? ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope) : null;
+        let executionInput = toolUse.input;
+        let validationFailure = platformEnabled ? ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope) : null;
+        if (!validationFailure && platformEnabled && taskContext.targets?.length
+          && ActionRegistry.actions.get(toolUse.name)?.kind === 'read') {
+          const readTarget = await TaskContext.prepareReadInput(toolUse.input, taskContext, {
+            toolName: toolUse.name, schema: ActionRegistry.actions.get(toolUse.name).schema,
+          });
+          if (readTarget.error) validationFailure = readTarget;
+          else executionInput = readTarget.input;
+        }
         if (validationFailure) {
           result = validationFailure;
           failed = true;
@@ -2436,8 +2445,9 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
           try {
             // Recall is actor-bound: the owner id travels from the
             // authenticated request, never from model-supplied input.
-            result = await executeToolByName(toolUse.name, toolUse.input, techContext,
-              HISTORY_TOOL_NAMES.has(toolUse.name) ? { actorId: getAdminActorId(req) } : {});
+            result = await executeToolByName(toolUse.name, executionInput, techContext, {
+              actorId: getAdminActorId(req), readCustomerIds: taskContext?.targets?.map(target => target.customer_id) || [],
+            });
             if (isToolFailure(result)) {
               failed = true;
               errorMessage = result.error || result.message || 'tool returned error';
@@ -2844,7 +2854,7 @@ router.post('/confirm-action', async (req, res, next) => {
 
     const execParams = { ...action.params };
     if (execParams._ib_task_context) {
-      const targetFailure = await TaskContext.validateMutationTarget(execParams, execParams._ib_task_context, { toolName: action.tool_name });
+      const targetFailure = await TaskContext.validateRecordTarget(execParams, execParams._ib_task_context, { toolName: action.tool_name });
       if (targetFailure) {
         await PendingActions.recordResult(action.id, targetFailure);
         return res.status(409).json(targetFailure);

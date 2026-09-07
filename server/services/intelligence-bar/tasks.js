@@ -116,4 +116,12 @@ async function list(actorId, sessionId) {
     actions.filter(action => action.task_id === task.id).map(PendingActions.actionReceipt)) }));
 }
 
-module.exports = { UUID_RE, REQUEST_KEY_RE, begin, checkpoint, claimResume, get, list, snapshot, requestHash, withoutImages };
+// Run from the existing IB retention sweep even while the platform gate is off.
+// Keep an active runner until its lease ends. Pending-action receipts survive
+// through their existing FK SET NULL and remain actor-bound for reconciliation.
+async function purgeExpiredTasks() {
+  return db('ib_tasks').where('expires_at', '<=', db.fn.now())
+    .where('lease_expires_at', '<=', db.fn.now()).del();
+}
+
+module.exports = { UUID_RE, REQUEST_KEY_RE, begin, checkpoint, claimResume, get, list, snapshot, requestHash, withoutImages, purgeExpiredTasks };
