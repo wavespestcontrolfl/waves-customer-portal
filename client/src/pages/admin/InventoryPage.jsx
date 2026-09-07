@@ -2808,6 +2808,7 @@ function RestockRequestsTab({ showToast, onUpdate, canAuthor = false, refreshId,
   const [, setSearchParams] = useSearchParams();
   const [requests, setRequests] = useState([]);
   const [status, setStatus] = useState(requestId ? "all" : "active");
+  useEffect(() => { if (requestId) setStatus("all"); }, [requestId]);
   const [loading, setLoading] = useState(true);
   const loadSequence = useRef(0);
   const [receivingId, setReceivingId] = useState("");

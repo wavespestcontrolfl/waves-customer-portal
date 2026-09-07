@@ -447,7 +447,7 @@ function GlobalCommandPalette({ user }, ref) {
       threadSeqRef.current = null;
     }
     resetAttachments();
-  }, [location.pathname, location.search, context, ibPageData?.customer_id, ibPageData?.appointment_id, ibPageData?.viewed_date, resetAttachments]);
+  }, [location.pathname, location.search, context, ibPageData?.customer_id, ibPageData?.appointment_id, ibPageData?.product_id, ibPageData?.viewed_date, resetAttachments]);
 
   // Load a server thread into the palette (resume-on-open and the picker
   // share this). Shows the thread's last reply — otherwise the palette

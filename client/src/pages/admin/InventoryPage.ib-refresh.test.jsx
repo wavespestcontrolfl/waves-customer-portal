@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Outlet, Route, Routes, useNavigate } from 'react-router-dom';
 import InventoryPage from './InventoryPage';
 import { IntelligenceBarPageDataProvider, useIntelligenceBarActions } from '../../hooks/useIntelligenceBarPageData';
 
@@ -13,7 +13,9 @@ const deferred = () => { let resolve; const promise = new Promise(r => { resolve
 const product = quantity => ({ id: productId, name: 'Synthetic stock product', inventoryOnHand: quantity, inventoryUnit: 'lb', vendorPricing: [] });
 function RefreshButton() {
   const { notifyMutation } = useIntelligenceBarActions();
-  return <button onClick={() => notifyMutation({ id: crypto.randomUUID(), product_id: productId, domain: 'inventory' })}>Receive verified result</button>;
+  const navigate = useNavigate();
+  return <><button onClick={() => notifyMutation({ id: crypto.randomUUID(), product_id: productId, domain: 'inventory' })}>Receive verified result</button>
+    <button onClick={() => navigate(-1)}>Browser Back</button></>;
 }
 function Host() {
   return <IntelligenceBarPageDataProvider><RefreshButton /><Outlet context={{ user: { role: 'admin' } }} /></IntelligenceBarPageDataProvider>;
@@ -69,4 +71,19 @@ test('product and movement refresh preserve the product filter and ignore an ear
   const productCalls = fetch.mock.calls.filter(([url]) => url.includes('/inventory?'));
   expect(productCalls.length).toBeGreaterThan(1);
   expect(productCalls.every(([url]) => url.includes('search=Synthetic'))).toBe(true);
+});
+
+test('browser Back restores a closed pinned request after Show all requests', async () => {
+  const row = { id: requestId, productId, productName: 'Synthetic closed request', status: 'received', priority: 'normal', requestedQuantity: 2, unit: 'lb' };
+  vi.stubGlobal('fetch', vi.fn(url => Promise.resolve(reply(url.includes('/restock-requests?')
+    ? { requests: new URL(url, 'http://localhost').searchParams.get('status') === 'all' ? [row] : [] }
+    : {}))));
+  mount(`tab=restock&requestId=${requestId}`);
+  await screen.findByText('Synthetic closed request');
+  fireEvent.click(screen.getByText('Show all requests'));
+  await waitFor(() => expect(screen.queryByText('Synthetic closed request')).toBeNull());
+  fireEvent.click(screen.getByText('Browser Back'));
+  await screen.findByText('Synthetic closed request');
+  expect(fetch.mock.calls.filter(([url]) => url.includes('/restock-requests?')).at(-1)[0])
+    .toContain(`status=all&requestId=${requestId}`);
 });

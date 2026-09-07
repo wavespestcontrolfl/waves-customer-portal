@@ -103,3 +103,5 @@ Cross-page discovery uses `GATE_IB_PLATFORM`, default off. The shared domain
 corrections also apply to the existing portal and gated confirmation path. No new
 migration, production data write, production gate change, supplier purchase,
 customer communication or money movement was performed during QA.
+
+Navigation review adds a passing closed-request Back regression: leaving the pinned received request for the active queue and navigating Back restores the all-status filter and the original request. Product selection on an unchanged route also invalidates late bar results. The integrated bar/card/inventory suites pass 30 tests. Actual desktop/mobile Chrome repeats request, ordered-recording, receiving, physical-count and cancellation workflows and verifies closed-request Back restoration. Screenshots: `.local/ib-inventory-{desktop,mobile}-back-restored.png`.
