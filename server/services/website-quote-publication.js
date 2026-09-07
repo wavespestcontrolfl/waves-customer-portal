@@ -37,9 +37,20 @@ async function publishWebsiteQuote({ estimateId, leadId, engineInput, engineResu
       .whereNull('deleted_at').whereNotIn('pipeline_stage', [...CUSTOMER_STAGES, ...FORMER_CUSTOMER_STAGES])
       .forUpdate().first();
     if (!customer || isMembershipCustomerRow(customer)) return null;
+    // Booked customers can retain a lead stage. Any appointment or completed
+    // service is account evidence, even without a membership tier.
+    const history = await Promise.all(['scheduled_services', 'service_records'].map(table => (
+      trx(table).where({ customer_id: customer.id }).first('id')
+    )));
+    if (history.some(Boolean)) return null;
 
     const token = row.token || randomBytes(16).toString('hex');
-    const publishable = { ...row, token };
+    // The public wizard stores the singular engineInput carrier. Published
+    // estimates use the canonical engineInputs carrier for cadence replay.
+    // Convert this newly published row, and retain this run's full engine
+    // provenance so later floor/config changes cannot alter its sold basis.
+    const { engineInput: _wizardInput, ...estimateData } = stored;
+    const publishable = { ...row, token, estimate_data: { ...estimateData, engineInputs: engineInput, engineResult } };
     const delivery = require('../routes/admin-estimates');
     // Reuse the send boundary, including quote-required, linkage, approval,
     // and engine-authority guards. No staff acknowledgement is fabricated.
@@ -59,6 +70,7 @@ async function publishWebsiteQuote({ estimateId, leadId, engineInput, engineResu
       && moneyCents(bundle.setupFee ? bundle.setupFee.amount : 0) !== moneyCents(fee.amount)) return null;
 
     snapshot.websiteSelfService = { publishedAt: now.toISOString() };
+    snapshot.noEngagementAutomation = true;
     await trx('estimates').where({ id: row.id, status: 'draft' }).update({
       token,
       status: 'sent',

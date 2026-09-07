@@ -38,6 +38,12 @@ it('keeps booking unavailable when a line has no quoted amount', () => {
   expect(screen.queryByRole('button', { name: /book my service/i })).not.toBeInTheDocument();
 });
 
+it('preserves a server-supplied one-time label without doubling its prefix', () => {
+  render(<WebsiteEstimateFlow {...base} oneTimeBreakdown={{ items: [{ service: 'one_time_pest', label: 'One-Time Pest Treatment', amount: 199 }] }} />);
+  expect(screen.getByText('One-Time Pest Control Service')).toBeInTheDocument();
+  expect(screen.queryByText(/One-Time One-Time/)).not.toBeInTheDocument();
+});
+
 it('preserves an included line and a discount rather than hiding them as unknown prices', () => {
   render(<WebsiteEstimateFlow {...base} oneTimeBreakdown={{ items: [
     { label: 'Pest Control', amount: 199 }, { label: 'Follow-up', amount: 0, kind: 'included' },

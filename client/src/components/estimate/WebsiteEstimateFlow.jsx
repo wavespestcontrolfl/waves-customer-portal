@@ -4,6 +4,7 @@ import './website-estimate.css';
 
 const CADENCE_NAMES = { 4: 'Quarterly', 6: 'Bi-Monthly', 9: 'Seasonal', 12: 'Monthly' };
 const CADENCE_COUNTS = { quarterly: 4, bimonthly: 6, bi_monthly: 6, monthly: 12, seasonal9: 9 };
+const ONE_TIME_NAMES = { one_time_pest: 'Pest Control Service', one_time_lawn: 'Lawn Care Service' };
 const money = value => Number(value).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 
 function applicationCount(frequency) {
@@ -74,7 +75,7 @@ export default function WebsiteEstimateFlow({
       return {
         key: section.key,
         label: `${CADENCE_NAMES[count] || frequency?.label || 'Recurring'} ${section.label} Service`,
-        amount, unit: 'per application', cadence: `${count}x /yr`,
+        amount, unit: 'per application', cadence: count && `${count}x /yr`,
       };
     });
 
@@ -82,7 +83,7 @@ export default function WebsiteEstimateFlow({
     .filter(item => !fees.some(fee => fee.service && fee.service === item.service))
     .map((item, index) => ({
       key: `${item.service || item.label}-${index}`,
-      label: item.kind === 'discount' ? item.label : `One-Time ${item.label || 'Service'}`,
+      label: item.kind === 'discount' ? item.label : `One-Time ${ONE_TIME_NAMES[item.service] || String(item.label || 'Service').replace(/^one[- ]time\s+/i, '')}`,
       amount: item.amount, unit: item.kind === 'included' ? 'Included' : '',
     })));
   const fullyPriced = priceRows.length > 0 && priceRows.every(row => row.amount != null && Number.isFinite(Number(row.amount)));

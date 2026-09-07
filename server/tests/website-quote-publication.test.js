@@ -72,6 +72,7 @@ test('publishes the current verified quote once, freezing the canonical snapshot
   expect(result.token).toMatch(/^[a-f0-9]{32}$/);
   expect(rows.estimates[0]).toMatchObject({ status: 'sent', token: result.token });
   expect(JSON.parse(rows.estimates[0].estimate_data).sendSnapshot).toEqual(snapshot.sendSnapshot);
+  expect(JSON.parse(rows.estimates[0].estimate_data).noEngagementAutomation).toBe(true);
   expect(locks).toEqual(['estimates', 'customers']);
   expect(delivery._internals.assertEstimateSendable).toHaveBeenCalledTimes(1);
   expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ action: 'website_quote_published', critical: true, trx: query }));
@@ -95,6 +96,18 @@ test.each(['active_customer', 'won', 'at_risk', 'churned', 'past_customer', 'dor
 test('rejects a member even when the CRM still labels them a lead', async () => {
   rows.customers[0].waveguard_tier = 'Silver';
   expect(await publishWebsiteQuote(args)).toBeNull();
+});
+
+test.each(['scheduled_services', 'service_records'])('rejects a lead-stage account with %s history', async table => {
+  rows[table] = [{ id: 'service-fixture', customer_id: 'customer-fixture' }];
+  expect(await publishWebsiteQuote(args)).toBeNull();
+  expect(rows.estimates[0].status).toBe('draft');
+  expect(recordAuditEvent).not.toHaveBeenCalled();
+});
+
+test('does not confuse another account’s service history with this prospect', async () => {
+  rows.scheduled_services = [{ id: 'service-fixture', customer_id: 'another-customer' }];
+  expect(await publishWebsiteQuote(args)).toEqual({ token: expect.any(String) });
 });
 
 test.each([
@@ -143,12 +156,17 @@ test.each([98.99, 99.01, null])('refuses a changed or missing membership fee: %s
   expect(rows.estimates[0].status).toBe('draft');
 });
 
-test('the actual engine quote can freeze through the canonical send snapshot builder', async () => {
+test.each([
+  [{ pest: { frequency: 'quarterly' } }, 'Pest Control', 99],
+  [{ lawn: { track: 'st_augustine', lawnFreq: 9 } }, 'Lawn Care', 0],
+  [{ oneTimePest: { urgency: 'NONE', afterHours: false } }, 'One-Time Pest Treatment', 0],
+  [{ pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine', lawnFreq: 9 } }, 'Pest Control + Lawn Care', 0],
+])('freezes the actual engine quote through the canonical send snapshot: %s', async (services, serviceInterest, fee) => {
   const { generateEstimate } = require('../services/pricing-engine');
   const engineInput = {
     homeSqFt: 2000, lotSqFt: 10000, stories: 1, propertyType: 'single_family',
     features: { shrubs: 'moderate', trees: 'moderate', complexity: 'standard' },
-    services: { pest: { frequency: 'quarterly' } }, paymentMethod: 'card',
+    services, measuredTurfSf: 4250, paymentMethod: 'card',
   };
   const engineResult = generateEstimate(engineInput);
   const totals = {
@@ -157,10 +175,10 @@ test('the actual engine quote can freeze through the canonical send snapshot bui
     onetime_total: engineResult.summary.oneTimeTotal,
   };
   Object.assign(rows.estimates[0], totals, {
-    service_interest: 'Pest Control',
+    service_interest: serviceInterest,
     estimate_data: {
       lead_id: args.leadId, engineInput, engineResult,
-      setupFeeQuote: { kind: 'waveguard_membership', amount: 99 },
+      setupFeeQuote: { kind: 'waveguard_membership', amount: fee },
     },
   });
   const actualDelivery = jest.requireActual('../routes/admin-estimates');
@@ -168,6 +186,14 @@ test('the actual engine quote can freeze through the canonical send snapshot bui
   delivery._internals.assertEstimateSendable.mockImplementation(actualDelivery._internals.assertEstimateSendable);
   const result = await publishWebsiteQuote({ ...args, engineInput, engineResult, totals });
   expect(result).toEqual({ token: expect.any(String) });
-  expect(JSON.parse(rows.estimates[0].estimate_data).sendSnapshot.pricingBundle.frequencies)
-    .toEqual(expect.arrayContaining([expect.objectContaining({ annual: totals.annual_total })]));
+  const stored = JSON.parse(rows.estimates[0].estimate_data);
+  expect(stored.engineInputs).toEqual(engineInput);
+  expect(stored.engineInput).toBeUndefined();
+  expect(stored.engineResult.pricingMetadata).toEqual(engineResult.pricingMetadata);
+  const bundle = stored.sendSnapshot.pricingBundle;
+  if (totals.annual_total > 0) {
+    expect(bundle.frequencies).toEqual(expect.arrayContaining([expect.objectContaining({ annual: totals.annual_total })]));
+  } else {
+    expect(bundle.anchorOneTimePrice).toBe(totals.onetime_total);
+  }
 });

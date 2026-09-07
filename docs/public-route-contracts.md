@@ -511,11 +511,14 @@ returns pricing and eligible booking handoffs. Optional `websiteFlow: true`
 opts website estimate pages into `GATE_WEBSITE_QUOTE_BOOKING` (default off).
 Only this run's self-bookable, server-priced `quote_wizard` draft may become
 customer-viewable: estimate then customer row locks, unchanged lead/input/
-totals, new-customer eligibility, existing sendability guards, no uncertain
+totals, new-customer eligibility (including no appointment/service history), existing sendability guards, no uncertain
 engine lines, and cent-exact frozen pricing plus membership-fee agreement.
 No staff approval is required. Successful publication returns the additive
 `website_estimate_url` and uses it for `booking_url` and the existing quote
-invite; no new delivery mechanism is added. A refused website publication
+invite; no new delivery mechanism is added. Published website quotes carry
+`noEngagementAutomation: true` to exclude automatic follow-up campaigns;
+the quote invitation and booking confirmations retain their existing paths.
+A refused website publication
 withholds the booking handoff. Legacy callers keep their current `/book`
 handoff. Ordinary website lead forms do not opt into this route.
 Request shape: either `services` keyed by the engine
