@@ -94,6 +94,45 @@ describe("Email draft and navigation preservation", () => {
     expect(screen.getByRole("textbox", { name: "Reply" })).toBeInTheDocument();
   });
 
+  it("opens a newly linked message from Blocked Senders without losing its prior reply", async () => {
+    mount();
+    fireEvent.change(await open(a), { target: { value: "Retained reply for A" } });
+    fireEvent.click(screen.getByRole("button", { name: "Blocked Senders" }));
+    expect(screen.queryByRole("textbox", { name: "Reply" })).not.toBeInTheDocument();
+    act(() => {
+      window.history.pushState({}, "", `/admin/communications?id=${b.id}#tab=email`);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    expect(await screen.findByText(b.body_text)).toBeInTheDocument();
+    expect(await open(a)).toHaveValue("Retained reply for A");
+  });
+
+  it.each([false, true])("refreshes Gmail connection status on activation (initially connected: %s)", async (initial) => {
+    let connected = initial;
+    loadResponses.status = () => response({ connected });
+    const view = mount();
+    await screen.findByRole("button", { name: initial ? "New Email" : "Connect Gmail Account" });
+    view.rerender(emailRoute(false));
+    connected = !initial;
+    view.rerender(emailRoute());
+    expect(await screen.findByRole("button", { name: connected ? "New Email" : "Connect Gmail Account" })).toBeInTheDocument();
+  });
+
+  it.each(["disconnected", "failed"])("ignores an older %s connection check after reconnecting", async (stale) => {
+    const pending = [];
+    loadResponses.status = () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
+    const view = mount();
+    await waitFor(() => expect(pending).toHaveLength(1));
+    view.rerender(emailRoute(false));
+    view.rerender(emailRoute());
+    await waitFor(() => expect(pending).toHaveLength(2));
+    await act(async () => pending[1].resolve(response({ connected: true })));
+    await screen.findByRole("button", { name: "New Email" });
+    await act(async () => stale === "failed" ? pending[0].reject(new Error("Synthetic connection check failure")) : pending[0].resolve(response({ connected: false })));
+    expect(screen.getByRole("button", { name: "New Email" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connect Gmail Account" })).not.toBeInTheDocument();
+  });
+
   it.each([404, 503, "network"])("clears the previous message while a changed link loads or fails (%s)", async (failure) => {
     mount();
     fireEvent.change(await open(a), { target: { value: "Unsent reply for A" } });

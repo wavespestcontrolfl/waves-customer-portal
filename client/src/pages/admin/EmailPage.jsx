@@ -190,15 +190,16 @@ export default function EmailPage({ navigation, active }) {
   const [toDropdownOpen, setToDropdownOpen] = useState(false);
   const toFieldRef = useRef(null);
   const hasDrafts = Object.values(composeForm).some(Boolean) || Object.values(drafts.replies).some(Boolean);
-  const loadSequence = useRef({ stats: 0, digest: 0, emails: 0, blocked: 0 });
+  const loadSequence = useRef({ status: 0, stats: 0, digest: 0, emails: 0, blocked: 0 });
 
   const loadStatus = useCallback(async () => {
+    const request = ++loadSequence.current.status;
     try {
       const r = await adminFetch("/api/admin/email/oauth/status");
       const d = await r.json();
-      setStatus(d);
+      if (request === loadSequence.current.status) setStatus(d);
     } catch {
-      setStatus({ connected: false });
+      if (request === loadSequence.current.status) setStatus({ connected: false });
     }
   }, []);
 
@@ -277,15 +278,15 @@ export default function EmailPage({ navigation, active }) {
   };
 
   useEffect(() => {
-    loadStatus();
-  }, [loadStatus]);
+    if (active) loadStatus();
+  }, [active, loadStatus]);
   useEffect(() => {
     if (active && status?.connected) {
       loadStats();
       loadEmails();
       loadDigest();
     }
-  }, [active, status, loadStats, loadEmails, loadDigest]);
+  }, [active, status?.connected, loadStats, loadEmails, loadDigest]);
   useEffect(() => {
     if (active && tab === "blocked") loadBlocked();
   }, [active, tab, loadBlocked]);
@@ -299,6 +300,7 @@ export default function EmailPage({ navigation, active }) {
     const id = searchParams.get("id");
     if (id && id === selectedIdRef.current && !activated) return;
     if (id !== selectedIdRef.current) {
+      if (id) setTab("inbox");
       selectedIdRef.current = null;
       setSelectedEmail(null);
       setThread([]);
@@ -317,7 +319,7 @@ export default function EmailPage({ navigation, active }) {
       } catch { /* the inbox still renders */ }
     })();
     return () => { cancelled = true; };
-  }, [active, status, searchParams]);
+  }, [active, status?.connected, searchParams]);
 
   const openEmail = async (email) => {
     selectedIdRef.current = email.id;

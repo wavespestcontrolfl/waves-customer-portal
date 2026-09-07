@@ -348,3 +348,27 @@ After conflict resolution, all **104 focused tests across nine suites**,
 gates pass. Logs: `.tmp/email-main-integration-{focused,browser,build}.log`.
 Local migrations were not run. This reconciliation does not merge or release
 the Email draft PR.
+
+## Ready-for-review follow-through
+
+The review triggered by marking #4004 ready found two P2 issues on
+`77cb77a9b2`. A changed message link now selects Inbox from Blocked Senders,
+while ordinary channel returns retain the selected sub-section. Email also
+refreshes Gmail connection status on activation, using the existing request
+generation guard for both success and failure responses. Unchanged connection
+results do not duplicate inbox or selected-message refreshes.
+
+Five additional component regressions cover linked-message visibility, prior
+reply preservation, connection changes in both directions, and superseded
+connection responses/errors. Two new browser scenarios verify linked-message
+navigation and the mobile disconnected/connected surfaces; the mobile flow
+also preserves an unsent reply across reconnection.
+
+After consolidating overlapping concurrent test additions, **109 focused
+tests across nine suites**, **16 synthetic browser scenarios**, the production
+build and prebuild gates pass on Node 20. Scoped lint has zero errors; the
+existing structural deferral now records EmailPage complexity **65** versus
+47 before consolidation. Evidence: `.tmp/email-ready-owner-{focused,browser,build,lint}.log`;
+reviewed desktop/mobile screenshots include
+`email-linked-inbox-desktop-1440.png` and `email-reconnected-mobile-390.png`.
+Local migrations and live provider workflows were not run.

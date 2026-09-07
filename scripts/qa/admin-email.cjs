@@ -24,6 +24,7 @@ async function main() {
   let smsMessages = [];
   let refreshedEmail = false;
   let blockedSenders = [];
+  let gmailConnected = true;
   async function openPage(role = 'admin', width = 1440) {
     const page = await browser.newPage({ viewport: { width, height: 1000 }, timezoneId: 'America/New_York', serviceWorkers: 'block' });
     page.setDefaultTimeout(15000);
@@ -50,7 +51,7 @@ async function main() {
       else if (api === '/health') body = { status: 'ok', gates: {} };
       else if (api === '/admin/feature-flags') body = { flags: {} };
       else if (api === '/admin/notifications/unread-count') body = { count: 0 };
-      else if (api === '/admin/email/oauth/status') body = { connected: true };
+      else if (api === '/admin/email/oauth/status') body = { connected: gmailConnected };
       else if (api === '/admin/email/inbox') body = { emails: [b], total: 1 };
       else if (api === '/admin/email/stats') body = { total: 1, unread: 0 };
       else if (api === '/admin/email/daily-digest') body = { total_received: 0 };
@@ -158,6 +159,43 @@ async function main() {
       await page.getByText('blocked.example.invalid', { exact: true }).waitFor();
       blockedSenders = [];
       await page.getByRole('navigation', { name: 'Email section', exact: true }).getByRole('button', { name: 'Inbox', exact: true }).click();
+    });
+    await scenario('message navigation opens Inbox from Blocked Senders', async () => {
+      const linked = await openPage();
+      await linked.goto(`${server.baseUrl}/admin/communications?id=${a.id}#tab=email`);
+      await linked.getByText(a.body_text, { exact: true }).waitFor();
+      await linked.getByRole('navigation', { name: 'Email section', exact: true }).getByRole('button', { name: 'Blocked Senders' }).click();
+      await linked.evaluate((id) => {
+        history.pushState({}, '', `/admin/communications?id=${id}#tab=email`);
+        window.dispatchEvent(new PopStateEvent('popstate'));
+      }, b.id);
+      await linked.getByText(b.body_text, { exact: true }).waitFor();
+      await shot(linked, 'email-linked-inbox-desktop-1440');
+      await linked.close();
+    });
+    await scenario('Email activation refreshes connected and disconnected Gmail state', async () => {
+      const connection = await openPage('admin', 390);
+      gmailConnected = false;
+      await connection.goto(`${server.baseUrl}/admin/communications#tab=email`);
+      await connection.getByRole('button', { name: 'Connect Gmail', exact: true }).waitFor();
+      await channel(connection, 'SMS').click();
+      gmailConnected = true;
+      await channel(connection, 'Email').click();
+      await connection.getByText(b.subject, { exact: true }).waitFor();
+      await connection.getByText(b.subject, { exact: true }).click();
+      await connection.getByRole('textbox', { name: 'Reply' }).fill('Synthetic reply across Gmail reconnect');
+      await channel(connection, 'SMS').click();
+      gmailConnected = false;
+      await channel(connection, 'Email').click();
+      await connection.getByRole('button', { name: 'Connect Gmail', exact: true }).waitFor();
+      await shot(connection, 'email-connection-refresh-mobile-390');
+      await channel(connection, 'SMS').click();
+      gmailConnected = true;
+      await channel(connection, 'Email').click();
+      await connection.getByRole('textbox', { name: 'Reply' }).waitFor();
+      assert.equal(await connection.getByRole('textbox', { name: 'Reply' }).inputValue(), 'Synthetic reply across Gmail reconnect');
+      await shot(connection, 'email-reconnected-mobile-390');
+      await connection.close();
     });
     await scenario('hidden Email defers a changed message link until the channel opens', async () => {
       await channel(page, 'SMS').click();
