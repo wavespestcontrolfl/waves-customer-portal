@@ -209,3 +209,28 @@ unavailable customers are excluded. The final parent-integrated checks pass
 earlier unchanged provider/publisher checks remain recorded above.
 
 Customer-ID-only searches retain linked history after a phone-number change; only unlinked messages depend on the current saved phone. An explicit phone selector still narrows the results. The final seven adapter DB cases and 32 reader/pinning/history tests pass after this correction, and independent review closed it.
+
+B1 also binds explicit child identifiers in the request, requires a deliberate
+reference for customerless calls, and freshly validates every child owner.
+Emails inherit a converted lead's customer and reject deleted or conflicting
+ownership; an address-only reply requires exactly one matching thread. Relevant
+page hints survive stale auxiliary hints, including compound “this customer and
+that estimate” requests. Name lookup now uses the same punctuation and space
+normalization as request matching. The resulting scope passes 154 unit/write
+boundary cases and 19 rollback-only PostgreSQL cases. No provider was called.
+
+B2 propagates Gmail uncertainty through the native email route and editor.
+The existing tab-scoped draft store saves an attempt before submission, retains
+the guard through reloads and quota failures, and requires explicit Sent-folder
+reconciliation before another send. Gmail acceptance requires its message ID;
+inbox-refresh failure cannot become a send failure. The shared Gmail client
+also rejects ID-less responses as unknown, so the existing outreach claim and
+manual reconciliation path retain their send lock. This closes native-tab retry
+behavior, not cross-device/server idempotency; that remains Phase 3 work.
+
+Controlled desktop (1440) and mobile (390) browser checks covered compose/reply
+uncertainty, reload, both reconciliation verdicts and no duplicate send. Three
+screenshots were inspected; no JavaScript errors or horizontal overflow appeared.
+The provider was stubbed in browser QA. Actual native-route tests and the real
+Google SDK with a controlled transporter separately cover outcome classification.
+The parent-integrated database suites pass 26 rollback-only cases.

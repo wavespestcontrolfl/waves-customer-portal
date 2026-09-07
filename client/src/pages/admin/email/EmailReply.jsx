@@ -1,12 +1,14 @@
 import { D } from "./emailStyles";
 import EmailQuickLinks from "../../../components/admin/EmailQuickLinks";
 import { appendStaticLinkClause } from "../../../lib/composerLinks";
+import EmailSendOutcome from "./EmailSendOutcome";
 
 export default function EmailReply({ active, sender, mailbox, editor }) {
   const { selectedEmail } = mailbox;
   const { drafts, setReplyDraft, sending, drafting, draftResult } = editor;
   const replyText = drafts.replies[selectedEmail.id] || "";
-  const replyDisabled = sending || !replyText.trim();
+  const attemptKey = `reply:${selectedEmail.id}`;
+  const replyDisabled = sending || Boolean(editor.sendAttempts[attemptKey]) || !replyText.trim();
   return (
     <div
       style={{
@@ -46,6 +48,7 @@ export default function EmailReply({ active, sender, mailbox, editor }) {
           boxSizing: "border-box",
         }}
       />
+      {!sending && <EmailSendOutcome attempt={editor.sendAttempts[attemptKey]} onResolve={outcome => editor.reconcileSend(attemptKey, outcome)} />}
       {draftResult && (
         <div
           style={{

@@ -16,11 +16,15 @@ beforeEach(() => {
     customers: [{ id: A, first_name: 'Synthetic', last_name: 'Person', version: '2026-09-01 12:00:00.123456+00' }, { id: B }],
   };
   db.mockReset().mockImplementation(table => {
-    let id, ids, nameMatch = false;
+    let id, ids, nameMatch = false, threadProjection = false;
     const q = { where: (key, value) => { id = typeof key === 'object' ? key.id : value; return q; },
       first: async () => rows[table]?.find(row => row.id === id),
       whereRaw: () => { nameMatch = true; return q; }, whereNull: () => q, whereIn: (key, values) => { if (key === 'id') ids = values; return q; }, limit: () => q,
-      select: () => q, then: resolve => Promise.resolve(ids ? (rows[table] || []).filter(row => ids.includes(row.id)) : nameMatch ? rows[table] || [] : lookupRows).then(resolve) };
+      distinct: () => { threadProjection = true; return q; },
+      select: () => q, then: resolve => {
+        const selected = ids ? (rows[table] || []).filter(row => ids.includes(row.id)) : nameMatch ? rows[table] || [] : lookupRows;
+        return Promise.resolve(threadProjection ? [...new Set(selected.map(row => row.gmail_thread_id || row.id))].map(thread_key => ({ thread_key })) : selected).then(resolve);
+      } };
     return q;
   });
   db.raw = text => ({ text });
@@ -52,6 +56,50 @@ test('viewed and selected targets retain the database text version without Date 
 });
 const context = (customerId = A) => ({ targets: customerId ? [{ customer_id: customerId }] : [], page: { ids: {} } });
 
+test('explicit child identifiers constrain same-customer choices and exclude message content', async () => {
+  const one = 'abcdef01-0000-4000-8000-000000000001';
+  const two = 'abcdef01-0000-4000-8000-000000000002';
+  rows.estimates = [{ id: one, customer_id: A }, { id: two, customer_id: A }];
+  lookupRows = [rows.customers[0]];
+  const task = await Context.resolve({ prompt: `Revise estimate ${one.toUpperCase()} for Synthetic Person`, pageData: { estimate_id: two } });
+  expect(await Context.validateRecordTarget({ estimate_id: one }, task)).toBeNull();
+  expect(await Context.validateRecordTarget({ estimate_id: two }, task)).toMatchObject({ code: 'target_clarification_required' });
+  const multiple = await Context.resolve({ prompt: `Revise estimate ${one} and estimate ${two} for Synthetic Person`, pageData: {} });
+  expect(await Context.validateRecordTarget({ estimate_id: two }, multiple)).toBeNull();
+  const note = await Context.resolve({ prompt: `Add a note for Synthetic Person saying estimate ${two} needs attention`, pageData: {} });
+  expect(note.requestedRecords).toEqual({});
+  for (const noun of [`this estimate`, `estimate ${one}`]) {
+    for (const content of ['mentioning', 'referencing', 'containing', 'with', 'reading', 'for the office about']) {
+      const inline = await Context.resolve({ prompt: `Revise ${noun} for Synthetic Person and add a note ${content} estimate ${two}`, pageData: { estimate_id: one } });
+      expect(await Context.validateRecordTarget({ estimate_id: one }, inline)).toBeNull();
+      expect(await Context.validateRecordTarget({ estimate_id: two }, inline)).toMatchObject({ code: 'target_clarification_required' });
+    }
+  }
+  const conflicting = await Context.resolve({ prompt: `Revise this estimate or estimate ${two} for Synthetic Person`, pageData: { estimate_id: one } });
+  expect(await Context.validateRecordTarget({ estimate_id: two }, conflicting)).toMatchObject({ code: 'target_clarification_required' });
+  const attachedNote = await Context.resolve({ prompt: `Revise estimate ${one} for Synthetic Person with a note containing estimate ${two}`, pageData: {} });
+  expect(await Context.validateRecordTarget({ estimate_id: one }, attachedNote)).toBeNull();
+  expect(await Context.validateRecordTarget({ estimate_id: two }, attachedNote)).toMatchObject({ code: 'target_clarification_required' });
+});
+
+test('a later that-estimate constraint survives filtering unrelated page hints', async () => {
+  const id = 'abcdef01-0000-4000-8000-000000000001';
+  rows.estimates = [{ id, customer_id: A }];
+  const task = await Context.resolve({ prompt: 'Update this customer and revise that estimate', pageData: { customer_id: A, estimate_id: id } });
+  expect(task.requestedRecords.estimate_id).toBe(id);
+  expect(await Context.validateRecordTarget({ estimate_id: id }, task)).toBeNull();
+});
+
+test.each(['reschedule_appointment', 'move_stops_to_day'])('%s cannot attach a customerless reservation to a customer task', async toolName => {
+  const hold = '40000000-0000-4000-8000-000000000001';
+  const owned = '40000000-0000-4000-8000-000000000002';
+  rows.scheduled_services = [{ id: hold, customer_id: null }, { id: owned, customer_id: A }];
+  const params = id => toolName === 'move_stops_to_day' ? { service_ids: [id] } : { appointment_id: id };
+  expect(await Context.validateRecordTarget(params(hold), context(), { toolName })).toMatchObject({ code: 'target_clarification_required' });
+  expect(await Context.validateRecordTarget(params(owned), context(), { toolName })).toBeNull();
+  expect(await Context.validateRecordTarget(params(hold), context(null), { toolName })).toBeNull();
+});
+
 test.each(['Synthetic Person', 'Another Person', 'Unresolved'])('SMS recipient name %s requires a canonical customer ID', async customer_name => {
   expect((await Context.validateRecordTarget({ customer_name }, context(), { toolName: 'send_sms' })).code).toBe('target_clarification_required');
   expect((await Context.validateRecordTarget({ customer_name, customerId: A }, context(), { toolName: 'send_sms' })).code).toBe('target_clarification_required');
@@ -60,6 +108,14 @@ test.each(['Synthetic Person', 'Another Person', 'Unresolved'])('SMS recipient n
   expect(await Context.validateRecordTarget({ customer_id: A, customer_name, phone: '5550101234' }, context(), { toolName: 'send_sms' })).toBeNull();
   expect((await Context.validateRecordTarget({ customer_id: B, customer_name }, context(), { toolName: 'send_sms' })).code).toBe('target_clarification_required');
   expect((await Context.validateRecordTarget({ customer_id: A, customer_name, phone: '5550104321' }, context(), { toolName: 'send_sms' })).code).toBe('target_relationship_mismatch');
+});
+
+test.each(['trigger_review_request', 'reply_via_sms'])('%s requires a canonical current-task customer before proposal', async toolName => {
+  for (const customer_name of ['Synthetic Person', 'Another Person', 'Unresolved']) {
+    expect(await Context.validateRecordTarget({ customer_name }, context(), { toolName })).toMatchObject({ code: 'target_clarification_required' });
+    expect(await Context.validateRecordTarget({ customer_name, customer_id: A }, context(), { toolName })).toBeNull();
+    expect(await Context.validateRecordTarget({ customer_name, customer_id: B }, context(), { toolName })).toMatchObject({ code: 'target_clarification_required' });
+  }
 });
 
 test.each([['email', 'emails'], ['call', 'call_log'], ['lead', 'leads']])('a %s mentioned only in content gives no customer authority', async (noun, table) => {
