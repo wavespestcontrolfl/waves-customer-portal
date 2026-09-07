@@ -31,6 +31,15 @@ for new data**.
   within the day (newest first, per-row lock + re-check, same core as the
   lazy reads). A later consumer may therefore assume the row exists after at
   most a day — never at insert time; the booking anchor backfills its own.
+  The day holds while the backlog is under the run's `maxRows` guard (2000);
+  a capped run logs a warning and the remainder waits for the next tick.
+  Rows the sweep creates carry `source = 'backfill'`, so with
+  `GATE_PROPERTY_ENRICH_BACKFILL` on they enter the nightly paid enrichment
+  candidate set (`fetchBackfillCandidates`, `call-property-lookup.js`) —
+  bounded by `PROPERTY_BACKFILL_BATCH` (default 20/night) and the 14-day
+  attempt cooldown, so it reorders that spend rather than adding to it; with
+  the gate off (call-recovery mode) candidates are fenced to call-pipeline
+  provenance and these rows are untouched.
 
 Service: `server/services/customer-properties.js` (pure helpers `normStreet` /
 `normalizeOccupancy` / `isNewStreet` are unit-tested in

@@ -55,7 +55,7 @@ function installDb({ candidates = [], customersById = {}, props = {}, insertErro
 const live = (id, over = {}) => ({ id, deleted_at: null, address_line1: '100 Main St', city: 'Sampleville', state: 'FL', zip: '34200', latitude: 27.1, longitude: -82.1, contact_role: null, ...over });
 
 describe('sweepMissingPrimaryProperties (daily primary backstop)', () => {
-  beforeEach(() => { mockDb.mockReset(); logger.error.mockClear(); });
+  beforeEach(() => { mockDb.mockReset(); logger.error.mockClear(); logger.warn.mockClear(); });
 
   test('creates the primary from the customers mirror for every row-less live customer', async () => {
     const { inserted } = installDb({ candidates: ['c1', 'c2'], customersById: { c1: live('c1'), c2: live('c2', { contact_role: 'property_manager' }) } });
@@ -96,12 +96,22 @@ describe('sweepMissingPrimaryProperties (daily primary backstop)', () => {
     expect(await sweepMissingPrimaryProperties({ batchSize: 100 })).toEqual({ checked: 250, created: 250, skipped: 0, failed: 0 });
     expect(inserted).toHaveLength(250);
     expect(new Set(inserted.map((r) => r.customer_id)).size).toBe(250);
+    expect(logger.warn).not.toHaveBeenCalled();
   });
 
-  test('maxRows caps a runaway run', async () => {
+  test('maxRows caps a runaway run, and says so: a capped run is not a drained one', async () => {
     const ids = Array.from({ length: 30 }, (_, i) => `c${i}`);
     installDb({ candidates: ids, customersById: Object.fromEntries(ids.map((id) => [id, live(id)])) });
     expect((await sweepMissingPrimaryProperties({ batchSize: 10, maxRows: 25 })).checked).toBe(25);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn.mock.calls[0][0]).toContain('maxRows guard (25)');
+  });
+
+  test('a backlog that ends exactly on the guard is reported as capped, not drained', async () => {
+    const ids = Array.from({ length: 20 }, (_, i) => `c${i}`);
+    installDb({ candidates: ids, customersById: Object.fromEntries(ids.map((id) => [id, live(id)])) });
+    expect((await sweepMissingPrimaryProperties({ batchSize: 10, maxRows: 20 })).checked).toBe(20);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
   });
 
   test('nothing to do → zero counts and no log noise', async () => {

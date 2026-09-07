@@ -558,6 +558,7 @@ async function sweepMissingPrimaryProperties({ batchSize = 100, maxRows = 2000 }
   // row-less id is excluded from later batches so it cannot be re-selected
   // forever within one run.
   const seen = new Set();
+  let cappedOut = false;
   while (results.checked < maxRows) {
     const rows = await db('customers as c')
       .whereNull('c.deleted_at')
@@ -585,12 +586,19 @@ async function sweepMissingPrimaryProperties({ batchSize = 100, maxRows = 2000 }
         logger.error(`[customer-properties] primary backstop failed for customer ${row.id}: ${err.code || err.name || 'error'}`);
       }
     }
+    // Stopped on the guard, not on an empty candidate set: whatever is left
+    // waits for the next run, and the doc's "within a day" does not hold for
+    // it. A clean resolve alone would read as fully drained.
+    if (results.checked >= maxRows) cappedOut = true;
   }
   if (results.checked > 0) {
     logger.info(
       `[customer-properties] primary backstop sweep: checked=${results.checked}, ` +
       `created=${results.created}, skipped=${results.skipped}, failed=${results.failed}`,
     );
+  }
+  if (cappedOut) {
+    logger.warn(`[customer-properties] primary backstop stopped at the maxRows guard (${maxRows}); a backlog may remain for the next run`);
   }
   // Every row was attempted; now surface the failures to job_health (the
   // scheduler runs this under runExclusive, which records success on a
