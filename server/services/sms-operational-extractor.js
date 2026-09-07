@@ -43,7 +43,7 @@ const INTERROGATIVE = /(?:^|[.!;:\n]\s*)(?:(?:and|but|also|however|please)[, ]+)
 // Indirect questions do not invert the subject and auxiliary. Keep the
 // inquiry verb and its embedded question in the same clause; any such
 // clause makes a whole-message fact unsuitable for automatic persistence.
-const INDIRECT_INTERROGATIVE = /\b(?:wonder(?:ing|ed|s)?|ask(?:ing|ed|s)?|know|confirm|clarify)\b[^.!?;:\n]*\b(?:if|whether|what|where|when|why|who|whose|which|how)\b/i;
+const INDIRECT_INTERROGATIVE = /\b(?:wonder(?:ing|ed|s)?|ask(?:ing|ed|s)?|know|confirm|clarify|check(?:ing|ed|s)?|see(?:ing)?|curious|find(?:ing)? out)\b[^.!?;:\n]*\b(?:if|whether|what|where|when|why|who|whose|which|how)\b/i;
 function isQuestionSource(source) {
   const text = String(source || '').normalize('NFKC');
   return /[?¿؟]/u.test(text) || INTERROGATIVE.test(text) || INDIRECT_INTERROGATIVE.test(text);

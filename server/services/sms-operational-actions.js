@@ -121,11 +121,15 @@ async function proposeFact(trx, message, fact, current) {
 async function applyFacts(trx, message, facts, context) {
   const outcomes = [];
   let persistedCurrent = context.current;
+  // Every free-form value is the whole message, so two distinct free-form
+  // fields in one batch claim the same text for different topics.
+  const mixedTopics = new Set(facts.filter((f) => !AUTO_APPLY_FIELDS.has(f.field)).map((f) => f.field)).size > 1;
   for (const fact of facts) {
     const duplicateField = facts.filter((f) => f.field === fact.field).length > 1;
     const negatedReview = REVIEW_ON_NEGATION[fact.field];
     const negated = negatedReview && NEGATED_OR_UNCERTAIN.test(message.message_body);
-    const verdict = duplicateField ? 'conflicting_facts' : negated ? negatedReview : factVerdict(fact, context);
+    const verdict = duplicateField ? 'conflicting_facts' : negated ? negatedReview
+      : mixedTopics && !AUTO_APPLY_FIELDS.has(fact.field) ? 'mixed_topics' : factVerdict(fact, context);
     if (verdict !== 'apply') { outcomes.push({ ...fact, outcome: verdict }); continue; }
     if (!AUTO_APPLY_FIELDS.has(fact.field)) {
       const proposalId = await proposeFact(trx, message, fact, persistedCurrent);

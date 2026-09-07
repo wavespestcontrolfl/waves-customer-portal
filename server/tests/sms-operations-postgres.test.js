@@ -179,6 +179,20 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(NotificationService.notifyAdmin).toHaveBeenCalled();
   });
 
+  test('two free-form fields from one SMS are held as mixed topics, not proposed twice', async () => {
+    const quote = 'Two dogs are in the yard. Park in the driveway.';
+    message.message_body = quote;
+    await mockPg('sms_log').where({ id: message.id }).update({ message_body: quote });
+    result.facts = ['pet_details', 'parking_notes'].map((field) => ({ field, quote, value: quote,
+      property_id: context.properties[0].id, duration: 'durable' }));
+    await recordMessageOperations(mockPg, message, result, context);
+    expect(await mockPg('data_hygiene_proposals')).toHaveLength(0);
+    expect(await mockPg('property_preferences')).toHaveLength(0);
+    const outcomes = (await mockPg('sms_log').first()).operational_analysis.facts.map((fact) => fact.outcome);
+    expect(outcomes).toEqual(['mixed_topics', 'mixed_topics']);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalled();
+  });
+
   test('a stated pet becomes a pending proposal instead of a direct write', async () => {
     const quote = 'Two friendly dogs in the yard.';
     message.message_body = quote;
