@@ -11,7 +11,7 @@ jest.mock('../middleware/admin-auth', () => ({
 }));
 jest.mock('../services/tech-line', () => ({ techLineContext: jest.fn() }));
 jest.mock('../services/call-bridge', () => ({ placeBridgeCall: jest.fn(async () => ({ callSid: 'CA-1', callLogId: 'log-1' })) }));
-jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true })) }));
+jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn(async () => ({ sent: true, providerMessageId: 'SM-real' })) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 
 const db = require('../models/db');
@@ -96,6 +96,14 @@ describe('POST /sms', () => {
     primeVisit({ customer: { id: 'c1', phone: null } });
     expect((await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'hi' } })).statusCode).toBe(409);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('the SMS-gate-off sentinel (sent:true, no provider id) is a 409, never "Sent."', async () => {
+    primeVisit();
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'gate-blocked' });
+    const r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'hi' } });
+    expect(r.statusCode).toBe(409);
+    expect(r.body.code).toBe('SMS_GATE_OFF');
   });
 
   test('a guard refusal is a 409 carrying the reason, never a silent 200', async () => {

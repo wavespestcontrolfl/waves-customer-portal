@@ -12,6 +12,7 @@ const { dispatchWithFallback } = require('../services/llm/call');
 const { normalizePhone, phoneMatchDigits } = require('../utils/phone');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
+const { placeBridgeCall } = require('../services/call-bridge');
 const { parseETDateTime, etDateString, etParts } = require('../utils/datetime-et');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { buildRescheduleLink } = require('../services/reschedule-link');
@@ -1235,19 +1236,15 @@ router.post('/call', async (req, res, next) => {
       return res.json({ success: false, error: 'Voice gate is disabled' });
     }
 
-    const twilio = require('twilio');
-    const config = require('../config');
-    if (!config.twilio.accountSid || !config.twilio.authToken) {
-      return res.status(500).json({ error: 'Twilio not configured' });
-    }
-    const client = twilio(config.twilio.accountSid, config.twilio.authToken);
+    // Credentials are checked by the bridge (TWILIO_NOT_CONFIGURED → 500
+    // below); it also owns the call_log row, the Twilio call, and the
+    // touchpoint. This handler keeps the admin-only validations.
 
     // All outbound calls present the main company line, regardless of which
     // endpoint the UI picker selected (fromNumber is still validated above so
     // garbage input fails loudly rather than silently dialing as main).
     const from = TWILIO_NUMBERS.mainLine.number;
     attemptedFrom = from;
-    const domain = process.env.SERVER_DOMAIN || 'portal.wavespestcontrol.com';
     const source = rawSource === 'call-log-callback' ? 'admin-callback' : 'admin-click';
     const metadata = relatedCallId ? { relatedCallId } : null;
 
@@ -1286,59 +1283,16 @@ router.post('/call', async (req, res, next) => {
       ? `${customer.first_name || ''} ${customer.last_name || ''}`.trim()
       : '';
 
-    // Insert call_log FIRST so outbound-admin-prompt / outbound-connect can
-    // update the row reliably. Twilio typically fires those webhooks 2–5s
-    // after calls.create() returns, but racing the insert is cheap to avoid.
-    const [callLogRow] = await db('call_log')
-      .insert({
-        customer_id: customer?.id || null,
-        direction: 'outbound',
-        from_phone: from,
-        to_phone: to,
-        status: 'initiated',
-        source,
-        metadata: metadata ? JSON.stringify(metadata) : null,
-      })
-      .returning(['id']);
-    const callLogId = callLogRow?.id;
-
-    const promptParams = new URLSearchParams({
-      customerNumber: to,
-      callerIdNumber: from,
-    });
-    if (callLogId) promptParams.set('callLogId', callLogId);
-    if (leadName) promptParams.set('leadName', leadName);
-
-    // Step 1: Call the admin first. When admin picks up and presses 1, dial the customer.
-    const call = await client.calls.create({
-      to: adminPhone,
-      from,
-      url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?${promptParams.toString()}`,
-      statusCallback: `https://${domain}/api/webhooks/twilio/call-status`,
-      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+    // Step 1 (services/call-bridge.js — shared with the tech portal's
+    // "Call from my line"): call the admin first; on press-1, dial the
+    // customer with the main line as caller ID.
+    const bridged = await placeBridgeCall({
+      to, bridgePhone: adminPhone, from, customer, source, adminUserId: req.technicianId, metadata, leadName,
     });
 
-    // Backfill the Twilio CallSid now that we have it.
-    if (callLogId) {
-      await db('call_log').where({ id: callLogId }).update({
-        twilio_call_sid: call.sid,
-        updated_at: new Date(),
-      }).catch(() => {});
-    }
-    require('../services/conversations').recordTouchpoint({
-      customerId: customer?.id || null,
-      channel: 'voice',
-      ourEndpointId: from,
-      contactPhone: customer ? null : to,
-      direction: 'outbound',
-      authorType: 'admin',
-      adminUserId: req.technicianId,
-      twilioSid: call.sid,
-      deliveryStatus: 'initiated',
-    }).catch(() => {});
-
-    res.json({ success: true, callSid: call.sid, callLogId });
+    res.json({ success: true, callSid: bridged.callSid, callLogId: bridged.callLogId });
   } catch (err) {
+    if (err.code === 'TWILIO_NOT_CONFIGURED') return res.status(500).json({ error: 'Twilio not configured' });
     notifyTwilioFailure({
       channel: 'voice',
       direction: 'outbound',

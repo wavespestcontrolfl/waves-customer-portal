@@ -27,6 +27,7 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 const { techLineContext } = require('../services/tech-line');
 const { placeBridgeCall } = require('../services/call-bridge');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { isRealProviderSend } = require('../services/sms-auto-send');
 const { isEnabled } = require('../config/feature-gates');
 const { toE164, isLikelyE164 } = require('../utils/phone');
 
@@ -87,9 +88,16 @@ router.post('/sms', async (req, res, next) => {
         fromNumber: ctx.line.number,
       },
     });
-    if (!result.sent) {
-      logger.info(`[tech-line] text from ${ctx.line.number} not sent for visit ${target.visit.id}: ${result.code || result.reason || 'blocked'}`);
-      return res.status(409).json({ error: result.reason || 'Message was not sent', code: result.code || 'NOT_SENT', deferred: Boolean(result.deferred) });
+    // A suppression / gate-off sentinel comes back sent:true with no real
+    // provider id — the tech must not see "Sent." for a text that never left.
+    if (!result.sent || !isRealProviderSend(result)) {
+      const code = result.code || (result.sent ? 'SMS_GATE_OFF' : 'NOT_SENT');
+      logger.info(`[tech-line] text from ${ctx.line.number} not sent for visit ${target.visit.id}: ${code}`);
+      return res.status(409).json({
+        error: result.reason || (result.sent ? 'Texting is switched off right now' : 'Message was not sent'),
+        code,
+        deferred: Boolean(result.deferred),
+      });
     }
     res.json({ success: true, from: publicLine(ctx) });
   } catch (err) { next(err); }
