@@ -13,8 +13,20 @@
  * fact check never spends a model call and never varies between runs.
  */
 
+const crypto = require('crypto');
+const fs = require('fs');
 const cohort = require('../../data/aeo-entity-cohort-v1.json');
 const { MEASUREMENT_VERSION } = require('./aeo-measurement');
+
+// The matching rules, fingerprinted: this module's source plus every pattern
+// and expectation in the cohort. A stored score carries the revision that
+// produced it; a row scored under other rules is rescored from its raw answer
+// before it joins the dashboard, so before/after accuracy compares like with
+// like even when a pattern is repaired without changing a prompt.
+const SCORER_REVISION = crypto.createHash('sha1')
+  .update(fs.readFileSync(__filename))
+  .update(JSON.stringify({ facts: cohort.facts, claims: cohort.claims, global_forbid: cohort.global_forbid, questions: cohort.questions.map(q => [q.id, q.query, q.expect, q.forbid]) }))
+  .digest('hex').slice(0, 12);
 
 // `{{other_entities}}` in a pattern expands to the competitor list, matched
 // in any letter case even inside a case-sensitive pattern (the owner pattern
@@ -190,7 +202,14 @@ function normalizeAnswer(text, keepUrls = false) {
 // pronoun ("it", "they") or a subject-less coordinated clause ("… and is a
 // franchise") inherits that last named subject, across sentences. With no
 // named party at all the answer is taken to be about Waves.
-const OTHER_ENTITY_RE = new RegExp(`\\b(?:${cohort.other_entities.map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})\\b`, 'gi');
+// Any other company is another party: the owner's competitor list in any
+// letter case, or a capitalized name ending in a business word ("Acme Pest",
+// "Sunshine Pest Control", "Bug Busters LLC"). Waves itself is collapsed to
+// "Waves" before matching, and government bodies (FDACS) are not companies.
+// Words of one name sit on one line; a capitalized generic service word
+// ("Residential Pest Control", "Pest Control Services") is a heading, not a company.
+const NOT_A_COMPANY_NAME = 'Waves|Pest|Lawn|Termite|Mosquito|Rodent|Residential|Commercial|General|Local|Professional|Our|Their|Its|The|This|That|These|Those|Same|Other|Additional|Core|Main|Full|Complete|Department|Division|Agriculture|Consumer|County|State|University|Bureau|Board|Association';
+const OTHER_ENTITY_RE = new RegExp(`\\b(?:${OTHER_ENTITY_ALTERNATION})\\b|\\b(?!(?:${NOT_A_COMPANY_NAME})\\b)(?!(?:[A-Z][\\w'&-]*[ \\t]+){0,3}(?:${NOT_A_COMPANY_NAME})[ \\t]+(?:Services?|Inc\\.?|LLC|Co\\.?|Company|Corp\\.?)\\b)[A-Z][\\w'&-]*(?:[ \\t]+[A-Z][\\w'&-]*){0,3}[ \\t]+(?:Pest(?:[ \\t]+Control)?|Exterminat(?:ors?|ing)|Termite(?:[ \\t]+(?:&|and)[ \\t]+Pest)?|Lawn(?:[ \\t]+Care)?|Services?|Inc\\.?|LLC|Co\\.?|Company|Corp\\.?)\\b`, 'g');
 const WAVES_NAMED_RE = /\bwaves\b|\badam\b|\bbenetti\b|\bwe\b|\bour\b/gi;
 // Sentence-initial capitalization is accepted for the intro word; the
 // compared party must still be a proper name.
@@ -334,6 +353,7 @@ function scoreEntityAnswer(query, text) {
   const right = Object.values(expected).filter(Boolean).length;
   return {
     cohort: cohort.version,
+    scorer: SCORER_REVISION,
     id: question.id,
     expected,
     forbidden,
@@ -353,13 +373,21 @@ function asEntityFacts(value) {
 }
 
 /**
- * A fact score needs an answer; it does not need resolved citations. It must
- * also have been scored under the active cohort version — a row scored under
- * an earlier definition is not comparable and stays out of the dashboard.
+ * The fact score for a row under the CURRENT rules. A fact score needs an
+ * answer; it does not need resolved citations. A score stored under another
+ * cohort version or scorer revision is recomputed from the raw answer; with
+ * no raw answer to rescore, the row stays out of the dashboard.
  */
+function currentEntityFacts(row) {
+  if (row.measurement_version !== MEASUREMENT_VERSION || row.answer_available !== true) return null;
+  const stored = asEntityFacts(row.entity_facts);
+  if (!stored) return null;
+  if (stored.cohort === cohort.version && stored.scorer === SCORER_REVISION) return stored;
+  return typeof row.response_raw === 'string' ? scoreEntityAnswer(row.query, row.response_raw) : null;
+}
+
 function isScorableAnswer(row) {
-  return row.measurement_version === MEASUREMENT_VERSION && row.answer_available === true
-    && asEntityFacts(row.entity_facts)?.cohort === cohort.version;
+  return currentEntityFacts(row) !== null;
 }
 
 function topLabels(counts, dictionary, limit = 3) {
@@ -368,7 +396,7 @@ function topLabels(counts, dictionary, limit = 3) {
 }
 
 function summarizeEntityObservations(rows) {
-  const scored = rows.filter(isScorableAnswer).map(row => asEntityFacts(row.entity_facts));
+  const scored = rows.map(currentEntityFacts).filter(Boolean);
   let right = 0;
   let missing = 0;
   let withWrong = 0;
@@ -435,6 +463,7 @@ function buildEntityDashboard(grid, queries) {
 
 module.exports = {
   ENTITY_COHORT: cohort,
+  SCORER_REVISION,
   entityQuestion,
   isEntityQuestion,
   scoreEntityAnswer,

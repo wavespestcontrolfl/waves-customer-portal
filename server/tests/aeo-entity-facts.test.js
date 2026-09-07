@@ -6,7 +6,7 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn());
 
 const db = require('../models/db');
 const { LLMMentionProber, buildDashboard } = require('../services/seo/llm-mention-prober');
-const { ENTITY_COHORT, scoreEntityAnswer, summarizeEntityObservations, isEntityQuestion } = require('../services/seo/aeo-entity-facts');
+const { ENTITY_COHORT, SCORER_REVISION, scoreEntityAnswer, summarizeEntityObservations, isEntityQuestion } = require('../services/seo/aeo-entity-facts');
 const benchmark = require('../data/aeo-benchmark-v1.json');
 
 const byId = id => ENTITY_COHORT.questions.find(q => q.id === id);
@@ -287,7 +287,7 @@ test('facts need their relation or context; forbidden claims cover equivalent wo
   expect(score('E7', 'The bond is valid for one year.').expected.bond_renewable).toBe(true);
   expect(score('E7', 'The bond repairs termite damage.').forbidden.damage_repair_coverage).toBe(true);
   expect(score('E7', 'Waves will repair any termite damage under the bond.').forbidden.damage_repair_coverage).toBe(true);
-  expect(score('E7', 'Damage caused by termites will be repaired.').forbidden.damage_repair_coverage).toBe(true);
+  expect(score('E7', 'Under the bond, damage caused by termites will be repaired.').forbidden.damage_repair_coverage).toBe(true);
   expect(score('E7', 'Waves will not repair termite damage.').forbidden.damage_repair_coverage).toBe(false);
   expect(score('E8', "Waves is part of Orkin's franchise network.").forbidden.franchise).toBe(true);
   expect(score('E8', 'Waves operates under the Orkin franchise.').forbidden.franchise).toBe(true);
@@ -321,10 +321,45 @@ test('a bare name answers the ownership question directly, and URL dots are not 
   expect(score('E10', 'Visit www.wavespestcontrol.com or call 941.297.5749.')).toMatchObject({ right: 2 });
 });
 
-test('a row scored under another cohort version stays out of the dashboard', () => {
+test('a score from another cohort version or scorer revision is rescored from the raw answer, or stays out', () => {
   const current = row(byId('E1').query, { text: 'Founded by Adam Benetti.' });
-  const stale = { ...current, entity_facts: { ...current.entity_facts, cohort: 'entity-2026-01-v0' } };
-  expect(summarizeEntityObservations([current, stale])).toMatchObject({ total: 2, observed: 1 });
+  expect(current.entity_facts.scorer).toBe(SCORER_REVISION);
+  const staleCohort = { ...current, entity_facts: { ...current.entity_facts, cohort: 'entity-2026-01-v0' } };
+  expect(summarizeEntityObservations([current, staleCohort])).toMatchObject({ total: 2, observed: 1 });
+  const staleRules = { ...current, response_raw: 'Founded by John Smith.', entity_facts: { ...current.entity_facts, scorer: 'old-rules', wrong: 0, right: 1 } };
+  expect(summarizeEntityObservations([current, staleRules])).toMatchObject({ total: 2, observed: 2, factsRight: 1, wrongClaims: 1 });
+});
+
+test('facts need Waves as the holder; claims cover subsidiaries, tenting, copular headquarters (GitHub review r3)', () => {
+  expect(score('E12', 'FDACS says JB351547 belongs to Orkin.').expected.fdacs_license).toBe(false);
+  expect(score('E12', 'Waves holds FDACS license JB351547.').expected.fdacs_license).toBe(true);
+  expect(score('E3', 'License JB351547 is held by Orkin.').expected.fdacs_license).toBe(false);
+  expect(score('E1', 'Waves is a subsidiary of Rentokil.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'Rentokil is the parent company of Waves.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'Waves was purchased by Rentokil.').forbidden.wrong_founder).toBe(true);
+  expect(score('E1', 'Waves is not a subsidiary of Rentokil.').forbidden.wrong_founder).toBe(false);
+  expect(score('E8', 'Waves uses independent contractors.').expected.independent).toBe(false);
+  expect(score('E8', 'Waves offers an independent inspection service.').expected.independent).toBe(false);
+  expect(score('E8', 'Waves is an independent, family-owned company.').expected.independent).toBe(true);
+  expect(score('E9', 'Waves is also known as Sunshine Pest Control.').expected.alias_same).toBe(false);
+  expect(score('E9', 'Waves Pest Control is also known as Waves Pest Control & Lawn Care.').expected.alias_same).toBe(true);
+  expect(score('E6', 'Acme Pest offers termite treatment and fumigation. Waves offers neither.')).toMatchObject({ expected: { termite: false }, forbidden: { fumigation_offered: false } });
+  expect(score('E8', 'Sunshine Pest Control is a franchise. Waves is independently owned.')).toMatchObject({ expected: { independent: true }, forbidden: { franchise: false } });
+  expect(score('E3', 'The Florida Department of Agriculture and Consumer Services lists JB351547 as the license held by Waves.')).toMatchObject({ expected: { fdacs: true, fdacs_license: true } });
+  expect(score('E6', 'Residential Pest Control Services\nWaves offers termite treatment and fumigation.')).toMatchObject({ expected: { termite: true }, forbidden: { fumigation_offered: true } });
+  expect(score('E7', 'Waves repairs termite damage for a separate fee, but the bond does not cover damage.').forbidden.damage_repair_coverage).toBe(false);
+  expect(score('E7', 'The bond repairs termite damage.').forbidden.damage_repair_coverage).toBe(true);
+  expect(score('E10', 'The old Waves number was 941-297-5749; the current number is unknown.').expected.phone).toBe(false);
+  expect(score('E10', '941-297-5749 is no longer in service.').expected.phone).toBe(false);
+  expect(score('E10', 'Email contact@wavespestcontrol.com.').expected.website).toBe(false);
+  expect(score('E10', 'Email contact@wavespestcontrol.com or visit wavespestcontrol.com.').expected.website).toBe(true);
+  expect(score('E5', "Waves' headquarters are in Tampa, Florida.").forbidden.out_of_footprint_hq).toBe(true);
+  expect(score('E5', 'Its main office is in Tampa.').forbidden.out_of_footprint_hq).toBe(true);
+  expect(score('E5', 'Its main office is in Lakewood Ranch.').forbidden.out_of_footprint_hq).toBe(false);
+  expect(score('E6', 'Waves offers whole-house tenting for drywood termites.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves tents homes for drywood termites.').forbidden.fumigation_offered).toBe(true);
+  expect(score('E6', 'Waves does not offer tenting.').forbidden.fumigation_offered).toBe(false);
+  expect(score('E6', 'Waves provides tent-free termite treatment.').forbidden.fumigation_offered).toBe(false);
 });
 
 test('the founding-year fact needs founding context, but a bare year answer still counts', () => {

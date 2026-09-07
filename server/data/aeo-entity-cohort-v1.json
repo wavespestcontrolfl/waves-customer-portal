@@ -13,7 +13,7 @@
     },
     "fdacs_license": {
       "label": "License JB351547",
-      "pattern": "\\bJB\\s?351547\\b"
+      "pattern": "(?<=(?:\\b(?:waves|licen[cs]e\\w*|number|no\\.|holds?|holding|under|is|its|their)\\b|#|:)[^.;!?\\n]{0,60})\\bJB\\s?351547\\b|\\bJB\\s?351547\\b(?=[^.;!?\\n]{0,60}\\b(?:waves|held by|holder|its licen[cs]e)\\b)"
     },
     "fdacs": {
       "label": "Names FDACS as the licensing agency",
@@ -69,20 +69,20 @@
     },
     "independent": {
       "label": "Independently or family owned",
-      "pattern": "independent|family[- ]owned|locally[- ]owned|owner[- ]operated|not a franchise"
+      "pattern": "independent(?:ly)?[- ](?:owned|operated|run|held)|\\b(?:an|is|are|remains|stays|stayed|as an?)\\s+independent\\b(?!\\s+(?:contractor|inspection|inspector|review|audit|lab|test|assessment|third))|independent (?:company|business|operator|firm|pest|local|family)|family[- ]owned|locally[- ]owned|owner[- ]operated|not a franchise"
     },
     "alias_same": {
       "label": "Same business under the longer name",
-      "pattern": "same (business|company|brand|entity|operator)|one (business|company)|also (known as|operates as|goes by|branded as|called)|d/?b/?a\\b|trade name|(full|longer|expanded|extended) name"
+      "pattern": "same (business|company|brand|entity|operator)|one (business|company)|also (?:known as|operates as|goes by|branded as|called)\\s+waves\\b|(?:full|longer|expanded|extended|public|legal|trade|registered)\\s+(?:\\w+\\s+)?name(?:\\s+(?:is|of|for))?[^.;]{0,20}?\\bwaves\\b|\\bwaves\\b[^.;]{0,40}?\\b(?:is|as)\\s+(?:the\\s+|its\\s+|a\\s+)?(?:full|longer|expanded|extended|public|legal|trade|registered)\\s+(?:\\w+\\s+)?name|d/?b/?a\\s+waves\\b"
     },
     "phone": {
       "label": "Main line (941) 297-5749",
-      "pattern": "\\(?941\\)?[\\s.-]*297[\\s.-]*5749",
+      "pattern": "(?<!\\b(?:old|former|previous|prior|outdated|discontinued|disconnected|retired)\\b[^.;!?\\n]{0,40})\\(?941\\)?[\\s.-]*297[\\s.-]*5749(?![^.;!?\\n]{0,40}\\b(?:no longer|out of service|disconnected|discontinued|obsolete|retired)\\b)",
       "scope": "any"
     },
     "website": {
       "label": "wavespestcontrol.com",
-      "pattern": "wavespestcontrol\\.com",
+      "pattern": "(?<!@)wavespestcontrol\\.com",
       "scope": "any"
     }
   },
@@ -105,7 +105,7 @@
     },
     "wrong_founder": {
       "label": "Attributes ownership to someone else",
-      "pattern": "(?:[Ff]ounded|[Oo]wned|[Ss]tarted|[Ee]stablished|[Rr]un|[Oo]perated|[Ll]ed|[Aa]cquired) by (?!Waves\\b|The\\b|Florida\\b|FDACS\\b|the Benetti|a family|a local|its founder|the owner)(?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b)|\\b(?!Waves\\b)(?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b)\\s+(?:owns|founded|started|established|runs|operates|leads|co-founded|acquired)\\s+(?:Waves\\b|the (?:company|business)\\b|it\\b)|\\b[Tt]he (?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator)s?(?: (?:and|&|/) (?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator))? of (?:Waves(?: Pest Control(?:,? LLC)?)?|the (?:company|business)) (?:is|was|remains) (?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b)|\\b(?!Waves\\b)(?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b) (?:is|was|remains) (?:the |its |a )?(?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator)s?(?: (?:and|&|/) (?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator))? of (?:Waves(?: Pest Control(?:,? LLC)?)?|the (?:company|business))|(?:^|\\n)\\s*(?:(?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator)s?(?: (?:and|&|/) (?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator))?|[Oo]wned by|[Ff]ounded by)\\s*:\\s*(?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b)",
+      "pattern": "(?:[Ff]ounded|[Oo]wned|[Ss]tarted|[Ee]stablished|[Rr]un|[Oo]perated|[Ll]ed|[Aa]cquired|[Pp]urchased|[Bb]ought) by (?!Waves\\b|The\\b|Florida\\b|FDACS\\b|the Benetti|a family|a local|its founder|the owner)(?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b)|\\b(?!Waves\\b)(?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b)\\s+(?:owns|founded|started|established|runs|operates|leads|co-founded|acquired)\\s+(?:Waves\\b|the (?:company|business)\\b|it\\b)|\\b[Tt]he (?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator)s?(?: (?:and|&|/) (?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator))? of (?:Waves(?: Pest Control(?:,? LLC)?)?|the (?:company|business)) (?:is|was|remains) (?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b)|\\b(?!Waves\\b)(?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b) (?:is|was|remains) (?:the |its |a )?(?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator)s?(?: (?:and|&|/) (?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator))? of (?:Waves(?: Pest Control(?:,? LLC)?)?|the (?:company|business))|(?:^|\\n)\\s*(?:(?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator)s?(?: (?:and|&|/) (?:[Oo]wner|[Ff]ounder|[Cc]o-founder|CEO|[Pp]resident|[Pp]roprietor|[Oo]perator))?|[Oo]wned by|[Ff]ounded by)\\s*:\\s*(?:([A-Z][a-z]+(?: [A-Z][a-z]+)+)|({{other_entities}})\\b)|\\b(?:Waves|[Ii]t|[Tt]he (?:company|business))\\s+(?:is|was|remains|became)\\s+(?:a\\s+|an\\s+)?(?:subsidiary|division|unit|brand|affiliate)\\s+of\\s+(?:([A-Z][a-z]+(?: [A-Z][a-z]+)*)|({{other_entities}})\\b)|\\b(?!Waves\\b)(?:([A-Z][a-z]+(?: [A-Z][a-z]+)*)|({{other_entities}})\\b)\\s+(?:is|was|remains|became)\\s+(?:the\\s+)?parent\\s+(?:company\\s+)?of\\s+(?:Waves\\b|the (?:company|business)\\b|it\\b)",
       "flags": "",
       "reject_value": "Adam Benetti"
     },
@@ -115,16 +115,16 @@
     },
     "fumigation_offered": {
       "label": "Offers fumigation",
-      "pattern": "(?<=\\b(?:offers?|offering|offered|provides?|providing|provided|performs?|performing|performed|handles?|handling|does|do|did|sells?|carr(?:y|ies)|specializ(?:es|e|ing)\\s+in|includ(?:es?|ing)|services?|also|available)\\b[^.;!?\\n]{0,160})\\bfumigat|\\bfumigat(?=\\w*\\s+(?:services?|treatments?|options?|programs?|packages?|(?:(?:for|of|in|on|to|against|with|under)\\s+(?:[\\w'-]+\\s+){1,4})?(?:is|are)\\s+(?:also\\s+|still\\s+)?(?:available|offered|provided|included|performed|an option|one of|part of|among))\\b)|(?<=^|\\n)\\s*(?:(?:tent|structural|whole[- ](?:house|structure))\\s+)?fumigation\\b(?=\\s*(?:$|\\n|\\(|[:\\-–—]\\s))"
+      "pattern": "(?<=\\b(?:offers?|offering|offered|provides?|providing|provided|performs?|performing|performed|handles?|handling|does|do|did|sells?|carr(?:y|ies)|specializ(?:es|e|ing)\\s+in|includ(?:es?|ing)|services?|also|available)\\b[^.;!?\\n]{0,160})\\bfumigat|\\bfumigat(?=\\w*\\s+(?:services?|treatments?|options?|programs?|packages?|(?:(?:for|of|in|on|to|against|with|under)\\s+(?:[\\w'-]+\\s+){1,4})?(?:is|are)\\s+(?:also\\s+|still\\s+)?(?:available|offered|provided|included|performed|an option|one of|part of|among))\\b)|(?<=^|\\n)\\s*(?:(?:tent|structural|whole[- ](?:house|structure))\\s+)?fumigation\\b(?=\\s*(?:$|\\n|\\(|[:\\-–—]\\s))|(?<=\\b(?:offers?|offering|offered|provides?|providing|provided|performs?|performing|performed|handles?|handling|does|do|did|sells?|specializ(?:es|e|ing)\\s+in|includ(?:es?|ing)|services?|also|available)\\b[^.;!?\\n]{0,160})\\b(?:whole[- ](?:house|home|structure)\\s+|structural\\s+)?tent(?:ing|s)?\\b(?=\\s+(?:for|of|homes?|houses?|structures?|buildings?|services?|treatments?|jobs?)\\b|\\s*[.,;!?]|\\s*$)|\\b(?:waves|it|they|we)\\s+(?:also\\s+)?tents?\\s+(?:homes?|houses?|structures?|buildings?)\\b"
     },
     "out_of_footprint_hq": {
       "label": "Places the headquarters outside SWFL",
-      "pattern": "\\b(?:based|headquartered|located|headquarters|home office|hq)\\s+(?:in|out of)\\s+((?:the\\s+)?[^.,;:!?\\n()]{1,40}?)(?=\\s*(?:[.,;:!?\\n()]|$)|\\s+(?:and|or|but|where|which|that|since|with|serving|servicing|near)\\b)|(?:^|\\n)\\s*(?:headquarters|headquartered|hq|home office|based in|based|location|head office|main office)\\s*:\\s*((?:the\\s+)?[^.,;:!?\\n()]{1,40}?)(?=\\s*(?:[.,;:!?\\n()]|$)|\\s+(?:and|or|but|where|which|that|since|with|serving|servicing|near)\\b)",
+      "pattern": "\\b(?:based|headquartered|located|headquarters|home office|hq)\\s+(?:in|out of)\\s+((?:the\\s+)?[^.,;:!?\\n()]{1,40}?)(?=\\s*(?:[.,;:!?\\n()]|$)|\\s+(?:and|or|but|where|which|that|since|with|serving|servicing|near)\\b)|(?:^|\\n)\\s*(?:headquarters|headquartered|hq|home office|based in|based|location|head office|main office)\\s*:\\s*((?:the\\s+)?[^.,;:!?\\n()]{1,40}?)(?=\\s*(?:[.,;:!?\\n()]|$)|\\s+(?:and|or|but|where|which|that|since|with|serving|servicing|near)\\b)|\\b(?:headquarters|head office|main office|home office|hq|offices?)\\s+(?:is|are|was|were|remains?|sits?|lies?)\\s+(?:located\\s+|based\\s+)?(?:in|at|out of)\\s+((?:the\\s+)?[^.,;:!?\\n()]{1,40}?)(?=\\s*(?:[.,;:!?\\n()]|$)|\\s+(?:and|or|but|where|which|that|since|with|serving|servicing|near)\\b)",
       "reject_pattern": "lakewood|bradenton|sarasota|venice|parrish|palmetto|north port|port charlotte|charlotte county|charlotte harbor|manatee|ellenton|nokomis|osprey|englewood|myakka|(?:southwest|south-west|sw)\\s*(?:florida|fl)\\b|swfl|suncoast|gulf coast|^(?:the\\s+)?(?:state of\\s+)?(?:florida|fl|us|usa|u\\.s\\.a?\\.?|united states|america)$|^(?:unknown|unclear|unspecified|undisclosed|not (?:listed|stated|disclosed|specified|available|provided|found)|n/?a|none|tbd)$"
     },
     "damage_repair_coverage": {
       "label": "Infers damage-repair coverage",
-      "pattern": "(repair|damage) (coverage|warranty|guarantee|protection)|covers? (termite |any |future )?damage|damage[- ]repair|pays? for (any |the )?(repairs?|damage)|\\brepairs?\\s+(?:any\\s+|the\\s+|all\\s+|future\\s+)?(?:termite\\s+)?damage|\\bdamage\\b[^.;]{0,30}?\\b(?:will be|is|are|gets?)\\s+repaired|\\b(?:will|would)\\s+repair\\b"
+      "pattern": "(repair|damage) (coverage|warranty|guarantee|protection)|covers? (termite |any |future )?damage|damage[- ]repair|pays? for (any |the )?(repairs?|damage)|(?<=\\b(?:bond|warranty|coverage|agreement|guarantee)\\b[^.;!?\\n]{0,60})\\b(?:will\\s+|would\\s+|also\\s+)?repairs?\\s+(?:any\\s+|the\\s+|all\\s+|future\\s+)?(?:termite\\s+)?damage|\\brepairs?\\s+(?:any\\s+|the\\s+|all\\s+|future\\s+)?(?:termite\\s+)?damage(?=[^.;!?\\n]{0,40}\\b(?:under|through|per|with|as part of|covered by)\\s+(?:the\\s+|its\\s+|an?\\s+|your\\s+)?(?:bond|warranty|coverage|agreement))|(?<=\\b(?:bond|warranty|coverage|agreement|guarantee)\\b[^.;!?\\n]{0,60})\\bdamage\\b[^.;]{0,30}?\\b(?:will be|is|are|gets?)\\s+repaired|\\bdamage\\b[^.;]{0,30}?\\b(?:will be|is|are|gets?)\\s+repaired(?=[^.;!?\\n]{0,40}\\b(?:under|through|per|as part of|covered by)\\b[^.;!?\\n]{0,20}\\b(?:bond|warranty|coverage|agreement))"
     },
     "free_retreat_guarantee": {
       "label": "Infers a free re-treatment or blanket guarantee",
