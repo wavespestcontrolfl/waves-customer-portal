@@ -16,7 +16,7 @@ const TermiteStations = require('../services/termite-stations');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
-const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft } = require('../services/nutrient-ledger');
+const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft, ledgerRowCoverage } = require('../services/nutrient-ledger');
 const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
 const { lawnCompletionDefaultsEnabled } = require('../services/lawn-completion-defaults');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
@@ -4200,7 +4200,11 @@ async function completeScheduledService(completionInput, packetRecord = null) {
               // instead of inventing a density here.
               unquantifiedNProducts.push(catalog.name || 'nitrogen product');
             } else if (treatedSqft > 0) {
-              actualVisitN += (pounds * (Number(catalog.analysis_n) / 100)) / (treatedSqft / 1000);
+              // Per 1,000 sq ft of the whole lawn: a product confined to one
+              // zone counts in proportion to its coverage (ledgerRowCoverage),
+              // the same way the annual ledger aggregates it.
+              actualVisitN += ((pounds * (Number(catalog.analysis_n) / 100)) / (treatedSqft / 1000))
+                * ledgerRowCoverage({ lawn_sqft: treatedSqft }, lawnSqft);
             }
           }
           const used = Number(annualN?.used || 0);

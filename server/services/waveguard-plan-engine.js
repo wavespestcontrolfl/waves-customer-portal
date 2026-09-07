@@ -1165,12 +1165,13 @@ async function calculateNutrientLedger(knex, customerId, products, lawnSqft, ser
       'county',
       'blackout_status',
       'service_product_id',
+      'lawn_sqft',
     )
     .orderBy('application_date', 'asc'))
     .catch((err) => { if (strict) throw err; return null; });
 
   const ledgerSummary = Array.isArray(ledgerRows) && ledgerRows.length
-    ? summarizeLedgerRows(ledgerRows, year)
+    ? summarizeLedgerRows(ledgerRows, year, { lawnSqft })
     : null;
 
   const serviceProductQuery = knex('service_products as sp')
