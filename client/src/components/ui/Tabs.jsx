@@ -1,12 +1,20 @@
-import React, { createContext, useContext, useId } from 'react';
+import React, { createContext, useContext, useEffect, useId, useState } from 'react';
 import { cn } from './cn';
 
 const TabsCtx = createContext(null);
 
 export function Tabs({ value, onValueChange, children, className }) {
   const base = useId();
+  // Panels register themselves (mounted or not) so a Tab only claims
+  // aria-controls when a matching TabPanel exists — some call sites use
+  // Tabs as a bare filter strip with no panels.
+  const [panels, setPanels] = useState(() => new Set());
+  const registerPanel = (v) => {
+    setPanels((prev) => (prev.has(v) ? prev : new Set(prev).add(v)));
+    return () => setPanels((prev) => { if (!prev.has(v)) return prev; const next = new Set(prev); next.delete(v); return next; });
+  };
   return (
-    <TabsCtx.Provider value={{ value, onValueChange, base }}>
+    <TabsCtx.Provider value={{ value, onValueChange, base, panels, registerPanel }}>
       <div className={className}>{children}</div>
     </TabsCtx.Provider>
   );
@@ -58,12 +66,13 @@ export function Tab({ value, children, className, disabled, ...rest }) {
   const ctx = useContext(TabsCtx);
   const active = ctx && ctx.value === value;
   const base = ctx?.base;
+  const hasPanel = !!(ctx && ctx.panels && ctx.panels.has(value));
   return (
     <button
       type="button"
       role="tab"
       id={base ? `${base}-tab-${value}` : undefined}
-      aria-controls={base ? `${base}-panel-${value}` : undefined}
+      aria-controls={base && hasPanel ? `${base}-panel-${value}` : undefined}
       aria-selected={!!active}
       tabIndex={active ? 0 : -1}
       data-value={value}
@@ -87,6 +96,8 @@ export function Tab({ value, children, className, disabled, ...rest }) {
 
 export function TabPanel({ value, children, className, ...rest }) {
   const ctx = useContext(TabsCtx);
+  const register = ctx?.registerPanel;
+  useEffect(() => (register ? register(value) : undefined), [register, value]);
   if (!ctx || ctx.value !== value) return null;
   const base = ctx.base;
   return (
