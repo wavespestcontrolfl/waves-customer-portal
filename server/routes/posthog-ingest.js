@@ -18,7 +18,9 @@
  * Abuse posture:
  *  - GATE_POSTHOG_INGEST_PROXY off → 404, the dark-surface contract every other
  *    gated public route uses. Read at REQUEST time (gateEnvValue: 1/true/on),
- *    so unsetting it on Railway kills the route in the running process.
+ *    so a flip needs no code deploy — Railway's automatic redeploy on the
+ *    variable change restarts the process with the new value (a change made
+ *    with --skip-deploys is invisible until `railway redeploy`).
  *    Revoke = unset the gate AND revert the SDK host env on the caller (a
  *    live SDK pointed at a 404 host just drops events).
  *  - GET / POST / OPTIONS only; 2 MB body cap; 10 s upstream timeout; a
@@ -250,8 +252,8 @@ async function proxy(req, res) {
 const router = express.Router();
 
 router.use((req, res, next) => {
-  // Call-time read (not the load-time gates snapshot): a Railway unset is a
-  // live kill, as documented.
+  // Call-time read (not the load-time gates snapshot): the process needs no
+  // code deploy to notice a flip, only Railway's restart on the var change.
   if (!gateEnvValue('GATE_POSTHOG_INGEST_PROXY')) return res.status(404).end();
   if (!METHODS.has(req.method)) return res.status(405).set('Allow', 'GET, POST, OPTIONS').end();
   return next();
