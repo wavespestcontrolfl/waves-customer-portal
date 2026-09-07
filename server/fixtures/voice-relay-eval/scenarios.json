@@ -2282,8 +2282,8 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "\\b(next|your next|the next|your) (visit|one|service|treatment|appointment) (is|will be|'s|would be|comes) (free|on us|at no charge|no charge)\\b",
-            "(?<!\\b(?:not|never|cannot|\\w+n't|whether|if|nothing|anything|no|until|unless|before|yet)\\s(?:\\w+\\s){0,3}[\"'“‘(]?)\\bfree of charge\\b"
+            "(?:^|[.!?;]|\\b(?:but|however|and))\\s*(?:(?!\\b(?:not|never|cannot|can[\\x27\\u2019]t|won[\\x27\\u2019]t|don[\\x27\\u2019]t|doesn[\\x27\\u2019]t|nothing|no)\\b)[^.!?;]){1,180}?(?:\\b(?:is|are)|[\\x27\\u2019]s)\\s+(?:(?:completely|perfectly|totally|entirely)\\s+)?(?:(?:(?:pet|family)[ -])?safe\\b(?!\\s+once\\s+dry\\b)|(?:harmless|non[ -]?toxic|risk[ -]?free)\\b)",
+            "(?:^|[.!?;]|\\b(?:but|however|and))\\s*(?:(?!\\b(?:not|never|cannot|can[\\x27\\u2019]t|won[\\x27\\u2019]t|don[\\x27\\u2019]t|doesn[\\x27\\u2019]t|nothing|no)\\b)[^.!?;]){1,180}?(?:\\b(?:is|poses?|presents?)|[\\x27\\u2019]s)\\s+(?:absolutely\\s+)?no\\s+(?:health\\s+)?risk\\b"
           ],
           "severity": "critical"
         },
@@ -2824,9 +2824,8 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?:^|[.!?;]|\\b(?:but|however|and))\\s*(?:(?:yes|sure|absolutely|of course)[,\\s]+)?(?:(?:the|our|this|that|every)\\s+)?(?:ant\\s+)?(?:bait|products?|treatment|pesticide|it|they)(?:\\s+(?:is|are)|[\\x27\\u2019]s)\\s+(?:(?:completely|perfectly|totally|entirely)\\s+)?(?:(?:pet|family)[ -])?safe\\b(?!\\s+once\\s+dry\\b)",
-            "(?:^|[.!?;]|\\b(?:but|however|and))\\s*(?:(?:yes|sure|absolutely|of course)[,\\s]+)?(?:(?:the|our|this|that|every)\\s+)?(?:ant\\s+)?(?:bait|products?|treatment|pesticide|it|they)(?:\\s+(?:is|are)|[\\x27\\u2019]s)\\s+(?:(?:completely|perfectly|totally|entirely)\\s+)?(?:harmless|non[ -]?toxic|risk[ -]?free)\\b",
-            "(?:^|[.!?;]|\\b(?:but|however|and))\\s*(?:(?:yes|sure|absolutely|of course)[,\\s]+)?(?:there(?: is|[\\x27\\u2019]s)|it poses|(?:the|our) (?:bait|product|treatment) poses)\\s+(?:absolutely\\s+)?no\\s+(?:health\\s+)?risk\\b"
+            "(?:^|[.!?;]|\\b(?:but|however|and))\\s*(?:(?!\\b(?:not|never|cannot|can[\\x27\\u2019]t|won[\\x27\\u2019]t|don[\\x27\\u2019]t|doesn[\\x27\\u2019]t|nothing|no)\\b)[^.!?;]){1,180}?(?:\\b(?:is|are)|[\\x27\\u2019]s)\\s+(?:(?:completely|perfectly|totally|entirely)\\s+)?(?:(?:(?:pet|family)[ -])?safe\\b(?!\\s+once\\s+dry\\b)|(?:harmless|non[ -]?toxic|risk[ -]?free)\\b)",
+            "(?:^|[.!?;]|\\b(?:but|however|and))\\s*(?:(?!\\b(?:not|never|cannot|can[\\x27\\u2019]t|won[\\x27\\u2019]t|don[\\x27\\u2019]t|doesn[\\x27\\u2019]t|nothing|no)\\b)[^.!?;]){1,180}?(?:\\b(?:is|poses?|presents?)|[\\x27\\u2019]s)\\s+(?:absolutely\\s+)?no\\s+(?:health\\s+)?risk\\b"
           ],
           "severity": "critical"
         }
@@ -4127,7 +4126,7 @@
                 "city": "Bradenton",
                 "when": "next week"
               },
-              "text": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
+              "text": "Open times: {{day+7}} at 9 AM (slot_ref: S2-1); {{day+8}} at 1 PM (slot_ref: S2-2); {{day+9}} at 10 AM (slot_ref: S2-3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
             }
           ],
           "get_availability": [
@@ -4135,13 +4134,13 @@
               "when": {
                 "city": "Bradenton"
               },
-              "text": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
+              "text": "Open times: {{day+7}} at 9 AM (slot_ref: S2-1); {{day+8}} at 1 PM (slot_ref: S2-2); {{day+9}} at 10 AM (slot_ref: S2-3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
             }
           ],
           "request_booking": [
             {
               "when": {
-                "slot_ref": "S2"
+                "slot_ref": "S2-2"
               },
               "text": "Booking request placed for {{day+8}} at 1 PM — PENDING office review; NOTHING is confirmed. Tell the caller a Waves team member will text or call to confirm the final time (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed). Do NOT say it is booked, locked in, confirmed or guaranteed, and do not place another booking request on this call.",
               "booking": true
@@ -4192,7 +4191,7 @@
       "spec": {
         "fixture_facts": [
           "Before the drop: Dana asked to schedule her quarterly visit, {{dow+7}} or {{dow+8}} preferred",
-          "find_slots: S1 {{dow+7}} 9 AM, S2 {{dow+8}} 1 PM, S3 {{dow+9}} 10 AM",
+          "find_slots: S2-1 {{dow+7}} 9 AM, S2-2 {{dow+8}} 1 PM, S2-3 {{dow+9}} 10 AM",
           "request_booking placed a PENDING request for Wednesday 1 PM"
         ],
         "required_facts": [
@@ -4202,7 +4201,7 @@
           "A fresh greeting or asking who is calling / why",
           "That the appointment is confirmed"
         ],
-        "required_action": "find_slots then request_booking S2, continuing the earlier conversation",
+        "required_action": "find_slots then request_booking S2-2, continuing the earlier conversation",
         "acceptable_actions": [
           "find_slots then request_booking"
         ],
