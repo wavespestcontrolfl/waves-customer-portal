@@ -78,6 +78,22 @@ beforeEach(() => {
 });
 
 describe('CancelPlanDialog', () => {
+  it('lets the operator use its controls without the click reaching the Customer 360 overlay that opened it', async () => {
+    stubFetch((path) => (path.endsWith('/cancel-plan/preview') ? response(previewBody()) : response({})));
+    const profileClose = vi.fn();
+    render(
+      <div onClick={profileClose}>
+        <CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn()} layer={1120} />
+      </div>,
+    );
+
+    await screen.findByText('the whole plan');
+    fireEvent.click(screen.getByLabelText('Only these services'));
+    fireEvent.click(screen.getByLabelText('Waive the scheduled-visit fee on pulled visits'));
+    expect(profileClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: 'Cancel plan' })).toBeInTheDocument();
+  });
+
   it('forwards the layer so the dialog paints above the Customer 360 overlay that opens it', async () => {
     stubFetch((path) => (path.endsWith('/cancel-plan/preview') ? response(previewBody()) : response({})));
     render(<CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn()} layer={1120} />);

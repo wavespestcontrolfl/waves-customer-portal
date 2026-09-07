@@ -85,6 +85,11 @@ export function Dialog({
       aria-modal="true"
       aria-label={ariaLabel}
       aria-labelledby={!ariaLabel && hasTitle ? titleId : undefined}
+      // The dialog is portaled to <body>, but React still bubbles its
+      // synthetic events through the REACT tree — so a click inside it would
+      // reach whatever opened it (a row's onClick, an overlay's onClose).
+      // A modal owns its clicks: stop them at the boundary.
+      onClick={(e) => e.stopPropagation()}
       style={{
         paddingTop: 'max(16px, env(safe-area-inset-top, 0px))',
         paddingRight: 'max(16px, env(safe-area-inset-right, 0px))',
