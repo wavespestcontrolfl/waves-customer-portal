@@ -60,12 +60,15 @@ suite('IB target validation against isolated PostgreSQL', () => {
     for (const word of ['this', 'that', 'selected']) {
       const task = await Context.resolve({ prompt: `Update ${word} property label`, pageData: { property_id: ids[0] } });
       expect(await Context.validateRecordTarget({ property_id: ids[0] }, task)).toBeNull();
+      expect(await Context.validateRecordTarget({ customer_id: customerId.toUpperCase(), property_id: ids[0].toUpperCase() }, task)).toBeNull();
       expect((await Context.validateRecordTarget({ property_id: ids[1] }, task)).code).toBe('target_clarification_required');
     }
     const missing = await Context.resolve({ prompt: 'Update this property label', pageData: { customer_id: customerId } });
     expect((await Context.validateRecordTarget({ property_id: ids[1] }, missing)).code).toBe('target_clarification_required');
     const explicit = await Context.resolve({ prompt: 'Update Synthetic Targetfixture property label', pageData: { property_id: ids[0] } });
     expect(await Context.validateRecordTarget({ property_id: ids[1] }, explicit)).toBeNull();
+    const uppercase = await Context.resolve({ prompt: 'Update this property label', pageData: { property_id: ids[0].toUpperCase() } });
+    expect(await Context.validateRecordTarget({ property_id: ids[0] }, uppercase)).toBeNull();
   });
 
   test('SMS name-only proposals refuse while canonical recipients use fresh phone data', async () => {

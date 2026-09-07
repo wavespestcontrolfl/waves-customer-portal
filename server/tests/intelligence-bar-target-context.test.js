@@ -120,6 +120,20 @@ test('malformed identifiers refuse before a query, and child relationships are c
   expect((await Context.validateRecordTarget({ customer_id: A, property_id: PROPERTY }, context())).code).toBe('target_relationship_mismatch');
 });
 
+test.each([['lead', 'leads', { first_name: 'Synthetic', last_name: 'Unlinkedfixture' }],
+  ['estimate', 'estimates', { customer_name: 'Synthetic Unlinkedfixture' }]])('an unlinked %s needs a deliberate target expression', async (noun, table, name) => {
+  const id = '40000000-0000-4000-8000-000000000001';
+  rows[table] = [{ id, customer_id: null, ...name }];
+  for (const prompt of ['Look up inventory', 'Add a note: Synthetic Unlinkedfixture needs attention', 'Add a note saying Synthetic Unlinkedfixture needs attention']) {
+    const task = await Context.resolve({ prompt, pageData: { [`${noun}_id`]: id } });
+    expect((await Context.validateRecordTarget({ [`${noun}_id`]: id }, task)).code).toBe('target_clarification_required');
+  }
+  for (const prompt of [`Update this ${noun}`, `Update that ${noun}`, 'Update Synthetic Unlinkedfixture']) {
+    const task = await Context.resolve({ prompt, pageData: { [`${noun}_id`]: id } });
+    expect(await Context.validateRecordTarget({ [`${noun}_id`]: id }, task)).toBeNull();
+  }
+});
+
  test.each([
   'Reply to the review for Another Person',
   `Add a note: reply to review ${REVIEW}`,

@@ -75,7 +75,7 @@ function pageIds(pageData = {}) {
       || (key === 'review_id' ? query.get('review') : null);
     if (id !== undefined && id !== null && id !== '') {
       if (!UUID_RE.test(String(id))) return { error: 'The viewed record identifier is invalid', code: 'invalid_page_context' };
-      ids[key] = String(id);
+      ids[key] = String(id).toLowerCase();
     }
   }
   return ids;
@@ -94,7 +94,8 @@ function customerTarget(customer, provenance) {
 }
 
 function namesTargetCustomer(clause, customer) {
-  const name = normalizeName([customer.first_name, customer.last_name].filter(Boolean).join(' '));
+  const name = normalizeName(customer.customer_name || [customer.first_name, customer.last_name].filter(Boolean).join(' '));
+  if (!name) return false;
   const offset = ` ${clause} `.indexOf(` ${name} `);
   if (offset < 0) return false;
   const before = clause.slice(0, offset).trim();
@@ -210,8 +211,8 @@ async function resolve({ prompt, pageData, selectedTarget }) {
     && /\b(?:this|that|current|selected|viewed|open)\s+review\b/i.test(reviewClause) ? page.ids.review_id : null);
   const requestedRecords = Object.fromEntries([...targetClause(prompt, true).matchAll(/\b(?:this|that|current|selected|viewed|open)\s+(property|appointment|estimate|invoice|review|email|call|product|lead)\b/gi)]
     .map(match => { const kind = `${match[1].toLowerCase()}_id`; return [kind, page.ids[kind] || null]; }));
-  return { page, candidates, ...selection, requestedRecords, requestPhrase: normalizeName(prompt),
-    reviewReference: reviewReference || null,
+  return { page, candidates, ...selection, requestedRecords, requestPhrase: normalizeName(targetClause(prompt)),
+    reviewReference: reviewReference?.toLowerCase() || null,
     bulkLeadRequest: !namesRequested(prompt) && /\b(?:all|bulk)\b.*\bleads\b/i.test(targetClause(prompt)),
     explicitEmails: [...recipient.matchAll(/^([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi)]
       .map(match => normalizeEmail(match[1])),
@@ -227,15 +228,15 @@ function unlinkedRecordIsReferenced(record, context) {
   if (record.kind === 'review_id') return targets.length === 0 && context.reviewReference === record.id;
   if (record.kind === 'call_id') return targets.length === 0;
   if (!['lead_id', 'email_id', 'estimate_id'].includes(record.kind)) return true;
-  if (ids[record.kind] === record.id) return true;
+  const noun = record.kind.replace(/_id$/, '');
+  if (ids[record.kind] === record.id && new RegExp(`\\b(?:this|that|current|selected|viewed|open)\\s+${noun}\\b`).test(requestPhrase)) return true;
   if (record.kind === 'email_id') return explicitEmails.includes(normalizeEmail(record.from_address));
-  const name = normalizeName(record.customer_name || [record.first_name, record.last_name].filter(Boolean).join(' '));
-  return !!name && ` ${requestPhrase} `.includes(` ${name} `);
+  return namesTargetCustomer(requestPhrase, record);
 }
 
 function relationshipFailure(records, params, toolName) {
-  const intendedCustomer = params.customer_id || params.customerId;
-  const intendedProperty = params.property_id || params.propertyId;
+  const intendedCustomer = String(params.customer_id || params.customerId || '').toLowerCase();
+  const intendedProperty = String(params.property_id || params.propertyId || '').toLowerCase();
   const crossCustomer = records.some(r => r.customer_id && intendedCustomer && r.customer_id !== intendedCustomer);
   const crossProperty = records.some(r => r.property_id && intendedProperty && r.property_id !== intendedProperty
     && !(toolName === 'switch_appointment_property' && r.kind === 'appointment_id'));
@@ -303,7 +304,7 @@ async function prepareReadInput(params, context, { toolName, schema }) {
     const selected = matches.filter(customer => permitted.has(customer.id));
     const customer = selected.length === 1 ? await customerById(selected[0].id) : null;
     const phoneMatches = !params.phone || (customer && String(customer.phone || '').replace(/\D/g, '').slice(-10) === String(params.phone).replace(/\D/g, '').slice(-10));
-    if (!customer || !phoneMatches || (params.customer_id && params.customer_id !== customer.id)) {
+    if (!customer || !phoneMatches || (params.customer_id && String(params.customer_id).toLowerCase() !== customer.id)) {
       return { error: 'Use the resolved task customer for this record lookup', code: 'target_clarification_required' };
     }
     input.customer_id = customer.id;

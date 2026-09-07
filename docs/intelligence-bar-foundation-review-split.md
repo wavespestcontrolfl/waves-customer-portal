@@ -107,3 +107,8 @@ isolated PostgreSQL tests run in rollback transactions. Approval proof storage
 and resume belong to C; actual request/confirmation acceptance remains in D.
 Exact product/formulation request binding remains required in inventory #4029;
 this resolver does not claim inventory write verification or complete parity.
+
+B1 independent review also closed incidental page/note authority for unlinked
+leads and estimates and normalized UUID comparisons to PostgreSQL identity.
+The final scope passes 147 distinct unit/write-boundary cases and five isolated
+PostgreSQL cases. No provider adapter or live action ran in those checks.
