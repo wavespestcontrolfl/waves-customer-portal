@@ -92,7 +92,8 @@ postgres('SMS operations on PostgreSQL', () => {
     expect(proposals).toHaveLength(1);
     expect(proposals[0]).toMatchObject({ field: 'irrigation_controller_location', status: 'pending', is_sensitive: true,
       source: 'message-extraction', resource_type: 'property_preferences', resource_id: null, scope_id: message.customer_id });
-    expect(proposals[0].evidence.sms_log_id).toBe(message.id);
+    expect(proposals[0].evidence).toMatchObject({ sms_log_id: message.id, channel: 'sms' });
+    expect(JSON.stringify(proposals[0].evidence)).not.toContain('beside the garage');
     expect((await mockPg('sms_log').first()).operational_analysis.facts[0])
       .toMatchObject({ outcome: 'proposed', proposal_id: proposals[0].id });
     // Existing Owed/call readers remain call-scoped. No new portal queue.
@@ -298,13 +299,13 @@ postgres('SMS operations on PostgreSQL', () => {
   test('the irrigation companion flip is reported on apply and restored on revert only while it holds', async () => {
     const writer = require('../services/data-hygiene/property-preferences');
     const [row] = await mockPg('property_preferences').insert({ customer_id: message.customer_id, irrigation_system: false }).returning('*');
-    const proposal = { scope_id: message.customer_id, field: 'irrigation_issues', resource_id: row.id };
+    const proposal = { scope_id: message.customer_id, field: 'irrigation_controller_location', resource_id: row.id };
     await mockPg.transaction(async (trx) => {
       const target = await writer.resolvePropertyPreferencesTarget({ trx, proposal, currentRaw: null });
-      const { companions } = await writer.applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw: 'Zone 3 head is broken.' });
+      const { companions } = await writer.applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw: 'Beside the garage.' });
       expect(companions).toEqual({ irrigation_system: false });
     });
-    expect(await mockPg('property_preferences').first()).toMatchObject({ irrigation_system: true, irrigation_issues: 'Zone 3 head is broken.' });
+    expect(await mockPg('property_preferences').first()).toMatchObject({ irrigation_system: true, irrigation_controller_location: 'Beside the garage.' });
     const revert = () => mockPg.transaction(async (trx) => {
       const target = await trx('property_preferences').where({ id: row.id }).forUpdate().first();
       return writer.revertPropertyPreferenceCompanions({ trx, proposal, target, companions: { irrigation_system: false } });
@@ -312,7 +313,13 @@ postgres('SMS operations on PostgreSQL', () => {
     // A deliberate change after approval is not clobbered by the revert.
     await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_system: false });
     expect(await revert()).toEqual({ reverted: [] });
-    await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_system: true });
+    // Later irrigation evidence (another input, or a portal confirmation) keeps the system on.
+    await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_system: true, irrigation_issues: 'Zone 3 head is broken.' });
+    expect(await revert()).toEqual({ reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } });
+    await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_issues: null, irrigation_confirmed_fields: JSON.stringify(['watering_days']) });
+    expect(await revert()).toEqual({ reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } });
+    expect((await mockPg('property_preferences').first()).irrigation_system).toBe(true);
+    await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_confirmed_fields: JSON.stringify([]) });
     expect(await revert()).toEqual({ reverted: ['irrigation_system'] });
     expect((await mockPg('property_preferences').first()).irrigation_system).toBe(false);
   });

@@ -1,6 +1,6 @@
 'use strict';
 
-const { IRRIGATION_INPUT_FIELDS } = require('../irrigation-schedule-confirmation');
+const { IRRIGATION_INPUT_FIELDS, parseConfirmedFields } = require('../irrigation-schedule-confirmation');
 
 // Shared compare-and-set writer for private property preferences.
 // Callers own authorization, field allowlists, the transaction and audit.
@@ -58,10 +58,17 @@ async function applyPropertyPreferenceValue({ trx, proposal, target, proposedRaw
   return { companions };
 }
 
+const hasValue = (value) => !(value === null || value === undefined || value === '' || value === false
+  || (Array.isArray(value) && value.length === 0));
+
 // Undo a companion flip recorded at apply time, only while the flag still
-// holds the value apply set: a later deliberate change survives the revert.
+// holds the value apply set and nothing later confirmed irrigation: another
+// irrigation input on the row or a portal confirmation keeps the system on.
 async function revertPropertyPreferenceCompanions({ trx, proposal, target, companions = {} }) {
   if (!('irrigation_system' in companions) || target.irrigation_system !== true) return { reverted: [] };
+  const laterEvidence = IRRIGATION_INPUT_FIELDS.some((field) => field !== proposal.field && hasValue(target[field]))
+    || parseConfirmedFields(target.irrigation_confirmed_fields).length > 0;
+  if (laterEvidence) return { reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } };
   await trx('property_preferences')
     .where({ id: target.id, customer_id: proposal.scope_id })
     .update({ irrigation_system: companions.irrigation_system, updated_at: trx.fn.now() });

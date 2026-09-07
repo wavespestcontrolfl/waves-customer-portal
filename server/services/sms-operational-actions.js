@@ -12,7 +12,6 @@ const { recordAuditEvent } = require('./audit-log');
 const NotificationService = require('./notification-service');
 const { hashExtractionSource, recordExtractionAttempt } = require('./data-hygiene/source-extraction-store');
 const { stalePendingExtractionProposals, upsertSensitiveProposal } = require('./data-hygiene/proposal-store');
-const { redactExcerpt } = require('./data-hygiene/message-extractor');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
 const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode } = require('./sms-operational-extractor');
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
@@ -110,9 +109,11 @@ async function proposeFact(trx, message, fact, current) {
     resource_id: current?.id || null, scope_type: 'customer', scope_id: message.customer_id, field: fact.field,
     current_value: current?.[fact.field] ?? null, proposed_value: fact.value,
     source: 'message-extraction', confidence: 0.9, tier: 'medium', is_sensitive: true,
+    // The proposals API returns evidence without the audited reveal step, so
+    // the text itself stays in the vault and the customer conversation.
     evidence: { evidence_source_type: 'message', evidence_source_id: message.id, sms_log_id: message.id,
-      property_id: fact.property_id, extractor_version: VERSION,
-      source_excerpt: redactExcerpt(message.message_body, fact.value) },
+      channel: 'sms', property_id: fact.property_id, extractor_version: VERSION,
+      source_excerpt: 'Customer SMS; the text is in the vault and the customer conversation.' },
   }, { trx });
   return proposal.id;
 }
