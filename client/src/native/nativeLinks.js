@@ -169,10 +169,18 @@ export async function initNativeLinks() {
   }
 
   let handledEvent = false;
+  let androidLaunchPending = nativePlatform() === 'android';
+  let pendingAndroidEvent;
   try {
     // Registration is asynchronous. Handle its rejection independently so a
     // missing listener cannot prevent the cold-start lookup from running.
     void App.addListener('appUrlOpen', (event) => {
+      // A redirect tears down this document. Android must learn and consume
+      // its original intent before a newer event can navigate away from it.
+      if (androidLaunchPending && customerAppUrl(event?.url)) {
+        pendingAndroidEvent = event.url;
+        return;
+      }
       handledEvent = navigateTo(event?.url, 'event') || handledEvent;
     }).then(() => traceLink('boot', 'listener-ready'))
       .catch(() => traceLink('boot', 'listener-error'));
@@ -181,13 +189,14 @@ export async function initNativeLinks() {
   }
 
   // A bridge call can hang without rejecting. Report that separately, without
-  // cancelling a delayed result or blocking an eventual appUrlOpen event.
+  // cancelling a delayed result. Android startup events wait for this lookup
+  // to settle so a document unload cannot lose the original intent's marker.
   const lookupTimer = setTimeout(() => traceLink('launch', 'lookup-timeout'), 5000);
   try {
     const launch = await App.getLaunchUrl();
     // Android keeps its original launch URL even after a newer event. Consume
     // the superseded lookup so the event's destination survives the next boot.
-    const supersededAndroidUrl = handledEvent && nativePlatform() === 'android'
+    const supersededAndroidUrl = pendingAndroidEvent
       ? customerAppUrl(launch?.url) : null;
     if (supersededAndroidUrl) {
       try {
@@ -196,12 +205,14 @@ export async function initNativeLinks() {
         traceLink('launch', 'storage-unavailable', supersededAndroidUrl);
       }
     }
-    if (handledEvent) traceLink('launch', 'superseded');
+    if (handledEvent || pendingAndroidEvent) traceLink('launch', 'superseded');
     else if (launch?.url) navigateTo(launch.url, 'launch');
     else traceLink('launch', 'empty');
   } catch {
     traceLink('launch', 'lookup-error');
   } finally {
     clearTimeout(lookupTimer);
+    androidLaunchPending = false;
+    if (pendingAndroidEvent) navigateTo(pendingAndroidEvent, 'event');
   }
 }

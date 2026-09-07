@@ -273,6 +273,11 @@ describe('launch URL replay (redirecting short links)', () => {
     await vi.waitFor(() => expect(resolveLaunch).toBeTypeOf('function'));
     const newerLink = `${ORIGIN}/l/newer-test-link`;
     capMocks.state.listeners.appUrlOpen({ url: newerLink });
+    expect(assignSpy).not.toHaveBeenCalled();
+    assignSpy.mockImplementation(() => {
+      // The marker must already exist at the point a real browser unloads.
+      expect(sessionStorage.getItem(LAUNCH_URL_CONSUMED_KEY)).toBe(SHORT_LINK);
+    });
     resolveLaunch({ url: SHORT_LINK });
     await boot;
     expect(assignSpy).toHaveBeenCalledTimes(1);
@@ -284,6 +289,39 @@ describe('launch URL replay (redirecting short links)', () => {
     await initNativeLinks();
     expect(assignSpy).not.toHaveBeenCalled();
     expect(reported('replay-skipped').at(-1)).toMatchObject({ platform: 'android', route: 'estimate' });
+  });
+
+  it('queues only the latest valid Android startup event', async () => {
+    capMocks.state.platform = 'android';
+    let resolveLaunch;
+    capMocks.App.getLaunchUrl.mockImplementationOnce(() => new Promise((resolve) => { resolveLaunch = resolve; }));
+    const boot = initNativeLinks();
+    await vi.waitFor(() => expect(resolveLaunch).toBeTypeOf('function'));
+    const newerLink = `${ORIGIN}/l/newer-test-link`;
+    capMocks.state.listeners.appUrlOpen({ url: SHORT_LINK });
+    capMocks.state.listeners.appUrlOpen({ url: newerLink });
+    capMocks.state.listeners.appUrlOpen({ url: `${ORIGIN}/admin/customers` });
+    expect(assignSpy).not.toHaveBeenCalled();
+    expect(reported('rejected')).toHaveLength(1);
+    resolveLaunch(null);
+    await boot;
+    expect(assignSpy).toHaveBeenCalledTimes(1);
+    expect(assignSpy).toHaveBeenCalledWith(newerLink);
+  });
+
+  it('releases a queued Android event if the launch lookup rejects', async () => {
+    capMocks.state.platform = 'android';
+    let rejectLaunch;
+    capMocks.App.getLaunchUrl.mockImplementationOnce(() => new Promise((resolve, reject) => { rejectLaunch = reject; }));
+    const boot = initNativeLinks();
+    await vi.waitFor(() => expect(rejectLaunch).toBeTypeOf('function'));
+    capMocks.state.listeners.appUrlOpen({ url: SHORT_LINK });
+    expect(assignSpy).not.toHaveBeenCalled();
+    rejectLaunch(new Error('bridge error'));
+    await boot;
+    expect(reported('lookup-error')).toHaveLength(1);
+    expect(assignSpy).toHaveBeenCalledTimes(1);
+    expect(assignSpy).toHaveBeenCalledWith(SHORT_LINK);
   });
 
   it('reports a stalled bridge but still honors a delayed launch result', async () => {
@@ -298,6 +336,25 @@ describe('launch URL replay (redirecting short links)', () => {
     resolveLaunch({ url: SHORT_LINK });
     await boot;
     expect(assignSpy).toHaveBeenCalledWith(SHORT_LINK);
+  });
+
+  it('keeps an Android startup event queued through a timeout until its marker can be written', async () => {
+    capMocks.state.platform = 'android';
+    vi.useFakeTimers();
+    let resolveLaunch;
+    capMocks.App.getLaunchUrl.mockImplementationOnce(() => new Promise((resolve) => { resolveLaunch = resolve; }));
+    const boot = initNativeLinks();
+    await vi.waitFor(() => expect(resolveLaunch).toBeTypeOf('function'));
+    const newerLink = `${ORIGIN}/l/newer-test-link`;
+    capMocks.state.listeners.appUrlOpen({ url: newerLink });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(reported('lookup-timeout')).toHaveLength(1);
+    expect(assignSpy).not.toHaveBeenCalled();
+    resolveLaunch({ url: SHORT_LINK });
+    await boot;
+    expect(assignSpy).toHaveBeenCalledTimes(1);
+    expect(assignSpy).toHaveBeenCalledWith(newerLink);
+    expect(sessionStorage.getItem(LAUNCH_URL_CONSUMED_KEY)).toBe(SHORT_LINK);
   });
 
   it('never includes launch tokens, query strings or unknown path segments in diagnostics', async () => {
