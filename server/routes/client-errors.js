@@ -1,8 +1,18 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const Sentry = require('@sentry/node');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 
 const router = express.Router();
+const NATIVE_LINK_ERRORS = new Set([
+  'plugin-error', 'listener-error', 'lookup-timeout', 'lookup-error',
+  'storage-unavailable', 'navigation-failed',
+]);
+
+function isRoutineNativeReport(req) {
+  return req.body?.context === 'native-links'
+    && !NATIVE_LINK_ERRORS.has(req.body?.nativeLink?.outcome);
+}
 
 // Client-reported errors (React error boundaries, admin handler catches). There
 // was no client-side error telemetry — render crashes and handler failures only
@@ -18,21 +28,22 @@ const router = express.Router();
 // context label, or native handoff labels) before it reaches Sentry.
 const limiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 30,
+  max: (req) => (isRoutineNativeReport(req) ? 10 : 30),
+  keyGenerator: (req) => `${isRoutineNativeReport(req) ? 'native-info' : 'error'}:${unauthenticatedAuthLimitKey(req)}`,
   standardHeaders: true,
   legacyHeaders: false,
 });
 
-// A GLOBAL ceiling (one shared bucket) on top of the per-IP limit: distributed
-// callers could otherwise bypass the per-IP cap and exhaust the Sentry event
-// quota, hiding real errors. Client crashes are rare, so 60/min across everyone
-// is generous; excess is dropped before it reaches Sentry.
+// Reserve the original 60/min cross-user budget for actual errors. Routine
+// native stages have their own smaller 20/min budget in the SAME limiter;
+// ordinary app boots must not debit either error bucket and hide real crashes.
+// All budgets are fixed regardless of caller-supplied platform/route labels.
 const globalLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 60,
+  max: (req) => (isRoutineNativeReport(req) ? 20 : 60),
   standardHeaders: false,
   legacyHeaders: false,
-  keyGenerator: () => 'global',
+  keyGenerator: (req) => (isRoutineNativeReport(req) ? 'native-info' : 'global'),
 });
 
 // A JS error name. Identifier-shape checks still let attacker PII through (a
@@ -69,11 +80,6 @@ const NATIVE_LINK_OUTCOMES = new Set([
   'storage-unavailable', 'already-current', 'navigation-requested', 'navigation-failed',
 ]);
 const NATIVE_LINK_ROUTES = new Set(['home', 'shortlink', 'estimate', 'other', 'none']);
-const NATIVE_LINK_ERRORS = new Set([
-  'plugin-error', 'listener-error', 'lookup-timeout', 'lookup-error',
-  'storage-unavailable', 'navigation-failed',
-]);
-
 function captureNativeLink(value) {
   const { platform, source, outcome, route, target } = value || {};
   if (!NATIVE_PLATFORMS.has(platform) || !NATIVE_LINK_SOURCES.has(source)

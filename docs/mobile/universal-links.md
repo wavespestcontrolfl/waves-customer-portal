@@ -100,9 +100,11 @@ query string, customer information or a device identifier.
 | `already-current` | The destination is already the current URL. |
 | `storage-unavailable` | The replay marker could not be read or written; navigation remains best-effort, and redirect-loop protection cannot be guaranteed. |
 
-Normal stages are informational; bridge, storage and navigation failures use
-error severity. Reports share the receiver's per-IP and global ceilings and
-are best-effort. Missing telemetry is not proof that the OS never delivered a
+Normal stages are informational and have a budget of 10/min per IP and 20/min
+globally. Bridge, storage and navigation failures share the existing crash
+report budgets of 30/min per IP and 60/min globally. The same limiters use
+separate keys so routine native activity cannot hide error reports. Telemetry
+is best-effort. Missing telemetry is not proof that the OS never delivered a
 URL. No stable per-device identifier is collected, so aggregate events are
 not a correlated per-customer navigation trace.
 
