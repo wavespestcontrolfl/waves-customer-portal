@@ -4,6 +4,10 @@ const { buildPlanForService } = require('./waveguard-plan-engine');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { describeInventoryConversion } = require('./inventory-units');
 
+// Planner blocks under which waveguard-plan-engine plans NO products for the
+// appointment (see propertyGate in buildPlanForService).
+const WITHHELD_PLAN_BLOCK_CODES = ['lawn_archived_recipe_unavailable', 'lawn_protocol_unresolved', 'lawn_property_unresolved'];
+
 const ADVISORY_LOCK_KEY = 'waveguard-inventory-forecast-cron';
 let isRunning = false;
 
@@ -95,12 +99,15 @@ async function buildWaveGuardInventoryForecast({ days = 14, limit = 150, knex = 
       const customerName = `${service.first_name || ''} ${service.last_name || ''}`.trim() || 'Customer';
       // Under the lawn completion gates the planner withholds EVERY product
       // when the assigned protocol version/window cannot be resolved
-      // (lawn_protocol_unresolved) or an archived assignment's recipe no
-      // longer reproduces (lawn_archived_recipe_unavailable) — it never
-      // borrows a later recipe. Counting either as zero demand would read as
-      // "nothing needed" and under-order — report it the way a failed plan is.
+      // (lawn_protocol_unresolved), an archived assignment's recipe no
+      // longer reproduces (lawn_archived_recipe_unavailable), or the saved
+      // turf profile does not prove the service property
+      // (lawn_property_unresolved, sqft 0 → every amount null) — it never
+      // borrows a later recipe or another property. Counting any of these as
+      // zero demand would read as "nothing needed" and under-order — report
+      // it the way a failed plan is.
       const withheldBlock = (plan?.propertyGate?.blocks || [])
-        .find((block) => ['lawn_archived_recipe_unavailable', 'lawn_protocol_unresolved'].includes(block.code));
+        .find((block) => WITHHELD_PLAN_BLOCK_CODES.includes(block.code));
       if (withheldBlock) {
         errors.push({ serviceId: service.id, scheduledDate: service.scheduled_date, customerName, message: withheldBlock.message });
         continue;
