@@ -137,14 +137,27 @@ else
   # Refresh $BASE from its remote (origin/main -> fetch origin main): the
   # hook runs against whatever the last fetch left locally, and a main
   # that advanced since then could have deployed a migration this push
-  # carries an edited copy of. A failed fetch (offline, unknown remote)
+  # carries an edited copy of. Non-interactive and bounded (30 s, same
+  # process-group watchdog as the LLM audit below) so a dead network or
+  # a credential prompt cannot hang the push; a failed or timed-out fetch
   # falls back to the local copy with a warning rather than blocking.
   BASE_REMOTE="${BASE%%/*}"
   BASE_BRANCH="${BASE#*/}"
   if [ "$BASE_REMOTE" != "$BASE" ] && [ -n "$BASE_BRANCH" ] \
     && git remote get-url "$BASE_REMOTE" >/dev/null 2>&1; then
-    if ! git fetch --quiet "$BASE_REMOTE" "+refs/heads/$BASE_BRANCH:refs/remotes/$BASE_REMOTE/$BASE_BRANCH" 2>/dev/null; then
-      echo "[migration-guard] could not fetch $BASE_BRANCH from $BASE_REMOTE — checking against the local $BASE, which may be stale." >&2
+    set -m
+    GIT_TERMINAL_PROMPT=0 git fetch --quiet "$BASE_REMOTE" \
+      "+refs/heads/$BASE_BRANCH:refs/remotes/$BASE_REMOTE/$BASE_BRANCH" >/dev/null 2>&1 &
+    FETCH_PID=$!
+    ( sleep 30; kill -TERM -"$FETCH_PID" 2>/dev/null; sleep 5; kill -KILL -"$FETCH_PID" 2>/dev/null ) >/dev/null 2>&1 &
+    FETCH_WATCHDOG_PID=$!
+    set +m
+    FETCH_STATUS=0
+    wait "$FETCH_PID" || FETCH_STATUS=$?
+    kill -TERM -"$FETCH_WATCHDOG_PID" 2>/dev/null
+    wait "$FETCH_WATCHDOG_PID" 2>/dev/null
+    if [ "$FETCH_STATUS" -ne 0 ]; then
+      echo "[migration-guard] could not fetch $BASE_BRANCH from $BASE_REMOTE (offline, or it took over 30 s) — checking against the local $BASE, which may be stale." >&2
     fi
   fi
   BASE_OK=0
