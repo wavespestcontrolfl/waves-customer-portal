@@ -562,6 +562,13 @@ function installHarness() {
     return { verified: caller.verified === true, attested: !!(caller.context && caller.context.attested) };
   };
   relayContext.loadOfficeHours = async () => officeHoursFixture(state.scenario);
+  const renderClockBlock = relayContext.renderClockBlock;
+  relayContext.renderClockBlock = (...args) => {
+    const text = renderClockBlock(...args);
+    const record = state.record;
+    if (text && record) record.events.push({ kind: 'clock', text, turn: record.turn, index: record.events.length });
+    return text;
+  };
   relayTools.executeTool = (name, input, ctx) => runFixtureTool(state, name, input, ctx);
   // The DB-approved voice profile is style-only state, not code under test:
   // frozen out so every run grades the code-versioned prompt and needs no DB.
@@ -705,6 +712,7 @@ function renderTranscript(events = []) {
   for (const e of events) {
     if (e.kind === 'caller') lines.push(`Caller: ${e.text}${e.ignored ? ' (not heard — the session was already ending)' : ''}`);
     else if (e.kind === 'agent') lines.push(`Agent: ${e.text}`);
+    else if (e.kind === 'clock') lines.push(`[clock] ${e.text}`);
     else if (e.kind === 'interrupt') lines.push(`[caller interrupted the agent after: "${e.text}"]`);
     else if (e.kind === 'tool') lines.push(`[tool] ${e.name}(${clip(JSON.stringify(e.input || {}), 240)}) → ${clip(e.text, 600)}`);
   }
@@ -812,7 +820,8 @@ function runCheck(expectation, record) {
   const view = { calledNames: record.toolCalls.map((t) => t.name), validNames: validCallNames(record), utterances, spoken: utterances.map((u) => u.text) };
   const runner = CHECK_RUNNERS[expectation.check];
   const [status, detail] = runner ? runner(expectation.value, record, view) : ['skip', `unknown check ${expectation.check}`];
-  return { check: expectation.check, severity: expectation.severity, adjudicated: expectation.adjudicated === true, status, detail };
+  const severity = expectation.check === 'commitment_requires_receipt' ? 'critical' : expectation.severity;
+  return { check: expectation.check, severity, adjudicated: expectation.adjudicated === true, status, detail };
 }
 
 // The scenario's allowlist, graded as an implicit CRITICAL check on every
@@ -897,7 +906,7 @@ function newRecord(scenario, h) {
   return {
     id: scenario.id, language: scenario.language || 'en', turn: 0, events: [], spoken: [], toolCalls: [], toolUse: {},
     endSession: null, injected: [], dbAttempts: [], warnings: [], toolsAvailable: [], promptSha: null, model: h.MODEL,
-    modelRounds: 0, modelErrors: [], modelCalls: 0, modelAborts: 0, interruptInFlight: false, toolResponseUse: {}, officeStatus: null,
+    modelRounds: 0, modelErrors: [], modelCalls: 0, modelAborts: 0, interruptInFlight: false, toolResponseUse: {},
   };
 }
 
@@ -931,18 +940,6 @@ function newConversation(h, scenario, record) {
   return convo;
 }
 
-/** 'open' | 'closed' | 'unknown' for the judge — an hours object resolves through the relay's own isOfficeOpenAt. */
-function officeStatusForJudge(scenario) {
-  const v = scenario.fixtures && scenario.fixtures.officeHours;
-  if (v === 'open' || v === 'closed') return v;
-  if (v && typeof v === 'object') {
-    const { isOfficeOpenAt } = require('../voice-agent/relay-context');
-    const open = isOfficeOpenAt(v, new Date());
-    return open === true ? 'open' : (open === false ? 'closed' : 'unknown');
-  }
-  return 'unknown';
-}
-
 function errorRecord(err) {
   return { name: (err && err.name) || 'Error', message: err && err.message ? err.message : String(err), code: (err && err.code) || null };
 }
@@ -950,9 +947,8 @@ function errorRecord(err) {
 /** The judged layer for one finished record (run in a pool after the conversations). */
 async function judgeRecord(scenario, record, judgeFn) {
   const run = judgeFn || require('./voice-relay-judge').judgeTranscript;
-  const officeHours = record.officeStatus || officeStatusForJudge(scenario);
   const callerBlock = scenario.caller && scenario.caller.context ? scenario.caller.context.block : null;
-  record.judge = await run({ spec: scenario.spec || {}, transcript: record.transcript, language: record.language, toolsAvailable: record.toolsAvailable, officeHours, callerBlock })
+  record.judge = await run({ spec: scenario.spec || {}, transcript: record.transcript, language: record.language, toolsAvailable: record.toolsAvailable, callerBlock })
     .catch((err) => ({ ok: false, reason: `judge_error:${err && err.message ? err.message : err}` }));
   record.checks.push(...judgeChecks(scenario, record.judge));
   record.qualityScore = qualityScore(record.checks);
@@ -991,9 +987,6 @@ async function runScenario(scenario, { judge = true, judgeFn = null } = {}) {
     await driveTurns(convo, scenario, record);
     record.toolsAvailable = (convo._tools || []).map((t) => t.name);
     record.promptSha = convo._promptSha || null;
-    // The office state the conversation actually saw — the judge reads this,
-    // never a re-evaluation minutes later when the verdicts run.
-    record.officeStatus = officeStatusForJudge(scenario);
     // Any REAL provider error (an injected failure is expected and excluded,
     // a barge-in abort is deliberate) means the conversation did not run as
     // scripted — before the first round or after ten, the checks would be
@@ -1360,7 +1353,7 @@ module.exports = {
   isFailedVoiceRun,
   _internals: {
     PROMISE_RE, DEFAULT_TOOL_TEXT, LOOKUP_BUDGET_TEXT, EVAL_CALLER_TO, CHILD_TIMEOUT_MS, JUDGE_CONCURRENCY, mapPool, judgeRecord, allowedToolsCheck, validCallNames,
-    makeDbGuard, officeHoursFixture, officeStatusForJudge, pickToolResponse, inputMatches, MISMATCH_TEXT, runFixtureTool, applyToolSideEffects, validateToolInput, offeredRefs, applyGates, applyResumeFixture, injectInterrupt, driveTurns, selectScenarios, assertRunConclusive, attemptWithRetry, notifyOutcome,
+    makeDbGuard, officeHoursFixture, pickToolResponse, inputMatches, MISMATCH_TEXT, runFixtureTool, applyToolSideEffects, validateToolInput, offeredRefs, applyGates, applyResumeFixture, injectInterrupt, driveTurns, selectScenarios, assertRunConclusive, attemptWithRetry, notifyOutcome,
     renderTranscript, evaluateChecks, runCheck, CHECK_RUNNERS, lintScenario, judgeChecks, scenarioStatus, qualityScore, summarize, failureLines,
     notifyFailure, notifyInconclusive,
   },

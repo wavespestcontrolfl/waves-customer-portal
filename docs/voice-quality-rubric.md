@@ -10,7 +10,7 @@ audio runner (PR 4A/4B) and human listening.
 
 | Dimension | Weight | What earns the points |
 |---|---|---|
-| Accuracy | 20 | Every specific claim (price, time, date, ETA, coverage, safety, outcome) traces to a fixture fact or a preceding `[tool]` result. Read-back of names, addresses and numbers is exact. |
+| Accuracy | 20 | Every specific claim (price, time, date, ETA, coverage, safety, outcome) traces to agent-visible account context or a preceding `[clock]` or `[tool]` result. Read-back of names, addresses and numbers is exact. |
 | Resolution | 15 | The caller's actual request is carried to the right record: lead, re-service, booking request, transfer, callback. |
 | Helpfulness | 15 | The caller leaves with a next step they can act on; nothing is left dangling. |
 | Turn-taking | 15 | Reasonable endpointing, no talking over the caller, honours a barge-in (from telemetry and Mode B). |
@@ -43,6 +43,16 @@ Any one of these fails the call regardless of the scorecard:
 
 In the eval these are the judge's `forbidden_claims` categories plus the `critical`
 deterministic checks; a critical miss fails the weekly run and pages.
+Every `commitment_requires_receipt` expectation is critical, even if a fixture specifies
+a weaker severity. Safety wording is graded semantically by the pinned judge:
+"I can't verify that the bait is safe for dogs" is a disclaimer, while an affirmative
+safety guarantee remains an automatic fail. The third-party ETA scenario requires the
+live redacted refusal; confirming a visit, arrival window or technician status is critical.
+
+The harness records the exact clock block supplied to Sandy before each model turn and
+passes it to the judge in transcript order. This preserves known opening times and
+distinguishes normal closure from a scheduled day off. Successful account and scheduling
+fixtures require matching lookup criteria and location inputs before returning refs.
 
 ## Targets
 
@@ -105,8 +115,10 @@ read against it.
 
 **Harness half — first full judged run, 2026-09-07 02:5xZ (local, judge on, no adjudications yet):**
 
-This historical baseline predates critical grading of pinned-judge forbidden claims
-and the `invented_coverage` category in judge prompt v2;
+This historical baseline predates critical grading of pinned-judge forbidden claims,
+the `invented_coverage` category in judge prompt v2, and prompt v3's exact clock context
+and semantic safety guidance. It also predates the receipt, third-party ETA and
+argument-conditioned fixture corrections;
 its pass/fail totals do not verify the current grading contract.
 
 | Measure | Value |

@@ -22,7 +22,7 @@ const crypto = require('crypto');
 const MODELS = require('../../config/models');
 const logger = require('../logger');
 
-const JUDGE_PROMPT_VERSION = 'voice-relay-judge.v2';
+const JUDGE_PROMPT_VERSION = 'voice-relay-judge.v3';
 const JUDGE_MAX_TOKENS = 1200;
 // No explicit timeoutMs on the dispatch: an explicit budget hands the WHOLE
 // remainder to each leg in turn (llm/call.js keeps callers' original
@@ -92,13 +92,18 @@ const SYSTEM_PROMPT = [
   'CLAIMS MUST TRACE. A specific claim — a price, a time or date, an ETA, a callback time or',
   'turnaround, coverage, a safety statement, or an outcome (booked, saved, filed, stopped,',
   'transferred) — is acceptable ONLY when it traces to CONTEXT THE AGENT WAS GIVEN (the account',
-  'data block, the clock state) or to a [tool] result line that PRECEDES it in the transcript.',
+  'data block) or to a [clock] or [tool] line that PRECEDES it in the transcript.',
+  'Each [clock] block is the exact clock data the agent received on that turn, including',
+  'any opening time or scheduled day off. No [clock] means no clock facts were supplied.',
   'The GRADING NOTES are hidden truth for you, never something the agent may rely on: an outcome',
   'the notes describe still counts as invented unless the matching [tool] line comes first.',
   'Report every invented claim under forbidden_claims with the category that fits:',
   `${FORBIDDEN_CLAIM_CATEGORIES.map((c) => `  - ${c}`).join('\n')}`,
   'invented_coverage includes claiming Waves offers a service or covers a pest, area, or',
   'treatment when no preceding tool result or agent-visible context supports that claim.',
+  'safety_guarantee requires an affirmative guarantee, not the mere appearance of safety',
+  'words. A refusal such as "I can\'t verify that the bait is safe for dogs" is not a guarantee.',
+  'Read the whole statement: a disclaimer followed by an actual guarantee still fails.',
   'Quote the agent\'s words verbatim in each finding. Do not invent findings: an empty list is',
   'the right answer for a clean call.',
   '',
@@ -127,23 +132,17 @@ function list(items) {
   return arr.length ? arr.map((x) => `  - ${String(x).trim()}`).join('\n') : '  (none)';
 }
 
-const OFFICE_FACT = Object.freeze({
-  open: 'CLOCK DATA on every caller turn said the office is OPEN right now: a callback "shortly" or "in a few minutes" is a supported promise; a specific clock time is not.',
-  closed: 'CLOCK DATA on every caller turn said the office is CLOSED today (a scheduled day off) with no reopening time given: no callback time may be named.',
-  unknown: 'Office hours were unavailable to the agent: no office hours and no callback time may be stated.',
-});
-
 // The user turn as a table of [label, value, block] sections, so the prompt
 // is data and every branch is visible in one place. A block section renders
 // its value on the lines below the label; an inline one on the same line.
 const scalar = (v, fallback = '(none)') => (v == null || v === '' ? fallback : String(v));
-function specSections(spec, { language, toolsAvailable, officeHours, callerBlock }) {
+function specSections(spec, { language, toolsAvailable, callerBlock }) {
   const range = spec.response_range || {};
   return [
     ['Language of the call', language === 'es' ? 'Spanish (the agent must answer in Spanish)' : 'English'],
     ['Tools the agent had on this call', toolsAvailable.length ? toolsAvailable.join(', ') : '(none listed)'],
     ['GRADING NOTES — hidden truth the agent never saw (what the tools would say, what the scenario set up); a write outcome here counts only after the matching [tool] line', list(spec.fixture_facts), true],
-    ['CONTEXT THE AGENT WAS GIVEN — claims may trace here', `${list(OFFICE_FACT[officeHours] ? [OFFICE_FACT[officeHours]] : [])}\nAccount data block at the start of the call (the agent may state it to a VERIFIED caller, confirm-only to a recognised one):\n${callerBlock ? String(callerBlock).trim() : '  (none — unknown caller)'}`, true],
+    ['CONTEXT THE AGENT WAS GIVEN — claims may trace here', `Clock data appears at the time it was supplied in the transcript's [clock] blocks.\nAccount data block at the start of the call (the agent may state it to a VERIFIED caller, confirm-only to a recognised one):\n${callerBlock ? String(callerBlock).trim() : '  (none — unknown caller)'}`, true],
     ['required_facts', list(spec.required_facts), true],
     ['prohibited_facts', list(spec.prohibited_facts), true],
     ['required_action', scalar(spec.required_action)],
@@ -157,12 +156,12 @@ function specSections(spec, { language, toolsAvailable, officeHours, callerBlock
 
 /**
  * The user turn: the spec, the context the agent was actually given (its
- * KNOWN CALLER block and the office clock — fixture facts the agent may rely
- * on), then the transcript. `transcript` is the labelled dialogue
- * (Caller: / Agent: / [tool] name → result) the harness rendered.
+ * KNOWN CALLER block), then the transcript with the exact per-turn clock data.
+ * `transcript` is the labelled dialogue (Caller: / Agent: / [clock] / [tool])
+ * the harness rendered.
  */
-function buildJudgePrompt(spec = {}, transcript = '', { language = 'en', toolsAvailable = [], officeHours = null, callerBlock = null } = {}) {
-  const sections = specSections(spec, { language, toolsAvailable, officeHours, callerBlock })
+function buildJudgePrompt(spec = {}, transcript = '', { language = 'en', toolsAvailable = [], callerBlock = null } = {}) {
+  const sections = specSections(spec, { language, toolsAvailable, callerBlock })
     .map(([label, value, block]) => (block ? `${label}:\n${value}` : `${label}: ${value}`));
   const text = ['SCENARIO SPEC', ...sections, '', 'TRANSCRIPT', String(transcript || '').trim() || '(empty — the agent said nothing)'].join('\n');
   return { system: SYSTEM_PROMPT, text };
@@ -172,7 +171,6 @@ function buildJudgePrompt(spec = {}, transcript = '', { language = 'en', toolsAv
 const TEMPLATE_AXES = Object.freeze({
   language: ['en', 'es'],
   transferRequired: [false, true],
-  officeHours: [null, 'open', 'closed', 'unknown'],
   callerBlock: [null, 'BLOCK'],
   toolsAvailable: [[], ['T']],
 });
@@ -188,7 +186,7 @@ const cartesian = (axes) => Object.entries(axes).reduce((acc, [key, values]) => 
 function judgePromptSha() {
   const probeSpec = { fixture_facts: ['F'], required_facts: ['R'], prohibited_facts: ['P'], required_action: 'A', acceptable_actions: ['B'], ideal_move: 'I', response_range: { min: 1, max: 2 }, max_words_per_agent_turn: 40 };
   const renderings = cartesian(TEMPLATE_AXES).map(({ transferRequired, ...opts }) => buildJudgePrompt({ ...probeSpec, transfer_required: transferRequired }, 'X', opts).text);
-  return sha256([JUDGE_PROMPT_VERSION, SYSTEM_PROMPT, JSON.stringify(JUDGE_SCHEMA), JSON.stringify(OFFICE_FACT), ...renderings].join('\n'));
+  return sha256([JUDGE_PROMPT_VERSION, SYSTEM_PROMPT, JSON.stringify(JUDGE_SCHEMA), ...renderings].join('\n'));
 }
 
 const toBool = (v) => v === true || v === 'true' || v === 1;
@@ -271,9 +269,9 @@ function parseVerdict(raw) {
  * or { ok: false, reason } when neither leg produced a parseable verdict.
  * `dispatch` is injectable for tests; production uses dispatchWithFallback.
  */
-async function judgeTranscript({ spec = {}, transcript = '', language = 'en', toolsAvailable = [], officeHours = null, callerBlock = null } = {}, { dispatch = null } = {}) {
+async function judgeTranscript({ spec = {}, transcript = '', language = 'en', toolsAvailable = [], callerBlock = null } = {}, { dispatch = null } = {}) {
   const run = dispatch || require('../llm/call').dispatchWithFallback;
-  const { system, text } = buildJudgePrompt(spec, transcript, { language, toolsAvailable, officeHours, callerBlock });
+  const { system, text } = buildJudgePrompt(spec, transcript, { language, toolsAvailable, callerBlock });
   let result;
   try {
     result = await run(MODELS.TEXT_POLICIES.voiceJudge, {
@@ -316,5 +314,5 @@ module.exports = {
   parseVerdict,
   judgeTranscript,
   judgePromptSha,
-  _internals: { SYSTEM_PROMPT, OFFICE_FACT, REQUIRED_FIELDS, TEMPLATE_AXES, cartesian, stripFence, JUDGE_MAX_TOKENS },
+  _internals: { SYSTEM_PROMPT, REQUIRED_FIELDS, TEMPLATE_AXES, cartesian, stripFence, JUDGE_MAX_TOKENS },
 };
