@@ -1547,7 +1547,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     durationMinutes: slotCheckDuration,
     technicianId: form.technicianId || undefined,
     excludeServiceIds: [service.id],
-    pickedStart: form.windowStart,
+    // The picked verdict prices ONE technician's route; with the visit set
+    // to Unassigned the gap-mode fallback would name and quote whichever
+    // technician's gap matches, and saving keeps the visit unassigned. Chips
+    // stay (picking one adopts its technician); no verdict (Codex #4120 r6 P2).
+    pickedStart: form.technicianId ? form.windowStart : undefined,
     pickedEnd: form.windowEnd,
     rangeFrom: etDateString(),
   });
@@ -7451,18 +7455,20 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                 </div>{" "}
                 {/* Appointment windows ALWAYS start on the hour (owner
                     directive) — an hour select instead of a free time input
-                    so an off-hour start can't be submitted. 06:00–19:00: the
-                    admin day ends at 20:00 (window-rules), so a 19:00 start
-                    is the last one the save accepts and the last one the
-                    arrival-window hints can recommend — an option the select
-                    lacks would show 06:00 while holding the picked value. */}
+                    so an off-hour start can't be submitted. From 06:00 up to
+                    the last hour whose window still ends by 20:00, the admin
+                    day end (window-rules) — the save rejects a later end, and
+                    the arrival-window hints never recommend one, so every
+                    option is savable and every recommendation is an option
+                    (Codex #4120 r6 P1). */}
                 <select
                   value={manualTime}
                   onChange={(e) => setManualTime(e.target.value)}
                   style={inputSt}
                 >
-                  {Array.from({ length: 14 }, (_, i) => {
-                    const h = i + 6;
+                  {Array.from({ length: 14 }, (_, i) => i + 6)
+                    .filter((h) => h * 60 + durationMinutes <= 20 * 60)
+                    .map((h) => {
                     const value = `${String(h).padStart(2, "0")}:00`;
                     const label = `${h % 12 || 12}:00 ${h >= 12 ? "PM" : "AM"}`;
                     return (

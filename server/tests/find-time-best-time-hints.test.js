@@ -506,6 +506,16 @@ test('a same-day picked hour before the engine\'s now+30 floor is not scored (no
   expect(later.picked).toMatchObject({ start: '13:00', fits: true });
 });
 
+test('an inverted picked window (end at or before start) is not scored: the save rejects it, so no verdict may normalize it into a fit', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  findAvailableSlots.mockResolvedValue({ slots: [gapSlot()], evaluated: 1 });
+  const inverted = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '09:00', pickedEnd: '08:00' })).json();
+  expect(inverted.picked).toBeUndefined();
+  const zero = await (await post({ ...BASE, hint: true, slotStepMinutes: 60, pickedStart: '09:00', pickedEnd: '09:00' })).json();
+  expect(zero.picked).toBeUndefined();
+  expect(zero.slots).toHaveLength(1);
+});
+
 test('a same-day picked hour below the caller\'s sameDayFloorMin is not scored (Quick Move running-late marks it invalid), an hour at the floor is', async () => {
   process.env.GATE_BEST_TIME_HINTS = 'true';
   // ET now is pinned at 12:00 (engine floor 12:30). Quick Move sends a

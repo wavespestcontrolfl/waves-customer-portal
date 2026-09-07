@@ -212,14 +212,17 @@ async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, sp
  * What the hour already in the picker costs on `from`. The edit form's
  * window end is set independently of the service duration, so the scored
  * window is max(end, start + duration) — the same window the live conflict
- * check and the save probe use. Returns undefined when there is nothing
- * honest to say (see pickedUnscorable / the arrival rules above).
+ * check and the save probe use. An explicit end at or before the start is
+ * an inverted window the save rejects outright — no verdict may normalize
+ * it into a fit (Codex #4120 r6 P2). Returns undefined when there is
+ * nothing honest to say (see pickedUnscorable / the arrival rules above).
  */
 async function scorePickedHour({
   rawSlots, from, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
   serviceId, technicianId, excludeServiceIds, excluded,
 }) {
   const pickedMin = toMin(pickedStart);
+  if (pickedEnd !== undefined && toMin(pickedEnd) <= pickedMin) return undefined;
   const pickedEndMin = Math.max(pickedMin + spanMin, pickedEnd !== undefined ? toMin(pickedEnd) : 0);
   if (pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMin, useArrivalWindows })) return undefined;
   const pickedWindow = { start: pickedStart, end: toHHMM(pickedEndMin) };
