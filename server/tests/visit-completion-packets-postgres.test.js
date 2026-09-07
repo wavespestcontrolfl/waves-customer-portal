@@ -23,7 +23,8 @@ jest.mock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn(),
 }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ suppressed: true })) }));
-jest.mock('../services/push-notifications', () => ({ sendToAdminUsers: jest.fn(async () => ({ sent: 1 })) }));
+jest.mock('../services/push-notifications', () => ({ sendToAdminUsers: jest.fn(async (_ids, _build, { beforeDispatch } = {}) => (
+  beforeDispatch && (await beforeDispatch()) === false ? { subscriptions: 1, sent: 0, superseded: true } : { sent: 1 })) }));
 jest.mock('../services/admin-unread', () => ({ getUnreadCountForAdmin: jest.fn(async () => ({ count: 0, at: Date.now() })) }));
 jest.mock('../services/customer-card', () => ({ ensureCardForCompletion: jest.fn(async () => {}) }));
 jest.mock('../services/referral-engine', () => ({ creditReferralOnFirstService: jest.fn(async () => {}) }));
@@ -155,6 +156,8 @@ postgres('visit completion packet records on PostgreSQL', () => {
     if (fixture.formTemplateId) await mockPg('job_form_templates').where({ id: fixture.formTemplateId }).del();
     if (fixture.discountId) await mockPg('discounts').where({ id: fixture.discountId }).del();
     if (fixture.payerId) await mockPg('payers').where({ id: fixture.payerId }).del();
+    await mockPg('notification_preferences').where({ admin_user_id: fixture.techId }).del();
+    await mockPg('push_subscriptions').where({ admin_user_id: fixture.techId }).del();
     await mockPg('technicians').where({ id: fixture.techId }).del();
     await mockPg('service_completion_profiles').where({ service_key: `fixture_${fixture.catalogId}` }).del();
     await mockPg('services').where({ id: fixture.catalogId }).del();
@@ -245,8 +248,19 @@ postgres('visit completion packet records on PostgreSQL', () => {
 
   test('a newly rejected immutable photo caption creates one office exception and leaves the retry queue', async () => {
     const input = submission();
-    input.items[0].body.completionPhotos = [{ caption: 'Fixture observation' }];
-    const saved = await saveVisitCompletionPacket(input);
+    // Packet photos must upload at save time (main #4011); the caption is
+    // what the deferred effects-phase screen rejects.
+    const config = require('../config');
+    const priorBucket = config.s3.bucket;
+    config.s3.bucket = 'fixture-photo-bucket';
+    jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send').mockResolvedValue({});
+    input.items[0].body.completionPhotos = [{ data: 'data:image/png;base64,Zml4dHVyZQ==', name: 'fixture.png', caption: 'Fixture observation' }];
+    let saved;
+    try {
+      saved = await saveVisitCompletionPacket(input);
+    } finally {
+      config.s3.bucket = priorBucket;
+    }
     const indicators = require('../services/service-report/activity-indicators');
     const screen = indicators.findBannedCustomerCopy;
     jest.spyOn(indicators, 'findBannedCustomerCopy').mockImplementation((value) =>
@@ -268,6 +282,27 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect((await mockPg('service_visits').where({ id: fixture.visitId }).first()).billing_hold).toBe(true);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('a packet whose members carry photo bytes still resumes through effects', async () => {
+    const config = require('../config');
+    const priorBucket = config.s3.bucket;
+    config.s3.bucket = 'fixture-photo-bucket';
+    jest.spyOn(require('@aws-sdk/client-s3').S3Client.prototype, 'send').mockResolvedValue({});
+    const input = submission();
+    for (const item of input.items) item.body.completionPhotos = [{ data: 'data:image/png;base64,Zml4dHVyZQ==', name: 'fixture.png', caption: 'Work area' }];
+    let saved;
+    try {
+      saved = await saveVisitCompletionPacket(input);
+    } finally {
+      config.s3.bucket = priorBucket;
+    }
+    // The saved form no longer holds bytes; the member attempt hash must match it.
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
+      .every((item) => item.status === 'done')).toBe(true);
+    expect(await mockPg('service_photos').whereIn('service_record_id', saved.body.items.map((item) => item.serviceRecordId)))
+      .toHaveLength(2);
   });
 
   test('an interrupted first effects claim still writes its operational activity', async () => {
@@ -343,14 +378,70 @@ postgres('visit completion packet records on PostgreSQL', () => {
     jest.spyOn(require('../services/completion-attempts'), 'markCompletionAttemptSucceeded')
       .mockRejectedValueOnce(new Error('Synthetic interruption after notification'));
     await expect(runVisitCompletionPacketEffects(saved.body.packetId)).rejects.toThrow('Synthetic interruption');
-    expect(require('../services/push-notifications').sendToAdminUsers).toHaveBeenCalledTimes(1);
+    const pushSends = async () => (await Promise.all(require('../services/push-notifications').sendToAdminUsers.mock.results
+      .map((call) => call.value))).map((result) => result.sent);
+    expect(await pushSends()).toEqual([1]);
     expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
-    expect(require('../services/push-notifications').sendToAdminUsers).toHaveBeenCalledTimes(2);
+    // The interrupted member's push was already claimed: the provider is
+    // consulted again but refuses at the post-lookup claim, so nothing
+    // buzzes twice.
+    expect(await pushSends()).toEqual([1, 0, 1]);
     expect(await mockPg('activity_log').where({ customer_id: fixture.customerId, action: 'service_completed' })).toHaveLength(2);
     expect(await mockPg('notifications').whereIn(mockPg.raw("metadata->'payload'->>'serviceId'"), fixture.serviceIds))
       .toHaveLength(bell ? 2 : 0);
     expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
       .every((item) => item.notification_push_started_at)).toBe(true);
+  });
+
+  test('a profile cut over to a project flow after the records commit still resumes the saved members', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('service_completion_profiles').insert({ service_key: `fixture_${fixture.catalogId}`,
+      service_name_snapshot: 'Fixture General Pest Control', completion_mode: 'project_required',
+      project_type: 'fixture_project', active: true });
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'processing' });
+    expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: false });
+    expect(await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereIn('job_id', fixture.serviceIds)).toHaveLength(0);
+    expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
+      .every((item) => item.status === 'done')).toBe(true);
+    // A fresh single-service completion of a project-backed profile is still refused.
+    const [serviceId] = fixture.serviceIds;
+    await mockPg('service_completion_attempts').where({ service_id: serviceId }).del();
+    await mockPg('service_records').where({ scheduled_service_id: serviceId }).del();
+    await mockPg('scheduled_services').where({ id: serviceId }).update({ visit_id: null, status: 'on_site' });
+    expect((await completeScheduledService({ serviceId, idempotencyKey: randomUUID(),
+      body: submission().items[0].body, actor: { techRole: 'technician', technicianId: fixture.techId } })).body.code)
+      .toBe('project_required_completion');
+  });
+
+  test('a push subscription lookup outage keeps the member retryable and the push unclaimed', async () => {
+    mockNotificationRecipientId = fixture.techId;
+    await mockPg('notification_preferences').insert({ admin_user_id: fixture.techId, trigger_key: 'job_complete',
+      bell_enabled: false, push_enabled: true, sound_enabled: false });
+    await mockPg('push_subscriptions').insert({ admin_user_id: fixture.techId, role: 'technician', platform: 'web',
+      subscription_data: JSON.stringify({ endpoint: 'https://push.invalid/fixture', keys: {} }), staff_token_version: 1, active: true });
+    jest.spyOn(require('../services/notification-bell-policy'), 'isBellPolicyEnabled').mockReturnValue(false);
+    require('../services/notification-triggers').triggerNotification.mockImplementation(
+      jest.requireActual('../services/notification-triggers').triggerNotification);
+    require('../services/push-notifications').sendToAdminUsers.mockImplementation((...args) => (
+      jest.requireActual('../services/push-notifications').sendToAdminUsers(...args)));
+    const saved = await saveVisitCompletionPacket(submission());
+    const execute = mockPg.client._query;
+    let interrupted = false;
+    jest.spyOn(mockPg.client, '_query').mockImplementation(function failSubscriptionLookup(connection, query) {
+      if (!interrupted && query.sql.includes('from "push_subscriptions"')) {
+        interrupted = true;
+        return Promise.reject(new Error('Synthetic subscription lookup outage'));
+      }
+      return execute.call(this, connection, query);
+    });
+    await expect(runVisitCompletionPacketEffects(saved.body.packetId)).rejects.toThrow('remains pending');
+    expect(interrupted).toBe(true);
+    expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
+      .every((item) => item.status === 'processing' && !item.notification_push_started_at)).toBe(true);
+    expect((await runVisitCompletionPacketEffects(saved.body.packetId)).body.state).toBe('member_effects_ready');
+    expect((await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }))
+      .every((item) => item.status === 'done' && item.notification_push_started_at)).toBe(true);
   });
 
   test('inspection-credit receipts and recovery recognize a non-anchor billed member', async () => {

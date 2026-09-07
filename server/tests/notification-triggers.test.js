@@ -317,7 +317,9 @@ describe('triggerNotification bell outcome', () => {
       order.push('badge');
       return { count: 0, at: Date.now() };
     });
-    require('../services/push-notifications').sendToAdminUsers.mockImplementationOnce(async () => {
+    require('../services/push-notifications').sendToAdminUsers.mockImplementationOnce(async (_ids, _build, { beforeDispatch }) => {
+      order.push('lookup');
+      await beforeDispatch();
       order.push('send');
       return { sent: 1 };
     });
@@ -325,7 +327,29 @@ describe('triggerNotification bell outcome', () => {
       order.push(dispatching ? 'claim' : 'eligibility');
       return true;
     } });
-    expect(order).toEqual(['eligibility', 'badge', 'claim', 'send']);
+    expect(order).toEqual(['eligibility', 'badge', 'lookup', 'claim', 'send']);
+  });
+
+  test('a push claim refused after the subscription lookup reads as superseded', async () => {
+    db.mockImplementation((table) => tableMock(table === 'technicians' ? [{ id: 'admin-1', role: 'admin' }] : []));
+    require('../services/push-notifications').sendToAdminUsers.mockImplementationOnce(async (_ids, _build, { beforeDispatch }) => (
+      (await beforeDispatch()) === false ? { subscriptions: 1, sent: 0, superseded: true } : { sent: 1 }));
+    const result = await triggerNotification('job_complete', {}, {
+      dedupeKey: 'fixture_completion_record', beforePush: async ({ dispatching }) => !dispatching,
+    });
+    expect(result.push).toEqual({ sent: 0, skipped: 'superseded_before_push' });
+    expect(result.retryable).toBe(false);
+  });
+
+  test('a push lookup failure keeps a resumed event retryable without taking the claim', async () => {
+    db.mockImplementation((table) => tableMock(table === 'technicians' ? [{ id: 'admin-1', role: 'admin' }] : []));
+    require('../services/push-notifications').sendToAdminUsers.mockRejectedValueOnce(new Error('Synthetic subscription lookup outage'));
+    const claim = jest.fn(async () => true);
+    const result = await triggerNotification('job_complete', {}, {
+      dedupeKey: 'fixture_completion_record', beforePush: ({ dispatching }) => (dispatching ? claim() : true),
+    });
+    expect(claim).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ push: null, retryable: true, error: 'Synthetic subscription lookup outage' });
   });
 
   test('an intentionally suppressed durable bell is not a retryable failure', async () => {

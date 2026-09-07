@@ -12,7 +12,7 @@
 const crypto = require('crypto');
 const { validate: isUuid } = require('uuid');
 const db = require('../models/db');
-const { hashCompletionRequest } = require('./completion-attempts');
+const { hashCompletionRequest, withoutPhotoBytes } = require('./completion-attempts');
 const { dateOnly, lockStop, stopBaseKey } = require('./visit-groups');
 const { TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
 const { cleanupUploadedServicePhotoObjects } = require('./service-photos');
@@ -52,16 +52,11 @@ function packetSnapshot(request, actor, members, existing) {
   if (existing) return { ...existing.payload, retainedMembers: existing.payload.retainedMembers || [] };
   const retainedMembers = members.filter((member) => TERMINAL_ROW_STATUSES.includes(member.status))
     .map((member) => ({ serviceId: member.id, status: member.status }));
-  const items = structuredClone(request.items);
-  for (const item of items) {
-    if (item.body.gaugePhoto && typeof item.body.gaugePhoto === 'object') delete item.body.gaugePhoto.data;
-    if (!Array.isArray(item.body.completionPhotos)) continue;
-    for (const photo of item.body.completionPhotos) {
-      if (photo && typeof photo === 'object') delete photo.data;
-    }
-  }
-  // The request hash still covers the original photo bytes. Uploaded objects
-  // belong to each service record; packet retries never upload them again.
+  // The packet-level request hash still covers the original photo bytes (a
+  // save-time replay must resend the same photos); each member's attempt hash
+  // covers this stripped form. Uploaded objects belong to each service record;
+  // packet retries never upload them again.
+  const items = request.items.map((item) => ({ ...item, body: withoutPhotoBytes(item.body) }));
   return { items, actor, retainedMembers };
 }
 

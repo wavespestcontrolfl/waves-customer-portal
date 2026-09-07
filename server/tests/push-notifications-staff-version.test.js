@@ -27,4 +27,21 @@ describe('staff push credential-version filtering', () => {
       'ps.staff_token_version = t.auth_token_version',
     );
   });
+
+  test('beforeDispatch runs after the subscription lookup and can withhold every send', async () => {
+    const order = [];
+    mockQuery.select.mockImplementationOnce(async () => { order.push('lookup'); return [{ id: 'sub-1', platform: 'web', subscription_data: '{}' }]; });
+    const beforeDispatch = jest.fn(async () => { order.push('claim'); return false; });
+    await expect(pushService.sendToAdminUsers(['tech-1'], { title: 'Update' }, { beforeDispatch }))
+      .resolves.toMatchObject({ subscriptions: 1, sent: 0, superseded: true });
+    expect(order).toEqual(['lookup', 'claim']);
+    expect(require('web-push').sendNotification).not.toHaveBeenCalled();
+  });
+
+  test('beforeDispatch is not consulted when the lookup finds no subscription', async () => {
+    const beforeDispatch = jest.fn(async () => true);
+    await expect(pushService.sendToAdminUsers(['tech-1'], { title: 'Update' }, { beforeDispatch }))
+      .resolves.toMatchObject({ subscriptions: 0, sent: 0 });
+    expect(beforeDispatch).not.toHaveBeenCalled();
+  });
 });

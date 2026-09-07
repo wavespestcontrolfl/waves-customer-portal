@@ -2794,7 +2794,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
         return ({ status: reconcileBlock.status, body: reconcileBlock.payload });
       }
     }
-    if (completionProfile?.requiresProject || completionProfile?.projectBacked) {
+    // A committed completion (a saved visit member, a lost-response retry)
+    // must reach the replay/resume claim: its record and shared invoice
+    // already exist under the frozen snapshot, and a profile cut over to a
+    // project flow after that commit cannot un-record them (codex #4058 r2
+    // P1). A lookup outage keeps a packet member retryable; the legacy path
+    // keeps refusing.
+    if ((completionProfile?.requiresProject || completionProfile?.projectBacked)
+      && !(await CompletionAttempts.hasCommittedCompletionAttempt(svc.id, db)
+        .catch((err) => { if (packetEffects) throw err; return false; }))) {
       return ({ status: 409, body: {
         error: 'This service must be completed through a project.',
         code: 'project_required_completion',
@@ -3422,7 +3430,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const attemptClaim = await CompletionAttempts.claimCompletionAttempt({
             serviceId: svc.id,
             idempotencyKey,
-            requestHash: CompletionAttempts.hashCompletionRequest(completionInput.body),
+            // Both packet phases hash what the effects resume will present.
+            requestHash: CompletionAttempts.hashCompletionRequest(packetContext
+              ? CompletionAttempts.withoutPhotoBytes(completionInput.body) : completionInput.body),
           }, lockTrx);
           if (packetEffects && ['resume', 'replay'].includes(attemptClaim.action)
               && (attemptClaim.serviceRecordId || attemptClaim.payload?.serviceRecordId) !== ownedItem.service_record_id) {
