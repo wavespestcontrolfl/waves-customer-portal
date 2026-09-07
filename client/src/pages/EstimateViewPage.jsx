@@ -577,8 +577,8 @@ function labelAlreadyIncludesService(frequencyLabel, serviceLabel) {
 // Liquid-glass theme — now unconditional on every estimate (the old page was
 // retired at 100% rollout). Only the marketing COPY stays category-scoped via
 // glassCopyActive(); the visual theme mounts for all estimates.
-function Page({ children, website = false }) {
-  if (website) return <WebsiteEstimateFrame>{children}</WebsiteEstimateFrame>;
+function Page({ children, website = false, stage = null }) {
+  if (website) return <WebsiteEstimateFrame stage={stage}>{children}</WebsiteEstimateFrame>;
   return (
     <div style={{
       flex: 1, background: ESTIMATE_BG,
@@ -7396,7 +7396,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
       // proof — is deliberately GONE: they already said yes, and the PDF in
       // the action bar carries the what-did-I-agree-to reference.
       return (
-        <Page website={websiteMode}>
+        <Page website={websiteMode} stage="booked">
           {readOnlyPreview ? <DraftPreviewBanner draft={adminDraftPreview} estimateId={data?.estimate?.id} /> : null}
           {/* Doc tools ABOVE the hero on every estimate (owner 2026-07-09). */}
           {estimateActionBar}
@@ -7513,7 +7513,7 @@ function EstimateViewPageInner({ websiteMode = false }) {
           recurring={serviceMode !== 'one_time'}
         />
     );
-    if (websiteMode) return <WebsiteEstimateFrame>{successCard}</WebsiteEstimateFrame>;
+    if (websiteMode) return <WebsiteEstimateFrame stage="booked">{successCard}</WebsiteEstimateFrame>;
     return (
       <Page website={websiteMode}>
         {estimateActionBar}

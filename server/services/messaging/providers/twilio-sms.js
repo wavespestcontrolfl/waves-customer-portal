@@ -108,6 +108,9 @@ async function sendViaTwilio(input, { preSendCheck } = {}) {
   try {
     const result = await TwilioService.sendSMS(input.to, input.body, {
       customerId: input.customerId || null,
+      explicitPushOnly: input.channel === 'push',
+      skipPushRouting: Boolean(input.metadata?.appFallbackReason),
+      notificationEventKey: input.metadata?.notificationEventKey,
       messageType,
       // Push channel routing (services/twilio.js) treats operator-initiated
       // sends as sms_only — the operator explicitly chose the SMS channel.
@@ -151,6 +154,15 @@ async function sendViaTwilio(input, { preSendCheck } = {}) {
     //    line is never a customer). Without this branch the generic
     //    success:false path below would record PROVIDER_FAILURE and the
     //    queued-send lanes would retry a send that can never succeed.
+    if (input.channel === 'push' && (result.suppressed || result.gateBlocked || result.templateDisabled || result.guardBlocked)) {
+      return { sent: false, blocked: true, provider: 'push', code: 'DELIVERY_SUPPRESSED', error: result.error || result.sid, validator: 'delivery_guard' };
+    }
+    if (result.appUnavailable) {
+      return { sent: false, provider: 'push', appUnavailable: true, error: result.error || 'push_unavailable' };
+    }
+    if (result.appPending) {
+      return { sent: false, blocked: true, provider: 'push', code: 'PUSH_IN_FLIGHT', error: 'push_in_flight', retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 60000).toISOString() };
+    }
     if (result.preSendBlocked || (result.guardBlocked && result.code)) {
       return {
         sent: false,
@@ -244,6 +256,8 @@ function mapPurposeToMessageType(purpose) {
     case 'appointment_confirmation': return 'appointment_confirmation';
     case 'appointment_cancellation': return 'appointment_cancelled';
     case 'tech_en_route':       return 'tech_en_route';
+    case 'tech_arrived':        return 'tech_arrived';
+    case 'service_completion':  return 'service_complete';
     case 'billing':             return 'billing_reminder';
     case 'payment_receipt':     return 'receipt';
     case 'payment_failure':     return 'payment_failure';

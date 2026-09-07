@@ -12,7 +12,10 @@ function applicationCount(frequency) {
     || CADENCE_COUNTS[frequency?.key] || null;
 }
 
-export function WebsiteEstimateFrame({ title, timer, children }) {
+// `stage` rides the step message so the host page (the website's estimate
+// dialog) knows where the customer got to — 'booked' once the success card
+// is up — without reading anything inside the frame.
+export function WebsiteEstimateFrame({ title, timer, stage = null, children }) {
   const frameRef = useRef(null);
   useEffect(() => {
     if (window.parent === window || !document.referrer) return undefined;
@@ -24,9 +27,9 @@ export function WebsiteEstimateFrame({ title, timer, children }) {
     const observer = new ResizeObserver(reportHeight);
     if (frameRef.current) observer.observe(frameRef.current);
     reportHeight();
-    window.parent.postMessage({ type: 'waves:estimate-step' }, origin);
+    window.parent.postMessage({ type: 'waves:estimate-step', stage }, origin);
     return () => observer.disconnect();
-  }, [title]);
+  }, [title, stage]);
   return (
     <section ref={frameRef} className={`website-estimate${new URLSearchParams(window.location.search).get('embed') === '1' ? ' website-estimate-embedded' : ''}`} aria-label={title || 'Your estimate'}>
       <div className="website-estimate-content">

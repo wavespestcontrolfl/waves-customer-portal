@@ -3,7 +3,7 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import WebsiteEstimateFlow from './WebsiteEstimateFlow';
+import WebsiteEstimateFlow, { WebsiteEstimateFrame } from './WebsiteEstimateFlow';
 import WebsiteCallbackButton from './WebsiteCallbackButton';
 
 beforeEach(() => vi.stubGlobal('scrollTo', vi.fn()));
@@ -77,4 +77,17 @@ it('lets the customer retry a failed callback without claiming success', async (
   fireEvent.click(screen.getByRole('button', { name: 'Call Me' }));
   await screen.findByText('We received your callback request.');
   expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
+it('tells the host page which stage the frame is at — booked on the success card, null otherwise', () => {
+  const postMessage = vi.fn();
+  vi.stubGlobal('parent', { postMessage });
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+  Object.defineProperty(document, 'referrer', { value: 'https://www.wavespestcontrol.com/estimate/pest-control/', configurable: true });
+  render(<WebsiteEstimateFrame title="Your Quote"><div>quote</div></WebsiteEstimateFrame>);
+  expect(postMessage).toHaveBeenCalledWith({ type: 'waves:estimate-step', stage: null }, 'https://www.wavespestcontrol.com');
+  cleanup();
+  postMessage.mockClear();
+  render(<WebsiteEstimateFrame stage="booked"><div>booked</div></WebsiteEstimateFrame>);
+  expect(postMessage).toHaveBeenCalledWith({ type: 'waves:estimate-step', stage: 'booked' }, 'https://www.wavespestcontrol.com');
 });
