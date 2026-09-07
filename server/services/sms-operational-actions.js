@@ -202,18 +202,19 @@ function withoutScheduledDeliveryTwins(query, alias) {
   });
 }
 
-async function scheduledSourceSent(conn, message) {
-  if (message.direction !== 'outbound') return true;
-  // The queue keeps status=sent after a provider callback marks its delivery
-  // failed. Read and lock the latest linked delivery before capturing new work;
-  // already captured obligations intentionally remain actionable afterwards.
+async function scheduledSourceMessage(conn, message) {
+  if (message?.direction !== 'outbound') return message;
+  // Keep queue identity but use the actual send's text, endpoints, time and
+  // status. Recovery may re-stamp the queue hours later; relative deadlines
+  // must not move with it. Locking the delivery also closes callback races.
   const delivery = await conn('sms_log').where({ direction: 'outbound', customer_id: message.customer_id })
     .whereRaw("metadata->>'scheduled_sms_log_id' = ?", [message.id])
-    .orderBy('created_at', 'desc').orderBy('id', 'desc').forUpdate().first('status');
-  return !delivery || ['sent', 'delivered'].includes(delivery.status);
+    .orderBy('created_at', 'desc').orderBy('id', 'desc').forUpdate().first(...SOURCE_COLUMNS);
+  return delivery ? { ...delivery, id: message.id, operational_analysis: message.operational_analysis } : message;
 }
 
 async function loadMessageContext(conn, message) {
+  message = await scheduledSourceMessage(conn, message);
   const [history, properties, preferences] = await Promise.all([
     conn('sms_log').where({ customer_id: message.customer_id }).where('created_at', '<', new Date(message.created_at))
       .where(function endpoints() {
@@ -235,11 +236,15 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
       ['property-preferences', String(message.customer_id)]);
     const customer = await trx('customers').where({ id: message.customer_id }).whereNull('deleted_at').forUpdate().first();
     if (!customer) return { skipped: 'customer_unavailable' };
-    const live = await trx('sms_log').modify(withoutScheduledDeliveryTwins, 'sms_log')
+    const source = await trx('sms_log').modify(withoutScheduledDeliveryTwins, 'sms_log')
       .where({ id: message.id }).forUpdate().first();
+    const live = await scheduledSourceMessage(trx, source);
     if (!enabled() || matchedContext.captureCommitments !== smsCommitmentsEnabled()) return { skipped: 'gate_changed' };
-    if (!eligibleMessage(live) || live.customer_id !== message.customer_id || live.message_body !== message.message_body) return { skipped: 'source_changed' };
-    if (!await scheduledSourceSent(trx, live)) return { skipped: 'source_changed' };
+    if (!eligibleMessage(live) || ['customer_id', 'message_body', 'direction', 'message_type', 'from_phone', 'to_phone']
+      .some((field) => (live[field] ?? null) !== (message[field] ?? null))) return { skipped: 'source_changed' };
+    if (new Date(live.created_at).getTime() !== new Date(message.created_at).getTime()) return { skipped: 'source_changed' };
+    const since = gateEnvTimestamp('GATE_SMS_OPERATIONAL_ACTIONS_SINCE');
+    if (!since || new Date(live.created_at) < since) return { skipped: 'outside_activation_window' };
     if (live.operational_analysis?.version === VERSION) return { skipped: 'already_processed' };
     const properties = await trx('customer_properties').where({ customer_id: customer.id, active: true }).select('id');
     const current = await trx('property_preferences').where({ customer_id: customer.id }).forUpdate().first();
@@ -259,7 +264,7 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
         description: item.description, channel: 'sms', due_at: item.due_at,
         due_basis: item.due_at ? 'stated' : null, source: 'ai', extractor_version: VERSION,
         evidence: JSON.stringify([{ quote: item.quote, sms_log_id: message.id, matched: true,
-          speaker: message.direction === 'inbound' ? 'caller' : 'agent' }]),
+          speaker: { inbound: 'caller', outbound: 'agent' }[message.direction] }]),
         sms_context: { basis: item.basis, due_text: item.due_text, property_id: propertyValid ? item.property_id : null,
           property_ambiguous: !propertyValid, customer_id: customer.id, source_at: message.created_at },
       }).onConflict(['sms_log_id', 'commitment_key']).ignore();
@@ -313,10 +318,11 @@ async function runSmsOperationalActions({ now = new Date(), conn = db, extract =
         source_hash: hashExtractionSource(message.message_body) };
       if (!eligibleMessage(message)) { await recordExtractionAttempt({ ...source, trx: conn, status: 'no_fields' }); continue; }
       try {
-        if (!await scheduledSourceSent(conn, message)) { skipped += 1; continue; }
         const context = await loadMessageContext(conn, message);
+        if (!eligibleMessage(context.message) || new Date(context.message.created_at) < since) { skipped += 1; continue; }
+        source.source_hash = hashExtractionSource(context.message.message_body);
         const extracted = await extract(context);
-        const outcome = await recordMessageOperations(conn, message, extracted, context);
+        const outcome = await recordMessageOperations(conn, context.message, extracted, context);
         if (outcome.skipped) { skipped += 1; continue; }
         processed += 1;
       } catch {
@@ -415,7 +421,7 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
   for (const row of rows) {
     if (!smsCommitmentsEnabled()) return { scanned, fulfilled, unverified, skipped: 'gate_off' };
     scanned += 1;
-    const message = await conn('sms_log').where({ id: row.sms_log_id }).first(...SOURCE_COLUMNS);
+    const message = await scheduledSourceMessage(conn, await conn('sms_log').where({ id: row.sms_log_id }).first(...SOURCE_COLUMNS));
     // A later delivery failure cannot erase already-recorded staff work.
     // Intake still refuses failed sources; captured promises stay actionable.
     if (!message || !eligibleMessage(message, { captured: true })) continue;
@@ -430,7 +436,7 @@ async function refreshSmsCommitments({ now = new Date(), conn = db, verify = ver
       // while verification runs must retry against the current owner.
       const customer = await trx('customers').where({ id: message.customer_id }).whereNull('deleted_at').forUpdate().first();
       if (!customer) return;
-      const source = await trx('sms_log').where({ id: message.id }).forUpdate().first();
+      const source = await scheduledSourceMessage(trx, await trx('sms_log').where({ id: message.id }).forUpdate().first());
       if (!source || !eligibleMessage(source, { captured: true }) || source.customer_id !== message.customer_id || source.message_body !== message.message_body) return;
       const live = await trx('call_commitments').where({ id: row.id }).forUpdate().first();
       if (!smsCommitmentsEnabled() || live?.status !== 'open' || live.human_state != null) return;

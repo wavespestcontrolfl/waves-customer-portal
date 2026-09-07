@@ -71,3 +71,8 @@ status is checked and locked again in the capture transaction. A failed or
 undelivered provider row cannot be treated as a sent promise merely because
 the queue still says sent. Recorded promises remain available for follow-up
 after a later failure. Missing provider logs retain the settled queue fallback.
+
+Scheduled sources keep the queue id while using the provider delivery's actual
+text, endpoints, send time and status. Recovery cannot shift a quoted relative
+deadline or import a pre-activation send by re-stamping the queue's timestamp.
+Both the capture transaction and follow-up re-read that same delivery source.

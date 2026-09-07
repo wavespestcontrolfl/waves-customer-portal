@@ -220,6 +220,49 @@ postgres('SMS commitments on PostgreSQL', () => {
     },
   );
 
+  test('a recovered queue uses actual delivery time and endpoints with one canonical source id', async () => {
+    await mockPg('sms_log').where({ id: message.id }).update({ operational_analysis: { version: 'already-analyzed' } });
+    const sentAt = new Date(message.created_at.getTime() - 86400000);
+    process.env.GATE_SMS_OPERATIONAL_ACTIONS_SINCE = new Date(sentAt.getTime() - 1000).toISOString();
+    const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
+      message_body: 'Queued template.', from_phone: numbers.locations.bradenton.number, to_phone: '+12025550199',
+      scheduled_for: sentAt, status: 'sent' };
+    const provider = { ...queue, id: randomUUID(), message_body: 'I will call tomorrow at 10 AM.',
+      from_phone: message.to_phone, to_phone: message.from_phone, created_at: sentAt, scheduled_for: null,
+      metadata: { scheduled_sms_log_id: queue.id } };
+    await mockPg('sms_log').insert([queue, provider]);
+    const extract = jest.fn(async (matched) => {
+      expect(matched.message).toMatchObject({ id: queue.id, created_at: sentAt, message_body: provider.message_body,
+        from_phone: provider.from_phone, to_phone: provider.to_phone });
+      return require('../services/sms-operational-extractor').groundExtraction({ facts: [], obligations: [{
+        party: 'waves', kind: 'callback', description: 'call', quote: provider.message_body, basis: 'promise',
+        property_id: context.properties[0].id, due_text: 'tomorrow at 10 AM', due_at: null,
+      }] }, matched);
+    });
+    await runSmsOperationalActions({ conn: mockPg, extract });
+    expect(extract).toHaveBeenCalledTimes(1);
+    const row = await mockPg('call_commitments').first();
+    const due = require('../utils/datetime-et').parseQuotedETDeadline('tomorrow at 10 AM', sentAt);
+    expect(row.sms_log_id).toBe(queue.id);
+    expect(row.due_at).toEqual(due);
+    expect(new Date(row.sms_context.source_at)).toEqual(sentAt);
+  });
+
+  test('post-activation queue recovery never imports a message sent before activation', async () => {
+    await mockPg('sms_log').where({ id: message.id }).update({ operational_analysis: { version: 'already-analyzed' } });
+    const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
+      from_phone: message.to_phone, to_phone: message.from_phone, scheduled_for: new Date(), status: 'sent' };
+    const provider = { ...queue, id: randomUUID(), created_at: new Date(message.created_at.getTime() - 86400000),
+      scheduled_for: null, metadata: { scheduled_sms_log_id: queue.id } };
+    await mockPg('sms_log').insert([queue, provider]);
+    const extract = jest.fn();
+    await runSmsOperationalActions({ conn: mockPg, extract });
+    expect(extract).not.toHaveBeenCalled();
+    const matched = await loadMessageContext(mockPg, queue);
+    expect(await recordMessageOperations(mockPg, matched.message, result, matched)).toEqual({ skipped: 'outside_activation_window' });
+    expect(await mockPg('call_commitments')).toHaveLength(0);
+  });
+
   test('separate scheduled sends with identical text keep separate obligations', async () => {
     await mockPg('sms_log').where({ id: message.id }).update({ operational_analysis: { version: 'already-analyzed' } });
     const rows = [1, 2].map(() => ({ ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
@@ -255,7 +298,7 @@ postgres('SMS commitments on PostgreSQL', () => {
     await mockPg('sms_log').insert(provider);
     context = await loadMessageContext(mockPg, message);
     result.facts = [];
-    await recordMessageOperations(mockPg, message, result, context);
+    await recordMessageOperations(mockPg, context.message, result, context);
     await mockPg('sms_log').where({ id: provider.id }).update({ status: 'undelivered' });
     const rows = await listSmsCommitments(mockPg, { customerId: message.customer_id });
     expect(rows).toHaveLength(1);
