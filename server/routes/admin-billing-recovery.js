@@ -74,14 +74,16 @@ const isReviewServiceType = (serviceType) => matchesPatterns(serviceType, REVIEW
 // Packet invoices keep ownership after reversal; only ordinary void invoices
 // may re-enter this legacy single-service mint queue.
 // Aliases: `sr` = service_records, `ss` = scheduled_services.
-const HAS_INVOICE_SQL = `EXISTS (
+const HAS_INVOICE_SQL = `(EXISTS (
   SELECT 1 FROM invoices i
-  WHERE ((i.service_record_id = sr.id OR i.scheduled_service_id = ss.id)
-    AND COALESCE(i.status, '') <> 'void')
-    OR EXISTS (SELECT 1 FROM visit_completion_packet_items pi
-      WHERE pi.invoice_id = i.id AND pi.scheduled_service_id = ss.id
-        AND pi.service_record_id = sr.id)
-)`;
+  WHERE (i.service_record_id = sr.id OR i.scheduled_service_id = ss.id)
+    AND COALESCE(i.status, '') <> 'void'
+) OR EXISTS (
+  SELECT 1 FROM visit_completion_packet_items pi
+  JOIN visit_completion_packets p ON p.id = pi.packet_id
+  WHERE p.visit_id = ss.visit_id AND pi.scheduled_service_id = ss.id
+    AND pi.service_record_id = sr.id
+))`;
 
 const INTERNAL_NAME_SQL = "LOWER(COALESCE(c.first_name,'') || ' ' || COALESCE(c.last_name,''))";
 

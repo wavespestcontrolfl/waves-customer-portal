@@ -242,8 +242,13 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(saved.body.billing).toMatchObject({ state: 'invoice_ready', total: 240 });
   });
 
-  test.each(['draft', 'void', 'refunded'])('billing recovery recognizes the %s shared invoice for every linked member', async (status) => {
-    const saved = await saveVisitCompletionPacket(submission());
+  test.each([
+    ['draft', 'completed'], ['void', 'completed'], ['refunded', 'completed'],
+    ['paid', 'inspection_only'], ['paid', 'customer_declined'],
+  ])('billing recovery recognizes the %s shared invoice for a %s member', async (status, outcome) => {
+    const input = submission();
+    input.items[1].body.visitOutcome = outcome;
+    const saved = await saveVisitCompletionPacket(input);
     await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).update({ status });
     await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ completed_at: mockPg.fn.now() });
     const router = require('../routes/admin-billing-recovery');
@@ -255,7 +260,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     // Positive control: without the packet's secondary-member link, this
     // exact completed work really would enter the existing recovery queue.
     await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId,
-      scheduled_service_id: fixture.serviceIds[1] }).update({ invoice_id: null });
+      scheduled_service_id: fixture.serviceIds[1] }).update({ service_record_id: null });
     res.json.mockClear();
     await handler({ query: { days: 1 } }, res);
     expect(res.status).not.toHaveBeenCalled();
