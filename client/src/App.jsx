@@ -582,13 +582,13 @@ export default function App() {
             <Route path="ppc" element={<Suspense fallback={<RouteFallback label="Loading PPC..." />}><AdminAdsPage /></Suspense>} />
             <Route path="seo" element={<Suspense fallback={<RouteFallback label="Loading SEO..." />}><AdminSEOPage /></Suspense>} />
             {/* Content Engine + Registry are now tabs inside the Blog hub; keep the old paths as redirects for bookmarks and server actionUrls. */}
-            <Route path="content-engine" element={<Navigate to="/admin/blog?tab=autopilot" replace />} />
-            <Route path="content-registry" element={<Navigate to="/admin/blog?tab=registry" replace />} />
-            <Route path="data-hygiene" element={<Navigate to="/admin/agents?tab=hygiene" replace />} />
+            <Route path="content-engine" element={<AdminTabRedirect to="/admin/blog" tab="autopilot" />} />
+            <Route path="content-registry" element={<AdminTabRedirect to="/admin/blog" tab="registry" />} />
+            <Route path="data-hygiene" element={<AdminTabRedirect to="/admin/agents" tab="hygiene" />} />
             <Route path="agents" element={<Suspense fallback={<RouteFallback label="Loading agents..." />}><AgentsHubPage /></Suspense>} />
-            <Route path="agent-decisions" element={<Navigate to="/admin/agents?tab=decisions" replace />} />
+            <Route path="agent-decisions" element={<AdminTabRedirect to="/admin/agents" tab="decisions" />} />
             {/* The documented owner-approval queue URL (feature-gates.js, service docs) — the queue lives as a hub tab. */}
-            <Route path="drafts" element={<Navigate to="/admin/agents?tab=drafts" replace />} />
+            <Route path="drafts" element={<AdminTabRedirect to="/admin/agents" tab="drafts" />} />
             <Route path="blog" element={<Suspense fallback={<RouteFallback label="Loading blog..." />}><AdminBlogPage /></Suspense>} />
             <Route path="knowledge" element={<Suspense fallback={<RouteFallback label="Loading knowledge..." />}><KnowledgeHubPage /></Suspense>} />
             <Route path="referrals" element={<Suspense fallback={<RouteFallback label="Loading referrals..." />}><AdminReferralsPage /></Suspense>} />
@@ -644,16 +644,16 @@ export default function App() {
             <Route path="inventory" element={<Suspense fallback={<RouteFallback label="Loading inventory..." />}><AdminInventoryPage /></Suspense>} />
             <Route path="settings" element={<Suspense fallback={<RouteFallback label="Loading settings..." />}><AdminSettingsPage /></Suspense>} />
             <Route path="settings/pest-pressure" element={<Suspense fallback={<RouteFallback label="Loading Pest Pressure settings..." />}><PestPressureSettingsPage /></Suspense>} />
-            <Route path="health" element={<Navigate to="/admin/customers?view=health" replace />} />
+            <Route path="health" element={<AdminTabRedirect to="/admin/customers" tab="health" queryKey="view" />} />
             <Route path="timetracking" element={<Suspense fallback={<RouteFallback label="Loading time tracking..." />}><TimeTrackingPage /></Suspense>} />
             <Route path="leads" element={<AdminTabRedirect to="/admin/pipeline" tab="leads" />} />
             <Route path="fleet" element={<FleetRedirect />} />
             <Route path="service-library" element={<Suspense fallback={<RouteFallback label="Loading service library..." />}><ServiceLibraryPage /></Suspense>} />
             <Route path="projects" element={<Suspense fallback={<RouteFallback label="Loading projects..." />}><ProjectsPage /></Suspense>} />
             <Route path="contracts" element={<Suspense fallback={<RouteFallback label="Loading contracts..." />}><AdminContractsPage /></Suspense>} />
-            <Route path="documents" element={<Navigate to="/admin/contracts?tab=templates" replace />} />
-            <Route path="document-requests" element={<Navigate to="/admin/contracts?tab=requests" replace />} />
-            <Route path="discounts" element={<Navigate to="/admin/service-library?tab=discounts" replace />} />
+            <Route path="documents" element={<AdminTabRedirect to="/admin/contracts" tab="templates" />} />
+            <Route path="document-requests" element={<AdminTabRedirect to="/admin/contracts" tab="requests" />} />
+            <Route path="discounts" element={<AdminTabRedirect to="/admin/service-library" tab="discounts" />} />
             <Route path="compliance" element={<Suspense fallback={<RouteFallback label="Loading compliance..." />}><CompliancePage /></Suspense>} />
             <Route path="credentials" element={<AdminTabRedirect to="/admin/compliance" tab="credentials" />} />
             <Route path="newsletter" element={<Suspense fallback={<RouteFallback label="Loading newsletter..." />}><NewsletterPage /></Suspense>} />

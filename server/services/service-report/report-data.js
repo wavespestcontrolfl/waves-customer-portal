@@ -2188,7 +2188,9 @@ class PinnedAssessmentUnavailable extends Error {
 // Bumping forces those lawn PDFs through one fresh render.
 // p3: signature composition gained the portal irrigation stamp (explicit or
 // derived inches + system toggle) — prefs edits must invalidate cached PDFs.
-const LAWN_RENDER_STRATEGY = 'p3';
+// p4: watering advice resolves structured moisture evidence, not observation
+// wording. Regenerate older lawn PDFs so they agree with the current report.
+const LAWN_RENDER_STRATEGY = 'p4';
 
 async function resolveCanonicalLawnRender(service, knex = db) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
@@ -2863,6 +2865,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     }
   }
 
+  const droughtStress = parseJsonObject(assessment.composite_scores).drought_stress;
   return {
     assessmentId: assessment.id,
     serviceRecordId: assessment.service_record_id || null,
@@ -2881,6 +2884,9 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // report. Older assessments lack it → client also falls back to a low
     // fungus_control score as fungal/mushroom evidence.
     overwateringSignal: parseJsonObject(assessment.composite_scores).overwatering_signal === true,
+    // Only this visit's tech-confirmed assessment reaches this projection.
+    // Legacy rows lack the separate cause; never recover it from free text.
+    droughtStress: ['none', 'minor', 'moderate', 'severe'].includes(droughtStress) ? droughtStress : null,
     fawnSnapshot,
     waterContext,
     // NOT reproducible: the week was fetched but could not be frozen, so a

@@ -239,6 +239,160 @@ function getClient() {
 // Keep backward-compatible reference for any code that reads `client` directly
 const client = null;
 
+// ── Tech Arrived delivery (channel-aware) ───────────────────────────────────
+// Kept out of sendTechArrived so the sender reads as: load → gate → build the
+// SMS leg → deliver by channel. Each channel handler is one short function.
+
+// notification_prefs.tech_arrived_channel through the same account-level
+// resolver the reminder channels use; unknown values / lookup failures → sms.
+async function resolveArrivalChannel(customerId, prefs, customer) {
+  const AppointmentReminders = require("./appointment-reminders");
+  try {
+    const channelRow = await AppointmentReminders.resolveChannelPrefsRow(customerId, prefs, customer);
+    return AppointmentReminders.apptChannel(channelRow?.tech_arrived_channel);
+  } catch (e) {
+    logger.warn(`[twilio] tech-arrived channel lookup failed for customer ${customerId}: ${e.message} — defaulting to SMS`);
+    return "sms";
+  }
+}
+
+// One arrival email per appointment OCCURRENCE: live rescheduling reuses the
+// scheduled_services row (LIVE_LIFECYCLE_RESET clears arrival_sms_sent_at),
+// so the scheduled date AND window start ride in the key — a same-day move
+// to another window is a new occurrence, while retries of the same
+// occurrence still dedupe.
+// The row's arrived_at for THIS arrival rides in the key too: a lifecycle
+// rewind (reschedule back to a used slot, tech reassignment) clears it and the
+// next arrival stamps a new one, while retries of the same arrival keep it.
+function arrivalOccurrenceKey({ scheduledServiceId, scheduledDate, scheduledWindowStart, arrivedAt, customerId }) {
+  if (!scheduledServiceId) return String(customerId);
+  const day = scheduledDate instanceof Date
+    ? scheduledDate.toISOString().slice(0, 10)
+    : String(scheduledDate || "").slice(0, 10);
+  const start = String(scheduledWindowStart || "").slice(0, 5);
+  const when = [day, start].filter(Boolean).join("T");
+  const attempt = arrivedAt ? new Date(arrivedAt).toISOString() : "";
+  return [scheduledServiceId, when, attempt].filter(Boolean).join(":");
+}
+
+// The email leg. Honors the portal-wide email opt-out (a deterministic
+// "skipped" so fallbacks and classification treat it like a missing address).
+async function sendArrivalEmailLeg({ customerId, scheduledServiceId, scheduledDate, scheduledWindowStart, arrivedAt, techName, emailAllowed }) {
+  if (!emailAllowed) return { ok: false, skipped: true, reason: "email_disabled" };
+  try {
+    const AppointmentEmail = require("./appointment-email");
+    const res = await AppointmentEmail.sendTechArrivedEmail({
+      customerId,
+      scheduledServiceId,
+      techName,
+      occurrence: arrivalOccurrenceKey({ scheduledServiceId, scheduledDate, scheduledWindowStart, arrivedAt, customerId }),
+    });
+    // The template is archived (the migration's rollback / kill switch): a
+    // deterministic refusal, not a transient failure — retrying can't change it.
+    if (res?.code === "EMAIL_TEMPLATE_DISABLED") return { ok: false, skipped: true, reason: "template_disabled" };
+    return res;
+  } catch (e) {
+    if (e?.code === "EMAIL_TEMPLATE_DISABLED") return { ok: false, skipped: true, reason: "template_disabled" };
+    logger.warn(`[twilio] tech-arrived email send failed for customer ${customerId}: ${e.message}`);
+    return { ok: false, error: e.message };
+  }
+}
+
+// Neither leg can reach the customer for an Email/Both arrival: ring the same
+// staff bell the en-route notice rings (dedupes per customer + visit for 24h).
+async function alertArrivalUnreachable({ customerId, scheduledServiceId, emailRes }) {
+  try {
+    const AppointmentReminders = require("./appointment-reminders");
+    await AppointmentReminders.alertNoReachableChannel({
+      customerId,
+      kind: "tech_arrived",
+      scheduledServiceId,
+      emailReason: emailRes?.blocked ? "suppressed" : "missing",
+    });
+  } catch (e) {
+    logger.warn(`[twilio] tech-arrived no-channel alert failed for customer ${customerId}: ${e.message}`);
+  }
+}
+
+// Staff get paged only for a genuinely unreachable email (no address /
+// suppressed) — the same test the en-route sender applies. A customer's
+// email opt-out or the rolled-back template is a deliberate skip, not a
+// contact-repair job.
+function emailLegUnreachable(emailRes) {
+  return !!emailRes && !emailRes.ok && (emailRes.blocked === true || emailRes.reason === "missing_email");
+}
+
+// classifyArrivalMiss + the staff alert when the miss is terminal.
+async function settleArrivalMiss(ctx, emailRes) {
+  const verdict = classifyArrivalMiss({ results: ctx.results, emailRes, smsLegAvailable: ctx.smsLegAvailable });
+  if (verdict.suppressed && verdict.reason === "blocked" && emailLegUnreachable(emailRes)) {
+    await alertArrivalUnreachable({ ...ctx, emailRes });
+  }
+  return verdict;
+}
+
+// Nothing delivered. Decide whether the caller releases its arrival guard.
+//  - send-window hold is HANDLED, never retryable, whatever the email leg did:
+//    "has arrived" is only true at arrival time, and a released guard would
+//    let the next morning's GPS re-fire text "has arrived" hours late.
+//  - retryable: a transient email error, or an SMS leg that existed and
+//    transiently failed (results empty → template missing → re-seed fixes it).
+//  - suppressed: every attempt was deterministic (blocked / no address / no
+//    leg) — the arrival is handled and the guard stays stamped.
+function classifyArrivalMiss({ results, emailRes, smsLegAvailable }) {
+  if (results.some((r) => r?.code === "QUIET_HOURS_HOLD")) {
+    return { success: false, suppressed: true, reason: "send_window_hold", results };
+  }
+  // Transient = not delivered, not a deterministic skip, and either a
+  // provider error is present (even alongside a suppressed sibling recipient)
+  // or nothing at all was blocked.
+  const emailTransient = !!emailRes && !emailRes.ok && !emailRes.skipped && (!!emailRes.error || !emailRes.blocked);
+  const smsRetryable = smsLegAvailable && (results.length === 0 || results.some((r) => r?.retryable));
+  if (emailTransient || smsRetryable) return { success: false, results };
+  return { success: false, suppressed: true, reason: "blocked", results };
+}
+
+const ARRIVAL_DELIVERY = {
+  // email first; when no usable email exists fall back to SMS so the arrival
+  // notice still lands.
+  async email(ctx) {
+    const emailRes = await sendArrivalEmailLeg(ctx);
+    if (emailRes?.ok) return { success: true, results: ctx.results, emailSent: true };
+    if (ctx.smsLegAvailable && (await ctx.attemptSmsLegs())) return { success: true, results: ctx.results };
+    // SMS leg absent ONLY because the hold emptied a non-empty list: stay
+    // retryable — a YES mid-job restores the SMS leg (#2956 r11).
+    if (ctx.heldAllSms) return { success: false, results: ctx.results };
+    return settleArrivalMiss(ctx, emailRes);
+  },
+  // SMS and email; success when either lands. Exception: when the opt-in
+  // hold emptied a NON-empty SMS list, an email success alone stays a
+  // retryable miss (idempotent email dedupes repeats) so a YES while the tech
+  // is on-property still gets the SMS (#2956 r10).
+  async both(ctx) {
+    const smsDelivered = ctx.smsLegAvailable ? await ctx.attemptSmsLegs() : false;
+    const emailRes = await sendArrivalEmailLeg(ctx);
+    if (smsDelivered || (emailRes?.ok && !ctx.heldAllSms)) return { success: true, results: ctx.results, emailSent: !!emailRes?.ok };
+    if (ctx.heldAllSms) return { success: false, results: ctx.results, emailSent: !!emailRes?.ok };
+    return settleArrivalMiss(ctx, emailRes);
+  },
+  // sms (default). When the opt-in hold emptied a NON-empty recipient list
+  // there is no SMS leg at all: send the email fallback and return a
+  // retryable miss so a later same-job signal can text the newly confirmed
+  // recipient — the email's idempotency key dedupes repeats (#2956 r8/r9).
+  async sms(ctx) {
+    if (ctx.heldAllSms) {
+      const emailRes = await sendArrivalEmailLeg(ctx);
+      return { success: false, results: ctx.results, emailSent: !!emailRes?.ok };
+    }
+    if (await ctx.attemptSmsLegs()) return { success: true, results: ctx.results };
+    return classifyArrivalMiss({ results: ctx.results, emailRes: null, smsLegAvailable: ctx.smsLegAvailable });
+  },
+};
+
+function deliverArrival(channel, ctx) {
+  return (ARRIVAL_DELIVERY[channel] || ARRIVAL_DELIVERY.sms)(ctx);
+}
+
 const TwilioService = {
   // =========================================================================
   // PHONE VERIFICATION (Login via OTP)
@@ -1086,7 +1240,7 @@ const TwilioService = {
    * text. Copy must not say "on the way" (that's en-route). Fired from
    * track-transitions markOnProperty when the live tracker flips to on-site.
    */
-  async sendTechArrived(customerId, techName, { scheduledServiceId = null } = {}) {
+  async sendTechArrived(customerId, techName, { scheduledServiceId = null, scheduledDate = null, scheduledWindowStart = null, arrivedAt = null } = {}) {
     const customer = await db("customers").where({ id: customerId }).first();
     const prefs = await db("notification_prefs")
       .where({ customer_id: customerId })
@@ -1098,12 +1252,17 @@ const TwilioService = {
     if (!customer) return { success: false, suppressed: true, reason: "no_customer" };
     if (!prefs?.tech_arrived) return { success: false, suppressed: true, reason: "opt_out" };
 
-    // Arrival notices are SMS-only. The appointment.tech_arrived email twin
-    // was retired 2026-08-06 (owner call): zero sends ever in prod and every
-    // customer's tech_arrived_channel is 'sms', so email/both values in
-    // notification_prefs.tech_arrived_channel intentionally behave as sms.
+    // Delivery channel (portal Settings dropdown, notification_prefs
+    // .tech_arrived_channel; account-level like the reminder channels). The
+    // email leg was retired 2026-08-06 (#3247) and restored 2026-09-06 on the
+    // owner's go.
+    const channel = await resolveArrivalChannel(customerId, prefs, customer);
     const smsAllowed = !!prefs?.sms_enabled;
-    if (!smsAllowed) return { success: false, suppressed: true, reason: "sms_disabled" };
+    // Portal-wide email opt-out: AppointmentEmail sends on the
+    // transactional_required stream and does not enforce this toggle itself
+    // (same rule as the reminder promotion, appointment-reminders.js).
+    const emailAllowed = prefs?.email_enabled !== false;
+    if (channel === "sms" && !smsAllowed) return { success: false, suppressed: true, reason: "sms_disabled" };
 
     const { getAppointmentContacts, isServiceContactRole, firstNameFrom } = require("./customer-contact");
     // Same recipient double opt-in hold as the en-route path above. When
@@ -1114,14 +1273,12 @@ const TwilioService = {
     const { filterRecipientsByOptin } = require("./recipient-optin");
     const unfilteredContacts = getAppointmentContacts(customer, prefs);
     const contacts = await filterRecipientsByOptin(unfilteredContacts, customer.id);
-    if (!contacts.length && !unfilteredContacts.length) {
+    if (channel === "sms" && !contacts.length && !unfilteredContacts.length) {
       return { success: false, suppressed: true, reason: "no_contacts" };
     }
 
     const results = [];
-    const {
-      sendCustomerMessage,
-    } = require("./messaging/send-customer-message");
+    const { sendCustomerMessage } = require("./messaging/send-customer-message");
     const customerTechName = formatTechnicianForCustomer({ name: techName });
     const attemptSmsLegs = async () => {
       for (const contact of contacts) {
@@ -1163,42 +1320,26 @@ const TwilioService = {
       return results.some((r) => r?.sent);
     };
 
-    // Opt-in hold emptied a NON-empty recipient list: there is no SMS leg at
-    // all right now, but the hold is TRANSIENT (the recipient may still reply
-    // YES) — return a retryable miss so the arrival guard is released and a
-    // later same-job signal can text the newly confirmed recipient
-    // (#2956 codex r8/r9; the email fallback that used to fire here was
-    // retired with the appointment.tech_arrived email, 2026-08-06).
-    if (!contacts.length && unfilteredContacts.length) {
-      return { success: false, results };
-    }
-    if (await attemptSmsLegs()) return { success: true, results };
-
-    // Nothing delivered. Distinguish a RETRYABLE miss from deterministic
-    // suppression so the caller knows whether to release its arrival guard:
-    //  - retryable: a transient provider failure (carries
-    //    retryable:true from sendCustomerMessage), or the template was
-    //    missing for every contact (results empty → re-seed fixes it).
-    //  - suppressed: every attempt was blocked/terminal for a deterministic
-    //    reason (STOP/wrong-number/manual-DNC suppression, consent, a non-mobile
-    //    or otherwise terminal provider result). Retrying can't change those, so
-    //    the arrival is HANDLED — the caller must keep the guard stamped, else a
-    //    later same-job signal could fire a stale "has arrived" if the
-    //    suppression/number is fixed while the job is still on-property.
-    // Send-window hold is HANDLED, not retryable, for this one notification:
-    // "has arrived" is only true at arrival time. Releasing the guard on a
-    // night hold lets the next morning's GPS/geofence re-fire of an
-    // on_property row text "has arrived" hours after the fact (markOnProperty
-    // deliberately retries stamped-but-unsent rows on every later signal).
-    // Dropping the text is the correct outcome — same call as the completion
-    // SMS's no-retry rail documented in the PR body.
-    const heldByWindow = results.some((r) => r?.code === "QUIET_HOURS_HOLD");
-    if (heldByWindow) {
-      return { success: false, suppressed: true, reason: "send_window_hold", results };
-    }
-    const anyRetryable = results.length === 0 || results.some((r) => r?.retryable);
-    if (anyRetryable) return { success: false, results };
-    return { success: false, suppressed: true, reason: "blocked", results };
+    return deliverArrival(channel, {
+      customerId,
+      scheduledServiceId,
+      scheduledDate,
+      scheduledWindowStart,
+      arrivedAt,
+      techName: customerTechName,
+      emailAllowed,
+      // The SMS leg exists when texting is enabled and there is someone to
+      // text. For email/both this decides whether an SMS miss is retryable
+      // ("the leg existed and transiently failed") or deterministic.
+      smsLegAvailable: smsAllowed && contacts.length > 0,
+      // The opt-in hold emptied a NON-empty list: no SMS leg right now, but
+      // the hold is TRANSIENT (the recipient may still reply YES). Only while
+      // texting is enabled — a disabled SMS leg is permanent, and must not
+      // turn a delivered email into a retryable miss.
+      heldAllSms: smsAllowed && !contacts.length && unfilteredContacts.length > 0,
+      attemptSmsLegs,
+      results,
+    });
   },
 
   /**

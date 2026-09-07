@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  bookableProperties,
+  bookingPropertyTarget,
   buildFindTimeRequestBody,
+  defaultBookingPropertyId,
   ESTIMATE_SOURCE_LABEL,
+  filterScheduleEstimatesForProperty,
   findScheduleEstimateById,
+  isBookableProperty,
   formatScheduleEstimateAmount,
   MANUAL_SERVICE_ENTRY_LABEL,
   pickAutoScheduleEstimate,
@@ -122,6 +127,9 @@ describe('buildFindTimeRequestBody', () => {
       horizonDays: 7,
     });
     expect(body).not.toHaveProperty('serviceId');
+    // No property chosen → no address override; the server resolves the primary.
+    expect(body.address).toBeUndefined();
+    expect(body.lat).toBeUndefined();
     expect(body).toMatchObject({
       customerId: 'cust-1',
       serviceType: 'Quarterly Pest',
@@ -160,5 +168,55 @@ describe('quick-add phone-match confirm helpers', () => {
       .toEqual({ confirmDuplicate: true, confirmMatchedAccountId: 'acct-1' });
     expect(quickAddConfirmFlags({ code: 'PHONE_MATCH_CONFIRM' }, { separateAccount: true }))
       .toEqual({ forceNewAccount: true, ignorePhoneMatch: true });
+  });
+});
+
+describe('multi-property booking helpers', () => {
+  const HOME = { id: 'p-home', is_primary: true, address_line1: '10 Palm Ave' };
+  const RENTAL = { id: 'p-rental', is_primary: false, address_line1: '20 Oak St' };
+
+  it('defaults the picker to the primary property, else the first, else nothing', () => {
+    expect(defaultBookingPropertyId([RENTAL, HOME])).toBe('p-home');
+    expect(defaultBookingPropertyId([RENTAL])).toBe('p-rental');
+    expect(defaultBookingPropertyId([])).toBe('');
+  });
+
+  it('offers property-linked quotes only at their own property and unlinked quotes everywhere', () => {
+    const forHome = { id: 1, propertyId: 'p-home' };
+    const forRental = { id: 2, propertyId: 'p-rental' };
+    const anywhere = { id: 3, propertyId: null };
+    const all = [forHome, forRental, anywhere];
+    expect(filterScheduleEstimatesForProperty(all, 'p-rental')).toEqual([forRental, anywhere]);
+    expect(filterScheduleEstimatesForProperty(all, 'p-home')).toEqual([forHome, anywhere]);
+    // No picker (single-property customer / lane dark) → nothing is hidden.
+    expect(filterScheduleEstimatesForProperty(all, '')).toEqual(all);
+  });
+});
+
+describe('service-address picker guards', () => {
+  const COMPLETE = { id: 'p1', is_primary: true, address_line1: '10 Palm Ave', city: 'Naples', state: 'FL', zip: '34102', latitude: '27.4400000', longitude: '-82.5200000' };
+  const STREET_ONLY = { id: 'p2', is_primary: false, address_line1: '20 Oak St', city: '', state: 'FL', zip: null };
+  const RENTAL = { id: 'p3', is_primary: false, address_line1: '20 Oak St', city: 'Naples', state: 'FL', zip: '34103' };
+
+  it('offers only properties with a complete street address (the server refuses the rest)', () => {
+    expect(isBookableProperty(COMPLETE)).toBe(true);
+    expect(isBookableProperty(STREET_ONLY)).toBe(false);
+    expect(isBookableProperty(null)).toBe(false);
+    expect(bookableProperties([COMPLETE, STREET_ONLY, RENTAL]).map((p) => p.id)).toEqual(['p1', 'p3']);
+    // An incomplete PRIMARY never becomes the default either.
+    expect(defaultBookingPropertyId(bookableProperties([{ ...COMPLETE, zip: '' }, RENTAL]))).toBe('p3');
+  });
+
+  it('routes slot searches to the chosen property: coords when present, else its address', () => {
+    expect(bookingPropertyTarget(COMPLETE)).toEqual({ address: '10 Palm Ave, Naples, FL 34102', lat: 27.44, lng: -82.52 });
+    expect(bookingPropertyTarget(RENTAL)).toEqual({ address: '20 Oak St, Naples, FL 34103', lat: undefined, lng: undefined });
+    // Not-yet-geocoded rows carry NULL — never a 0,0 pair the server would trust.
+    expect(bookingPropertyTarget({ ...RENTAL, latitude: null, longitude: null })).toMatchObject({ lat: undefined, lng: undefined });
+    expect(bookingPropertyTarget({ ...RENTAL, latitude: '', longitude: '' })).toMatchObject({ lat: undefined, lng: undefined });
+    // A half pair is no pair.
+    expect(bookingPropertyTarget({ ...RENTAL, latitude: '26.1', longitude: null })).toMatchObject({ lat: undefined, lng: undefined });
+    expect(bookingPropertyTarget(null)).toEqual({});
+    const body = buildFindTimeRequestBody({ customerId: 'c', ...bookingPropertyTarget(COMPLETE), serviceName: 's', durationMinutes: 60, dateFrom: 'a', dateTo: 'b' });
+    expect(body).toMatchObject({ customerId: 'c', lat: 27.44, lng: -82.52, address: '10 Palm Ave, Naples, FL 34102' });
   });
 });

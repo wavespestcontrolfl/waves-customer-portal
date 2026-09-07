@@ -353,6 +353,84 @@ describe('generateVideoVariant', () => {
   });
 });
 
+describe('scene library refill (2026-09-06)', () => {
+  test('every bucket is at least eight concepts deep with unique keys and no text/people/logo words', () => {
+    const allKeys = [];
+    for (const [bucket, concepts] of Object.entries(Engine.SCENE_LIBRARY)) {
+      expect({ bucket, size: concepts.length }).toEqual({ bucket, size: expect.any(Number) });
+      expect(concepts.length).toBeGreaterThanOrEqual(8);
+      for (const c of concepts) {
+        allKeys.push(c.key);
+        expect(c.scene).not.toMatch(/\b(?:logo|watermark|caption|signage)\b/i);
+      }
+    }
+    expect(new Set(allKeys).size).toBe(allKeys.length);
+  });
+
+  test('new topic keywords route to their service bank', () => {
+    expect(Engine.resolveSceneBucket({ topic: 'nutsedge taking over soggy spots', service: 'lawn care' })).toBe('lawn');
+    expect(Engine.resolveSceneBucket({ topic: 'No-See-Um vs Mosquito', service: 'mosquito' })).toBe('mosquito');
+    expect(Engine.resolveSceneBucket({ topic: 'Whitefly vs Mealybug', service: 'tree and shrub' })).toBe('tree_shrub');
+    expect(Engine.resolveSceneBucket({ topic: 'Drywood Termite Frass vs Carpenter Ant Frass', service: 'termite' })).toBe('termite');
+  });
+});
+
+describe('diagnostic scenes apply only to matching topics (Codex r3 on #3990)', () => {
+  test('a swarmer campaign never gets the pellet-pile or mud-tube-in-garage scene; a drywood topic can', () => {
+    const swarm = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.termite, { service: 'termite', topic: 'peak termite swarm month' }).map((c) => c.key);
+    expect(swarm).not.toContain('termite-pellet-pile');
+    expect(swarm).not.toContain('termite-garage-baseboard');
+    expect(swarm).toContain('termite-porch-light-swarm');
+    const drywood = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.termite, { service: 'termite', topic: 'drywood termite pellets in the garage' }).map((c) => c.key);
+    expect(drywood).toContain('termite-pellet-pile');
+    expect(drywood).not.toContain('termite-porch-light-swarm');
+  });
+
+  test('an armyworm campaign never gets the webworm moth; a webworm topic never gets the armyworm caterpillar', () => {
+    const army = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.lawn, { service: 'lawn care', topic: 'fall armyworms moving across lawns' }).map((c) => c.key);
+    expect(army).not.toContain('lawn-webworm-moth');
+    expect(army).toContain('lawn-armyworm-caterpillar');
+    const web = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.lawn, { service: 'lawn care', topic: 'sod webworm moths at dusk' }).map((c) => c.key);
+    expect(web).toContain('lawn-webworm-moth');
+    expect(web).not.toContain('lawn-armyworm-caterpillar');
+  });
+
+  test('keywords match whole words: "temperatures" is not a rat, chinch pressure never gets the peeled-sod (root loss) scene (Codex r4 on #3990)', () => {
+    expect(Engine.resolveSceneBucket({ service: 'general pest', topic: 'ants trailing indoors as temperatures climb' })).toBe('general');
+    expect(Engine.resolveSceneBucket({ service: 'termite', topic: 'Formosan termite swarmers' })).toBe('termite');
+    expect(Engine.resolveSceneBucket({ service: 'tree and shrub', topic: 'whiteflies on ficus hedges' })).toBe('tree_shrub');
+    expect(Engine.resolveSceneBucket({ service: 'rodent', topic: 'roof rats in attics' })).toBe('rodent');
+    const rodent = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.rodent, { service: 'general pest', topic: 'ants trailing indoors as temperatures climb' }).map((c) => c.key);
+    expect(rodent).not.toContain('rodent-citrus-hollow');
+    const chinch = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.lawn, { service: 'lawn care', topic: 'chinch bug pressure starting early' }).map((c) => c.key);
+    expect(chinch).not.toContain('lawn-peeled-sod');
+    expect(chinch).toContain('lawn-edge-sidewalk');
+    const grub = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.lawn, { service: 'lawn care', topic: 'grubs and root loss' }).map((c) => c.key);
+    expect(grub).toContain('lawn-peeled-sod');
+    // The rain-day millipede scene shows millipedes, so a rain topic about other pests never gets it (Codex r5 on #3990).
+    const rainAnts = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.general, { service: 'general pest', topic: 'ants and roaches after heavy rain' }).map((c) => c.key);
+    expect(rainAnts).not.toContain('pest-lanai-floor-rain');
+    expect(Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.general, { service: 'general pest', topic: 'earwigs and springtails after downpours' }).map((c) => c.key)).not.toContain('pest-lanai-floor-rain');
+    expect(Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.general, { service: 'general pest', topic: 'millipedes on the lanai after rain' }).map((c) => c.key)).toContain('pest-lanai-floor-rain');
+    // Stems in `only` lists still match at a word start.
+    const pellets = Engine.conceptsApplicableTo(Engine.SCENE_LIBRARY.termite, { service: 'termite', topic: 'drywood termite pellets' }).map((c) => c.key);
+    expect(pellets).toContain('termite-pellet-pile');
+  });
+
+  test('every bank keeps service-wide (unrestricted) concepts so a generic topic always has a scene', () => {
+    for (const [bucket, bank] of Object.entries(Engine.SCENE_LIBRARY)) {
+      const generic = Engine.conceptsApplicableTo(bank, { service: bucket, topic: 'seasonal pressure' });
+      expect({ bucket, generic: generic.length }).toEqual({ bucket, generic: expect.any(Number) });
+      expect(generic.length).toBeGreaterThanOrEqual(4);
+    }
+  });
+
+  test('pickConcepts honours applicability', () => {
+    const picked = Engine.pickConcepts({ service: 'termite', topic: 'peak termite swarm month', count: 10, now: new Date('2026-03-02T16:00:00Z') });
+    expect(picked.map((c) => c.key)).not.toContain('termite-pellet-pile');
+  });
+});
+
 describe('versus + milestone runs on the engine (2026-09-06)', () => {
   test('milestone scenes come from the review (calm home) bank', () => {
     expect(Engine.resolveSceneBucket({ variant: 'milestone', service: 'Google reviews', topic: '300 Google reviews' })).toBe('review');

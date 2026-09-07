@@ -111,4 +111,27 @@ describe('geocodeAddressWithStatus with a rejected result', () => {
     const out = await geocodeAddressWithStatus('1 Old Main St, Bradenton, FL 34205');
     expect(out).toEqual({ location: { lat: 27.4989, lng: -82.5748 }, permanent: false });
   });
+
+  test('cache-only reads never start provider calls and retain the service-address guard', async () => {
+    const address = '100 Fixture Cache Street, Bradenton, FL 34205';
+    global.fetch = jest.fn(async () => ({ json: async () => ({
+      status: 'OK', results: [rooftop(27.4989, -82.5748)],
+    }) }));
+    expect(await geocodeAddressWithStatus(address, { cacheOnly: true }))
+      .toEqual({ location: null, permanent: false });
+    expect(global.fetch).not.toHaveBeenCalled();
+    await geocodeAddressWithStatus(address);
+    expect(await geocodeAddressWithStatus(address, { cacheOnly: true }))
+      .toEqual({ location: { lat: 27.4989, lng: -82.5748 }, permanent: false });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+
+    const rejected = '200 Fixture Cache Street, Bradenton, FL 34205';
+    global.fetch.mockResolvedValue({ json: async () => ({
+      status: 'OK', results: [rooftop(27.4989, -82.5748, { partial_match: true })],
+    }) });
+    await geocodeAddressWithStatus(rejected, { serviceAddress: false });
+    expect(await geocodeAddressWithStatus(rejected, { cacheOnly: true }))
+      .toEqual({ location: null, permanent: true });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
 });

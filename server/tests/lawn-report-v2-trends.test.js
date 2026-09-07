@@ -9,6 +9,7 @@ function assessment(overrides = {}) {
   return {
     scores: { turfDensity: 73, weedSuppression: 81, colorHealth: 77, stressDamage: 35, fungusControl: 95, overallScore: 68, season: 'peak' },
     overwateringSignal: false,
+    droughtStress: 'minor',
     turfProfile: { grassType: 'st_augustine' },
     observations: 'Mild drought stress in the mid-lawn zone.',
     waterContext: {

@@ -1139,6 +1139,21 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     expect(card.notes.instructions).toContain('do not treat the vegetable garden');
   });
 
+  test('schedule readiness uses the resolver without generating or caching a paragraph, or returning private facts', async () => {
+    const callModel = jest.fn();
+    const update = jest.fn();
+    const base = factsDb({ 'scheduled_services as ss': visit(false), property_preferences: prefs });
+    const dbh = Object.assign(table => Object.assign(base(table), { update }), { raw: base.raw });
+    const result = await jobCard.buildJobCard('svc1', {
+      dbh, readinessOnly: true,
+      deps: { callModel, getRecentCalls: async () => [], getHourly: async () => null, protocols: {} },
+      now: new Date('2026-09-04T12:00:00Z'),
+    });
+    expect(result).toEqual({ serviceId: 'svc1', checkedAt: '2026-09-04T12:00:00.000Z', issues: [{ kind: 'protocol', status: 'unknown', label: 'No products resolved' }] });
+    expect(callModel).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+  });
+
   test('the rain window ends on the viewed visit date, today at the latest (Codex r14 P2)', async () => {
     const getAreaRainfall = jest.fn(async () => 0.4);
     const today = new Date();

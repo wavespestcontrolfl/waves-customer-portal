@@ -96,12 +96,12 @@ describe('reminder settings rows', () => {
       '72-Hour Appointment Reminder',
       '24-Hour Service Reminder',
       'Tech En Route Alert',
+      'Tech Arrived Alert',
     ];
     for (const name of channelNames) {
       expect(screen.getByRole('combobox', { name: `Delivery method for ${name}` })).toBeInTheDocument();
     }
-    // SMS-only / app-only alerts deliberately never grew a select.
-    expect(screen.queryByRole('combobox', { name: /Tech Arrived Alert/i })).not.toBeInTheDocument();
+    // App-only advisories deliberately never grew a select.
     expect(screen.queryByRole('combobox', { name: /Weather & Property Alerts/i })).not.toBeInTheDocument();
   });
 
