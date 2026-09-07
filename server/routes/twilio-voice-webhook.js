@@ -3050,9 +3050,25 @@ router.post('/lead-alert-announce', async (req, res) => {
 // =========================================================================
 // POST /api/webhooks/twilio/outbound-admin-prompt — Step 1: Admin picks up, press 1 to connect
 // =========================================================================
+// call_log.id is a uuid; the prompt URL carries it as a string.
+const CALL_LOG_ID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 router.post('/outbound-admin-prompt', async (req, res) => {
   try {
     const { callLogId, customerNumber, callerIdNumber, leadName: rawName = '' } = req.query;
+    // An ambiguous create (services/call-bridge.js: the local request timed
+    // out after reaching Twilio) leaves the row without its CallSid — the
+    // only key /call-status and the recording callbacks look an outbound
+    // row up by, so its terminal status and recording could never attach
+    // and activeBridgeCall held the interlock for the whole window. This is
+    // the parent leg's own TwiML request, so its CallSid IS that sid: adopt
+    // it onto the row iff still unset (codex #4072 r17 P2). Never blocks
+    // the TwiML.
+    if (callLogId && CALL_LOG_ID_SHAPE.test(String(callLogId)) && req.body?.CallSid) {
+      await db('call_log').where({ id: callLogId }).whereNull('twilio_call_sid')
+        .update({ twilio_call_sid: req.body.CallSid, updated_at: new Date() })
+        .catch((dbErr) => logger.warn(`[outbound-admin-prompt] sid adopt skipped for ${callLogId} (${String(dbErr?.code || dbErr?.name || 'error')})`));
+    }
     const eventLabel = String(req.query.eventLabel || req.body.eventLabel || '')
       .replace(/[^\w\s.,:-]/g, '')
       .trim()
