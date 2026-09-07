@@ -93,6 +93,8 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // Staff Quick Links receipt picker; delivery evidence is recorded even while dark.
+  composerReceiptLinks: process.env.GATE_COMPOSER_RECEIPT_LINKS === 'true',
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.

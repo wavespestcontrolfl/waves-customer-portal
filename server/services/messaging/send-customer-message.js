@@ -54,6 +54,30 @@ const { isEnabled } = require('../../config/feature-gates');
 
 const DEFAULT_PROVIDER_RETRY_DELAY_MS = 5 * 60 * 1000;
 
+// Receipt re-sharing needs invoice-specific SMS evidence. receipt_sent_at
+// also covers email; provider success can mean push or an owner-silence
+// sentinel. Only an accepted Twilio SMS/MMS for a settled invoice qualifies.
+async function recordReceiptSmsDelivery(input, outcome) {
+  const receipt = (input.purpose === 'payment_receipt' && input.metadata?.original_message_type === 'receipt')
+    || (input.purpose === 'appointment' && input.metadata?.original_message_type === 'service_complete_paid_receipt');
+  if (!receipt || input.channel !== 'sms' || !input.invoiceId || !input.customerId
+    || outcome.sent !== true || outcome.provider !== 'twilio'
+    || !/^(SM|MM)[a-f0-9]{32}$/i.test(outcome.providerMessageId || '')) return;
+  try {
+    const db = require('../../models/db');
+    await db('invoices')
+      .where({ id: input.invoiceId, customer_id: input.customerId })
+      .whereIn('status', ['paid', 'refunded'])
+      .whereNull('payer_id')
+      .whereNull('receipt_sms_sent_at')
+      .update({ receipt_sms_sent_at: outcome.sentAt ? new Date(outcome.sentAt) : db.fn.now() });
+  } catch (err) {
+    // The provider already accepted. A missing fact keeps Quick Links
+    // closed; it must never turn this delivery into a retry/double text.
+    logger.warn(`[messaging] receipt SMS evidence failed for invoice ${input.invoiceId}: ${err.message}`);
+  }
+}
+
 // Grouped unit-move hold for appointment notices (codex #3609 r30/r31).
 // A visit mid-move (or stranded partial) stamps move_hold_until on its
 // members' reminder rows; a notice rendered for the OLD slot must not
@@ -406,6 +430,8 @@ async function sendCustomerMessage(input) {
       encoding: segmentMeta.encoding,
     };
   }
+
+  await recordReceiptSmsDelivery(sendInput, providerOutcome);
 
   // 8. Persist final audit row with provider outcome. A throw past this
   // point carries the KNOWN provider outcome on the error, so callers with

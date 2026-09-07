@@ -10962,6 +10962,7 @@ async function completeScheduledService(completionInput) {
             purpose: 'appointment',
             customerId: svc.customer_id,
             appointmentId: svc.id,
+            ...(sentSmsType === 'service_complete_paid_receipt' && invoice?.id ? { invoiceId: invoice.id } : {}),
             identityTrustLevel: 'phone_matches_customer',
             metadata: smsMetadata,
           };
