@@ -247,11 +247,11 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
 
   return (
     <div style={{
-      position: 'fixed', top: 12, left: 12, right: 12, zIndex: 10_000,
+      position: 'fixed', top: 'calc(12px + env(safe-area-inset-top, 0px))', left: 12, right: 12, zIndex: 10_000,
       display: 'flex', flexDirection: 'column', gap: 10, pointerEvents: 'none',
       // The stack scrolls inside the viewport instead of running past it:
       // a phone-height screen must still reach every card.
-      maxHeight: 'calc(100vh - 24px)', overflowY: 'auto',
+      maxHeight: 'calc(100dvh - 24px - env(safe-area-inset-top, 0px))', overflowY: 'auto',
     }}>
       {cards.map((n) => (
         <div key={n.id} style={{ pointerEvents: 'auto' }}>

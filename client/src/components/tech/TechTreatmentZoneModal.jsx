@@ -651,7 +651,7 @@ export default function TechTreatmentZoneModal({
         style={{
           background: T.bg, width: '100%', maxWidth: 560,
           borderTopLeftRadius: 16, borderTopRightRadius: 16,
-          padding: 16, maxHeight: '92vh', overflowY: 'auto',
+          padding: 16, paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))', maxHeight: 'min(92vh, 92dvh)', overflowY: 'auto',
           border: `1px solid ${T.border}`,
           fontFamily: T.font,
         }}

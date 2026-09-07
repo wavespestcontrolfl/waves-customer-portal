@@ -384,7 +384,7 @@ export default function ServiceRecapModal({
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: '100%', maxWidth: 520, maxHeight: '92vh', overflowY: 'auto',
+          width: '100%', maxWidth: 520, maxHeight: 'min(92vh, 92dvh)', overflowY: 'auto',
           background: P.bg, borderTopLeftRadius: 18, borderTopRightRadius: 18,
           border: `1px solid ${P.border}`, boxShadow: '0 -8px 40px rgba(0,0,0,0.35)',
         }}
@@ -420,7 +420,7 @@ export default function ServiceRecapModal({
         ) : loadError ? (
           <div style={{ padding: 24, color: P.red, fontSize: 14 }}>{loadError}</div>
         ) : (
-          <div style={{ padding: '14px 18px 18px' }}>
+          <div style={{ padding: '14px 18px calc(18px + env(safe-area-inset-bottom, 0px))' }}>
             {/* Timeline */}
             {timeline.length > 0 && (
               <div style={{

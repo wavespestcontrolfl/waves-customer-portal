@@ -151,7 +151,7 @@ export default function TechServicePhotosModal({ serviceId, customerName, onClos
         style={{
           background: DARK.bg, width: '100%', maxWidth: 480,
           borderTopLeftRadius: 16, borderTopRightRadius: 16,
-          padding: 16, maxHeight: '90vh', overflowY: 'auto',
+          padding: 16, paddingBottom: 'calc(16px + env(safe-area-inset-bottom, 0px))', maxHeight: 'min(90vh, 90dvh)', overflowY: 'auto',
           border: `1px solid ${DARK.border}`,
         }}
       >
