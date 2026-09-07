@@ -1,6 +1,11 @@
 /** Canonical completion writes against a migrated, private nonproduction database. */
 jest.mock('../models/db', () => {
-  const db = (...args) => mockPg(...args);
+  const db = (table, ...args) => {
+    const query = mockPg(table, ...args);
+    // Isolate the notification recipient fixture from other seeded QA staff.
+    return table === 'technicians' && mockNotificationRecipientId
+      ? query.where({ id: mockNotificationRecipientId }) : query;
+  };
   for (const name of ['raw', 'transaction', 'queryBuilder', 'ref']) db[name] = (...args) => mockPg[name](...args);
   for (const name of ['schema', 'fn']) Object.defineProperty(db, name, { get: () => mockPg[name] });
   return db;
@@ -42,6 +47,7 @@ const originalPestRecap = process.env.PEST_RECAP;
 const postgres = connection ? describe : describe.skip;
 let mockPg;
 let fixture;
+let mockNotificationRecipientId;
 const originalSummaryKey = process.env.DATA_HYGIENE_VAULT_KEY;
 const originalCloseoutGate = process.env.GATE_VISIT_CLOSEOUT;
 jest.setTimeout(90000);
@@ -75,6 +81,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     if (mockPg) await mockPg.destroy();
   });
   beforeEach(async () => {
+    mockNotificationRecipientId = null;
     jest.restoreAllMocks();
     process.env.GATE_VISIT_CLOSEOUT = 'true';
     process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
@@ -463,6 +470,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
   });
 
   test.each([true, false])('interruption after an admin notification does not duplicate activity or push (bell=%s)', async (bell) => {
+    mockNotificationRecipientId = fixture.techId;
     await mockPg('notification_preferences').insert({ admin_user_id: fixture.techId, trigger_key: 'job_complete',
       bell_enabled: bell, push_enabled: true, sound_enabled: false });
     jest.spyOn(require('../services/notification-bell-policy'), 'isBellPolicyEnabled').mockReturnValue(false);
