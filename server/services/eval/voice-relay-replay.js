@@ -57,7 +57,7 @@ const CHECKS = Object.freeze([
   'tools_called_include', 'tools_never_called', 'tools_called_subset_of',
   'spoken_never_matches', 'spoken_matches_any', 'capture_lead_input_includes',
   'end_session_called', 'no_model_text_before_tool',
-  'commitment_requires_receipt', 'tools_performed_include',
+  'commitment_requires_receipt', 'tools_performed_include', 'tools_performed_any_of',
 ]);
 // The registered write tools and the ONE ctx effect each performs live
 // (relay-tools / relay-booking / relay-reservice / relay-transfer). A fixture
@@ -184,6 +184,7 @@ const writeToolList = () => (v) => (!Array.isArray(v) || !v.length ? 'value must
 const CHECK_VALUE_RULES = Object.freeze({
   tools_called_include: toolList,
   tools_performed_include: writeToolList,
+  tools_performed_any_of: writeToolList,
   tools_never_called: toolList,
   tools_called_subset_of: toolList,
   spoken_never_matches: () => regexList,
@@ -261,7 +262,7 @@ function lintScenario(s, knownTools) {
     if (error) problems.push(`allowedToolInputs: ${error.message}`);
   }
   for (const e of expects) {
-    if (e && ['tools_called_include', 'tools_performed_include'].includes(e.check) && Array.isArray(e.value)) {
+    if (e && ['tools_called_include', 'tools_performed_include', 'tools_performed_any_of'].includes(e.check) && Array.isArray(e.value)) {
       for (const name of e.value) if (!allowed.has(name)) problems.push(`expect ${e.check} names "${name}", which allowedTools does not allow`);
     }
   }
@@ -783,10 +784,15 @@ const CHECK_RUNNERS = Object.freeze({
   },
   // A write the fixture PERFORMED (a receipt) — a refusal answer ("that time
   // is gone") is a valid call, but the tool did not do the scenario's job.
-  tools_performed_include(value, record) {
-    const performed = record.toolCalls.filter((t) => t.receipt === true).map((t) => t.name);
-    const missing = value.filter((n) => !performed.includes(n));
+  tools_performed_include(value, record, { performedNames }) {
+    const missing = value.filter((n) => !performedNames.includes(n));
     return missing.length ? ['fail', `never performed: ${missing.join(', ')}`] : ['pass', `performed: ${value.join(', ')}`];
+  },
+  // The scenario's artifact may take either form (a re-service ticket OR a
+  // captured lead) — but one of them must have been performed.
+  tools_performed_any_of(value, record, { performedNames }) {
+    const hit = value.filter((n) => performedNames.includes(n));
+    return hit.length ? ['pass', `performed: ${hit.join(', ')}`] : ['fail', `none of ${value.join(', ')} was performed`];
   },
   spoken_never_matches(value, record, { spoken }) {
     const hit = firstRegexHit(value, spoken);
@@ -854,7 +860,13 @@ function validCallNames(record) {
 
 function runCheck(expectation, record) {
   const utterances = agentUtterances(record);
-  const view = { calledNames: record.toolCalls.map((t) => t.name), validNames: validCallNames(record), utterances, spoken: utterances.map((u) => u.text) };
+  const view = {
+    calledNames: record.toolCalls.map((t) => t.name),
+    validNames: validCallNames(record),
+    performedNames: record.toolCalls.filter((t) => t.receipt === true).map((t) => t.name),
+    utterances,
+    spoken: utterances.map((u) => u.text),
+  };
   const runner = CHECK_RUNNERS[expectation.check];
   const [status, detail] = runner ? runner(expectation.value, record, view) : ['skip', `unknown check ${expectation.check}`];
   const severity = expectation.check === 'commitment_requires_receipt' ? 'critical' : expectation.severity;
