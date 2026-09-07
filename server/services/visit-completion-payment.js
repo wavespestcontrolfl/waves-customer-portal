@@ -76,8 +76,18 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
   // Refuse the mixed lane instead of silently selecting another saved method.
   const ids = billed.map((member) => member.id);
   const appointmentConsent = await trx('appointment_card_requests').whereIn('scheduled_service_id', ids).first('id');
-  const heldConsent = await trx('estimate_card_holds').whereIn('scheduled_service_id', ids).where({ status: 'held' }).first('id');
+  const heldConsent = await trx('estimate_card_holds').whereIn('scheduled_service_id', ids)
+    .whereNotIn('status', ['released', 'cancelled', 'failed']).first('id');
   if (appointmentConsent || heldConsent) refuse('competing_card_consent');
+  // The visit-effect finalizer can be lost after Stripe has already refused
+  // this invoice. Its expired lease must not authorize another automatic
+  // provider attempt. The saved-card rail stamps submission durably, before
+  // dispatch; pre-submission failures remain retryable and zero balances can
+  // still settle. Failed submitted attempts need office reconciliation because
+  // their ledger does not distinguish declines from other provider refusals.
+  const failedSubmission = await trx('stripe_invoice_charge_attempts')
+    .where({ invoice_id: invoice.id, status: 'failed' }).whereNotNull('submitted_at').first('id');
+  if (failedSubmission && invoiceAmountDue(invoice) > 0) refuse('previous_collection_failed');
 }
 
 /** One automatic collection decision for the saved visit, using the invoice rail. */

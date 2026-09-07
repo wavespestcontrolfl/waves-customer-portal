@@ -520,6 +520,65 @@ postgres('visit completion packet records on PostgreSQL', () => {
       .toMatchObject({ reason: 'parked_manual_refunded_invoice', refundedInvoiceId: saved.body.billing.invoiceId });
   });
 
+  test.each(['charging', 'charge_review', 'released'])('a %s card hold is rechecked at collection', async (status) => {
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    const estimateId = randomUUID();
+    fixture.estimateIds.push(estimateId);
+    await mockPg('estimates').insert({ id: estimateId, customer_id: fixture.customerId, status: 'accepted' });
+    await mockPg('estimate_card_holds').insert({ estimate_id: estimateId, customer_id: fixture.customerId,
+      scheduled_service_id: fixture.serviceIds[1], status });
+    const guarded = mockPg.transaction(async (trx) => {
+      const invoice = await trx('invoices').where({ id: saved.body.billing.invoiceId }).forUpdate().first();
+      await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+      await assertVisitCompletionCharge(trx, invoice, saved.body.packetId);
+    });
+    if (status === 'released') await expect(guarded).resolves.toBeUndefined();
+    else await expect(guarded).rejects.toMatchObject({ code: 'VISIT_PAYMENT_REVIEW_REQUIRED', reason: 'competing_card_consent' });
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test.each([true, false])('a lost decline finalizer uses durable submission evidence (%s)', async (submitted) => {
+    const methodId = randomUUID();
+    await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,
+      processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_fixture_visit',
+      is_default: true, autopay_enabled: true, exp_month: 12, exp_year: new Date().getUTCFullYear() + 1 });
+    await mockPg('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true, autopay_payment_method_id: methodId });
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    const provider = jest.fn();
+    chargeInvoiceWithSavedCard.mockImplementation(async (id, selectedMethod, options) => {
+      await mockPg.transaction(async (trx) => {
+        const invoice = await trx('invoices').where({ id }).forUpdate().first();
+        await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+        await assertVisitCompletionCharge(trx, invoice, options.requireVisitCompletionPacketId);
+      });
+      provider();
+      await mockPg('stripe_invoice_charge_attempts').insert({ invoice_id: id, payment_method_id: selectedMethod,
+        stripe_payment_method_id: 'pm_fixture_visit', idempotency_key: randomUUID(), status: 'failed',
+        submitted_at: submitted ? new Date() : null, resolved_at: new Date() });
+      throw Object.assign(new Error('Synthetic collection refusal'), { wavesCardDecline: true });
+    });
+    const groups = require('../services/visit-groups');
+    const finalizer = jest.spyOn(groups, 'finalizeVisitNotification').mockRejectedValueOnce(new Error('Synthetic finalizer outage'));
+    try {
+      await expect(collectVisitCompletionInvoice(saved.body.packetId)).rejects.toThrow('Synthetic finalizer outage');
+      await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' })
+        .update({ claimed_at: new Date(Date.now() - 11 * 60 * 1000) });
+      expect(await collectVisitCompletionInvoice(saved.body.packetId))
+        .toMatchObject({ state: submitted ? 'office_required' : 'payment_failed', invoiceId });
+      expect(provider).toHaveBeenCalledTimes(submitted ? 1 : 2);
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: submitted });
+      expect(await collectVisitCompletionInvoice(saved.body.packetId))
+        .toMatchObject({ state: submitted ? 'office_required' : 'payment_failed' });
+      expect(provider).toHaveBeenCalledTimes(submitted ? 1 : 2);
+    } finally {
+      finalizer.mockRestore();
+    }
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
   test('a zero balance with an existing payment session stays for office reconciliation', async () => {
     const saved = await saveVisitCompletionPacket(submission());
     const invoiceId = saved.body.billing.invoiceId;
