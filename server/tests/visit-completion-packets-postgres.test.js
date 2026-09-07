@@ -439,6 +439,26 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
+  test.each([1, 2])('%i recap-only forms omit their invoice lines and keep requested review enrollment', async (recapCount) => {
+    const input = submission();
+    for (const item of input.items.slice(0, recapCount)) item.body.oneTimeRecapOnly = true;
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved).toMatchObject({ status: 202, body: { billing: { state: recapCount === 2 ? 'no_charge' : 'invoice_ready' } } });
+    const invoices = await mockPg('invoices').where({ customer_id: fixture.customerId });
+    expect(invoices).toHaveLength(recapCount === 2 ? 0 : 1);
+    if (invoices.length) {
+      expect(Number(invoices[0].total)).toBe(120);
+      await mockPg('invoices').where({ id: invoices[0].id }).update({ status: 'paid' });
+    }
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+    expect((await mockPg('service_visits').where({ id: fixture.visitId }).first()).billing_hold).toBe(false);
+    expect(require('../services/review-request').enrollPostService).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect((await saveVisitCompletionPacket(input)).body.replayed).toBe(true);
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(invoices.length);
+  });
+
   test('concurrent packet replay and pest recap acquire customer before stop without a lock cycle', async () => {
     await mockPg('services').where({ id: fixture.catalogId }).update({ category: 'pest_control' });
     await saveVisitCompletionPacket(submission());

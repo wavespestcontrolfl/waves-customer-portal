@@ -17,12 +17,13 @@ function office(reason, serviceId = null) {
 async function buildMemberLines(member, customer, trx) {
   const notes = member.record_notes || {};
   const price = Number.parseFloat(member.estimated_price);
-  if ([notes.backfill, notes.oneTimeRecapOnly, notes.invoiceAlreadySent].some(Boolean)) {
+  if ([notes.backfill, notes.invoiceAlreadySent].some(Boolean)) {
     return office('special_completion_billing', member.id);
   }
   if (member.record_status === 'incomplete'
       || ['inspection_only', 'customer_declined'].includes(notes.visitOutcome)) return { lineItems: [] };
   if (member.record_status !== 'completed') return office('record_not_completed', member.id);
+  if (notes.oneTimeRecapOnly) return { lineItems: [] };
   if (member.prepaid_method || Number(member.prepaid_amount) > 0) return office('prepaid_member', member.id);
   const payer = await require('./payer').resolveForInvoice({
     database: trx, customerId: customer.id, customer, scheduledServiceId: member.id, throwOnError: true,
