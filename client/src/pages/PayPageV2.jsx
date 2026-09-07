@@ -1581,6 +1581,8 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
           "Invoice total / Total charged" pair repeated the same figure
           twice right above a button that states it again (owner
           2026-08-31: the price appeared 6-7 times on one page). */}
+      {/* Persistent polite live region: the surcharge / funding quote appears here after "Continue", so it is announced (F0276). */}
+      <div role="status" aria-live="polite" aria-atomic="true" id="pay-review-totals">
       {(isCardFamily && (displayedSurcharge > 0 || (quoteData && quoteData.funding !== 'credit'))) && (
       <div data-glass="soft" style={{
         padding: SP.md,
@@ -1624,6 +1626,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         </div>
       </div>
       )}
+      </div>
 
       {elementError && (
         <div role="alert" style={{
@@ -1655,7 +1658,7 @@ function PaymentForm({ publishableKey, clientSecret, amount, paymentIntentId, to
         </div>
       )}
 
-      <BrandButton variant="primary" fullWidth onClick={awaitingConfirm ? handleFinalizePayment : handleSubmit} disabled={disabled}>
+      <BrandButton variant="primary" fullWidth onClick={awaitingConfirm ? handleFinalizePayment : handleSubmit} disabled={disabled} aria-describedby="pay-review-totals">
         {processing
           ? 'Processing…'
           : !ready
