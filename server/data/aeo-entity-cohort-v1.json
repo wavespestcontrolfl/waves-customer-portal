@@ -1,7 +1,7 @@
 {
   "version": "entity-2026-09-v1",
   "frozen_on": "2026-09-07",
-  "notes": "Owner-approved entity-accuracy cohort (decision 6, 2026-09-07). E1–E10 are customer-phrased questions; E11–E12 are search-query tests. Each question records the approved answer, its supporting source, the facts an answer must state, and the claims it must not make. Append a new version when changing a prompt; approved answers and patterns may be repaired without changing a prompt. Patterns are case-insensitive JavaScript regular expressions unless `flags` says otherwise. A fact or claim match counts only when its clause (bounded by sentence punctuation or a contrastive conjunction such as but / however / whereas) carries no negation before or after it, so a denied fact is not credited and a correct denial is never a wrong claim; a claim with `reject_value` captures a value in group 1 and counts only when the captured value differs from it. `other_entities` lists competitors: a claim whose clause subject is one of them (and not Waves) is about that company, not a wrong claim about Waves.",
+  "notes": "Owner-approved entity-accuracy cohort (decision 6, 2026-09-07). E1–E10 are customer-phrased questions; E11–E12 are search-query tests. Each question records the approved answer, its supporting source, the facts an answer must state, and the claims it must not make. Append a new version when changing a prompt; approved answers and patterns may be repaired without changing a prompt. Patterns are case-insensitive JavaScript regular expressions unless `flags` says otherwise. A fact or claim match counts only when its clause (bounded by sentence punctuation or a contrastive conjunction such as but / however / whereas) carries no negation before or after it, so a denied fact is not credited and a correct denial is never a wrong claim; a claim with `reject_value` captures a value in group 1 and counts only when the captured value differs from it. `other_entities` lists competitors: a claim whose clause subject is one of them (and not Waves) is about that company, not a wrong claim about Waves. URLs (link destinations and bare links) are removed from the prose before matching so a path such as /fumigation/ is never an assertion; a fact with `scope: any` is also matched against the collected URLs (website, phone).",
   "facts": {
     "founder": {
       "label": "Names Adam Benetti",
@@ -77,11 +77,13 @@
     },
     "phone": {
       "label": "Main line (941) 297-5749",
-      "pattern": "\\(?941\\)?[\\s.-]*297[\\s.-]*5749"
+      "pattern": "\\(?941\\)?[\\s.-]*297[\\s.-]*5749",
+      "scope": "any"
     },
     "website": {
       "label": "wavespestcontrol.com",
-      "pattern": "wavespestcontrol\\.com"
+      "pattern": "wavespestcontrol\\.com",
+      "scope": "any"
     }
   },
   "claims": {
