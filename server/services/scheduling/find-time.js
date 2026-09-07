@@ -79,9 +79,13 @@ async function findArrivalWindowSlots(opts) {
   for (const date of enumerateDates(dateFrom, dateTo, { includeWeekends: opts.includeWeekends })) {
     if (date < today) continue;
     for (const tech of techs) {
+      // `changes` is the caller's pending edit (duration, a re-picked
+      // service address) — the same shape the save probe hands the
+      // checker, so the ranking simulates the visit being saved, not the
+      // one stored.
       const context = await loadArrivalRouteContext({
         serviceId: opts.arrivalWindow.serviceId, date, technicianId: tech.id,
-        excludeServiceIds: opts.excludeServiceIds, now,
+        excludeServiceIds: opts.excludeServiceIds, changes: opts.arrivalWindow.changes, now,
       });
       if (!context) continue;
       const floor = Math.max(DAY_START_HOUR * 60, date === today ? parts.hour * 60 + parts.minute + 30 : 0);

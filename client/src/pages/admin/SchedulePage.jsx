@@ -1532,6 +1532,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     durationMinutes: slotCheckDuration,
     excludeServiceIds: [service.id],
   });
+  // The Service address picker's state lives ahead of the hint hook: a
+  // pending selection is a hint input (declared here, rendered below).
+  const [addressOptions, setAddressOptions] = useState([]);
+  const [addressState, setAddressState] = useState("loading");
+  const [selectedPropertyId, setSelectedPropertyId] = useState("");
   // Advisory drive-detour suggestions for the same fixed day — picking a
   // chip only fills the window fields (never saves). A terminal visit's
   // date/window edit is a record correction: there is no route to price,
@@ -1554,6 +1559,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     pickedStart: form.technicianId ? form.windowStart : undefined,
     pickedEnd: form.windowEnd,
     rangeFrom: etDateString(),
+    // A re-picked Service address is where the save sends the visit —
+    // score there, and re-score when the selection changes (Codex r7 P2).
+    propertyId: selectedPropertyId || undefined,
   });
   // Estimate provenance: if this appointment was scheduled from an accepted
   // estimate, surface the same quote/deposit/charge card the New Appointment
@@ -1676,9 +1684,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [createInvoice, setCreateInvoice] = useState(
     !!(service.createInvoiceOnComplete ?? service.create_invoice_on_complete),
   );
-  const [addressOptions, setAddressOptions] = useState([]);
-  const [addressState, setAddressState] = useState("loading");
-  const [selectedPropertyId, setSelectedPropertyId] = useState("");
   const selectedProperty = addressOptions.find((property) => property.id === selectedPropertyId);
   useEffect(() => {
     let cancelled = false;

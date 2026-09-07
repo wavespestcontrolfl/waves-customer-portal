@@ -68,7 +68,9 @@ function markUnknownDetours(slots) {
  * The engine walks per-technician routes, so a scheduled row with NO
  * assigned tech occupies no route and is invisible to it — an hour it
  * recommends can sit on an unassigned visit the commit will still reject.
- * Mirror the dispatch slot-check occupancy guard (tech-blind, same overlap
+ * Mirror the dispatch slot-check occupancy guard (tech-blind BY DESIGN —
+ * one active field technician, so every overlap is a real clash and every
+ * commit gate is tech-blind too; see scheduling/occupancy.js — same overlap
  * predicate, excludeServiceIds honored) and veto those hours. The engine
  * emits only the EARLIEST start per route gap, so a vetoed candidate must
  * not discard its whole gap — walk the gap through latest_start_min at the
@@ -152,11 +154,16 @@ function pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMi
 // selected (visit set to Unassigned) the checker would fall back to the
 // SAVED technician while the recommendations rank every technician — a
 // verdict on a different pool than the chips: no technician, no verdict.
-async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds }) {
+// `changes` is the caller's pending edit (duration, re-picked address);
+// the picked window joins it so the checker's context is the row the save
+// would write — the save probe passes `changes: updates` the same way, and
+// derives the work span from THAT window, not the stored one (r7 P2).
+async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes }) {
   if (!technicianId) return undefined;
   try {
     const fit = await checkArrivalPlacement({
       serviceId, date: from, technicianId, excludeServiceIds,
+      changes: { ...changes, window_start: pickedWindow.start, window_end: pickedWindow.end },
       windowStart: pickedWindow.start, windowEnd: pickedWindow.end, durationMinutes: spanMin,
     });
     if (fit.feasible) {
@@ -219,7 +226,7 @@ async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, sp
  */
 async function scorePickedHour({
   rawSlots, from, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
-  serviceId, technicianId, excludeServiceIds, excluded,
+  serviceId, technicianId, excludeServiceIds, excluded, changes,
 }) {
   const pickedMin = toMin(pickedStart);
   if (pickedEnd !== undefined && toMin(pickedEnd) <= pickedMin) return undefined;
@@ -227,7 +234,7 @@ async function scorePickedHour({
   if (pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMin, useArrivalWindows })) return undefined;
   const pickedWindow = { start: pickedStart, end: toHHMM(pickedEndMin) };
   return useArrivalWindows
-    ? pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds })
+    ? pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes })
     : pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded });
 }
 

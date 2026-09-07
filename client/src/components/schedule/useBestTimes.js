@@ -91,7 +91,7 @@ function normalizeDay(day, scopedToTech) {
 // absent — exactly the resolveFindTimeTarget order.
 export function useBestTimes({
   date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds,
-  arrivalWindows = false, enabled = true, address, lat, lng,
+  arrivalWindows = false, enabled = true, address, lat, lng, propertyId,
   pickedStart, pickedEnd, rangeFrom, sameDayFloorMin,
 }) {
   const [bestTimes, setBestTimes] = useState([]);
@@ -133,6 +133,10 @@ export function useBestTimes({
             // the VISIT's stamped address (secondary/rental properties),
             // not the customer's primary home.
             serviceId: serviceId || undefined,
+            // The edit form's pending Service address selection — the
+            // server scores at THAT property (what the save will stamp),
+            // not the visit's stored address.
+            propertyId: propertyId || undefined,
             customerId,
             address: address || undefined,
             lat: lat ?? undefined,
@@ -169,6 +173,6 @@ export function useBestTimes({
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, serviceId, customerId, durationMinutes, technicianId, excludeKey, arrivalWindows, address, lat, lng, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin]);
+  }, [enabled, date, serviceId, customerId, durationMinutes, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin]);
   return { bestTimes, picked, bestInRange, checking };
 }

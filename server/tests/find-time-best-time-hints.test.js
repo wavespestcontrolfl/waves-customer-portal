@@ -574,3 +574,107 @@ test('arrival-window mode scores the picked hour with the shared route checker: 
     else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = saved;
   }
 });
+
+// The edit form's pending Service address: the save stamps it, so the hint
+// must score there — and the arrival context must simulate the visit being
+// saved (that stamp, the form's duration, the picked window), the way the
+// save probe hands the checker `changes: updates` (Codex #4120 r7 P2).
+function mockVisitAndProperty(db, property) {
+  db.raw = jest.fn((sql) => sql);
+  db.mockImplementation((table) => (table === 'customer_properties'
+    ? { where: () => ({ first: async () => property }) }
+    : {
+      where: () => ({
+        leftJoin: () => ({
+          first: async () => ({
+            lat: 27.55, lng: -82.4,
+            address_line1: '100 Fixture Street', city: 'Parrish', state: 'FL', zip: '34219',
+            visit_customer_id: 'fixture-customer', visit_profile_label: null,
+          }),
+        }),
+      }),
+    }));
+}
+const PROPERTY_ID = '11111111-2222-4333-8444-555555555555';
+const rentalProperty = {
+  id: PROPERTY_ID, address_line1: '9 Rental Way', address_line2: '', city: 'Parrish', state: 'FL', zip: '34219',
+  latitude: 27.11, longitude: -82.22,
+};
+
+test('a pending propertyId scores at THAT property, not the visit\'s stored stamp (gap mode)', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  mockVisitAndProperty(require('../models/db'), rentalProperty);
+  const res = await post({ hint: true, serviceId: 'fixture-service', propertyId: PROPERTY_ID, durationMinutes: 60, dateFrom: '2026-09-01', dateTo: '2026-09-01' });
+  expect(res.status).toBe(200);
+  expect(findAvailableSlots.mock.calls[0][0]).toMatchObject({ lat: 27.11, lng: -82.22 });
+  const body = await res.json();
+  expect(body.target).toMatchObject({ source: 'pending_property', address: '9 Rental Way, Parrish, FL, 34219' });
+});
+
+test('a pending property without a pin geocodes ITS address, never the stored pin', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const { geocodeAddress } = require('../services/geocoder');
+  mockVisitAndProperty(require('../models/db'), { ...rentalProperty, latitude: null, longitude: null });
+  geocodeAddress.mockResolvedValue({ lat: 27.5, lng: -82.4 });
+  const res = await post({ hint: true, serviceId: 'fixture-service', propertyId: PROPERTY_ID, durationMinutes: 60, dateFrom: '2026-09-01', dateTo: '2026-09-01' });
+  expect(res.status).toBe(200);
+  expect(geocodeAddress).toHaveBeenCalledWith('9 Rental Way, Parrish, FL, 34219', { cacheOnly: false });
+  expect(findAvailableSlots.mock.calls[0][0]).toMatchObject({ lat: 27.5, lng: -82.4 });
+  expect((await res.json()).target.source).toBe('address_geocoded_now');
+});
+
+test('arrival mode hands the engine and the picked-hour checker the pending edit as `changes`: duration, the property stamp, and (picked only) the window', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const saved = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+  process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  mockVisitAndProperty(require('../models/db'), rentalProperty);
+  findAvailableSlots.mockResolvedValue({ slots: [], evaluated: 0 });
+  checkArrivalPlacement.mockResolvedValue({ feasible: true, detourMinutes: 4 });
+  try {
+    const res = await post({
+      hint: true, arrivalWindows: true, serviceId: 'fixture-service', propertyId: PROPERTY_ID, technicianId: 't1',
+      durationMinutes: 90, dateFrom: '2026-09-01', dateTo: '2026-09-01', slotStepMinutes: 60, pickedStart: '09:00', pickedEnd: '12:00',
+    });
+    expect(res.status).toBe(200);
+    const stamp = { property_id: PROPERTY_ID, address_line1: '9 Rental Way', city: 'Parrish', state: 'FL', zip: '34219', lat: 27.11, lng: -82.22 };
+    expect(findAvailableSlots.mock.calls[0][0]).toMatchObject({
+      lat: 27.11, lng: -82.22,
+      arrivalWindow: { serviceId: 'fixture-service', changes: { estimated_duration_minutes: 90, ...stamp } },
+    });
+    expect(checkArrivalPlacement).toHaveBeenCalledWith(expect.objectContaining({
+      windowStart: '09:00', windowEnd: '12:00', durationMinutes: 90,
+      changes: { estimated_duration_minutes: 90, ...stamp, window_start: '09:00', window_end: '12:00' },
+    }));
+    expect((await res.json()).picked).toMatchObject({ start: '09:00', fits: true });
+  } finally {
+    if (saved === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = saved;
+  }
+});
+
+test('arrival mode without a pending property still passes the form\'s duration and the picked window through `changes`', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  const saved = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+  process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+  mockVisitAndProperty(require('../models/db'), null);
+  findAvailableSlots.mockResolvedValue({ slots: [], evaluated: 0 });
+  checkArrivalPlacement.mockResolvedValue({ feasible: true, detourMinutes: 4 });
+  try {
+    await post({ ...BASE, hint: true, arrivalWindows: true, serviceId: 'fixture-service', technicianId: 't1', slotStepMinutes: 60, pickedStart: '09:00', pickedEnd: '11:00' });
+    expect(findAvailableSlots.mock.calls[0][0].arrivalWindow).toEqual({ serviceId: 'fixture-service', changes: { estimated_duration_minutes: 60 } });
+    expect(checkArrivalPlacement.mock.calls[0][0].changes).toEqual({ estimated_duration_minutes: 60, window_start: '09:00', window_end: '11:00' });
+  } finally {
+    if (saved === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = saved;
+  }
+});
+
+test('propertyId is refused outside hint mode / without a serviceId, and an unknown property 422s before the engine runs', async () => {
+  process.env.GATE_BEST_TIME_HINTS = 'true';
+  expect((await post({ ...BASE, propertyId: PROPERTY_ID })).status).toBe(400);
+  expect((await post({ ...BASE, hint: true, propertyId: PROPERTY_ID })).status).toBe(400);
+  mockVisitAndProperty(require('../models/db'), null);
+  const res = await post({ hint: true, serviceId: 'fixture-service', propertyId: PROPERTY_ID, durationMinutes: 60, dateFrom: '2026-09-01', dateTo: '2026-09-01' });
+  expect(res.status).toBe(422);
+  expect(findAvailableSlots).not.toHaveBeenCalled();
+});

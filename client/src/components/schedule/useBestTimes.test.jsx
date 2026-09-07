@@ -68,3 +68,17 @@ it('enabled:false searches nothing — the edit form turns the hint off for a co
   expect(fetch).not.toHaveBeenCalled();
   expect(result.current).toMatchObject({ bestTimes: [], picked: null, bestInRange: null, checking: false });
 });
+
+it('a pending Service address travels as propertyId and a change re-runs the search (edit form)', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ slots: [] }) });
+  vi.stubGlobal('fetch', fetch);
+  const { rerender } = renderHook(
+    (props) => useBestTimes({ date: '2035-01-02', serviceId: 'fixture', technicianId: 'tech', ...props }),
+    { initialProps: { propertyId: undefined } },
+  );
+  await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  expect('propertyId' in JSON.parse(fetch.mock.calls[0][1].body)).toBe(false);
+  rerender({ propertyId: 'prop-2' });
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  expect(JSON.parse(fetch.mock.calls[1][1].body)).toMatchObject({ propertyId: 'prop-2', serviceId: 'fixture' });
+});

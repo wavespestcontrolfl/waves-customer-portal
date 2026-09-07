@@ -30,6 +30,7 @@ const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../ser
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { serviceLocationSelects, resolveServiceLocation } = require('../services/scheduling/day-stops');
 const { arrivalWindowRoutingEnabled } = require('../services/scheduling/arrival-route');
+const { bookingPropertyStamp } = require('../services/customer-properties');
 
 const MAX_FIND_TIME_DAYS = 90;
 
@@ -55,7 +56,24 @@ function isYmd(value) {
   return Number.isFinite(parsed.getTime()) && etDateString(parsed) === value;
 }
 
-async function resolveFindTimeTarget({ serviceId, customerId, address, lat, lng }) {
+// The edit form's Service address picker: a property the operator has
+// selected but not yet saved. Its stamp (what update-details will write)
+// replaces the visit's stored stamp for this search, in the shape the
+// arrival context and geocoder read (Codex #4120 r7 P2).
+async function pendingPropertyStamp({ customerId, propertyId }) {
+  const stamp = await bookingPropertyStamp({ customerId, propertyId });
+  return {
+    property_id: stamp.property_id,
+    address_line1: stamp.service_address_line1,
+    city: stamp.service_address_city,
+    state: stamp.service_address_state,
+    zip: stamp.service_address_zip,
+    lat: finiteNumber(stamp.lat),
+    lng: finiteNumber(stamp.lng),
+  };
+}
+
+async function resolveFindTimeTarget({ serviceId, propertyId, customerId, address, lat, lng }) {
   let targetLat = finiteNumber(lat);
   let targetLng = finiteNumber(lng);
   let source = targetLat != null && targetLng != null ? 'request_coordinates' : null;
@@ -63,6 +81,7 @@ async function resolveFindTimeTarget({ serviceId, customerId, address, lat, lng 
   let targetAddress = address || null;
   let resolvedCustomerId = customerId || null;
   let profileLabel = null;
+  let pendingStamp = null;
 
   // Existing-visit surfaces rank at the VISIT's stamped address — a call
   // booking for a secondary/rental property must not score detours at the
@@ -82,11 +101,15 @@ async function resolveFindTimeTarget({ serviceId, customerId, address, lat, lng 
     if (!visit) throw httpError(404, 'Visit not found');
     resolvedCustomerId = resolvedCustomerId || visit.visit_customer_id || null;
     profileLabel = visit.visit_profile_label || null;
-    const location = await resolveServiceLocation(visit, targetAddress);
+    // A pending Service address selection outranks the stored stamp: the
+    // save applies it, so the hint must price the destination the save
+    // will leave, not the one it replaces.
+    pendingStamp = propertyId ? await pendingPropertyStamp({ customerId: visit.visit_customer_id, propertyId }) : null;
+    const location = await resolveServiceLocation(pendingStamp || visit, pendingStamp ? undefined : targetAddress);
     targetAddress = location.address || null;
     targetLat = finiteNumber(location.lat);
     targetLng = finiteNumber(location.lng);
-    source = location.source;
+    source = pendingStamp && location.source === 'visit_stamp' ? 'pending_property' : location.source;
   }
 
   // An EXPLICIT request address (the create modal's service-address picker
@@ -149,12 +172,15 @@ async function resolveFindTimeTarget({ serviceId, customerId, address, lat, lng 
   }
 
   return {
-    lat: targetLat,
-    lng: targetLng,
-    address: targetAddress,
-    source,
-    customerId: customer?.id || resolvedCustomerId,
-    profileLabel: customer?.profile_label || profileLabel,
+    target: {
+      lat: targetLat,
+      lng: targetLng,
+      address: targetAddress,
+      source,
+      customerId: customer?.id || resolvedCustomerId,
+      profileLabel: customer?.profile_label || profileLabel,
+    },
+    pendingStamp,
   };
 }
 
@@ -165,7 +191,7 @@ router.post('/', async (req, res) => {
       durationMinutes, dateFrom, dateTo,
       technicianId, topN,
       hint, serviceId, arrivalWindows, excludeServiceIds, slotStepMinutes,
-      pickedStart, pickedEnd, sameDayFloorMin,
+      pickedStart, pickedEnd, sameDayFloorMin, propertyId,
     } = req.body || {};
 
     // Best-time hint consumers go dark behind GATE_BEST_TIME_HINTS — read
@@ -198,6 +224,12 @@ router.post('/', async (req, res) => {
     // picker's same-day floor) — shapes and meaning in find-time-hints.js.
     const hintParamError = validateHintParams({ pickedStart, pickedEnd, sameDayFloorMin });
     if (hintParamError) throw httpError(400, hintParamError);
+    // A pending Service address only means something for an existing
+    // visit (the edit form); the stamp helper 422s on an id that is not
+    // one of the customer's active saved addresses.
+    if (propertyId !== undefined && (!hint || !serviceId || typeof propertyId !== 'string' || !propertyId.trim())) {
+      throw httpError(400, 'propertyId requires hint mode and a serviceId');
+    }
 
     const today = etDateString();
     const from = dateFrom || today;
@@ -212,9 +244,19 @@ router.post('/', async (req, res) => {
     const useArrivalWindows = hint && serviceId && arrivalWindows === true && arrivalWindowRoutingEnabled();
     // Arrival checks load the saved appointment too. Request coordinates or
     // an address echo must not make its hint promise a different destination.
-    const target = await resolveFindTimeTarget(useArrivalWindows
-      ? { serviceId }
-      : { serviceId, customerId, address, lat, lng });
+    const { target, pendingStamp } = await resolveFindTimeTarget(useArrivalWindows
+      ? { serviceId, propertyId }
+      : { serviceId, propertyId, customerId, address, lat, lng });
+    // The pending edit as the save probe would hand it to the arrival
+    // checker (`changes: updates`): the duration the form will save and,
+    // when the operator re-picked the Service address, that property's
+    // stamp — so the route simulation runs on the visit being saved. The
+    // picked verdict adds its window (scorePickedHour); the ranking's
+    // candidates carry their own. Gap mode has no route context to feed.
+    const spanMin = Math.max(15, parseInt(durationMinutes, 10) || 60);
+    const hintChanges = useArrivalWindows
+      ? { estimated_duration_minutes: spanMin, ...(pendingStamp || {}) }
+      : undefined;
 
     const requestedTopN = Math.min(Math.max(parseInt(topN, 10) || 10, 1), 100);
     const result = await findAvailableSlots({
@@ -236,7 +278,7 @@ router.post('/', async (req, res) => {
       excludeServiceIds,
       // Existing-visit staff hints share their route check with the edit
       // and rebooker save probes. Other consumers retain their slot contract.
-      ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId } } : {}),
+      ...(hint && serviceId && arrivalWindows === true ? { arrivalWindow: { serviceId, changes: hintChanges } } : {}),
       slotStepMinutes: slotStepMinutes !== undefined ? Number(slotStepMinutes) : undefined,
       // Staff tool: blackout days stay visible — admin manual scheduling is
       // deliberately unblocked (Settings blackouts gate CUSTOMER surfaces).
@@ -251,7 +293,6 @@ router.post('/', async (req, res) => {
     // the ungated Find-a-Time search only gets unknown detours marked.
     const excluded = (excludeServiceIds || []).map(String);
     const step = slotStepMinutes !== undefined ? Number(slotStepMinutes) : 1;
-    const spanMin = Math.max(15, parseInt(durationMinutes, 10) || 60);
     const rawSlots = markUnknownDetours(Array.isArray(result?.slots) ? result.slots : []);
     const slots = hint
       ? await guardHintSlots(rawSlots, { today, sameDayFloorMin, step, spanMin, excluded, topN: requestedTopN })
@@ -259,7 +300,7 @@ router.post('/', async (req, res) => {
     const picked = hint && pickedStart
       ? await scorePickedHour({
         rawSlots, from, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
-        serviceId, technicianId: technicianId || undefined, excludeServiceIds, excluded,
+        serviceId, technicianId: technicianId || undefined, excludeServiceIds, excluded, changes: hintChanges,
       })
       : undefined;
 
