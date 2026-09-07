@@ -335,6 +335,16 @@ describe('POST /call', () => {
     // No call was placed: the bridge claim goes back so the tech can retry now.
     expect(chains.sms_send_claims.del).toHaveBeenCalled();
   });
+
+  test('an ambiguous transport failure on the create keeps the claim and the row — the call may be ringing — and answers 409, still raising the bell (codex #4072 r16 P2)', async () => {
+    primeVisit();
+    placeBridgeCall.mockRejectedValueOnce(Object.assign(new Error('ETIMEDOUT'), { code: 'ETIMEDOUT', bridgeAmbiguous: true }));
+    const r = await call('post', '/call', { body: { scheduledServiceId: VISIT } });
+    expect(r.statusCode).toBe(409);
+    expect(r.body).toMatchObject({ code: 'CALL_IN_FLIGHT', mayHaveStarted: true });
+    expect(chains.sms_send_claims).toBeUndefined(); // claim kept
+    expect(alertTwilioFailure).toHaveBeenCalledWith(expect.objectContaining({ channel: 'voice', phase: 'send_api' }));
+  });
 });
 
 describe('tech-click calls take the processor\'s tech follow-up seam (codex #4072 r1–r8)', () => {

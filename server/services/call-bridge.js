@@ -12,6 +12,7 @@
  * the Twilio call, the SID backfill, and the conversation touchpoint.
  */
 const db = require('../models/db');
+const { classifyProviderFailure } = require('./messaging/providers/twilio-sms');
 const logger = require('./logger');
 
 async function placeBridgeCall({ to, bridgePhone, from, customer = null, source, adminUserId = null, metadata = null, leadName = '' }) {
@@ -61,11 +62,22 @@ async function placeBridgeCall({ to, bridgePhone, from, customer = null, source,
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
     });
   } catch (err) {
+    // An AMBIGUOUS transport failure — timeout, reset, 5xx / 429, the SMS
+    // provider's own classifier — may have reached Twilio: the call can be
+    // ringing. The row then stays 'initiated' (it holds activeBridgeCall's
+    // interlock for the window; /call-status adopts a real call by SID)
+    // and the caller keeps its claim; only a definitive rejection closes
+    // the row (codex #4072 r16 P2).
+    const ambiguous = classifyProviderFailure(err).retryable === true;
+    err.bridgeAmbiguous = ambiguous;
     if (callLogId) {
+      const close = ambiguous
+        ? { metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{create_ambiguous}', 'true'::jsonb, true)"), updated_at: new Date() }
+        : { status: 'failed', updated_at: new Date() };
       try {
-        await db('call_log').where({ id: callLogId }).update({ status: 'failed', updated_at: new Date() });
+        await db('call_log').where({ id: callLogId }).update(close);
       } catch (markErr) {
-        logger.warn(`[call-bridge] failed-mark skipped for ${callLogId}: ${markErr.message}`);
+        logger.warn(`[call-bridge] ${ambiguous ? 'ambiguous-mark' : 'failed-mark'} skipped for ${callLogId} (${String(markErr?.code || markErr?.name || 'error')})`);
       }
     }
     throw err;

@@ -301,8 +301,12 @@ router.post('/call', async (req, res, next) => {
         leadName: [target.customer.first_name, target.customer.last_name].filter(Boolean).join(' ').trim(),
       });
     } catch (err) {
-      // No call was placed: the claim goes back so the tech can retry now.
-      await releaseClaim(claimKey);
+      // A definitive rejection placed no call: the claim goes back so the
+      // tech can retry now. An AMBIGUOUS transport failure (the bridge
+      // flags it) may have reached Twilio — the call can be ringing — so
+      // the claim and the 'initiated' row stay (codex #4072 r16 P2).
+      const ambiguous = Boolean(err.bridgeAmbiguous);
+      if (!ambiguous) await releaseClaim(claimKey);
       if (err.code === 'TWILIO_NOT_CONFIGURED') return res.status(500).json({ error: 'Twilio not configured' });
       // Same deduplicated operator bell the admin bridge raises: a rejected
       // create never produces a status callback, so this is the only signal.
@@ -310,6 +314,10 @@ router.post('/call', async (req, res, next) => {
         channel: 'voice', direction: 'outbound', phase: 'send_api', status: 'failed',
         errorMessage: err.message, from: ctx.line.number, to: ctx.cell, link: '/admin/communications',
       }).catch((alertErr) => logger.error(`[twilio-alerts] async notification failed: ${alertErr.message}`));
+      if (ambiguous) {
+        logger.warn(`[tech-line] bridge create ambiguous (${String(err.code || err.status || 'transport')}) for visit ${target.visit.id} — claim and row kept`);
+        return res.status(409).json({ error: 'Twilio did not confirm the call — your phone may still ring. Wait a minute before trying again.', code: 'CALL_IN_FLIGHT', mayHaveStarted: true });
+      }
       return next(sanitized(err, 'call'));
     }
     res.json({ success: true, callSid: bridged.callSid, callLogId: bridged.callLogId, from: publicLine(ctx) });

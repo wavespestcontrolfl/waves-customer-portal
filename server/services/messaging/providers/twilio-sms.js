@@ -264,6 +264,10 @@ function mapPurposeToMessageType(purpose) {
 module.exports = {
   sendViaTwilio,
   mapPurposeToMessageType,
+  // Shared with the voice bridge (services/call-bridge.js): the same
+  // definitive-vs-ambiguous split decides whether a failed calls.create()
+  // may still have reached Twilio.
+  classifyProviderFailure,
   // Shared with sendCustomerMessage so the wrapper's MMS-vs-SMS decision
   // (GSM normalization exemption) uses the SAME predicate that decides
   // whether media URLs actually reach Twilio.

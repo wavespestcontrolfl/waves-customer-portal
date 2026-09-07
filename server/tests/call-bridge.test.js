@@ -6,6 +6,10 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/conversations', () => ({ recordTouchpoint: jest.fn(async () => null) }));
+// The SMS provider's definitive-vs-ambiguous split, shared with the bridge.
+jest.mock('../services/messaging/providers/twilio-sms', () => ({
+  classifyProviderFailure: (err) => ({ retryable: /timeout|econnreset|etimedout|socket hang up/i.test(String(err?.message || '')) || Number(err?.status) >= 500 }),
+}));
 const mockCallsCreate = jest.fn(async () => ({ sid: 'CA-bridge' }));
 jest.mock('twilio', () => jest.fn(() => ({ calls: { create: mockCallsCreate } })));
 jest.mock('../config', () => ({ twilio: { accountSid: 'AC-test', authToken: 'tok' } }));
@@ -59,6 +63,21 @@ test('a rejected Twilio create closes the pre-inserted row as failed and rethrow
     .rejects.toThrow('Unable to create record');
   expect(updates[0]).toMatchObject({ status: 'failed' });
   expect(recordTouchpoint).not.toHaveBeenCalled();
+});
+
+test('an ambiguous transport failure keeps the row initiated (flagged), never failed, and flags the error (codex #4072 r16 P2)', async () => {
+  const { updates } = primeDb();
+  db.raw = jest.fn((sql) => sql);
+  mockCallsCreate.mockRejectedValueOnce(Object.assign(new Error('ETIMEDOUT: socket hang up'), { code: 'ETIMEDOUT' }));
+  await expect(placeBridgeCall({ to: '+19415550100', bridgePhone: '+19415550101', from: '+19412975749', source: 'tech-click' }))
+    .rejects.toMatchObject({ bridgeAmbiguous: true });
+  expect(updates[0].status).toBeUndefined();
+  expect(String(updates[0].metadata)).toContain('create_ambiguous');
+  // …while a definitive rejection is flagged as such.
+  primeDb();
+  mockCallsCreate.mockRejectedValueOnce(Object.assign(new Error('Unable to create record: unverified'), { status: 400, code: 21219 }));
+  await expect(placeBridgeCall({ to: '+19415550100', bridgePhone: '+19415550101', from: '+19412975749', source: 'tech-click' }))
+    .rejects.toMatchObject({ bridgeAmbiguous: false });
 });
 
 // Last on purpose: resets the module registry with an empty config, which
