@@ -157,6 +157,42 @@ describe('nativePush permission and tap handling', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('does not let a late native registration-error event cancel a retry', async () => {
+    vi.useFakeTimers();
+    localStorage.setItem('waves_token', 'test-customer-session');
+    nativeMocks.state.permission = 'granted';
+    nativeMocks.PushNotifications.register.mockImplementationOnce(() => new Promise(() => {}));
+    const first = requestNativePushPermission();
+    await vi.advanceTimersByTimeAsync(15000);
+    await expect(first).resolves.toBe('registration_unavailable');
+
+    nativeMocks.PushNotifications.register.mockImplementationOnce(async () => {});
+    let result;
+    requestNativePushPermission().then((value) => { result = value; });
+    await vi.advanceTimersByTimeAsync(0);
+    nativeMocks.state.listeners.registrationError({ error: 'late native failure' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(result).toBeUndefined();
+    await nativeMocks.state.listeners.registration({ value: 'retried-device' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(result).toBe('granted');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('still times out after a native registration-error event without a device token', async () => {
+    vi.useFakeTimers();
+    localStorage.setItem('waves_token', 'test-customer-session');
+    nativeMocks.state.permission = 'granted';
+    nativeMocks.PushNotifications.register.mockImplementationOnce(async () => {});
+    let result;
+    requestNativePushPermission().then((value) => { result = value; });
+    await vi.advanceTimersByTimeAsync(0);
+    nativeMocks.state.listeners.registrationError({ error: 'native failure' });
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(result).toBe('registration_unavailable');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('posts a pre-login device token through the refresh-aware customer API after login', async () => {
     await initNativePush();
     nativeMocks.state.listeners.registration({ value: 'device-token-1' });

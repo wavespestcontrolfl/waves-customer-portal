@@ -119,7 +119,9 @@ async function bindPushListeners(PushNotifications) {
       finishRegistration(registered ? 'granted' : 'registration_unavailable');
     });
     await PushNotifications.addListener('registrationError', (err) => {
-      finishRegistration('registration_unavailable');
+      // Native errors carry no attempt ID and may arrive after a timeout.
+      // Keep them diagnostic: each active attempt has its own deadline,
+      // so a stale error cannot cancel a retry that is still registering.
       console.error('[nativePush] push registration error:', err?.error || err);
     });
     await PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
