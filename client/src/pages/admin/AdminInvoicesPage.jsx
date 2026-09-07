@@ -77,7 +77,7 @@ import {
 import { launchTapToPay } from "../../lib/tapToPay";
 import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 import { computeCardTotal } from "../../lib/cardSurcharge";
-import { invoiceDateOnly, formatInvoiceDate } from "../../lib/invoiceDates";
+import { invoiceDateOnly, formatInvoiceDate, isInvoiceDueDateOverdue } from "../../lib/invoiceDates";
 import { formatETDate } from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import DictationButton from "../../components/tech/DictationButton";
@@ -517,6 +517,7 @@ export default function AdminInvoicesPage() {
   const [tab, setTab] = useState("list");
   const [stats, setStats] = useState(null);
   const [toast, setToast] = useState("");
+  const [toastTone, setToastTone] = useState("ok");
   const [editInvoice, setEditInvoice] = useState(null);
   // Set when an already-delivered invoice was just edited: the list view
   // opens the resend modal for this id so the customer gets the new version.
@@ -539,9 +540,12 @@ export default function AdminInvoicesPage() {
   useEffect(() => {
     loadStats();
   }, [loadStats]);
-  const showToast = (msg) => {
+  // tone "ok" | "error": a failure is announced as one (prefix, colour, a
+  // longer dwell) instead of behind a green "OK".
+  const showToast = (msg, tone = "ok") => {
     setToast(msg);
-    setTimeout(() => setToast(""), 3500);
+    setToastTone(tone);
+    setTimeout(() => setToast(""), tone === "error" ? 8000 : 3500);
   };
 
   return (
@@ -608,6 +612,8 @@ export default function AdminInvoicesPage() {
         />
       )}
       <div
+        role="status"
+        aria-live="polite"
         style={{
           position: "fixed",
           bottom: isMobile
@@ -615,7 +621,7 @@ export default function AdminInvoicesPage() {
             : 20,
           right: 20,
           background: D.card,
-          border: `1px solid ${D.green}`,
+          border: `1px solid ${toastTone === "error" ? D.red : D.green}`,
           borderRadius: 8,
           padding: "10px 16px",
           display: "flex",
@@ -623,7 +629,7 @@ export default function AdminInvoicesPage() {
           gap: 8,
           boxShadow: "0 8px 32px rgba(0,0,0,.4)",
           zIndex: 300,
-          fontSize: 12,
+          fontSize: 13,
           transform: toast ? "translateY(0)" : "translateY(80px)",
           opacity: toast ? 1 : 0,
           transition: "all .3s",
@@ -631,7 +637,9 @@ export default function AdminInvoicesPage() {
         }}
       >
         {" "}
-        <span style={{ color: D.green }}>OK</span>
+        <span style={{ color: toastTone === "error" ? D.red : D.green }}>
+          {toastTone === "error" ? "Error" : "OK"}
+        </span>
         <span style={{ color: D.text }}>{toast}</span>{" "}
       </div>{" "}
     </div>
@@ -726,7 +734,7 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
       await load();
       onRefresh?.();
     } catch (err) {
-      showToast(err.message || "Could not apply the Zelle payment");
+      showToast(err.message || "Could not apply the Zelle payment", "error");
       // The server may have re-parked the notice as apply_failed, another
       // operator may have resolved it, or the settlement may have committed
       // before the response was lost — show the authoritative state of the
@@ -746,7 +754,7 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
       showToast("Zelle notice ignored");
       await load();
     } catch (err) {
-      showToast(err.message || "Could not ignore the notice");
+      showToast(err.message || "Could not ignore the notice", "error");
       // Same as Apply: the server may have closed it before the response was
       // lost, or another operator may have resolved it — show its state.
       await load();
@@ -954,6 +962,18 @@ function InvoiceList({
   const [datePeriod, setDatePeriod] = useState("all");
   const [sort, setSort] = useState("newest");
   const [query, setQuery] = useState("");
+  // The list fetch follows the search box by 300 ms (the customer search in
+  // CreateInvoice already does) and only the newest response paints, so fast
+  // typing no longer flickers to an earlier query's rows. A failed load says
+  // so instead of reading as "No invoices match".
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [listLoading, setListLoading] = useState(true);
+  const [listError, setListError] = useState(false);
+  const listReqIdRef = useRef(0);
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(query), 300);
+    return () => clearTimeout(t);
+  }, [query]);
   const [expanded, setExpanded] = useState(null);
   // A deep-linked invoice fetched ahead of its page lives OUTSIDE the
   // paginated collection (Codex PR r9 P2): merging it into `invoices`
@@ -979,16 +999,25 @@ function InvoiceList({
         pageNo,
         sort,
         filter,
-        query,
+        query: debouncedQuery,
         datePeriod,
         customerFilterId,
       });
 
+      const reqId = ++listReqIdRef.current;
+      if (!append) {
+        setListLoading(true);
+        setListError(false);
+      }
       const data = await adminFetch(`/admin/invoices?${params}`).catch(
         () => null,
       );
+      // A newer request has been issued since — let it paint instead.
+      if (reqId !== listReqIdRef.current) return;
+      if (!append) setListLoading(false);
       if (!data) {
         if (!append) {
+          setListError(true);
           setInvoices([]);
           setTotal(0);
           setSelected(new Set());
@@ -1008,7 +1037,7 @@ function InvoiceList({
         setSelected(new Set());
       }
     },
-    [PAGE_SIZE, customerFilterId, datePeriod, filter, query, sort],
+    [PAGE_SIZE, customerFilterId, datePeriod, debouncedQuery, filter, sort],
   );
   useEffect(() => {
     load();
@@ -1132,7 +1161,7 @@ function InvoiceList({
       load();
       onRefresh();
     } catch (err) {
-      showToast(`Void failed: ${err.message}`);
+      showToast(`Void failed: ${err.message}`, "error");
     } finally {
       setRowActionBusy(null);
     }
@@ -1152,19 +1181,22 @@ function InvoiceList({
       load();
       onRefresh();
     } catch (err) {
-      showToast(`Unvoid failed: ${err.message}`);
+      showToast(`Unvoid failed: ${err.message}`, "error");
     } finally {
       setRowActionBusy(null);
     }
   };
 
   const handleReversePrepaid = async (id) => {
+    if (rowActionBusy) return;
     if (
       !confirm(
         "Reverse this prepaid invoice? The applied account credit is returned to the customer and the invoice reopens for collection.",
       )
     )
       return;
+    // Money moves here — the busy latch keeps a double click to one POST.
+    setRowActionBusy(id);
     try {
       const res = await adminFetch(`/admin/invoices/${id}/reverse-prepaid`, {
         method: "POST",
@@ -1175,7 +1207,9 @@ function InvoiceList({
       load();
       onRefresh();
     } catch (err) {
-      showToast(`Reverse failed: ${err.message}`);
+      showToast(`Reverse failed: ${err.message}`, "error");
+    } finally {
+      setRowActionBusy(null);
     }
   };
 
@@ -1204,7 +1238,7 @@ function InvoiceList({
       load();
       onRefresh();
     } catch (err) {
-      showToast(`Cancel plan failed: ${err.message}`);
+      showToast(`Cancel plan failed: ${err.message}`, "error");
     } finally {
       setCancellingPlanInvoiceId(null);
     }
@@ -1226,7 +1260,7 @@ function InvoiceList({
       load();
       onRefresh();
     } catch (err) {
-      showToast(`Archive failed: ${err.message}`);
+      showToast(`Archive failed: ${err.message}`, "error");
     } finally {
       setRowActionBusy(null);
     }
@@ -1240,7 +1274,7 @@ function InvoiceList({
       load();
       onRefresh();
     } catch (err) {
-      showToast(`Restore failed: ${err.message}`);
+      showToast(`Restore failed: ${err.message}`, "error");
     } finally {
       setRowActionBusy(null);
     }
@@ -1321,7 +1355,7 @@ function InvoiceList({
       load();
       onRefresh();
     } catch (err) {
-      showToast(`Batch send failed: ${err.message}`);
+      showToast(`Batch send failed: ${err.message}`, "error");
     } finally {
       setBatchSending(false);
     }
@@ -1362,11 +1396,10 @@ function InvoiceList({
       return { key: "sending", label: "Sending", color: D.amber };
     if (inv.status === "draft")
       return { key: "draft", label: "Draft", color: D.muted };
-    if (inv.due_date) {
-      const due = new Date(inv.due_date + "T23:59:59");
-      if (Date.now() > due.getTime())
-        return { key: "overdue", label: "Overdue", color: D.red };
-    }
+    // ET wall-clock, like the server's list filter — the old browser-local
+    // check flipped rows a day early/late for anyone outside ET.
+    if (isInvoiceDueDateOverdue(inv.due_date))
+      return { key: "overdue", label: "Overdue", color: D.red };
     if (inv.status === "overdue")
       return { key: "overdue", label: "Overdue", color: D.red };
     if (inv.status === "viewed")
@@ -1575,11 +1608,26 @@ function InvoiceList({
           style={{
             padding: 48,
             textAlign: "center",
-            color: D.muted,
+            color: listError ? D.red : D.muted,
             fontSize: 15,
           }}
         >
-          No invoices match
+          {listError ? (
+            <>
+              <div role="alert">Could not load invoices</div>
+              <button
+                type="button"
+                onClick={() => load()}
+                style={{ ...sBtn(D.heading, D.white, isMobile), marginTop: 12 }}
+              >
+                Retry
+              </button>
+            </>
+          ) : listLoading ? (
+            "Loading invoices…"
+          ) : (
+            "No invoices match"
+          )}
         </div>
       ) : (
         <div
@@ -1856,7 +1904,7 @@ function InvoiceList({
                                 try {
                                   await launchTapToPay(inv.id);
                                 } catch (e) {
-                                  showToast(`Tap to Pay failed: ${e.message}`);
+                                  showToast(`Tap to Pay failed: ${e.message}`, "error");
                                 }
                               }}
                               style={sBtn(D.heading, D.white, isMobile)}
@@ -1975,7 +2023,11 @@ function InvoiceList({
                           {inv.status === "prepaid" && (
                             <button
                               onClick={() => handleReversePrepaid(inv.id)}
-                              style={sBtn("transparent", D.red, isMobile)}
+                              disabled={rowActionBusy === inv.id}
+                              style={{
+                                ...sBtn("transparent", D.red, isMobile),
+                                opacity: rowActionBusy === inv.id ? 0.5 : 1,
+                              }}
                               title="Return the applied account credit to the customer and reopen this invoice"
                             >
                               Reverse prepaid
@@ -2158,7 +2210,7 @@ function InvoiceList({
             load();
             onRefresh();
           }}
-          onError={(msg) => showToast(msg)}
+          onError={(msg) => showToast(msg, "error")}
         />
       )}
 
@@ -2173,7 +2225,7 @@ function InvoiceList({
             load();
             onRefresh();
           }}
-          onError={(msg) => showToast(msg)}
+          onError={(msg) => showToast(msg, "error")}
         />
       )}
 
@@ -2188,7 +2240,7 @@ function InvoiceList({
             load();
             onRefresh();
           }}
-          onError={(msg) => showToast(msg)}
+          onError={(msg) => showToast(msg, "error")}
         />
       )}
 
@@ -2203,7 +2255,7 @@ function InvoiceList({
             load();
             onRefresh();
           }}
-          onError={(msg) => showToast(msg)}
+          onError={(msg) => showToast(msg, "error")}
         />
       )}
 
@@ -2218,7 +2270,7 @@ function InvoiceList({
             load();
             onRefresh();
           }}
-          onError={(msg) => showToast(msg)}
+          onError={(msg) => showToast(msg, "error")}
         />
       )}
 
@@ -2233,7 +2285,7 @@ function InvoiceList({
             load();
             onRefresh();
           }}
-          onError={(msg) => showToast(msg)}
+          onError={(msg) => showToast(msg, "error")}
         />
       )}
 
@@ -2556,7 +2608,7 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
       showToast(`${files.length} attachment${files.length === 1 ? "" : "s"} uploaded`);
       await load();
     } catch (err) {
-      showToast(`Attachment upload failed: ${err.message}`);
+      showToast(`Attachment upload failed: ${err.message}`, "error");
     } finally {
       setUploading(false);
     }
@@ -2569,7 +2621,7 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
       );
       if (data.url) window.open(data.url, "_blank", "noopener,noreferrer");
     } catch (err) {
-      showToast(`Attachment open failed: ${err.message}`);
+      showToast(`Attachment open failed: ${err.message}`, "error");
     }
   };
 
@@ -2584,7 +2636,7 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
       showToast("Attachment removed");
       await load();
     } catch (err) {
-      showToast(`Attachment delete failed: ${err.message}`);
+      showToast(`Attachment delete failed: ${err.message}`, "error");
     } finally {
       setDeletingId(null);
     }
@@ -5374,7 +5426,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
         showToast("AI did not return a summary");
       }
     } catch (e) {
-      showToast(`AI summary failed: ${e.message}`);
+      showToast(`AI summary failed: ${e.message}`, "error");
     }
     setAiNotesLoading(false);
   };
@@ -5402,7 +5454,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
         showToast("AI did not return a message");
       }
     } catch (e) {
-      showToast(`AI message failed: ${e.message}`);
+      showToast(`AI message failed: ${e.message}`, "error");
     }
     setAiMessageLoading(false);
   };
@@ -5779,7 +5831,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       const disposition = persistedSendDisposition(persisted);
       if (disposition === "unsent") {
         setPendingScheduleInvoice({ invoice: pInv, reason: err.message });
-        showToast(`Send failed: ${err.message}`);
+        showToast(`Send failed: ${err.message}`, "error");
       } else if (disposition === "committed") {
         showToast(
           `The send went through for ${pInv.invoice_number} (status: ${persisted.status}) despite a network error`,

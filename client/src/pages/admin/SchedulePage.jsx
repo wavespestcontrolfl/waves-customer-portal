@@ -10191,7 +10191,7 @@ function RecapCapture({ serviceId }) {
             <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 10, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 10, padding: 8 }}>
               <div style={{ width: 40, height: 40, borderRadius: 7, background: "linear-gradient(135deg,#3f3f46,#18181b)", flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12.5, fontWeight: 500, color: D.white, textTransform: "capitalize" }}>{m.role}</div>
+                <div style={{ fontSize: 12.5, fontWeight: 500, color: D.heading, textTransform: "capitalize" }}>{m.role}</div>
                 <div style={{ fontSize: 11.5, color: "#111" }}>“{m.caption}”</div>
               </div>
               <span style={{ fontSize: 10.5, color: m.status === "ready" ? "#111" : D.muted, fontWeight: 500 }}>{m.status === "ready" ? "Uploaded" : m.status}</span>
@@ -10210,7 +10210,7 @@ function RecapCapture({ serviceId }) {
         <div style={{ position: "fixed", inset: 0, background: "rgba(5,8,13,.7)", zIndex: 50, display: "flex", alignItems: "flex-end" }} onClick={() => setPendingFile(null)}>
           <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", background: D.card, borderRadius: "18px 18px 0 0", border: `1px solid ${D.border}`, padding: "16px 14px 22px", maxHeight: "82%", overflowY: "auto" }}>
             <div style={{ width: 40, height: 4, background: D.border, borderRadius: 3, margin: "0 auto 12px" }} />
-            <div style={{ fontFamily: "'Montserrat', sans-serif", fontWeight: 500, fontSize: 16, color: D.white, textAlign: "center" }}>What were you doing?</div>
+            <div style={{ fontWeight: 500, fontSize: 16, color: D.heading, textAlign: "center" }}>What were you doing?</div>
             <div style={{ fontSize: 12, color: D.muted, textAlign: "center", margin: "4px 0 12px" }}>One tap. We caption it for the customer.</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               {(showMore ? [...RECAP_CHIPS_TOP, ...RECAP_CHIPS_MORE] : RECAP_CHIPS_TOP).map((c) => (
@@ -19946,7 +19946,7 @@ export function CompletionPanel({
                     {" "}
                     <span style={{ fontSize: 14, color: D.text, flex: 1 }}>
                       {row.label}:{" "}
-                      <span style={{ color: D.white }}>
+                      <span style={{ color: D.heading, fontWeight: 500 }}>
                         {formatReentryStepperMinutes(row.value)}
                       </span>
                     </span>{" "}
