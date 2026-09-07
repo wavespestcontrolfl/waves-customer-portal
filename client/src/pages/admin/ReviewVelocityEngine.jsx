@@ -185,6 +185,12 @@ const STAGES = {
 // 2026-08-06: keep in lockstep when either side changes.
 const TEMPLATES = [
   {
+    id: "day0_ask",
+    name: "Day-0 Ask",
+    sentiment: "happy",
+    body: "Hi {first}! {sender}. If we earned it, a Google review means a lot: {review_url} Reply if anything's off.",
+  },
+  {
     id: "friendly_ask",
     name: "Friendly Ask",
     sentiment: "happy",
@@ -321,6 +327,10 @@ function hydrate(body, c) {
     // server's own first-name substitution never runs on it, and a full name
     // would tip the one-segment ask templates into a second segment.
     .replace(/\{tech\}/g, String(c.lastTech || "Adam").trim().split(/\s+/)[0] || "Adam")
+    // Mirrors renderOutreachBody: the tech on the record, else the company.
+    .replace(/\{sender\}/g, c.lastTech
+      ? `${String(c.lastTech).trim().split(/\s+/)[0]} with Waves`
+      : "Waves Pest Control")
     .replace(/\{service_type\}/g, c.lastSvc || "pest control")
     .replace(/\{review_url\}/g, c.reviewUrl)
     .replace(/\{date\}/g, c.lastDate);

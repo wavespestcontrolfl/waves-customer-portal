@@ -3137,24 +3137,38 @@ const ReviewService = {
     // THAT for honest per-template attribution. An edited SMS body is persisted
     // (custom_body) so a provider retry re-sends the operator's copy
     // rather than reverting to the template.
+    let persistedBody = actualChannel === "sms" && customBody && customBody.trim() ? customBody : null;
+    // Controlled Day-0 composition (owner decision 2026-09-07): a cadence's
+    // step-0 SMS ask is the day0_ask template rendered from verified fields —
+    // never the LLM drafter, and never a draft persisted by an earlier
+    // (deferred, never-submitted) attempt of this step: those drafts were
+    // grounded on call history and carried the stale "today". Plans persisted
+    // before the change still name friendly_ask at step 0; they get the same
+    // body. Operator-provided copy still wins; first_treatment_ask keeps its
+    // own template.
+    const day0Controlled = actualChannel === "sms" && !persistedBody && !noLinkSend && sequenceId != null
+      && !canonicalTemplate
+      && OUTREACH.isDay0ControlledAsk({ sequenceStep, channel: actualChannel, templateId });
     const smsTemplateId = canonicalTemplate
       ? null
-      : templateId || (customBody && customBody.trim() ? null : "friendly_ask");
+      : day0Controlled
+        ? OUTREACH.DAY0_ASK_TEMPLATE_KEY
+        : templateId || (customBody && customBody.trim() ? null : "friendly_ask");
     let recordedTemplateKey = actualChannel === "email"
       ? "review_request_email"
       // Canonical asks record a NULL template_key (ASK_TOUCH_SQL's canonical
       // shape, matching create()-minted rows) — never 'custom'.
       : canonicalTemplate ? null : smsTemplateId || "custom";
-    let persistedBody = actualChannel === "sms" && customBody && customBody.trim() ? customBody : null;
 
     // Personalized ask body (GATE_REVIEW_ASK_PERSONALIZED): CADENCE SMS ask
     // touches only (sequenceId required — a CSR's one-off send keeps exactly
-    // the template they picked; Codex P1, r1). Operator-provided copy always
-    // wins; private no-link check-ins and email touches keep their templates.
+    // the template they picked; Codex P1, r1), and never the Day-0 touch
+    // (controlled composition above). Operator-provided copy always wins;
+    // private no-link check-ins and email touches keep their templates.
     // A null draft (gate off, no grounding, model down, failed verification,
     // or a recipient who isn't the account holder) falls through to the
     // template.
-    if (actualChannel === "sms" && !persistedBody && !noLinkSend && sequenceId != null) {
+    if (actualChannel === "sms" && !persistedBody && !noLinkSend && sequenceId != null && !day0Controlled) {
       // Identity guard (Codex P1, r1): the SMS goes to the RESOLVED service
       // contact. The account's call/SMS history only belongs to the account
       // holder — when the recipient is someone else (tenant, buyer, realtor),
@@ -3298,12 +3312,16 @@ const ReviewService = {
 
     const reviewUrl = await buildReviewUrl(request, customer.id);
 
+    // First name only (codex #3235 r2 P2): a full technician name blows the
+    // one-segment budget on the {tech}-bearing templates, and the customer
+    // knows the tech by first name anyway.
+    const techFirst = firstNameFrom(techName) || (await technicianFirstName(technicianId)) || null;
     const vars = {
       first: firstNameFrom(contact.name) || customer.first_name || "",
-      // First name only (codex #3235 r2 P2): a full technician name blows the
-      // one-segment budget on the {tech}-bearing templates, and the customer
-      // knows the tech by first name anyway.
-      tech: firstNameFrom(techName) || (await technicianFirstName(technicianId)) || TECH_FALLBACK_SMS,
+      tech: techFirst || TECH_FALLBACK_SMS,
+      // {sender} (day0_ask): the technician on the record, else the company —
+      // the "Your tech" SMS fallback must not become "Your tech with Waves".
+      sender: techFirst ? `${techFirst} with Waves` : "Waves Pest Control",
       service_type: serviceType || "service",
       review_url: reviewUrl,
     };
