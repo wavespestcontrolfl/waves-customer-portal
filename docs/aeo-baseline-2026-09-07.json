@@ -1,0 +1,96 @@
+{
+  "benchmark": "swfl-2026-09-v1",
+  "measurement_version": 2,
+  "surface": "API",
+  "questions": 40,
+  "observations": 160,
+  "first_observation_at": "2026-09-07T06:57:55.543Z",
+  "last_observation_at": "2026-09-07T07:19:36.315Z",
+  "publication_state": "Before task content release",
+  "adapter_sha256": "799a728d1bb077d3f3c0741aa736f0f71499796c5276afaf7147035aff3a9bb9",
+  "database_environment": "Dedicated QA database in verified Railway codex-dev",
+  "provider_configuration_environment": "Railway staging; provider keys only",
+  "unavailable_platforms": [
+    {
+      "platform": "perplexity",
+      "reason": "No provider configuration"
+    }
+  ],
+  "by_engine": [
+    {
+      "engine": "chatgpt",
+      "models": [
+        "gpt-5-search-api-2025-10-14"
+      ],
+      "questions_observed": 40,
+      "total": 40,
+      "measured": 40,
+      "mentioned": 3,
+      "cited": 16,
+      "mentionRate": 8,
+      "citationRate": 40,
+      "legacy": 0,
+      "noAnswer": 0,
+      "unresolved": 0,
+      "target_cited": 0
+    },
+    {
+      "engine": "claude",
+      "models": [
+        "claude-sonnet-5"
+      ],
+      "questions_observed": 40,
+      "total": 40,
+      "measured": 40,
+      "mentioned": 5,
+      "cited": 15,
+      "mentionRate": 13,
+      "citationRate": 38,
+      "legacy": 0,
+      "noAnswer": 0,
+      "unresolved": 0,
+      "target_cited": 4
+    },
+    {
+      "engine": "gemini",
+      "models": [
+        "gemini-2.5-flash"
+      ],
+      "questions_observed": 40,
+      "total": 40,
+      "measured": 40,
+      "mentioned": 6,
+      "cited": 15,
+      "mentionRate": 15,
+      "citationRate": 38,
+      "legacy": 0,
+      "noAnswer": 0,
+      "unresolved": 0,
+      "target_cited": 4
+    },
+    {
+      "engine": "google_ai_overview",
+      "models": [
+        "dataforseo:ai_overview"
+      ],
+      "questions_observed": 40,
+      "total": 40,
+      "measured": 36,
+      "mentioned": 9,
+      "cited": 18,
+      "mentionRate": 25,
+      "citationRate": 50,
+      "legacy": 0,
+      "noAnswer": 4,
+      "unresolved": 0,
+      "target_cited": 3
+    }
+  ],
+  "notes": [
+    "API observations are separate from consumer interfaces.",
+    "No before/after improvement or causal lift is claimed.",
+    "All 40 questions were attempted for each configured engine.",
+    "The reviewed AIO attribution rule was applied before summarizing; raw answers and citation/source arrays are retained."
+  ],
+  "question_outcomes_file": "aeo-baseline-2026-09-07.csv"
+}

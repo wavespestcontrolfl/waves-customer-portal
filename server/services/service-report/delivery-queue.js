@@ -229,6 +229,7 @@ async function processServiceReportDelivery(delivery, knex = db) {
     await markDeliverySkipped(delivery, { error: 'Unsupported service report delivery' }, knex);
     return { status: 'skipped' };
   }
+  const propertyHistoryEnabled = require('../../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
 
   // Jobs held for grounding: an elapsed hold is NOT proof the grounded
   // write/sanitize ran (the enqueuing process may have died) — the worker
@@ -297,7 +298,7 @@ async function processServiceReportDelivery(delivery, knex = db) {
     const { detectServiceLine } = require('./service-line-configs');
     isLawnDelivery = (serviceRow?.service_line || detectServiceLine(serviceRow?.service_type)) === 'lawn';
     const linked = serviceRow
-      ? await loadLinkedLawnAssessment(serviceRow, knex, { failClosed: true })
+      ? await loadLinkedLawnAssessment(serviceRow, knex, { failClosed: true, propertyHistoryEnabled })
       : null;
     fencedAssessmentId = linked?.id || null;
     canonicalAtResolve = fencedAssessmentId;
@@ -309,6 +310,7 @@ async function processServiceReportDelivery(delivery, knex = db) {
   // assessment isn't confirmed yet), fall back to the id the hold was created
   // for, which is the row that was grounded and sanitized above.
   if (!fencedAssessmentId && heldForGrounding) fencedAssessmentId = heldPayload.lawn_assessment_id;
+  const lawnHistoryEnabled = propertyHistoryEnabled && isLawnDelivery;
 
   // The fence is installed for EVERY delivery, including ones whose canonical
   // selection is currently null (codex P1 #3143 r3). Gating installation on a
@@ -340,7 +342,7 @@ async function processServiceReportDelivery(delivery, knex = db) {
     // registration refuses while it is unexpired, so nothing can start
     // between this check and the dispatch.
     const versionOf = (row) => (row ? JSON.stringify([row.recommendations, row.ai_summary, row.updated_at]) : null);
-    lawnFenceCheck = async ({ renderedAssessmentId = null } = {}) => {
+    lawnFenceCheck = async ({ renderedAssessmentId, renderedLawnHistoryIdentity } = {}) => {
       try {
         // The render is authoritative about which assessment the customer is
         // about to receive (codex P1 #3135 r3). If it used a DIFFERENT row than
@@ -383,11 +385,18 @@ async function processServiceReportDelivery(delivery, knex = db) {
           .where({ id: delivery.service_record_id })
           .first('id', 'customer_id', 'scheduled_service_id', 'service_id');
         const linkedNow = serviceNow
-          ? await loadLinkedLawnAssessment(serviceNow, knex, { failClosed: true })
+          ? await loadLinkedLawnAssessment(serviceNow, knex, { failClosed: true, propertyHistoryEnabled })
           : null;
         if (String(linkedNow?.id || '') !== String(canonicalAtResolve || '')) {
           logger.warn(`[delivery-queue] lawn assessment selection changed across render for record ${delivery.service_record_id} (was ${canonicalAtResolve || 'none'}, now ${linkedNow?.id || 'none'}, fenced ${assessmentId || 'none'}) — deferring send`);
           return false;
+        }
+        if (lawnHistoryEnabled) {
+          // The signed PDF pin proves the browser's history at render time.
+          // Recheck that exact identity here: the same current assessment can
+          // survive a reset, prior-row edit, or ancillary visit reassignment.
+          const historyNow = await require('../lawn-assessment-history').historyForReport(serviceNow, { assessment: linkedNow }, knex);
+          if (historyNow.identity !== renderedLawnHistoryIdentity) return false;
         }
         // Selection-only mode: no assessment resolved, so there is nothing to
         // seal. The re-check above is the whole guarantee — it proved the
@@ -462,6 +471,7 @@ async function processServiceReportDelivery(delivery, knex = db) {
       // correct there: the page renders no lawn section (canonical found
       // none), while the seal still guards the held assessment's copy.
       pinnedLawnAssessmentId: isLawnDelivery ? (canonicalAtResolve || PIN_NO_ASSESSMENT) : null,
+      propertyHistoryEnabled,
       verifyBeforeSend: lawnFenceCheck,
     });
     if (result.ok) {

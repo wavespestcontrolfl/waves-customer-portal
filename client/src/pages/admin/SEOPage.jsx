@@ -1696,6 +1696,7 @@ function BacklinksTab() {
   const [scanning, setScanning] = useState(false);
   const [subTab, setSubTab] = useState("overview");
   const [llmDash, setLlmDash] = useState(null);
+  const [llmError, setLlmError] = useState(false);
   const [llmScanning, setLlmScanning] = useState(false);
   const canRunSeoActions = isAdminUser();
 
@@ -1708,14 +1709,14 @@ function BacklinksTab() {
       .catch(() => setLoading(false));
   }, []);
 
-  // Lazy-load the answer-engine share-of-voice dashboard the first time the
+  // Lazy-load citation evidence the first time the
   // LLM Mentions sub-tab is opened.
   useEffect(() => {
-    if (subTab !== "llm" || llmDash) return;
+    if (subTab !== "llm" || llmDash || llmError) return;
     adminFetch("/admin/seo/llm-mentions")
       .then(setLlmDash)
-      .catch(() => {});
-  }, [subTab, llmDash]);
+      .catch(() => setLlmError(true));
+  }, [subTab, llmDash, llmError]);
 
   const handleLlmScan = async () => {
     if (!canRunSeoActions) return;
@@ -2207,299 +2208,92 @@ function BacklinksTab() {
         </Card>
       )}
 
-      {/* LLM Mentions sub-tab — answer-engine visibility (AEO) */}
+      {/* Citation evidence and brand mentions are separate measurements. */}
       {subTab === "llm" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {/* Header + scan */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
           <Card>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-              }}
-            >
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
               <div>
-                <div
-                  style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
-                >
-                  Answer-Engine Visibility (AEO)
-                </div>
-                <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
-                  {llmDash
-                    ? `${llmDash.summary?.overallShareOfVoice ?? 0}% share of voice · ${llmDash.summary?.queriesTracked ?? 0} queries · ${(llmDash.summary?.platforms || []).length} engines`
-                    : "Loading…"}
-                </div>
+                <h3 style={{ fontSize: 18, fontWeight: 500, color: D.heading, margin: "0 0 8px" }}>AI citations and mentions</h3>
+                <p style={{ fontSize: 14, color: D.muted, margin: 0 }}>
+                  {llmDash ? `${llmDash.summary.queriesTracked} active queries observed across ${llmDash.summary.platforms.length} engines` : llmError ? "Observations could not be loaded." : "Loading observations…"}
+                </p>
               </div>
               {canRunSeoActions && (
-                <button
-                  onClick={handleLlmScan}
-                  disabled={llmScanning}
-                  style={{
-                    padding: "4px 10px",
-                    borderRadius: 4,
-                    border: `1px solid ${D.teal}`,
-                    background: "transparent",
-                    color: D.teal,
-                    fontSize: 11,
-                    cursor: llmScanning ? "default" : "pointer",
-                    opacity: llmScanning ? 0.6 : 1,
-                  }}
-                >
+                <button onClick={handleLlmScan} disabled={llmScanning}
+                  style={{ padding: "8px 14px", minHeight: 44, borderRadius: 4, border: `1px solid ${D.border}`, background: D.bg, color: D.text, fontSize: 14, cursor: llmScanning ? "default" : "pointer" }}>
                   {llmScanning ? "Scanning…" : "Run Scan"}
                 </button>
               )}
             </div>
+            <p style={{ fontSize: 14, color: D.muted, lineHeight: 1.6, marginBottom: 0 }}>
+              Citation rate counts answers with a Waves source link attached. Mention rate counts answers that name Waves.
+              Search-result links do not count as citations. Unanswered probes and unresolved links are excluded from rates.
+              These API observations are directional; validate a sample in each consumer app.
+            </p>
+            {llmError && <button onClick={() => setLlmError(false)} style={{ marginTop: 12, minHeight: 44, padding: "8px 14px", border: `1px solid ${D.border}`, borderRadius: 4, background: D.bg, color: D.text, fontSize: 14, cursor: "pointer" }}>Retry loading observations</button>}
           </Card>
-
-          {/* Share of voice by engine */}
-          {llmDash?.byPlatform?.length > 0 && (
+          {llmDash?.benchmark && (
             <Card>
-              <div
-                style={{
-                  fontSize: 12,
-                  fontWeight: 500,
-                  color: D.heading,
-                  marginBottom: 10,
-                }}
-              >
-                Share of Voice by Engine
+              <h3 style={{ fontSize: 16, color: D.heading, fontWeight: 500, marginTop: 0 }}>Fixed 40-question benchmark</h3>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 24 }}>
+                <div><div style={{ fontSize: 14, color: D.muted }}>Linked citation rate</div><div style={{ fontSize: 24, color: D.heading }}>{aeoRate(llmDash.benchmark.citationRate)}</div></div>
+                <div><div style={{ fontSize: 14, color: D.muted }}>Brand mention rate</div><div style={{ fontSize: 24, color: D.heading }}>{aeoRate(llmDash.benchmark.mentionRate)}</div></div>
+                <div><div style={{ fontSize: 14, color: D.muted }}>Questions observed</div><div style={{ fontSize: 24, color: D.heading }}>{llmDash.benchmark.observedQuestions} / {llmDash.benchmark.questions}</div></div>
               </div>
-              {llmDash.byPlatform.map((p) => (
-                <div
-                  key={p.platform}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    marginBottom: 6,
-                  }}
-                >
-                  <div
-                    style={{
-                      width: 130,
-                      fontSize: 11,
-                      color: D.text,
-                      textTransform: "capitalize",
-                    }}
-                  >
-                    {p.platform.replace(/_/g, " ")}
-                  </div>
-                  <div
-                    style={{
-                      flex: 1,
-                      height: 14,
-                      background: D.bg,
-                      borderRadius: 3,
-                    }}
-                  >
-                    <div
-                      style={{
-                        height: "100%",
-                        borderRadius: 3,
-                        background:
-                          p.shareOfVoice >= 50
-                            ? D.green
-                            : p.shareOfVoice > 0
-                              ? D.amber
-                              : D.muted,
-                        width: `${p.shareOfVoice}%`,
-                      }}
-                    />
-                  </div>
-                  <div
-                    style={{
-                      width: 70,
-                      fontSize: 11,
-                      color: D.muted,
-                      textAlign: "right",
-                      fontFamily: MONO,
-                    }}
-                  >
-                    {p.shareOfVoice}% ({p.mentioned}/{p.total})
-                  </div>
+              <p style={{ fontSize: 14, color: D.muted, lineHeight: 1.6, marginBottom: 0 }}>
+                {llmDash.benchmark.activeQuestions} questions active · {llmDash.benchmark.measured} measured answers.
+                Excluded: {llmDash.benchmark.legacy} legacy, {llmDash.benchmark.noAnswer} no answer, {llmDash.benchmark.unresolved} unresolved.
+                Historical observations used a different citation method. Compare the same questions and model in repeat runs.
+                This view uses the latest observations within 30 days; sampling dates may differ by engine.
+              </p>
+            </Card>
+          )}
+          <AeoRateTable label="Benchmark by engine and model" rows={llmDash?.benchmark?.byPlatform || []} />
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 320px), 1fr))", gap: 12, minWidth: 0 }}>
+            <AeoRateTable label="Benchmark by question type" rows={llmDash?.benchmark?.byIntent || []} />
+            <AeoRateTable label="Benchmark by city" rows={llmDash?.benchmark?.byCity || []} />
+          </div>
+          <details style={{ fontSize: 14, color: D.text }}>
+            <summary style={{ cursor: "pointer", padding: "10px 0" }}>All managed queries and benchmark history</summary>
+            <AeoRateTable label="All managed queries by engine" rows={llmDash?.byPlatform || []} />
+            <AeoRateTable label="Daily benchmark observations by engine and model" rows={llmDash?.trend || []} />
+          </details>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <Card style={{ flex: 1, minWidth: 240 }}>
+              <h3 style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginTop: 0 }}>Linked Waves pages</h3>
+              {(llmDash?.citedPages || []).length === 0 && <p style={{ fontSize: 14, color: D.muted }}>No verified linked citations yet.</p>}
+              {(llmDash?.citedPages || []).map(c => (
+                <div key={c.url} style={{ display: "flex", gap: 12, justifyContent: "space-between", padding: "6px 0", fontSize: 14 }}>
+                  <a href={c.url} target="_blank" rel="noopener noreferrer" style={{ color: D.text, overflowWrap: "anywhere", minWidth: 0 }}>{c.url}</a>
+                  <span style={{ color: D.muted, fontFamily: MONO }}>{c.count}</span>
                 </div>
               ))}
             </Card>
-          )}
-
-          {/* Share-of-voice trend */}
-          {llmDash?.trend?.length > 1 && (
-            <Card>
-              <div
-                style={{
-                  fontSize: 12,
-                  fontWeight: 500,
-                  color: D.heading,
-                  marginBottom: 10,
-                }}
-              >
-                Share-of-Voice Trend ({llmDash.trend.length}d)
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "flex-end",
-                  gap: 2,
-                  height: 48,
-                }}
-              >
-                {llmDash.trend.map((t) => (
-                  <div
-                    key={t.date}
-                    title={`${t.date}: ${t.shareOfVoice}% (${t.mentioned}/${t.total})`}
-                    style={{
-                      flex: 1,
-                      minWidth: 3,
-                      height: `${Math.max(2, t.shareOfVoice)}%`,
-                      background: D.green,
-                      borderRadius: 2,
-                    }}
-                  />
-                ))}
-              </div>
-            </Card>
-          )}
-
-          {/* Cited Waves pages + competitors */}
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
             <Card style={{ flex: 1, minWidth: 240 }}>
-              <div
-                style={{
-                  fontSize: 12,
-                  fontWeight: 500,
-                  color: D.heading,
-                  marginBottom: 10,
-                }}
-              >
-                Cited Waves Pages
-              </div>
-              {(llmDash?.citedPages || []).length === 0 ? (
-                <div style={{ fontSize: 12, color: D.muted }}>
-                  No owned-domain citations yet.
+              <h3 style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginTop: 0 }}>Competitors mentioned</h3>
+              {(llmDash?.competitors || []).length === 0 && <p style={{ fontSize: 14, color: D.muted }}>None detected in measured answers.</p>}
+              {(llmDash?.competitors || []).map(c => (
+                <div key={c.name} style={{ display: "flex", gap: 12, justifyContent: "space-between", padding: "6px 0", fontSize: 14, color: D.text }}>
+                  <span>{c.name}</span><span style={{ fontFamily: MONO }}>{c.count}</span>
                 </div>
-              ) : (
-                llmDash.citedPages.map((c, i) => (
-                  <div
-                    key={i}
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      gap: 8,
-                      fontSize: 11,
-                      padding: "3px 0",
-                      color: D.text,
-                    }}
-                  >
-                    <span
-                      style={{
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {c.url}
-                    </span>
-                    <span style={{ color: D.green, fontFamily: MONO }}>
-                      {c.count}
-                    </span>
-                  </div>
-                ))
-              )}
-            </Card>
-            <Card style={{ flex: 1, minWidth: 240 }}>
-              <div
-                style={{
-                  fontSize: 12,
-                  fontWeight: 500,
-                  color: D.heading,
-                  marginBottom: 10,
-                }}
-              >
-                Competitors Cited
-              </div>
-              {(llmDash?.competitors || []).length === 0 ? (
-                <div style={{ fontSize: 12, color: D.muted }}>
-                  None detected.
-                </div>
-              ) : (
-                llmDash.competitors.map((c, i) => (
-                  <div
-                    key={i}
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      gap: 8,
-                      fontSize: 11,
-                      padding: "3px 0",
-                      color: D.text,
-                      textTransform: "capitalize",
-                    }}
-                  >
-                    <span>{c.name}</span>
-                    <span style={{ color: D.amber, fontFamily: MONO }}>
-                      {c.count}
-                    </span>
-                  </div>
-                ))
-              )}
+              ))}
             </Card>
           </div>
-
-          {/* Latest by query × engine */}
           <Card>
-            <div
-              style={{
-                fontSize: 12,
-                fontWeight: 500,
-                color: D.heading,
-                marginBottom: 10,
-              }}
-            >
-              Latest by Query × Engine
-            </div>
-            {(llmDash?.grid || data.llmMentions || []).length === 0 ? (
-              <div
-                style={{
-                  fontSize: 13,
-                  color: D.muted,
-                  padding: 20,
-                  textAlign: "center",
-                }}
-              >
-                {canRunSeoActions
-                  ? 'Click "Run Scan" to probe answer engines for Waves mentions'
-                  : "No LLM mentions found."}
-              </div>
-            ) : (
-              (llmDash?.grid || data.llmMentions || []).map((m, i) => (
-                <div
-                  key={i}
-                  style={{
-                    padding: "8px 12px",
-                    background: D.bg,
-                    borderRadius: 6,
-                    marginBottom: 4,
-                    borderLeft: `3px solid ${m.waves_mentioned ? D.green : D.muted}`,
-                  }}
-                >
-                  <div style={{ fontSize: 12, color: D.heading }}>
-                    "{m.query}"
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: m.waves_mentioned ? D.green : D.muted,
-                    }}
-                  >
-                    {m.waves_mentioned
-                      ? `✓ Mentioned${m.rank_position ? ` (rank ${m.rank_position})` : ""}`
-                      : "— Not mentioned"}{" "}
-                    · {m.llm_platform} · {m.check_date}
-                  </div>
-                </div>
-              ))
-            )}
+            <h3 style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginTop: 0 }}>Latest answer evidence</h3>
+            {!llmDash?.grid?.length && <p style={{ fontSize: 14, color: D.muted }}>No observations for active queries yet.</p>}
+            {(llmDash?.grid || []).map(m => (
+              <details key={`${m.query}::${m.llm_platform}::${m.model_version}`} style={{ padding: "12px 0", borderBottom: `1px solid ${D.border}`, fontSize: 14, color: D.text }}>
+                <summary style={{ cursor: "pointer", lineHeight: 1.6 }}>
+                  {m.benchmark_id && `${m.benchmark_id} · `}{m.query}
+                  <span style={{ display: "block", color: D.muted }}>{aeoStatus(m)} · {m.llm_platform} · {m.model_version} · {String(m.check_date).slice(0, 10)}</span>
+                </summary>
+                <p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: 1.6 }}>{m.response_raw || "No answer text returned."}</p>
+                {m.waves_cited_urls.map(url => <p key={url}><a href={url} target="_blank" rel="noopener noreferrer" style={{ color: D.text, overflowWrap: "anywhere" }}>{url}</a></p>)}
+                {m.target_cited && <p style={{ color: D.muted }}>The guide mapped to this benchmark question was linked.</p>}
+              </details>
+            ))}
           </Card>
         </div>
       )}
@@ -2507,6 +2301,40 @@ function BacklinksTab() {
       {subTab === "prospects" && <LinkBuildingBoard canRun={canRunSeoActions} />}
       {subTab === "agent" && <BacklinkAgentPanel />}
     </div>
+  );
+}
+
+function aeoRate(value) {
+  return typeof value === "number" ? `${value}%` : "Not measured";
+}
+
+function aeoStatus(row) {
+  if (row.measurement_version !== 2) return "Historical observation";
+  if (!row.answer_available) return "No answer";
+  if (!row.citations_complete) return "Unresolved source link";
+  if (row.waves_cited_urls.length) return "Linked citation";
+  return row.waves_mentioned ? "Mention only" : "No Waves mention or citation";
+}
+
+function AeoRateTable({ label, rows }) {
+  return (
+    <Card style={{ flex: 1, minWidth: 0 }}>
+      <h3 style={{ fontSize: 16, fontWeight: 500, color: D.heading, marginTop: 0 }}>{label}</h3>
+      {rows.length === 0 ? <p style={{ fontSize: 14, color: D.muted }}>No observations yet.</p> : (
+        <div style={{ overflowX: "auto" }}>
+          <table aria-label={label} style={{ width: "100%", minWidth: 440, borderCollapse: "collapse", fontSize: 14, color: D.text }}>
+            <thead><tr>{["Group", "Linked", "Mentioned", "Answers", "Excluded"].map(title => <th key={title} style={{ textAlign: "left", fontWeight: 500, padding: "8px", borderBottom: `1px solid ${D.border}` }}>{title}</th>)}</tr></thead>
+            <tbody>{rows.map(row => <tr key={row.key}>
+              <td style={{ padding: "8px", overflowWrap: "anywhere" }}>{row.key}</td>
+              <td style={{ padding: "8px", whiteSpace: "nowrap" }}>{aeoRate(row.citationRate)}</td>
+              <td style={{ padding: "8px", whiteSpace: "nowrap" }}>{aeoRate(row.mentionRate)}</td>
+              <td style={{ padding: "8px" }}>{row.measured}</td>
+              <td style={{ padding: "8px" }}>{row.total - row.measured}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>
+      )}
+    </Card>
   );
 }
 
