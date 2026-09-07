@@ -297,9 +297,16 @@ describe('adapters project onto the canonical shape', () => {
     // every lane that names its cron: the job exists in the scheduler under that name, and the job reads with the lane's policy
     const scheduler = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
     const mapped = Object.entries(LANE_RUNTIME).filter(([, p]) => p.workflow_id);
-    expect(mapped.map(([l]) => l).sort()).toEqual(['call_research', 'call_self_audit', 'shadow_judge', 'voice_profile']);
+    expect(mapped.map(([l]) => l).sort()).toEqual(['call_research', 'call_self_audit', 'shadow_judge', 'sms-operational-actions', 'voice_profile']);
     for (const [laneId, policy] of mapped) {
-      expect(scheduler).toContain(`runExclusive('${policy.workflow_id}'`);
+      const workflowSource = laneId === 'sms-operational-actions'
+        ? require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'sms-operational-actions.js'), 'utf8')
+        : scheduler;
+      expect(workflowSource).toContain(`runExclusive('${policy.workflow_id}'`);
+      if (laneId === 'sms-operational-actions') {
+        expect(scheduler).toContain("require('./sms-operational-actions')");
+        expect(scheduler).toContain('runSmsOperationalActions(');
+      }
       expect(jobHealth.laneForJob(policy.workflow_id)).toBe(laneId);
     }
     const miner = jobHealth.fromRow({ job_name: 'call-research-miner', last_status: 'running', last_started_at: ago(7 * 60e3) });

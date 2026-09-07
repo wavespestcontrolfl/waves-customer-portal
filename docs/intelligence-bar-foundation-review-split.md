@@ -150,3 +150,9 @@ dev database; no production migration or gate activation is authorized.
   ordered relationship, recipient and proof checks remain together; extracting
   one-use helpers would only move branches. Further simplification must keep
   every tested authorization path.
+
+Main integration at `db70ae441` adds the three new prep-guide/Quick Links
+request sites, retaining 1,739 cumulative sites as unsupported/unverified in A.
+Their baseline fingerprints are proved against that already-merged main
+revision. The former Communications handlers remain recorded as historical
+sites; moving the UI does not remove work from the capability denominator.

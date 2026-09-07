@@ -65,6 +65,11 @@ jobs:
         env:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx knex migrate:latest --knexfile server/knexfile.js
+      - name: SMS operational transaction tests
+        working-directory: server
+        env:
+          SMS_OPERATIONS_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/sms-operations-postgres.test.js
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
         run: npx jest --ci --silent --maxWorkers=2

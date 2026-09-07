@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Sheet, SheetHeader, SheetBody } from '../ui/Sheet';
 import { cn } from '../ui/cn';
+import PrepGuideForm, { PREP_GUIDE_LINKS } from './PrepGuideForm';
 
-// The SMS composer's Quick Links picker: one searchable sheet over every link
-// an operator can text a customer — the per-customer minted links (reschedule,
+// The composers' Quick Links picker: one searchable sheet over links and prep
+// guides. The SMS composer supplies its per-customer minted links (reschedule,
 // re-service, review request, pay balance, latest estimate, referral, Auto
 // Pay setup), the per-office Google review links, and the whole link library
 // (sitemap-synced website pages + hand-managed rows). Presentation only: the
@@ -21,6 +22,7 @@ export const LINK_CHANNELS = [
 
 export const LINK_GROUP_ORDER = [
   ['customer', 'For this customer'],
+  ['guides', 'Prep guides'],
   ['reviews', 'Reviews'],
   ['booking', 'Booking & quotes'],
   ['app', 'Waves app'],
@@ -87,45 +89,71 @@ export default function InsertLinkSheet({
   busyKey = null,
   onPick,
   groupCaptions = {},
+  recipientSearch = "",
+  prepChannel = "both",
+  layer = 120,
 }) {
   const [query, setQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("all");
   // The `channels` row whose Text / Email / Both chooser is open.
   const [channelRowKey, setChannelRowKey] = useState(null);
+  const [prepGuide, setPrepGuide] = useState(null);
+  const [prepSending, setPrepSending] = useState(false);
   const searchRef = useRef(null);
 
   // Fresh search each open — a stale filter from the last insert is never
   // what the operator wants for the next one.
   useEffect(() => {
-    if (open) {
+    if (open && !prepGuide) {
       setQuery("");
       setActiveCategory("all");
       setChannelRowKey(null);
-      const t = setTimeout(() => searchRef.current?.focus({ preventScroll: true }), 60);
-      return () => clearTimeout(t);
     }
-    return undefined;
   }, [open]);
 
+  // The list remounts after Back; focus only after its input exists.
+  useEffect(() => {
+    if (!open || prepGuide) return undefined;
+    const t = setTimeout(() => searchRef.current?.focus({ preventScroll: true }), 60);
+    return () => clearTimeout(t);
+  }, [open, prepGuide]);
+
   const groups = useMemo(
-    () => buildLinkGroups(links, query, activeCategory),
+    () => buildLinkGroups([...(links || []), ...PREP_GUIDE_LINKS], query, activeCategory),
     [links, query, activeCategory],
   );
   const hasQuery = Boolean(query.trim());
+  const close = () => {
+    if (prepSending) return;
+    setPrepGuide(null);
+    onClose();
+  };
 
   return (
-    <Sheet open={open} onClose={onClose} width="sm" ariaLabel="Quick Links">
+    <Sheet open={open} onClose={close} width="sm" ariaLabel="Quick Links" layer={layer} keepMounted={!!prepGuide}>
       <SheetHeader>
         <span className="text-14 font-medium text-zinc-900">Quick Links</span>
         <button
           type="button"
-          onClick={onClose}
+          onClick={close}
+          disabled={prepSending}
           aria-label="Close"
           className="w-8 h-8 rounded-full bg-zinc-100 text-zinc-600 hover:bg-zinc-200 u-focus-ring text-13"
         >
           ✕
         </button>
       </SheetHeader>
+      {prepGuide ? (
+        <SheetBody>
+          <button type="button" disabled={prepSending}
+            onClick={() => setPrepGuide(null)}
+            className="border-0 bg-transparent p-0 text-14 text-zinc-600 underline mb-4 u-focus-ring disabled:opacity-50">
+            Back to Quick Links
+          </button>
+          <PrepGuideForm active={open} guide={prepGuide} initialSearch={recipientSearch}
+            initialChannel={prepChannel} onSendingChange={setPrepSending} />
+        </SheetBody>
+      ) : <>
       <div className="px-5 pt-3 pb-2 border-b border-hairline border-zinc-200 shrink-0">
         <div className="relative">
           <svg
@@ -192,7 +220,9 @@ export default function InsertLinkSheet({
                   <div key={link.key}>
                   <button
                     type="button"
-                    onClick={() => (link.channels
+                    onClick={() => (link.pestType
+                      ? setPrepGuide(link)
+                      : link.channels
                       ? setChannelRowKey(chooserOpen ? null : link.key)
                       : onPick(link))}
                     disabled={busyKey != null}
@@ -210,7 +240,7 @@ export default function InsertLinkSheet({
                     <span className="flex-1 min-w-0">
                       <span className="block text-13 font-medium text-zinc-900 truncate">{link.name}</span>
                       <span className="block text-11 text-ink-tertiary truncate">
-                        {displayUrl(link.url) || "Personal link — looked up on insert"}
+                        {link.description || displayUrl(link.url) || "Personal link — looked up on insert"}
                       </span>
                     </span>
                     {busy ? (
@@ -268,6 +298,7 @@ export default function InsertLinkSheet({
           </div>
         )}
       </SheetBody>
+      </>}
     </Sheet>
   );
 }

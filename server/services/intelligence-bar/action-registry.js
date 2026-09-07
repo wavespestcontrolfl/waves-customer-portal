@@ -96,6 +96,7 @@ const DISCOVERY_TOOL = {
   },
 };
 const validateDiscovery = ajv.compile(DISCOVERY_TOOL.input_schema);
+const DISCOVERY_STOPWORDS = new Set('a an the i me my we our you your it this that these those do does did can could will would should please like want need to for from of on in with is are be have has and or what how'.split(' '));
 
 function allowed(action, { role, context } = {}) {
   if (!action) return false;
@@ -126,11 +127,12 @@ function validateInput(name, input, scope) {
 function discover(input, scope) {
   const failure = validateInput(DISCOVERY_TOOL.name, input, scope);
   if (failure) return { result: failure, definitions: [] };
-  const terms = input.query.toLowerCase().match(/[a-z0-9]+/g) || [];
+  const terms = [...new Set(input.query.toLowerCase().match(/[a-z0-9]+/g) || [])]
+    .filter(term => !DISCOVERY_STOPWORDS.has(term));
   const ranked = [...actions.values()].filter(a => allowed(a, scope) && (!input.domain || a.domain === input.domain))
     .map(a => {
-      const text = `${a.id.replace(/_/g, ' ')} ${a.domain} ${a.definition.description}`.toLowerCase();
-      return { action: a, score: terms.reduce((n, word) => n + (text.includes(word) ? 1 : 0), 0) };
+      const words = new Set(`${a.id.replace(/_/g, ' ')} ${a.domain} ${a.definition.description}`.toLowerCase().match(/[a-z0-9]+/g) || []);
+      return { action: a, score: terms.reduce((n, word) => n + (words.has(word) ? 1 : 0), 0) };
     }).filter(r => r.score > 0).sort((a, b) => b.score - a.score || a.action.id.localeCompare(b.action.id));
   const selected = ranked.slice(0, 12).map(r => r.action);
   return {
