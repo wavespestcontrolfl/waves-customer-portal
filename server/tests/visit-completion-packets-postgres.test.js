@@ -1,6 +1,11 @@
 /** Canonical completion writes against a migrated, private nonproduction database. */
 jest.mock('../models/db', () => {
-  const db = (...args) => mockPg(...args);
+  const db = (table, ...args) => {
+    const query = mockPg(table, ...args);
+    // Isolate the notification recipient fixture from other seeded QA staff.
+    return table === 'technicians' && mockNotificationRecipientId
+      ? query.where({ id: mockNotificationRecipientId }) : query;
+  };
   for (const name of ['raw', 'transaction', 'queryBuilder', 'ref']) db[name] = (...args) => mockPg[name](...args);
   for (const name of ['schema', 'fn']) Object.defineProperty(db, name, { get: () => mockPg[name] });
   return db;
@@ -36,6 +41,7 @@ const originalPestRecap = process.env.PEST_RECAP;
 const postgres = connection ? describe : describe.skip;
 let mockPg;
 let fixture;
+let mockNotificationRecipientId;
 jest.setTimeout(90000);
 
 function submission(overrides = {}) {
@@ -59,6 +65,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
   });
   afterAll(async () => { if (mockPg) await mockPg.destroy(); });
   beforeEach(async () => {
+    mockNotificationRecipientId = null;
     jest.restoreAllMocks();
     jest.clearAllMocks();
     chargeInvoiceWithSavedCard.mockReset();
@@ -283,6 +290,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
   });
 
   test.each([true, false])('interruption after an admin notification does not duplicate activity or push (bell=%s)', async (bell) => {
+    mockNotificationRecipientId = fixture.techId;
     await mockPg('notification_preferences').insert({ admin_user_id: fixture.techId, trigger_key: 'job_complete',
       bell_enabled: bell, push_enabled: true, sound_enabled: false });
     jest.spyOn(require('../services/notification-bell-policy'), 'isBellPolicyEnabled').mockReturnValue(false);
@@ -518,6 +526,80 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).update({ status: 'refunded' });
     expect((await require('../services/closeout-status').getCloseoutStatus(fixture.serviceIds[1], { knex: mockPg })).facts.invoice)
       .toMatchObject({ reason: 'parked_manual_refunded_invoice', refundedInvoiceId: saved.body.billing.invoiceId });
+  });
+
+  test('an interrupted accepted ACH payment recovers without a second collection', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    const groups = require('../services/visit-groups');
+    const member = await mockPg('scheduled_services').where({ visit_id: fixture.visitId }).orderBy('id').first();
+    expect(await groups.claimVisitNotification(member, 'visit_payment')).toMatchObject({ state: 'owner' });
+    await mockPg('invoices').where({ id: saved.body.billing.invoiceId })
+      .update({ status: 'processing', stripe_payment_intent_id: 'pi_fixture_ach_processing' });
+    for (let replay = 0; replay < 2; replay++) {
+      expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'processing' });
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first())
+        .toMatchObject({ payment_intent_id: 'pi_fixture_ach_processing' });
+      expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
+        .toMatchObject({ status: 'sent' });
+    }
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('a moved non-anchor member prevents collection until its saved stop is restored', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    const invoice = await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first();
+    const secondaryId = fixture.serviceIds.find((id) => id !== invoice.scheduled_service_id);
+    const original = await mockPg('scheduled_services').where({ id: secondaryId }).first();
+    const propertyId = randomUUID();
+    await mockPg('customer_properties').insert({ id: propertyId, customer_id: fixture.customerId });
+    const guarded = () => mockPg.transaction(async (trx) => {
+      const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
+      await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+      await assertVisitCompletionCharge(trx, locked, saved.body.packetId);
+    });
+    for (const changes of [{ technician_id: null }, { property_id: propertyId },
+      { scheduled_date: '2099-12-31' }, { window_start: '15:00', window_end: '16:00' }]) {
+      await mockPg('scheduled_services').where({ id: secondaryId }).update(changes);
+      await expect(guarded()).rejects.toMatchObject({ code: 'VISIT_PAYMENT_REVIEW_REQUIRED', reason: 'member_stop_changed' });
+      await mockPg('scheduled_services').where({ id: secondaryId })
+        .update(Object.fromEntries(Object.keys(changes).map((key) => [key, original[key]])));
+    }
+    await expect(guarded()).resolves.toBeUndefined();
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('positive collection waits for the existing reminder handoff', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    await mockPg('invoice_followup_sequences').insert({ invoice_id: saved.body.billing.invoiceId,
+      customer_id: fixture.customerId, status: 'active', touch_claimed_at: new Date() });
+    const guarded = () => mockPg.transaction(async (trx) => {
+      const invoice = await trx('invoices').where({ id: saved.body.billing.invoiceId }).forUpdate().first();
+      await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+      await assertVisitCompletionCharge(trx, invoice, saved.body.packetId);
+    });
+    await expect(guarded()).rejects.toMatchObject({ code: 'VISIT_PAYMENT_FOLLOWUP_IN_FLIGHT' });
+    await mockPg('invoice_followup_sequences').where({ invoice_id: saved.body.billing.invoiceId }).update({ touch_claimed_at: null });
+    await expect(guarded()).resolves.toBeUndefined();
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test.each(['void', 'canceled', 'cancelled'])('a %s packet invoice remains an office exception for every member', async (status) => {
+    const saved = await saveVisitCompletionPacket(submission());
+    await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).update({ status });
+    await mockPg('service_completion_attempts').whereIn('service_id', fixture.serviceIds).update({ status: 'succeeded' });
+    for (const serviceId of fixture.serviceIds) {
+      const facts = (await require('../services/closeout-status').getCloseoutStatus(serviceId, { knex: mockPg })).facts;
+      expect(facts.invoice).toMatchObject({ state: 'pending', reason: 'parked_manual_reversed_packet_invoice',
+        invoiceId: saved.body.billing.invoiceId, status });
+      const issues = require('../services/closeout-alerts').__private.moneyCommsIssues(facts);
+      expect(issues).toEqual(expect.arrayContaining([expect.objectContaining({
+        reason: 'parked_manual_reversed_packet_invoice', summary: expect.stringContaining('review the existing invoice'),
+      })]));
+      expect(JSON.stringify(issues)).not.toContain('never minted');
+    }
   });
 
   test.each(['charging', 'charge_review', 'released'])('a %s card hold is rechecked at collection', async (status) => {
