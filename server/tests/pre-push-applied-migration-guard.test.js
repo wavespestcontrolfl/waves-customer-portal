@@ -67,6 +67,9 @@ beforeAll(() => {
     [MIG_A]: "exports.up = async () => {};\nexports.down = async () => {};\n",
     'server/index.js': "module.exports = 1;\n",
   }, 'first migration');
+  // Seed the remote's main here, not in a test: every case below assumes
+  // origin/main exists, and a case run alone with `-t` must still find it.
+  git(work, ['push', '-q', 'origin', 'HEAD:main']);
 });
 
 afterAll(() => {
@@ -75,7 +78,7 @@ afterAll(() => {
 
 describe('pre-push applied-migration guard', () => {
   test('a brand-new remote branch passes (nothing on the remote has run yet)', () => {
-    const r = pushResult(work);
+    const r = pushResult(work, {}, 'HEAD:refs/heads/fresh-branch');
     expect(r.ok).toBe(true);
   });
 
@@ -203,5 +206,44 @@ describe('pre-push applied-migration guard', () => {
     }, 'add migration on new branch');
     const r = pushResult(work, {}, 'HEAD:refs/heads/feature-add');
     expect(r.ok).toBe(true);
+  });
+
+  // A stale branch that carries a byte-identical copy of a deployed main
+  // migration under a NEW filename: the tip diff reads R100, and knex
+  // would run the copy a second time (Codex on #4047, 1260e6d round).
+  test('a STALE branch that re-stamps a deployed main migration under a new name is BLOCKED via the base tip', () => {
+    git(work, ['fetch', '-q', 'origin']);
+    const MIG_MAIN = path.join(MIGRATIONS, '20260101000004_landed_on_main.js');
+    const MIG_RESTAMPED = path.join(MIGRATIONS, '20260101000009_landed_on_main_restamped.js');
+    const mainBody = git(work, ['show', 'origin/main:' + MIG_MAIN.split(path.sep).join('/')]);
+    git(work, ['checkout', '-q', '-b', 'stale-restamp', 'origin/main~1']);
+    writeAndCommit(work, { [MIG_RESTAMPED]: mainBody }, 'cherry-pick + re-stamp');
+    const r = pushResult(work, {}, 'HEAD:refs/heads/stale-restamp');
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toMatch(/\[migration-guard\] BLOCKED/);
+    expect(r.stderr).toContain('vs origin/main tip: R100\t' + MIG_MAIN.split(path.sep).join('/') + '\t' + MIG_RESTAMPED.split(path.sep).join('/'));
+  });
+
+  // main advanced from ANOTHER clone since this clone last fetched: the
+  // local origin/main predates the deployed migration, so without a fetch
+  // the tip check would read the edited copy as "added" (Codex on #4047,
+  // 1260e6d round). The hook fetches $BASE from its remote first.
+  test('a branch that edits a migration main deployed AFTER this clone last fetched is BLOCKED (the hook refreshes origin/main)', () => {
+    const MIG_X = path.join(MIGRATIONS, '20260101000010_landed_elsewhere.js');
+    const other = path.join(root, 'other');
+    git(root, ['clone', '-q', remote, other]);
+    git(other, ['checkout', '-q', 'main']);
+    writeAndCommit(other, { [MIG_X]: "exports.up = async () => {};\nexports.down = async () => {};\n" }, 'main migration from another clone');
+    git(other, ['push', '-q', 'origin', 'HEAD:main']);
+    const remoteMain = git(remote, ['rev-parse', 'main']).trim();
+    // No fetch in `work`: its origin/main is now stale.
+    expect(git(work, ['rev-parse', 'origin/main']).trim()).not.toBe(remoteMain);
+    git(work, ['checkout', '-q', '-b', 'stale-fetch', 'origin/main']);
+    writeAndCommit(work, { [MIG_X]: "exports.up = async () => { /* edited copy of a migration main deployed */ };\nexports.down = async () => {};\n" }, 'edited copy of an unfetched main migration');
+    const r = pushResult(work, {}, 'HEAD:refs/heads/stale-fetch');
+    expect(r.ok).toBe(false);
+    expect(r.stderr).toMatch(/\[migration-guard\] BLOCKED/);
+    expect(r.stderr).toContain('vs origin/main tip: M\t' + MIG_X.split(path.sep).join('/'));
+    expect(git(work, ['rev-parse', 'origin/main']).trim()).toBe(remoteMain);
   });
 });

@@ -105,13 +105,16 @@ BASE="${CODEX_REVIEW_BASE:-origin/main}"
 # checked for every destination: the remote tip catches the branch's own
 # preview-run files; the merge base catches main's prod-run files the
 # branch inherited by merging (its old tip never had the file, so the
-# remote diff would read "added"); and the $BASE TIP itself, modified
-# files only, catches a stale branch that cherry-picked or squashed a
-# main migration instead of merging (the merge base predates the file,
-# so both ancestry diffs read "added" too). Supersede with a NEW file instead —
-# .claude/skills/waves-db/SKILL.md §4. Blocks the push (exit 1). A
-# baseline that is not fetched locally is skipped with a warning (the
-# guard cannot see what it cannot diff).
+# remote diff would read "added"); and the $BASE TIP itself — modified
+# files and byte-identical renames — catches a stale branch that
+# cherry-picked or squashed a main migration instead of merging (the
+# merge base predates the file, so both ancestry diffs read "added" too),
+# including a copy re-stamped under a new filename, which knex would run
+# a second time. $BASE is fetched from its remote first so the tip is
+# the deployed one, not whatever the last `git fetch` left behind.
+# Supersede with a NEW file instead — .claude/skills/waves-db/SKILL.md §4.
+# Blocks the push (exit 1). A baseline that is not fetched locally is
+# skipped with a warning (the guard cannot see what it cannot diff).
 #
 # The guard sees pushes, not deploys: a pushed file whose deploy failed or
 # never ran its migrations is NOT applied and may be edited in place — a
@@ -131,6 +134,19 @@ if [ "${SKIP_MIGRATION_GUARD:-0}" = "1" ]; then
   echo "[migration-guard] SKIP_MIGRATION_GUARD=1 set — skipping applied-migration guard." >&2
 else
   GUARD_HITS=""
+  # Refresh $BASE from its remote (origin/main -> fetch origin main): the
+  # hook runs against whatever the last fetch left locally, and a main
+  # that advanced since then could have deployed a migration this push
+  # carries an edited copy of. A failed fetch (offline, unknown remote)
+  # falls back to the local copy with a warning rather than blocking.
+  BASE_REMOTE="${BASE%%/*}"
+  BASE_BRANCH="${BASE#*/}"
+  if [ "$BASE_REMOTE" != "$BASE" ] && [ -n "$BASE_BRANCH" ] \
+    && git remote get-url "$BASE_REMOTE" >/dev/null 2>&1; then
+    if ! git fetch --quiet "$BASE_REMOTE" "+refs/heads/$BASE_BRANCH:refs/remotes/$BASE_REMOTE/$BASE_BRANCH" 2>/dev/null; then
+      echo "[migration-guard] could not fetch $BASE_BRANCH from $BASE_REMOTE — checking against the local $BASE, which may be stale." >&2
+    fi
+  fi
   BASE_OK=0
   if git rev-parse --verify "$BASE" >/dev/null 2>&1; then
     BASE_OK=1
@@ -156,11 +172,14 @@ else
         [ -n "$base_hits" ] && hits="${hits:+$hits
 }$base_hits"
       fi
-      # $BASE tip, modified only: a path that exists on the tip with
-      # different content is a deployed file this push changes, whatever
-      # the ancestry. D/R are not checked here — a stale branch simply
-      # lacks main's newer files, that is not a deletion.
-      tip_hits="$(git diff --name-status --diff-filter=M "$BASE" "$pushed" -- "$MIGRATIONS_DIR" 2>/dev/null \
+      # $BASE tip: a path that exists on the tip with different content
+      # (M) is a deployed file this push changes, whatever the ancestry;
+      # a byte-identical copy under a new name (R100) is a deployed file
+      # knex would run again. D is NOT checked here — a stale branch
+      # simply lacks main's newer files, that is not a deletion — and
+      # rename detection is exact-match only, so one of those missing
+      # files is never paired with the branch's own similar boilerplate.
+      tip_hits="$(git diff --name-status --find-renames=100% --diff-filter=MR "$BASE" "$pushed" -- "$MIGRATIONS_DIR" 2>/dev/null \
         | sed "s|^|    vs $BASE tip: |")"
       [ -n "$tip_hits" ] && hits="${hits:+$hits
 }$tip_hits"
