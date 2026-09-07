@@ -303,3 +303,17 @@ foundation alone adds the catalog and drift check; runtime discovery, task
 targeting and recovery are introduced by its dependent PRs. Recorded browser
 and database evidence below was obtained against the integrated stack, not
 against the registry-only commit. See `intelligence-bar-foundation-review-split.md`.
+
+Customerless reservation protection: `unlinkedRecordIsReferenced` refuses an
+appointment without a customer owner when the task has customer targets. This
+keeps live estimate slot holds out of another customer's single/bulk move. The
+bulk-move customer join qualifies `scheduled_services.id` so the query reaches
+that target check. Own-customer and deliberately unscoped operations retain
+their existing rules.
+
+Evidence: two new unit regressions failed before the fix; the final scheduling,
+target, and write-gate suites pass 176 tests. Two isolated PostgreSQL cases pass,
+covering single/bulk proof validation and actual query → discovery → move
+proposal refusal. The route test asserts `target_clarification_required`, no
+approval row, and an unchanged hold. Focused DB runs exclude unrelated cases
+whose prior evidence remains recorded above.
