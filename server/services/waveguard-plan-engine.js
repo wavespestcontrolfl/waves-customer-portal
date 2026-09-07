@@ -876,6 +876,10 @@ function summarizeCalibration({ calibration, calibrations }) {
   const selected = calibration
     || (activeCalibrations.length === 1 ? activeCalibrations[0] : null)
     || (activeCalibrations.length > 1 ? resolveAmongActive(activeCalibrations) : null);
+  // inferred = the engine picked the rig, the visit did not name it. Mix
+  // math may use it; completion must not record it as equipment used
+  // (Codex #4124 r2 P1).
+  const inferred = !calibration && Boolean(selected);
   const warnings = [];
   if (selected && !selected.tank_capacity_gal) {
     warnings.push({
@@ -884,7 +888,7 @@ function summarizeCalibration({ calibration, calibrations }) {
       message: 'Equipment tank capacity is missing; tank-fill checks are limited.',
     });
   }
-  return { selected, blocks: [], warnings };
+  return { selected, inferred, blocks: [], warnings };
 }
 
 function calculateNutrients(items, lawnSqft) {
@@ -1332,7 +1336,14 @@ async function buildPlanForService(serviceId, options = {}) {
   });
   const plannedCandidateItems = candidateItems.filter((item) => item.selected);
 
-  const calibrationSummary = summarizeCalibration({ calibrations: activeCalibrations, date: serviceDate });
+  // A rig the visit names (assignment or explicit request) is the visit's;
+  // anything else the summary picks is inferred.
+  const assignedRig = Boolean(options.equipmentSystemId || options.calibrationId || service.assigned_equipment_system_id || service.assigned_calibration_id);
+  const calibrationSummary = summarizeCalibration({
+    calibration: assignedRig && activeCalibrations.length === 1 ? activeCalibrations[0] : null,
+    calibrations: activeCalibrations,
+    date: serviceDate,
+  });
   const calibration = calibrationSummary.selected;
   // Rig carrier when one resolved, else the protocol window's default (the
   // same fallback the completed-service report already reads).

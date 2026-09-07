@@ -155,7 +155,7 @@ describe('waveguard-plan-engine helpers', () => {
     expect(summarizeCalibration({
       calibration: null,
       date: new Date('2026-05-01T12:00:00'),
-    })).toEqual({ selected: null, blocks: [], warnings: [] });
+    })).toEqual({ selected: null, inferred: false, blocks: [], warnings: [] });
 
     const expired = summarizeCalibration({
       calibration: {
@@ -176,7 +176,8 @@ describe('waveguard-plan-engine helpers', () => {
     const tank2 = { equipment_system_id: 'tank2', system_type: 'tank', system_name: '110-gal tank #2', carrier_gal_per_1000: '2.000', calibration_status: 'field_verified' };
     const backpack = { equipment_system_id: 'backpack', system_type: 'backpack', system_name: 'FlowZone Typhoon 3.0 #1', carrier_gal_per_1000: 1.33 };
     const date = new Date('2026-05-01T12:00:00');
-    expect(summarizeCalibration({ calibrations: [tank1, backpack], date }).selected).toBe(tank1);
+    expect(summarizeCalibration({ calibrations: [tank1, backpack], date })).toMatchObject({ selected: tank1, inferred: true });
+    expect(summarizeCalibration({ calibration: tank1, calibrations: [tank1], date })).toMatchObject({ selected: tank1, inferred: false });
     // Two tanks on the same carrier resolve (the field-verified one is named).
     expect(summarizeCalibration({ calibrations: [tank1, tank2, backpack], date }).selected).toBe(tank2);
     const result = summarizeCalibration({ calibrations: [tank1, { ...tank2, carrier_gal_per_1000: 3 }, backpack], date });
