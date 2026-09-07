@@ -96,7 +96,7 @@ const DISCOVERY_TOOL = {
   },
 };
 const validateDiscovery = ajv.compile(DISCOVERY_TOOL.input_schema);
-const DISCOVERY_STOPWORDS = new Set('a an the i me my we our you your it this that these those do does did can could will would should please like want need to for from of on in with is are be have has and or what how'.split(' '));
+const DISCOVERY_STOPWORDS = new Set('a an the i me my we our you your it this that these those do does did can could will would should please like want need to for from of on in with is are be have has and or what how get find show search list'.split(' '));
 
 function allowed(action, { role, context } = {}) {
   if (!action) return false;

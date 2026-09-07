@@ -112,3 +112,9 @@ B1 independent review also closed incidental page/note authority for unlinked
 leads and estimates and normalized UUID comparisons to PostgreSQL identity.
 The final scope passes 147 distinct unit/write-boundary cases and five isolated
 PostgreSQL cases. No provider adapter or live action ran in those checks.
+
+Shared-wrapper remediation in A detects known admin requests regardless of
+source directory. Five existing dispatch, equipment and Terminal request sites
+are proved against merged main and retained as unsupported, for 1,744 cumulative
+sites. Generic lookup verbs cannot turn an unsupported capability into a match.
+The final catalog/coverage suites pass 23 tests.
