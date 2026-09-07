@@ -250,7 +250,7 @@ async function renderPresetMovedNotice({ service, reasonCode, target, note, resc
     firstName: service.first_name,
     serviceType: service.service_type,
     date: target.date,
-    window: service.visit_id ? LONGEST_ARRIVAL_WINDOW : target.window,
+    window: LONGEST_ARRIVAL_WINDOW,
     weatherLead: composeWeatherLead({ reasonCode, ...LONGEST_LEAD }),
     reasonCode,
     rescheduleUrl,
@@ -289,9 +289,11 @@ async function preMoveRescheduleUrl(serviceId, service) {
 // earliest member start after the move — visit-groups' visitStart), which
 // is only known once the move lands. The customer label's length varies
 // by at most two characters with the start (`1:00 PM - 3:00 PM` vs
-// `10:00 AM - 12:00 PM`), so the pre-move cap measures a grouped stop at
-// the LONGEST label any start can produce, never the tapped member's slot
-// (codex pre-push P1). Single stops quote the target window exactly.
+// `10:00 AM - 12:00 PM`), so the pre-move cap measures EVERY stop at the
+// LONGEST label any start can produce, never the tapped member's slot
+// (codex pre-push P1) — every stop, not only one the service snapshot
+// shows grouped, because a stop grouped between that snapshot and the
+// move would otherwise be measured two slots short (codex #4122 r4 P2).
 const LONGEST_ARRIVAL_WINDOW = { start: '10:00', end: null };
 
 // Send-layer blockers the note guards can't see because they live in the

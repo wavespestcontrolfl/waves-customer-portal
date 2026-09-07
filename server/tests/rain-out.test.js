@@ -2933,10 +2933,10 @@ describe('rain-out service', () => {
       for (const call of v3Calls) expect(call[3]).toEqual({ noVariants: true, templateBody: V3_BODY });
     });
 
-    test('gate on: a grouped stop is measured at the LONGEST arrival label, since its landed start is only known after the move', async () => {
+    test('gate on: EVERY stop is measured at the LONGEST arrival label (a stop grouped after the snapshot lands at a start only the move knows)', async () => {
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       mockV3Render();
-      wireSingle({ visit_id: 'visit-9' });
+      wireSingle();
 
       const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
 
@@ -3113,7 +3113,7 @@ describe('rain-out service', () => {
       const vars = renderSmsTemplate.mock.calls[0][1];
       expect(vars.link_clause).toContain('https://waves.test/r/tok123');
       const { countSegments } = require('../services/messaging/segment-counter');
-      const body = `Hi Pat, ${vars.weather_lead}, so we moved your quarterly pest control to Fri, Jun 12, 1:00 PM - 3:00 PM.${vars.link_clause}\n\nNote from our team: See you Friday!`;
+      const body = `Hi Pat, ${vars.weather_lead}, so we moved your quarterly pest control to ${vars.new_option}.${vars.link_clause}\n\nNote from our team: See you Friday!`;
       const seg = countSegments(asSent(body));
       expect(result).toMatchObject({
         segments: seg.segmentCount, maxSegments: 2, withinCap: true, remaining: 306 - seg.gsmSlotCount, encoding: 'GSM_7',
@@ -3122,7 +3122,7 @@ describe('rain-out service', () => {
       wireSingle();
       result = await RainOut.previewMovedSms({ serviceId: 'svc-1', reasonCode: 'weather_rain', customMessage: '', target });
       expect(result.ok).toBe(true);
-      const bare = countSegments(asSent(`Hi Pat, ${vars.weather_lead}, so we moved your quarterly pest control to Fri, Jun 12, 1:00 PM - 3:00 PM.${vars.link_clause}`));
+      const bare = countSegments(asSent(`Hi Pat, ${vars.weather_lead}, so we moved your quarterly pest control to ${vars.new_option}.${vars.link_clause}`));
       expect(result.remaining).toBe(306 - bare.gsmSlotCount);
 
       delete process.env.GATE_RAINOUT_MOVE_BANNER;
