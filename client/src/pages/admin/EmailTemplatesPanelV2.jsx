@@ -2701,7 +2701,7 @@ export default function EmailTemplatesPanelV2() {
                   {preview?.audiencePreview?.scheduledServiceId === audienceAppointmentId.trim() && preview.audiencePreview.templateKey === selectedKey && (
                     <div className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-14 text-ink-secondary" role="status">
                       {preview.audiencePreview.applies ? (
-                        <p>Audience eligible before: {preview.audiencePreview.before ? "Yes" : "No"}. After: {preview.audiencePreview.after ? "Yes" : "No"}.</p>
+                        <p>Before audience expansion: {preview.audiencePreview.before ? "Yes" : "No"}. After: {preview.audiencePreview.after ? "Yes" : "No"}.</p>
                       ) : <p>This appointment’s audience is unchanged.</p>}
                       <p>Email gate: {preview.audiencePreview.gateEnabled ? "Enabled" : "Off"}.</p>
                       <p className="mt-2">{preview.audiencePreview.note}</p>

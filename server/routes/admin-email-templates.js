@@ -1200,11 +1200,13 @@ async function onboardingAudiencePreview(templateKey, scheduledServiceId) {
     return {
       scheduledServiceId, templateKey,
       applies: true,
+      // The parent template change already shares the corrected first-visit
+      // reader. This comparison isolates the recurring/member gate expansion.
       before: eligibility.eligible && service.is_recurring === true && ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(customer.waveguard_tier),
       after: eligibility.eligible,
       gateEnabled: intro.isEnabled(),
       reason: eligibility.reason,
-      note: 'Audience check only. Recipient validation, suppression and the once-per-customer send ledger still apply at delivery.',
+      note: 'Current first-visit rules apply to both audiences. Recipient validation, suppression and the once-per-customer send ledger still apply at delivery.',
     };
   }
   const welcome = require('../services/new-recurring-welcome-sms');
