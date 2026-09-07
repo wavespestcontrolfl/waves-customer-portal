@@ -21,19 +21,21 @@ const COLLECTIONS = { customer_id: 'customer_ids', appointment_id: 'service_ids'
 const ALIASES = { customer_id: 'customerId', property_id: 'propertyId', appointment_id: 'appointmentId', estimate_id: 'estimateId', invoice_id: 'invoiceId', product_id: 'productId', lead_id: 'leadId', email_id: 'emailId', call_id: 'callId' };
 const normalizeName = value => String(value || '').toLowerCase().replace(/[’']/g, "'").replace(/'s\b/g, '')
   .replace(/[^\p{L}\p{N}\s'-]/gu, ' ').replace(/\s+/g, ' ').trim();
-const PERSON_REFERENCE = /\b(?:for|customer|named|change|update|email|text|message|contact|quote|send|notify|schedule)\s+([\p{L}'-]+)\b/gu;
-const AFTER_GIVEN_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'at', 'on', 'and',
+const PERSON_REFERENCE = /\b(?:for|customer|named|change|update|email|text|message|contact|quote|send|notify|schedule|reply to)\s+([\p{L}'-]+)\b/gu;
+const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
-  'property', 'properties', 'appointment', 'appointments', 'estimate', 'invoice', 'details', 'inactive', 'active']);
+  'property', 'properties', 'appointment', 'appointments', 'estimate', 'invoice', 'details', 'inactive', 'active', 'reminder', 'reminders']);
 const PAGE_REFERENCE_RE = /\b(?:(?:this|that|current|selected|viewed|open)\s+(?:customer|account|property|appointment|estimate|invoice)|his|her|their)\b/i;
 
 function targetClause(prompt) {
   // Message bodies and replacement values are data, even when they contain
   // another customer's exact name. They never select the recipient/account.
-  return String(prompt).split(/[:;\n]|\b(?:that|saying|regarding|about)\b|\b(?:name|address|email|phone|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+/i)[0];
+  const clause = String(prompt).split(/[:;\n“”"]|\b(?:that|saying|regarding|about)\b/i)[0];
+  if (!/\b(?:change|update|set|rename|relabel|add|save)\b/i.test(clause)) return clause;
+  return clause.split(/\b(?:name|address|email|phone|label|notes?|instructions|message|contact)\s+(?:to|as|is|=)\s+/i)[0];
 }
 
-function explicitFirstNames(prompt) {
+function explicitSingleNames(prompt) {
   const clause = targetClause(prompt);
   const normalized = normalizeName(clause);
   return [...new Set([
@@ -48,8 +50,8 @@ function explicitFirstNames(prompt) {
 function namesRequested(prompt) {
   // This is a refusal hint, never a fuzzy identity match. A misspelling after
   // an explicit person reference must not fall back to the open customer.
-  const references = explicitFirstNames(prompt);
-  const nonNames = new Set(['this', 'that', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using']);
+  const references = explicitSingleNames(prompt);
+  const nonNames = new Set(['this', 'that', 'the', 'a', 'an', 'his', 'her', 'their', 'my', 'our', 'each', 'all', 'both', 'next', 'today', 'tomorrow', 'me', 'him', 'them', 'it', 'lawn', 'pest', 'mosquito', 'termite', 'rodent', 'name', 'address', 'phone', 'email', 'notes', 'note', 'labels', 'label', 'customer', 'customers', 'lead', 'leads', 'stock', 'inventory', 'quantity', 'active', 'inactive', 'to', 'as', 'from', 'with', 'and', 'or', 'by', 'using']);
   return references.some(word => !nonNames.has(word));
 }
 
@@ -84,7 +86,7 @@ function namesTargetCustomer(clause, customer) {
   if (offset < 0) return false;
   const before = clause.slice(0, offset).trim();
   if (!before || before === 'please') return true;
-  return /\b(?:for|customer|named|change|update|email|text|message|quote|notify|schedule|send to)(?:\s+both)?$/.test(before)
+  return /\b(?:for|customer|named|change|update|email|text|message|quote|notify|schedule|send to|reply to)(?:\s+both)?$/.test(before)
     || (/\bboth\b/.test(clause) && /\band$/.test(before));
 }
 
@@ -95,17 +97,19 @@ async function namedCustomers(prompt) {
   for (let length = 2; length <= 5; length++) {
     for (let start = 0; start + length <= words.length; start++) phrases.push(words.slice(start, start + length).join(' '));
   }
-  // A first-name-only request must be explicit and an EXACT unique match,
+  // A single-name request must be explicit and an EXACT unique match,
   // never the first fuzzy result or a name mentioned by an old assistant turn.
-  const firstNames = explicitFirstNames(prompt).filter(name => words.some((word, i) => word === name
-    && (!words[i + 1] || AFTER_GIVEN_NAME.has(words[i + 1]))));
-  if (!phrases.length && !firstNames.length) return [];
+  const singleNames = explicitSingleNames(prompt).filter(name => words.some((word, i) => word === name
+    && (!words[i + 1] || AFTER_SINGLE_NAME.has(words[i + 1]))));
+  if (!phrases.length && !singleNames.length) return [];
   const columns = ['id', 'first_name', 'last_name', 'address_line1', 'city', 'updated_at'];
   const matches = phrases.length ? await db('customers').whereNull('deleted_at')
     .whereIn(db.raw("lower(concat_ws(' ', first_name, last_name))"), phrases).limit(10).select(columns) : [];
   const fullNames = matches.filter(customer => namesTargetCustomer(normalized, customer));
-  if (fullNames.length || !firstNames.length) return fullNames;
-  return db('customers').whereNull('deleted_at').whereIn(db.raw('lower(first_name)'), firstNames).limit(10).select(columns);
+  if (fullNames.length || !singleNames.length) return fullNames;
+  return db('customers').whereNull('deleted_at').where(function () {
+    this.whereIn(db.raw('lower(first_name)'), singleNames).orWhereIn(db.raw('lower(last_name)'), singleNames);
+  }).limit(10).select(columns);
 }
 
 // Shared whitelist reader for page context and read/write relationships. It
@@ -172,9 +176,15 @@ async function resolve({ prompt, pageData, selectedTarget }) {
     const target = customerTarget(selected, 'operator_selection');
     selection = { target, targets: [target], ambiguous: false };
   }
+  // Only the leading recipient expression establishes a raw contact. A later
+  // "text <number>" inside a note or an unresolved person's message is data.
+  const recipient = targetClause(prompt).match(/^(?:(?:please|can you|could you|would you|will you|i need you to|i'd like you to)\s+)*(?:text|message|sms|email|reply\s+to|respond\s+to|send(?:\s+(?:a|an))?(?:\s+(?:text|sms|message|reminder|email|reply))?\s+to)\s+(?:to\s+)?(.+)/i)?.[1] || '';
   return { page, candidates, ...selection, requestPhrase: normalizeName(prompt),
-    explicitEmails: (targetClause(prompt).match(/[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+/gi) || []).map(normalizeEmail),
-    explicitPhones: (prompt.match(/\+?[\d() .-]{10,}/g) || []).map(p => p.replace(/\D/g, '').slice(-10)) };
+    bulkLeadRequest: !namesRequested(prompt) && /\b(?:all|bulk)\b.*\bleads\b/i.test(targetClause(prompt)),
+    explicitEmails: [...recipient.matchAll(/^([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi)]
+      .map(match => normalizeEmail(match[1])),
+    explicitPhones: [...recipient.matchAll(/^((?:\+?1[ .-]*)?(?:\(\d{3}\)|\d{3})[ .-]*\d{3}[ .-]*\d{4})(?!\d)/g)]
+      .map(match => match[1].replace(/\D/g, '').slice(-10)) };
 }
 
 function unlinkedRecordIsReferenced(record, context) {
@@ -197,6 +207,14 @@ function relationshipFailure(records, params, toolName) {
   return null;
 }
 
+function bulkLeadSelection(toolName, records, params) {
+  return require('./pending-actions').paramsHash(toolName, {
+    records: records.map(record => `${record.kind}:${record.id}`).sort(),
+    current_status: params.current_status, older_than_days: params.older_than_days ?? null,
+    exactSet: params._expect_full_set === true,
+  });
+}
+
 async function validateRecordTarget(params, context = {}, { toolName } = {}) {
   const references = { ...params };
   if (['get_closeout_status', 'get_stop_details'].includes(toolName) && params.service_id) references.appointment_id = params.service_id;
@@ -206,8 +224,12 @@ async function validateRecordTarget(params, context = {}, { toolName } = {}) {
   const { records } = resolved;
   const relationship = relationshipFailure(records, params, toolName);
   if (relationship) return relationship;
+  if (context.bulkLeadRequest && !context.targets?.length
+    && context.bulkLeadSelection === bulkLeadSelection(toolName, records, params)) {
+    return null; // Server dry-run cohort, scoped only to this approved action.
+  }
   const permitted = new Set((context.targets || []).map(t => t.customer_id));
-  if (toolName === 'send_email_reply') {
+  if (toolName === 'send_email_reply' && !permitted.size) {
     for (const record of records) {
       if (record.kind === 'email_id' && context.explicitEmails?.includes(normalizeEmail(record.from_address))) permitted.add(record.customer_id);
     }
@@ -223,7 +245,7 @@ async function validateRecordTarget(params, context = {}, { toolName } = {}) {
     const customer = records.find(r => r.kind === 'customer_id');
     const matchesCustomer = customer && String(customer.phone || '').replace(/\D/g, '').slice(-10) === phone;
     if (customer && !matchesCustomer) return { error: 'The message recipient does not match the target customer', code: 'target_relationship_mismatch' };
-    if (!customer && !context.explicitPhones?.includes(phone)) return { error: 'Select the customer or explicitly provide the recipient number', code: 'target_clarification_required' };
+    if (!customer && (permitted.size || !context.explicitPhones?.includes(phone))) return { error: 'Select the customer or explicitly provide the recipient number', code: 'target_clarification_required' };
   }
   return null;
 }
@@ -254,4 +276,4 @@ async function prepareReadInput(params, context, { toolName, schema }) {
   return invalid || { input };
 }
 
-module.exports = { pageIds, resolve, validateRecordTarget, prepareReadInput, customerById, customerTarget, namedCustomers, namesRequested };
+module.exports = { pageIds, resolve, validateRecordTarget, prepareReadInput, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };

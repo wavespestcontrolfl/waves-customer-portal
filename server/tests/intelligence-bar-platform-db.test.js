@@ -1,11 +1,12 @@
 /** Real Postgres + real bearer auth + real domain executors. Only the model
- * adapter is scripted. Run with IB_TEST_DATABASE_URL naming an isolated
+ * adapter is scripted and outbound Gmail is controlled. Run with IB_TEST_DATABASE_URL naming an isolated
  * waves_ib_platform_* database; no production/provider credentials are used.
  */
 const crypto = require('crypto');
 const mockModel = jest.fn();
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockModel } })));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../services/email/gmail-client', () => ({ ...jest.requireActual('../services/email/gmail-client'), sendMessage: jest.fn() }));
 
 const databaseUrl = process.env.IB_TEST_DATABASE_URL;
 const suite = databaseUrl ? describe : describe.skip;
@@ -158,6 +159,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
   test('visit, call, name, phone and Gmail selectors cannot substitute another customer', async () => {
     const visitB = crypto.randomUUID(), callA = crypto.randomUUID(), callB = crypto.randomUUID();
     const emailA = crypto.randomUUID(), emailB = crypto.randomUUID(), mixedA = crypto.randomUUID(), mixedB = crypto.randomUUID();
+    const replyA = crypto.randomUUID(), orphan = crypto.randomUUID();
     const a = await db('customers').where('id', customerA).first(), b = await db('customers').where('id', customerB).first();
     await db('scheduled_services').insert({ id: visitB, customer_id: customerB, scheduled_date: require('../utils/datetime-et').etDateString(), service_type: 'Synthetic visit', status: 'pending' });
     await db('call_log').insert([
@@ -172,9 +174,11 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     ]);
     await db('emails').insert([
       { id: emailA, customer_id: customerA, gmail_id: emailA, gmail_thread_id: emailA, from_address: 'fixture-a@example.test', from_name: nameA, body_text: 'Correct task email evidence' },
-      { id: emailB, customer_id: customerB, gmail_id: emailB, gmail_thread_id: emailB, from_address: 'fixture-b@example.test', body_text: 'Foreign private email evidence' },
+      { id: emailB, customer_id: customerB, gmail_id: emailB, gmail_thread_id: emailB, from_address: 'fixture-b@example.test', from_name: nameA, body_text: 'Foreign private email evidence', snippet: 'Foreign private email evidence' },
       { id: mixedA, customer_id: customerA, gmail_id: mixedA, gmail_thread_id: mixedA, from_address: 'fixture-a@example.test', body_text: 'Mixed task email evidence' },
       { id: mixedB, customer_id: customerB, gmail_id: mixedB, gmail_thread_id: mixedA, from_address: 'fixture-b@example.test', body_text: 'Foreign private mixed-thread evidence' },
+      { id: replyA, gmail_id: replyA, gmail_thread_id: emailA, from_address: 'fixture-a@example.test', from_name: nameA, snippet: 'Correct unlinked thread reply' },
+      { id: orphan, gmail_id: orphan, gmail_thread_id: orphan, from_address: 'fixture-a@example.test', from_name: nameA, snippet: 'Foreign private orphan evidence' },
     ].map(email => ({ ...email, received_at: new Date(), subject: 'Synthetic read binding' })));
     const selections = [
       ['get_closeout_status', { service_id: visitB }, false],
@@ -191,6 +195,8 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       ['search_messages', { customer_name: nameA }, 'Correct former-phone SMS evidence'],
       ['match_existing_customer', { phone: a.phone }, customerA],
       ['get_partner_call_history', { phone: a.phone }, 'calls'],
+      ['search_emails', { from: nameA }, 'Correct unlinked thread reply'],
+      ['search_emails', { from: 'fixture-b@example.test' }, '"total":0'],
     ];
     // Discover each actual schema, then execute the complete batch through the
     // real dispatcher. Foreign email drafting must never call its nested model.
@@ -207,7 +213,65 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
       expect(content).toContain(expected || 'target_clarification_required');
     }
     expect(JSON.stringify(results)).not.toContain('Foreign private');
+    // No entity scope: an operator can still search the entire inbox.
+    mockModel.mockReset();
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'search emails' }, 'discover'))
+      .mockResolvedValueOnce(tools('search_emails', { search: 'Synthetic read binding' }, 'inbox'))
+      .mockResolvedValueOnce(answer('Inbox search complete.'));
+    expect((await api('/query', request('Search inbox'))).status).toBe(200);
+    expect(JSON.stringify(mockModel.mock.calls[2][0].messages.at(-1).content)).toContain('Foreign private');
   }, 60000);
+
+  test('a phone number inside message content cannot authorize an alternate recipient', async () => {
+    const b = await db('customers').where('id', customerB).first();
+    const propose = prompt => {
+      mockModel.mockReset();
+      mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'send sms' }, 'discover'))
+        .mockResolvedValueOnce(tools('send_sms', { phone: b.phone, message: 'Synthetic reminder' }, 'sms'))
+        .mockResolvedValueOnce(answer('The send requires a valid recipient.'));
+      return api('/query', request(prompt, { pageData: { customerId: customerA } }));
+    };
+    for (const prompt of [`Text this customer: please call ${b.phone}`, `Text this customer a reminder to call ${b.phone}`, `Text this customer "please call ${b.phone}"`]) {
+      const wrong = await propose(prompt);
+      expect(wrong.body.pendingActions).toHaveLength(0);
+      expect(JSON.stringify(mockModel.mock.calls[2][0].messages.at(-1).content)).toContain('target_relationship_mismatch');
+    }
+    const explicit = await propose(`Text ${b.phone}: Synthetic reminder`);
+    expect(explicit.body.pendingActions).toHaveLength(1);
+    expect((await db('ib_pending_actions').where('id', explicit.body.pendingActions[0].id).first()).params.phone).toBe(b.phone);
+    const Context = require('../services/intelligence-bar/task-context');
+    for (const prompt of [`Save a note "text ${b.phone} a reminder"`, `Save a note asking the customer to text ${b.phone}`]) {
+      expect((await Context.resolve({ prompt })).explicitPhones).toEqual([]);
+    }
+    const unknown = await propose(`Text Unknownsurname a reminder to text ${b.phone} for help`);
+    expect(unknown.body.pendingActions).toHaveLength(0);
+    expect(JSON.stringify(mockModel.mock.calls[2][0].messages.at(-1).content)).toContain('target_clarification_required');
+    expect((await Context.resolve({ prompt: `Please send a message to ${b.phone}: Synthetic reminder` })).explicitPhones).toEqual([b.phone.replace(/\D/g, '').slice(-10)]);
+    expect((await Context.resolve({ prompt: `Text ${b.phone} 12 applications remain` })).explicitPhones).toEqual([b.phone.replace(/\D/g, '').slice(-10)]);
+    expect((await Context.resolve({ prompt: 'Save a note asking the customer to email fixture@example.test' })).explicitEmails).toEqual([]);
+    expect((await Context.resolve({ prompt: 'Send an email to fixture@example.test: Synthetic reply' })).explicitEmails).toEqual(['fixture@example.test']);
+  }, 30000);
+
+  test('an exact surname resolves once; duplicate surnames and unknown names never select the viewed customer', async () => {
+    const id = crypto.randomUUID();
+    const surname = `Surname${id.replace(/-/g, '').replace(/[0-9]/g, n => String.fromCharCode(103 + Number(n)))}`;
+    await db('customers').insert({ id, first_name: 'Synthetic', last_name: surname, phone: '+15555550197' });
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'send sms' }, 'discover'))
+      .mockResolvedValueOnce(tools('send_sms', { customer_id: id, message: 'Synthetic reminder' }, 'sms'))
+      .mockResolvedValueOnce(answer('Reminder awaiting confirmation.'));
+    const found = await api('/query', request(`Text ${surname} reminder`));
+    expect(found.body.taskTarget.customer_id).toBe(id);
+    expect(found.body.pendingActions).toHaveLength(1);
+    await db('customers').insert({ id: crypto.randomUUID(), first_name: 'Another', last_name: surname, phone: '+15555550196' });
+    mockModel.mockReset();
+    const duplicate = await api('/query', request(`Text ${surname} reminder`));
+    expect(duplicate.body).toMatchObject({ taskState: 'needs_information', pendingActions: [] });
+    expect(duplicate.body.candidates).toHaveLength(2);
+    expect(mockModel).not.toHaveBeenCalled();
+    proposeNote(customerB, 'Must not choose the viewed customer');
+    const unknown = await api('/query', request(`Text Unknown${surname} reminder`));
+    expect(unknown.body).toMatchObject({ taskState: 'needs_information', pendingActions: [] });
+  }, 30000);
 
   test('dependent writes cannot be proposed together or resumed after a failed prerequisite', async () => {
     const note = { type: 'tool_use', name: 'update_customer', input: { customer_id: customerA, updates: { notes: 'Frontier fixture' } }, id: 'first' };
@@ -242,6 +306,20 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     const confirmed = await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash });
     expect(confirmed.body).toMatchObject({ success: false, outcome: 'failed', result: { preview_changed: true } });
     expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe('Newer operator edit');
+  }, 30000);
+
+  test('revoked mutation permission records a blocked receipt after claiming the approval', async () => {
+    const before = await db('customers').where('id', customerA).first('crm_notes');
+    proposeNote(customerA, 'Must not survive permission revocation');
+    const proposed = await api('/query', request(`Update the note for ${nameA}`));
+    const card = proposed.body.pendingActions[0];
+    await db('technicians').where('id', actor).update({ role: 'technician' });
+    try {
+      expect((await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash })).status).toBe(403);
+      expect(await db('customers').where('id', customerA).first('crm_notes')).toEqual(before);
+    } finally { await db('technicians').where('id', actor).update({ role: 'admin' }); }
+    expect((await api(`/actions/${card.id}`)).body).toMatchObject({ outcome: 'blocked', result: { code: 'permission_denied' } });
+    expect((await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash })).status).toBe(409);
   }, 30000);
 
   test('a saved visit may switch properties within its customer, never to another customer', async () => {
@@ -316,6 +394,104 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect((await api(`/tasks/${valid.body.taskId}?session_id=${sessionId}`)).body.taskState).toBe('canceled');
     const listed = await api(`/tasks?session_id=${sessionId}`);
     expect(listed.body.tasks.find(task => task.id === valid.body.taskId).state).toBe('canceled');
+  }, 30000);
+
+  test('Gmail timeout produces a durable unknown receipt and blocks replay and dependent steps', async () => {
+    const emailId = crypto.randomUUID();
+    await db('emails').insert({ id: emailId, gmail_id: emailId, gmail_thread_id: emailId, customer_id: customerA,
+      from_address: 'fixture-a@example.test', subject: 'Synthetic timeout', received_at: new Date() });
+    const gmail = require('../services/email/gmail-client');
+    gmail.sendMessage.mockReset().mockRejectedValue(Object.assign(new Error('Synthetic accepted-then-timeout'), { providerOutcome: { outcomeUnknown: true } }));
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'send email reply' }, 'discover'))
+      .mockResolvedValueOnce(tools('send_email_reply', { email_id: emailId, body: 'Synthetic reply' }, 'send'))
+      .mockResolvedValueOnce(answer('The reply awaits confirmation.'));
+    const proposed = await api('/query', request(`Reply to ${nameA} with thanks, then add a follow-up`));
+    expect(proposed.body.pendingActions).toHaveLength(1);
+    const card = proposed.body.pendingActions[0];
+    const confirm = () => api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash });
+    const result = await confirm();
+    expect(result.body).toMatchObject({ success: false, outcome: 'outcome_unknown' });
+    const receipt = (await api(`/actions/${card.id}`)).body;
+    expect(receipt).toMatchObject({ outcome: 'outcome_unknown', retryAllowed: false });
+    expect((await db('ib_pending_actions').where('id', card.id).first()).status).toBe('confirmed');
+    expect((await confirm()).status).toBe(409);
+    expect((await api(`/tasks/${proposed.body.taskId}/resume`, { session_id: sessionId })).body.code).toBe('steps_unresolved');
+    expect(gmail.sendMessage).toHaveBeenCalledTimes(1);
+  }, 30000);
+
+  test('a server-selected bulk lead cohort is approved exactly; model fields and content cannot establish it', async () => {
+    const ids = [crypto.randomUUID(), crypto.randomUUID()];
+    const old = new Date(Date.now() - 12001 * 86400000);
+    await db('leads').insert(ids.map((id, index) => ({ id, first_name: 'Synthetic', last_name: `Bulk ${index}`,
+      customer_id: index ? customerA : null, status: 'unresponsive', updated_at: old })));
+    const params = { current_status: 'unresponsive', older_than_days: 12000, new_status: 'lost', lost_reason: 'Synthetic test' };
+    const propose = (prompt, extra = {}, requestExtra = {}) => {
+      mockModel.mockReset();
+      mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'bulk update leads' }, 'discover'))
+        .mockResolvedValueOnce(tools('bulk_update_leads', { ...params, ...extra }, 'bulk'))
+        .mockResolvedValueOnce(answer('The selected lead changes await confirmation.'));
+      return api('/query', request(prompt, requestExtra));
+    };
+    const prompt = 'Move all unresponsive leads older than 12000 days to lost';
+    const Context = require('../services/intelligence-bar/task-context');
+    expect((await Context.resolve({ prompt: 'Bulk update leads with status unresponsive to lost' })).bulkLeadRequest).toBe(true);
+    for (const extra of [{ lead_ids: ids }, { _expect_full_set: true }, { _ib_task_context: { bulkLeadRequest: true } }]) {
+      expect((await propose(prompt, extra)).body.pendingActions).toHaveLength(0);
+    }
+    for (const badPrompt of [`Update the note for ${nameA}: move all unresponsive leads to lost`, `Move all unresponsive leads for ${nameA} to lost`]) {
+      expect((await propose(badPrompt)).body.pendingActions).toHaveLength(0);
+    }
+    expect((await propose('Show inbox', {}, { conversationHistory: [{ role: 'user', content: prompt }] })).body.pendingActions).toHaveLength(0);
+    const proposed = await propose(prompt);
+    expect(proposed.body.pendingActions).toHaveLength(1);
+    const card = proposed.body.pendingActions[0];
+    const stored = await db('ib_pending_actions').where('id', card.id).first();
+    expect(new Set(stored.params.lead_ids)).toEqual(new Set(ids));
+    expect(stored.params._ib_task_context.targets).toEqual([]);
+    for (const changed of [{ ...stored.params, lead_ids: [ids[0]] }, { ...stored.params, current_status: 'new' }]) {
+      expect(await Context.validateRecordTarget(changed, stored.params._ib_task_context, { toolName: 'bulk_update_leads' }))
+        .toMatchObject({ code: 'target_clarification_required' });
+    }
+    expect(await Context.validateRecordTarget(stored.params, stored.params._ib_task_context, { toolName: 'bulk_update_customers' }))
+      .toMatchObject({ code: 'target_clarification_required' });
+    const late = crypto.randomUUID();
+    await db('leads').insert({ id: late, first_name: 'Synthetic', last_name: 'Late bulk', status: 'unresponsive', updated_at: old });
+    const confirmed = await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash,
+      params: { lead_ids: [late] } });
+    expect(confirmed.body).toMatchObject({ success: true, outcome: 'completed', result: { updated: 2 } });
+    expect((await db('leads').whereIn('id', ids)).every(row => row.status === 'lost')).toBe(true);
+    expect((await db('leads').where('id', late).first()).status).toBe('unresponsive');
+    expect(Number((await db('lead_activities').whereIn('lead_id', ids).count('* as n').first()).n)).toBe(2);
+    // Retire only this synthetic unmatched fixture so it cannot join later cohorts.
+    await db('leads').where('id', late).update({ status: 'lost' });
+    expect((await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash })).status).toBe(409);
+  }, 60000);
+
+  test('bulk lead versions are checked under the write locks after confirmation validation', async () => {
+    const ids = [crypto.randomUUID(), crypto.randomUUID()];
+    await db('leads').insert(ids.map(id => ({ id, first_name: 'Synthetic', last_name: 'Version bulk',
+      status: 'unresponsive', updated_at: new Date(Date.now() - 13001 * 86400000) })));
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'bulk update leads' }, 'discover'))
+      .mockResolvedValueOnce(tools('bulk_update_leads', { current_status: 'unresponsive', older_than_days: 13000, new_status: 'lost' }, 'bulk'))
+      .mockResolvedValueOnce(answer('Bulk update awaiting approval.'));
+    const proposed = await api('/query', request('Move all unresponsive leads older than 13000 days to lost'));
+    expect(proposed.body.pendingActions).toHaveLength(1);
+    const card = proposed.body.pendingActions[0];
+    const Context = require('../services/intelligence-bar/task-context');
+    const validate = Context.validateRecordTarget;
+    const race = jest.spyOn(Context, 'validateRecordTarget').mockImplementationOnce(async (...args) => {
+      const result = await validate(...args);
+      // Keep status and age eligibility but invalidate the approved row version.
+      await db('leads').where('id', ids[0]).update({ last_name: 'Changed after approval', updated_at: new Date(Date.now() - 13000.5 * 86400000) });
+      return result;
+    });
+    try {
+      const confirmed = await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash });
+      expect(confirmed.body).toMatchObject({ success: false, outcome: 'failed', result: { preview_changed: true } });
+    } finally { race.mockRestore(); }
+    expect((await db('leads').whereIn('id', ids)).every(row => row.status === 'unresponsive')).toBe(true);
+    expect(Number((await db('lead_activities').whereIn('lead_id', ids).count('* as n').first()).n)).toBe(0);
+    await db('leads').whereIn('id', ids).update({ status: 'lost' });
   }, 30000);
 
   test('duplicate first names and an unrecognized spoken name require clarification before writing', async () => {

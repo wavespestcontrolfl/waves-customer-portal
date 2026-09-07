@@ -62,6 +62,23 @@ mocked provider response is not evidence of end-to-end capability.
   verifies parent-child relationships, and binds customer reads and writes to the current
   request's resolved target. Message/replacement text and old history cannot
   select a customer. Duplicate names and unmatched surnames require clarification.
+  Unique exact surnames resolve through the same fresh customer lookup. Raw
+  phone/email recipients must begin the current request's recipient expression;
+  numbers inside a named recipient's message or a note cannot authorize a send.
+  A resolved customer's phone is pinned from the live record and checked again.
+- Bulk lead updates retain the existing server predicate preview, complete target
+  disclosure and exact-set executor. An action-specific selection proof authorizes
+  only that cohort, only for an explicit current bulk request without a narrower
+  customer target. Full-precision lead versions are rechecked under write locks.
+  Bulk customer IDs still need independently established targets; model-supplied
+  ID lists are not treated as server-selected cohorts.
+- Scoped email search returns linked customer messages and unlinked replies in
+  exclusively owned threads; shared names, orphan messages and mixed-customer
+  threads cannot widen the result. Unscoped inbox searches remain available.
+  Gmail send failures distinguish uncertain message submission from definitive
+  rejection and OAuth/pre-send errors. Unknown results persist without replay or
+  dependent continuation. The existing pre-send transport classifier is shared
+  with GBP, and message POST transport retries are explicitly disabled.
 - The existing IB retention tick removes expired task recovery data after the
   30-day window, including while the platform gate is off. A live runner lease
   postpones deletion; separate actor-bound action receipts remain available for
@@ -115,7 +132,7 @@ has deliberately not been relabeled as verified application parity.
 ## Verification evidence
 
 - Real Express route + bearer authentication + domain executor + isolated Railway
-  development Postgres, scripted model: eighteen tests pass in
+  development Postgres, scripted model and controlled Gmail: twenty-four tests pass in
   `server/tests/intelligence-bar-platform-db.test.js`. Independent row reads verify
   A changes while viewed B remains unchanged. Cases include ID tampering, bulk
   targeting, message-body names, surname mismatch, request replay, stale runner,
@@ -135,6 +152,13 @@ has deliberately not been relabeled as verified application parity.
   phone readers receive validated customer IDs; mixed-customer email threads
   refuse before model egress, and shared-phone SMS excludes other linked accounts.
   A scheduler regression proves both purges run in the one existing ET cron tick.
+  Added cases cover surname ambiguity, body-number substitution (including an
+  unresolved name and no delimiter), Gmail uncertainty/replay, exact bulk lead
+  selection, locked lead versions and permission revocation after approval.
+  A real Google SDK with an in-memory transporter separately checks message
+  timeout/reset/408/503 and unreadable accepted response, known 4xx rejection,
+  DNS/TLS failure, and OAuth refresh failure without a message POST. The six
+  focused confirmation, registry, email, SDK and GBP suites pass 143 tests.
 - Client regression tests: eighteen pass across GlobalCommandPalette,
   PendingActionsCard, and useIntelligenceBar. They cover query-only navigation,
   non-URL appointment selection, double Enter, close/reopen, Clear races, failed results, restored warnings, and
