@@ -2278,6 +2278,14 @@ const StripeService = {
         // concurrent request before our lock is never attributed to this attempt.
         if (requireVisitCompletionPacketId) {
           await require('./visit-completion-payment').assertVisitCompletionCharge(trx, lockedInvoice, requireVisitCompletionPacketId);
+          // A downward edit can land after the coordinator's locked decision.
+          // Release this unsubmitted attempt; packet recovery will take the
+          // non-cash settlement path from its next fresh invoice snapshot.
+          if (invoiceAmountDue(lockedInvoice) === 0) {
+            throw Object.assign(new Error('Visit invoice now has no balance to collect. Retry closeout.'), {
+              code: 'VISIT_PAYMENT_ZERO_BALANCE',
+            });
+          }
         }
         chargeOriginalCreditApplied = Number(lockedInvoice.credit_applied) || 0;
         chargeCreditAppliedTotal = chargeOriginalCreditApplied;

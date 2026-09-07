@@ -146,7 +146,8 @@ postgres('visit completion packet records on PostgreSQL', () => {
         amount: 240, status: 'received', stripe_payment_intent_id: `pi_fixture_${randomUUID()}` });
     } else {
       await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({
-        discount_type: 'fixed_amount', discount_amount: 120, discount_dollars: 120, discount_name: 'Synthetic full discount',
+        primary_line_price: 120, discount_type: 'fixed_amount', discount_amount: 120,
+        discount_dollars: 120, discount_name: 'Synthetic full discount',
       });
     }
     const saved = await saveVisitCompletionPacket(submission());
@@ -180,10 +181,11 @@ postgres('visit completion packet records on PostgreSQL', () => {
     }
   });
 
-  test('zero-balance settlement rechecks a concurrent price edit under the invoice lock', async () => {
+  test.each([[0, 240, 'payment_needed'], [240, 0, 'prepaid']])(
+    'the locked balance overrides a stale snapshot (%s to %s)', async (before, after, expectedState) => {
     const saved = await saveVisitCompletionPacket(submission());
     const invoiceId = saved.body.billing.invoiceId;
-    await mockPg('invoices').where({ id: invoiceId }).update({ total: 0 });
+    await mockPg('invoices').where({ id: invoiceId }).update({ total: before });
     await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
     const editor = await mockPg.transaction();
     await editor('invoices').where({ id: invoiceId }).forUpdate().first();
@@ -195,17 +197,39 @@ postgres('visit completion packet records on PostgreSQL', () => {
     mockPg.on('query', onQuery);
     const collection = collectVisitCompletionInvoice(saved.body.packetId);
     try {
-      await waiting;
-      await editor('invoices').where({ id: invoiceId }).update({ total: 240 });
+      await Promise.race([waiting, collection.then(() => { throw new Error('Collection finished before acquiring the invoice lock'); })]);
+      await editor('invoices').where({ id: invoiceId }).update({ total: after });
       await editor.commit();
-      expect(await collection).toMatchObject({ state: 'office_required' });
+      expect(await collection).toMatchObject({ state: expectedState });
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
-      expect((await mockPg('invoices').where({ id: invoiceId }).first()).status).toBe('draft');
+      expect((await mockPg('invoices').where({ id: invoiceId }).first()).status).toBe(after === 0 ? 'prepaid' : 'draft');
     } finally {
       mockPg.off('query', onQuery);
       if (!editor.isCompleted()) await editor.rollback();
       await collection;
     }
+  });
+
+  test('zero settlement waits for a reminder handoff, then completes its sequence atomically', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('invoices').where({ id: invoiceId }).update({ total: 0 });
+    await mockPg('visit_completion_packet_items').where({ packet_id: saved.body.packetId }).update({ status: 'done' });
+    const [sequence] = await mockPg('invoice_followup_sequences').insert({
+      invoice_id: invoiceId, customer_id: fixture.customerId, status: 'active',
+      touch_claimed_at: new Date(), next_touch_at: new Date(),
+    }).returning('*');
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'payment_pending' });
+    expect((await mockPg('invoices').where({ id: invoiceId }).first()).status).toBe('draft');
+    expect((await mockPg('invoice_followup_sequences').where({ id: sequence.id }).first()).status).toBe('active');
+    expect(await mockPg('audit_log').where({ resource_id: invoiceId, action: 'invoice.zero_balance_settled' })).toHaveLength(0);
+    await mockPg('invoice_followup_sequences').where({ id: sequence.id }).update({ touch_claimed_at: new Date(Date.now() - 11 * 60 * 1000) });
+    expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'prepaid' });
+    expect(await mockPg('invoice_followup_sequences').where({ id: sequence.id }).first())
+      .toMatchObject({ status: 'completed', touch_claimed_at: null, next_touch_at: null });
+    expect(await mockPg('audit_log').where({ resource_id: invoiceId, action: 'invoice.zero_balance_settled' })).toHaveLength(1);
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test('positive shared-invoice collection remains singular and replays its paid state', async () => {
@@ -229,6 +253,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await Promise.all([collectVisitCompletionInvoice(saved.body.packetId), collectVisitCompletionInvoice(saved.body.packetId)]);
     expect(await collectVisitCompletionInvoice(saved.body.packetId)).toMatchObject({ state: 'paid' });
     expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
+    await mockPg('service_completion_attempts').whereIn('service_id', fixture.serviceIds).update({ status: 'succeeded' });
     const status = await require('../services/closeout-status').getCloseoutStatus(fixture.serviceIds[1], { knex: mockPg });
     expect(status.facts.invoice).toMatchObject({ state: 'done', invoiceId: saved.body.billing.invoiceId, status: 'paid' });
     await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).update({ status: 'refunded' });

@@ -5017,8 +5017,8 @@ const InvoiceService = {
       if (!require("./invoice-helpers").isInvoiceCollectibleStatus(invoice.status)) return skip("already_settled");
       const totalCents = Math.round(Number(invoice.total) * 100);
       const creditCents = Math.round(Number(invoice.credit_applied || 0) * 100);
-      if (invoice.total == null || !Number.isSafeInteger(totalCents) || !Number.isSafeInteger(creditCents)
-          || totalCents < 0 || creditCents < 0 || creditCents > totalCents) return skip("invalid_balance");
+      const validAmounts = [totalCents, creditCents].every((cents) => Number.isSafeInteger(cents) && cents >= 0);
+      if (invoice.total == null || !validAmounts || creditCents > totalCents) return skip("invalid_balance");
       if (totalCents !== creditCents) return skip("balance_due");
       if ([invoice.payer_id, invoice.payer_statement_id, invoice.annual_prepay_term_id,
         invoice.stripe_payment_intent_id, invoice.payment_recorded_at, invoice.status === "sending"].some(Boolean)) {
@@ -5028,8 +5028,14 @@ const InvoiceService = {
         .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [id]).first("id");
       const plan = await trx("payment_plans").where({ invoice_id: id, status: "active" }).first("id");
       if (payment || plan) return skip("existing_payment_work");
-      const sequence = await trx("invoice_followup_sequences").where({ invoice_id: id }).forUpdate().first("status");
+      const sequence = await trx("invoice_followup_sequences").where({ invoice_id: id }).forUpdate()
+        .first("id", "status", "touch_claimed_at");
       if (sequence?.status === "stopped") return skip("collection_stopped");
+      // fireStep claims under this same invoice lock, then renders/sends
+      // outside its transaction. Let that existing ten-minute lease finish.
+      if (new Date(sequence?.touch_claimed_at).getTime() > Date.now() - 10 * 60 * 1000) {
+        return { ...skip("followup_in_flight"), retryable: true };
+      }
       await trx("customers").where({ id: invoice.customer_id }).forUpdate().first("id");
       if (await require("./invoice-helpers").visitRefusesSettlement(trx, invoice.scheduled_service_id)) {
         return skip("visit_never_ran");
@@ -5039,6 +5045,9 @@ const InvoiceService = {
         prepaid_at: trx.fn.now(), prepaid_by: "system:zero_balance",
         paid_at: trx.fn.now(), updated_at: trx.fn.now(),
       }).returning("*");
+      if (sequence) await trx("invoice_followup_sequences").where({ id: sequence.id }).update({
+        status: "completed", next_touch_at: null, touch_claimed_at: null, updated_at: trx.fn.now(),
+      });
       await require("./audit-log").recordAuditEvent({
         actor_type: "system", action: "invoice.zero_balance_settled",
         resource_type: "invoice", resource_id: id,
