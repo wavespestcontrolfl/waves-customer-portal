@@ -122,6 +122,12 @@ async function saveVisitCompletionPacket(input, database = db) {
         return recordsResult(existing, saved, billing, true);
       }
       if (visit.status !== 'open') return failure(409, 'visit_not_open', 'This visit is no longer open for closeout.');
+      if (!require('../config/feature-gates').isEnabled('visitCloseout')) {
+        return failure(404, 'visit_closeout_disabled', 'Visit closeout is unavailable.');
+      }
+      if (!process.env.DATA_HYGIENE_VAULT_KEY) {
+        return failure(503, 'visit_closeout_unavailable', 'Visit closeout is temporarily unavailable. No services were completed.');
+      }
       const keyOwner = await trx('visit_completion_packets').where({ idempotency_key: request.key }).first('id');
       if (keyOwner) return failure(409, 'visit_closeout_key_reused', 'The idempotency key belongs to another visit.');
       const [packet] = await trx('visit_completion_packets').insert({
@@ -308,7 +314,7 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
     }
   });
   return { status: pending ? 202 : 200, body: {
-    visitId: packet.visit_id, packetId: packet.id, state, payment, delivery, summaryUrl: `/visit/${token}`,
+    visitId: packet.visit_id, packetId: packet.id, state, payment, delivery, summaryUrl: token ? `/visit/${token}` : null,
   } };
 }
 

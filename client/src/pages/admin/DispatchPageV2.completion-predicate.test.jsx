@@ -13,6 +13,10 @@ vi.mock("./SchedulePage", () => ({
 import { completedVisitOwesCompletion, completionResumeMarked } from "./DispatchPageV2";
 
 describe("completedVisitOwesCompletion", () => {
+  it("reopens a saved visit packet that still owes effects on another device", () => {
+    expect(completedVisitOwesCompletion({ status: 'completed', has_service_record: true, visitCloseoutPacket: { status: 'processing' } })).toBe(true);
+    expect(completedVisitOwesCompletion({ status: 'completed', has_service_record: true, visitCloseoutPacket: { status: 'done' } })).toBe(false);
+  });
   it("opens completion for a completed visit with NO service record (status-only completion)", () => {
     expect(completedVisitOwesCompletion({ id: "svc-1", status: "completed", has_service_record: false })).toBe(true);
   });
@@ -54,4 +58,3 @@ describe("completionResumeMarked — the badge predicate", () => {
     expect(completionResumeMarked({ id: "svc-resume", status: "on_site" })).toBe(false);
   });
 });
-

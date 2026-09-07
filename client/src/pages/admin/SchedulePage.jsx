@@ -10343,6 +10343,9 @@ export function CompletionPanel({
   products,
   onClose,
   onSubmit,
+  // The stop sheet prepares every canonical form before one visit submit.
+  onPrepared,
+  preparedDraft,
   onViewDetails,
   // Typed specialty completion (PR 4): parent-owned success-screen
   // follow-up CTA (the button only renders when provided).
@@ -12105,7 +12108,9 @@ export function CompletionPanel({
     treeShrubCloseoutRequired && !isIncompleteVisit && treeShrubCloseoutBlocks.length > 0;
   const structuredCloseoutRequired =
     (calibrationRequired || treeShrubCloseoutRequired) && !isIncompleteVisit;
-  const baseCompletionCtaLabel = submitting
+  const baseCompletionCtaLabel = onPrepared
+    ? (submitting ? "Saving form…" : "Save service form")
+    : submitting
     ? "Completing..."
     : committedReplayReady
       ? "Resume Closeout"
@@ -12393,7 +12398,9 @@ export function CompletionPanel({
     setSavedDraft(null);
     setShowDraftPrompt(false);
     try {
-      const raw = localStorage.getItem(completionDraftKey(service.id));
+      const raw = preparedDraft?.serviceId === service.id
+        ? JSON.stringify(preparedDraft)
+        : localStorage.getItem(completionDraftKey(service.id));
       if (raw) {
         const draft = JSON.parse(raw);
         if (draft && draft.serviceId === service.id) {
@@ -12663,6 +12670,9 @@ export function CompletionPanel({
 
   function restoreDraft() {
     if (!savedDraft) return;
+    const restoredPhotos = onPrepared && Array.isArray(savedDraft.servicePhotos)
+      ? savedDraft.servicePhotos : servicePhotos;
+    if (onPrepared) setServicePhotos(restoredPhotos);
     lawnAreasInitializedRef.current = true;
     lawnDefaultMixSeededRef.current = true;
     if (savedDraft.lawnDefaultMixSnapshot) lawnDefaultMixSnapshotRef.current = savedDraft.lawnDefaultMixSnapshot;
@@ -12903,7 +12913,7 @@ export function CompletionPanel({
     // (codex r78).
     if (generatedReportTextRef.current
       && Number.isInteger(savedDraft.generationPhotoCount)
-      && savedDraft.generationPhotoCount !== servicePhotos.length) {
+      && savedDraft.generationPhotoCount !== restoredPhotos.length) {
       restorePruned = true;
     }
     // Same contract for the lawn-assessment identity (codex r82): a
@@ -14950,6 +14960,13 @@ export function CompletionPanel({
       // byte-for-byte through replayCommittedCompletion above; a fresh build
       // reaching here becomes the candidate snapshot.
       lastSubmitBodyRef.current = body;
+      if (onPrepared) {
+        await onPrepared(service.id, body, {
+          ...draftSnapshotRef.current, serviceId: service.id, servicePhotos,
+        });
+        setSubmitting(false);
+        return;
+      }
       const result = await onSubmit(service.id, body);
       if (finishCompletionSuccess(result) === "closed") return;
     } catch (e) {
@@ -15900,7 +15917,7 @@ export function CompletionPanel({
                   textOverflow: "ellipsis",
                 }}
               >
-                Complete service
+                {onPrepared ? "Service form" : "Complete service"}
               </div>{" "}
             </div>
             {onViewDetails ? (
@@ -18244,7 +18261,7 @@ export function CompletionPanel({
               id={`completion-panel-title-${service.id}`}
               style={{ fontSize: 18, fontWeight: 500, color: D.heading }}
             >
-              Complete Service
+              {onPrepared ? "Service form" : "Complete Service"}
             </div>{" "}
             <button
               type="button"
@@ -20190,8 +20207,8 @@ export function CompletionPanel({
                 <span style={{ fontSize: 15, fontWeight: 500 }}>
                   {completionCtaLabel}
                 </span>{" "}
-                <span style={{ fontSize: 11, fontWeight: 400, opacity: 0.85 }}>
-                  {isIncompleteVisit
+                <span style={{ fontSize: 14, fontWeight: 400, opacity: 0.85 }}>
+                  {onPrepared ? "Saved with the other services in this visit" : isIncompleteVisit
                     ? "Office follow-up alert will be created"
                     : effectiveSendSms
                       ? `SMS + Report sent to ${service.customerName}`

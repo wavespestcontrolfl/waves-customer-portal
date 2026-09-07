@@ -42,6 +42,22 @@ afterEach(() => {
 });
 
 describe('completion draft departure', () => {
+  it('prepares the canonical form and restores its photos without completing a service', async () => {
+    const onSubmit = vi.fn();
+    const onPrepared = vi.fn().mockResolvedValue(undefined);
+    const photos = [{ data: 'data:image/jpeg;base64,c3ludGhldGlj', name: 'fixture.jpg', capturedAt: '2020-01-01T12:00:00Z' }];
+    await mount({ onSubmit, onPrepared, preparedDraft: { serviceId: service.id, notes: 'Prepared report note', servicePhotos: photos } });
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    expect(notes().value).toBe('Prepared report note');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^Save service form/i }));
+    });
+    expect(onPrepared).toHaveBeenCalledTimes(1);
+    expect(onPrepared.mock.calls[0][1]).toMatchObject({ technicianNotes: 'Prepared report note', completionPhotos: [expect.objectContaining(photos[0])] });
+    expect(onPrepared.mock.calls[0][2].servicePhotos).toEqual(photos);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /^Save service form/i })).toBeTruthy();
+  });
   it('saves the latest note and preference when leaving before autosave', async () => {
     const view = await mount();
     fireEvent.change(notes(), { target: { value: 'Older saved note' } });

@@ -343,6 +343,9 @@ const gates = {
   // creation) and issued /visit/:token links keep resolving. Fail-closed
   // ==='true' in EVERY environment; kill switch: unset.
   visitGroups: process.env.GATE_VISIT_GROUPS === 'true',
+  // Creation only. Saved packets and issued summary links survive the kill
+  // switch. Read at call time so grouping and closeout share one decision.
+  get visitCloseout() { return process.env.GATE_VISIT_CLOSEOUT === 'true'; },
 
   // Quote-wizard repeat-run dedupe (#3834 split, PR A′): a tokenless
   // /calculate rerun of an OPEN quote_wizard lead (same email + phone +

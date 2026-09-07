@@ -17,9 +17,10 @@ async function ensureVisitSummaryToken(packetId, database = db) {
       const packet = await trx('visit_completion_packets').where({ id: packetId }).first();
       if (!packet || !['processing', 'done'].includes(packet.status)) throw new Error('Packet unavailable');
       const visit = await trx('service_visits').where({ id: packet.visit_id }).forUpdate().first();
-      if (!visit || visit.summary_token_revoked_at || !['closing', 'closed'].includes(visit.status)) {
+      if (!visit || !['closing', 'closed'].includes(visit.status)) {
         throw new Error('Visit unavailable');
       }
+      if (visit.summary_token_revoked_at) return null;
       const pending = await trx('visit_completion_packet_items').where({ packet_id: packet.id })
         .whereNot('status', 'done').first('id');
       if (pending) throw new Error('Member reports are still pending');
@@ -198,7 +199,7 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   const summary = await getVisitCompletionSummary(token, database);
   const visibleMembers = await database('visit_completion_packet_items').where({ packet_id: packet.id })
     .whereIn('service_record_id', (summary?.services || []).map((service) => service.id)).pluck('scheduled_service_id');
-  const context = { visit, member, customer, prefs, database, visible: Boolean(summary), summaryUrl: portalUrl(`/visit/${token}`),
+  const context = { visit, member, customer, prefs, database, visible: Boolean(summary), summaryUrl: token ? portalUrl(`/visit/${token}`) : null,
     requested: payload.items.some((item) => visibleMembers.includes(item.serviceId) && item.body.sendCompletionSms !== false) };
   await sendSummarySms(context);
   await sendSummaryEmail(context);

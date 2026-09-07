@@ -113,8 +113,9 @@ function isPestControlService(service) {
 // findings schema) complete through the Dispatch completion form — neither
 // the recap modal (no findings/billing gate) nor project creation (server
 // 422s appointment-managed types) is the right surface.
-function isTypedFindingsService(service) {
-  return !!service?.completionProfile?.findingsType;
+function usesDispatchCompletion(service) {
+  return !!service?.completionProfile?.findingsType
+    || !!((service?.visitId || service?.visit_id) && (service?.visitCloseoutEnabled || service?.visitCloseoutPacket));
 }
 
 // C4 (universal one-time services, ratified Q9): instead of an alert telling
@@ -128,7 +129,7 @@ function isTypedFindingsService(service) {
 const TERMINAL_SERVICE_STATUSES = new Set(["completed", "cancelled", "skipped", "no_show"]);
 function openTypedCompletion(service) {
   const status = String(service?.status || "");
-  if (TERMINAL_SERVICE_STATUSES.has(status)) {
+  if (TERMINAL_SERVICE_STATUSES.has(status) && !service?.visitCloseoutPacket) {
     alert(`This visit is already ${status} — nothing to complete.`);
     return;
   }
@@ -258,7 +259,7 @@ export default function TechHomePage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `Route failed to load (${res.status})`);
-      setSchedule(scheduleRowsFromResponse(data));
+      setSchedule(scheduleRowsFromResponse(data).map((service) => ({ ...service, visitCloseoutEnabled: data.visitCloseout === true })));
       setRainChance(typeof data.rainChance === 'number' ? data.rainChance : null);
     } catch (err) {
       console.error('Failed to fetch schedule:', err);
@@ -521,7 +522,7 @@ export default function TechHomePage() {
       const only = myServices[0];
       // Same routing as the row/picker handlers — a cut-over typed job must
       // not open CreateProjectModal through the quick action either.
-      if (isTypedFindingsService(only)) {
+      if (usesDispatchCompletion(only)) {
         openTypedCompletion(only);
       } else if (isPestControlService(only)) {
         setRecapService(only);
@@ -815,7 +816,7 @@ export default function TechHomePage() {
                 onToggle={() => toggleStop(stop)}
                 onRetryDetail={() => loadStopDetail(stop)}
                 onProject={(s) => (
-                  isTypedFindingsService(s)
+                  usesDispatchCompletion(s)
                     ? openTypedCompletion(s)
                     : isPestControlService(s) ? setRecapService(s) : openProjectOrContinue(s)
                 )}
@@ -889,7 +890,7 @@ export default function TechHomePage() {
           onClose={() => setShowProjectPicker(false)}
           onSelect={(service) => {
             setShowProjectPicker(false);
-            if (isTypedFindingsService(service)) openTypedCompletion(service);
+            if (usesDispatchCompletion(service)) openTypedCompletion(service);
             else if (isPestControlService(service)) setRecapService(service);
             else openProjectOrContinue(service);
           }}

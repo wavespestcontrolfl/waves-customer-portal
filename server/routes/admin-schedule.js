@@ -3969,6 +3969,12 @@ router.get('/', async (req, res, next) => {
       };
     }));
     require('../services/visit-groups').visitSummariesForRows(enriched);
+    const visitIds = [...new Set(enriched.map((service) => service.visitId).filter(Boolean))];
+    const closeouts = visitIds.length
+      ? await db('visit_completion_packets').whereIn('visit_id', visitIds).select('id', 'visit_id', 'status')
+      : [];
+    const closeoutByVisit = new Map(closeouts.map((packet) => [packet.visit_id, { id: packet.id, status: packet.status }]));
+    for (const service of enriched) service.visitCloseoutPacket = closeoutByVisit.get(service.visitId) || null;
 
     // Group by technician
     const byTech = {};
@@ -4050,6 +4056,7 @@ router.get('/', async (req, res, next) => {
       // kill switch is off instead of offering an action the group route
       // 404s (GH codex #3843 r1 P1). Split/Separate stay ungated.
       visitGroups: isEnabled('visitGroups'),
+      visitCloseout: isEnabled('visitCloseout'),
       techSummary: Object.values(byTech),
       unassigned,
       technicians,

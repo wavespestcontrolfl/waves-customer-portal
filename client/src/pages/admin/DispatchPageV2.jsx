@@ -88,6 +88,7 @@ import {
   isETToday as isETTodayStr,
 } from "../../lib/timezone";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
+import VisitCloseoutSheet from '../../components/admin/VisitCloseoutSheet';
 import {
   mergePostPaymentService,
   shouldReopenCompletionAfterPayment,
@@ -125,6 +126,7 @@ export function completedVisitOwesCompletion(service) {
   // typed visit with a leftover linked project and a failed profile lookup
   // would otherwise lose its resume — Codex #3799 r5).
   if (completionResumeMarked(service)) return true;
+  if (service?.visitCloseoutPacket && service.visitCloseoutPacket.status !== 'done') return true;
   // A completed project-backed visit is closed by definition — handleComplete
   // refuses it (projectCompletionIsClosed) and CompletionPanel never owns
   // it, so a status-only reopen would be a dead end (Codex #3799 r1).
@@ -427,6 +429,7 @@ export default function DispatchPageV2({
   const [error, setError] = useState(null);
   const [products, setProducts] = useState([]);
   const [completingService, setCompletingService] = useState(null);
+  const [closingVisitId, setClosingVisitId] = useState(null);
   const [projectService, setProjectService] = useState(null);
   // In-place project editor (owner ask 2026-07-13): a project-backed visit's
   // report opens right here in the schedule — the same interaction as the
@@ -841,6 +844,10 @@ export default function DispatchPageV2({
       setCompletingService(service);
       return;
     }
+    if (service.visitId && (data?.visitCloseout === true || service.visitCloseoutPacket)) {
+      setClosingVisitId(service.visitId);
+      return;
+    }
     if (isProjectBackedCompletion(service)) {
       if (projectCompletionIsClosed(service)) return;
       if (service?.linkedProject?.id) {
@@ -853,7 +860,7 @@ export default function DispatchPageV2({
       return;
     }
     setCompletingService(service);
-  }, []);
+  }, [data?.visitCloseout]);
 
   // Second half of the ?completeService deep-link: once the day's schedule
   // is loaded, open the completion for the pending id through
@@ -1775,6 +1782,14 @@ export default function DispatchPageV2({
       )}
 
       {/* Modals — V1 components, unchanged */}
+      {closingVisitId && <VisitCloseoutSheet
+        key={closingVisitId} visitId={closingVisitId} products={products}
+        onClose={() => setClosingVisitId(null)}
+        onSaved={() => {
+          setScheduleRefreshKey((value) => value + 1);
+          void fetchSchedule(date, { silent: true });
+        }}
+      />}
       {completingService && (
         <CompletionPanel
           service={completingService}

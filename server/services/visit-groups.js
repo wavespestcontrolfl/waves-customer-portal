@@ -1137,6 +1137,9 @@ async function customerExcludedByAutopay(customerId, database = db) {
     const customer = await database('customers').where({ id: customerId })
       .first('id', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status');
     if (!customer) return true;
+    // The full closeout rail owns one invoice and automatic collection.
+    // Missing link encryption configuration keeps new Auto Pay groups out.
+    if (require('../config/feature-gates').isEnabled('visitCloseout') && process.env.DATA_HYGIENE_VAULT_KEY) return false;
     // ENROLLMENT excludes, not current chargeability (pre-push codex P0):
     // customerOnAutopay returns false during an autopay PAUSE, but a
     // paused customer is still enrolled — a group formed during the pause
@@ -1482,6 +1485,10 @@ async function beginVisitNotificationDispatch(visitId, kind, token, { dedupeKey 
     this.where('status', 'unknown_delivery').orWhere(function liveClaim() {
       this.where('status', 'claimed').where('claimed_at', '>', new Date(Date.now() - NOTIFICATION_CLAIM_LEASE_MS));
     });
+  }).modify((query) => {
+    if (['completion_sms', 'completion_email'].includes(effectType)) {
+      query.whereExists(db('service_visits').select(db.raw('1')).where({ id: visitId }).whereNull('summary_token_revoked_at'));
+    }
   }).update({ status: 'unknown_delivery', last_error: null, claimed_at: db.fn.now(), updated_at: db.fn.now() }).returning('id');
   return rows.length > 0;
 }

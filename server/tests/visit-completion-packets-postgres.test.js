@@ -35,6 +35,8 @@ const connection = process.env.VISIT_PACKET_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 let mockPg;
 let fixture;
+const originalSummaryKey = process.env.DATA_HYGIENE_VAULT_KEY;
+const originalCloseoutGate = process.env.GATE_VISIT_CLOSEOUT;
 jest.setTimeout(90000);
 
 function submission(overrides = {}) {
@@ -51,14 +53,24 @@ function submission(overrides = {}) {
 
 postgres('visit completion packet records on PostgreSQL', () => {
   beforeAll(async () => {
+    process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
+    process.env.GATE_VISIT_CLOSEOUT = 'true';
     const url = new URL(connection);
     if (!/^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname)) throw new Error('Use a verified, task-private QA database');
     mockPg = knex({ client: 'pg', connection, pool: { min: 0, max: 8 } });
     if (!(await mockPg.schema.hasTable('visit_completion_packets'))) throw new Error('Run the repository migrations first');
   });
-  afterAll(async () => { if (mockPg) await mockPg.destroy(); });
+  afterAll(async () => {
+    if (originalSummaryKey === undefined) delete process.env.DATA_HYGIENE_VAULT_KEY;
+    else process.env.DATA_HYGIENE_VAULT_KEY = originalSummaryKey;
+    if (originalCloseoutGate === undefined) delete process.env.GATE_VISIT_CLOSEOUT;
+    else process.env.GATE_VISIT_CLOSEOUT = originalCloseoutGate;
+    if (mockPg) await mockPg.destroy();
+  });
   beforeEach(async () => {
     jest.restoreAllMocks();
+    process.env.GATE_VISIT_CLOSEOUT = 'true';
+    process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
     jest.clearAllMocks();
     chargeInvoiceWithSavedCard.mockReset();
     require('../services/notification-triggers').triggerNotification.mockReset().mockResolvedValue({ suppressed: true });
@@ -86,6 +98,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
   afterEach(async () => {
     if (!fixture) return;
     jest.restoreAllMocks();
+    if (fixture.httpServer) await new Promise((resolve) => fixture.httpServer.close(resolve));
     // Only the synthetic fixture's rows; the private database's seeded catalog
     // and migration data remain intact for later billing/UI verification.
     await mockPg('invoices').where({ customer_id: fixture.customerId }).del();
@@ -124,6 +137,95 @@ postgres('visit completion packet records on PostgreSQL', () => {
     });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('staff routes enforce ownership and resume a committed closeout after the creation gate closes', async () => {
+    const app = require('express')();
+    app.use(require('express').json());
+    app.use('/api/admin/visit-closeouts', require('../routes/admin-visit-closeouts'));
+    app.use('/api/visit-summary', require('../routes/visit-summary-public'));
+    fixture.httpServer = await new Promise((resolve) => {
+      const server = app.listen(0, '127.0.0.1', () => resolve(server));
+    });
+    const request = async (path, { method = 'GET', auth = {}, body } = {}) => {
+      const response = await fetch(`http://127.0.0.1:${fixture.httpServer.address().port}${path}`, {
+        method, headers: { ...auth, 'Content-Type': 'application/json', 'Idempotency-Key': fixture.key },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      });
+      return { status: response.status, body: await response.json(), headers: Object.fromEntries(response.headers) };
+    };
+    await mockPg('technicians').where({ id: fixture.techId }).update({ employment_status: 'active', auth_token_version: 1, must_change_password: false });
+    const token = require('jsonwebtoken').sign({ technicianId: fixture.techId, type: 'access', tokenVersion: 1 }, require('../config').jwt.secret);
+    const path = `/api/admin/visit-closeouts/${fixture.visitId}`;
+    const auth = { Authorization: `Bearer ${token}` };
+    expect((await request(path)).status).toBe(401);
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ technician_id: null });
+    expect((await request(path, { method: 'POST', auth, body: { ...submission(), actor: { techRole: 'admin' } } })).status).toBe(403);
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[1] }).update({ technician_id: fixture.techId });
+    const result = await request(path, { method: 'POST', auth, body: { items: submission().items } });
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ state: 'done', payment: { state: 'payment_needed' } });
+    expect(result.headers['cache-control']).toContain('no-store');
+    process.env.GATE_VISIT_CLOSEOUT = 'false';
+    const detail = await request(path, { auth });
+    expect(detail.body).toMatchObject({ packet: { status: 'done' }, invoice: { total: 240, status: 'scheduled' } });
+    expect((await request(`${path}/resume`, { method: 'POST', auth, body: { items: [], actor: { techRole: 'admin' } } })).status).toBe(200);
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(require('../services/email-template-library').sendTemplate).toHaveBeenCalledTimes(1);
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(2);
+    const summaryPath = result.body.summaryUrl.replace('/visit/', '/api/visit-summary/');
+    const summary = await request(summaryPath);
+    expect(summary.status).toBe(200);
+    expect(summary.body.services).toHaveLength(2);
+    expect(summary.headers['referrer-policy']).toBe('no-referrer');
+    expect(summary.headers['x-robots-tag']).toContain('noindex');
+    expect(summary.headers['cache-control']).toContain('no-store');
+    expect((await request(`${path}/revoke-summary`, { method: 'POST', auth, body: {} })).status).toBe(403);
+    await mockPg('technicians').where({ id: fixture.techId }).update({ role: 'admin' });
+    expect((await request(path, { auth })).body.canRevokeSummary).toBe(true);
+    expect((await request(`${path}/revoke-summary`, { method: 'POST', auth, body: {} })).body).toEqual({ revoked: true });
+    const revoked = await request(summaryPath);
+    const malformed = await request('/api/visit-summary/not-a-token');
+    expect(revoked.status).toBe(404);
+    expect(malformed.status).toBe(404);
+    expect(revoked.body).toEqual(malformed.body);
+    const claimToken = randomUUID();
+    await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' })
+      .update({ status: 'claimed', claim_token: claimToken, claimed_at: mockPg.fn.now() });
+    expect(await require('../services/visit-groups').beginVisitNotificationDispatch(fixture.visitId, 'completion_sms', claimToken)).toBe(false);
+    await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).update({ status: 'sent' });
+    const resumed = await request(`${path}/resume`, { method: 'POST', auth, body: {} });
+    expect(resumed.status).toBe(200);
+    expect(resumed.body.summaryUrl).toBeNull();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(require('../services/email-template-library').sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('new closeouts require the creation gate and summary key before any record commits', async () => {
+    process.env.GATE_VISIT_CLOSEOUT = 'false';
+    expect(await saveVisitCompletionPacket(submission()))
+      .toMatchObject({ status: 404, body: { code: 'visit_closeout_disabled' } });
+    process.env.GATE_VISIT_CLOSEOUT = 'true';
+    delete process.env.DATA_HYGIENE_VAULT_KEY;
+    expect(await saveVisitCompletionPacket(submission()))
+      .toMatchObject({ status: 503, body: { code: 'visit_closeout_unavailable' } });
+    expect(await mockPg('service_records').where({ customer_id: fixture.customerId })).toHaveLength(0);
+    expect(await mockPg('invoices').where({ customer_id: fixture.customerId })).toHaveLength(0);
+    expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
+  });
+
+  test('Auto Pay grouping becomes eligible only with the full closeout gate and summary key', async () => {
+    const { customerExcludedByAutopay } = require('../services/visit-groups');
+    await mockPg('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true });
+    process.env.GATE_VISIT_CLOSEOUT = 'false';
+    expect(await customerExcludedByAutopay(fixture.customerId)).toBe(true);
+    process.env.GATE_VISIT_CLOSEOUT = 'true';
+    delete process.env.DATA_HYGIENE_VAULT_KEY;
+    expect(await customerExcludedByAutopay(fixture.customerId)).toBe(true);
+    process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
+    expect(await customerExcludedByAutopay(fixture.customerId)).toBe(false);
+    expect(await customerExcludedByAutopay(randomUUID())).toBe(true);
   });
 
   test('member recovery keeps forms, reports and operational records without collecting or delivering', async () => {
