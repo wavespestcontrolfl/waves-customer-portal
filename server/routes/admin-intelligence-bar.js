@@ -686,6 +686,9 @@ function confirmationDisplayParams(toolName, params, preview) {
   if (toolName === 'send_email_reply' && preview?.pinned_recipient) {
     return { ...params, reply_to: preview.pinned_recipient.email_masked, subject: preview.pinned_recipient.subject || undefined };
   }
+  if (toolName === 'submit_review_reply' && preview?.review) {
+    return { ...preview.review, reply_text: params.reply_text };
+  }
   if (toolName === 'approve_price' && preview?.pinned_approval) {
     const a = preview.pinned_approval;
     return {
@@ -817,6 +820,13 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   } else {
     // Legacy bare writes mutate on call — never execute from the model loop.
     preview = { proposal: true, tool: toolUse.name, params };
+    if (toolUse.name === 'submit_review_reply') {
+      const pinned = await require('../services/intelligence-bar/review-tools').loadReviewReplyPin(params.review_id);
+      if (!pinned) return { failed: true, modelResult: { error: 'The review is unavailable', code: 'record_unavailable' } };
+      const { _pin, ...review } = pinned;
+      params._ib_review_pin = _pin;
+      preview.review = review;
+    }
     // Identity pinning (mirrors the set_estimate_presentation pin below):
     // name→row resolution happens NOW, so the operator approves a specific
     // pinned id and /confirm-action can never re-resolve "Smith" to a
@@ -1320,6 +1330,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   return {
     modelResult: {
       ...preview,
+      ...(preview.params ? { params: Object.fromEntries(Object.entries(preview.params).filter(([key]) => !key.startsWith('_'))) } : {}),
       pending_confirmation: true,
       note: 'Proposed — awaiting the operator\'s Confirm click on the confirmation card in the portal. Do NOT retry this tool and do NOT claim the action is done; tell the operator to confirm or cancel using the card.',
     },
@@ -1936,12 +1947,16 @@ function getToolsForContext(context, isAdmin = false) {
 
 // techContext is only set for tech portal calls
 function executeToolByName(toolName, input, techContext, actionContext = {}) {
-  if (gateEnvValue('GATE_IB_PLATFORM') && toolName !== AGENT_ESTIMATE_WRITE_TOOL) {
+  // Existing owner-only /execute workflows keep their transport contract;
+  // the registry advertises them as requiring that separate approved flow.
+  if (gateEnvValue('GATE_IB_PLATFORM') && toolName !== AGENT_ESTIMATE_WRITE_TOOL && !CONFIRMED_ACTION_TOOL_NAMES.has(toolName)) {
     return ActionRegistry.execute(toolName, input, {
       role: techContext ? 'technician' : 'admin', context: techContext ? 'tech' : 'platform',
       techContext, actionContext,
     });
   }
+  input = { ...input, ...actionContext.executionPins,
+    ...(WRITE_TWO_STEP_TOOL_NAMES.has(toolName) ? { confirmed: actionContext.confirmed === true } : {}) };
   if (TECH_TOOL_NAMES.has(toolName)) {
     return executeTechTool(toolName, input, techContext || {});
   }
@@ -1949,7 +1964,7 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
     return executeHistoryTool(toolName, input, actionContext);
   }
   if (REVIEW_TOOL_NAMES.has(toolName)) {
-    return executeReviewTool(toolName, input);
+    return executeReviewTool(toolName, input, actionContext);
   }
   if (COMMS_TOOL_NAMES.has(toolName)) {
     return executeCommsTool(toolName, input);
@@ -2053,6 +2068,22 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   return executeTool(toolName, input, actionContext);
 }
 
+// Only claimed, hash-verified approval parameters enter here. Model arguments
+// go directly to executeToolByName and must pass the registry schema unchanged.
+function executeApprovedTool(toolName, params, techContext, actionContext) {
+  const input = {}, executionPins = {};
+  for (const [key, value] of Object.entries(params)) {
+    if (key.startsWith('_')) executionPins[key] = value;
+    // Existing pending cancellation rows store this historical field name.
+    else if (key === 'preview_fingerprint') executionPins._approved_cancel_plan_fingerprint = value;
+    // The native stored approval uses lead_ids; the executor receives the
+    // server-owned cohort separately from model-visible criteria.
+    else if (toolName === 'bulk_update_leads' && key === 'lead_ids') executionPins._approved_lead_ids = value;
+    else if (key !== 'confirmed' && key !== 'confirm') input[key] = value;
+  }
+  return executeToolByName(toolName, input, techContext, { ...actionContext, executionPins });
+}
+
 // Field technicians who can take an assignment right now (active AND
 // field-dispatchable — technician-eligibility.js is the one definition).
 async function liveTeamPrompt() {
@@ -2132,6 +2163,8 @@ async function runQuery(req, res, next) {
   let activeTask = null;
   try {
     const { prompt, conversationHistory = [], context: requestedContext, pageData } = req.body;
+    const priorThread = UUID_RE.test(String(req.body.thread_id || ''))
+      ? { threadId: req.body.thread_id, threadSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null } : {};
     const images = sanitizeQueryImages(req.body.images);
     const imageTainted = images.length > 0 || hasImageTaintedHistory(conversationHistory);
     const piiTaintedHistory = hasPiiTaintedHistory(conversationHistory);
@@ -2168,7 +2201,9 @@ async function runQuery(req, res, next) {
       const started = req.ibResumedTask ? { task: req.ibResumedTask, created: true } : await IbTasks.begin({ actorId: getAdminActorId(req), sessionId: req.body.session_id,
         requestKey: req.body.request_key,
         request: { prompt, context, pageData: pageData || {}, selectedTarget: req.body.selected_target || null, images,
-          conversationHistory: conversationHistory.slice(-10) },
+          conversationHistory: conversationHistory.slice(-10),
+          thread_id: UUID_RE.test(String(req.body.thread_id || '')) ? req.body.thread_id : null,
+          thread_seq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null },
         pageContext: pageData,
       });
       if (started.error) return res.status(409).json(started);
@@ -2180,7 +2215,7 @@ async function runQuery(req, res, next) {
         const payload = { response: taskContext.error || (taskContext.ambiguous
           ? 'More than one customer matches. Select the customer for this request.'
           : 'I could not match the named customer. Select the intended customer before changing a record.'),
-        taskId: activeTask.id, taskState: 'needs_information', candidates: taskContext.candidates || [], pendingActions: [] };
+        ...priorThread, taskId: activeTask.id, taskState: 'needs_information', candidates: taskContext.candidates || [], pendingActions: [] };
         await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, state: 'needs_information', target: taskContext, response: payload });
         return res.json(payload);
       }
@@ -2189,7 +2224,7 @@ async function runQuery(req, res, next) {
 
     if (!Anthropic || !process.env.ANTHROPIC_API_KEY) {
       if (activeTask) await IbTasks.checkpoint(activeTask.id, getAdminActorId(req), { runnerToken: activeTask.runner_token, state: 'failed',
-        response: { response: 'The model integration is unavailable. No actions were proposed.' } });
+        response: { ...priorThread, response: 'The model integration is unavailable. No actions were proposed.' } });
       return res.status(503).json({
         error: 'AI not configured',
         message: 'ANTHROPIC_API_KEY is not set. Intelligence Bar requires Claude API access.',
@@ -2340,7 +2375,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         const toolStartedAt = Date.now();
         let executionInput = toolUse.input;
         let validationFailure = platformEnabled ? ActionRegistry.validateInput(toolUse.name, toolUse.input, actionScope) : null;
-        if (!validationFailure && platformEnabled && taskContext.targets?.length
+        if (!validationFailure && platformEnabled && (taskContext.targets?.length || toolUse.name === 'draft_review_reply')
           && ActionRegistry.actions.get(toolUse.name)?.kind === 'read') {
           const readTarget = await TaskContext.prepareReadInput(toolUse.input, taskContext, {
             toolName: toolUse.name, schema: ActionRegistry.actions.get(toolUse.name).schema,
@@ -2555,7 +2590,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
         // turn so a resumed model never believes a proposal is still awaiting
         // confirmation and the operator knows to re-ask.
         const threadAssistantTurn = pendingProposals.length
-          ? `${persistedAssistantTurn}\n[This reply proposed ${pendingProposals.length} pending action(s); those confirmation cards expired with the session and were not restored. If the action is still wanted, propose it again.]`
+          ? `${persistedAssistantTurn}\n[This reply proposed ${pendingProposals.length} pending action(s). Check the task's current confirmation cards and receipts; this historical proposal text is not evidence of execution.]`
           : persistedAssistantTurn;
         // thread_seq is the client's view of the thread tail — a mismatch
         // means a concurrent append (another tab) landed first, so this
@@ -2665,6 +2700,8 @@ router.post('/tasks/:id/select-target', async (req, res, next) => {
     req.ibResumedTask = claimed.task;
     req.ibResumeReceipts = claimed.receipts;
     req.body = { ...claimed.task.request, selected_target: selectedTarget, session_id: task.session_id, request_key: task.request_key };
+    req.body.thread_id = claimed.task.response?.threadId || claimed.task.request.thread_id;
+    req.body.thread_seq = claimed.task.response?.threadId ? claimed.task.response.threadSeq : claimed.task.request.thread_seq;
     return runQuery(req, res, next);
   } catch (err) { return next(err); }
 });
@@ -2679,6 +2716,8 @@ router.post('/tasks/:id/resume', async (req, res, next) => {
     req.ibResumeReceipts = claimed.receipts;
     req.body = { ...claimed.task.request, session_id: claimed.task.session_id, request_key: claimed.task.request_key,
       selected_target: claimed.task.request.selectedTarget || claimed.task.target?.target || null };
+    req.body.thread_id = claimed.task.response?.threadId || claimed.task.request.thread_id;
+    req.body.thread_seq = claimed.task.response?.threadId ? claimed.task.response.threadSeq : claimed.task.request.thread_seq;
     return runQuery(req, res, next);
   } catch (err) { return next(err); }
 });
@@ -2728,7 +2767,7 @@ router.post('/execute', async (req, res, next) => {
       return res.status(409).json({ error: IB_WRITES_DISABLED_MESSAGE });
     }
 
-    if (gateEnvValue('GATE_IB_PLATFORM')) {
+    if (gateEnvValue('GATE_IB_PLATFORM') && !CONFIRMED_ACTION_TOOL_NAMES.has(action)) {
       const invalid = ActionRegistry.validateInput(action, params || {}, { role: req.techRole, context: 'platform' });
       if (invalid) return res.status(invalid.code === 'permission_denied' ? 403 : 400).json(invalid);
     }
@@ -2846,12 +2885,22 @@ router.post('/confirm-action', async (req, res, next) => {
       }
       delete execParams._ib_task_context;
     }
+    if (action.tool_name === 'submit_review_reply') {
+      const approved = execParams._ib_review_pin;
+      const current = await require('../services/intelligence-bar/review-tools').loadReviewReplyPin(execParams.review_id);
+      if (!approved || !current || approved.version !== current._pin.version
+        || (approved.resourceName && approved.resourceName !== current._pin.resourceName)) {
+        const result = { error: 'The review identity or content changed. Review a fresh confirmation card.', preview_changed: true };
+        await PendingActions.recordResult(action.id, result);
+        return res.status(409).json(result);
+      }
+    }
     let approvedAgentEstimateFingerprint = null;
     if (action.tool_name === AGENT_ESTIMATE_WRITE_TOOL) {
       const approvedFingerprint = execParams._approvedPreviewFingerprint;
       approvedAgentEstimateFingerprint = approvedFingerprint;
       delete execParams._approvedPreviewFingerprint;
-      const livePreview = await executeToolByName(action.tool_name, execParams, null, {
+      const livePreview = await executeApprovedTool(action.tool_name, execParams, null, {
         isAdmin: req.techRole === 'admin',
         technicianId: req.technicianId || req.technician?.id || null,
         confirmed: false,
@@ -2963,7 +3012,7 @@ router.post('/confirm-action', async (req, res, next) => {
       const approvedTwoStep = execParams._two_step_preview_fingerprint;
       delete execParams._two_step_preview_fingerprint;
       if (approvedTwoStep) {
-        const livePreview = await executeToolByName(action.tool_name, { ...execParams }, techContextForExecution(req), {
+        const livePreview = await executeApprovedTool(action.tool_name, { ...execParams }, techContextForExecution(req), {
           isAdmin: req.techRole === 'admin',
           technicianId: req.technicianId || req.technician?.id || null,
           confirmed: false,
@@ -3056,12 +3105,10 @@ router.post('/confirm-action', async (req, res, next) => {
           };
         }
       }
-      // Server-derived confirmation: the operator clicked Confirm. This is
-      // the only place a confirmed flag is ever attached.
-      execParams.confirmed = true;
     }
 
-    const result = await executeToolByName(action.tool_name, execParams, techContextForExecution(req), {
+    const result = await executeApprovedTool(action.tool_name, execParams, techContextForExecution(req), {
+      actorId: getAdminActorId(req),
       isAdmin: req.techRole === 'admin',
       technicianId: req.technicianId || req.technician?.id || null,
       confirmed: true,

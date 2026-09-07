@@ -632,7 +632,7 @@ async function settleBulkWon(ids) {
 }
 
 async function bulkUpdateLeads(input) {
-  const { current_status, older_than_days, new_status, lost_reason, dry_run = true, lead_ids } = input;
+  const { current_status, older_than_days, new_status, lost_reason, dry_run = true, _approved_lead_ids: lead_ids } = input;
   if (!LEAD_STATUS_SET.has(new_status)) {
     return { error: `Invalid lead status: ${new_status}` };
   }

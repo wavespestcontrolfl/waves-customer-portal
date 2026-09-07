@@ -182,7 +182,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     ].map(email => ({ ...email, received_at: new Date(), subject: 'Synthetic read binding' })));
     const selections = [
       ['get_closeout_status', { service_id: visitB }, false],
-      ['get_call_log', { call_id: callB }, false],
+      ['get_call_log', { call_id: callB }, 'target_relationship_mismatch'],
       ['get_conversation_thread', { customer_name: `${b.first_name} ${b.last_name}` }, false],
       ['get_conversation_thread', { phone: b.phone }, false],
       ['get_email_thread', { thread_id: emailB }, false],
@@ -233,6 +233,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     };
     for (const prompt of [`Text this customer: please call ${b.phone}`, `Text this customer a reminder to call ${b.phone}`, `Text this customer "please call ${b.phone}"`]) {
       const wrong = await propose(prompt);
+      expect(wrong.body.taskTarget?.customer_id).toBe(customerA);
       expect(wrong.body.pendingActions).toHaveLength(0);
       expect(JSON.stringify(mockModel.mock.calls[2][0].messages.at(-1).content)).toContain('target_relationship_mismatch');
     }
@@ -304,7 +305,8 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     const card = proposed.body.pendingActions[0];
     await db('customers').where('id', customerA).update({ crm_notes: 'Newer operator edit', updated_at: db.fn.now() });
     const confirmed = await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash });
-    expect(confirmed.body).toMatchObject({ success: false, outcome: 'failed', result: { preview_changed: true } });
+    expect(confirmed.status).toBe(409);
+    expect(confirmed.body).toMatchObject({ code: 'target_changed' });
     expect((await db('customers').where('id', customerA).first('crm_notes')).crm_notes).toBe('Newer operator edit');
   }, 30000);
 
@@ -445,6 +447,10 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
   test('a server-selected bulk lead cohort is approved exactly; model fields and content cannot establish it', async () => {
     const ids = [crypto.randomUUID(), crypto.randomUUID()];
     const old = new Date(Date.now() - 12001 * 86400000);
+    // A previous failed synthetic run may have left eligible rows. The task
+    // explicitly requests the whole current cohort, including those rows.
+    const existingIds = await db('leads').where('status', 'unresponsive')
+      .where('updated_at', '<', new Date(Date.now() - 12000 * 86400000)).pluck('id');
     await db('leads').insert(ids.map((id, index) => ({ id, first_name: 'Synthetic', last_name: `Bulk ${index}`,
       customer_id: index ? customerA : null, status: 'unresponsive', updated_at: old })));
     const params = { current_status: 'unresponsive', older_than_days: 12000, new_status: 'lost', lost_reason: 'Synthetic test' };
@@ -469,19 +475,19 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(proposed.body.pendingActions).toHaveLength(1);
     const card = proposed.body.pendingActions[0];
     const stored = await db('ib_pending_actions').where('id', card.id).first();
-    expect(new Set(stored.params.lead_ids)).toEqual(new Set(ids));
+    expect(new Set(stored.params.lead_ids)).toEqual(new Set([...existingIds, ...ids]));
     expect(stored.params._ib_task_context.targets).toEqual([]);
     for (const changed of [{ ...stored.params, lead_ids: [ids[0]] }, { ...stored.params, current_status: 'new' }]) {
       expect(await Context.validateRecordTarget(changed, stored.params._ib_task_context, { toolName: 'bulk_update_leads' }))
-        .toMatchObject({ code: 'target_clarification_required' });
+        .toMatchObject({ code: 'target_changed' });
     }
     expect(await Context.validateRecordTarget(stored.params, stored.params._ib_task_context, { toolName: 'bulk_update_customers' }))
-      .toMatchObject({ code: 'target_clarification_required' });
+      .toMatchObject({ code: 'target_changed' });
     const late = crypto.randomUUID();
     await db('leads').insert({ id: late, first_name: 'Synthetic', last_name: 'Late bulk', status: 'unresponsive', updated_at: old });
     const confirmed = await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash,
       params: { lead_ids: [late] } });
-    expect(confirmed.body).toMatchObject({ success: true, outcome: 'completed', result: { updated: 2 } });
+    expect(confirmed.body).toMatchObject({ success: true, outcome: 'completed', result: { updated: existingIds.length + 2 } });
     expect((await db('leads').whereIn('id', ids)).every(row => row.status === 'lost')).toBe(true);
     expect((await db('leads').where('id', late).first()).status).toBe('unresponsive');
     expect(Number((await db('lead_activities').whereIn('lead_id', ids).count('* as n').first()).n)).toBe(2);
@@ -635,4 +641,94 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(JSON.stringify(mockModel.mock.calls.at(-1)[0].messages)).toContain('Selection regression');
     expect(JSON.stringify(mockModel.mock.calls[0][0].messages)).toContain('Synthetic original note draft');
   }, 30000);
+
+  test('thread continuations preserve their cursor across model outages and refuse unseen concurrent appends', async () => {
+    process.env.GATE_IB_THREADS = 'true';
+    const Threads = require('../services/intelligence-bar/threads');
+    const seed = await Threads.appendExchange({ actorId: actor, context: 'customers', userText: 'Synthetic seed', assistantText: 'Synthetic seed reply' });
+    try {
+      proposeNote(customerA, 'Thread note one');
+      let result = await api('/query', request(`Add notes for ${nameA}`, { thread_id: seed.threadId, thread_seq: seed.lastSeq }));
+      const taskId = result.body.taskId;
+      expect(result.body).toMatchObject({ threadId: seed.threadId, threadSeq: 4 });
+      const confirm = async response => {
+        const card = response.body.pendingActions[0];
+        expect((await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash })).body.outcome).toBe('completed');
+      };
+      await confirm(result);
+      delete process.env.ANTHROPIC_API_KEY;
+      expect((await api(`/tasks/${taskId}/resume`, { session_id: sessionId })).status).toBe(503);
+      expect((await db('ib_tasks').where('id', taskId).first()).response).toMatchObject({ threadId: seed.threadId, threadSeq: 4 });
+      process.env.ANTHROPIC_API_KEY = 'scripted-model-only';
+      for (const [note, sequence] of [['Thread note two', 6], ['Thread note three', 8]]) {
+        proposeNote(customerA, note);
+        result = await api(`/tasks/${taskId}/resume`, { session_id: sessionId });
+        expect(result.body).toMatchObject({ taskId, threadId: seed.threadId, threadSeq: sequence });
+        await confirm(result);
+      }
+      const concurrent = await Threads.appendExchange({ actorId: actor, threadId: seed.threadId, expectedSeq: 8,
+        context: 'customers', userText: 'Concurrent synthetic turn', assistantText: 'Another tab reply' });
+      expect(concurrent.lastSeq).toBe(10);
+      mockModel.mockResolvedValueOnce(answer('The requested notes are saved.'));
+      const final = await api(`/tasks/${taskId}/resume`, { session_id: sessionId });
+      expect(final.status).toBe(200);
+      expect(final.body.threadId).toBeUndefined();
+      expect(Number((await db('ib_thread_turns').where('thread_id', seed.threadId).max('seq as n').first()).n)).toBe(10);
+    } finally {
+      process.env.GATE_IB_THREADS = 'false'; process.env.ANTHROPIC_API_KEY = 'scripted-model-only';
+    }
+  }, 60000);
+
+  test('review drafting and approval use the current customer and show identity without exposing execution pins', async () => {
+    const own = crypto.randomUUID(), foreign = crypto.randomUUID();
+    await db('google_reviews').insert([
+      { id: own, google_review_id: own, customer_id: customerA, reviewer_name: 'Synthetic Own Review', location_id: 'bradenton', star_rating: 5, review_created_at: new Date(), review_text: 'Synthetic review' },
+      { id: foreign, google_review_id: foreign, customer_id: customerB, reviewer_name: 'Synthetic Foreign Review', location_id: 'bradenton', star_rating: 5, review_created_at: new Date(), review_text: 'Foreign synthetic review' },
+    ]);
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'draft review reply' }, 'discover'))
+      .mockResolvedValueOnce(tools('draft_review_reply', { review_id: foreign }, 'draft'))
+      .mockResolvedValueOnce(answer('That review does not belong to the selected customer.'));
+    const refused = await api('/query', request(`Draft a review reply for ${nameA}`));
+    expect(refused.body.pendingActions).toHaveLength(0);
+    expect(mockModel).toHaveBeenCalledTimes(3); // No nested drafting model.
+    expect(JSON.stringify(mockModel.mock.calls[2][0].messages.at(-1).content)).toContain('target_clarification_required');
+    mockModel.mockReset();
+    mockModel.mockResolvedValueOnce(tools('discover_capabilities', { query: 'submit review reply' }, 'discover'))
+      .mockResolvedValueOnce(tools('submit_review_reply', { review_id: own, reply_text: 'Synthetic proposed reply', grounding_token: 'synthetic-no-provider-call' }, 'reply'))
+      .mockResolvedValueOnce(answer('Review reply awaiting approval.'));
+    const proposed = await api('/query', request(`Submit a review reply for ${nameA}`));
+    expect(proposed.body.pendingActions).toHaveLength(1);
+    const card = proposed.body.pendingActions[0];
+    expect(JSON.stringify(card)).toContain('Synthetic Own Review');
+    expect(JSON.stringify(card)).not.toContain('synthetic-no-provider-call');
+    expect(JSON.stringify(mockModel.mock.calls)).not.toContain('_ib_review_pin');
+    const pending = await db('ib_pending_actions').where('id', card.id).first();
+    expect(pending.params._ib_review_pin.version).toBeTruthy();
+    await db('google_reviews').where('id', own).update({ customer_id: customerB });
+    const changed = await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash });
+    expect(changed.status).toBe(409);
+    expect(changed.body.code).toBe('target_changed');
+    expect((await db('google_reviews').where('id', own).first()).review_reply).toBeNull();
+  }, 30000);
+
+
+  test('ambiguity selection before the first model call retains the original thread and sequence', async () => {
+    process.env.GATE_IB_THREADS = 'true';
+    const Threads = require('../services/intelligence-bar/threads');
+    const seed = await Threads.appendExchange({ actorId: actor, context: 'customers', userText: 'Synthetic seed', assistantText: 'Synthetic seed reply' });
+    const seeded = await Threads.appendExchange({ actorId: actor, threadId: seed.threadId, expectedSeq: seed.lastSeq,
+      context: 'customers', userText: 'Synthetic second turn', assistantText: 'Synthetic second reply' });
+    try {
+      const first = await api('/query', request('Add a note for Fixture', { thread_id: seeded.threadId, thread_seq: seeded.lastSeq }));
+      expect(first.body.taskState).toBe('needs_information');
+      expect(mockModel).not.toHaveBeenCalled();
+      const selected = first.body.candidates[0].customer_id;
+      proposeNote(selected, 'Synthetic thread selection');
+      const resumed = await api(`/tasks/${first.body.taskId}/select-target`, { session_id: sessionId, customer_id: selected });
+      expect(resumed.body).toMatchObject({ taskId: first.body.taskId, threadId: seed.threadId, threadSeq: 6 });
+      expect((await db('ib_tasks').where('id', first.body.taskId).first()).request)
+        .toMatchObject({ thread_id: seed.threadId, thread_seq: 4 });
+    } finally { process.env.GATE_IB_THREADS = 'false'; }
+  }, 30000);
+
 });

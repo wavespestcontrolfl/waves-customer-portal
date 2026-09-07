@@ -245,7 +245,7 @@ describe('bulk_update_leads (leads)', () => {
       current_status: 'contacted',
       new_status: 'lost',
       dry_run: false,
-      lead_ids: ['lead-1', 'lead-2', 'lead-gone'],
+      _approved_lead_ids: ['lead-1', 'lead-2', 'lead-gone'],
     });
 
     expect(res.success).toBe(true);
@@ -267,7 +267,7 @@ describe('bulk_update_leads (leads)', () => {
     bridgeLeadsFunnelStage.mockResolvedValueOnce({ reason: 'error' });
 
     const res = await executeLeadsTool('bulk_update_leads', {
-      current_status: 'estimate_sent', new_status: 'won', dry_run: false, lead_ids: ['lead-1', 'lead-2', 'lead-3'],
+      current_status: 'estimate_sent', new_status: 'won', dry_run: false, _approved_lead_ids: ['lead-1', 'lead-2', 'lead-3'],
     });
     expect(res.success).toBe(true);
     expect(bridgeLeadsFunnelStage).toHaveBeenCalledTimes(1);
@@ -286,7 +286,7 @@ describe('bulk_update_leads (leads)', () => {
     db.mockImplementation((table) => (table === 'leads' ? leads : activities));
 
     const res = await executeLeadsTool('bulk_update_leads', {
-      current_status: 'estimate_sent', new_status: 'won', dry_run: false, lead_ids: ['lead-1'],
+      current_status: 'estimate_sent', new_status: 'won', dry_run: false, _approved_lead_ids: ['lead-1'],
     });
     expect(res.success).toBe(true);
     expect(res.updated).toBe(1);
@@ -301,7 +301,7 @@ describe('bulk_update_leads (leads)', () => {
     db.mockImplementation((table) => (table === 'leads' ? leads : activities));
 
     const res = await executeLeadsTool('bulk_update_leads', {
-      current_status: 'contacted', new_status: 'lost', dry_run: false, lead_ids: ['lead-1'],
+      current_status: 'contacted', new_status: 'lost', dry_run: false, _approved_lead_ids: ['lead-1'],
     });
     expect(res.dry_run).toBeUndefined();
     expect(res.updated).toBe(1);

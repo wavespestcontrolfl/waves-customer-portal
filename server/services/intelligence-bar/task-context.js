@@ -44,6 +44,9 @@ function targetClause(prompt, retainRecordConstraints = false) {
   // authority. Retain it in compound requests even when recipient parsing
   // stops at "that"; never use this view to grant customer/review authority.
   if (retainRecordConstraints) return clause;
+  // After an explicit communication recipient, the requested message is
+  // content: e.g. 'a reminder to call' cannot name a new customer 'call'.
+  clause = clause.replace(/^(\s*(?:please\s+)?(?:text|sms|message|email|send|notify|tell)\s+(?:this|that|current|selected|viewed|open)\s+(?:customer|account))\s+(?:a|an|the)\s+(?:reminder|message|text|sms|email)\b.*$/i, '$1');
   const opener = new RegExp(`^(\\s*(?:(?:please|can you|could you|would you|will you)\\s+)*(?:(?:${PERSON_ACTIONS}|set|rename|relabel|add|save)(?:\\s+(?:to|for))?|(?:draft|write|post|submit)\\s+(?:(?:a|the)\\s+)?(?:reply|response)\\s+(?:to|for)|send\\s+(?:a|an)\\s+(?:text|sms|message|reminder|email|reply)\\s+(?:to|for))\\s+)that(?=\\s+(?:customer|account|property|appointment|estimate|invoice|review|email|call|product|lead)\\b)`, 'i');
   return clause.replace(opener, '$1this').split(/\bthat\b/i)[0];
 }

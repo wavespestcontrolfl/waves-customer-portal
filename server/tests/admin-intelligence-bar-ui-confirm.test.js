@@ -194,8 +194,8 @@ describe('UI-confirm gate in /query (GATE_IB_UI_CONFIRM=true)', () => {
       expect(mockExecuteTool).toHaveBeenCalledTimes(1);
       const [toolName, params] = mockExecuteTool.mock.calls[0];
       expect(toolName).toBe('create_customer');
-      expect(params).toEqual({ first_name: 'Jeff', phone: '9415550100' });
-      expect(params.confirmed).toBeUndefined();
+      expect(params).toEqual({ first_name: 'Jeff', phone: '9415550100', confirmed: false });
+      expect(params.confirmed).toBe(false);
 
       // …the stored proposal also carries no confirmation flag…
       const stored = mockCreatePendingAction.mock.calls[0][0];
@@ -1006,7 +1006,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       const [toolName, params] = mockExecuteTool.mock.calls[0];
       expect(toolName).toBe('bulk_update_leads');
       expect(params.dry_run).toBe(false);
-      expect(params.lead_ids).toEqual(['l1', 'l2']);
+      expect(params._approved_lead_ids).toEqual(['l1', 'l2']);
     });
   });
 });

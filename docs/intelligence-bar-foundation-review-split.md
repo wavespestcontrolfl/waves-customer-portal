@@ -11,7 +11,7 @@ communications are outside the development/testing authorization.
 | --- | --- | --- |
 | A | `feat/ib-registry-coverage-foundation` / #4041 | Typed catalog and explicit action policy over existing executors; source census and CI drift check. No runtime route or UI integration. |
 | B | `feat/ib-target-context-foundation` / #4044 | Fresh target resolution, parent scope and version checks, shared outcome classification, and identity-bound review publishing. |
-| C | `feat/ib-task-recovery-foundation` | Actor/session task ledger, confirmation receipts, safe resume and bounded sensitive-context retention. |
+| C | `feat/ib-task-recovery-foundation` / #4049 | Actor/session task ledger, confirmation receipts, safe resume and bounded sensitive-context retention. |
 | D | `feat/ib-platform-foundation` / #4019 | Route and UI integration, durable conversation continuation, desktop/mobile and real dev-database acceptance tests. |
 
 Property #4021 and inventory #4029 remain dependent on D. Existing-customer
@@ -43,8 +43,9 @@ main source. No runtime or browser proof is attributed to A.
 
 The platform implementation document is the full-stack evidence ledger from
 #4019. Its execution, UI, migration, and test evidence applies to the recorded
-integrated commits, not to this catalog-only branch. Part D restores the ten
-reviewed transport exceptions once their implementation is present. None of
+integrated commits, not to this catalog-only branch. Part D restores the five current
+reviewed transport exceptions after checking their exact fingerprints. The five
+retired transport rows remain unsupported historical entries. None of
 those exceptions grants domain-action coverage.
 
 Part A local checks: catalog/coverage unit suites (9 tests) passed. The coverage
@@ -150,3 +151,5 @@ dev database; no production migration or gate activation is authorized.
   ordered relationship, recipient and proof checks remain together; extracting
   one-use helpers would only move branches. Further simplification must keep
   every tested authorization path.
+
+Part D integration preserves private execution pins outside model schemas, the native owner/idempotency endpoint, and original persisted approval formats. Review cards disclose review identity; thread continuations retain their own cursor through early model outages and refuse unseen concurrent appends. The integrated database suite covers 28 scenarios across the full run and focused thread rerun; 235 affected unit tests pass. Browser verification for this integrated state remains pending.
