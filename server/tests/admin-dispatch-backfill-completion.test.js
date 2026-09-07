@@ -2727,8 +2727,11 @@ describe('completion route wiring (source contracts)', () => {
     // completed_at window can see the visit; instant coverage above.)
     // The else branch carries the LIVE admin override's adjusted instant
     // (codex P2 #3152 round 10) — null for plain live completions, so the
-    // backfill contract itself is unchanged.
-    expect(source).toMatch(/const backfillTrackerCompletedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(\s*\n\s*serviceDateOnly\(svc\.scheduled_date\),\s*\n\s*effectiveTimeOnSite,\s*\n\s*svc,\s*\n(?:\s*\/\/[^\n]*\n)*\s*\{ now: completionWallClockAt \|\| new Date\(\) \},\s*\n\s*\)\s*\n(?:\s*\/\/[^\n]*\n)*\s*: \(typeof effectiveTimeOnSite === 'number'\s*\n\s*\? \(completionWallClockAt\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionWallClockAt\)\s*\n\s*: \(finiteDate\(svc\.actual_end_time\) \|\| finiteDate\(svc\.check_out_time\) \|\| null\)\)\s*\n\s*: null\);/);
+    // backfill contract itself is unchanged. The `now` anchor is the
+    // transaction's own wall clock, or on a crash-resumed retry the end
+    // instant the record froze (issuedInvoiceCloseout.completedAt, #4127
+    // GitHub r3 P2) — never the retry's clock; null = the day-scale rule.
+    expect(source).toMatch(/const backfillTrackerCompletedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(\s*\n\s*serviceDateOnly\(svc\.scheduled_date\),\s*\n\s*effectiveTimeOnSite,\s*\n\s*svc,\s*\n(?:\s*\/\/[^\n]*\n)*\s*\{ now: completionWallClockAt \|\| finiteDate\(parseJsonObject\(record\?\.structured_notes\)\?\.issuedInvoiceCloseout\?\.completedAt\) \|\| null \},\s*\n\s*\)\s*\n(?:\s*\/\/[^\n]*\n)*\s*: \(typeof effectiveTimeOnSite === 'number'\s*\n\s*\? \(completionWallClockAt\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionWallClockAt\)\s*\n\s*: \(finiteDate\(svc\.actual_end_time\) \|\| finiteDate\(svc\.check_out_time\) \|\| null\)\)\s*\n\s*: null\);/);
     // Derived AFTER the crash-resume re-derivation (it reads the healed
     // flag AND the frozen duration), BEFORE the first markComplete that
     // consumes it.
