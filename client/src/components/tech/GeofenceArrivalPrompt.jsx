@@ -8,6 +8,8 @@
  *   - a visit card for `visit_assigned` / `visit_unassigned` /
  *     `visit_rescheduled` / `visit_cancelled` (tech-visit-notifications.js) —
  *     no auto-dismiss: it waits until the tech taps "Got it"
+ *   - a text card for `tech_line_sms` (tech-line.js: a text to the tech's own
+ *     Twilio line) — same kept-until-"Got it" rule and the same on-screen cap
  *
  * Mount once inside TechLayout / TechHomePage — it renders a fixed-position
  * container so the parent layout doesn't need to reserve space.
@@ -46,6 +48,9 @@ const MAX_VISIT_CARDS = 2;
 // Visit cards are the tech's record of a schedule change; they never
 // auto-dismiss (the 5-min reminder timer would mark them read unseen).
 const VISIT_TYPES = new Set(['visit_assigned', 'visit_unassigned', 'visit_rescheduled', 'visit_cancelled']);
+// A text on the tech's own line is kept the same way, and shares the cap.
+const TEXT_TYPES = new Set(['tech_line_sms']);
+const KEPT_TYPES = new Set([...VISIT_TYPES, ...TEXT_TYPES]);
 const VISIT_ACCENT = {
   visit_assigned: '#0ea5e9',
   visit_rescheduled: '#f59e0b',
@@ -115,7 +120,7 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
       // back if the feed lists it again. Timed cards stay client-owned.
       const listed = new Set(notifications.map((n) => n.id));
       setActive((prev) => {
-        const gone = prev.filter((n) => VISIT_TYPES.has(n.type) && !listed.has(n.id));
+        const gone = prev.filter((n) => KEPT_TYPES.has(n.type) && !listed.has(n.id));
         gone.forEach((n) => seenIds.current.delete(n.id));
         if (gone.length === 0 && fresh.length === 0) return prev;
         return [...prev.filter((n) => !gone.includes(n)), ...fresh];
@@ -139,7 +144,7 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
     const otherCards = [];
     const visitCards = [];
     for (const n of active) {
-      if (VISIT_TYPES.has(n.type)) { visitCards.push(n); continue; }
+      if (KEPT_TYPES.has(n.type)) { visitCards.push(n); continue; }
       if (n.type !== 'storm_watch_alert') { otherCards.push(n); continue; }
       const jobKey = n.payload?.job_id || n.id;
       const prev = stormByJob.get(jobKey);
@@ -191,7 +196,7 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
   // marking them read here would hide them from every future unreadOnly poll
   // without the tech ever seeing them.
   useEffect(() => {
-    const timers = cards.filter((n) => !VISIT_TYPES.has(n.type)).map((n) => {
+    const timers = cards.filter((n) => !KEPT_TYPES.has(n.type)).map((n) => {
       const ms = n.type === 'geofence_timer_stopped' ? STOP_TOAST_MS : REMINDER_AUTODISMISS_MS;
       return setTimeout(() => removeCard(n.id, { silent: true }), ms);
     });
@@ -265,6 +270,9 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
           {VISIT_TYPES.has(n.type) && (
             <VisitCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
           )}
+          {TEXT_TYPES.has(n.type) && (
+            <TextCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
+          )}
           {n.type === 'storm_watch_alert' && (
             <StormCard
               n={n}
@@ -280,7 +288,7 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
       {hiddenVisitCount > 0 && (
         <div style={{ ...cardStyle(COLORS.muted), pointerEvents: 'auto', padding: 10 }} data-testid="visit-notice-more">
           <div style={{ fontSize: 13, color: COLORS.muted }}>
-            🗓 {hiddenVisitCount} more schedule change{hiddenVisitCount === 1 ? '' : 's'} — they'll surface as you clear these.
+            🗓 {hiddenVisitCount} more notice{hiddenVisitCount === 1 ? '' : 's'} — they'll surface as you clear these.
           </div>
         </div>
       )}
@@ -400,6 +408,28 @@ function VisitCard({ n, onDismiss }) {
             ? <div key={i}>{line}</div>
             : <div key={i} style={{ textDecoration: 'line-through', color: '#64748b' }}>{line.text}</div>
         ))}
+      </div>
+      <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
+    </div>
+  );
+}
+
+// A text on the tech's own Twilio line (tech-line.js). The office sees the
+// same thread in /admin/communications; this card is the tech's copy, kept
+// until "Got it" like a visit card. Replying from the line is a later PR.
+function TextCard({ n, onDismiss }) {
+  const p = n.payload || {};
+  const media = Number(p.media_count || 0);
+  return (
+    <div style={cardStyle(COLORS.teal)} data-testid="tech-line-text">
+      <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>
+        💬 {p.headline || 'Text on your line'}
+      </div>
+      <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.text, marginBottom: 4 }}>
+        {p.customer_name || p.from || 'Unknown sender'}
+      </div>
+      <div style={{ fontSize: 14, color: COLORS.text, marginBottom: 12, lineHeight: 1.4, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+        {p.body || (media > 0 ? `${media} photo${media === 1 ? '' : 's'}` : '(empty message)')}
       </div>
       <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
     </div>

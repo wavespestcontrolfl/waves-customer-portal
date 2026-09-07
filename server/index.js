@@ -155,11 +155,7 @@ const cspDirectives = {
   styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
   fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
   imgSrc: ["'self'", "https:", "data:", "blob:"],
-  // GrowthBook feature-definition host for the client SDK (harmless while
-  // VITE_GROWTHBOOK_CLIENT_KEY is unset). Follows GROWTHBOOK_API_HOST so a
-  // self-hosted/proxy deployment stays CSP-allowed — keep it in lockstep with
-  // the VITE_GROWTHBOOK_API_HOST baked into the client build.
-  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com", (process.env.GROWTHBOOK_API_HOST || 'https://cdn.growthbook.io').replace(/\/+$/, '')],
+  connectSrc: ["'self'", "https://fonts.googleapis.com", "https://fonts.gstatic.com", "https://maps.googleapis.com", "https://api.dataforseo.com", "https://fawn.ifas.ufl.edu", "https://generativelanguage.googleapis.com", "https://www.googleapis.com", "https://api.stripe.com", "https://*.posthog.com"],
   // blob: — the customer portal's in-app document viewer renders Bearer-only
   // report PDFs through an iframe on a blob URL (Capacitor shell has no
   // download pipeline); blob frames are same-origin script-created only.
@@ -193,6 +189,17 @@ const embedHelmet = helmet({
   crossOriginOpenerPolicy,
 });
 
+// Website estimate embeds are restricted to the existing first-party fleet
+// allowlist. Unlike the general /book embed, unrelated sites cannot frame a
+// customer estimate. The query changes presentation only; token guards stand.
+const websiteEstimateHelmet = helmet({
+  contentSecurityPolicy: {
+    directives: { ...cspDirectives, frameAncestors: ["'self'", ...require('./config/cors-origins').allowedOrigins] },
+  },
+  frameguard: false,
+  crossOriginOpenerPolicy,
+});
+
 // First-party PostHog ingest proxy (/ingest/* → PostHog Cloud). Mounted
 // ABOVE helmet, the CORS allowlist, and the body parsers on purpose: PostHog's
 // own CORS headers must pass through untouched (spoke origins are not on the
@@ -205,6 +212,9 @@ app.use((req, res, next) => {
   // Only the /book HTML document needs frame-ancestors loosened
   // (query string is not part of req.path; handle trailing slash too)
   if (req.path === '/book' || req.path === '/book/') return embedHelmet(req, res, next);
+  if (/^\/estimate\/[A-Za-z0-9_-]{15,64}\/?$/.test(req.path)
+    && req.query.website === '1' && req.query.embed === '1'
+    && require('./config/feature-gates').isEnabled('websiteQuoteBooking')) return websiteEstimateHelmet(req, res, next);
   return strictHelmet(req, res, next);
 });
 

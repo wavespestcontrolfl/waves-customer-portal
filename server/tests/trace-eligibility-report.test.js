@@ -9,6 +9,7 @@
 
 jest.mock('../config/feature-gates', () => ({
   isEnabled: (key) => key === 'treatmentZoneMap',
+  gateEnvValue: () => false,
 }));
 jest.mock('../services/photos', () => ({
   getViewUrl: jest.fn(async () => 'https://signed.example/snapshot.png'),

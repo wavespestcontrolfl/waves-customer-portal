@@ -1079,10 +1079,11 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
   });
 
   test('the finalization takes the row lock at transaction start — corrections and finalizations are strictly ordered (codex P2 round 14)', () => {
-    // Pricing reads lock estimate -> customer -> parent before the visit,
+    // Lawn baseline serialization precedes estimate -> customer -> parent -> visit;
+    // pricing reads retain their existing relative lock order,
     // matching acceptance and customer-dedupe ordering. No visit mutation or
     // timer snapshot may precede the visit lock that serializes corrections.
-    expect(source).toMatch(/await db\.transaction\(async \(trx\) => \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(completionPricingPlan\) \{\s*await require\('\.\.\/services\/completion-pricing'\)\.lockCompletionPricingEstimate\(trx, completionPricingPlan\);\s*\}\s*(?:\s*\/\/[^\n]*\n)*\s*const snapshotCustomerRow = await trx\('customers'\)[^;]*;\s*if \(completionPricingPlan\) \{\s*await require\('\.\.\/services\/completion-pricing'\)\.lockCompletionPricingParent\(trx, completionPricingPlan\);\s*\}\s*const lockedSvcRow = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);/);
+    expect(source).toMatch(/await db\.transaction\(async \(trx\) => \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(propertyHistoryEnabled && canLinkLawnAssessmentRecord\) \{\s*await require\('\.\/lawn-assessment'\)\.lockCustomerBaseline\(svc\.customer_id, trx\);\s*\}\s*(?:\s*\/\/[^\n]*\n)*\s*if \(completionPricingPlan\) \{\s*await require\('\.\.\/services\/completion-pricing'\)\.lockCompletionPricingEstimate\(trx, completionPricingPlan\);\s*\}\s*(?:\s*\/\/[^\n]*\n)*\s*const snapshotCustomerRow = await trx\('customers'\)[^;]*;\s*if \(completionPricingPlan\) \{\s*await require\('\.\.\/services\/completion-pricing'\)\.lockCompletionPricingParent\(trx, completionPricingPlan\);\s*\}\s*const lockedSvcRow = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);/);
   });
 
   test('the finalization reconciles with the LOCKED row and preserves a mid-flight correction (codex P2 round 15)', () => {

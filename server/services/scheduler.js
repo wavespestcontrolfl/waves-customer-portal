@@ -10,7 +10,7 @@ const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/
 const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { isEnabled, gateEnvValue } = require('../config/feature-gates');
-const { runExclusive } = require('../utils/cron-lock');
+const { runExclusive, recordMissedTick } = require('../utils/cron-lock');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 
 const SCHEDULED_SMS_CLAIM_LIMIT = 20;
@@ -102,7 +102,7 @@ async function scheduledDepositReceiptAllowed(msg) {
       .where({ customer_id: msg.customer_id })
       .first('payment_receipt_channel');
     const channel = prefs?.payment_receipt_channel || 'sms';
-    return channel === 'sms' || channel === 'both';
+    return channel === 'sms' || channel === 'both' || channel === 'push';
   } catch {
     return true;
   }
@@ -1391,9 +1391,17 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  // Overdue promises to callers (call_commitments) — daily 7:20am ET, one
-  // exception bell per overdue promise per ET day. No-op while
-  // GATE_CALL_COMMITMENTS is off. See services/call-commitments-watchdog.js.
+  // Recover interrupted SMS profile capture every five minutes.
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;
+    try {
+      await runSmsRecoveryTick();
+    } catch {
+      logger.error('[sms-operations] profile capture did not complete');
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Keep the existing daily call watchdog independent of timer latency.
   cron.schedule('0 20 7 * * *', async () => {
     try {
       const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
@@ -3629,7 +3637,9 @@ function initScheduledJobs() {
             // in metadata and the replay forwards them, or the
             // require_input_ids validator would block a send the immediate
             // path already validated.
-            ...(claimMeta.invoice_id ? { invoiceId: claimMeta.invoice_id } : {}),
+            invoiceId: msg.message_type === 'service_complete_paid_receipt'
+              ? claimMeta.stamp_receipt_invoice_id
+              : claimMeta.invoice_id,
             ...(claimMeta.estimate_id ? { estimateId: claimMeta.estimate_id } : {}),
             // Inbound-reply provenance survives the retry rail: a transient
             // provider failure on an immediate AI reply (Twilio 429/5xx)
@@ -3662,6 +3672,9 @@ function initScheduledJobs() {
             metadata: {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
+              notificationEventKey: claimMeta.notificationEventKey,
+              useCustomerChannel: claimMeta.useCustomerChannel === true,
+              bundled_review_request_id: claimMeta.bundled_review_request_id,
               // Enqueue provenance survives the replay (codex #3607 r4): the
               // audit row is written under this worker's own entry point, so
               // the ORIGINAL one (e.g. autopay_completion_decline_deferred)
@@ -6628,8 +6641,23 @@ function initBankingSync() {
   }, { timezone: 'America/New_York' });
 }
 
+// One SMS profile-capture recovery tick. runExclusive returns
+// { skipped: true, reason } WITHOUT running the sweep when it cannot acquire
+// a DB connection; lease_held is a normal overlap. A lost tick is ledgered
+// through the missed-tick path so job health never reads as quiet.
+async function runSmsRecoveryTick({ now = Date.now() } = {}) {
+  const { runSmsOperationalActions } = require('./sms-operational-actions');
+  const res = await runSmsOperationalActions();
+  if (res && res.skipped === true && res.reason !== 'lease_held') {
+    logger.error(`[sms-operations] profile capture tick skipped (${res.reason})`);
+    await recordMissedTick('sms-operational-actions', now, `tick skipped: ${res.reason}`);
+  }
+  return res;
+}
+
 module.exports = {
   initScheduledJobs,
+  runSmsRecoveryTick,
   initBankingSync,
   purposeForScheduledMessageType,
   resolveScheduledRecipient,

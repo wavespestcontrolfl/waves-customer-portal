@@ -186,28 +186,20 @@ WHERE converted_at IS NOT NULL AND phone IS NOT NULL
    split: **20% holdback / 80% treatment** — control forgoes real recovery
    touches, so keep it small.
 
-## 6. Phase 2 — client-side React SDK
+## 6. Phase 2 — client-side React SDK (removed 2026-09-07)
 
-`client/src/lib/growthbook.js` + `GrowthBookProvider` in `App.jsx`. **Dark by
-default**: without `VITE_GROWTHBOOK_CLIENT_KEY` at build time the instance is
-null and nothing changes. To activate, set on the Railway client build:
+The portal SPA no longer carries a GrowthBook client: `client/src/lib/growthbook.js`,
+the `GrowthBookProvider` in `App.jsx`, the `@growthbook/growthbook-react`
+dependency and the CSP `connect-src` entry for the feature-definition host were
+removed after months with no consumer (`useFeatureIsOn` / `useFeatureValue` were
+never called). The portal's experiments are **server-assigned** (§4–§5:
+`services/experimentation/growthbook.js`, sticky replay from
+`experiment_exposures`, the arm shipped to React in the page's own data
+response — the estimate page pattern). If a portal-side client experiment is
+ever needed, assign it server-side the same way rather than re-adding the SDK;
+the anonymous-visitor lane lives on the marketing hub (§7).
 
-| Var | Value |
-|-----|-------|
-| `VITE_GROWTHBOOK_CLIENT_KEY` | the same `sdk-…` client key (safe to embed) |
-| `VITE_GROWTHBOOK_API_HOST` | optional, defaults to `https://cdn.growthbook.io` |
-
-- Unit = anonymous visitor id (`waves_exp_uid` in localStorage), hashed on
-  attribute `id`. Exposures POST to `POST /api/public/experiments/exposure`
-  (gated by `GATE_GROWTHBOOK`, per-route rate limit, only live tracking keys
-  accepted, `unit_type='anon'`).
-- **Server-owned experiment keys (`estimate-view`, `booking-abandon-recovery`)
-  are refused by that endpoint** — client exposures can never poison the
-  server's sticky-replay rows.
-- Client experiments need their own `anon` identifier type + assignment query
-  (`WHERE unit_type = 'anon'`) in the data source when the first one ships.
-- In components: `useFeatureIsOn('<feature>')` / `useFeatureValue('<feature>',
-  fallback)` from `@growthbook/growthbook-react`.
+`POST /api/public/experiments/exposure` stays: it is the hub's exposure intake.
 
 ## 7. Phase 3 — marketing site (Astro) experiments
 

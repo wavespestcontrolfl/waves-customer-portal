@@ -27,7 +27,9 @@ jest.mock('../services/knowledge-bridge', () => ({
 }));
 jest.mock('../services/service-report/report-data', () => ({
   loadLinkedLawnAssessment: jest.fn(),
+  PIN_NO_ASSESSMENT: 'none',
 }));
+jest.mock('../services/lawn-assessment-history', () => ({ historyForReport: jest.fn() }));
 
 const { processServiceReportDelivery } = require('../services/service-report/delivery-queue');
 const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
@@ -201,7 +203,7 @@ describe('#3135 r1/r2 — fence target resolution', () => {
 
     // Resolved through the renderer's own function, fail-closed, same knex.
     expect(loadLinkedLawnAssessment).toHaveBeenCalledWith(
-      SERVICE_ROW, knex, { failClosed: true },
+      SERVICE_ROW, knex, { failClosed: true, propertyHistoryEnabled: false },
     );
     const opts = sendServiceReportV1Email.mock.calls[0][1];
     await opts.verifyBeforeSend();
@@ -417,5 +419,42 @@ describe('#3135 r1/r2 — fence target resolution', () => {
     expect(out.error).toMatch(/connection terminated/);
     // The decisive assertion: nothing was mailed.
     expect(sendServiceReportV1Email).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('property-history identity at the final send fence', () => {
+  const history = require('../services/lawn-assessment-history');
+  const cases = [true, false].flatMap((withAssessment) => ['unchanged', 'changed', 'missing', 'unreadable'].map((state) => ({ withAssessment, state })));
+
+  test.each(cases)('history $state with current assessment=$withAssessment', async ({ withAssessment, state }) => {
+    const original = process.env.GATE_LAWN_PROPERTY_HISTORY;
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    jest.clearAllMocks();
+    KnowledgeBridge.sealRecommendationsForSend.mockResolvedValue(true);
+    loadLinkedLawnAssessment.mockResolvedValue(withAssessment ? { id: 'assess-canonical' } : null);
+    history.historyForReport.mockReset();
+    if (state === 'unreadable') history.historyForReport.mockRejectedValue(new Error('fixture unavailable'));
+    else history.historyForReport.mockResolvedValue({ identity: state === 'changed' ? 'new-history' : 'rendered-history' });
+    sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
+      expect(opts.propertyHistoryEnabled).toBe(true);
+      // The operation must retain its decision across the render window.
+      process.env.GATE_LAWN_PROPERTY_HISTORY = 'false';
+      const safe = await opts.verifyBeforeSend({
+        renderedAssessmentId: withAssessment ? 'assess-canonical' : null,
+        renderedLawnHistoryIdentity: state === 'missing' ? undefined : 'rendered-history',
+      });
+      return safe ? { ok: true, messageId: 'msg-fixture' } : { ok: false, error: 'deferring', retryable: true };
+    });
+    try {
+      const result = await processServiceReportDelivery(DELIVERY, makeKnex({ serviceRow: { ...SERVICE_ROW, service_line: 'lawn' } }));
+      expect(result.status).toBe(state === 'unchanged' ? 'sent' : 'queued');
+      expect(loadLinkedLawnAssessment.mock.calls.every((call) => call[2].propertyHistoryEnabled === true)).toBe(true);
+      expect(KnowledgeBridge.sealRecommendationsForSend).toHaveBeenCalledTimes(state === 'unchanged' && withAssessment ? 1 : 0);
+      expect(history.historyForReport).toHaveBeenCalledTimes(1);
+    } finally {
+      if (original === undefined) delete process.env.GATE_LAWN_PROPERTY_HISTORY;
+      else process.env.GATE_LAWN_PROPERTY_HISTORY = original;
+    }
   });
 });

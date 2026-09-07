@@ -37,6 +37,7 @@ import CallRecordingsPanel from "./CallRecordingsPanel";
 import AuthenticatedCallAudio from "../../components/admin/AuthenticatedCallAudio";
 import PushSettings from "../../components/admin/PushSettings";
 import CallBridgeLink from "../../components/admin/CallBridgeLink";
+import { TECH_LINE_NUMBERS } from "../../constants/techLines";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const D = {
@@ -303,6 +304,11 @@ const ALL_NUMBERS = [
         label: "Waves Van",
       },
     ],
+  },
+  {
+    // Per-tech lines — one shared list with the Team tab picker.
+    group: "Tech Lines",
+    numbers: TECH_LINE_NUMBERS,
   },
 ];
 

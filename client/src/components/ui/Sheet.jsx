@@ -5,7 +5,7 @@ import { cn } from './cn';
 
 // Right-side slide-in panel. Customer Detail in spec §5.6 lives here.
 // Same focus-trap strategy as Dialog — swap root for Radix if needed.
-export function Sheet({ open, onClose, children, width = 'md', className, ariaLabel = 'Details', keepMounted = false }) {
+export function Sheet({ open, onClose, children, width = 'md', className, ariaLabel = 'Details', layer = 120, keepMounted = false }) {
   const panelRef = useModalFocus(open, onClose);
 
   useEffect(() => {
@@ -27,8 +27,9 @@ export function Sheet({ open, onClose, children, width = 'md', className, ariaLa
       // C360 estimates panel (110). At the old z-[100] the overlay TIED the
       // sidebar and only won by portal DOM order. Palette/notification
       // popovers (9998/9999) still deliberately beat modals.
-      className="fixed inset-0 z-[120]"
-      style={{ display: open ? undefined : 'none' }}
+      className="fixed inset-0"
+      style={{ zIndex: layer }}
+      hidden={!open}
       role="dialog"
       aria-modal="true"
       aria-label={ariaLabel}

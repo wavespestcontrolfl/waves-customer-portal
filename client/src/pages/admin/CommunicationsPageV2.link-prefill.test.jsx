@@ -4,14 +4,13 @@
 // caller falls back to the bare server clause. Copy must stay plain ASCII —
 // an em dash or curly quote flips the SMS to UCS-2 (70-char segments).
 import { describe, expect, it } from "vitest";
+import { appendStaticLinkClause, libraryLinkClause } from "../../lib/composerLinks";
 import {
   reviewEmailNote,
-  appendStaticLinkClause,
   buildCustomerLinkPrefill,
   buildReschedulePrefill,
   buildReservicePrefill,
   CUSTOMER_COMPOSER_LINKS,
-  libraryLinkClause,
 } from "./CommunicationsPageV2";
 
 const URL = "https://portal.wavespestcontrol.com/l/abc123";
@@ -162,7 +161,7 @@ describe("buildCustomerLinkPrefill", () => {
 });
 
 describe("CUSTOMER_COMPOSER_LINKS", () => {
-  it("carries all seventeen customer rows in the customer category", () => {
+  it("carries all eighteen customer rows in the customer category", () => {
     expect(CUSTOMER_COMPOSER_LINKS.map((l) => l.key)).toEqual([
       "reschedule",
       "reservice",
@@ -177,12 +176,13 @@ describe("CUSTOMER_COMPOSER_LINKS", () => {
       "service_report",
       "contract",
       "statement",
+      "receipt",
       "project_report",
       "portal_login",
       "cancel_plan",
     ]);
     for (const link of CUSTOMER_COMPOSER_LINKS) {
-      expect(link.category).toBe("customer");
+      expect(link.category).toBe(link.key === "prep_guide" ? "guides" : "customer");
     }
     // The one static row inserts a scheme-less portal link (SMS link policy
     // for owned hosts) and carries its clause with it.

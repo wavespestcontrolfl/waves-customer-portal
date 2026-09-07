@@ -106,6 +106,8 @@ is omitted and that leg stays live. The PDF filename and the canonical lawn
 pin read the same overlaid row. Presentation (technician photo URL, copy
 config) and the deliberately live sections (next visit, review CTA,
 cross-sell) are unchanged. `services/service-report/report-identity-snapshot.js`.
+Under `GATE_LAWN_PROPERTY_HISTORY`, lawn trends, initial scores and before/after comparisons use the visit property’s confirmed assessments, one installed result per visit, bounded by the report visit date and applicable baseline-reset window. Mowing and water-gap histories use the same proven visit eligibility. Payload keys stay unchanged; `assessmentDate` and trend dates use visit dates, including the seasonal calculation and water-gap history cutoff. Frozen weather remains keyed to the assessment run date. The PDF signature includes the resolved history identity. The existing opaque `asig` may carry a signed `h1.<history fingerprint>.<HMAC>` envelope: the data route verifies it and refuses a changed history or a disabled gate with the existing generic 409 pin refusal. Legacy signatures remain accepted; token, eligibility, privacy and rate-limit guards remain in force.
+Confirmed assessment property stamps remain eligible after another property is added, subject to ownership and conflicting visit/address checks; unstamped assessment and ancillary histories still require the live sole-property/no-move fallback. Unresolved property scope retains only the report visit’s installed assessment (or its valid signed pin), without prior-property comparisons. An empty same-day baseline reset excludes confirmations preceding the reset from the active window; reports for those earlier confirmations retain their historical window.
 The lawn assessment payload also carries `droughtStress` (`none`, `minor`,
 `moderate`, `severe`, or `null`) from the linked, tech-confirmed assessment's
 stored `composite_scores.drought_stress`. Missing or invalid historical
@@ -129,7 +131,11 @@ older cached PDFs to match this evidence rule),
 the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
-`/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound),
+`/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound; the SMS
+operational extension runs after acknowledgment under
+`GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
+it reuses persisted SMS evidence for private profile updates and admin
+notifications, with no additional response fields or customer sends),
 `/api/webhooks/twilio/collections-vestibule[-key|-noinput]` +
 `/api/webhooks/twilio/collections-relay-complete` +
 `/api/webhooks/twilio/collections-transfer-complete` +
@@ -390,15 +396,18 @@ models or customer copy. Privacy headers on all responses.)
 tokens and archived/merged customers, 60 req/min per-IP read limit on top of
 the global /api limiter, `Cache-Control: private, no-store`; payload is a
 strict whitelist — customer FIRST NAME + member-since year +
-has_left_google_review flag only, tech name + presigned photo, office
-phone, the tracked /l review short-link, and the customer's referral link
+has_left_google_review flag only, tech name + presigned photo, the
+office phone — or, with GATE_TECH_LINES on and the card's tech holding a
+registry tech line (`technicians.twilio_number`), that tech line —, the
+tracked /l review short-link, and the customer's referral link
 (share never exposes the card token) — no address, email, or phone PII;
 the SPA shell `/card/:token` carries the same noindex/no-referrer/no-store
 headers via sensitive-spa-headers.js),
 `/api/card/:token/contact.vcf` (read-only Save-contact vCard; same 64-hex
 token gate + archived-customer 404 + rate limit + `no-store`; contents are
-COMPANY-ONLY — tech name/title, office line, company email/site/address,
-license line — never customer data),
+COMPANY-ONLY — tech name/title, office line (or the tech's own line under
+the same GATE_TECH_LINES condition as the JSON payload), company
+email/site/address, license line — never customer data),
 `/api/card/:token/wallet.pkpass` (read-only signed Apple Wallet pass; same
 64-hex token gate + archived-customer 404 + per-route rate limit +
 `no-store`; 404s whenever the PASS_* signing env vars are unset (config
@@ -503,7 +512,21 @@ authority on any money path).
 `/api/public/quote/calculate` (+ `/api/public/quote/upsell`) (write; public
 instant estimate via the pricing engine — no auth, no token, 10 req/hour rate
 limit. Persists a quote/lead and may text the quote via a Twilio short-link;
-returns pricing only. Request shape: either `services` keyed by the engine
+returns pricing and eligible booking handoffs. Optional `websiteFlow: true`
+opts website estimate pages into `GATE_WEBSITE_QUOTE_BOOKING` (default off).
+Only this run's self-bookable, server-priced `quote_wizard` draft may become
+customer-viewable: estimate then customer row locks, unchanged lead/input/
+totals, new-customer eligibility (including no appointment/service history), existing sendability guards, no uncertain
+engine lines, and cent-exact frozen pricing plus membership-fee agreement.
+No staff approval is required. Successful publication returns the additive
+`website_estimate_url` and uses it for `booking_url` and the existing quote
+invite; no new delivery mechanism is added. Published website quotes carry
+`noEngagementAutomation: true` to exclude automatic follow-up campaigns;
+the quote invitation and booking confirmations retain their existing paths.
+A refused website publication
+withholds the booking handoff. Legacy callers keep their current `/book`
+handoff. Ordinary website lead forms do not opt into this route.
+Request shape: either `services` keyed by the engine
 keys in `PUBLIC_QUOTE_SERVICE_KEYS` (`routes/public-quote.js`) or a catalog
 `serviceKey` / `service_key` from the `/api/public/services/menu` payload,
 which expands SERVER-SIDE via `quoteServicesForKey` — the posted body can
@@ -621,8 +644,9 @@ server can't validate exposure keys)).
 browser SDK on the hub and on `/book` posts here instead of `*.posthog.com`
 so ad blockers stop dropping funnel events. **Gated behind
 GATE_POSTHOG_INGEST_PROXY** (generic 404 when off, no upstream call; read at
-REQUEST time via `gateEnvValue` — `1`/`true`/`on` — so a Railway unset is a
-live kill, no redeploy).
+REQUEST time via `gateEnvValue` — `1`/`true`/`on` — so a flip needs no code
+deploy; Railway restarts the process on the variable change, which is what
+makes it take effect — never set it with `--skip-deploys`).
 Mounted in `server/index.js` ABOVE helmet, the CORS allowlist and the body
 parsers → `routes/posthog-ingest.js`. Invariants: the upstream origins are
 FIXED constants (`https://us.i.posthog.com`; `/static/*` and `/array/*` →
@@ -717,6 +741,14 @@ Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+The `/estimate/:token?website=1` SPA uses the website's compact pricing →
+scheduling → Auto Pay presentation over these same APIs. `embed=1` permits
+framing only while `GATE_WEBSITE_QUOTE_BOOKING` is on and only from the
+existing first-party CORS origin allowlist (`server/index.js` CSP); other
+estimate documents retain the strict framing policy. Query markers do not
+grant draft access or change token, payment, consent, or booking eligibility.
+The iframe exchanges only height/step messages with its parent, which checks
+the sender window and exact origin; no customer details or tokens are posted.
 `/accept` fails CLOSED when the accepted plan's money cannot be resolved
 (#3751): 409 `{ error, code }` with nothing booked and call-the-office copy
 — `PER_APPLICATION_ADD_ON_UNPRICED` (an established per-application
@@ -1468,11 +1500,23 @@ server, no SSE). Treat the auth ordering and the read-only tool surface as
 security-critical).
 `/api/client-errors` (POST; unauthenticated client error telemetry. An
 anonymous surface — /admin/login, a public token route, or any page — can
-crash in the browser, so the reporter cannot require auth. Hardened: per-IP
-rate limit (30/min), every field truncated server-side before it reaches
-Sentry (tagged `source=client`), and the client scrubs token-like path
-segments out of the reported URL. No reads, no PII persistence, no writes to
-app data — it only forwards to Sentry).
+crash in the browser, so the reporter cannot require auth. Error reports
+retain a per-IP limit (30/min) followed by a global error ceiling (60/min).
+The same limiters reserve separate keys for routine native diagnostics:
+10/min per IP, then 20/min globally; normal app activity cannot debit the
+error budgets. IP keys use the shared unauthenticated /64-collapsing helper.
+Legacy reports accept
+`name/context/route`: error names and contexts are allowlisted; the server
+reduces routes to known roots and allowlisted admin/tech page segments before
+forwarding to Sentry, tagged `source=client`. Optional native-link diagnostics
+use `{ context: 'native-links', nativeLink: { platform, source, outcome,
+route, target } }`. Every native field is an exact allowlisted label; route
+and target are only `home/shortlink/estimate/other/none`, never a URL, token,
+query, error message, stack or device identifier. Invalid native reports are
+discarded with 204; extra fields are ignored. Native failures report at error
+severity under the error budgets and normal handoff stages at info severity
+under the routine budgets. Existing reporters remain compatible. No reads, no PII persistence,
+no writes to app data — it only forwards to Sentry).
 `/api/public/mcp` (POST; ANONYMOUS read-only MCP JSON-RPC server for
 third-party AI agents — the surface the hub's /.well-known agent-readiness
 cards point at. No token BY DESIGN (the audience is anonymous agents);
@@ -1541,6 +1585,11 @@ customer soft-exit sheet, GATE_ESTIMATE_SOFT_EXIT. `kind:'change'` parks
 ONE `service_requests` row (`requested_service='estimate_change_request'`)
 + an admin bell through the measurement review's shared notify core;
 `kind:'still_deciding'` writes one `activity_log` row and nothing else.
+`kind:'callback'` instead gates on `GATE_WEBSITE_QUOTE_BOOKING`, requires
+the server's `websiteSelfService` stamp on the locked estimate, and parks
+one `estimate_callback_request` through the same office-request writer and
+notification core. Its content is server-authored; no arbitrary phone number
+is accepted. Each request kind dedupes under its own requested-service key.
 The estimate is NEVER mutated and the customer is NEVER auto-messaged.
 Guards mirror measurement-review exactly: gate with a gate-aware limiter
 skip (dark = generic 404), token format gate, 5/hr shared IPv6-safe key,

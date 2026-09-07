@@ -73,14 +73,15 @@ async function getTurfHeightForVisit(serviceRecordId, knex = db) {
 }
 
 /** The customer's most recent reading (customer card), or null. Fail-soft. */
-async function getLatestTurfHeight(customerId, knex = db) {
+async function getLatestTurfHeight(customerId, knex = db, { eligibleVisitIds } = {}) {
   if (!customerId) return null;
   try {
     // The card shows the maintained height-of-cut, so return the latest reading
     // that actually has a numeric value — a photo-only visit (null height) must
     // not blank a previously-populated card.
-    return await knex('turf_height_readings')
-      .where({ customer_id: customerId })
+    const query = knex('turf_height_readings').where({ customer_id: customerId });
+    if (eligibleVisitIds !== undefined) require('./lawn-assessment-history').restrictVisitHistory(query, 'turf_height_readings', eligibleVisitIds, knex);
+    return await query
       .whereNotNull('manual_height_in')
       .orderBy('measured_at', 'desc')
       .first(READING_COLUMNS);
@@ -95,11 +96,14 @@ async function getLatestTurfHeight(customerId, knex = db) {
  * only ever reveal readings as-of that report's visit — never later ones. The
  * live portal card passes no cap.
  */
-async function getTurfHeightTrend(customerId, limit = 12, knex = db, beforeMeasuredAt = null) {
+async function getTurfHeightTrend(customerId, limit = 12, knex = db, beforeMeasuredAt = null, { eligibleVisitIds } = {}) {
   if (!customerId) return [];
   const n = Math.min(Math.max(parseInt(limit, 10) || 12, 1), 60);
   try {
     let q = knex('turf_height_readings').where({ customer_id: customerId });
+    if (eligibleVisitIds !== undefined) {
+      q = require('./lawn-assessment-history').restrictVisitHistory(q, 'turf_height_readings', eligibleVisitIds, knex);
+    }
     if (beforeMeasuredAt) q = q.where('measured_at', '<=', beforeMeasuredAt);
     return await q
       .orderBy('measured_at', 'desc')

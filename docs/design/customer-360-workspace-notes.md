@@ -1,19 +1,19 @@
 # Customer workspace reference implementation
 
-The local proof is available at `/admin/customers?customer360=workspace`. A selected record adds `&customerId=<id>`. The query option defaults off and preserves existing customer links and the standalone profile used by other screens.
+The workspace is available at `/admin/customers?customer360=workspace`. A selected record adds `&customerId=<id>`. The query option defaults off and preserves existing customer links and the standalone profile used by other screens.
 
 ## Design direction
 
 [Square Dashboard](https://developer.squareup.com/docs/devtools/seller-dashboard) and [Square customer profiles](https://squareup.com/help/us/en/article/8401-edit-merge-or-delete-customer-profiles) are the sole visual and interaction reference for this iteration. The proof applies their compact hierarchy, explicit editing, overflow actions, readable directory, and connection between customer information and everyday work. Waves retains its own terminology, relationships, permissions, business rules, Roboto typography, and semantic colors.
 
-The directory uses the existing Waves Table controls. Columns show customer/contact, property, services on record, next service, and existing balance/health signals. “Services on record” describes the historical service types returned by the current list endpoint; it does not imply an active subscription. Row actions move into one native disclosure, which supports keyboard access, Escape, and dismissal when focus or a pointer moves outside it. Mobile presents the same rows with visible field labels.
+The directory uses the existing Waves Table controls. Columns show customer/contact, property, services on record, next service, and recorded health grades and overdue invoice exceptions. “Services on record” describes the historical service types returned by the current list endpoint; it does not imply an active subscription. Row actions move into one native disclosure, which supports keyboard access, Escape, and dismissal when focus or a pointer moves outside it. Mobile presents the same rows with visible field labels.
 
-The profile occupies the admin shell's full content width. All customers returns to the directory with its search and filters retained. The compact header contains contact details and Message, Create estimate, Edit, and More actions. Action buttons retain the requested white surfaces. Actual warnings and customer status signals remain visible.
+The profile occupies the admin shell's full content width. All customers returns to the directory with its search and filters retained. The compact header contains contact details and Message, Create estimate, Edit, and More actions. Actions use the existing semantic button styles. Actual warnings and customer status signals remain visible.
 
 | Section | Existing capabilities available here |
 | --- | --- |
-| Summary | Next appointment, recurring service summary, and customer health |
-| Activity | Customer conversation and composer, owed commitments, notes, the searchable account timeline, service records/photos, and scheduled services |
+| Summary | Next appointment, latest communication and service, recorded attention items, access notes, account details, and owed commitments |
+| Activity | Full searchable account timeline with expandable text, invoice and estimate lifecycle events, payments, call-record links, notes, service records/photos, and scheduled services |
 | Billing | Existing billing controls, saved methods, payments, invoices, account credit/prepay/pause actions where eligible, and historical estimates |
 | Details | Contact and recipient settings, billing routing, property information, compliance records, contracts, and authorization forms/history |
 
@@ -36,11 +36,11 @@ The user's proposed shadcn/Base UI foundation is a possible later addition for a
 
 ## Messaging and unread count
 
-Message opens Activity within the selected customer record and reuses the existing Messages composer. Fixed recipient, business-line context, image attachments, AI draft/rewrite, dictation, link insertion, delayed sending, and draft retention across section changes stay in that implementation. Changing customers resets the composer. Immediate sends clear only after provider acceptance; suppressed sends retain the draft. The existing scheduler does not support scheduled MMS and explains this without dropping the text or images.
+Message opens a customer-specific drawer with the conversation and existing Messages composer. The summary and header open this same drawer. Fixed recipient, business-line context, image attachments, AI draft/rewrite, dictation, link insertion, delayed sending, and draft retention across section changes stay in that implementation. Changing customers resets the composer. Immediate sends clear only after provider acceptance; suppressed sends retain the draft. The existing scheduler does not support scheduled MMS and explains this without dropping the text or images.
 
 The badge counts unread conversations, matching the global Messages badge's unit. The existing admin-only `/admin/communications/unread-count` endpoint now accepts an optional validated `customerId`; its default global response is unchanged. The query retains inbound/SMS/unread and internal-phone exclusions. Opening the customer conversation uses the existing `/messages/read` writer for the loaded inbound SMS, then refreshes badges after acknowledgment. Failed polls retain the last confirmed count, and late requests cannot overwrite a newer refresh or another customer's state. Technicians do not request admin-only counts.
 
-This small functional addition is explicit; the directory/profile reorganization does not introduce alternative billing or pricing logic.
+The Activity feed includes only recorded lifecycle timestamps and preserves message bodies. Legacy calls absent from unified messages remain visible without duplicating mirrored calls; call entries link to the existing Calls view for transcript and audio. Optional sources that cannot be read are disclosed in the feed. Billing summaries reuse the existing self-pay open-balance resolver and report an unavailable state when completeness cannot be established.
 
 ## Financial and document continuity
 
@@ -50,12 +50,16 @@ Contract history cards retain statuses, dates, audit events, and existing action
 
 `AdminInvoicesPage.jsx` still owns invoice creation/editing, send/resend, PDFs, attachments, payment/delivery history, saved-method charges, recorded payments, account credit, payment plans, and void/reverse workflows. More and Billing link to that existing workflow, and invoice references select the individual invoice. Stripe and pricing decisions remain in their authoritative services.
 
+## Directory health and retention
+
+Directory, Map, and Outreach & Upsells are the page views. Previous `?view=health` links resolve to Directory. Each name carries the stored A/B/C/D/F grade; missing grades stay unknown. The filter sheet combines grade, health score range, risk, 30-day churn probability, and recorded retention outcomes with the existing customer search and filters. List and count queries apply the same predicates before pagination. Retention filters use the existing 30-day creation cohort and return each customer once.
+
+The directory replaces health and retention charts, aggregate cards, and the separate Health tab. Outreach & Upsells retains prepared outreach approval/skip and service opportunity actions. Technician list responses and membership filtering continue to exclude private health, retention, and billing information.
+
 ## Verification
 
-Validation: 83 focused client tests and two server query-compilation tests passed. The production build, its prebuild domain/brand gates, and ESLint completed with zero lint errors; structural and legacy warnings remain.
+Focused client checks cover section navigation, directory/filter/edit state, profile roles and customer changes, account history, historical quote values, composer behavior, and unread-count refresh races. Server regressions cover query bindings, health and retention filter composition, technician redaction, recorded timeline events, and complete self-pay balance summaries. Exact final-commit test and development PostgreSQL results are recorded in the PR.
 
-Focused client checks cover section navigation, directory/filter/edit state, profile roles and customer changes, account history, historical quote values, composer behavior, and unread-count refresh races. Server tests compile the unread query with parameter bindings; this is not database integration verification.
+Browser verification uses synthetic fixtures with backend/provider requests intercepted. Desktop Chromium and mobile/tablet WebKit checks exercise the directory, menus, editing, four sections, billing links, contract expansion and draft retention, messaging tools, history search, filters, and overflow. Desktop and mobile screenshots accompany the PR. The shared static preview contains fictional records and is separate from the portal deployment.
 
-Browser verification uses local synthetic fixtures with backend/provider requests intercepted. Desktop Chromium and mobile/tablet WebKit checks exercise the directory, menus, editing, four sections, billing links, contract expansion and draft retention, messaging tools, history search, and overflow. Desktop and mobile screenshots are retained with the local QA artifacts.
-
-No migrations or real database end-to-end verification were run: no verified development database was configured for this task. No real messages, AI requests, charges, or deployment were performed. Device speech recognition and the installed iPhone home-screen experience still require an on-device check.
+No customer messages, provider AI calls, or charges are performed during verification. Device speech recognition and the installed iPhone home-screen experience still require an on-device check. The layout remains opt-in through `customer360=workspace`; remove the query parameter to return to the existing profile presentation. Read-side additions and directory health consolidation apply to the existing Customers route.
