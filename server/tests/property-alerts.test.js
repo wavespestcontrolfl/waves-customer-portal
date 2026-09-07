@@ -361,6 +361,7 @@ describe('saved weekly watering plan delivery', () => {
   const MONDAY = new Date('2026-09-07T14:05:00Z');
   const PLAN = {
     weekEnding: '2026-09-06', sentAt: '2026-09-07T11:00:00.000Z', validThrough: '2026-09-13',
+    notificationEligible: true,
     title: 'This week: about 30 minutes per turf zone',
     notificationBody: 'If the forecast rain arrives, skip this week. Otherwise, use your assigned day.',
   };
@@ -395,9 +396,21 @@ describe('saved weekly watering plan delivery', () => {
     // flip stops delivery even though the durable bell already exists.
     loadCustomerWateringPlan.mockResolvedValue(null);
     expect(await args[4].pushOptions.shouldContinue()).toBe(false);
+    loadCustomerWateringPlan.mockResolvedValue({ ...PLAN, notificationEligible: false });
+    expect(await args[4].pushOptions.shouldContinue()).toBe(false);
     loadCustomerWateringPlan.mockResolvedValue(PLAN);
     appPlanEnabled.mockReturnValue(false);
     expect(await args[4].pushOptions.shouldContinue()).toBe(false);
+  });
+
+  test.each([false, undefined])('missing or unconfirmed portal numbers skip the notification and consume no cap (%s)', async (notificationEligible) => {
+    loadCustomerWateringPlan.mockResolvedValue({ ...PLAN, notificationEligible });
+    const knex = knexFor(tables);
+    expect((await runPropertyAlertsSweep({ now: MONDAY, knex })).delivered).toBe(0);
+    // Keep the saved plan's priority so the legacy rain rule cannot replace
+    // a withheld weekly plan with an unsolicited irrigation instruction.
+    expect(NotificationService.notifyCustomer).not.toHaveBeenCalled();
+    expect(knex.__inserts).toHaveLength(0);
   });
 
   test('Tuesday keeps the plan authoritative without sending it late or sending a contradictory rain alert', async () => {
