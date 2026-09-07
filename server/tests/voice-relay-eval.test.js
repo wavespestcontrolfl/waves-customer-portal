@@ -100,6 +100,29 @@ describe('voice relay eval — fixture lint', () => {
   });
 });
 
+describe('voice relay eval — run-relative dates', () => {
+  const replay = require('../services/eval/voice-relay-replay');
+  const saturday = new Date('2026-09-05T23:30:00-04:00'); // Saturday in ET (03:30Z Sunday — the ET date must win)
+
+  test('tokens render from the ET calendar date of the run, in every string, at any depth', () => {
+    expect(replay.renderDateTokens('{{day+7}} | {{dow+8}} | {{monthday+9}} | {{iso+16}} | {{dow-1}}', saturday))
+      .toBe('Saturday September 12 | Sunday | September 14 | 2026-09-21 | Friday');
+    const rendered = replay.renderDateTokens({ turns: [{ caller: 'Is {{dow+8}} open?' }], fixtures: { toolResponses: { find_slots: ['{{day+7}} at 9 AM', '{{iso+7}}'] } }, n: 3 }, saturday);
+    expect(rendered).toEqual({ turns: [{ caller: 'Is Sunday open?' }], fixtures: { toolResponses: { find_slots: ['Saturday September 12 at 9 AM', '2026-09-12'] } }, n: 3 });
+  });
+
+  test('the shipped fixture carries no literal booking dates: every scenario renders token-free and lints clean', () => {
+    const fixture = replay.renderDateTokens(replay.loadFixture(FIXTURE_PATH), saturday);
+    expect(replay.lintFixture(fixture)).toEqual([]);
+    expect(JSON.stringify(fixture.scenarios)).not.toMatch(/\{\{(day|dow|monthday|iso)/);
+    const booking = fixture.scenarios.find((s) => s.id === 'booking-happy-path');
+    expect(booking.turns[1].caller).toMatch(/^Sunday at one/);
+    expect(booking.fixtures.toolResponses.find_slots).toMatch(/Sunday September 13 at 1 PM \(slot_ref: S2\)/);
+    // The raw file keeps the tokens (the run renders, the file does not move).
+    expect(JSON.stringify(replay.loadFixture(FIXTURE_PATH).scenarios)).toMatch(/\{\{dow\+8\}\}/);
+  });
+});
+
 describe('voice relay eval — each expect key', () => {
   const { _internals: { runCheck } } = require('../services/eval/voice-relay-replay');
 
@@ -482,6 +505,18 @@ describe('voice relay eval — scheduled wrapper and child process', () => {
     expect(bell.body).toMatch(/card-number-spoken: critical spoken_never_matches — \/4111\/ matched/);
     expect(bell.body).toMatch(/Re-run manually: node server\/scripts\/run-voice-relay-eval.js --json/);
     expect(sendEmail).toHaveBeenCalledWith(expect.objectContaining({ subject: 'FIX: Voice relay eval: 1 failing scenario(s)', heading: 'Voice relay conversation eval' }));
+  });
+
+  test('a manual run (notifyOnFailure: false) touches no channel at all — no bell, no email, no ops digest', async () => {
+    const notify = jest.fn();
+    const sendEmail = jest.fn(async () => ({ ok: true }));
+    const out = await replay.runVoiceRelayEval({ runReplay: async () => failing(), notify, sendEmail, notifyOnFailure: false });
+    expect(out.status).toBe('fail');
+    expect(notify).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
+    const bad = await replay.runVoiceRelayEval({ runReplay: async () => { throw new Error('no model'); }, notify, sendEmail, notifyOnFailure: false });
+    expect(bad.status).toBe('inconclusive');
+    expect(notify).not.toHaveBeenCalled();
   });
 
   test('a replay that throws is inconclusive and says the fixture was NOT verified', async () => {

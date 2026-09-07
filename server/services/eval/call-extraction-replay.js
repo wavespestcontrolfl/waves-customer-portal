@@ -257,6 +257,10 @@ async function runCallExtractionReplayEval(opts = {}) {
     || ((options) => require('../../scripts/replay-call-extraction-variance').runReplayVariance(options));
   const notify = opts.notify || defaultNotify;
   const sendEmail = opts.sendEmail || defaultSendEmail;
+  // notifyOnFailure: false = a manual run — no bell, no email and no ops
+  // digest (emailFailure's deliverOpsDigest writes an in-app notification
+  // under GATE_OPS_DIGESTS_IN_APP even with the email sender stubbed).
+  const notifyOnFailure = opts.notifyOnFailure !== false;
   const fixturePath = opts.fixturePath || DEFAULT_FIXTURE_PATH;
   const replayOptions = {
     fixturePath,
@@ -280,7 +284,9 @@ async function runCallExtractionReplayEval(opts = {}) {
     }
   }
 
-  if (finalAttempt.status === 'fail') {
+  if (!notifyOnFailure) {
+    logger.info(`[call-replay-eval] manual run — ${finalAttempt.status}, no notification`);
+  } else if (finalAttempt.status === 'fail') {
     await notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath });
   } else if (finalAttempt.status === 'inconclusive') {
     await notifyInconclusive({ notify, sendEmail, attempt: finalAttempt, fixturePath });

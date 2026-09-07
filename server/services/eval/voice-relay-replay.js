@@ -97,6 +97,47 @@ function loadFixture(fixturePath = DEFAULT_FIXTURE_PATH) {
   return JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
 }
 
+// Run-relative dates. The live relay renders the REAL clock into every turn,
+// so a fixture that says "Wednesday September 16" stops being "next week"
+// the moment the calendar moves — and a booking scenario would then grade
+// Sandy on a stale calendar. Fixture strings carry tokens instead, rendered
+// once per run from the ET date the run started on:
+//   {{day+N}}      Wednesday September 16   (speakSlot form, no year)
+//   {{dow+N}}      Wednesday
+//   {{monthday+N}} September 16
+//   {{iso+N}}      2026-09-16
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const DATE_TOKEN_RE = /\{\{(day|dow|monthday|iso)([+-]\d+)\}\}/g;
+
+function etCalendarDate(runDate) {
+  const { etParts } = require('../../utils/datetime-et');
+  const et = etParts(runDate);
+  return new Date(Date.UTC(et.year, et.month - 1, et.day));
+}
+
+function renderDateToken(kind, offsetDays, base) {
+  const d = new Date(base.getTime() + offsetDays * 86400000);
+  const dow = WEEKDAYS[d.getUTCDay()];
+  const monthday = `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+  if (kind === 'dow') return dow;
+  if (kind === 'monthday') return monthday;
+  if (kind === 'iso') return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  return `${dow} ${monthday}`;
+}
+
+/** Deep-render every date token in a scenario (or any JSON value) for one run date. */
+function renderDateTokens(value, runDate = new Date()) {
+  const base = etCalendarDate(runDate);
+  const walk = (v) => {
+    if (typeof v === 'string') return v.replace(DATE_TOKEN_RE, (m, kind, offset) => renderDateToken(kind, Number(offset), base));
+    if (Array.isArray(v)) return v.map(walk);
+    if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]));
+    return v;
+  };
+  return walk(value);
+}
+
 /** The tool names Sandy can be given today (registered sets, not prose). */
 function knownToolNames() {
   const { TOOLS, CONTEXT_TOOLS, BOOKING_TOOLS } = require('../voice-agent/relay-tools');
@@ -757,8 +798,10 @@ function isFailedVoiceRun(run) {
  * false skips the judged layer (deterministic checks only). Throws on a
  * malformed fixture — the caller records that as "could not run".
  */
-async function runVoiceRelayReplay({ fixturePath = DEFAULT_FIXTURE_PATH, only = null, judge = true, judgeFn = null } = {}) {
-  const fixture = loadFixture(fixturePath);
+async function runVoiceRelayReplay({ fixturePath = DEFAULT_FIXTURE_PATH, only = null, judge = true, judgeFn = null, runDate = new Date() } = {}) {
+  // One clock per run: every scenario's dated fixture is rendered against
+  // the same ET date, and the lint sees the rendered strings.
+  const fixture = renderDateTokens(loadFixture(fixturePath), runDate);
   const lint = lintFixture(fixture);
   if (lint.length) throw new Error(`fixture lint failed: ${lint.slice(0, 5).join(' | ')}${lint.length > 5 ? ` (+${lint.length - 5} more)` : ''}`);
   let scenarios = fixture.scenarios;
@@ -791,7 +834,7 @@ async function runVoiceRelayReplay({ fixturePath = DEFAULT_FIXTURE_PATH, only = 
     const first = results.find((r) => r.error && r.error.code === 'EVAL_MODEL_UNAVAILABLE');
     throw new Error(`no scenario completed a model round — ${first.error.message}`);
   }
-  return { failed: isFailedVoiceRun({ summary }), fixturePath, schemaVersion: fixture.schemaVersion, judge, summary, results };
+  return { failed: isFailedVoiceRun({ summary }), fixturePath, schemaVersion: fixture.schemaVersion, runDate: runDate.toISOString(), judge, summary, results };
 }
 
 // ── Retry-once / notify wrapper (the call-replay shape) ───────────────────
@@ -875,6 +918,10 @@ async function runVoiceRelayEval(opts = {}) {
   const runReplay = opts.runReplay || runVoiceRelayReplay;
   const notify = opts.notify || defaultNotify;
   const sendEmail = opts.sendEmail || defaultSendEmail;
+  // notifyOnFailure: false = a manual run — no bell, no email AND no ops
+  // digest (emailFailure's deliverOpsDigest writes an in-app notification
+  // under GATE_OPS_DIGESTS_IN_APP even with the email sender stubbed).
+  const notifyOnFailure = opts.notifyOnFailure !== false;
   const fixturePath = opts.fixturePath || DEFAULT_FIXTURE_PATH;
   const replayOptions = { fixturePath, only: opts.only || null, judge: opts.judge !== false, judgeFn: opts.judgeFn || null };
   const attemptOptions = { isFailed: isFailedVoiceRun, lane: 'voice_relay' };
@@ -890,7 +937,8 @@ async function runVoiceRelayEval(opts = {}) {
     flaky = retryAttempt.status === 'pass';
     if (flaky) logger.warn('[voice-relay-eval] pass-on-retry; treating as flaky, not failing');
   }
-  if (finalAttempt.status === 'fail') await notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath });
+  if (!notifyOnFailure) logger.info(`[voice-relay-eval] manual run — ${finalAttempt.status}, no notification`);
+  else if (finalAttempt.status === 'fail') await notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath });
   else if (finalAttempt.status === 'inconclusive') await notifyInconclusive({ notify, sendEmail, attempt: finalAttempt, fixturePath });
 
   const run = finalAttempt.run || null;
@@ -940,6 +988,7 @@ module.exports = {
   SEVERITIES,
   WRITE_TOOLS,
   loadFixture,
+  renderDateTokens,
   lintFixture,
   knownToolNames,
   installHarness,

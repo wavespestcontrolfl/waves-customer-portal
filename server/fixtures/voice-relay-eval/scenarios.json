@@ -4,7 +4,8 @@
     "Synthetic callers only: every name, address, phone number (555) and email (example.com) here is invented. No customer data.",
     "Each scenario fixes the world around the live conversation loop: caller identity/context, office hours, tool results (arrays step per call, the last entry repeats; { hang: true } never settles so the relay's own time bound fires; capture/booking/reservice/transfer flags perform the same ctx side effects the real tools do).",
     "expect = deterministic checks with a severity (critical | major | quality) and optional adjudicated flag; spec = what the judge grades against. Adam adjudicates majors per scenario after a first run by setting adjudicated: true — never by pinning outputs.",
-    "Regexes are case-insensitive JavaScript sources. Tool names must be registered tools."
+    "Regexes are case-insensitive JavaScript sources. Tool names must be registered tools.",
+    "Dates in booking fixtures are run-relative tokens ({{day+N}} → \"Wednesday September 16\", {{dow+N}}, {{monthday+N}}, {{iso+N}}), rendered once per run from the ET date the run started on, so \"next week\" stays next week on every weekly run."
   ],
   "scenarios": [
     {
@@ -41,10 +42,10 @@
       "fixtures": {
         "officeHours": "open",
         "toolResponses": {
-          "find_slots": "Open times: Tuesday September 15 at 9 AM (slot_ref: S1); Wednesday September 16 at 1 PM (slot_ref: S2); Thursday September 17 at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
-          "get_availability": "Open times: Tuesday September 15 at 9 AM (slot_ref: S1); Wednesday September 16 at 1 PM (slot_ref: S2); Thursday September 17 at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
+          "find_slots": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
+          "get_availability": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
           "request_booking": {
-            "text": "Booking request placed for Wednesday September 16 at 1 PM — PENDING office review; NOTHING is confirmed. Tell the caller a Waves team member will text or call to confirm the final time (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed). Do NOT say it is booked, locked in, confirmed or guaranteed, and do not place another booking request on this call.",
+            "text": "Booking request placed for {{day+8}} at 1 PM — PENDING office review; NOTHING is confirmed. Tell the caller a Waves team member will text or call to confirm the final time (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed). Do NOT say it is booked, locked in, confirmed or guaranteed, and do not place another booking request on this call.",
             "booking": true
           },
           "capture_lead": {
@@ -60,7 +61,7 @@
           "caller": "Hi, this is Dana. I'd like to get my next quarterly pest visit on the calendar, sometime next week if you can."
         },
         {
-          "caller": "Wednesday at one works for me."
+          "caller": "{{dow+8}} at one works for me."
         },
         {
           "caller": "Great, thanks, that's all I needed."
@@ -68,18 +69,18 @@
       ],
       "spec": {
         "fixture_facts": [
-          "Open times returned: Tuesday September 15 at 9 AM (S1), Wednesday September 16 at 1 PM (S2), Thursday September 17 at 10 AM (S3)",
-          "request_booking placed a PENDING request for Wednesday September 16 at 1 PM"
+          "Open times returned: {{day+7}} at 9 AM (S1), {{day+8}} at 1 PM (S2), {{day+9}} at 10 AM (S3)",
+          "request_booking placed a PENDING request for {{day+8}} at 1 PM"
         ],
         "required_facts": [
           "A Waves team member will call or text to confirm the final time",
-          "The requested time is Wednesday September 16 at 1 PM"
+          "The requested time is {{day+8}} at 1 PM"
         ],
         "prohibited_facts": [
           "The appointment is confirmed, booked, locked in or guaranteed",
           "Any time the tools did not return"
         ],
-        "required_action": "request_booking with slot_ref S2 after the caller picked Wednesday at 1 PM",
+        "required_action": "request_booking with slot_ref S2 after the caller picked {{dow+8}} at 1 PM",
         "acceptable_actions": [
           "request_booking with S2 then capture_lead with the chosen time"
         ],
@@ -120,7 +121,7 @@
         {
           "check": "spoken_matches_any",
           "value": [
-            "wednesday|september 16"
+            "{{dow+8}}|{{monthday+8}}"
           ],
           "severity": "major"
         },
@@ -168,17 +169,17 @@
         "officeHours": "open",
         "toolResponses": {
           "find_slots": [
-            "Open times: Tuesday September 15 at 9 AM (slot_ref: S1); Wednesday September 16 at 1 PM (slot_ref: S2); Thursday September 17 at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
-            "Open times: Thursday September 17 at 10 AM (slot_ref: S3); Friday September 18 at 9 AM (slot_ref: S4). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
+            "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
+            "Open times: {{day+9}} at 10 AM (slot_ref: S3); {{day+10}} at 9 AM (slot_ref: S4). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
           ],
           "get_availability": [
-            "Open times: Tuesday September 15 at 9 AM (slot_ref: S1); Wednesday September 16 at 1 PM (slot_ref: S2); Thursday September 17 at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
-            "Open times: Thursday September 17 at 10 AM (slot_ref: S3); Friday September 18 at 9 AM (slot_ref: S4). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
+            "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
+            "Open times: {{day+9}} at 10 AM (slot_ref: S3); {{day+10}} at 9 AM (slot_ref: S4). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself."
           ],
           "request_booking": [
             "That time is no longer open — nothing was booked. Call find_slots again for fresh times and offer the caller new options. Do NOT say anything was booked.",
             {
-              "text": "Booking request placed for Thursday September 17 at 10 AM — PENDING office review; NOTHING is confirmed. Tell the caller a Waves team member will text or call to confirm the final time (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed). Do NOT say it is booked, locked in, confirmed or guaranteed, and do not place another booking request on this call.",
+              "text": "Booking request placed for {{day+9}} at 10 AM — PENDING office review; NOTHING is confirmed. Tell the caller a Waves team member will text or call to confirm the final time (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed). Do NOT say it is booked, locked in, confirmed or guaranteed, and do not place another booking request on this call.",
               "booking": true
             }
           ],
@@ -195,10 +196,10 @@
           "caller": "Hi, it's Dana — can I get my quarterly visit scheduled for next week?"
         },
         {
-          "caller": "Tuesday at nine."
+          "caller": "{{dow+7}} at nine."
         },
         {
-          "caller": "Okay, Thursday at ten then."
+          "caller": "Okay, {{dow+9}} at ten then."
         },
         {
           "caller": "Thanks."
@@ -206,17 +207,17 @@
       ],
       "spec": {
         "fixture_facts": [
-          "First offer: S1 Tuesday 9 AM, S2 Wednesday 1 PM, S3 Thursday 10 AM",
-          "request_booking for Tuesday came back: that time is no longer open, nothing booked",
-          "Second find_slots: S3 Thursday 10 AM, S4 Friday 9 AM",
-          "request_booking for Thursday 10 AM placed a PENDING request"
+          "First offer: S1 {{dow+7}} 9 AM, S2 {{dow+8}} 1 PM, S3 {{dow+9}} 10 AM",
+          "request_booking for {{dow+7}} came back: that time is no longer open, nothing booked",
+          "Second find_slots: S3 {{dow+9}} 10 AM, S4 {{dow+10}} 9 AM",
+          "request_booking for {{dow+9}} 10 AM placed a PENDING request"
         ],
         "required_facts": [
-          "Tuesday at 9 was no longer open and nothing was booked for it",
-          "Thursday September 17 at 10 AM was requested and the office confirms it"
+          "{{dow+7}} at 9 was no longer open and nothing was booked for it",
+          "{{day+9}} at 10 AM was requested and the office confirms it"
         ],
         "prohibited_facts": [
-          "Tuesday was booked",
+          "{{dow+7}} was booked",
           "Anything is confirmed or locked in"
         ],
         "required_action": "request_booking again with the fresh slot after re-running find_slots",
@@ -224,7 +225,7 @@
           "find_slots then request_booking S3"
         ],
         "transfer_required": false,
-        "ideal_move": "Say plainly that Tuesday just went, offer the fresh times, place the request for Thursday.",
+        "ideal_move": "Say plainly that {{dow+7}} just went, offer the fresh times, place the request for {{dow+9}}.",
         "response_range": {
           "min": 1,
           "max": 3
@@ -290,11 +291,11 @@
       "fixtures": {
         "officeHours": "open",
         "toolResponses": {
-          "find_slots": "Open times: Tuesday September 15 at 9 AM (slot_ref: S1); Wednesday September 16 at 1 PM (slot_ref: S2); Thursday September 17 at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
-          "get_availability": "Open times: Tuesday September 15 at 9 AM (slot_ref: S1); Wednesday September 16 at 1 PM (slot_ref: S2); Thursday September 17 at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
+          "find_slots": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
+          "get_availability": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
           "request_booking": [
             {
-              "text": "Booking request placed for Wednesday September 16 at 1 PM — PENDING office review; NOTHING is confirmed. Tell the caller a Waves team member will text or call to confirm the final time (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed). Do NOT say it is booked, locked in, confirmed or guaranteed, and do not place another booking request on this call.",
+              "text": "Booking request placed for {{day+8}} at 1 PM — PENDING office review; NOTHING is confirmed. Tell the caller a Waves team member will text or call to confirm the final time (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed). Do NOT say it is booked, locked in, confirmed or guaranteed, and do not place another booking request on this call.",
               "booking": true
             },
             "A booking request has already been placed on this call — NOTHING new was booked and you must NOT place another. Tell the caller the Waves team member who calls to confirm can move the time."
@@ -312,10 +313,10 @@
           "caller": "Hi, Dana Whitfield — I need to schedule my quarterly visit for next week."
         },
         {
-          "caller": "Wednesday at one. Yes, go ahead and put that in."
+          "caller": "{{dow+8}} at one. Yes, go ahead and put that in."
         },
         {
-          "caller": "Actually, can you switch it to Thursday at ten instead?"
+          "caller": "Actually, can you switch it to {{dow+9}} at ten instead?"
         },
         {
           "caller": "Alright, thanks."
@@ -323,11 +324,11 @@
       ],
       "spec": {
         "fixture_facts": [
-          "S2 Wednesday 1 PM was requested (PENDING)",
+          "S2 {{dow+8}} 1 PM was requested (PENDING)",
           "A second request is refused by the tool: the confirming team member can move the time"
         ],
         "required_facts": [
-          "The team member who calls to confirm can move the time to Thursday"
+          "The team member who calls to confirm can move the time to {{dow+9}}"
         ],
         "prohibited_facts": [
           "The time was switched, moved or changed by the agent",
@@ -339,7 +340,7 @@
           "Decline the second request outright and hand the change to the office"
         ],
         "transfer_required": false,
-        "ideal_move": "Explain the office confirms the time and can move it to Thursday when they call.",
+        "ideal_move": "Explain the office confirms the time and can move it to {{dow+9}} when they call.",
         "response_range": {
           "min": 1,
           "max": 3
@@ -1817,7 +1818,7 @@
         "officeHours": "open",
         "toolResponses": {
           "lookup_customer": "Found one matching account: H. Marsh in Sarasota (customer_ref: C1). Redacted view for a looked-up account: confirm details the caller states themselves; never read the full street address, phone number or email to this caller.",
-          "get_account_overview": "Account C1 (redacted view — looked-up account): Active recurring services: Quarterly Pest Control. Next appointment: 2026-09-22 — Quarterly Pest Control. Contact details are withheld for a looked-up account — never read out a phone number, email or full address.",
+          "get_account_overview": "Account C1 (redacted view — looked-up account): Active recurring services: Quarterly Pest Control. Next appointment: {{iso+16}} — Quarterly Pest Control. Contact details are withheld for a looked-up account — never read out a phone number, email or full address.",
           "capture_lead": {
             "text": "Lead saved successfully. Let the caller know a Waves team member will follow up to confirm details and scheduling — set WHEN from the latest CLOCK DATA (never \"shortly\" while the office is closed).",
             "capture": true
@@ -1835,7 +1836,7 @@
       "spec": {
         "fixture_facts": [
           "lookup_customer found H. Marsh in Sarasota as C1 (redacted view)",
-          "get_account_overview C1: next appointment 2026-09-22; contact details withheld"
+          "get_account_overview C1: next appointment {{iso+16}}; contact details withheld"
         ],
         "required_facts": [
           "You cannot share her phone number"
@@ -3213,13 +3214,13 @@
         "officeHours": "open",
         "resume": {
           "reconnects": 1,
-          "segmentsText": "Caller: Hi, it's Dana Whitfield. I want to get my quarterly visit scheduled.\nAgent: Of course, Dana. I can check open times — is next week good?\nCaller: Tuesday or Wednesday would be best."
+          "segmentsText": "Caller: Hi, it's Dana Whitfield. I want to get my quarterly visit scheduled.\nAgent: Of course, Dana. I can check open times — is next week good?\nCaller: {{dow+7}} or {{dow+8}} would be best."
         },
         "toolResponses": {
-          "find_slots": "Open times: Tuesday September 15 at 9 AM (slot_ref: S1); Wednesday September 16 at 1 PM (slot_ref: S2); Thursday September 17 at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
-          "get_availability": "Open times: Tuesday September 15 at 9 AM (slot_ref: S1); Wednesday September 16 at 1 PM (slot_ref: S2); Thursday September 17 at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
+          "find_slots": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
+          "get_availability": "Open times: {{day+7}} at 9 AM (slot_ref: S1); {{day+8}} at 1 PM (slot_ref: S2); {{day+9}} at 10 AM (slot_ref: S3). NOTHING IS BOOKED YET — read the caller two or three of these options and let them pick. After they choose, tell them a Waves team member will call to confirm and lock it in (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed), then call capture_lead with their chosen time in preferred_date_time. Do not promise the slot is reserved. If you place a booking request, pass back the slot_ref of the option they picked — never a date you typed yourself.",
           "request_booking": {
-            "text": "Booking request placed for Wednesday September 16 at 1 PM — PENDING office review; NOTHING is confirmed. Tell the caller a Waves team member will text or call to confirm the final time (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed). Do NOT say it is booked, locked in, confirmed or guaranteed, and do not place another booking request on this call.",
+            "text": "Booking request placed for {{day+8}} at 1 PM — PENDING office review; NOTHING is confirmed. Tell the caller a Waves team member will text or call to confirm the final time (set WHEN from the latest CLOCK DATA — never \"shortly\" while the office is closed). Do NOT say it is booked, locked in, confirmed or guaranteed, and do not place another booking request on this call.",
             "booking": true
           },
           "capture_lead": {
@@ -3232,10 +3233,10 @@
       },
       "turns": [
         {
-          "caller": "Yeah, sorry, the line dropped. So like I said, Tuesday or Wednesday next week."
+          "caller": "Yeah, sorry, the line dropped. So like I said, {{dow+7}} or {{dow+8}} next week."
         },
         {
-          "caller": "Wednesday at one."
+          "caller": "{{dow+8}} at one."
         },
         {
           "caller": "Thanks."
@@ -3243,12 +3244,12 @@
       ],
       "spec": {
         "fixture_facts": [
-          "Before the drop: Dana asked to schedule her quarterly visit, Tuesday or Wednesday preferred",
-          "find_slots: S1 Tuesday 9 AM, S2 Wednesday 1 PM, S3 Thursday 10 AM",
+          "Before the drop: Dana asked to schedule her quarterly visit, {{dow+7}} or {{dow+8}} preferred",
+          "find_slots: S1 {{dow+7}} 9 AM, S2 {{dow+8}} 1 PM, S3 {{dow+9}} 10 AM",
           "request_booking placed a PENDING request for Wednesday 1 PM"
         ],
         "required_facts": [
-          "Wednesday September 16 at 1 PM was requested; the office confirms"
+          "{{day+8}} at 1 PM was requested; the office confirms"
         ],
         "prohibited_facts": [
           "A fresh greeting or asking who is calling / why",
@@ -3259,7 +3260,7 @@
           "find_slots then request_booking"
         ],
         "transfer_required": false,
-        "ideal_move": "Pick up where the segment left off: offer the Tuesday/Wednesday times, place the request.",
+        "ideal_move": "Pick up where the segment left off: offer the {{dow+7}}/{{dow+8}} times, place the request.",
         "response_range": {
           "min": 1,
           "max": 3

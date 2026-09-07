@@ -67,6 +67,15 @@ function failingRun() {
 const failIfRealEmail = async () => { throw new Error('test fell through to default email sender'); };
 
 describe('call extraction replay scheduled eval', () => {
+  test('a manual run (notifyOnFailure: false) inserts no notification and sends no email', async () => {
+    const notify = jest.fn();
+    const sendEmail = jest.fn(async () => ({ ok: true }));
+    const out = await runCallExtractionReplayEval({ runReplay: async () => failingRun(), notify, sendEmail, notifyOnFailure: false });
+    expect(out.status).toBe('fail');
+    expect(notify).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
+  });
+
   test('green replay passes without notifying', async () => {
     const notifications = [];
     const runReplay = jest.fn(async () => replayRun());

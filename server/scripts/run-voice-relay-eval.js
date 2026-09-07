@@ -37,12 +37,9 @@ const ARGS = Object.fromEntries(
     const { runVoiceRelayEval, summaryLine } = require('../services/eval/voice-relay-replay');
 
     const opts = {};
-    // --notify gates BOTH channels: without it a manual run must neither
-    // insert an admin notification nor email the company inbox.
-    if (!ARGS.notify) {
-      opts.notify = async () => {};
-      opts.sendEmail = async () => ({ ok: true });
-    }
+    // --notify gates EVERY channel: without it a manual run inserts no admin
+    // notification, sends no email and writes no ops digest.
+    if (!ARGS.notify) opts.notifyOnFailure = false;
     if (ARGS.fixture) opts.fixturePath = ARGS.fixture;
     if (ARGS.only) opts.only = String(ARGS.only).split(',').map((s) => s.trim()).filter(Boolean);
     if (ARGS['no-judge']) opts.judge = false;
