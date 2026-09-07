@@ -2374,13 +2374,15 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     // whenever submitted — independent of the UI-defaults gates — and left
     // on the payload untouched, so a form opened before a gate rollback
     // still records its skips.
+    // productId must be a UUID: it lands in lawn_protocol_product_actuals.product_id
+    // (uuid), where a bad value would roll back the whole completion as a 500.
     const { error: lawnSkippedProductsError } = Joi.array().max(50).items(Joi.object({
-      productId: Joi.alternatives(Joi.string().max(80), Joi.number().integer().positive()).required(),
+      productId: Joi.string().uuid().required(),
       productName: Joi.string().trim().max(180).required(),
       reason: Joi.string().trim().max(500).allow(null, ''),
     })).allow(null).validate(lawnProtocolCompletion?.skippedProducts);
     if (lawnSkippedProductsError) {
-      return { status: 400, body: { error: 'skippedProducts must list removed plan defaults as { productId, productName, reason? }.', code: 'lawn_skipped_products_invalid' } };
+      return { status: 400, body: { error: 'skippedProducts must list removed plan defaults as { productId (uuid), productName, reason? }.', code: 'lawn_skipped_products_invalid' } };
     }
     if (offerInspectionCredit !== true && offerInspectionCredit !== false) {
       return ({ status: 400, body: { error: 'offerInspectionCredit must be a boolean' } });

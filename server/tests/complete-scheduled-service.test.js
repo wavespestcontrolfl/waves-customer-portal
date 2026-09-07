@@ -82,7 +82,9 @@ test.each([false, '', 0, -1, 2500.5, 10000001, {}, []])('invalid lawn visit area
 });
 
 test.each([
-  'front', [{ productId: 'p1' }], [{ productName: 'Iron' }], [{ productId: 'p1', productName: 'Iron', extra: true }], [{ productId: true, productName: 'Iron' }],
+  'front', [{ productId: '00000000-0000-4000-8000-000000000201' }], [{ productName: 'Iron' }],
+  [{ productId: '00000000-0000-4000-8000-000000000201', productName: 'Iron', extra: true }], [{ productId: true, productName: 'Iron' }],
+  [{ productId: 'p1', productName: 'Iron' }], [{ productId: 42, productName: 'Iron' }],
 ])('malformed skipped plan defaults %j are rejected before a completion claim or database read, whatever the UI gates', async skippedProducts => {
   delete process.env.GATE_LAWN_COMPLETION_DEFAULTS;
   delete process.env.GATE_LAWN_PROPERTY_HISTORY;
