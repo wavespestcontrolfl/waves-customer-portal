@@ -8,6 +8,7 @@ const { isFirstServiceVisit } = require('../services/customer-visit-history');
 const { validationFor } = require('../services/email-template-library');
 const migration = require('../models/migrations/20260907000090_app_onboarding_email_versions');
 const preflight = require('../models/migrations/20260907000089_app_onboarding_tour_preflight');
+const welcomePreflight = require('../models/migrations/20260907000088_app_onboarding_welcome_preflight');
 const { TEMPLATE: APP_V4 } = require('../models/migrations/20260708000011_app_intro_email_v4_track_reminders');
 
 (SKIP ? describe.skip : describe)('app onboarding PostgreSQL contracts', () => {
@@ -110,7 +111,7 @@ const { TEMPLATE: APP_V4 } = require('../models/migrations/20260708000011_app_in
       'welcome.new_recurring': [
         { type: 'paragraph', content: 'Hi {{first_name}}, welcome.' },
         { type: 'details', rows: [{ label: 'Plan', value: '{{plan_name}}' }] },
-        { type: 'paragraph', content: 'On the first recurring visit, your technician will inspect the property.' },
+        { type: 'paragraph', content: 'On the first recurring visit, your technician will inspect the property, treat the service areas, and note anything that needs attention on future visits.' },
         { type: 'paragraph', content: 'After service, you can review reports, upcoming visits, invoices, and account details in the customer portal.' },
         { type: 'cta', label: 'Open portal', url_variable: 'customer_portal_url' },
       ],
@@ -142,14 +143,22 @@ const { TEMPLATE: APP_V4 } = require('../models/migrations/20260708000011_app_in
     }
     // Equivalent to BEGIN / up / readback / ROLLBACK. No released data changes.
     await db.transaction(async trx => {
+      const welcomeSource = before.find(row => row.template.template_key === 'welcome.new_recurring').version;
+      const editedWelcome = structuredClone(welcomeSource.blocks);
+      editedWelcome.find(block => block.content?.startsWith('On the first recurring visit,')).content += ' Staff instructions.';
+      await trx('email_template_versions').where({ id: welcomeSource.id }).update({ blocks: JSON.stringify(editedWelcome) });
+      await expect(welcomePreflight.up(trx)).rejects.toThrow('edited welcome paragraph');
+      await trx('email_template_versions').where({ id: welcomeSource.id }).update({ blocks: JSON.stringify(welcomeSource.blocks) });
       const appSource = before.find(row => row.template.template_key === 'app_intro').version;
       const edited = structuredClone(appSource.blocks);
       edited.find(block => block.type === 'paragraph' && APP_V4.blocks.some(seed => seed.content === block.content)).content += ' Staff edit.';
       await trx('email_template_versions').where({ id: appSource.id }).update({ blocks: JSON.stringify(edited) });
       await expect(preflight.up(trx)).rejects.toThrow('edited app tour block');
       await trx('email_template_versions').where({ id: appSource.id }).update({ blocks: JSON.stringify(appSource.blocks) });
+      await welcomePreflight.up(trx);
       await preflight.up(trx);
       await migration.up(trx);
+      await welcomePreflight.up(trx);
       await preflight.up(trx);
       await migration.up(trx);
       await migration.down(trx);
