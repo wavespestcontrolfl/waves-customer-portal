@@ -2,9 +2,16 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { MemoryRouter } from "react-router-dom";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MobileEstimateRow } from "./EstimatesPageV2";
+
+const { openMessages } = vi.hoisted(() => ({ openMessages: vi.fn() }));
+vi.mock("../../components/admin/customer360/CustomerSmsPanel", async (importOriginal) => ({
+  ...await importOriginal(),
+  useCustomerSms: () => openMessages,
+  CustomerSmsProvider: ({ children }) => children,
+}));
 
 const ESTIMATE = {
   id: "estimate-1",
@@ -26,10 +33,14 @@ function renderRow(props = {}) {
   );
 }
 
-afterEach(() => cleanup());
+beforeEach(() => {
+  openMessages.mockClear();
+  vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ customer: { id: "customer-1", first_name: "QA", last_name: "Current", phone: "+19415550199" } }) })));
+});
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("MobileEstimateRow accessibility", () => {
-  it("keeps the customer summary separate from the row action controls", () => {
+  it("keeps the customer summary separate from the row action controls", async () => {
     const onOpenCustomerPanel = vi.fn();
     const { container } = renderRow({ onOpenCustomerPanel });
     const row = container.querySelector('[data-estimate-id="estimate-1"]');
@@ -41,7 +52,11 @@ describe("MobileEstimateRow accessibility", () => {
     expect(row).not.toHaveAttribute("tabindex");
     expect(summary.querySelector("button, a")).toBeNull();
     expect(screen.getByRole("button", { name: "Call via Waves" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "SMS" })).toBeInTheDocument();
+    const message = screen.getByRole("button", { name: "SMS" });
+    expect(message).toBeInTheDocument();
+    fireEvent.click(message);
+    await waitFor(() => expect(openMessages).toHaveBeenCalledWith({ id: "customer-1", firstName: "QA", lastName: "Current", phone: "+19415550199" }));
+    expect(fetch).toHaveBeenCalledWith("/api/admin/customers/customer-1/estimates-summary", expect.any(Object));
 
     fireEvent.click(summary);
     expect(onOpenCustomerPanel).toHaveBeenCalledWith("customer-1");
@@ -56,4 +71,13 @@ describe("MobileEstimateRow accessibility", () => {
     // shell chrome (90–100) and the C360 estimates panel (110).
     expect(screen.getByRole("dialog")).toHaveClass("z-[120]");
   });
+  it("does not open the stale snapshot when live contact lookup fails", async () => {
+    const alert = vi.spyOn(window, "alert").mockImplementation(() => {});
+    fetch.mockRejectedValue(new Error("Contact lookup unavailable"));
+    renderRow();
+    fireEvent.click(screen.getByRole("button", { name: "SMS" }));
+    await waitFor(() => expect(alert).toHaveBeenCalledWith("Contact lookup unavailable"));
+    expect(openMessages).not.toHaveBeenCalled();
+  });
+
 });

@@ -413,14 +413,15 @@ router.isTemplateActive = async function(messageType) {
 
 // Get template body by key (returns null if disabled)
 router.getTemplate = async function(templateKey, vars = {}, context = {}, opts = {}) {
+  const audit = opts.audit === false ? () => {} : auditSmsTemplateIssue;
   try {
     if (!(await db.schema.hasTable('sms_templates'))) {
-      auditSmsTemplateIssue(templateKey, 'missing_table', 'sms_templates table missing', context);
+      audit(templateKey, 'missing_table', 'sms_templates table missing', context);
       return null;
     }
     const t = await db('sms_templates').where({ template_key: templateKey }).first();
     if (!t) {
-      auditSmsTemplateIssue(templateKey, 'missing_template', 'template row missing', context);
+      audit(templateKey, 'missing_template', 'template row missing', context);
       return null;
     }
     if (t.is_active === false) {
@@ -446,7 +447,7 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}, opts =
     // that will actually render.
     for (const name of opts.requiredVars || []) {
       if (!body.includes(`{${name}}`)) {
-        auditSmsTemplateIssue(templateKey, 'missing_required_placeholder', `template body lost required placeholder {${name}}`, context);
+        audit(templateKey, 'missing_required_placeholder', `template body lost required placeholder {${name}}`, context);
         return null;
       }
     }
@@ -461,7 +462,7 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}, opts =
     }
     const unresolved = extractTemplatePlaceholders(body);
     if (unresolved.length) {
-      auditSmsTemplateIssue(templateKey, 'unresolved_placeholders', 'template rendered with unresolved placeholders', {
+      audit(templateKey, 'unresolved_placeholders', 'template rendered with unresolved placeholders', {
         ...context,
         unresolved_placeholders: unresolved,
       });
@@ -476,7 +477,7 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}, opts =
     // billable whitespace as well as sloppy output.
     return stripPortalUrlScheme(body).replace(/\n{3,}/g, '\n\n').trim();
   } catch (err) {
-    auditSmsTemplateIssue(templateKey, 'render_error', err.message || 'template render failed', context);
+    audit(templateKey, 'render_error', err.message || 'template render failed', context);
     return null;
   }
 };

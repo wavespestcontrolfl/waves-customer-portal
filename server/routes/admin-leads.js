@@ -706,20 +706,25 @@ router.get('/', async (req, res, next) => {
   try {
     const {
       status, source, source_name, channel, search, sort = 'first_contact_at',
-      order = 'desc', page = 1, limit = 50, start_date, end_date,
+      order = 'desc', page = 1, limit = 50, start_date, end_date, id,
     } = req.query;
+    if (id && Joi.string().uuid().validate(id).error) return res.status(400).json({ error: 'Invalid lead id' });
 
     let query = db('leads')
       .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
       .leftJoin('technicians', 'leads.assigned_to', 'technicians.id')
+      .leftJoin('estimates', 'leads.estimate_id', 'estimates.id')
       .select(
         'leads.*',
         'lead_sources.name as source_name',
         'lead_sources.source_type',
         'lead_sources.channel as source_channel',
+        'estimates.status as estimate_status',
         db.raw("technicians.name as assigned_name"),
       )
       .whereNull('leads.deleted_at');
+
+    if (id) query = query.where('leads.id', id);
 
     // Virtual `open` filter (the Pipeline table's default view): every status
     // still being worked. Individual status values pass through unchanged.
@@ -775,6 +780,7 @@ router.get('/', async (req, res, next) => {
     const countQuery = db('leads')
       .leftJoin('lead_sources', 'leads.lead_source_id', 'lead_sources.id')
       .whereNull('leads.deleted_at');
+    if (id) countQuery.where('leads.id', id);
     if (status === 'open') countQuery.whereIn('leads.status', OPEN_LEAD_STATUSES);
     else if (status) countQuery.where('leads.status', status);
     if (source) countQuery.where('leads.lead_source_id', source);
@@ -824,10 +830,26 @@ router.get('/', async (req, res, next) => {
 
     const leads = await query
       .orderBy(sortCol, order === 'asc' ? 'asc' : 'desc')
+      .orderBy('leads.id', 'asc')
       .limit(lim)
       .offset((pg - 1) * lim);
 
     res.json({ leads, total: parseInt(count, 10), page: pg, limit: lim });
+  } catch (err) { next(err); }
+});
+
+// Manual intake shows possible existing records using the same contact
+// match as estimate/lead linking. A shared contact never implies a merge.
+router.get('/contact-matches', async (req, res, next) => {
+  try {
+    const { findUnconvertedLeadsByContact, findCustomerLinkedLeadsByContact } = require('../services/lead-estimate-link');
+    const matches = (await Promise.all([
+      findUnconvertedLeadsByContact(db, req.query.phone, req.query.email),
+      findCustomerLinkedLeadsByContact(db, req.query.phone, req.query.email),
+    ])).flat();
+    res.json({ matches: matches.slice(0, 5).map(({ id, first_name, last_name, status, service_interest }) => ({
+      id, first_name, last_name, status, service_interest,
+    })), total: matches.length });
   } catch (err) { next(err); }
 });
 
@@ -1224,6 +1246,9 @@ router.post('/:id/send-sms', async (req, res, next) => {
     const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
     if (!lead) return res.status(404).json({ error: 'Lead not found' });
     if (!lead.phone) return res.status(400).json({ error: 'Lead has no phone number' });
+    if (req.body.to && leadAttribution.normalizePhone(req.body.to) !== leadAttribution.normalizePhone(lead.phone)) {
+      return res.status(409).json({ error: 'The lead phone changed. Reopen messages before sending.' });
+    }
 
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
     const sendResult = await sendCustomerMessage({
@@ -1244,7 +1269,8 @@ router.post('/:id/send-sms', async (req, res, next) => {
         adminUserId: req.technicianId,
       },
     });
-    if (sendResult.blocked || sendResult.sent === false) {
+    const { isRealProviderSend } = require('../services/sms-auto-send');
+    if (sendResult.blocked || !isRealProviderSend(sendResult)) {
       return res.status(422).json(sendResult);
     }
 
@@ -1253,7 +1279,7 @@ router.post('/:id/send-sms', async (req, res, next) => {
       lead_id: req.params.id,
       activity_type: 'sms_sent',
       description: `SMS sent: ${message.slice(0, 100)}${message.length > 100 ? '...' : ''}`,
-      performed_by: req.technician.first_name + ' ' + (req.technician.last_name || ''),
+      performed_by: req.technician.name || [req.technician.first_name, req.technician.last_name].filter(Boolean).join(' ') || 'Admin',
       metadata: JSON.stringify({ message }),
     });
 
@@ -1264,13 +1290,13 @@ router.post('/:id/send-sms', async (req, res, next) => {
 
     // Update status to 'contacted' if currently 'new'
     if (lead.status === 'new') {
-      await db('leads').where('id', req.params.id).update({ status: 'contacted', updated_at: new Date() });
+      const changed = await db('leads').where('id', req.params.id).where('status', 'new').update({ status: 'contacted', updated_at: new Date() });
       // Funnel-row mirror (monotonic, best-effort).
-      await bridgeLeadFunnelStage(req.params.id, 'contacted');
+      if (changed) await bridgeLeadFunnelStage(req.params.id, 'contacted');
     }
 
     const updated = await db('leads').where('id', req.params.id).first();
-    res.json({ lead: updated, sent: true });
+    res.json({ lead: updated, sent: true, providerMessageId: sendResult.providerMessageId });
   } catch (err) { next(err); }
 });
 

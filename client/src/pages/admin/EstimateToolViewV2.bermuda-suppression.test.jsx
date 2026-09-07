@@ -72,7 +72,8 @@ describe("bermudagrass suppression add-on checkbox", () => {
         <EstimateToolViewV2 />
       </MemoryRouter>,
     );
-    // Lawn block renders (svcLawn defaults on)...
+    fireEvent.click(findCheckboxByLabel(container, /^\s*Lawn Care\s*$/));
+    // Selecting Lawn exposes its field contract...
     await waitFor(() => {
       expect(findGrassTypeSelect(container)).toBeTruthy();
     });
@@ -87,8 +88,9 @@ describe("bermudagrass suppression add-on checkbox", () => {
       </MemoryRouter>,
     );
 
-    // The fresh form preselects Lawn Care (svcLawn: true) on the default
-    // St. Augustine track, so the option is available immediately.
+    // Service selection is explicit; the existing St. Augustine default
+    // applies after the operator selects Lawn.
+    fireEvent.click(findCheckboxByLabel(container, /^\s*Lawn Care\s*$/));
     const bsCheckbox = await waitFor(() => {
       const el = findCheckboxByLabel(container, /Bermudagrass suppression/);
       expect(el).toBeTruthy();

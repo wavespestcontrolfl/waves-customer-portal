@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const { phoneMatchDigits } = require('../utils/phone');
 const logger = require('./logger');
 const leadAttribution = require('./lead-attribution');
 const { resolveLeadSource } = require('./lead-source-resolver');
@@ -1103,42 +1104,41 @@ function estimateValueHints(estimate) {
 }
 
 // Contact fallback — only OPEN, NOT-yet-converted leads (customer_id IS NULL),
-// matched on the last 10 phone digits (lead/customer phones are stored in
-// mixed E.164 / 10-digit formats) or a case-insensitive email. The
+// matched on complete phone digits (NANP also accepts the domestic form) or a case-insensitive email. The
 // `customer_id IS NULL` guard is deliberate: an existing customer can hold
 // separate open leads already attached to them (e.g. public quote links stamp
 // `leads.customer_id`), and we must never sweep those unrelated add-on leads.
 // We only rescue the originating lead that was never linked to anyone.
 async function findUnconvertedLeadsByContact(database, phone, email) {
-  const np = normalizePhone(phone);
+  const phones = phoneMatchDigits(phone);
   const ne = normalizeEmail(email);
-  if (!np && !ne) return [];
+  if (!phones.length && !ne) return [];
   return database('leads')
     .whereNotIn('status', [...CLOSED_LEAD_STATUSES])
     .whereNull('customer_id')
     .whereNull('deleted_at')
     .andWhere((builder) => {
-      if (np) builder.orWhereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = ?", [np]);
+      if (phones.length) builder.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ANY (?::text[])", [phones]);
       if (ne) builder.orWhereRaw("LOWER(COALESCE(email, '')) = ?", [ne]);
     });
 }
 
 // Counterpart to findUnconvertedLeadsByContact for the customer-linked rescue
 // tier: OPEN leads matching the contact that ALREADY carry a `customer_id` (the
-// exact rows the `customer_id IS NULL` version excludes). Same last-10-digit /
+// exact rows the `customer_id IS NULL` version excludes). Same complete-phone /
 // case-insensitive-email match. Callers must still enforce the originating guards
 // (single match + no prior won lead + isOriginatingLead) before advancing — this
 // only widens the candidate set.
 async function findCustomerLinkedLeadsByContact(database, phone, email) {
-  const np = normalizePhone(phone);
+  const phones = phoneMatchDigits(phone);
   const ne = normalizeEmail(email);
-  if (!np && !ne) return [];
+  if (!phones.length && !ne) return [];
   return database('leads')
     .whereNotIn('status', [...CLOSED_LEAD_STATUSES])
     .whereNotNull('customer_id')
     .whereNull('deleted_at')
     .andWhere((builder) => {
-      if (np) builder.orWhereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '\\D', '', 'g'), 10) = ?", [np]);
+      if (phones.length) builder.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ANY (?::text[])", [phones]);
       if (ne) builder.orWhereRaw("LOWER(COALESCE(email, '')) = ?", [ne]);
     });
 }
@@ -2009,6 +2009,7 @@ module.exports = {
   resolveEstimateEventLeads,
   convertLeadFromEvent,
   findUnconvertedLeadsByContact,
+  findCustomerLinkedLeadsByContact,
   linkLeadEstimatesToCustomer,
   attributeSelfBooking,
   // Exported for the one-off leads-pipeline-audit cleanup script, which must

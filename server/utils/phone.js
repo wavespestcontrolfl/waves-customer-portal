@@ -54,4 +54,15 @@ function isLikelyE164(value) {
   return digits.length >= 10 && digits.length <= 15;
 }
 
-module.exports = { toE164, normalizePhone: toE164, isLikelyE164 };
+// Complete digit strings that may identify this contact in mixed stored
+// E.164 / domestic formats. International numbers never use suffix matching.
+function phoneMatchDigits(raw) {
+  const text = typeof raw === 'string' ? raw.trim() : '';
+  const digits = text.replace(/\D/g, '');
+  const normalized = toE164(text);
+  if (!/^\+[1-9]\d{7,14}$/.test(normalized || '') || (!text.startsWith('+') && !/^(?:1)?\d{10}$/.test(digits))) return [];
+  const full = normalized.slice(1);
+  return /^1\d{10}$/.test(full) ? [full, full.slice(1)] : [full];
+}
+
+module.exports = { toE164, normalizePhone: toE164, isLikelyE164, phoneMatchDigits };

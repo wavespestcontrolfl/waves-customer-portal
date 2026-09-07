@@ -112,6 +112,28 @@ describe('scheduled-estimate cron vs the clarify re-price hold', () => {
     expect(parkedUpdate('est-held').payload.last_send_error).toMatch(/held for a re-price/);
   });
 
+  test('a reviewed scheduled attempt stops after any throw, including post-provider bookkeeping failure', async () => {
+    const tick = scheduledEstimateTick();
+    const scheduledAt = new Date();
+    db.__state.claimRows = [{ id: 'est-reviewed', send_method: 'sms', scheduled_send_attempts: 1, scheduled_at: scheduledAt,
+      estimate_data: { manualSendAttempts: [{ key: 'review-attempt', scheduleReview: { scheduledAt: scheduledAt.toISOString() } }] } }];
+    sendEstimateNow.mockRejectedValue(new Error('receipt write unavailable after provider acceptance'));
+    await tick();
+    expect(parkedUpdate('est-reviewed').payload).toEqual(expect.objectContaining({ status: 'send_failed', scheduled_at: null }));
+  });
+
+  test('a historical reviewed schedule does not disable the current legacy schedule retry', async () => {
+    const tick = scheduledEstimateTick();
+    const scheduledAt = new Date();
+    db.__state.claimRows = [{ id: 'est-later', send_method: 'sms', scheduled_send_attempts: 1, scheduled_at: scheduledAt,
+      estimate_data: { manualSendAttempts: [{ key: 'old-review', scheduleReview: { scheduledAt: new Date(scheduledAt.getTime() - 86400000).toISOString() } }] } }];
+    sendEstimateNow.mockRejectedValue(new Error('provider unavailable'));
+    await tick();
+    const update = parkedUpdate('est-later');
+    expect(update.payload.status).toBe('scheduled');
+    expect(update.payload.scheduled_at).toBeInstanceOf(Date);
+  });
+
   test('an ordinary transient failure still retries: back to scheduled with a fresh due time', async () => {
     const tick = scheduledEstimateTick();
     db.__state.claimRows = [{ id: 'est-flaky', send_method: 'sms', scheduled_send_attempts: 1 }];

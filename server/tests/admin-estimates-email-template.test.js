@@ -49,7 +49,10 @@ jest.mock('../routes/estimate-public', () => ({
   bookingServiceFor: jest.fn(),
 }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
-jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn() }));
+jest.mock('../services/sendgrid-mail', () => ({
+  isConfigured: jest.fn(),
+  isDefiniteRejection: jest.requireActual('../services/sendgrid-mail').isDefiniteRejection,
+}));
 
 const router = require('../routes/admin-estimates');
 const db = require('../models/db');

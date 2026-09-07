@@ -42,8 +42,11 @@ const {
   createOrReuseAdminEstimate,
   estimateExpiresAt,
   estimateReviseBlock,
+  estimateEditVersion,
   estimateViewUrl,
   reviseAdminEstimate,
+  lockScheduledGroupGuardGroups,
+  assertNoRevisionDuringGroupSend,
   staleCallLinkageReason,
   completePendingInvalidation,
   takePendingInvalidation,
@@ -106,6 +109,20 @@ function parseEstimateData(estimateData) {
     }
   }
   return typeof estimateData === 'object' ? estimateData : null;
+}
+
+// Operational delivery stamps may change while the claim is taken. Contact,
+// property, scope, terms and dollars must still be the offer that was reviewed.
+function estimateOfferVersion(row) {
+  const data = { ...(parseEstimateData(row.estimate_data) || {}) };
+  for (const key of ['sendSnapshot', 'deliveryState', 'manualSendAttempts']) delete data[key];
+  if (data.estimatorEngine) {
+    data.estimatorEngine = { ...data.estimatorEngine };
+    delete data.estimatorEngine.delivering_at;
+    delete data.estimatorEngine.delivering_token;
+  }
+  const fields = ['customer_id', 'property_id', 'estimate_group_id', 'customer_name', 'customer_phone', 'customer_email', 'address', 'notes', 'monthly_total', 'annual_total', 'onetime_total', 'show_one_time_option', 'bill_by_invoice'];
+  return crypto.createHash('sha256').update(JSON.stringify([fields.map((key) => row[key]), data])).digest('hex');
 }
 
 // When an operator authors a commercial proposal, their line items ARE the
@@ -662,55 +679,7 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
   };
 }
 
-async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], proposalMode = false }) {
-  if (sendgrid.isConfigured()) {
-    try {
-      const result = await EmailTemplateLibrary.sendTemplate({
-        templateKey: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery',
-        to: estimate.customer_email,
-        payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode }),
-        recipientType: estimate.customer_id ? 'customer' : 'lead',
-        recipientId: estimate.customer_id || null,
-        triggerEventId: `estimate_delivery:${estimate.id}`,
-        idempotencyKey: estimateEmailIdempotencyKey(estimate, idempotencyKey),
-        categories: ['estimate_delivery'],
-        attachments: Array.isArray(attachments) ? attachments : [],
-      });
-      if (result.blocked) {
-        return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
-      }
-      return { ok: !!result.sent, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
-    } catch (err) {
-      if (!canFallbackFromTemplateEmailError(err)) {
-        throw err;
-      }
-      logger.warn(`[admin-estimates] estimate.delivery template unavailable; falling back to SMTP for estimate ${estimate.id}: ${err.message}`);
-    }
-  }
-
-  if (!smtpFallbackAllowed()) {
-    logger.error(`[admin-estimates] SMTP fallback disabled in production for estimate ${estimate.id} — SendGrid template send required`);
-    return {
-      ok: false,
-      error: 'Email send unavailable: SendGrid template path failed and SMTP fallback is disabled in production',
-      template: 'estimate.delivery',
-    };
-  }
-
-  if (!process.env.GOOGLE_SMTP_PASSWORD) {
-    return { ok: false, error: 'Email not configured (SENDGRID_API_KEY or GOOGLE_SMTP_PASSWORD missing)' };
-  }
-
-  const nodemailer = require('nodemailer');
-  const transporter = nodemailer.createTransport({
-    host: 'smtp.gmail.com',
-    port: 587,
-    secure: false,
-    auth: {
-      user: 'contact@wavespestcontrol.com',
-      pass: process.env.GOOGLE_SMTP_PASSWORD,
-    },
-  });
+function estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode }) {
   const heading = proposalMode ? 'Your Waves proposal is ready' : 'Your Waves estimate is ready';
   const intro = proposalMode
     ? `Hi ${firstName}, your formal proposal is attached as a PDF. There is no online checkout for a commercial bid — your Waves account manager will follow up to answer questions and finalize the agreement.`
@@ -744,6 +713,124 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
     `Questions? Reply to this email or call ${WAVES_SUPPORT_PHONE_DISPLAY}.`,
     '- Waves Pest Control',
   ]);
+  return { subject: 'Your Waves Pest Control Estimate is Ready', html, text };
+}
+
+function estimateEmailPriceLine(estimate) {
+  if (!normalizeProposal(estimate).enabled) return moneySummary(estimate);
+  // This is the same first-year/recurring/one-time breakdown printed by
+  // the proposal PDF. It formats canonical totals; it never prices a quote.
+  const pt = computeProposalTotals(normalizeProposal(estimate));
+  const centsMoney = (n) => `$${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return [
+    pt.monthlyEquivalent > 0 && `${centsMoney(pt.monthlyEquivalent)}/mo`,
+    pt.annualRecurring > 0 && `${centsMoney(pt.annualRecurring)}/yr recurring`,
+    pt.oneTime > 0 && `${centsMoney(pt.oneTime)} one-time`,
+    pt.firstYearTotal > 0 && `first-year total ${centsMoney(pt.firstYearTotal)}`,
+  ].filter(Boolean).join(' · ');
+}
+
+// Uses the same template renderers as delivery, without minting tracked links,
+// auditing a template issue, or calling a transport. Only the link is shortened
+// at handoff; the manual send pins the base SMS template shown here.
+async function buildEstimateSendPreview(estimate) {
+  const firstName = estimate.customer_name?.split(' ')[0] || 'there';
+  const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
+  const proposalMode = normalizeProposal(estimate).enabled;
+  const priceLine = estimateEmailPriceLine(estimate);
+  const sms = await smsTemplatesRouter.getTemplate('estimate_sent', {
+    first_name: firstName, estimate_url: viewUrl,
+  }, {}, { noVariants: true, audit: false });
+  let email = null;
+  const library = sendgrid.isConfigured() ? await EmailTemplateLibrary.loadTemplateByKey(proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery') : null;
+  if (library?.activeVersion) {
+    const rendered = EmailTemplateLibrary.renderTemplate({
+      template: library.template, version: library.activeVersion,
+      payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode }),
+    });
+    email = { provider: 'sendgrid', subject: rendered.subject, text: rendered.text, versionId: library.activeVersion.id, contentHash: EmailTemplateLibrary.templateContentHash(library.template, library.activeVersion) };
+  } else if (smtpFallbackAllowed()) {
+    const rendered = estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode });
+    email = { provider: 'smtp', subject: rendered.subject, text: rendered.text, contentHash: crypto.createHash('sha256').update(JSON.stringify(rendered)).digest('hex') };
+  }
+  const messages = { sms: sms || null, email };
+  const attempts = parseEstimateData(estimate.estimate_data)?.manualSendAttempts;
+  const uncertain = (Array.isArray(attempts) ? attempts : []).some((entry) => entry.startedAt && !entry.result);
+  return {
+    id: estimate.id, status: estimate.status, editVersion: estimateEditVersion(estimate),
+    customerName: estimate.customer_name, customerPhone: estimate.customer_phone,
+    customerEmail: estimate.customer_email, address: estimate.address,
+    updatedAt: estimate.updated_at,
+    uncertainAttempt: uncertain,
+    groupVersions: estimate.estimate_group_id ? Object.fromEntries((await db('estimates')
+      .where({ estimate_group_id: estimate.estimate_group_id }).whereNull('archived_at').orderBy('id').select('*'))
+      .map((row) => [row.id, estimateOfferVersion(row)])) : null,
+    previewPath: `/estimate/${estimate.token}?adminPreview=1`,
+    customerUrl: ['sent', 'viewed'].includes(estimate.status) ? viewUrl : null,
+    messages,
+    messageVersion: crypto.createHash('sha256').update(JSON.stringify(messages)).digest('hex'),
+  };
+}
+
+async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idempotencyKey, attachments = [], proposalMode = false, versionId = null, expectedContentHash = null, reviewedProvider = null, onDispatch = null }) {
+  const provider = sendgrid.isConfigured() ? 'sendgrid' : 'smtp';
+  if (reviewedProvider && reviewedProvider !== provider) return { ok: false, error: 'The reviewed email provider changed. Review the message again before sending.' };
+  if (reviewedProvider === 'smtp') {
+    const content = estimateSmtpContent({ firstName, viewUrl: `https://portal.wavespestcontrol.com/estimate/${estimate.token}`, priceLine, proposalMode });
+    if (crypto.createHash('sha256').update(JSON.stringify(content)).digest('hex') !== expectedContentHash) return { ok: false, error: 'The reviewed email content changed. Review the message again before sending.' };
+  }
+  if (provider === 'sendgrid') {
+    try {
+      const result = await EmailTemplateLibrary.sendTemplate({
+        templateKey: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery',
+        ...(versionId ? { versionId } : {}),
+        ...(expectedContentHash ? { expectedContentHash } : {}),
+        to: estimate.customer_email,
+        payload: estimateEmailPayload({ estimate, firstName, viewUrl, priceLine, proposalMode }),
+        recipientType: estimate.customer_id ? 'customer' : 'lead',
+        recipientId: estimate.customer_id || null,
+        triggerEventId: `estimate_delivery:${estimate.id}`,
+        idempotencyKey: estimateEmailIdempotencyKey(estimate, idempotencyKey),
+        categories: ['estimate_delivery'],
+        attachments: Array.isArray(attachments) ? attachments : [],
+        onQueued: onDispatch,
+      });
+      if (result.blocked) {
+        return { ok: false, blocked: true, error: result.reason || 'Email suppressed', template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
+      }
+      return { ok: !!result.sent, messageId: result.message?.provider_message_id || null, template: proposalMode ? 'estimate.proposal_delivery' : 'estimate.delivery' };
+    } catch (err) {
+      if (versionId || !canFallbackFromTemplateEmailError(err)) {
+        throw err;
+      }
+      logger.warn(`[admin-estimates] estimate.delivery template unavailable; falling back to SMTP for estimate ${estimate.id}: ${err.message}`);
+    }
+  }
+
+  if (!smtpFallbackAllowed()) {
+    logger.error(`[admin-estimates] SMTP fallback disabled in production for estimate ${estimate.id} — SendGrid template send required`);
+    return {
+      ok: false,
+      error: 'Email send unavailable: SendGrid template path failed and SMTP fallback is disabled in production',
+      template: 'estimate.delivery',
+    };
+  }
+
+  if (!process.env.GOOGLE_SMTP_PASSWORD) {
+    return { ok: false, error: 'Email not configured (SENDGRID_API_KEY or GOOGLE_SMTP_PASSWORD missing)' };
+  }
+
+  const nodemailer = require('nodemailer');
+  const transporter = nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false,
+    auth: {
+      user: 'contact@wavespestcontrol.com',
+      pass: process.env.GOOGLE_SMTP_PASSWORD,
+    },
+  });
+  const { html, text } = estimateSmtpContent({ firstName, viewUrl, priceLine, proposalMode });
   // Convert SendGrid-shaped attachments ({ content: base64, type }) to
   // nodemailer's shape ({ content: Buffer, contentType }) for the SMTP path.
   const smtpAttachments = (Array.isArray(attachments) ? attachments : []).map((a) => ({
@@ -751,6 +838,7 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
     content: Buffer.from(a.content, 'base64'),
     contentType: a.type || 'application/pdf',
   }));
+  onDispatch?.();
   await transporter.sendMail({
     from: '"Waves Pest Control, LLC" <contact@wavespestcontrol.com>',
     to: estimate.customer_email,
@@ -831,6 +919,8 @@ router.post('/', async (req, res, next) => {
     res.status(reused ? 200 : 201).json({
       id: estimate.id,
       token: estimate.token,
+      editVersion: estimateEditVersion(estimate),
+      status: estimate.status,
       viewUrl: estimateViewUrl(estimate.token),
       // Server-authoritative pricing (Decision #2): the UI compares these to the
       // client preview it sent and surfaces a "recomputed" notice if they differ.
@@ -885,6 +975,7 @@ router.put('/:id', async (req, res, next) => {
     res.json({
       dryRun: dryRun || undefined,
       id: estimate.id,
+      editVersion: estimateEditVersion(estimate),
       token: estimate.token,
       viewUrl: estimateViewUrl(estimate.token),
       status: estimate.status,
@@ -985,6 +1076,7 @@ router.get('/:id/edit-source', async (req, res, next) => {
       id: estimate.id,
       status: estimate.status,
       editable: !block,
+      editVersion: estimateEditVersion(estimate),
       blockReason: block ? block.message : null,
       customerId: estimate.customer_id,
       customerName: estimate.customer_name,
@@ -999,6 +1091,9 @@ router.get('/:id/edit-source', async (req, res, next) => {
       propertyId: estimate.property_id || null,
       estimateGroupId: estimate.estimate_group_id || null,
       inputs,
+      result: inputs ? estData.result || null : null,
+      engineRequest: inputs ? estData.engineRequest || null : null,
+      token: estimate.token,
       engineProfile,
       customer,
     });
@@ -1039,6 +1134,21 @@ router.get('/:id/group', async (req, res, next) => {
 });
 
 // POST /api/admin/estimates/:id/send — send via SMS and/or email (immediate or scheduled)
+router.get('/:id/send-preview', async (req, res, next) => {
+  try {
+    const estimate = await db('estimates').where({ id: req.params.id }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    const preview = await buildEstimateSendPreview(estimate);
+    try {
+      assertEstimateSendable(estimate);
+    } catch (err) {
+      preview.blockReason = err.message;
+      preview.requiresEngineReview = err.code === 'ENGINE_REVIEW_REQUIRED';
+    }
+    res.set('Cache-Control', 'private, no-store').json(preview);
+  } catch (err) { next(err); }
+});
+
 router.post('/:id/send', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
@@ -1051,6 +1161,30 @@ router.post('/:id/send', async (req, res, next) => {
 
     if (!['sms', 'email', 'both'].includes(sendMethod)) {
       return res.status(400).json({ error: 'Invalid sendMethod' });
+    }
+    if (idempotencyKey && !/^[A-Za-z0-9_.:-]{1,120}$/.test(idempotencyKey)) {
+      return res.status(400).json({ error: 'Invalid send attempt identifier' });
+    }
+    const attemptBinding = JSON.stringify([sendMethod, scheduledAt, req.body?.expectedEditVersion || null, req.body?.messageVersion || null, req.body?.groupVersions || null]);
+    const attempts = parseEstimateData(estimate.estimate_data)?.manualSendAttempts;
+    const previousAttempt = (Array.isArray(attempts) ? attempts : []).find((entry) => entry.key === idempotencyKey);
+    if (previousAttempt) {
+      if (previousAttempt.binding !== attemptBinding) return res.status(409).json({ error: 'This send attempt belongs to a different reviewed request.' });
+      const receipt = previousAttempt.result || (!previousAttempt.startedAt && previousAttempt.scheduleResult);
+      if (receipt) return res.status(receipt.sent || receipt.scheduled ? 200 : 422).json({ ...receipt, replayed: true });
+      return res.status(409).json({ error: 'The earlier send may have reached a provider. Check its channel outcome before starting a new send.', code: 'SEND_OUTCOME_UNCERTAIN', channels: previousAttempt.channels || {} });
+    }
+    if ((Array.isArray(attempts) ? attempts : []).some((entry) => entry.startedAt && !entry.result) && req.body?.acknowledgeUncertainSend !== true) {
+      return res.status(409).json({ error: 'An earlier send has an uncertain outcome. Check delivery records before authorizing a deliberate resend.', code: 'SEND_OUTCOME_UNCERTAIN' });
+    }
+    if (req.body?.expectedEditVersion && req.body.expectedEditVersion !== estimateEditVersion(estimate)) {
+      return res.status(409).json({ error: 'This saved estimate changed. Close this dialog and review the current version before sending.', code: 'ESTIMATE_REVIEW_STALE' });
+    }
+    let reviewedMessages = null;
+    if (req.body?.messageVersion) {
+      const preview = await buildEstimateSendPreview(estimate);
+      if (preview.messageVersion !== req.body.messageVersion) return res.status(409).json({ error: 'The delivery message changed. Close this dialog and review it again.', code: 'ESTIMATE_REVIEW_STALE' });
+      reviewedMessages = preview.messages;
     }
     assertEstimateSendable(estimate, { engineReviewAcknowledged });
 
@@ -1079,6 +1213,13 @@ router.post('/:id/send', async (req, res, next) => {
       // re-sends — duplicate customer texts) or overwrite a concurrent
       // accept (money-bearing state lost, and the row re-enters the send
       // pipeline on a committed conversion).
+      const scheduleResult = { success: true, scheduled: true, scheduledAt: scheduledTime.toISOString() };
+      // A deliberate resend acknowledges only the uncertain attempts staff
+      // reviewed now, not a later handoff that may fail before the cron runs.
+      const acknowledgedUncertainAttemptKeys = req.body?.acknowledgeUncertainSend === true
+        ? (Array.isArray(attempts) ? attempts : []).filter((entry) => entry.startedAt && !entry.result).map((entry) => entry.key)
+        : [];
+      const scheduledAttemptKey = idempotencyKey || (acknowledgedUncertainAttemptKeys.length ? crypto.randomUUID() : null);
       const scheduleOutcome = await db.transaction(async (trx) => {
         if (estimate.estimate_group_id) {
           await trx.raw(
@@ -1088,6 +1229,17 @@ router.post('/:id/send', async (req, res, next) => {
         }
         const blockingSibling = await findGroupSiblingBlockingSend(estimate, { database: trx, forUpdate: true });
         if (blockingSibling) return { blockingSibling };
+        await assertReviewedEstimateGroup(trx, estimate, req.body?.groupVersions);
+        const lockedRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+        if (req.body?.expectedEditVersion && estimateEditVersion(lockedRow) !== req.body.expectedEditVersion) {
+          return { stale: true };
+        }
+        const lockedData = parseEstimateData(lockedRow?.estimate_data) || {};
+        const priorAttempts = Array.isArray(lockedData.manualSendAttempts) ? lockedData.manualSendAttempts : [];
+        const receipt = scheduledAttemptKey ? {
+          key: scheduledAttemptKey, binding: attemptBinding, scheduleResult, channels: {},
+          scheduleReview: { scheduledAt: scheduledTime.toISOString(), reviewedMessages, reviewedOffer: req.body?.expectedEditVersion ? estimateOfferVersion(lockedRow) : null, reviewedGroupVersions: req.body?.groupVersions || null, acknowledgedUncertainAttemptKeys },
+        } : null;
         const claimed = await trx('estimates')
           .where({ id: estimate.id })
           // Same observed-membership pin as the immediate claim (GH codex
@@ -1121,10 +1273,12 @@ router.post('/:id/send', async (req, res, next) => {
             expires_at: estimateExpiresAt(() => scheduledTime),
             scheduled_send_attempts: 0,
             last_send_error: null,
+            ...(receipt ? { estimate_data: JSON.stringify({ ...lockedData, manualSendAttempts: [...priorAttempts, receipt].slice(-DELIVERY_HISTORY_MAX) }) } : {}),
             updated_at: trx.fn.now(),
           });
         return { claimed };
       });
+      if (scheduleOutcome.stale) return res.status(409).json({ error: 'The saved estimate changed before scheduling. Review the current offer.', code: 'ESTIMATE_REVIEW_STALE' });
       if (scheduleOutcome.blockingSibling) {
         const { blockingSibling } = scheduleOutcome;
         return res.status(blockingSibling.statusCode).json({
@@ -1139,7 +1293,7 @@ router.post('/:id/send', async (req, res, next) => {
           error: 'This estimate is mid-send, already accepted, locked, or held for a re-price — refresh and retry.',
         });
       }
-      return res.json({ success: true, scheduled: true, scheduledAt: scheduledTime.toISOString() });
+      return res.json(scheduleResult);
     }
 
     // Send immediately. Claim the row as `sending` first so a concurrent
@@ -1178,6 +1332,15 @@ router.post('/:id/send', async (req, res, next) => {
         // meets the gate's own message.
         .modify((q) => {
           if (gatedSendAuthorityPredicateApplies()) q.whereRaw(GATED_SEND_AUTHORITY_SQL);
+          if (req.body?.expectedEditVersion) {
+            // CAS the snapshot observed before this claim. The later delivery
+            // verdict also compares content; this pin stops two reviewed
+            // clicks that both pre-read the same sent/draft row from winning
+            // sequentially after the first handoff completes.
+            q.where('status', estimate.status)
+              .whereRaw("COALESCE(estimate_data, '{}'::jsonb) = ?::jsonb", [JSON.stringify(parseEstimateData(estimate.estimate_data) || {})]);
+          }
+          if (idempotencyKey) q.whereRaw("NOT (COALESCE(estimate_data->'manualSendAttempts', '[]'::jsonb) @> ?::jsonb)", [JSON.stringify([{ key: idempotencyKey }])]);
         })
         .update({ status: 'sending', updated_at: db.fn.now() });
       if (!claimed) {
@@ -1190,10 +1353,11 @@ router.post('/:id/send', async (req, res, next) => {
     // records whether THIS request won it, so a losing request never resets
     // a concurrent winner's in-flight claim (codex #3248 r5).
     const claimState = { anchorClaimed: !estimate.estimate_group_id };
-    const releaseSendClaim = () => (claimState.anchorClaimed
+    const releaseSendClaim = (failed = false) => (claimState.anchorClaimed
       ? db('estimates')
         .where({ id: estimate.id, status: 'sending' })
-        .update({ status: estimate.status, updated_at: db.fn.now() })
+        .update({ status: failed && idempotencyKey && estimate.status === 'scheduled' ? 'send_failed' : estimate.status,
+          ...(failed && idempotencyKey && estimate.status === 'scheduled' ? { scheduled_at: null } : {}), updated_at: db.fn.now() })
         .catch((e) => logger.warn(`[admin-estimates] failed to release send claim for estimate ${estimate.id}: ${e.message}`))
       : Promise.resolve());
 
@@ -1202,16 +1366,23 @@ router.post('/:id/send', async (req, res, next) => {
       result = await sendEstimateNow(
         estimate.estimate_group_id ? estimate : { ...estimate, status: 'sending' },
         sendMethod,
-        { idempotencyKey, engineReviewAcknowledged, claimState },
+        {
+          idempotencyKey, engineReviewAcknowledged, claimState,
+          manualAttempt: idempotencyKey ? { key: idempotencyKey, binding: attemptBinding } : null,
+          reviewedMessages,
+          reviewedOffer: req.body?.expectedEditVersion ? estimateOfferVersion(estimate) : null,
+          reviewedEditVersion: req.body?.expectedEditVersion || null,
+          reviewedGroupVersions: req.body?.groupVersions || null,
+        },
       );
     } catch (e) {
-      await releaseSendClaim();
+      await releaseSendClaim(true);
       throw e;
     }
     if (!result.sent) {
-      // A successful send already flipped `sending` → `sent`; nothing was sent
-      // here, so hand the claim back to the prior status (still editable).
-      await releaseSendClaim();
+      // Known failures restore the editable prior state. An uncertain
+      // immediate attempt cancels an old schedule until staff review it.
+      await releaseSendClaim(result.uncertain === true);
       return res.status(422).json({
         success: false,
         error: 'Estimate was not sent on any requested channel',
@@ -1241,7 +1412,7 @@ router.post('/:id/send', async (req, res, next) => {
 // `leadShapeRef` (from sendEstimateNow) receives the parked key the moment
 // the commit lands — before any post-commit step can fail — so compensation
 // never depends on this function returning normally.
-async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
+async function applyLeadServiceForSend(estimate, { leadShapeRef = null, preserveReviewedOffer = false } = {}) {
   const untouched = { estimate, parkedKey: null };
   let parkedKey = null;
   const featureGates = require('../config/feature-gates');
@@ -1320,6 +1491,10 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null } = {}) {
         return { estimate: { ...restoredRow, status: estimate.status }, parkedKey: null };
       }
     }
+    // An explicit staff review commits to the saved bundle. Automated sends
+    // retain the existing lead-first rail; manual review never silently parks
+    // a service after the operator has approved that bundle and its price.
+    if (preserveReviewedOffer) return untouched;
     // NEW parking is gated (strict opt-in, needs opt-out + add).
     if (!featureGates.isEnabled('estimateLeadServiceSend')) return untouched;
     if (!featureGates.isEnabled('estimateServiceOptOut') || !featureGates.isEnabled('estimateServiceAdd')) return untouched;
@@ -1591,7 +1766,16 @@ function siblingRepricePending(row) {
   } catch { return false; }
 }
 
-async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false, autoSend = false } = {}) {
+async function assertReviewedEstimateGroup(database, estimate, expectedVersions) {
+  if (!expectedVersions || !estimate.estimate_group_id) return;
+  const rows = await database('estimates').where({ estimate_group_id: estimate.estimate_group_id }).whereNull('archived_at').orderBy('id').forUpdate().select('*');
+  const current = Object.fromEntries(rows.map((row) => [row.id, estimateOfferVersion(row)]));
+  if (JSON.stringify(current) !== JSON.stringify(expectedVersions)) {
+    throw Object.assign(new Error('A property on this estimate changed. Review the current group before sending.'), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
+  }
+}
+
+async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false, autoSend = false, reviewedEditVersion = null, reviewedGroupVersions = null } = {}) {
   // Mid-send check, sibling enumeration, and the claims run in ONE
   // transaction under a group-scoped advisory xact lock (codex #3244 r8):
   // without it, two overlapping immediate sends of different members could
@@ -1604,6 +1788,13 @@ async function claimGroupSiblingsForPublish(estimate, { callerPreClaimed = false
       'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
       ['estimate-group-send', String(estimate.estimate_group_id)],
     );
+    await assertReviewedEstimateGroup(trx, estimate, reviewedGroupVersions);
+    if (reviewedEditVersion) {
+      const anchor = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+      if (estimateEditVersion(anchor) !== reviewedEditVersion) {
+        throw Object.assign(new Error('The saved estimate changed before its send claim. Review it again.'), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
+      }
+    }
     // A sibling already mid-send is a concurrent publisher (another pod's
     // scheduled batch, or a parallel operator click): its send will publish
     // this group with its own message, so this send must abort rather than
@@ -1850,7 +2041,34 @@ async function estimateInvalidatedJustBeforeHandoff(estimateId) {
   return !!(await staleCallLinkageReason(db, data));
 }
 
+async function recordManualSendAttempt(estimateId, attempt, patch) {
+  if (!attempt) return;
+  await db.transaction(async (trx) => {
+    const row = await trx('estimates').where({ id: estimateId }).forUpdate().first('estimate_data');
+    const data = parseEstimateData(row?.estimate_data);
+    if (!data || !Array.isArray(data.manualSendAttempts)) throw new Error('Send attempt receipt is unavailable; check the provider outcome before retrying.');
+    const entry = data.manualSendAttempts.find((item) => item.key === attempt.key && item.binding === attempt.binding);
+    if (!entry) throw new Error('Send attempt receipt changed; check the provider outcome before retrying.');
+    Object.assign(entry, patch);
+    await trx('estimates').where({ id: estimateId }).update({ estimate_data: JSON.stringify(data) });
+  });
+}
+
 async function sendEstimateNow(estimate, sendMethod, options = {}) {
+  // The existing scheduled sender passes the claimed row. Carry the exact
+  // reviewed offer/template from its scheduled receipt into the same delivery
+  // claim used for immediate sends; no second scheduler or transport.
+  if (options.callerPreClaimed && estimate.scheduled_at) {
+    const scheduledAt = new Date(estimate.scheduled_at).toISOString();
+    const attempts = parseEstimateData(estimate.estimate_data)?.manualSendAttempts;
+    const scheduled = (Array.isArray(attempts) ? attempts : []).findLast((entry) => entry.scheduleReview?.scheduledAt === scheduledAt);
+    const acknowledged = scheduled?.scheduleReview?.acknowledgedUncertainAttemptKeys || [];
+    if ((Array.isArray(attempts) ? attempts : []).some((entry) => entry.startedAt && !entry.result && !acknowledged.includes(entry.key))) throw Object.assign(new Error('An earlier send has an uncertain outcome. Staff must review it before this schedule runs.'), { code: 'SEND_OUTCOME_UNCERTAIN', statusCode: 409 });
+    if (scheduled) {
+      if (scheduled.startedAt) throw Object.assign(new Error('This scheduled send already started. Review the recorded provider outcome before another send.'), { code: 'SEND_OUTCOME_UNCERTAIN', statusCode: 409 });
+      options = { ...options, ...scheduled.scheduleReview, idempotencyKey: scheduled.key, manualAttempt: { key: scheduled.key, binding: scheduled.binding } };
+    }
+  }
   // The claim is stamped inside the verdict transaction (see below) and
   // MUST be released on every exit — success, partial failure, or throw —
   // or legitimate linkage corrections stay blocked until the TTL expires.
@@ -1899,6 +2117,13 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     if (!restored) await markLeadServiceRevertPending(estimate, leadShapeRef.parkedKey, leadShapeRef.parkId || null);
   }
   if (thrown) throw thrown;
+  if (options.manualAttempt && Object.values(result?.channels || {}).some((channel) => channel.uncertain)) {
+    // No completed receipt: a provider timeout may already have handed off.
+    // Preserve channel evidence and require deliberate review for a new key.
+    await recordManualSendAttempt(estimate.id, options.manualAttempt, { channels: result.channels });
+    return { ...result, uncertain: true };
+  }
+  await recordManualSendAttempt(estimate.id, options.manualAttempt, { result, completedAt: new Date().toISOString() });
   return result;
 }
 
@@ -2051,7 +2276,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
   // event must see — an automated park is not an operator edit (GH codex
   // r9 P1).
   const preParkEstimate = estimate;
-  const leadShape = await applyLeadServiceForSend(estimate, { leadShapeRef: options.leadShapeRef || null });
+  const leadShape = await applyLeadServiceForSend(estimate, { leadShapeRef: options.leadShapeRef || null, preserveReviewedOffer: !!options.reviewedOffer });
   estimate = leadShape.estimate;
   if (leadShape.parkedKey) {
     // The operator acknowledged the pre-park bundle; the parked single-line
@@ -2091,6 +2316,8 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     const groupClaim = await claimGroupSiblingsForPublish(estimate, {
       callerPreClaimed: options.callerPreClaimed === true,
       autoSend: options.autoSend === true,
+      reviewedEditVersion: options.reviewedEditVersion,
+      reviewedGroupVersions: options.reviewedGroupVersions,
     });
     claimedGroupSiblings = groupClaim.claimed;
     // Signal claim ownership to the caller AFTER the claim transaction
@@ -2121,9 +2348,12 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       const verdictRow = await trx('estimates')
         .where({ id: estimate.id })
         .forUpdate()
-        .first('archived_at', 'estimate_data');
+        .first();
       if (!verdictRow) return 'invalidated_before_delivery';
       if (verdictRow.archived_at) return 'invalidated_before_delivery';
+      if (options.reviewedOffer && estimateOfferVersion(verdictRow) !== options.reviewedOffer) {
+        return 'saved_offer_changed';
+      }
       let data;
       try {
         data = typeof verdictRow.estimate_data === 'string'
@@ -2150,6 +2380,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       // read-only behavior) but no claim is stamped — a blind rewrite
       // would clobber whatever is in the column.
       if (data && typeof data === 'object') {
+        if (options.manualAttempt) {
+          const attempts = Array.isArray(data.manualSendAttempts) ? data.manualSendAttempts : [];
+          const priorAttempt = attempts.find((entry) => entry.key === options.manualAttempt.key);
+          if (priorAttempt?.startedAt) return 'send_attempt_already_started';
+          const started = { ...priorAttempt, ...options.manualAttempt, startedAt: new Date().toISOString(), channels: {} };
+          data.manualSendAttempts = [...attempts.filter((entry) => entry.key !== options.manualAttempt.key), started].slice(-DELIVERY_HISTORY_MAX);
+        }
         data.estimatorEngine = {
           ...(data.estimatorEngine && typeof data.estimatorEngine === 'object' ? data.estimatorEngine : {}),
           delivering_at: new Date().toISOString(),
@@ -2161,6 +2398,9 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       return null;
     });
     if (invalidatedNow) {
+      if (invalidatedNow === 'saved_offer_changed') {
+        throw Object.assign(new Error('The saved offer changed before delivery. Review the current version; nothing was sent.'), { statusCode: 409, code: 'ESTIMATE_REVIEW_STALE' });
+      }
       await db('estimates')
         .where({ id: estimate.id, status: 'sending' })
         .update({ status: 'send_failed', last_send_error: invalidatedNow, updated_at: db.fn.now() });
@@ -2251,16 +2491,22 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
       if (!normalized) {
         channels.sms = { ok: false, error: `Invalid phone format: ${estimate.customer_phone}` };
       } else {
+        let smsDispatchStarted = false;
         try {
-          const smsBody = await renderTemplate('estimate_sent', { first_name: firstName, estimate_url: smsViewUrl }, {
+          const currentSmsBody = await smsTemplatesRouter.getTemplate('estimate_sent', { first_name: firstName, estimate_url: smsViewUrl }, {
             workflow: 'admin_estimate_send',
             entity_type: 'estimate',
             entity_id: estimate.id,
-          });
-          if (!smsBody) throw new Error('SMS template estimate_sent is missing or inactive');
+          }, { noVariants: !!options.reviewedMessages });
+          if (!currentSmsBody) throw new Error('SMS template estimate_sent is missing or inactive');
+          const smsBody = options.reviewedMessages
+            ? options.reviewedMessages.sms?.split(smsTemplatesRouter.stripPortalUrlScheme(longUrl)).join(smsTemplatesRouter.stripPortalUrlScheme(smsViewUrl))
+            : currentSmsBody;
+          if (!smsBody) throw new Error('The reviewed text message is unavailable; nothing was sent');
           if (await estimateInvalidatedJustBeforeHandoff(estimate.id)) {
             throw new Error('invalidated_before_delivery');
           }
+          smsDispatchStarted = true;
           const result = await sendCustomerMessage({
             to: normalized,
             body: smsBody,
@@ -2281,23 +2527,37 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             },
           });
           if (!result.sent) {
-            channels.sms = { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
+            channels.sms = { ok: false, uncertain: result.code === 'PROVIDER_FAILURE' && result.terminal !== true, error: result.reason || result.code || 'SMS send blocked/failed' };
             logger.error(`Estimate SMS failed: ${result.reason || result.code || 'unknown'}`);
           } else {
-            // real: suppression paths (gate off, template disabled, owner
-            // kill) return sent:true with a sentinel provider id — delivered
-            // for the send result, but never a first response to the lead.
+            // Suppression is not a provider handoff and never publishes an
+            // offer or clears a promised-estimate obligation.
             const { isRealProviderSend } = require('../services/sms-auto-send');
-            channels.sms = { ok: true, real: isRealProviderSend(result) };
-            if (channels.sms.real) await stampLeadHandoffWitness(estimate, options);
+            const real = isRealProviderSend(result);
+            channels.sms = real
+              ? { ok: true, real: true, status: 'provider_accepted' }
+              : { ok: false, real: false, suppressed: true, error: result.reason || 'SMS suppressed; no provider handoff' };
+            if (channels.sms.real) {
+              if (options.leadShapeRef) options.leadShapeRef.delivered = true;
+              await stampLeadHandoffWitness(estimate, options);
+            }
           }
         } catch (e) {
           logger.error(`Estimate SMS failed: ${e.message}`);
-          channels.sms = { ok: false, error: e.message };
+          const { isRealProviderSend } = require('../services/sms-auto-send');
+          if (channels.sms?.real || isRealProviderSend(e.providerOutcome)) {
+            channels.sms = { ok: true, real: true, status: 'provider_accepted', warning: 'Provider accepted; some delivery bookkeeping failed.' };
+            if (options.leadShapeRef) options.leadShapeRef.delivered = true;
+          } else {
+            const rejected = e.providerOutcome?.terminal === true || sendgrid.isDefiniteRejection({ status: e.providerOutcome?.providerHttpStatus || e.status });
+            channels.sms = { ok: false, uncertain: smsDispatchStarted && !rejected, error: e.message };
+          }
         }
       }
     }
   }
+
+  await recordManualSendAttempt(estimate.id, options.manualAttempt, { channels: { ...channels } });
 
   // Send email through the template library when SendGrid is configured,
   // with the existing Workspace SMTP path kept only as an environment fallback.
@@ -2305,6 +2565,7 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     if (!estimate.customer_email) {
       channels.email = { ok: false, error: 'No email on file' };
     } else {
+      let emailDispatchStarted = false;
       try {
         // Read the row fresh right before sending so the proposal state (and
         // its PDF) reflects any save that landed during this send. nextExpiresAt
@@ -2342,31 +2603,11 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
           // Render the email from the fresh row when it's a proposal, so the
           // SendGrid price summary / details match the attached PDF if totals
           // changed mid-send. The PDF was built from freshEstimate above.
-          let freshPriceLine;
-          if (proposalMode) {
-            // A proposal can carry one-time + taxable lines, and the PDF
-            // headlines the first-year total (recurring + one-time + tax). A
-            // monthly/annual-only summary would disagree with the PDF — or be
-            // blank for a one-time-only proposal — so summarize from the same
-            // totals the PDF prints.
-            const pt = computeProposalTotals(normalizeProposal(freshEstimate));
-            // Cents on every figure (owner 2026-07-11; codex 2642 r3 — the
-            // whole-dollar Math.round here bypassed the cents rule).
-            const centsMoney = (n) => `$${Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-            const parts = [];
-            if (pt.monthlyEquivalent > 0) parts.push(`${centsMoney(pt.monthlyEquivalent)}/mo`);
-            if (pt.annualRecurring > 0) parts.push(`${centsMoney(pt.annualRecurring)}/yr recurring`);
-            if (pt.oneTime > 0) parts.push(`${centsMoney(pt.oneTime)} one-time`);
-            if (pt.firstYearTotal > 0) parts.push(`first-year total ${centsMoney(pt.firstYearTotal)}`);
-            freshPriceLine = parts.join(' · ');
-          } else {
-            const fm = parseFloat(freshEstimate.monthly_total || 0);
-            const fa = parseFloat(freshEstimate.annual_total || 0);
-            freshPriceLine = fm > 0 ? `$${fm.toFixed(2)}/mo · $${fa.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/yr` : priceLine;
-          }
+          const freshPriceLine = estimateEmailPriceLine(freshEstimate);
           if (await estimateInvalidatedJustBeforeHandoff(estimate.id)) {
             throw new Error('invalidated_before_delivery');
           }
+          if (options.reviewedMessages && !options.reviewedMessages.email) throw new Error('The reviewed email template was unavailable. Review a new message before sending.');
           const result = await sendEstimateEmail({
             estimate: proposalMode ? freshEstimate : estimate,
             firstName,
@@ -2375,21 +2616,31 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
             idempotencyKey: options.idempotencyKey || options.emailIdempotencyKey || null,
             attachments: proposalAttachments,
             proposalMode,
+            versionId: options.reviewedMessages?.email?.versionId || null,
+            expectedContentHash: options.reviewedMessages?.email?.contentHash || null,
+            reviewedProvider: options.reviewedMessages?.email?.provider || null,
+            onDispatch: () => { emailDispatchStarted = true; },
           });
-          if (result.ok) await stampLeadHandoffWitness(estimate, options);
           channels.email = result.ok
             ? { ok: true, provider: result.template || result.provider || 'email' }
             : { ok: false, error: result.error || 'Email send failed' };
+          if (result.ok) {
+            if (options.leadShapeRef) options.leadShapeRef.delivered = true;
+            await stampLeadHandoffWitness(estimate, options);
+          }
           if (proposalMode && result.ok && proposalAttachments.length > 0) {
             proposalPdfEmailed = true;
           }
         }
       } catch (e) {
         logger.error(`Estimate email failed: ${e.message}`);
-        channels.email = { ok: false, error: e.message };
+        if (channels.email?.ok) channels.email.warning = "Provider accepted; some delivery bookkeeping failed.";
+        else channels.email = { ok: false, uncertain: emailDispatchStarted && !sendgrid.isDefiniteRejection(e), error: e.message };
       }
     }
   }
+
+  await recordManualSendAttempt(estimate.id, options.manualAttempt, { channels: { ...channels } });
 
   const sentChannels = requestedChannels.filter((ch) => channels[ch]?.ok);
   const failedChannels = requestedChannels.filter((ch) => !channels[ch]?.ok);
@@ -4717,6 +4968,11 @@ router.patch('/:id', async (req, res, next) => {
     // accept racing this PATCH can't be silently overwritten.
     let updateQuery = db('estimates').where({ id: req.params.id });
     if (updates.status !== undefined) updateQuery = updateQuery.where({ status: estimate.status }).whereRaw(REPRICE_PENDING_ABSENT_SQL);
+    const changesDeliveryOptions = updates.show_one_time_option !== undefined || updates.bill_by_invoice !== undefined;
+    if (changesDeliveryOptions) {
+      updateQuery = updateQuery.whereNot({ status: 'sending' }).whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL);
+      updates.updated_at = db.fn.now();
+    }
     // Turning invoice mode OFF is predicated on the stored proposal STILL
     // having no structured payment term at write time — the pre-read guard
     // above can race a concurrent proposal PUT that saves one (the PUT's
@@ -4729,13 +4985,24 @@ router.patch('/:id', async (req, res, next) => {
         "COALESCE(estimate_data->'proposal'->'commercialTerms'->>'paymentTerms', '') = ''",
       );
     }
-    const updatedCount = await updateQuery.update(updates);
+    const updatedCount = changesDeliveryOptions ? await db.transaction(async (trx) => {
+      // Published siblings stay sent/viewed during a group handoff. Use the
+      // same group-then-row lock and in-flight guard as a full revision.
+      await lockScheduledGroupGuardGroups(trx, estimate);
+      const locked = await trx('estimates').where({ id: estimate.id }).forUpdate().first();
+      if (!locked || estimateEditVersion(locked) !== estimateEditVersion(estimate)) return 0;
+      await assertNoRevisionDuringGroupSend(trx, locked);
+      return updateQuery.transacting(trx).update(updates);
+    }) : await updateQuery.update(updates);
     if (!updatedCount) {
       return res.status(409).json({ error: 'Estimate changed while you were editing. Refresh and retry.' });
     }
     logger.info(`[estimates] Updated estimate ${req.params.id}: ${JSON.stringify(Object.keys(updates))}`);
     res.json({ success: true });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.statusCode === 409) return res.status(409).json({ error: err.message });
+    next(err);
+  }
 });
 
 // DELETE /api/admin/estimates/:id — delete a draft estimate only.
