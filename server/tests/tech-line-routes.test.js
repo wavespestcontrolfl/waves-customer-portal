@@ -53,25 +53,26 @@ async function call(method, path, req) {
   if (next.mock.calls[0]?.[0]) throw next.mock.calls[0][0];
   return r;
 }
-function primeVisit({ visit = { id: VISIT, customer_id: 'c1', technician_id: 'tech-1' }, customer = { id: 'c1', first_name: 'Pat', last_name: 'Sample', phone: '(941) 555-0100' }, recentText = null } = {}) {
+const chains = {};
+function primeVisit({ visit = { id: VISIT, customer_id: 'c1', technician_id: 'tech-1' }, customer = { id: 'c1', first_name: 'Pat', last_name: 'Sample', phone: '(941) 555-0100' } } = {}) {
   db.mockImplementation((table) => {
     const chain = {};
     chain.where = jest.fn(() => chain);
     chain.whereNull = jest.fn(() => chain);
-    chain.whereNotNull = jest.fn(() => chain);
-    chain.whereNotIn = jest.fn(() => chain);
-    chain.first = jest.fn(async () => {
-      if (table === 'scheduled_services') return visit;
-      if (table === 'messaging_audit_log') return recentText;
-      return customer;
-    });
+    chain.first = jest.fn(async () => (table === 'scheduled_services' ? visit : customer));
+    chain.del = jest.fn(async () => 1);
+    chain.catch = jest.fn(() => undefined);
+    chains[table] = chain;
     return chain;
   });
+  db.raw = jest.fn((sql) => sql);
 }
 
 // The text and bridge interlocks run under a per-customer transaction
-// advisory lock; the trx reads the audit log through the same db mock.
-const trx = Object.assign(jest.fn((table) => db(table)), { raw: jest.fn(async () => ({})) });
+// advisory lock; the text's durable claim insert answers through trx.raw
+// (a row = claim acquired) and its release goes through the same db mock.
+const CLAIM_SQL = /INSERT INTO sms_send_claims/;
+const trx = Object.assign(jest.fn((table) => db(table)), { raw: jest.fn(async () => ({ rows: [{ id: 1 }] })) });
 beforeEach(() => {
   jest.clearAllMocks();
   techLineContext.mockResolvedValue(CTX);
@@ -113,19 +114,36 @@ describe('POST /sms', () => {
     expect(r.body).toEqual({ success: true, from: LINE });
   });
 
-  test('an identical tech-line text that just went out to this customer is refused under the per-customer lock — a double submit from two PWAs never reaches Twilio (codex #4072 r10 P2)', async () => {
-    primeVisit({ recentText: { id: 'audit-1' } });
+  test('a live claim on (customer, body) refuses the text under the per-customer lock — a double submit from two PWAs never reaches Twilio (codex #4072 r10 + r11 P2)', async () => {
+    primeVisit();
+    trx.raw.mockImplementationOnce(async () => ({})); // the lock
+    trx.raw.mockImplementationOnce(async () => ({ rows: [] })); // claim held by the other request
     const r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way' } });
     expect(r.statusCode).toBe(409);
     expect(r.body.code).toBe('DUPLICATE_TEXT');
     expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['tech-text:c1']);
+    const [claimSql, claimBindings] = trx.raw.mock.calls[1];
+    expect(claimSql).toMatch(CLAIM_SQL);
+    expect(claimSql).toContain("interval '1 minute'");
+    expect(claimBindings[0]).toMatch(/^tech-line-text:c1:[0-9a-f]{64}$/);
     expect(reserveHumanReply).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
-    // No recent identical text → the send runs, inside the lock.
+    // Claim acquired → the send runs, inside the lock, and the claim is kept.
     primeVisit();
     const ok = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way' } });
     expect(ok.statusCode).toBe(200);
-    expect(trx.raw.mock.invocationCallOrder[1]).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+    expect(trx.raw.mock.invocationCallOrder[3]).toBeLessThan(sendCustomerMessage.mock.invocationCallOrder[0]);
+    expect(trx).not.toHaveBeenCalledWith('sms_send_claims');
+  });
+
+  test('a text that never left (gate-off sentinel) releases its claim so a real retry can send', async () => {
+    primeVisit();
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'gate-blocked' });
+    const r = await call('post', '/sms', { body: { scheduledServiceId: VISIT, body: 'On my way' } });
+    expect(r.statusCode).toBe(409);
+    expect(trx).toHaveBeenCalledWith('sms_send_claims');
+    expect(chains.sms_send_claims.where).toHaveBeenCalledWith({ claim_key: expect.stringMatching(/^tech-line-text:c1:/) });
+    expect(chains.sms_send_claims.del).toHaveBeenCalled();
   });
 
   test('a delivered text stamps the first response on any open lead with this phone — a suppressed send does not (codex #4072 r8 P2)', async () => {

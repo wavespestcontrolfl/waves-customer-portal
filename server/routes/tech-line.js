@@ -28,7 +28,7 @@ const { techLineContext } = require('../services/tech-line');
 const { placeBridgeCall, activeBridgeCall } = require('../services/call-bridge');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const crypto = require('crypto');
-const { isRealProviderSend, SUPPRESSION_SENTINELS } = require('../services/sms-auto-send');
+const { isRealProviderSend } = require('../services/sms-auto-send');
 const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
 const { reserveHumanReply, settleHumanReply } = require('../services/sms-suggest-mode');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
@@ -41,10 +41,9 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 const MAX_TEXT_CHARS = 600;
 // An identical tech-line text that already went out to the customer inside
 // this window is a double submit (two open PWAs), not a second message.
-const DUPLICATE_TEXT_WINDOW_MS = 60 * 1000;
-// The messaging audit row hashes the body AS SENT — sendCustomerMessage
-// GSM-normalizes a plain customer SMS before hashing — so the duplicate
-// check hashes the same way.
+const DUPLICATE_TEXT_WINDOW = '1 minute';
+// The claim key hashes the body AS SENT — sendCustomerMessage GSM-normalizes
+// a plain customer SMS — so two submits of the same text share one key.
 function sentBodyHash(body) {
   return crypto.createHash('sha256').update(normalizeGsmPunctuation(body), 'utf8').digest('hex');
 }
@@ -185,22 +184,36 @@ router.post('/sms', async (req, res, next) => {
 
     // Two PWA instances submitting the same text near-simultaneously must
     // not both reach Twilio: the send runs under a per-customer transaction
-    // advisory lock (the second waits for the first to finish), and an
-    // identical tech-line text that went out to this customer inside the
-    // last minute is refused (codex #4072 r10 P2). Same shape as the bridge
-    // interlock; the transaction carries only the lock — the send's own
-    // writes commit as before.
+    // advisory lock (the second waits for the first to finish) and holds a
+    // DURABLE claim on (customer, body) in sms_send_claims — the cross-
+    // process gate the public estimate route uses: a fresh insert, or a
+    // takeover of one older than the window (codex #4072 r10 + r11 P2).
+    // The audit row is best-effort by design, so it is never the proof.
+    // The claim commits with this transaction — after the send — so the
+    // waiting request sees it; a send that never left releases it, a throw
+    // rolls it back, so a real retry can send. Same shape as the bridge
+    // interlock; the send's own writes commit as before.
+    const claimKey = `tech-line-text:${target.customer.id}:${sentBodyHash(body)}`;
     const out = await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`tech-text:${target.customer.id}`]);
-      const dup = await trx('messaging_audit_log')
-        .where({ customer_id: target.customer.id, entry_point: 'tech_line_text', body_hash: sentBodyHash(body) })
-        .whereNotNull('provider_message_id')
-        .whereNotIn('provider_message_id', [...SUPPRESSION_SENTINELS])
-        .where('sent_at', '>', new Date(Date.now() - DUPLICATE_TEXT_WINDOW_MS))
-        .first('id');
-      if (dup) return { status: 409, json: { error: 'This text just went out to the customer', code: 'DUPLICATE_TEXT' } };
-      return textFromLine({ req, ctx, target, body });
+      const claim = await trx.raw(
+        `INSERT INTO sms_send_claims (claim_key) VALUES (?)
+         ON CONFLICT (claim_key) DO UPDATE SET created_at = NOW()
+         WHERE sms_send_claims.created_at < NOW() - interval '${DUPLICATE_TEXT_WINDOW}'
+         RETURNING id`,
+        [claimKey],
+      );
+      if (!(claim?.rows || []).length) {
+        return { status: 409, json: { error: 'This text just went out to the customer', code: 'DUPLICATE_TEXT' } };
+      }
+      const outcome = await textFromLine({ req, ctx, target, body });
+      if (outcome.status !== 200) await trx('sms_send_claims').where({ claim_key: claimKey }).del();
+      return outcome;
     });
+    if (out.status === 200) {
+      // One row per delivered text — a daily horizon keeps the table trivial.
+      void db('sms_send_claims').where('created_at', '<', db.raw("NOW() - interval '1 day'")).del().catch(() => {});
+    }
     res.status(out.status).json(out.json);
   } catch (err) { next(sanitized(err, 'text')); }
 });
