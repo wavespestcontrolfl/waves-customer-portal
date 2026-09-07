@@ -71,6 +71,7 @@ const ERROR_COPY = {
   custom_requires_note: 'Write the message — it becomes the front of the text.',
   note_too_many_segments: 'That message would send as 3+ SMS segments — shorten it to fit 2.',
   custom_message_unavailable: 'The custom-message text template is turned off — use a preset reason.',
+  note_cap_unavailable: "Couldn't check the text's length just now — try again in a moment.",
 };
 
 // Mirrors of the server's note guards (rain-out.js sanitizeCustomerNote) —
@@ -474,7 +475,12 @@ export default function RainOutSheet({ service, onClose, onDone }) {
         });
         const data = await res.json().catch(() => null);
         if (!controller.signal.aborted) setSmsSeg(res.ok && data?.ok ? data : null);
-      } catch { /* advisory only — the server enforces at commit */ }
+      } catch {
+        // Advisory only — the server enforces at commit. A stale over-budget
+        // result must not outlive a failed refetch and keep Move locked on
+        // a note the server would accept (codex #4122 P2).
+        if (!controller.signal.aborted) setSmsSeg(null);
+      }
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
   }, [wantsCounter, reason, notify, note, selectedDate, selectedStart, selectedEnd, service.id]);

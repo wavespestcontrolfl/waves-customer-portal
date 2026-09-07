@@ -34,6 +34,11 @@
  * code reuse, but where a mint would happen returns a placeholder of a
  * fresh code's length instead (the sheet's advisory counter must never
  * mint). Implies reuseExisting.
+ * opts.assumeConfirmed: judge eligibility on the row's LANDED state — the
+ * caller is about to move it through the rebooker, which confirms it, so
+ * the dispatch-owned-pending refusal does not apply (the link would be
+ * minted moments later by the post-move send anyway). Grouped / frozen
+ * refusals still apply. For the Quick Move pre-move measurement only.
  */
 
 // What a fresh mint looks like, length-wise (short-url createShortCode:
@@ -50,7 +55,7 @@ function smsLineFor(url) {
   return url ? `Reschedule here: ${url}\n\n` : '';
 }
 
-async function buildRescheduleLink(scheduledServiceId, { customerId = null, reuseExisting = false, previewOnly = false } = {}) {
+async function buildRescheduleLink(scheduledServiceId, { customerId = null, reuseExisting = false, previewOnly = false, assumeConfirmed = false } = {}) {
   try {
     if (!scheduledServiceId) return { url: null, line: '' };
     const svc = await db('scheduled_services')
@@ -79,7 +84,8 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null, reus
     // confirm, and a bearer reschedule URL would let the recipient move a
     // booking the authenticated schedule routes deliberately hide/refuse.
     // Callers already treat { url: null, line: '' } as "send without link".
-    if (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
+    if (!assumeConfirmed
+      && DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
       && String(svc.status || '').toLowerCase() === 'pending'
       && !svc.customer_confirmed) {
       return { url: null, line: '' };

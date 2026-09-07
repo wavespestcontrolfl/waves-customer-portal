@@ -213,16 +213,14 @@ async function renderV3MovedBody({ firstName, serviceType, date, window, weather
 // The v3 row's body as it stands NOW — the one snapshot both the pre-move
 // cap and the send render from. Null = uncapped: the gate is dark (v2 is
 // the long copy that bills 4+ segments by design), or the row is missing /
-// disabled (the send path's own kill switch reports that outcome).
+// disabled (the send path's own kill switch reports that outcome). A READ
+// FAILURE throws instead — treating it as uncapped would let a 3+ segment
+// text escape exactly while the DB blips (codex #4122 P2); callers fail
+// the move closed as note_cap_unavailable.
 async function v3TemplateSnapshot() {
   if (process.env.GATE_RAINOUT_MOVE_BANNER !== 'true') return null;
-  try {
-    const row = await db('sms_templates').where({ template_key: 'rain_out_moved_v3' }).first('body', 'is_active');
-    return row && row.is_active !== false && row.body ? String(row.body) : null;
-  } catch (err) {
-    logger.warn(`[rain-out] v3 template snapshot read failed — note cap skipped: ${err.message}`);
-    return null;
-  }
+  const row = await db('sms_templates').where({ template_key: 'rain_out_moved_v3' }).first('body', 'is_active');
+  return row && row.is_active !== false && row.body ? String(row.body) : null;
 }
 
 // Pre-move body for a PRESET reason's notice + note, measured against the
@@ -257,11 +255,16 @@ async function renderPresetMovedNotice({ service, reasonCode, target, note, resc
 // pre-push P1), preferring the visit's EXISTING short code over a fresh
 // mint: the sheet's counter estimated against the existing code, and a
 // legacy 5-char code vs a fresh 10-char mint flips a boundary case
-// (codex PR P2).
+// (codex PR P2). Eligibility is judged on the row's LANDED state
+// (assumeConfirmed): the rebooker confirms a dispatch-owned pending row
+// as it moves it, so the post-move send WOULD build a link — measuring
+// (and pinning) none here would text reply-only copy on a move with a
+// note and a link on the same move without one (codex #4122 P2).
 async function preMoveRescheduleUrl(serviceId, service) {
   return (await buildRescheduleLink(serviceId, {
     customerId: service.cust_id || service.customer_id,
     reuseExisting: true,
+    assumeConfirmed: true,
   })).url;
 }
 
@@ -318,7 +321,17 @@ async function previewMovedSms({ serviceId, reasonCode, customMessage, target })
     customerId: service.cust_id || service.customer_id,
     reuseExisting: true,
     previewOnly: true,
+    assumeConfirmed: true,
   });
+  let templateBody = null;
+  if (!isCustom) {
+    try {
+      templateBody = await v3TemplateSnapshot();
+    } catch (err) {
+      logger.warn(`[rain-out] v3 template snapshot read failed for preview ${serviceId}: ${err.message}`);
+      return { ok: false, reason: 'note_cap_unavailable' };
+    }
+  }
   const body = isCustom
     ? await renderCustomMovedBody({
       firstName: service.first_name,
@@ -329,10 +342,7 @@ async function previewMovedSms({ serviceId, reasonCode, customMessage, target })
       rescheduleUrl: url,
       serviceId,
     })
-    : await renderPresetMovedNotice({
-      service, reasonCode, target, note: message, rescheduleUrl: url, serviceId,
-      templateBody: await v3TemplateSnapshot(),
-    });
+    : await renderPresetMovedNotice({ service, reasonCode, target, note: message, rescheduleUrl: url, serviceId, templateBody });
   if (!body) return { ok: false, reason: isCustom ? 'custom_message_unavailable' : 'uncapped' };
   const seg = measureAsSent(body);
   const perSegment = seg.encoding === 'GSM_7' ? 153 : 67;
@@ -1774,7 +1784,14 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // their longest.
     const url = await preMoveRescheduleUrl(serviceId, service);
     prebuiltSms = { url };
-    const templateBody = await v3TemplateSnapshot();
+    let templateBody;
+    try {
+      templateBody = await v3TemplateSnapshot();
+    } catch (err) {
+      // Fail closed: an unreadable snapshot is not an uncapped rung.
+      logger.warn(`[rain-out] v3 template snapshot read failed for ${serviceId} — move refused: ${err.message}`);
+      return { ok: false, reason: 'note_cap_unavailable' };
+    }
     if (templateBody) {
       const body = await renderPresetMovedNotice({ service, reasonCode, target, note, rescheduleUrl: url, serviceId, templateBody });
       if (body && measureAsSent(body).segmentCount > MOVED_SMS_MAX_SEGMENTS) {

@@ -2919,7 +2919,7 @@ describe('rain-out service', () => {
       // a second build at send time could mint a longer code or fall back
       // to the LONG url and exceed the cap the check passed.
       expect(buildRescheduleLink).toHaveBeenCalledTimes(1);
-      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true });
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true, assumeConfirmed: true });
       expect(sendCustomerMessage.mock.calls[0][0].body).toContain('https://waves.test/r/tok123');
       const v3Calls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_v3');
       expect(v3Calls).toHaveLength(2);
@@ -2950,6 +2950,29 @@ describe('rain-out service', () => {
       expect(result.ok).toBe(true);
       expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
       expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('Note from our team');
+    });
+
+    test('gate on: an UNREADABLE v3 row fails the move closed — never treated as uncapped', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        sms_templates: [chain({ first: jest.fn().mockRejectedValue(new Error('connection reset')) })],
+      });
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
+
+      expect(result).toMatchObject({ ok: false, reason: 'note_cap_unavailable' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+      // The sheet counter reports the same, so it hides rather than lies.
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        sms_templates: [chain({ first: jest.fn().mockRejectedValue(new Error('connection reset')) })],
+      });
+      const preview = await RainOut.previewMovedSms({ serviceId: 'svc-1', reasonCode: 'weather_rain', customMessage: 'x', target: COMMIT_ARGS.target });
+      expect(preview).toEqual({ ok: false, reason: 'note_cap_unavailable' });
     });
 
     test('gate on: a disabled v3 row is uncapped here — the send path owns that kill switch', async () => {
@@ -2986,7 +3009,7 @@ describe('rain-out service', () => {
         serviceId: 'svc-1', reasonCode: 'weather_rain', customMessage: '  See you   Friday!  ', target,
       });
       expect(result.ok).toBe(true);
-      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true, previewOnly: true });
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true, previewOnly: true, assumeConfirmed: true });
       const vars = renderSmsTemplate.mock.calls[0][1];
       expect(vars.link_clause).toContain('https://waves.test/r/tok123');
       const { countSegments } = require('../services/messaging/segment-counter');
@@ -3189,7 +3212,7 @@ describe('rain-out service', () => {
 
       expect(result.ok).toBe(true);
       expect(buildRescheduleLink).toHaveBeenCalledTimes(1);
-      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true });
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true, assumeConfirmed: true });
       expect(sendCustomerMessage.mock.calls[0][0].body).toContain('https://waves.test/r/tok123');
     });
 
@@ -3321,7 +3344,7 @@ describe('rain-out service', () => {
       });
 
       expect(result.ok).toBe(true);
-      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true, previewOnly: true });
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true, previewOnly: true, assumeConfirmed: true });
       const vars = renderSmsTemplate.mock.calls[0][1];
       expect(vars.link_clause).toContain('https://waves.test/r/tok123');
       // Whitespace-collapsed like sanitizeCustomerNote before rendering.

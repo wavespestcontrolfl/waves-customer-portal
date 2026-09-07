@@ -565,6 +565,13 @@ describe('codex #3429 r2 P1 — dispatch-owned unreviewed bookings', () => {
     }));
     await expect(buildRescheduleLink('svc-1', { reuseExisting: true })).resolves.toEqual({ url: null, line: '' });
     expect(existingShortUrlFor).not.toHaveBeenCalled();
+
+    // assumeConfirmed: the SAME pending row judged on its landed state —
+    // the Quick Move pre-check is about to confirm it through the
+    // rebooker, so the link the post-move send would build is what gets
+    // measured and pinned (codex #4122 P2).
+    await expect(buildRescheduleLink('svc-1', { reuseExisting: true, assumeConfirmed: true }))
+      .resolves.toMatchObject({ url: 'https://portal.test/l/abcde' });
   });
 });
 
