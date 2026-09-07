@@ -621,6 +621,7 @@ export default function AdminInvoicesPage() {
       <div
         role="status"
         aria-live="polite"
+        aria-hidden={!toast}
         style={{
           position: "fixed",
           bottom: isMobile
@@ -643,11 +644,17 @@ export default function AdminInvoicesPage() {
           pointerEvents: "none",
         }}
       >
-        {" "}
-        <span style={{ color: toastTone === "error" ? D.red : D.green }}>
-          {toastTone === "error" ? "Error" : "OK"}
-        </span>
-        <span style={{ color: D.text }}>{toast}</span>{" "}
+        {/* Children render only while a toast is up: the container stays
+            mounted for its slide transition, but an always-present "OK" /
+            "Error" would linger in the live region after the message clears. */}
+        {toast ? (
+          <>
+            <span style={{ color: toastTone === "error" ? D.red : D.green }}>
+              {toastTone === "error" ? "Error" : "OK"}
+            </span>
+            <span style={{ color: D.text }}>{toast}</span>
+          </>
+        ) : null}
       </div>{" "}
     </div>
   );
