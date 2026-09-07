@@ -15,7 +15,8 @@
  *  - per-IP limiter sits AFTER the gate: gate-off probes never spend budget,
  *    the (n+1)th enabled request in a minute is 429 and never reaches upstream,
  *    and IPv6 addresses in one /64 share a bucket (shared unauthenticated key);
- *    a process-wide in-flight cap answers 503 before buffering and frees on completion
+ *    a process-wide in-flight cap answers 503 before buffering, frees on completion,
+ *    and a client disconnect aborts upstream while the slot is held until it settles
  *
  * Runs the real router on an ephemeral Express listener with global.fetch stubbed.
  */
@@ -343,6 +344,42 @@ describe('per-IP limiter after the gate', () => {
       for (let i = 0; i < 50 && r.inFlightCount() > 0; i++) await new Promise((t) => setTimeout(t, 10));
       expect(r.inFlightCount()).toBe(0);
       expect(await get(base, '/ingest/flags/', '203.0.113.3')).toBe(200);
+    } finally {
+      await new Promise((done) => srv.close(done));
+    }
+  });
+
+  test('client disconnect while upstream is pending aborts the fetch; the slot is held until it settles, then freed', async () => {
+    let r;
+    jest.isolateModules(() => {
+      process.env.POSTHOG_INGEST_MAX_IN_FLIGHT = '1';
+      r = require('../routes/posthog-ingest');
+      delete process.env.POSTHOG_INGEST_MAX_IN_FLIGHT;
+    });
+    const { srv, base } = await listen(r);
+    // Emulates real fetch: pending until released OR rejected on abort.
+    let sawAbort = false;
+    let releaseUpstream;
+    const held = new Promise((resolve) => { releaseUpstream = resolve; });
+    fetchImpl = (url, init) => new Promise((resolve, reject) => {
+      init.signal.addEventListener('abort', () => { sawAbort = true; const err = new Error('aborted'); err.name = 'AbortError'; reject(err); });
+      held.then(() => resolve(upstreamResponse()));
+    });
+    try {
+      const sock = http.request(base + '/ingest/flags/', { method: 'GET', headers: { 'x-forwarded-for': '203.0.113.9' } });
+      sock.on('error', () => {});
+      sock.end();
+      for (let i = 0; i < 50 && fetchCalls.length < 1; i++) await new Promise((t) => setTimeout(t, 10));
+      expect(r.inFlightCount()).toBe(1);
+      // Hang up mid-flight.
+      sock.destroy();
+      for (let i = 0; i < 100 && r.inFlightCount() > 0; i++) await new Promise((t) => setTimeout(t, 10));
+      expect(sawAbort).toBe(true);
+      expect(r.inFlightCount()).toBe(0);
+      // The slot is usable again without waiting for the 10 s timeout.
+      fetchImpl = async () => upstreamResponse();
+      expect(await get(base, '/ingest/flags/', '203.0.113.10')).toBe(200);
+      releaseUpstream();
     } finally {
       await new Promise((done) => srv.close(done));
     }

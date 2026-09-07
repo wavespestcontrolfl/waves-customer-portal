@@ -108,15 +108,31 @@ function upstreamHeaders(req) {
   return out;
 }
 
+// The in-flight slot is taken before the body is buffered and handed back
+// only once the upstream work has SETTLED — never on the client's 'close',
+// or an upload-and-disconnect loop could hold more than MAX_IN_FLIGHT
+// fetches open. A disconnect instead aborts the upstream call, which settles
+// it (and frees the slot) at once.
+function releaseSlot(res) {
+  if (res.locals.ingestSlot) {
+    res.locals.ingestSlot = false;
+    inFlight -= 1;
+  }
+}
+
 async function proxy(req, res) {
   let url;
   try {
     url = upstreamUrl(req);
   } catch {
+    releaseSlot(res);
     return res.status(400).end();
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  let clientGone = false;
+  const onClientGone = () => { if (!res.writableFinished) { clientGone = true; controller.abort(); } };
+  res.once('close', onClientGone);
   try {
     const hasBody = req.method === 'POST' && Buffer.isBuffer(req.body) && req.body.length > 0;
     const upstream = await fetch(url, {
@@ -136,12 +152,16 @@ async function proxy(req, res) {
     res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     res.end(body);
   } catch (e) {
-    // Never echo the request: the path is caller-controlled free text.
-    const kind = e && e.name === 'AbortError' ? 'timeout' : (e && e.code) || (e && e.name) || 'error';
-    logger.warn(`[posthog-ingest] upstream failed ${req.method} ${url.startsWith(ASSET_HOST) ? 'static' : 'ingest'}: ${kind}`);
-    if (!res.headersSent) res.status(502).end();
+    if (!clientGone) {
+      // Never echo the request: the path is caller-controlled free text.
+      const kind = e && e.name === 'AbortError' ? 'timeout' : (e && e.code) || (e && e.name) || 'error';
+      logger.warn(`[posthog-ingest] upstream failed ${req.method} ${url.startsWith(ASSET_HOST) ? 'static' : 'ingest'}: ${kind}`);
+      if (!res.headersSent) res.status(502).end();
+    }
   } finally {
     clearTimeout(timer);
+    res.off('close', onClientGone);
+    releaseSlot(res);
   }
 }
 
@@ -169,15 +189,13 @@ router.use(rateLimit({
   handler: (req, res) => res.status(429).end(),
 }));
 
-// Concurrency bound before any byte is buffered. Released on 'close' so an
-// aborted upload frees its slot too.
+// Concurrency bound before any byte is buffered. The slot is released by
+// proxy()'s finally (after upstream settles) or by the error handler below
+// (a 413 / aborted upload that never reached proxy()).
 router.use((req, res, next) => {
   if (inFlight >= MAX_IN_FLIGHT) return res.status(503).set('Retry-After', '5').end();
   inFlight += 1;
-  let released = false;
-  const release = () => { if (!released) { released = true; inFlight -= 1; } };
-  res.once('finish', release);
-  res.once('close', release);
+  res.locals.ingestSlot = true;
   return next();
 });
 
@@ -190,7 +208,8 @@ router.all('*', proxy);
 // express.raw's oversize error carries status 413; anything else is ours.
  
 router.use((err, req, res, next) => {
-  res.status(err && err.status ? err.status : 502).end();
+  releaseSlot(res);
+  if (!res.headersSent && !res.destroyed) res.status(err && err.status ? err.status : 502).end();
 });
 
 module.exports = router;

@@ -620,7 +620,9 @@ keyed by the shared `unauthenticatedAuthLimitKey`, so IPv6 collapses to /64)
 sits AFTER the gate so gate-off probes stay an unobservable 404 and never
 spend budget; a process-wide in-flight cap (`POSTHOG_INGEST_MAX_IN_FLIGHT`,
 default 32; fast 503 + `Retry-After`) is checked BEFORE the body is buffered
-so concurrent bytes are bounded (32 × 2 MB), not just requests per minute;
+so concurrent bytes are bounded (32 × 2 MB), not just requests per minute —
+a client disconnect aborts the upstream call and the slot is held until
+that call settles, so upload-and-hang-up loops cannot exceed the cap;
 2 MB raw body cap (413); 10 s upstream timeout (502).
 Inbound `cookie`, `authorization`, `referer`, `content-encoding` (the raw
 body parser has already inflated the bytes), hop-by-hop and client-IP
