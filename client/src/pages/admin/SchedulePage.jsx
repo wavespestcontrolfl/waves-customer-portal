@@ -11755,7 +11755,12 @@ export function CompletionPanel({
       const rows = reconcileLawnPlanSelections(selectedProducts, activeDefaults, lawnRemovedDefaultIds);
       lawnDefaultMixSeededRef.current = true;
       lawnDefaultMixSnapshotRef.current = JSON.stringify(defaults);
-      if (JSON.stringify(rows) !== JSON.stringify(selectedProducts)) setSelectedProducts(rows);
+      if (JSON.stringify(rows) !== JSON.stringify(selectedProducts)) {
+        // A plan refresh that changes the product payload is an edit like any
+        // other: an untouched generated report described the old products.
+        invalidateGeneratedReportOnTypedEdit();
+        setSelectedProducts(rows);
+      }
       return;
     }
     if (!currentLawnPlanReady || !inventoryAdvisoryTier) return;
@@ -11779,11 +11784,16 @@ export function CompletionPanel({
   }, [lawnDefaultsEnabled, lawnAreaOverride, areasServiced]);
   useEffect(() => {
     if (!lawnDefaultsEnabled) return;
-    setSelectedProducts(current => current.map(product => !product.lawnPlanDefaults && product.lawnAreaDefault && String(product.areaValue) !== String(lawnVisitArea)
+    const follows = product => !product.lawnPlanDefaults && product.lawnAreaDefault && String(product.areaValue) !== String(lawnVisitArea);
+    if (!selectedProducts.some(follows)) return;
+    // The visit area can move without a keystroke (a plan refresh changes the
+    // saved area); the quantities it derives are part of the product payload.
+    invalidateGeneratedReportOnTypedEdit();
+    setSelectedProducts(current => current.map(product => follows(product)
       ? { ...product, areaValue: lawnVisitArea,
         totalAmount: product.totalAmountManual ? product.totalAmount
           : isPerBasisUnit(product.rateUnit) ? "" : derivedTotalAmount(product.rate, lawnVisitArea) } : product));
-  }, [lawnDefaultsEnabled, lawnVisitArea]);
+  }, [lawnDefaultsEnabled, lawnVisitArea, selectedProducts]);
   useEffect(() => {
     if (!completionImprovements || !isLawn) return;
     const area = areasServiced.join(", ");

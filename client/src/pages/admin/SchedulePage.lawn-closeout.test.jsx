@@ -59,6 +59,7 @@ beforeEach(async () => {
       }
     }
     if (url.includes('tech-tips')) data = { available: true, groups: [{ id: 'lawn', label: 'Lawn care', tips: [{ id: 'lawn_water_morning', label: 'Water in the morning', copy: 'Use the morning irrigation window.' }] }] };
+    if (url.includes('generate-report')) data = { report: 'WHAT WE DID:\nApplied the old products.\nWHAT WE FOUND:\nLawn looked fine.' };
     if (url.includes('completion-actions')) data = { actions: [] };
     if (url.includes('property-map')) data = { available: false, stationsLoaded: true };
     return { ok: true, json: async () => data };
@@ -388,4 +389,20 @@ it.each([false, true])('failed visit-area refresh preserves only measured produc
   expect(card.getByPlaceholderText('Rate').value).toBe('');
   expect(within(totals()[1].parentElement).getByPlaceholderText('Sq ft').value).toBe('');
   expect(screen.getByRole('button', {name: /Product Actuals Required/}).disabled).toBe(true);
+});
+
+it('a plan refresh that changes the products drops an untouched generated report', async () => {
+  enableDefaults();
+  mount();
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  fireEvent.change(notes, { target: { value: 'Hand notes before generating.' } });
+  fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
+  await waitFor(() => expect(notes.value).toContain('Applied the old products.'));
+  withdrawDefaults = true;
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh plan' }));
+  await waitFor(() => expect(screen.queryByText('Updating plan suggestions…')).toBeNull());
+  await waitFor(() => expect(screen.queryAllByPlaceholderText('Total')).toHaveLength(0));
+  expect(notes.value).not.toContain('Applied the old products.');
+  expect(notes.value).toContain('Hand notes before generating.');
 });
