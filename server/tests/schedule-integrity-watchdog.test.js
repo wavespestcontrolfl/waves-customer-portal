@@ -24,6 +24,11 @@ jest.mock('../services/irrigation-weekly-email', () => ({
   findUnstampedRecurringLawnMembers: jest.fn(async () => []),
 }));
 
+jest.mock('../services/recurring-schedule-audit', () => ({
+  findAcceptedRecurringScheduleGaps: jest.fn(async () => []),
+}));
+
+const { findAcceptedRecurringScheduleGaps } = require('../services/recurring-schedule-audit');
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const { isEnabled } = require('../config/feature-gates');
@@ -318,5 +323,26 @@ describe('runInner alerting', () => {
     makeDbMock({ staleRows: [staleVisit()] });
     NotificationService.notifyAdmin.mockImplementation(async () => null);
     await expect(runInner({ now: NOW })).rejects.toThrow('pager output lost');
+  });
+});
+
+describe('accepted-plan schedule detection', () => {
+  test('acceptance findings use the existing admin bell and evidence dedupe', async () => {
+    const gap = { estimateId: 'e-1', customerId: 'c-1', serviceFamily: 'pest_control', pattern: 'monthly',
+      expectedVisits: 12, recordedVisits: 1, issues: ['missing_recurrence'], evidenceKey: 'evidence-1', appointmentIds: ['s-1'] };
+    findAcceptedRecurringScheduleGaps.mockResolvedValueOnce([gap]);
+    makeDbMock();
+    expect(await runInner({ now: NOW })).toMatchObject({ acceptedScheduleGaps: 1, acceptedScheduleCheckFailed: false, alerted: 1 });
+    expect(NotificationService.notifyAdmin.mock.calls[0][3]).toMatchObject({ bell: true,
+      link: '/admin/customers?customerId=c-1', metadata: { dedupeKey: 'accepted-schedule:e-1:pest_control:evidence-1' } });
+    findAcceptedRecurringScheduleGaps.mockResolvedValueOnce([gap]);
+    makeDbMock({ alertedKeys: new Set(['accepted-schedule:e-1:pest_control:evidence-1']) });
+    expect(await runInner({ now: NOW })).toMatchObject({ alerted: 0 });
+  });
+
+  test('an unavailable acceptance check is reported while existing checks keep running', async () => {
+    findAcceptedRecurringScheduleGaps.mockRejectedValueOnce(new Error('read failed'));
+    makeDbMock({ staleRows: [staleVisit()] });
+    expect(await runInner({ now: NOW })).toMatchObject({ acceptedScheduleCheckFailed: true, alerted: 1 });
   });
 });
