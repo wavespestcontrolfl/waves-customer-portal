@@ -22,8 +22,10 @@ const COLLECTIONS = { customer_id: 'customer_ids', appointment_id: 'service_ids'
 const ALIASES = { customer_id: 'customerId', property_id: 'propertyId', appointment_id: 'appointmentId', estimate_id: 'estimateId', invoice_id: 'invoiceId', product_id: 'productId', lead_id: 'leadId', email_id: 'emailId', call_id: 'callId', review_id: 'reviewId' };
 const normalizeName = value => String(value || '').toLowerCase().replace(/[’']/g, "'").replace(/'s\b/g, '')
   .replace(/[^\p{L}\p{N}\s'-]/gu, ' ').replace(/\s+/g, ' ').trim();
-const PERSON_REFERENCE = /\b(?:for|customer|named|change|update|email|text|message|contact|quote|send|notify|schedule|reply to)\s+([\p{L}'-]+)\b/gu;
-const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'at', 'on', 'and',
+// Overlapping selectors matter: "update customer Jhon" must still inspect
+// "customer Jhon" after seeing "update customer".
+const PERSON_REFERENCE = /\b(?=((?:send|email|text|sms|message|reminder|contact|notify|quote|schedule|reply|respond)\s+(?:to|for)|for|customer|named|change|update|email|text|message|contact|quote|send|notify|schedule)\s+([\p{L}'-]+)\b)/gu;
+const AFTER_SINGLE_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'using', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
   'property', 'properties', 'appointment', 'appointments', 'estimate', 'invoice', 'details', 'inactive', 'active', 'reminder', 'reminders']);
 const PAGE_REFERENCE_RE = /\b(?:(?:this|that|current|selected|viewed|open)\s+(?:customer|account|property|appointment|estimate|invoice|review)|his|her|their)\b/i;
@@ -42,8 +44,8 @@ function explicitSingleNames(prompt) {
   const normalized = normalizeName(clause);
   return [...new Set([
     ...[...normalized.matchAll(PERSON_REFERENCE)]
-      .filter(m => !m[0].startsWith('customer ') || !/\b(?:this|that|current|selected|viewed|open)\s+$/.test(normalized.slice(0, m.index)))
-      .map(m => m[1]),
+      .filter(m => m[1] !== 'customer' || !/\b(?:this|that|current|selected|viewed|open)\s+$/.test(normalized.slice(0, m.index)))
+      .map(m => m[2]),
     ...[...clause.matchAll(/\b([\p{L}-]+)[’']s\b/giu)].map(m => normalizeName(m[1])),
     ...(normalized.match(/^([\p{L}'-]+)\s+(?:needs|wants|has|is|should|would|asked)\b/u)?.slice(1, 2) || []),
   ])];
@@ -74,12 +76,12 @@ function pageIds(pageData = {}) {
 async function customerById(id) {
   if (!UUID_RE.test(String(id || ''))) return null;
   return db('customers').where({ id }).whereNull('deleted_at')
-    .first(CUSTOMER_FIELDS);
+    .first([...CUSTOMER_FIELDS, db.raw('updated_at::text AS version')]);
 }
 
 function customerTarget(customer, provenance) {
   return { customer_id: customer.id, label: [customer.first_name, customer.last_name].filter(Boolean).join(' '),
-    address: customer.address_line1 || null, city: customer.city || null, version: customer.updated_at || null,
+    address: customer.address_line1 || null, city: customer.city || null, version: customer.version || null,
     provenance, href: `/admin/customers?customerId=${encodeURIComponent(customer.id)}` };
 }
 
@@ -89,7 +91,7 @@ function namesTargetCustomer(clause, customer) {
   if (offset < 0) return false;
   const before = clause.slice(0, offset).trim();
   if (!before || before === 'please') return true;
-  return /\b(?:for|customer|named|change|update|email|text|message|quote|notify|schedule|send to|reply to)(?:\s+both)?$/.test(before)
+  return /\b(?:for|customer|named|change|update|(?:email|text|sms|message|reminder|contact|notify)(?: to)?|quote(?: for)?|schedule(?: for)?|send to|reply to|respond to)(?:\s+both)?$/.test(before)
     || (/\bboth\b/.test(clause) && /\band$/.test(before));
 }
 
@@ -105,7 +107,7 @@ async function namedCustomers(prompt) {
   const singleNames = explicitSingleNames(prompt).filter(name => words.some((word, i) => word === name
     && (!words[i + 1] || AFTER_SINGLE_NAME.has(words[i + 1]))));
   if (!phrases.length && !singleNames.length) return [];
-  const columns = ['id', 'first_name', 'last_name', 'address_line1', 'city', 'updated_at'];
+  const columns = ['id', 'first_name', 'last_name', 'address_line1', 'city', 'updated_at', db.raw('updated_at::text AS version')];
   const matches = phrases.length ? await db('customers').whereNull('deleted_at')
     .whereIn(db.raw("lower(concat_ws(' ', first_name, last_name))"), phrases).limit(10).select(columns) : [];
   const fullNames = matches.filter(customer => namesTargetCustomer(normalized, customer));

@@ -99,6 +99,11 @@ test('full-text hit: actor-scoped, paired turn + receipts attached', async () =>
         ['accepted', { state: 'provider_accepted', providerMessageId: 'fixture-provider-id' }, 'provider_accepted'],
         ['partial', { partial: true, warning: 'Synthetic downstream failure' }, 'partially_completed'],
         ['missing', null, 'outcome_unknown'],
+        ['no-effect', { message: 'No services found for this date', date: 'fixture-date' }, 'outcome_unknown'],
+        ['warning-only', { warning: 'Synthetic missing prerequisite' }, 'outcome_unknown'],
+        ['blocked-route', { blocked: true, message: 'No services found' }, 'blocked'],
+        ['dry-run', { dry_run: true, preview: [] }, 'awaiting_approval'],
+        ['known-partial', { success: true, warning: 'Synthetic secondary failure' }, 'partially_completed'],
       ].map(([id, result]) => ({ id, thread_id: T1, thread_turn_seq: 2, tool_name: 'send_sms',
         summary: 'Synthetic lifecycle fixture', status: 'confirmed', result,
         created_at: '2026-08-30T01:00:35Z', consumed_at: '2026-08-30T01:02:05Z' })),
@@ -119,6 +124,9 @@ test('full-text hit: actor-scoped, paired turn + receipts attached', async () =>
     ['empty', 'confirmed', 'outcome_unknown'], ['unknown', 'confirmed', 'outcome_unknown'],
     ['unknown-error', 'confirmed', 'outcome_unknown'], ['accepted', 'confirmed', 'provider_accepted'],
     ['partial', 'confirmed', 'partially_completed'], ['missing', 'confirmed', 'outcome_unknown'],
+    ['no-effect', 'confirmed', 'outcome_unknown'], ['warning-only', 'confirmed', 'outcome_unknown'],
+    ['blocked-route', 'confirmed', 'blocked'], ['dry-run', 'confirmed', 'awaiting_approval'],
+    ['known-partial', 'confirmed', 'partially_completed'],
   ]);
   expect(hit.receipts.find((x) => x.id === 'pa-9')).toBeUndefined();
 

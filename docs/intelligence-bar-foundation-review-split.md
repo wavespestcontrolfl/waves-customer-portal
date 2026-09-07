@@ -92,3 +92,18 @@ retains dynamic admin verb-wrapper calls. All 1,736 recorded sites remain
 unsupported/unverified. Backend registrations remain a manual inventory in
 this split; automated backend drift enforcement is deferred to the final
 capability reconciliation, so this gate currently enforces frontend sites only.
+
+Part B review remediation resolves prepositional and overlapping customer
+selectors before considering page fallback. Target versions use PostgreSQL
+`updated_at::text` throughout fresh page, operator, full-name and single-name
+lookups. Two isolated Postgres tests verify microsecond preservation and
+misspelling refusal with actual synthetic rows, rolled back after each test.
+The affected six service/confirmation suites pass 165 tests.
+
+The shared outcome classifier now requires affirmative success. Optimizer
+no-op, unavailable tax-advisor, and empty bulk-update paths explicitly block;
+dry runs remain previews. Estimate flag toggles report success only after an
+affected row. Message-only, warning-only and unnormalized legacy output stays
+unknown. Legacy payout, SEO enqueue and SEO approval results still need
+individual lifecycle adapters before those capabilities can be verified; no
+platform coverage is claimed for them by this split.

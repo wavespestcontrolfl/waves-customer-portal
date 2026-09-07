@@ -7,20 +7,47 @@ const B = '10000000-0000-4000-8000-000000000002';
 const REVIEW = '20000000-0000-4000-8000-000000000001';
 const PROPERTY = '30000000-0000-4000-8000-000000000001';
 let rows;
+let lookupRows;
 beforeEach(() => {
+  lookupRows = [];
   rows = {
     google_reviews: [{ id: REVIEW, customer_id: A, reviewer_name: 'Synthetic Reviewer' }],
     customer_properties: [{ id: PROPERTY, customer_id: B, active: true }],
-    customers: [{ id: A }, { id: B }],
+    customers: [{ id: A, first_name: 'Synthetic', last_name: 'Person', version: '2026-09-01 12:00:00.123456+00' }, { id: B }],
   };
   db.mockReset().mockImplementation(table => {
     let id;
-    const q = { where: (_key, value) => { id = value; return q; },
+    const q = { where: (key, value) => { id = typeof key === 'object' ? key.id : value; return q; },
       first: async () => rows[table]?.find(row => row.id === id),
-      whereNull: () => q, whereIn: () => q, limit: () => q, select: async () => [] };
+      whereNull: () => q, whereIn: () => q, limit: () => q, select: async () => lookupRows };
     return q;
   });
   db.raw = text => ({ text });
+});
+
+const selectors = ['Send to', 'Email to', 'Text to', 'Message to', 'Notify to', 'Quote for', 'Schedule for', 'Reply to', 'Respond to', 'Send a message to', 'Send an SMS to', 'Send a reminder to', 'Update customer'];
+test.each(selectors)(
+  'an unresolved person after "%s" cannot fall back to the viewed customer', async selector => {
+    const task = await Context.resolve({ prompt: `${selector} Jhon using this customer`, pageData: { customer_id: A } });
+    expect(task.page.customer.customer_id).toBe(A);
+    expect(task.target).toBeNull();
+    expect(task.targets).toEqual([]);
+    expect((await Context.validateRecordTarget({ customer_id: A }, task, { toolName: 'send_sms' })).code).toBe('target_clarification_required');
+  });
+
+test.each(selectors)('a matching full name after "%s" still resolves through fresh lookup', async selector => {
+  lookupRows = [rows.customers[0]];
+  const task = await Context.resolve({ prompt: `${selector} Synthetic Person using this customer`, pageData: {} });
+  expect(task.target.customer_id).toBe(A);
+  expect(task.target.provenance).toBe('current_request_lookup');
+  expect(task.target.version).toBe(rows.customers[0].version);
+});
+
+test('viewed and selected targets retain the database text version without Date conversion', async () => {
+  const viewed = await Context.resolve({ prompt: 'Update this customer', pageData: { customer_id: A } });
+  const selected = await Context.resolve({ prompt: 'Update the customer', pageData: {}, selectedTarget: { customer_id: A } });
+  expect(viewed.target.version).toBe('2026-09-01 12:00:00.123456+00');
+  expect(selected.target.version).toBe(viewed.target.version);
 });
 const context = (customerId = A) => ({ targets: customerId ? [{ customer_id: customerId }] : [], page: { ids: {} } });
 
