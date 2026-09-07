@@ -4064,7 +4064,7 @@ router.get('/', async (req, res, next) => {
       // kill switch is off instead of offering an action the group route
       // 404s (GH codex #3843 r1 P1). Split/Separate stay ungated.
       visitGroups: isEnabled('visitGroups'),
-      visitCloseout: isEnabled('visitCloseout'),
+      visitCloseout: legacyCloseoutEnabled,
       techSummary: Object.values(byTech),
       unassigned,
       technicians,

@@ -258,6 +258,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
     ))));
     const unavailableDay = await request(`/api/admin/schedule?date=${date}`, { auth });
     expect(unavailableDay.status).toBe(200);
+    expect(unavailableDay.body.visitCloseout).toBe(false);
     expect(unavailableDay.body.services).toEqual(expect.arrayContaining(fixture.serviceIds.map((id) => (
       expect.objectContaining({ id, visitCloseoutEnabled: fullBehavior })
     ))));
