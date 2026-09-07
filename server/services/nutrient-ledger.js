@@ -31,6 +31,13 @@ function calculateAppliedNutrients({ product, amount, amountUnit, lawnSqft }) {
   };
 }
 
+function nutrientTreatedSqft(areaValue, areaUnit, fallbackSqft) {
+  const measured = typeof areaValue === 'number' || typeof areaValue === 'string' ? Number(areaValue) : NaN;
+  // The nutrient ledger stores whole square feet; use the same rounded area
+  // for its rate calculation and the pre-completion nutrient advisory.
+  return areaUnit === 'sqft' && Number.isFinite(measured) && measured > 0 ? Math.max(1, Math.round(measured)) : fallbackSqft;
+}
+
 function hasNutrients(product) {
   return Number(product?.analysis_n || 0) > 0
     || Number(product?.analysis_p || 0) > 0
@@ -129,6 +136,7 @@ function summarizeLedgerRows(rows, year) {
 module.exports = {
   amountToPounds,
   calculateAppliedNutrients,
+  nutrientTreatedSqft,
   recordServiceProductNutrients,
   summarizeLedgerRows,
   toDateOnly,

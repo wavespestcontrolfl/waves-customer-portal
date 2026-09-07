@@ -67,6 +67,33 @@ test.each([
   expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
 });
 
+test.each([false, '', 0, -1, 2500.5, 10000001, {}, []])('invalid lawn visit area %j is rejected before a completion claim or database read', async treatedSqft => {
+  process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+  process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+  try {
+    const result = await complete({ lawnProtocolCompletion: { treatedSqft } });
+    expect(result).toMatchObject({ status: 400, body: { code: 'lawn_completion_area_invalid' } });
+    expect(db).not.toHaveBeenCalled();
+    expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
+  } finally {
+    delete process.env.GATE_LAWN_COMPLETION_DEFAULTS;
+    delete process.env.GATE_LAWN_PROPERTY_HISTORY;
+  }
+});
+
+test.each([undefined, null, 2500, '2500'])('valid or omitted lawn visit area %j preserves completion replay', async treatedSqft => {
+  process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+  process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+  const payload = { success: true, serviceRecordId: 'fixture-record' };
+  attempts.claimCompletionAttempt.mockResolvedValue({ action: 'replay', payload });
+  try {
+    await expect(complete({ lawnProtocolCompletion: { treatedSqft } })).resolves.toEqual({ status: 200, body: payload });
+  } finally {
+    delete process.env.GATE_LAWN_COMPLETION_DEFAULTS;
+    delete process.env.GATE_LAWN_PROPERTY_HISTORY;
+  }
+});
+
 test('a missing service returns the existing 404 payload', async () => {
   service = null;
   await expect(complete()).resolves.toEqual({ status: 404, body: { error: 'Service not found' } });
