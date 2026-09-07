@@ -44,6 +44,10 @@ jest.mock('../services/estimate-deposits', () => ({
   pendingDepositCredit: (...args) => mockPending(...args),
   consumeDepositCredit: (...args) => mockConsume(...args),
 }));
+const mockPayer = jest.fn(async () => ({ payerId: null }));
+jest.mock('../services/payer', () => ({
+  resolveForInvoice: (...args) => mockPayer(...args),
+}));
 const mockTrigger = jest.fn(async () => undefined);
 jest.mock('../services/notification-triggers', () => ({
   triggerNotification: (...args) => mockTrigger(...args),
@@ -200,6 +204,30 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
 
       expect(result).toEqual({ invoice: { id: 'inv-1', applied_deposit_credit: 100 }, reused: false });
       expect(mockConsume).toHaveBeenCalledWith(expect.objectContaining({ amount: 100 }));
+    });
+
+    it('a payer-billed visit previews zero and mints: the homeowner deposit is not payer-eligible (create applies none)', async () => {
+      programTransactions(makeTrx());
+      mockPending.mockResolvedValueOnce({ amount: 50 });
+      mockPayer.mockResolvedValueOnce({ payerId: 'payer-1' });
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1', applied_deposit_credit: 0 });
+
+      const result = await mintScheduledServiceInvoiceWithDeposit({ svc: { ...svc, customer_id: 'cust-1' }, buildCreateParams, expectedDepositCredit: 0 });
+
+      expect(result).toEqual({ invoice: { id: 'inv-1', applied_deposit_credit: 0 }, reused: false });
+      expect(mockPayer).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', scheduledServiceId: 'svc-1' }));
+      expect(mockConsume).not.toHaveBeenCalled();
+    });
+
+    it('a payer assigned after a non-zero preview is refused — create would apply no credit the operator saw', async () => {
+      programTransactions(makeTrx());
+      mockPending.mockResolvedValueOnce({ amount: 50 });
+      mockPayer.mockResolvedValueOnce({ payerId: 'payer-1' });
+
+      await expect(
+        mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 50 }),
+      ).rejects.toMatchObject({ status: 409, code: 'DEPOSIT_CREDIT_CHANGED', expectedDepositCredit: 50, pendingDepositCredit: 0 });
+      expect(mockCreate).not.toHaveBeenCalled();
     });
 
     it('mints when the pending deposit matches the preview to the cent', async () => {

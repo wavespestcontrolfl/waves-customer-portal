@@ -205,7 +205,7 @@ async function mintScheduledServiceInvoiceWithDeposit({
         const lockedSvc = await acquireScheduledMintLockChain(trx, {
           scheduledServiceId: svc.id,
           assertEligibleInTrx,
-          visitColumns: ['id', 'estimated_price', 'primary_line_price'],
+          visitColumns: ['id', 'customer_id', 'estimated_price', 'primary_line_price'],
         });
         if (!lockedSvc) {
           const e = new Error('Scheduled service not found');
@@ -227,7 +227,19 @@ async function mintScheduledServiceInvoiceWithDeposit({
         const depositCredit = withDeposit
           ? await pendingDepositCredit(sourceEstimateId, trx)
           : null;
-        const pendingAmount = depositCredit ? Number(depositCredit.amount) || 0 : 0;
+        // The PAYER-ELIGIBLE pending deposit (pre-push P1): InvoiceService
+        // .create applies no homeowner deposit when a third-party Bill-To
+        // resolves, and the Invoices page previews zero there through the
+        // same resolver — so the expectation is compared against zero when
+        // a payer resolves under the lock, and a payer assigned since a
+        // non-zero preview refuses. Same resolver, same fail-soft-to-self-pay
+        // contract as the create itself.
+        let pendingAmount = depositCredit ? Number(depositCredit.amount) || 0 : 0;
+        if (expectedDepositCredit != null && pendingAmount > 0) {
+          const { resolveForInvoice } = require('./payer');
+          const payer = await resolveForInvoice({ database: trx, customerId: lockedSvc.customer_id || svc.customer_id || null, scheduledServiceId: svc.id });
+          if (payer?.payerId) pendingAmount = 0;
+        }
         if (expectedDepositCredit != null
           && Math.round(pendingAmount * 100) !== Math.round(Number(expectedDepositCredit) * 100)) {
           const e = new Error(`The deposit credit changed while this invoice was being created (previewed $${Number(expectedDepositCredit).toFixed(2)}, now $${pendingAmount.toFixed(2)}) — nothing was created. Reload the visit and try again.`);
