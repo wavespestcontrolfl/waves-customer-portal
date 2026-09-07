@@ -16,7 +16,10 @@ export function previousLawnAssessment(history, service) {
       || (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0))[0] || null;
 }
 
-export function lawnPlanSelections(items, buildProduct, catalog) {
+const PLAN_FIELDS = ['rate', 'rateUnit', 'amountUnit', 'areaValue', 'areaUnit', 'totalAmount', 'applicationMethod'];
+const CALCULATION_INPUTS = ['rate', 'rateUnit', 'amountUnit', 'areaValue', 'areaUnit', 'applicationMethod'];
+
+export function lawnPlanSelections(items, buildProduct, catalog, { areas = LAWN_DEFAULT_AREAS, governed = false } = {}) {
   const seen = new Set();
   return (items || []).filter((item) => {
     const id = item?.product?.id;
@@ -29,7 +32,7 @@ export function lawnPlanSelections(items, buildProduct, catalog) {
     const mix = item.mix || {};
     // Only the generated per-visit mix supplies defaults; static optional
     // protocol rows and inferred label rates never become actual quantities.
-    return {
+    const selection = {
       ...row,
       rate: mix.ratePer1000 ?? '',
       rateUnit: mix.rateUnit || row.rateUnit,
@@ -38,10 +41,69 @@ export function lawnPlanSelections(items, buildProduct, catalog) {
       areaUnit: mix.treatedSqft != null ? 'sqft' : row.areaUnit,
       totalAmount: mix.amount ?? '',
       totalAmountManual: false,
-      applicationArea: LAWN_DEFAULT_AREAS.join(', '),
+      applicationArea: areas.join(', '),
       applicationAreaDefault: true,
     };
+    if (governed) {
+      selection.applicationMethod = item.applicationMethod || row.applicationMethod;
+      selection.areaValue = mix.treatedSqft ?? '';
+      selection.areaUnit = 'sqft';
+      selection.lawnAmountReason = item.amountReason;
+      selection.lawnPlanDefaults = Object.fromEntries(PLAN_FIELDS.map(key => [key, selection[key]]));
+      selection.lawnPlanManualFields = [];
+    }
+    return selection;
   });
+}
+
+// Reconcile each row, not the whole list: an edited total or a removed default
+// must not freeze every other product when the plan or visit area changes.
+// A legacy/manual row has no provenance and stays entirely technician-owned.
+export function reconcileLawnPlanSelections(current, defaults, removedIds = []) {
+  const byId = new Map(defaults.map(row => [String(row.productId), row]));
+  const removed = new Set(removedIds.map(String));
+  const rows = current.flatMap((row) => {
+    const fresh = byId.get(String(row.productId));
+    byId.delete(String(row.productId));
+    if (!row.lawnPlanDefaults) return [row];
+    const manual = new Set(row.lawnPlanManualFields || []);
+    const ownCalculation = CALCULATION_INPUTS.some(key => manual.has(key));
+    // Preserve each entered value with its unit on both refresh and withdrawal.
+    if (row.totalAmountManual) manual.add('totalAmount');
+    for (const [field, unit] of [['totalAmount', 'amountUnit'], ['rate', 'rateUnit'], ['areaValue', 'areaUnit']]) {
+      if (manual.has(field)) manual.add(unit);
+    }
+    if (!fresh) {
+      if (!manual.size && row.applicationAreaDefault !== false) return [];
+      return [{
+        ...row,
+        ...Object.fromEntries(PLAN_FIELDS.map(key => [key, manual.has(key) ? row[key] : ''])),
+        lawnAmountReason: 'This product is no longer a plan default. Confirm the actual work.',
+      }];
+    }
+    const next = { ...row, lawnPlanDefaults: fresh.lawnPlanDefaults, lawnAmountReason: fresh.lawnAmountReason };
+    // Once a rate, method or treated area is edited, this row's calculation
+    // belongs to that actual application. A visit-wide refresh cannot scale it.
+    for (const key of PLAN_FIELDS) {
+      if (manual.has(key) || ownCalculation) continue;
+      next[key] = fresh[key];
+    }
+    if (fresh.totalAmount === '' && !row.totalAmountManual) next.totalAmount = '';
+    if (fresh.rate === '' && !manual.has('rate')) next.rate = '';
+    if (row.applicationAreaDefault !== false) next.applicationArea = fresh.applicationArea;
+    return [next];
+  });
+  for (const [id, row] of byId) if (!removed.has(id)) rows.push(row);
+  return rows;
+}
+
+export function lawnPlanActionOptions(items = []) {
+  return items.filter(item => item.product?.id).map(item => ({
+    id: `lawn-plan-${item.product.id}`,
+    label: item.product.name, note: item.product.name,
+    product: { id: item.product.id, name: item.product.name },
+    scope: 'exterior', treatmentApplied: true,
+  }));
 }
 
 export const LAWN_FIELD_ACTIONS = lawnLibrary.actions.map((label, index) => ({ id: `lawn-field-${index}`, label, note: label, scope: 'exterior', treatmentApplied: false }));
