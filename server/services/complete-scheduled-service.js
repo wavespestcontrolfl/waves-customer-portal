@@ -10970,7 +10970,8 @@ async function completeScheduledService(completionInput) {
           };
           const sendingNotes = { ...recordStructuredNotes, ...smsNotesDelta };
           await mergeRecordNotesKeys(record.id, smsNotesDelta);
-          const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id };
+          const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id, notificationEventKey: `scheduled-service:${svc.id}:completed`, useCustomerChannel: true };
+          if (bundledReviewRequestId) smsMetadata.bundled_review_request_id = bundledReviewRequestId;
           if (serviceReportV1Delivery || String(sentSmsType || '').startsWith('service_report_v1')) {
             smsMetadata.report_template_version = 'service_report_v1';
             smsMetadata.report_url = reportUrl;
@@ -10994,7 +10995,7 @@ async function completeScheduledService(completionInput) {
             body: sentSmsBody,
             channel: 'sms',
             audience: 'customer',
-            purpose: 'appointment',
+            purpose: 'service_completion',
             customerId: svc.customer_id,
             appointmentId: svc.id,
             ...(sentSmsType === 'service_complete_paid_receipt' && invoice?.id ? { invoiceId: invoice.id } : {}),
@@ -11018,6 +11019,10 @@ async function completeScheduledService(completionInput) {
             invoiceLinkAllowed: allowCompletionInvoiceLink,
           };
           let smsResult = await sendCustomerMessage(sendInput);
+          if (smsResult.channel === 'push') {
+            sentSmsChannel = 'push';
+            completionSmsAcceptedSnapshot.channel = 'push';
+          }
           if (!smsResult.sent && !smsResult.blocked && attemptedMms) {
             logger.warn(`[dispatch] MMS service report send failed for ${record.id}; retrying SMS-only`);
             const fallbackMetadata = { ...smsMetadata };
@@ -11085,6 +11090,9 @@ async function completeScheduledService(completionInput) {
                 message_type: sentSmsType,
                 metadata: JSON.stringify({
                   entry_point: 'dispatch_completion_deferred',
+                  replay_purpose: 'service_completion',
+                  notificationEventKey: `scheduled-service:${svc.id}:completed`,
+                  useCustomerChannel: true,
                   service_record_id: record.id,
                   original_block_code: smsResult.code,
                   refresh_customer_phone: true,

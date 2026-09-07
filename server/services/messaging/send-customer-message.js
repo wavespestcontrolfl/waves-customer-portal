@@ -223,6 +223,23 @@ async function sendCustomerMessage(input) {
   // 4. Load contact state once (consent + suppression share the lookup)
   let contactState = await loadContactState(sendInput);
   contactState = await loadSuppressionState(sendInput, contactState);
+  const PushRouting = require('./push-channel-routing');
+  if (await PushRouting.wantsAppFirst(sendInput)) {
+    if (!validateNoCustomerEmoji({ ...sendInput, channel: 'push' }, policy).ok) {
+      const fallback = await sendCustomerMessage({ ...input, channel: 'sms', metadata: {
+        ...input.metadata, requestedChannel: 'push', appFallbackReason: 'push_body_unsupported',
+      } });
+      return { ...fallback, requestedChannel: 'push', fallbackReason: 'push_body_unsupported' };
+    }
+    sendInput.channel = 'push';
+    sendInput.metadata = {
+      ...sendInput.metadata, requestedChannel: 'push',
+      notificationEventKey: sendInput.metadata?.notificationEventKey
+        || (sendInput.invoiceId ? `invoice:${sendInput.invoiceId}:${sendInput.purpose}`
+          : `${sendInput.purpose}:${sendInput.appointmentId || sendInput.estimateId || sendInput.customerId}:${require('crypto').createHash('sha256').update(sendInput.body).digest('hex')}`),
+    };
+  }
+
 
   // 5. Run validator pipeline. Each entry is { name, fn }; fn is invoked
   //    with (input, policy, contactState).
@@ -454,6 +471,17 @@ async function sendCustomerMessage(input) {
     throw auditErr;
   }
 
+  if (!providerOutcome.sent && sendInput.channel === 'push' && providerOutcome.appUnavailable) {
+    // Re-enter the complete pipeline for an allowed backup, using fresh
+    // consent/suppression state. Never clear an opt-out to enable fallback.
+    const fallback = await sendCustomerMessage({
+      ...input,
+      channel: 'sms',
+      metadata: { ...input.metadata, requestedChannel: 'push', appFallbackReason: providerOutcome.error || 'push_unavailable' },
+    });
+    return { ...fallback, requestedChannel: 'push', fallbackReason: providerOutcome.error || 'push_unavailable' };
+  }
+
   if (!providerOutcome.sent) {
     const retryAt = nextProviderRetryAt(providerOutcome);
     return {
@@ -479,6 +507,7 @@ async function sendCustomerMessage(input) {
     sent: true,
     blocked: false,
     providerMessageId: providerOutcome.providerMessageId,
+    channel: providerOutcome.provider === 'push' ? 'push' : sendInput.channel,
     auditLogId: audit.id,
     segmentCount: segmentMeta.segmentCount,
     encoding: segmentMeta.encoding,
@@ -532,7 +561,7 @@ function validateContract(input) {
  * portal_chat dispatchers land when the corresponding call sites migrate.
  */
 async function dispatchToProvider(input, hooks = {}) {
-  if (input.channel === 'sms') {
+  if (input.channel === 'sms' || input.channel === 'push') {
     return sendViaTwilio(input, hooks);
   }
   return {

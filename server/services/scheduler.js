@@ -102,7 +102,7 @@ async function scheduledDepositReceiptAllowed(msg) {
       .where({ customer_id: msg.customer_id })
       .first('payment_receipt_channel');
     const channel = prefs?.payment_receipt_channel || 'sms';
-    return channel === 'sms' || channel === 'both';
+    return channel === 'sms' || channel === 'both' || channel === 'push';
   } catch {
     return true;
   }
@@ -3672,6 +3672,9 @@ function initScheduledJobs() {
             metadata: {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
+              notificationEventKey: claimMeta.notificationEventKey,
+              useCustomerChannel: claimMeta.useCustomerChannel === true,
+              bundled_review_request_id: claimMeta.bundled_review_request_id,
               // Enqueue provenance survives the replay (codex #3607 r4): the
               // audit row is written under this worker's own entry point, so
               // the ORIGINAL one (e.g. autopay_completion_decline_deferred)
