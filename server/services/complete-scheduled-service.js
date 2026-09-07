@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const Joi = require('joi');
 const db = require('../models/db');
 const { savepointRead, failSoftRead } = require('../utils/savepoint-read');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
@@ -15,8 +16,9 @@ const TermiteStations = require('../services/termite-stations');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
-const { recordServiceProductNutrients, amountToPounds } = require('../services/nutrient-ledger');
+const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft } = require('../services/nutrient-ledger');
 const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
+const { lawnCompletionDefaultsEnabled } = require('../services/lawn-completion-defaults');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
@@ -2357,6 +2359,14 @@ async function completeScheduledService(completionInput, packetRecord = null) {
       reentryExteriorMinutes,       // tech-adjusted exterior dry-down minutes — OPTIONAL, see completionReentryPlan
       reentryInteriorMinutes,       // tech-adjusted interior re-entry minutes — OPTIONAL
     } = completionInput.body;
+    // The field already exists for older clients; retain numeric-string input,
+    // while rejecting booleans, fractions and invalid values before any write.
+    const lawnDefaultsEnabled = lawnCompletionDefaultsEnabled();
+    const { value: lawnCompletionArea, error: lawnCompletionAreaError } = Joi.number().integer().min(1).max(10000000).allow(null)
+      .validate(lawnDefaultsEnabled ? lawnProtocolCompletion?.treatedSqft : undefined);
+    if (lawnCompletionAreaError) {
+      return { status: 400, body: { error: 'treatedSqft must be a positive whole number, or null to clear the visit area.', code: 'lawn_completion_area_invalid' } };
+    }
     if (offerInspectionCredit !== true && offerInspectionCredit !== false) {
       return ({ status: 400, body: { error: 'offerInspectionCredit must be a boolean' } });
     }
@@ -4095,6 +4105,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
         db,
         equipmentSystemId: waveguardEquipmentSystemId || null,
         calibrationId: waveguardCalibrationId || null,
+        lawnSqft: lawnCompletionArea,
       });
       waveguardPlan = plan;
       const calibrationBlocks = calibrationLockoutBlocks(plan);
@@ -4180,6 +4191,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             // Same normalization the persistence path uses: a "/gal" unit is
             // a mix concentration whose total is concentrate amount.
             const pounds = amountToPounds(p.totalAmount, baseQuantityUnit(p.amountUnit || p.rateUnit || null));
+            const treatedSqft = nutrientTreatedSqft(lawnDefaultsEnabled ? p.areaValue : null, p.areaUnit, lawnSqft);
             if (pounds == null) {
               // Fluid-volume amounts can't convert to lb N without a per-
               // product density — the entire annual-N system (nutrient
@@ -4187,8 +4199,8 @@ async function completeScheduledService(completionInput, packetRecord = null) {
               // them. Never SILENTLY: surface the gap as its own advisory
               // instead of inventing a density here.
               unquantifiedNProducts.push(catalog.name || 'nitrogen product');
-            } else if (lawnSqft > 0) {
-              actualVisitN += (pounds * (Number(catalog.analysis_n) / 100)) / (lawnSqft / 1000);
+            } else if (treatedSqft > 0) {
+              actualVisitN += (pounds * (Number(catalog.analysis_n) / 100)) / (treatedSqft / 1000);
             }
           }
           const used = Number(annualN?.used || 0);
@@ -6019,7 +6031,10 @@ async function completeScheduledService(completionInput, packetRecord = null) {
 
             await recordServiceProductNutrients(trx, {
               customerId: svc.customer_id,
-              turfProfile,
+              turfProfile: lawnDefaultsEnabled ? {
+                ...turfProfile,
+                lawn_sqft: nutrientTreatedSqft(p.areaValue, areaUnit, lawnCompletionArea === undefined ? turfProfile?.lawn_sqft : lawnCompletionArea),
+              } : turfProfile,
               serviceRecord: record,
               serviceProduct,
               product,
