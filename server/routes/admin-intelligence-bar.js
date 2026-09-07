@@ -2184,7 +2184,8 @@ async function runQuery(req, res, next) {
     if (platformEnabled) {
       const started = req.ibResumedTask ? { task: req.ibResumedTask, created: true } : await IbTasks.begin({ actorId: getAdminActorId(req), sessionId: req.body.session_id,
         requestKey: req.body.request_key,
-        request: { prompt, context, pageData: pageData || {}, selectedTarget: req.body.selected_target || null, images },
+        request: { prompt, context, pageData: pageData || {}, selectedTarget: req.body.selected_target || null, images,
+          conversationHistory: conversationHistory.slice(-10) },
         pageContext: pageData,
       });
       if (started.error) return res.status(409).json(started);
@@ -2192,7 +2193,7 @@ async function runQuery(req, res, next) {
       if (!started.created) return res.status(activeTask.state === 'running' ? 202 : 200)
         .json(await IbTasks.snapshot(activeTask, getAdminActorId(req)));
       taskContext = await TaskContext.resolve({ prompt, pageData, selectedTarget: req.body.selected_target });
-      if (taskContext.error) {
+      if (taskContext.error || taskContext.ambiguous) {
         const payload = { response: taskContext.error || (taskContext.ambiguous
           ? 'More than one customer matches. Select the customer for this request.'
           : 'I could not match the named customer. Select the intended customer before changing a record.'),

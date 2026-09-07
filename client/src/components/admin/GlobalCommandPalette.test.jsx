@@ -22,11 +22,11 @@ async function mount() {
   const ref = createRef();
   render(<MemoryRouter initialEntries={['/admin/customers?customerId=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa']}><RouteHarness paletteRef={ref} /></MemoryRouter>);
   act(() => ref.current.open());
-  await screen.findByPlaceholderText('Ask anything...');
+  await screen.findByPlaceholderText(/Ask anything/);
   return ref;
 }
 function submit(text) {
-  const input = screen.getByPlaceholderText('Ask anything...');
+  const input = screen.getByPlaceholderText(/Ask anything/);
   fireEvent.change(input, { target: { value: text } });
   fireEvent.keyDown(input, { key: 'Enter' });
 }
@@ -122,6 +122,48 @@ it('cancellation remains canceled after close and reopen', async () => {
   act(() => ref.current.open());
   expect(await screen.findByText('Cancelled')).toBeInTheDocument();
   expect(screen.queryByText('✓ Done')).not.toBeInTheDocument();
+});
+
+it.each([false, true])('keeps a legacy threaded confirmation across navigation when tasks are disabled (mobile=%s)', async mobile => {
+  useIsMobile.mockReturnValue(mobile);
+  fetchMock.mockImplementation(url => {
+    if (url.endsWith('/query')) return new Promise(resolve => queryResolvers.push(resolve));
+    if (url.includes('/tasks?')) return Promise.resolve({ ok: false, status: 404, json: async () => ({ error: 'Not enabled' }) });
+    if (url.endsWith('/confirm-action')) return Promise.resolve(ok({ success: true, outcome: 'completed' }));
+    return Promise.resolve(ok({ thread: null, actions: [], threads: [] }));
+  });
+  await mount();
+  submit('Update this customer');
+  await act(async () => queryResolvers[0](ok({ response: 'Prepared.', threadsEnabled: true,
+    pendingActions: [{ id: 'legacy-card', tool: 'update_customer', summary: 'Change Original fixture note', expiresInMs: 600000 }],
+  })));
+  act(() => navigate('/admin/customers?customerId=bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm', exact: true }));
+  expect(await screen.findByText('✓ Done')).toBeInTheDocument();
+  const confirmation = fetchMock.mock.calls.find(([url]) => url.endsWith('/confirm-action'));
+  expect(JSON.parse(confirmation[1].body).pending_action_id).toBe('legacy-card');
+});
+
+it('persists a legacy receipt when confirmation finishes after navigation and the bar reopens', async () => {
+  let confirm;
+  fetchMock.mockImplementation(url => {
+    if (url.endsWith('/query')) return new Promise(resolve => queryResolvers.push(resolve));
+    if (url.includes('/tasks?')) return Promise.resolve({ ok: false, status: 404, json: async () => ({ error: 'Not enabled' }) });
+    if (url.endsWith('/confirm-action')) return new Promise(resolve => { confirm = resolve; });
+    return Promise.resolve(ok({ thread: null, actions: [], threads: [] }));
+  });
+  const ref = await mount();
+  submit('Update this customer');
+  await act(async () => queryResolvers[0](ok({ response: 'Prepared.', threadsEnabled: true,
+    pendingActions: [{ id: 'legacy-card', tool: 'update_customer', summary: 'Change Original fixture note', expiresInMs: 600000 }],
+  })));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm', exact: true }));
+  act(() => navigate('/admin/customers?customerId=bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'));
+  await act(async () => confirm(ok({ success: true, outcome: 'completed' })));
+  act(() => ref.current.close());
+  act(() => ref.current.open());
+  expect(await screen.findByText('✓ Done')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Confirm', exact: true })).not.toBeInTheDocument();
 });
 
 test.each([[false, 200], [true, 200], [false, 409], [true, 409]])('failure stays settled across a follow-up (mobile=%s, HTTP=%s)', async (mobile, status) => {

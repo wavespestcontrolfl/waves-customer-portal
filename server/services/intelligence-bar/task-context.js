@@ -24,6 +24,7 @@ const PERSON_REFERENCE = /\b(?:for|customer|named|change|update|email|text|messa
 const AFTER_GIVEN_NAME = new Set(['the', 'a', 'an', 'this', 'that', 'their', 'his', 'her', 'to', 'with', 'at', 'on', 'and',
   'needs', 'wants', 'has', 'is', 'should', 'would', 'asked', 'address', 'phone', 'email', 'notes', 'note', 'label', 'labels',
   'property', 'properties', 'appointment', 'appointments', 'estimate', 'invoice', 'details', 'inactive', 'active']);
+const PAGE_REFERENCE_RE = /\b(?:(?:this|that|current|selected|viewed|open)\s+(?:customer|account|property|appointment|estimate|invoice)|his|her|their)\b/i;
 
 function targetClause(prompt) {
   // Message bodies and replacement values are data, even when they contain
@@ -149,15 +150,17 @@ function candidateSelection(candidates, prompt, viewedCustomer) {
   if (namedSet) return { target: null, targets: candidates, ambiguous: false };
   if (candidates.length === 1) return { target: candidates[0], targets: candidates, ambiguous: false };
   if (candidates.length > 1) return { target: null, targets: [], ambiguous: true };
-  const pageReference = /\b(?:(?:this|that|current|selected|viewed|open)\s+(?:customer|account|property|appointment|estimate|invoice)|his|her|their)\b/i.test(prompt);
+  const pageReference = PAGE_REFERENCE_RE.test(prompt);
   const target = !namesRequested(prompt) && pageReference ? viewedCustomer : null;
   return { target: target || null, targets: target ? [target] : [], ambiguous: false };
 }
 
 async function resolve({ prompt, pageData, selectedTarget }) {
-  const page = await loadPage(pageData);
-  if (page.error) return page;
-  const named = await namedCustomers(prompt);
+  const [viewed, named] = await Promise.all([loadPage(pageData), namedCustomers(prompt)]);
+  // A stale page hint cannot block an unrelated task or an explicitly named
+  // customer. A request relying on the unavailable viewed record still stops.
+  if (viewed.error && PAGE_REFERENCE_RE.test(prompt) && !named.length && !selectedTarget?.customer_id) return viewed;
+  const page = viewed.error ? { ids: {}, records: {} } : viewed;
   const candidates = named.map(c => customerTarget(c, 'current_request_lookup'));
   let selection = candidateSelection(candidates, prompt, page.customer);
   if (selectedTarget?.customer_id) {

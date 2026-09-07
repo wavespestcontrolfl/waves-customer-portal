@@ -178,7 +178,12 @@ async function recordResult(id, result) {
  */
 async function getActionReceipt(id, requestedBy) {
   const row = await db('ib_pending_actions').where({ id, requested_by: String(requestedBy) }).first();
-  if (!row) return null;
+  return row ? actionReceipt(row) : null;
+}
+
+// Format rows already selected under their actor scope. Task snapshots and
+// lists share this projection without issuing a second read per action.
+function actionReceipt(row) {
   const result = typeof row.result === 'string' ? JSON.parse(row.result) : row.result;
   const outcome = row.status === 'confirmed' ? executionOutcome(result)
     : row.status === 'cancelled' ? 'canceled'
@@ -211,6 +216,7 @@ async function attachThread(ids, threadId, turnSeq, requestedBy) {
 }
 
 module.exports = {
+  actionReceipt,
   TTL_MINUTES,
   paramsHash,
   stepKey,

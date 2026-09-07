@@ -311,6 +311,8 @@ function GlobalCommandPalette(_props, ref) {
   const [activeTask, setActiveTask] = useState(null);
   const [savedTasks, setSavedTasks] = useState([]);
   const [tasksAvailable, setTasksAvailable] = useState(false);
+  const tasksAvailableRef = useRef(false);
+  tasksAvailableRef.current = tasksAvailable;
   const sessionIdRef = useRef(null);
   if (!sessionIdRef.current) sessionIdRef.current = ibSessionId();
   const submittingRef = useRef(false);
@@ -428,7 +430,10 @@ function GlobalCommandPalette(_props, ref) {
     setLoading(false);
     setActiveTask(null);
     setResponse(null);
-    setPendingActions([]);
+    // Legacy threaded approvals have no task recovery. Keep their bound cards
+    // until resolved; task-backed cards can be reopened from Saved requests.
+    if (!threadsAvailableRef.current) setPendingActions([]);
+    else if (tasksAvailableRef.current) setPendingActions(previous => previous.filter(action => !action.taskId));
     setToolActivity([]);
     if (!threadsAvailableRef.current) {
       // Unlike New chat/submit (deliberate detach — no re-resume), a
@@ -575,7 +580,7 @@ function GlobalCommandPalette(_props, ref) {
         // drop the stale response instead of restoring the cleared thread.
         if (threadEpochRef.current === epoch) {
           setResponse(data.response);
-          setPendingActions(previous => [...previous, ...(data.pendingActions || []).filter(action => !previous.some(old => old.id === action.id)).map(action => ({ ...action, receivedAt: Date.now() }))]);
+          setPendingActions(previous => [...previous, ...(data.pendingActions || []).filter(action => !previous.some(old => old.id === action.id)).map(action => ({ ...action, taskId: data.taskId || null, receivedAt: Date.now() }))]);
           setActiveTask(data.taskId ? data : null);
           setToolActivity(Array.isArray(data.toolActivity) ? data.toolActivity : []);
           setConversationHistory(data.conversationHistory || []);
@@ -632,7 +637,7 @@ function GlobalCommandPalette(_props, ref) {
       setConversationHistory(data.conversationHistory || []);
       setThreadId(data.threadId || null);
       threadSeqRef.current = Number.isInteger(data.threadSeq) ? data.threadSeq : null;
-      setPendingActions(data.pendingActions || []);
+      setPendingActions((data.pendingActions || []).map(action => ({ ...action, taskId: data.taskId })));
       setToolActivity(data.toolActivity || []);
       setShowThreads(false);
     } catch (err) {
@@ -644,9 +649,11 @@ function GlobalCommandPalette(_props, ref) {
 
   const actionEpoch = threadEpochRef.current;
   const onActionResolved = (action, decision, body) => {
-    if (threadEpochRef.current !== actionEpoch) return;
+    // A retained legacy card still needs its receipt after navigation. Mapping
+    // by ID cannot restore a card removed by Clear or task-context isolation.
     setPendingActions(previous => previous.map(item => item.id === action.id
       ? { ...item, receipt: body, resolvedStatus: decision === 'cancel' && body.cancelled ? 'cancelled' : undefined } : item));
+    if (threadEpochRef.current !== actionEpoch) return;
     if (activeTask) void refreshTask();
   };
   const taskCard = <IntelligenceTaskCard task={activeTask}
@@ -996,7 +1003,7 @@ function GlobalCommandPalette(_props, ref) {
             <ThreadList threads={threads} loading={threadsLoading} onOpen={openThread} variant="dark" />
           </div>
         )}
-        {!response && !loading && !showThreads && quickActions.length > 0 && (
+        {!response && pendingActions.length === 0 && !loading && !showThreads && quickActions.length > 0 && (
           <div
             style={{
               padding: "12px 18px",
@@ -1059,7 +1066,7 @@ function GlobalCommandPalette(_props, ref) {
             ))}
           </div>
         )}
-        {response && !loading && !showThreads && (
+        {(response || pendingActions.length > 0) && !loading && !showThreads && (
           <div style={{ flex: 1, overflow: "auto", padding: "14px 18px" }}>
             {taskCard}
             {" "}
@@ -1067,7 +1074,7 @@ function GlobalCommandPalette(_props, ref) {
             {!activeTask && <PendingActionsCard actions={pendingActions} variant="dark" onResolved={onActionResolved} />}
           </div>
         )}
-        {response && !loading && !showThreads && (
+        {(response || pendingActions.length > 0) && !loading && !showThreads && (
           <div
             style={{
               padding: "10px 18px",
@@ -1470,7 +1477,7 @@ function MobileSheet({
           {response && !loading && !showThreads && (
             <IntelligenceResponse response={response} activity={toolActivity} task={activeTask} variant="light" />
           )}
-          {response && !loading && !showThreads && !activeTask && (
+          {pendingActions.length > 0 && !loading && !showThreads && !activeTask && (
             <PendingActionsCard actions={pendingActions} variant="light" onResolved={onActionResolved} />
           )}
 
@@ -1481,7 +1488,7 @@ function MobileSheet({
             </Section>
           )}
 
-          {!response && !loading && !showThreads && recents.length > 0 && (
+          {!response && pendingActions.length === 0 && !loading && !showThreads && recents.length > 0 && (
             <Section label="Recent">
               {recents.map((r, i) => (
                 <SheetRow
@@ -1500,7 +1507,7 @@ function MobileSheet({
             </Section>
           )}
 
-          {!response && !loading && !showThreads && quickActions.length > 0 && (
+          {!response && pendingActions.length === 0 && !loading && !showThreads && quickActions.length > 0 && (
             <Section label="Quick actions">
               {quickActions.map((a) => (
                 <SheetRow
@@ -1520,6 +1527,7 @@ function MobileSheet({
           )}
 
           {!response &&
+            pendingActions.length === 0 &&
             !loading &&
             !showThreads &&
             recents.length === 0 &&

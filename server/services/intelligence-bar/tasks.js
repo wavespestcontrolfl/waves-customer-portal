@@ -73,7 +73,7 @@ async function snapshot(task, actorId) {
   const receipts = [];
   const pendingActions = [];
   for (const row of rows) {
-    const receipt = await PendingActions.getActionReceipt(row.id, actorId);
+    const receipt = PendingActions.actionReceipt(row);
     receipts.push(receipt);
     if (receipt.outcome === 'awaiting_approval') pendingActions.push({
       id: row.id, tool: row.tool_name, summary: row.summary,
@@ -82,12 +82,22 @@ async function snapshot(task, actorId) {
       expiresInMs: Math.max(0, new Date(row.expires_at).getTime() - Date.now()),
     });
   }
-  return { ...(task.response || {}), taskId: task.id, taskState: task.state,
+  return { ...(task.response || {}), taskId: task.id, taskState: exposedTaskState(task, receipts),
     taskTarget: task.target?.target || null, pendingActions, receipts,
     canContinue: (task.state !== 'running' || new Date(task.lease_expires_at).getTime() < Date.now())
       && receipts.every(r => ['completed', 'provider_accepted'].includes(r.outcome)),
     response: task.response?.response || 'This request has not returned a final answer. Its saved actions are shown below.',
   };
+}
+
+function exposedTaskState(task, receipts) {
+  if (task.state !== 'awaiting_approval' || !receipts.length) return task.state;
+  const outcomes = new Set(receipts.map(receipt => receipt.outcome));
+  if (outcomes.has('awaiting_approval')) return 'awaiting_approval';
+  if (outcomes.has('outcome_unknown')) return 'outcome_unknown';
+  if ([...outcomes].every(outcome => ['completed', 'provider_accepted'].includes(outcome))) return 'ready_to_continue';
+  if (outcomes.has('completed') || outcomes.has('provider_accepted') || outcomes.has('partially_completed')) return 'partially_completed';
+  return outcomes.size === 1 && outcomes.has('canceled') ? 'canceled' : 'failed';
 }
 
 async function get(id, actorId, sessionId) {
@@ -97,9 +107,13 @@ async function get(id, actorId, sessionId) {
 
 async function list(actorId, sessionId) {
   if (!UUID_RE.test(sessionId || '')) return [];
-  return db('ib_tasks').where({ actor_id: String(actorId), session_id: sessionId })
+  const tasks = await db('ib_tasks').where({ actor_id: String(actorId), session_id: sessionId })
     .where('expires_at', '>', db.fn.now()).orderBy('created_at', 'desc').limit(20)
     .select('id', 'state', 'target', 'page_context', 'created_at', 'updated_at');
+  if (!tasks.length) return tasks;
+  const actions = await db('ib_pending_actions').where('requested_by', String(actorId)).whereIn('task_id', tasks.map(task => task.id));
+  return tasks.map(task => ({ ...task, state: exposedTaskState(task,
+    actions.filter(action => action.task_id === task.id).map(PendingActions.actionReceipt)) }));
 }
 
 module.exports = { UUID_RE, REQUEST_KEY_RE, begin, checkpoint, claimResume, get, list, snapshot, requestHash, withoutImages };

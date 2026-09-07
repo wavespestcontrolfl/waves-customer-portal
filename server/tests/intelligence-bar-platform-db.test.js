@@ -88,6 +88,9 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     const resumed = await api(`/tasks/${proposed.body.taskId}?session_id=${sessionId}`);
     expect(resumed.body.receipts[0].outcome).toBe('completed');
     expect(resumed.body.pendingActions).toHaveLength(0);
+    expect(resumed.body.taskState).toBe('ready_to_continue');
+    const listed = await api(`/tasks?session_id=${sessionId}`);
+    expect(listed.body.tasks.find(task => task.id === proposed.body.taskId).state).toBe('ready_to_continue');
     const replay = await api('/confirm-action', { pending_action_id: card.id, contract_hash: card.contract_hash });
     expect(replay.status).toBe(409);
     const repeatedQuery = await api('/query', input);
@@ -121,6 +124,11 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     const Pending = require('../services/intelligence-bar/pending-actions');
     await Pending.claimForConfirm(rows[0].id, actor, { contractHash: rows[0].contract_hash });
     await Pending.recordResult(rows[0].id, { success: false, error: 'Injected prerequisite failure' });
+    expect((await api(`/tasks/${result.body.taskId}?session_id=${sessionId}`)).body.taskState).toBe('failed');
+    expect((await api(`/tasks/${result.body.taskId}/resume`, { session_id: sessionId })).body.code).toBe('steps_unresolved');
+    await Pending.recordResult(rows[0].id, { success: true, state: 'provider_accepted', partial: true,
+      providerMessageId: 'synthetic-provider-id', warning: 'Disclosed inbox update failed' });
+    expect((await api(`/tasks/${result.body.taskId}?session_id=${sessionId}`)).body.taskState).toBe('partially_completed');
     expect((await api(`/tasks/${result.body.taskId}/resume`, { session_id: sessionId })).body.code).toBe('steps_unresolved');
     expect(await db('ib_pending_actions').where('task_id', result.body.taskId).count('* as count').first()).toEqual({ count: '1' });
   }, 30000);
@@ -204,6 +212,9 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect((await api('/cancel-action', { pending_action_id: pending.id })).body)
       .toMatchObject({ success: true, cancelled: true, outcome: 'canceled' });
     expect((await api(`/actions/${pending.id}`)).body.outcome).toBe('canceled');
+    expect((await api(`/tasks/${valid.body.taskId}?session_id=${sessionId}`)).body.taskState).toBe('canceled');
+    const listed = await api(`/tasks?session_id=${sessionId}`);
+    expect(listed.body.tasks.find(task => task.id === valid.body.taskId).state).toBe('canceled');
   }, 30000);
 
   test('duplicate first names and an unrecognized spoken name require clarification before writing', async () => {
@@ -216,6 +227,30 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     expect(typo.body.taskState).toBe('needs_information');
     expect(ambiguous.body.pendingActions).toHaveLength(0);
     expect(typo.body.pendingActions).toHaveLength(0);
+  }, 30000);
+
+  test('an ambiguous read stops before a model can pick either customer', async () => {
+    mockModel.mockResolvedValue(tools('get_customer_detail', { customer_id: customerA }, 'guessed-read'));
+    const result = await api('/query', request("Show me Fixture's details"));
+    expect(result.body.taskState).toBe('needs_information');
+    expect(result.body.candidates.length).toBeGreaterThanOrEqual(2);
+    expect(mockModel).not.toHaveBeenCalled();
+  }, 30000);
+
+  test('stale page hints allow unrelated and named requests, but cannot supply a pronoun target', async () => {
+    const pageData = { customerId: crypto.randomUUID() };
+    mockModel.mockResolvedValueOnce(answer('Revenue lookup fixture.'));
+    expect((await api('/query', request('Show revenue summary', { pageData }))).body.taskState).toBe('responded');
+    expect(mockModel).toHaveBeenCalledTimes(1);
+    mockModel.mockClear();
+    proposeNote(customerA, 'Named with stale page');
+    const named = await api('/query', request(`Add a note for ${nameA}: Named with stale page`, { pageData }));
+    expect(named.body.taskTarget.customer_id).toBe(customerA);
+    expect(named.body.pendingActions).toHaveLength(1);
+    mockModel.mockClear();
+    const dependent = await api('/query', request('Read this customer', { pageData }));
+    expect(dependent.body.taskState).toBe('needs_information');
+    expect(mockModel).not.toHaveBeenCalled();
   }, 30000);
 
   test('request identity rejects changed payload; receipt and task recovery enforce current actor/session', async () => {
@@ -282,12 +317,14 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
   }, 30000);
 
   test('selecting a saved ambiguity candidate resumes the same task and original request', async () => {
-    proposeNote(customerA, 'Selection regression');
-    const first = await api('/query', request('Add the Selection regression note for Fixture'));
+    const first = await api('/query', request('Add the Selection regression note for Fixture', {
+      conversationHistory: [{ role: 'user', content: 'Use the note draft from this conversation' },
+        { role: 'assistant', content: 'Synthetic original note draft: Selection regression' }],
+    }));
     expect(first.body.taskState).toBe('needs_information');
+    expect(mockModel).not.toHaveBeenCalled();
     const selected = first.body.candidates[0].customer_id;
-    mockModel.mockResolvedValueOnce(tools('update_customer', { customer_id: selected, updates: { notes: 'Selection regression' } }, 'selected'))
-      .mockResolvedValueOnce(answer('The selected customer note is awaiting confirmation.'));
+    proposeNote(selected, 'Selection regression');
     const resumed = await api(`/tasks/${first.body.taskId}/select-target`, { session_id: sessionId, customer_id: selected });
     expect(resumed.status).toBe(200);
     expect(resumed.body.taskId).toBe(first.body.taskId);
@@ -296,5 +333,6 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     const stored = await db('ib_pending_actions').where('id', resumed.body.pendingActions[0].id).first('task_id');
     expect(stored.task_id).toBe(first.body.taskId);
     expect(JSON.stringify(mockModel.mock.calls.at(-1)[0].messages)).toContain('Selection regression');
+    expect(JSON.stringify(mockModel.mock.calls[0][0].messages)).toContain('Synthetic original note draft');
   }, 30000);
 });

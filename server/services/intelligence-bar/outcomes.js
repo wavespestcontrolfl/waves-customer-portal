@@ -14,8 +14,9 @@ function executionOutcome(result) {
   if (result.pending_confirmation === true || result.preview === true || result.proposal === true) return 'awaiting_approval';
   if (result.blocked === true) return 'blocked';
   if (isToolFailure(result)) return 'failed';
+  if (result.partial === true) return 'partially_completed';
   if (result.state === 'provider_accepted') return 'provider_accepted';
-  if (result.partial === true || result.warning) return 'partially_completed';
+  if (result.warning) return 'partially_completed';
   return 'completed';
 }
 
