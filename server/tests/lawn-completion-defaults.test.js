@@ -105,3 +105,21 @@ test('selected defaults with counter or safety metadata remain defaults; plan bl
   plan.protocol.structured.products[0].defaultInPlan = false;
   expect(buildLawnCompletionDefaults(plan, context).items).toHaveLength(0);
 });
+
+test.each([
+  ['matching range', '0.35-0.50 lb N/1000', 0.4, null, true],
+  ['matching exact target', '0.50 lb N/1000', 0.5, null, true],
+  ['changed target', '0.35-0.50 lb N/1000', 0.6, null, false],
+  ['missing target', undefined, 0.4, null, false],
+  ['unrecognized target', 'label rate', 0.4, null, false],
+  ['current catalog fallback', '0.35-0.50 lb N/1000', 0.4, 2, false],
+])('archived derived nutrition: %s', (_label, targetN, targetNPer1000, catalogRate, allowed) => {
+  const { calculateProductAmount } = require('../services/waveguard-plan-engine');
+  const { archivedLawnRecipeMatches } = require('../services/lawn-completion-defaults');
+  const product = { id: 'derived-n', analysis_n: 20, default_rate_per_1000: catalogRate, rate_unit: 'lb' };
+  const mix = calculateProductAmount({ product, lawnSqft: 4000, targetNPer1000 });
+  expect(mix.ratePer1000).toBeGreaterThan(0);
+  const protocol = { status: 'archived', products: [{ productId: product.id, defaultInPlan: true,
+    applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_n', gates: { targetN } }] };
+  expect(archivedLawnRecipeMatches(protocol, [{ selected: true, product, mix }])).toBe(allowed);
+});

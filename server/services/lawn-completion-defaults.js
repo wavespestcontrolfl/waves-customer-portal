@@ -77,11 +77,23 @@ function archivedLawnRecipeMatches(protocol, items) {
   return products.filter(product => product.defaultInPlan).every(product => selected.some(item => item.product.id === product.productId))
     && selected.every(item => {
       const product = products.find(row => row.productId === item.product.id);
-      return !!product && !item.substitution && Number(product.ratePer1000) > 0
-        && Number(product.ratePer1000) === item.mix?.ratePer1000
-        && product.rateUnit === item.mix?.rateUnit
+      return !!product && !item.substitution && archivedLawnRateMatches(product, item.mix)
         && product.applicationMode === (item.scope?.includes('SPOT') ? 'spot' : 'broadcast');
     });
+}
+
+function archivedLawnRateMatches(product, mix) {
+  if (product.ratePer1000 != null) {
+    return Number(product.ratePer1000) > 0 && Number(product.ratePer1000) === mix?.ratePer1000
+      && product.rateUnit === mix?.rateUnit;
+  }
+  // A frozen nutrient target is a rate rule too. Match its stated N range
+  // against the planner's derived target; a current catalog rate alone cannot
+  // prove an archived recipe whose stored rate is absent.
+  const target = String(product.gates?.targetN || '').match(/^(\d+(?:\.\d+)?)(?:-(\d+(?:\.\d+)?))? lb N\/1000$/);
+  return !!target && product.rateUnit === 'lb_n' && mix?.rateSource === 'target_n_analysis'
+    && mix.rateUnit === 'lb' && mix.ratePer1000 > 0 && mix.targetNPer1000 > 0
+    && mix.targetNPer1000 >= Number(target[1]) && mix.targetNPer1000 <= Number(target[2] || target[1]);
 }
 
 function completionItem(item, protocolProduct, amountsAllowed) {
