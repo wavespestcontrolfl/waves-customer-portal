@@ -20,8 +20,4 @@ async function savepointRead(database, query) {
   }
 }
 
-function failSoftRead(database, query, fallback) {
-  return savepointRead(database, query).catch(() => fallback);
-}
-
-module.exports = { savepointRead, failSoftRead };
+module.exports = { savepointRead };
