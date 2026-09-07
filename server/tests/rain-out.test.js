@@ -2794,6 +2794,226 @@ describe('rain-out service', () => {
     });
   });
 
+  describe('preset-reason note segment cap (v3 notice + note ≤ 2 segments)', () => {
+    afterEach(() => {
+      delete process.env.GATE_RAINOUT_MOVE_BANNER;
+      delete process.env.GATE_QUICKMOVE_EXTRA_REASONS;
+    });
+
+    // The prod v3 row body — the snapshot commit() measures and the send
+    // renders from.
+    const V3_BODY = 'Hi {first_name}, {weather_lead}, so we moved your {service_type} to {new_option}.{link_clause}';
+
+    function wireSingle(extra = {}, { v3Row = { body: V3_BODY, is_active: true } } = {}) {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, ...extra }) })],
+        sms_templates: [chain({ first: jest.fn().mockResolvedValue(v3Row) })],
+      });
+    }
+
+    // Realistic v3 render so the pre-move cap counts a body shaped like
+    // production's (mirrors the migration BODY as edited in prod).
+    function mockV3Render() {
+      renderSmsTemplate.mockImplementation(async (key, vars) => {
+        if (key !== 'rain_out_moved_v3') return 'rendered body';
+        return `Hi ${vars.first_name}, ${vars.weather_lead}, so we moved your ${vars.service_type} to ${vars.new_option}.${vars.link_clause}`;
+      });
+    }
+
+    // The counter measures the body the way sendCustomerMessage transforms
+    // it (scheme-stripped links, GSM-normalized punctuation).
+    const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
+    const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
+    const asSent = (b) => normalizeGsmPunctuation(stripSmsUrlScheme(b));
+
+    const COMMIT_ARGS = {
+      serviceId: 'svc-1',
+      technicianId: 'tech-1',
+      reasonCode: 'weather_rain',
+      scope: 'job',
+      target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
+      notifyCustomer: true,
+      actorUserId: 'admin-7',
+    };
+
+    test('gate on: a note that would push the notice to 3 segments is rejected BEFORE the move', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+
+      // ~170-slot v3 notice + the 22-slot note prefix + a 200-char note
+      // (the note cap) ≈ 390 GSM slots — over the 306-slot 2-segment budget.
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'x'.repeat(200) });
+
+      expect(result).toMatchObject({ ok: false, reason: 'note_too_many_segments' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      // Measured on the v3 rung — the one that sends — with its real link
+      // clause, not a bare template.
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+      expect(renderSmsTemplate.mock.calls[0][0]).toBe('rain_out_moved_v3');
+      expect(renderSmsTemplate.mock.calls[0][1].link_clause)
+        .toBe(' New time, forecast & other options: https://waves.test/r/tok123');
+    });
+
+    test('gate on: a note that fits sends as v3 notice + note, measured on the same shape it sent', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
+
+      expect(result.ok).toBe(true);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const { body } = sendCustomerMessage.mock.calls[0][0];
+      expect(body).toMatch(/^Hi Pat, .* so we moved your quarterly pest control to Fri, Jun 12, 1:00 PM - 3:00 PM\. New time, forecast & other options: https:\/\/waves\.test\/r\/tok123\n\nNote from our team: See you Friday!$/);
+      const { countSegments } = require('../services/messaging/segment-counter');
+      expect(countSegments(body).segmentCount).toBeLessThanOrEqual(2);
+      // The pre-move measurement uses the LONGEST lead the reason can
+      // produce, so it never undercounts the forecast-dependent send.
+      const [preCheck, send] = renderSmsTemplate.mock.calls.map((c) => c[1]);
+      expect(preCheck.weather_lead.length).toBeGreaterThanOrEqual(send.weather_lead.length);
+    });
+
+    test('gate on: gate_locked measures the portal nudge that rides ahead of the link', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      mockV3Render();
+      wireSingle();
+
+      // Fits a weather move (≈90 slots of headroom) but not gate_locked,
+      // whose nudge clause eats ~60 of them.
+      const result = await RainOut.commit({ ...COMMIT_ARGS, reasonCode: 'gate_locked', customerNote: 'x'.repeat(80) });
+
+      expect(result).toMatchObject({ ok: false, reason: 'note_too_many_segments' });
+      expect(renderSmsTemplate.mock.calls[0][1].link_clause)
+        .toBe(' Add gate access for next time: portal.wavespestcontrol.com. New time & other options: https://waves.test/r/tok123');
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+    });
+
+    test('gate on: the note is measured AS SENT — smart punctuation and link schemes count like the send, not UCS-2', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+
+      // Raw, a curly apostrophe flips the whole body to UCS-2 (67-char
+      // segments → a ~200-char body reads as 3 segments); the send
+      // normalizes it to GSM-7 first, so the cap must too (pre-push P1).
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'We’ll see you Friday — thanks for your patience!' });
+
+      expect(result.ok).toBe(true);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('Note from our team: We’ll see you Friday — thanks for your patience!');
+    });
+
+    test('gate on: the send reuses the measured link (built once, existing code preferred, eligibility kept) and pins the base v3 row', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
+
+      expect(result.ok).toBe(true);
+      // Built ONCE, through the link builder (grouped / frozen /
+      // dispatch-pending refusals apply) with the existing code preferred;
+      // a second build at send time could mint a longer code or fall back
+      // to the LONG url and exceed the cap the check passed.
+      expect(buildRescheduleLink).toHaveBeenCalledTimes(1);
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true });
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('https://waves.test/r/tok123');
+      const v3Calls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_v3');
+      expect(v3Calls).toHaveLength(2);
+      for (const call of v3Calls) expect(call[3]).toEqual({ noVariants: true, templateBody: V3_BODY });
+    });
+
+    test('gate on: a grouped stop is measured at the LONGEST arrival label, since its landed start is only known after the move', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle({ visit_id: 'visit-9' });
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
+
+      expect(result.ok).toBe(true);
+      const [preCheck, send] = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_v3').map((c) => c[1]);
+      expect(preCheck.new_option).toBe('Fri, Jun 12, 10:00 AM - 12:00 PM');
+      expect(send.new_option).toBe('Fri, Jun 12, 1:00 PM - 3:00 PM');
+      expect(preCheck.new_option.length).toBeGreaterThanOrEqual(send.new_option.length);
+    });
+
+    test('gate on, no note: no pre-move render — the send is the only v3 render', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result.ok).toBe(true);
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('Note from our team');
+    });
+
+    test('gate on: a disabled v3 row is uncapped here — the send path owns that kill switch', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle({}, { v3Row: { body: V3_BODY, is_active: false } });
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'x'.repeat(200) });
+
+      // No pre-move render, no snapshot handed to the send.
+      expect(result.ok).toBe(true);
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+      expect(renderSmsTemplate.mock.calls[0][3]).toEqual({ noVariants: true });
+    });
+
+    test('gate off: the v2 rung is uncapped — a full-length note still moves and sends', async () => {
+      wireSingle();
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'x'.repeat(200) });
+
+      expect(result.ok).toBe(true);
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+      expect(renderSmsTemplate.mock.calls[0][0]).toBe('rain_out_moved_v2');
+      expect(sendCustomerMessage.mock.calls[0][0].body).toBe(`rendered body\n\nNote from our team: ${'x'.repeat(200)}`);
+    });
+
+    test('previewMovedSms: a preset reason counts the v3 notice + note; blank note = bare notice; gate off = uncapped', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+      const target = { date: '2026-06-12', window: { start: '13:00', end: '14:00' } };
+
+      let result = await RainOut.previewMovedSms({
+        serviceId: 'svc-1', reasonCode: 'weather_rain', customMessage: '  See you   Friday!  ', target,
+      });
+      expect(result.ok).toBe(true);
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true, previewOnly: true });
+      const vars = renderSmsTemplate.mock.calls[0][1];
+      expect(vars.link_clause).toContain('https://waves.test/r/tok123');
+      const { countSegments } = require('../services/messaging/segment-counter');
+      const body = `Hi Pat, ${vars.weather_lead}, so we moved your quarterly pest control to Fri, Jun 12, 1:00 PM - 3:00 PM.${vars.link_clause}\n\nNote from our team: See you Friday!`;
+      const seg = countSegments(asSent(body));
+      expect(result).toMatchObject({
+        segments: seg.segmentCount, maxSegments: 2, withinCap: true, remaining: 306 - seg.gsmSlotCount, encoding: 'GSM_7',
+      });
+
+      wireSingle();
+      result = await RainOut.previewMovedSms({ serviceId: 'svc-1', reasonCode: 'weather_rain', customMessage: '', target });
+      expect(result.ok).toBe(true);
+      const bare = countSegments(asSent(`Hi Pat, ${vars.weather_lead}, so we moved your quarterly pest control to Fri, Jun 12, 1:00 PM - 3:00 PM.${vars.link_clause}`));
+      expect(result.remaining).toBe(306 - bare.gsmSlotCount);
+
+      delete process.env.GATE_RAINOUT_MOVE_BANNER;
+      wireSingle();
+      result = await RainOut.previewMovedSms({ serviceId: 'svc-1', reasonCode: 'weather_rain', customMessage: 'x', target });
+      expect(result).toEqual({ ok: false, reason: 'uncapped' });
+
+      // A gated-off extra reason is not a valid reason for the preview either.
+      wireSingle();
+      result = await RainOut.previewMovedSms({ serviceId: 'svc-1', reasonCode: 'gate_locked', customMessage: 'x', target });
+      expect(result).toEqual({ ok: false, reason: 'bad_reason' });
+    });
+  });
+
   describe('custom reason (GATE_QUICKMOVE_CUSTOM_REASON)', () => {
     afterEach(() => {
       delete process.env.GATE_QUICKMOVE_CUSTOM_REASON;
@@ -2958,18 +3178,19 @@ describe('rain-out service', () => {
       // codex PR P2: getOptions' counter estimates with the existing code,
       // so commit must build the body with the SAME one — a legacy
       // odd-length code vs a fresh 10-char mint flips boundary cases.
+      // The reuse goes THROUGH the link builder (reuseExisting) so the
+      // grouped / frozen / dispatch-pending refusals still apply (pre-push
+      // P1), and the send reuses the measured URL instead of building again.
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
-      wireDb({
-        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
-        short_codes: [chain({ first: jest.fn().mockResolvedValue({ code: 'abcde' }) })],
-      });
+      wireSingle();
 
       const result = await RainOut.commit(COMMIT_ARGS);
 
       expect(result.ok).toBe(true);
-      expect(buildRescheduleLink).not.toHaveBeenCalled();
-      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('/l/abcde');
+      expect(buildRescheduleLink).toHaveBeenCalledTimes(1);
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true });
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('https://waves.test/r/tok123');
     });
 
     test('custom renders pin the base row and demand the load-bearing placeholders (renderer opts contract)', async () => {
@@ -3057,7 +3278,7 @@ describe('rain-out service', () => {
       let options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
       expect(options.customReasonEnabled).toBe(true);
       // No render payload — the counter is server-rendered on demand via
-      // previewCustomSms (codex r9 P1); this is only the availability flag.
+      // previewMovedSms (codex r9 P1); this is only the availability flag.
       expect(options.customCompose).toEqual({ maxSegments: 2 });
 
       // Disabled row = ops kill switch: the sheet must not offer Custom.
@@ -3085,33 +3306,31 @@ describe('rain-out service', () => {
       expect(options.customCompose).toBeNull();
     });
 
-    test('previewCustomSms: renders through the real pipeline and returns the enforcement math', async () => {
+    test('previewMovedSms: renders through the real pipeline and returns the enforcement math', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
       // Existing short code reused (read-only) — never a fresh mint; the
       // counter and commit() measure the same URL (codex PR P2 lineage).
-      wireDb({
-        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, reschedule_token: 'tok-abc' }) })],
-        short_codes: [chain({ first: jest.fn().mockResolvedValue({ code: 'abcde' }) })],
-      });
+      wireSingle();
 
-      const result = await RainOut.previewCustomSms({
+      const result = await RainOut.previewMovedSms({
         serviceId: 'svc-1',
+        reasonCode: 'custom',
         customMessage: `  ${MESSAGE}  `,
         target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
       });
 
       expect(result.ok).toBe(true);
-      expect(buildRescheduleLink).not.toHaveBeenCalled();
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true, previewOnly: true });
       const vars = renderSmsTemplate.mock.calls[0][1];
-      expect(vars.link_clause).toContain('/l/abcde');
+      expect(vars.link_clause).toContain('https://waves.test/r/tok123');
       // Whitespace-collapsed like sanitizeCustomerNote before rendering.
       expect(vars.custom_message).toBe(MESSAGE);
       // The math IS the enforcement math: same countSegments over the
       // rendered body.
       const { countSegments } = require('../services/messaging/segment-counter');
       const body = `Hi Pat - ${MESSAGE}\n\nWe've moved your quarterly pest control to Fri, Jun 12, 1:00 PM - 3:00 PM.${vars.link_clause}`;
-      const seg = countSegments(body);
+      const seg = countSegments(require('../services/messaging/sms-link-policy').stripSmsUrlScheme(body));
       expect(result).toMatchObject({
         segments: seg.segmentCount,
         maxSegments: 2,
@@ -3121,15 +3340,13 @@ describe('rain-out service', () => {
       });
     });
 
-    test('previewCustomSms: blank message counts the default opener — the body commit() would send', async () => {
+    test('previewMovedSms: blank message counts the default opener — the body commit() would send', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
-      wireDb({
-        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, reschedule_token: 'tok-abc' }) })],
-        short_codes: [chain({ first: jest.fn().mockResolvedValue({ code: 'abcde' }) })],
-      });
-      const result = await RainOut.previewCustomSms({
+      wireSingle();
+      const result = await RainOut.previewMovedSms({
         serviceId: 'svc-1',
+        reasonCode: 'custom',
         customMessage: '   ',
         target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
       });
@@ -3138,12 +3355,12 @@ describe('rain-out service', () => {
       expect(vars.custom_message).toBe('quick update on your upcoming appointment.');
     });
 
-    test('previewCustomSms: gate off / dead template reject like commit would', async () => {
+    test('previewMovedSms: gate off / dead template reject like commit would', async () => {
       wireDb({
         scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
       });
-      let result = await RainOut.previewCustomSms({
-        serviceId: 'svc-1', customMessage: MESSAGE,
+      let result = await RainOut.previewMovedSms({
+        serviceId: 'svc-1', reasonCode: 'custom', customMessage: MESSAGE,
         target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
       });
       expect(result).toMatchObject({ ok: false, reason: 'bad_reason' });
@@ -3153,8 +3370,8 @@ describe('rain-out service', () => {
       wireDb({
         scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
       });
-      result = await RainOut.previewCustomSms({
-        serviceId: 'svc-1', customMessage: MESSAGE,
+      result = await RainOut.previewMovedSms({
+        serviceId: 'svc-1', reasonCode: 'custom', customMessage: MESSAGE,
         target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
       });
       expect(result).toMatchObject({ ok: false, reason: 'custom_message_unavailable' });

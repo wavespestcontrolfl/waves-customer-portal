@@ -146,10 +146,133 @@ async function renderCustomMovedBody({ firstName, serviceType, date, window, cus
   });
 }
 
-// Hard cap for the assembled custom-move SMS (owner requirement: 2 segments,
-// never 3). Encoding-aware: the counter reports UCS-2 budgets when any
+// Hard cap every Quick Move text is held to pre-move (owner requirement:
+// 2 segments, never 3): the Custom rung's assembled body, and a preset
+// reason's v3 body plus the dispatcher's appended note (owner ask
+// 2026-09-07 — the note was the one path that could still bill a third
+// segment). Encoding-aware: the counter reports UCS-2 budgets when any
 // non-GSM char survives normalization.
-const CUSTOM_SMS_MAX_SEGMENTS = 2;
+const MOVED_SMS_MAX_SEGMENTS = 2;
+
+// The dispatcher's note rides AFTER the templated copy on every preset
+// rung — it decorates the notice, never replaces it. One composer so the
+// pre-move cap counts the exact suffix the send appends.
+function withTeamNote(body, note) {
+  return note ? `${body}\n\nNote from our team: ${note}` : body;
+}
+
+// Segment math on the body AS IT SENDS: sendCustomerMessage strips the
+// https:// scheme from links and GSM-normalizes smart punctuation before
+// counting, so the cap must measure the same transform — a raw note's
+// curly apostrophe would otherwise read as UCS-2 here (67-char segments)
+// and reject a text that sends as GSM-7 in two (codex pre-push P1).
+// Returns the counter's fields plus `sent`, the transformed body.
+function measureAsSent(body) {
+  const { stripSmsUrlScheme } = require('./messaging/sms-link-policy');
+  const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
+  const { countSegments } = require('./messaging/segment-counter');
+  const sent = normalizeGsmPunctuation(stripSmsUrlScheme(body));
+  return { sent, ...countSegments(sent) };
+}
+
+// The v3 rung's single render path — sendMovedSms and commit()'s pre-move
+// note cap both call THIS, so the body the cap was measured against is
+// shaped exactly like the body that sends (same template row, same link
+// clause wording, same gate_locked nudge).
+//   templateBody: the row snapshot the pre-move cap measured (see
+//     v3TemplateSnapshot) — the send renders from it, never from a re-read
+//     row an admin edit could have grown in between (codex pre-push P1).
+async function renderV3MovedBody({ firstName, serviceType, date, window, weatherLead, reasonCode, rescheduleUrl, serviceId, templateBody = null }) {
+  // gate_locked leads with the portal fix-it nudge so the reschedule
+  // link still closes the message (owner ask 2026-08-25). "forecast"
+  // only when the page's banner will actually show one — a non-weather
+  // move renders the banner without weather chips.
+  const gateAccessClause = reasonCode === 'gate_locked' ? GATE_ACCESS_CLAUSE : '';
+  const linkClause = gateAccessClause + (rescheduleUrl
+    ? (isExtraReason(reasonCode)
+      ? ` New time & other options: ${rescheduleUrl}`
+      : ` New time, forecast & other options: ${rescheduleUrl}`)
+    : ' Need a different time? Reply to this message.');
+  return renderSmsTemplate('rain_out_moved_v3', {
+    first_name: firstName || 'there',
+    service_type: (serviceType || 'service').toLowerCase(),
+    new_option: customerArrivalOption(date, window),
+    weather_lead: weatherLead,
+    link_clause: linkClause,
+  }, { workflow: 'tech_rain_out', entity_type: 'scheduled_service', entity_id: serviceId }, {
+    // Base row only: the pre-move cap and the sheet's counter measure ONE
+    // body, and a weighted random variant at send time could be longer
+    // than the one measured (same contract the Custom rung has — codex
+    // r3 P1 there, pre-push P1 here). No variant rows exist for this key
+    // in prod, so today's sends are byte-identical.
+    noVariants: true,
+    ...(templateBody != null ? { templateBody } : {}),
+  });
+}
+
+// The v3 row's body as it stands NOW — the one snapshot both the pre-move
+// cap and the send render from. Null = uncapped: the gate is dark (v2 is
+// the long copy that bills 4+ segments by design), or the row is missing /
+// disabled (the send path's own kill switch reports that outcome).
+async function v3TemplateSnapshot() {
+  if (process.env.GATE_RAINOUT_MOVE_BANNER !== 'true') return null;
+  try {
+    const row = await db('sms_templates').where({ template_key: 'rain_out_moved_v3' }).first('body', 'is_active');
+    return row && row.is_active !== false && row.body ? String(row.body) : null;
+  } catch (err) {
+    logger.warn(`[rain-out] v3 template snapshot read failed — note cap skipped: ${err.message}`);
+    return null;
+  }
+}
+
+// Pre-move body for a PRESET reason's notice + note, measured against the
+// same cap the Custom rung wears, rendered from the v3 row snapshot
+// (v3TemplateSnapshot; null snapshot = uncapped, null here too). The
+// weather lead is the LONGEST composeWeatherLead can produce for the
+// reason (same-day part-of-day wording, else the two-digit-chance
+// wording), so the count never understates the send: the real lead is
+// forecast-dependent and rendered at send time, but it is at most this
+// long.
+async function renderPresetMovedNotice({ service, reasonCode, target, note, rescheduleUrl, serviceId, templateBody }) {
+  if (!templateBody) return null;
+  const isSameDay = String(target.date) === etDateString();
+  const body = await renderV3MovedBody({
+    firstName: service.first_name,
+    serviceType: service.service_type,
+    date: target.date,
+    window: service.visit_id ? LONGEST_ARRIVAL_WINDOW : target.window,
+    weatherLead: composeWeatherLead({ reasonCode, isSameDay, hour: etParts().hour, todayChance: 30 }),
+    reasonCode,
+    rescheduleUrl,
+    serviceId,
+    templateBody,
+  });
+  return body ? withTeamNote(body, note) : null;
+}
+
+// The reschedule URL a pre-move render measures — and the one the send
+// then reuses (prebuiltSms.url). Built through the SAME link builder the
+// send uses, so a grouped / frozen / dispatch-pending visit gets no link
+// here either (a bare existing-code lookup skipped those refusals — codex
+// pre-push P1), preferring the visit's EXISTING short code over a fresh
+// mint: the sheet's counter estimated against the existing code, and a
+// legacy 5-char code vs a fresh 10-char mint flips a boundary case
+// (codex PR P2).
+async function preMoveRescheduleUrl(serviceId, service) {
+  return (await buildRescheduleLink(serviceId, {
+    customerId: service.cust_id || service.customer_id,
+    reuseExisting: true,
+  })).url;
+}
+
+// A grouped stop's moved-SMS quotes the STOP's landed arrival start (the
+// earliest member start after the move — visit-groups' visitStart), which
+// is only known once the move lands. The customer label's length varies
+// by at most two characters with the start (`1:00 PM - 3:00 PM` vs
+// `10:00 AM - 12:00 PM`), so the pre-move cap measures a grouped stop at
+// the LONGEST label any start can produce, never the tapped member's slot
+// (codex pre-push P1). Single stops quote the target window exactly.
+const LONGEST_ARRIVAL_WINDOW = { start: '10:00', end: null };
 
 // Send-layer blockers the note guards can't see because they live in the
 // TEMPLATE's static text (a broken-render marker like '1970'): discovering them AFTER the move strands a moved visit with
@@ -161,53 +284,65 @@ function customBodySendBlocked(body) {
 }
 
 /**
- * Server-side counter for the sheet's Custom mode: renders the EXACT body
- * commit() would send — same template row (base, noVariants), same
+ * Server-side counter for the sheet's message box: renders the body
+ * commit() would measure — the Custom rung's exact body, or a preset
+ * reason's v3 notice with the note appended (renderPresetMovedNotice) —
+ * through the same template row (base, noVariants), same
  * existing-short-code link selection, same renderer normalizations — and
  * returns the 2-segment math. The client keeps NO render mirrors (codex r9
  * P1: reimplementing gsm-normalize/segment-counter/sms-time-format/
  * substitution client-side meant any server-side change could silently
  * desync the advisory counter). Advisory + read-only: never mints a short
- * code, never moves anything; commit() re-renders and enforces.
+ * code, never moves anything; commit() re-renders and enforces. A preset
+ * reason whose rung is uncapped (v3 gate dark) answers `uncapped` so the
+ * sheet shows no counter rather than a wrong one.
  */
-async function previewCustomSms({ serviceId, customMessage, target }) {
-  if (!customReasonEnabled()) return { ok: false, reason: 'bad_reason' };
+async function previewMovedSms({ serviceId, reasonCode, customMessage, target }) {
+  const isCustom = reasonCode === CUSTOM_REASON;
+  if (!isValidReason(reasonCode)) return { ok: false, reason: 'bad_reason' };
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
   if (!target?.date || !target.window?.start) return { ok: false, reason: 'bad_target' };
   // Count the message the commit path embeds: sanitizeCustomerNote
-  // collapses whitespace runs, and a blank box falls back to
+  // collapses whitespace runs, and a blank Custom box falls back to
   // CUSTOM_DEFAULT_MESSAGE exactly like commit() does — the counter must
   // measure the body that would actually send. The full guard suite stays
   // at commit — the preview only answers "how long".
-  const message = String(customMessage == null ? '' : customMessage).replace(/\s+/g, ' ').trim()
-    || CUSTOM_DEFAULT_MESSAGE;
-  const { existingShortUrlFor, shortLinkBaseUrl } = require('./short-url');
-  const url = service.reschedule_token
-    ? ((await existingShortUrlFor({
-      kind: 'reschedule', entityType: 'scheduled_services', entityId: serviceId,
-    })) || `${shortLinkBaseUrl()}/l/xxxxxxxxxx`)
-    : null;
-  const body = await renderCustomMovedBody({
-    firstName: service.first_name,
-    serviceType: service.service_type,
-    date: target.date,
-    window: target.window,
-    customMessage: message,
-    rescheduleUrl: url,
-    serviceId,
+  const message = String(customMessage == null ? '' : customMessage).replace(/\s+/g, ' ').trim();
+  // The link the way commit() will build it — same eligibility checks
+  // (a grouped / frozen / dispatch-pending visit gets NO link, so the
+  // counter must not measure one — codex pre-push P1), same existing-code
+  // preference — but read-only: a fresh-code-length placeholder where a
+  // mint would happen.
+  const { url } = await buildRescheduleLink(serviceId, {
+    customerId: service.cust_id || service.customer_id,
+    reuseExisting: true,
+    previewOnly: true,
   });
-  if (!body) return { ok: false, reason: 'custom_message_unavailable' };
-  const { countSegments } = require('./messaging/segment-counter');
-  const seg = countSegments(body);
+  const body = isCustom
+    ? await renderCustomMovedBody({
+      firstName: service.first_name,
+      serviceType: service.service_type,
+      date: target.date,
+      window: target.window,
+      customMessage: message || CUSTOM_DEFAULT_MESSAGE,
+      rescheduleUrl: url,
+      serviceId,
+    })
+    : await renderPresetMovedNotice({
+      service, reasonCode, target, note: message, rescheduleUrl: url, serviceId,
+      templateBody: await v3TemplateSnapshot(),
+    });
+  if (!body) return { ok: false, reason: isCustom ? 'custom_message_unavailable' : 'uncapped' };
+  const seg = measureAsSent(body);
   const perSegment = seg.encoding === 'GSM_7' ? 153 : 67;
-  const used = seg.encoding === 'GSM_7' ? seg.gsmSlotCount : body.length;
+  const used = seg.encoding === 'GSM_7' ? seg.gsmSlotCount : seg.sent.length;
   return {
     ok: true,
     segments: seg.segmentCount,
-    maxSegments: CUSTOM_SMS_MAX_SEGMENTS,
-    withinCap: seg.segmentCount <= CUSTOM_SMS_MAX_SEGMENTS,
-    remaining: perSegment * CUSTOM_SMS_MAX_SEGMENTS - used,
+    maxSegments: MOVED_SMS_MAX_SEGMENTS,
+    withinCap: seg.segmentCount <= MOVED_SMS_MAX_SEGMENTS,
+    remaining: perSegment * MOVED_SMS_MAX_SEGMENTS - used,
     encoding: seg.encoding,
   };
 }
@@ -1183,8 +1318,8 @@ async function getOptions(serviceId, { caller = null } = {}) {
   // the gate is on AND the template row is live — a missing/disabled row
   // would send every Move into commit()'s custom_message_unavailable
   // rejection, so hide the option instead. The sheet's live 2-segment
-  // counter is SERVER-rendered (previewCustomSms, called by the
-  // custom-preview route) — the client keeps no render mirrors (codex r9
+  // counter is SERVER-rendered (previewMovedSms, called by the
+  // sms-preview route) — the client keeps no render mirrors (codex r9
   // P1), so no compose payload is served here.
   let customCompose = null;
   if (customReasonEnabled()) {
@@ -1192,7 +1327,7 @@ async function getOptions(serviceId, { caller = null } = {}) {
       .where({ template_key: CUSTOM_TEMPLATE_KEY })
       .first('is_active');
     if (row && row.is_active !== false) {
-      customCompose = { maxSegments: CUSTOM_SMS_MAX_SEGMENTS };
+      customCompose = { maxSegments: MOVED_SMS_MAX_SEGMENTS };
     }
   }
 
@@ -1227,20 +1362,21 @@ async function getOptions(serviceId, { caller = null } = {}) {
 // without it — the copy is optional, the tech's response is not.
 const FORECAST_DECORATION_TIMEOUT_MS = 1500;
 
-async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, customerNote = null, actorUserId = null, forecastHealth = { degraded: false }, operatorInitiated = false, prebuiltCustomSms = null }) {
+async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, customerNote = null, actorUserId = null, forecastHealth = { degraded: false }, operatorInitiated = false, prebuiltSms = null }) {
   if (!customer?.phone) return { sent: false, reason: 'no_phone' };
 
   const isCustom = reasonCode === CUSTOM_REASON;
 
   // Moved-first means the new slot is already booked — no confirmation
   // reply to ask for. Adjustments self-serve through the same tokenized
-  // /reschedule link the 72h/24h reminders send. A custom move reuses the
-  // { url, body } commit() built for its pre-move segment check: templates
-  // are admin-editable and the shortener can fall back to the LONG url, so
+  // /reschedule link the 72h/24h reminders send. A capped move reuses what
+  // commit() built for its pre-move segment check — { url, body } for a
+  // custom move, { url } for a preset move with a note: templates are
+  // admin-editable and the shortener can fall back to the LONG url, so
   // rebuilding either here could exceed the cap the check passed (codex
-  // pre-push P1) — the body that was checked is the body that sends.
-  const { url: rescheduleUrl } = prebuiltCustomSms
-    ? { url: prebuiltCustomSms.url }
+  // pre-push P1 ×2) — the link that was measured is the link that sends.
+  const { url: rescheduleUrl } = prebuiltSms
+    ? { url: prebuiltSms.url }
     : await buildRescheduleLink(serviceId, { customerId: customer.id });
   // gate_locked carries the portal fix-it nudge ahead of the reschedule
   // clause on whichever rung renders — the customer must hear how to fix
@@ -1332,8 +1468,8 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
     // missing/disabled row (its own kill switch — there is no honest
     // fallback rung, the older bodies all render a reason the dispatcher
     // didn't pick) reports the customer was NOT texted.
-    if (prebuiltCustomSms?.body) {
-      body = prebuiltCustomSms.body;
+    if (prebuiltSms?.body) {
+      body = prebuiltSms.body;
     } else {
       body = await renderCustomMovedBody({
         firstName: customer.first_name,
@@ -1352,28 +1488,27 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
       // render must not exceed it either. (Placeholder integrity is already
       // enforced inside the render via requiredVars: a gutted template
       // returns null above.)
-      const { countSegments } = require('./messaging/segment-counter');
-      if (countSegments(body).segmentCount > CUSTOM_SMS_MAX_SEGMENTS) {
-        logger.warn(`[rain-out] custom body for ${serviceId} exceeds ${CUSTOM_SMS_MAX_SEGMENTS} segments — no SMS`);
+      if (measureAsSent(body).segmentCount > MOVED_SMS_MAX_SEGMENTS) {
+        logger.warn(`[rain-out] custom body for ${serviceId} exceeds ${MOVED_SMS_MAX_SEGMENTS} segments — no SMS`);
         return { sent: false, reason: 'too_many_segments' };
       }
     }
     renderedKey = CUSTOM_TEMPLATE_KEY;
   }
   if (!body && process.env.GATE_RAINOUT_MOVE_BANNER === 'true') {
-    body = await renderSmsTemplate('rain_out_moved_v3', {
-      ...sharedVars,
-      weather_lead: weatherLead,
-      // "forecast" only when the page's banner will actually show one —
-      // a non-weather move renders the banner without weather chips.
-      // gate_locked leads with the portal fix-it nudge so the reschedule
-      // link still closes the message (owner ask 2026-08-25).
-      link_clause: gateAccessClause + (rescheduleUrl
-        ? (isExtraReason(reasonCode)
-          ? ` New time & other options: ${rescheduleUrl}`
-          : ` New time, forecast & other options: ${rescheduleUrl}`)
-        : ' Need a different time? Reply to this message.'),
-    }, renderContext);
+    body = await renderV3MovedBody({
+      firstName: customer.first_name,
+      serviceType: job.service_type,
+      date: chosen.date,
+      window: chosen.window,
+      weatherLead,
+      reasonCode,
+      rescheduleUrl,
+      serviceId,
+      // The row snapshot the pre-move note cap measured, when there was
+      // one — the send never re-reads a row an edit could have grown.
+      templateBody: prebuiltSms?.templateBody || null,
+    });
     if (body) {
       renderedKey = 'rain_out_moved_v3';
     } else {
@@ -1420,11 +1555,10 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
 
   // Dispatcher note rides AFTER whichever rung rendered — it decorates the
   // templated copy, never replaces it (the reply-to-adjust link and weather
-  // grounding stay intact). commit() already sanitized it. The custom rung
+  // grounding stay intact). commit() already sanitized it and, on the v3
+  // rung, held body + note to the segment cap pre-move. The custom rung
   // embeds the message as its opening line, so no append there.
-  if (customerNote && !isCustom) {
-    body = `${body}\n\nNote from our team: ${customerNote}`;
-  }
+  if (!isCustom) body = withTeamNote(body, customerNote);
 
   const result = await sendCustomerMessage({
     to: customer.phone,
@@ -1583,26 +1717,17 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // Custom reason: the dispatcher's message is the SMS's opening line, so
   // it's as stop-specific as the note (route scope would fan one customer's
   // situation out to strangers — single stop only), and the assembled SMS
-  // must fit CUSTOM_SMS_MAX_SEGMENTS. A blank message is allowed (owner
+  // must fit MOVED_SMS_MAX_SEGMENTS. A blank message is allowed (owner
   // ruling 2026-08-24) — the template already carries the full notice, so
   // CUSTOM_DEFAULT_MESSAGE fills the front instead of rejecting. The exact
   // send body is rendered here, pre-move, through the same
   // renderCustomMovedBody + link the send will use — reject BEFORE anything
   // moves, never after.
-  let prebuiltCustomSms = null;
+  let prebuiltSms = null;
   if (reasonCode === CUSTOM_REASON) {
     if (scope === 'route') return { ok: false, reason: 'custom_route_scope' };
     if (notifyCustomer) {
-      // Reuse the visit's EXISTING short code before minting: the
-      // reschedule target is deterministic per visit (stable token, codes
-      // never expire), and the sheet's live counter estimated against the
-      // existing code — minting here could produce a different-length URL
-      // than the one the counter measured (codex PR P2: a legacy 5-char
-      // code vs a fresh 10-char mint flips a boundary case).
-      const { existingShortUrlFor } = require('./short-url');
-      const url = (await existingShortUrlFor({
-        kind: 'reschedule', entityType: 'scheduled_services', entityId: serviceId,
-      })) || (await buildRescheduleLink(serviceId, { customerId: service.cust_id || service.customer_id })).url;
+      const url = await preMoveRescheduleUrl(serviceId, service);
       const body = await renderCustomMovedBody({
         firstName: service.first_name,
         serviceType: service.service_type,
@@ -1625,15 +1750,37 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         logger.warn(`[rain-out] ${CUSTOM_TEMPLATE_KEY} assembled body trips the send guards for ${serviceId} — rejecting pre-move`);
         return { ok: false, reason: 'custom_message_unavailable' };
       }
-      const { countSegments } = require('./messaging/segment-counter');
-      const seg = countSegments(body);
-      if (seg.segmentCount > CUSTOM_SMS_MAX_SEGMENTS) {
+      if (measureAsSent(body).segmentCount > MOVED_SMS_MAX_SEGMENTS) {
         return { ok: false, reason: 'note_too_many_segments' };
       }
       // The send reuses this exact { url, body } — templates are
       // admin-editable, so a re-render at send time could exceed the cap
       // this check just passed (codex pre-push P1).
-      prebuiltCustomSms = { url, body };
+      prebuiltSms = { url, body };
+    }
+  } else if (notifyCustomer && note) {
+    // Preset reason with a note: the same 2-segment cap, measured on the
+    // v3 notice + the appended note (the note rides the anchor stop only,
+    // so route scope measures the anchor's text — siblings get the
+    // standard copy). Reject BEFORE the move so the dispatcher shortens
+    // the note instead of the customer paying for a third segment. An
+    // uncapped rung (v3 gate dark, or its row missing/disabled) skips the
+    // check — the send path owns those outcomes. The send reuses the
+    // measured { url, templateBody }: a fresh mint or a shortener fallback
+    // to the LONG url, or a row an admin edit grew in between, could
+    // exceed the cap this check passed (codex pre-push P1 ×2). The send
+    // re-renders that snapshot with its two moving parts — the weather
+    // lead and a grouped stop's landed window — which were measured at
+    // their longest.
+    const url = await preMoveRescheduleUrl(serviceId, service);
+    prebuiltSms = { url };
+    const templateBody = await v3TemplateSnapshot();
+    if (templateBody) {
+      const body = await renderPresetMovedNotice({ service, reasonCode, target, note, rescheduleUrl: url, serviceId, templateBody });
+      if (body && measureAsSent(body).segmentCount > MOVED_SMS_MAX_SEGMENTS) {
+        return { ok: false, reason: 'note_too_many_segments' };
+      }
+      prebuiltSms.templateBody = templateBody;
     }
   }
   // "Running behind" can only push a same-day visit LATER. The generic
@@ -2055,10 +2202,11 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           actorUserId,
           forecastHealth,
           operatorInitiated,
-          // Custom move: send the exact body the pre-move segment check
-          // validated (see sendMovedSms header).
-          ...(job.id === serviceId && prebuiltCustomSms
-            ? { prebuiltCustomSms }
+          // Capped move: send with the link (and, for Custom, the exact
+          // body) the pre-move segment check measured (see sendMovedSms
+          // header).
+          ...(job.id === serviceId && prebuiltSms
+            ? { prebuiltSms }
             : {}),
         });
       } catch (err) {
@@ -2182,7 +2330,7 @@ function summarizeCommitResults(results) {
 module.exports = {
   getOptions,
   commit,
-  previewCustomSms,
+  previewMovedSms,
   checkTarget,
   checkSlots,
   // Tech-blind occupancy guard, consumed by the find-time hint path —
