@@ -124,7 +124,12 @@ advice retains its `area_estimated` label.
 Without either signal, observation/summary wording cannot trigger sprinkler
 advice or an unqualified "no action needed" reassurance. Measured water
 deficits/surpluses and eligible stored water snapshots
-retain their existing behavior. The optional whole-report AI narrative runs
+retain their existing behavior. A current watering snapshot can originate from
+Monday app publication independently of email delivery; `sent_at` remains an
+email outcome. Signed `plan` render pins bind to the stable publication time
+(or the original email timestamp on older snapshots), with the same policy,
+plan-week and service-premise checks. Unpublished drafts remain unavailable.
+The optional whole-report AI narrative runs
 only when `droughtSignal` is `true`; otherwise all deterministic report copy
 is retained before narrative cache/model access. Lawn PDF render strategy `p4` regenerates
 older cached PDFs to match this evidence rule),
@@ -135,7 +140,12 @@ same noindex/no-referrer/no-store headers as `/report/:token`),
 operational extension runs after acknowledgment under
 `GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
 it reuses persisted SMS evidence for private profile updates and admin
-notifications, with no additional response fields or customer sends),
+notifications, with no additional response fields or customer sends;
+ordinary inbound SMS is persisted before reschedule or lead-intake consumption,
+including replies that return early. Failure to persist that source returns
+503 with empty TwiML before either consumer runs; the owned SID claim is
+released before that response. Twilio's configured retry/fallback policy
+governs redelivery),
 `/api/webhooks/twilio/collections-vestibule[-key|-noinput]` +
 `/api/webhooks/twilio/collections-relay-complete` +
 `/api/webhooks/twilio/collections-transfer-complete` +

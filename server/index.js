@@ -730,6 +730,7 @@ app.use('/api/admin/triage', require('./routes/admin-triage'));
 
 app.use('/api/admin/contracts', require('./routes/admin-contracts'));
 app.use('/api/admin/document-templates', require('./routes/admin-document-templates'));
+app.use('/api/tech/staff-documents', require('./routes/tech-staff-documents'));
 app.use('/api/admin/invoices', require('./routes/admin-invoices'));
 app.use('/api/admin/billing-recovery', require('./routes/admin-billing-recovery'));
 app.use('/api/admin/payers', require('./routes/admin-payers'));
@@ -854,8 +855,8 @@ if (config.nodeEnv === 'production') {
     {
       prefix: '/admin',
       manifest: '/admin-manifest.json',
-      title: 'Waves Admin',
-      appleTitle: 'Waves Admin',
+      title: 'Waves',
+      appleTitle: 'Waves',
       themeColor: '#18181B',
       // html.admin-app scopes the admin form/font CSS (index.css) and marks
       // the document as already-admin for the SPA's bookmark-meta snapshot.

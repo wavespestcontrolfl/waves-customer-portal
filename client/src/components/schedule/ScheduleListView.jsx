@@ -326,13 +326,30 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
     setBulkBusy(false);
   };
 
-  const thClass = 'text-left text-11 uppercase tracking-label font-medium text-zinc-500 px-3 py-2 border-b border-hairline border-zinc-200 cursor-pointer hover:text-zinc-900 select-none whitespace-nowrap';
+  const thClass = 'text-left text-11 uppercase tracking-label font-medium text-zinc-500 px-3 py-2 border-b border-hairline border-zinc-200 whitespace-nowrap';
   const tdClass = 'px-3 py-2.5 text-13 border-b border-hairline border-zinc-100';
 
   const SortIndicator = ({ col }) => {
     if (sortCol !== col) return null;
-    return <span className="ml-0.5 text-zinc-400">{sortDir === 'asc' ? '↑' : '↓'}</span>;
+    return <span aria-hidden="true" className="ml-0.5 text-zinc-400">{sortDir === 'asc' ? '↑' : '↓'}</span>;
   };
+  // A sortable header is a real button (keyboard reachable) and the <th>
+  // announces the sort through aria-sort. A render helper rather than a
+  // component defined inside render (that would remount every header).
+  const sortTh = (col, label, className) => (
+    <th
+      className={cn(thClass, className)}
+      aria-sort={sortCol === col ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+    >
+      <button
+        type="button"
+        onClick={() => toggleSort(col)}
+        className="inline-flex items-center gap-0.5 uppercase tracking-label font-medium text-inherit hover:text-zinc-900 u-focus-ring"
+      >
+        {label}<SortIndicator col={col} />
+      </button>
+    </th>
+  );
 
   return (
     <div className="flex flex-col gap-3">
@@ -496,14 +513,14 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh, 
                   onChange={toggleAll}
                   className="w-4 h-4" style={{ accentColor: '#18181B' }} />
               </th>
-              <th className={thClass} onClick={() => toggleSort('customerName')}>Customer<SortIndicator col="customerName" /></th>
-              <th className={thClass} onClick={() => toggleSort('serviceType')}>Service<SortIndicator col="serviceType" /></th>
-              <th className={thClass} onClick={() => toggleSort('scheduledDate')}>Date<SortIndicator col="scheduledDate" /></th>
+              {sortTh('customerName', 'Customer')}
+              {sortTh('serviceType', 'Service')}
+              {sortTh('scheduledDate', 'Date')}
               <th className={thClass}>Time</th>
-              <th className={thClass} onClick={() => toggleSort('technicianName')}>Tech<SortIndicator col="technicianName" /></th>
-              <th className={thClass} onClick={() => toggleSort('status')}>Status<SortIndicator col="status" /></th>
+              {sortTh('technicianName', 'Tech')}
+              {sortTh('status', 'Status')}
               <th className={thClass}>Prepaid</th>
-              <th className={cn(thClass, 'text-right')} onClick={() => toggleSort('estimatedPrice')}>Price<SortIndicator col="estimatedPrice" /></th>
+              {sortTh('estimatedPrice', 'Price', 'text-right')}
             </tr>
           </thead>
           <tbody>

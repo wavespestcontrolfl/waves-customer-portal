@@ -114,42 +114,12 @@ function Card({ children, style, onClick }) {
   );
 }
 
-function TabBar({ tabs, active, onChange }) {
-  return (
-    <div
-      style={{
-        display: "flex",
-        gap: 4,
-        marginBottom: 24,
-        borderBottom: `1px solid ${COLORS.border}`,
-        paddingBottom: 0,
-      }}
-    >
-      {tabs.map((t) => (
-        <button
-          key={t.key}
-          onClick={() => onChange(t.key)}
-          style={{
-            padding: "10px 20px",
-            background: "none",
-            border: "none",
-            color: active === t.key ? COLORS.teal : COLORS.textMuted,
-            fontSize: 14,
-            fontWeight: 500,
-            cursor: "pointer",
-            borderBottom:
-              active === t.key
-                ? `2px solid ${COLORS.teal}`
-                : "2px solid transparent",
-            marginBottom: -1,
-            transition: "all 0.2s",
-          }}
-        >
-          {t.label}
-        </button>
-      ))}
-    </div>
-  );
+function HealthViewSelect({ tabs, active, onChange }) {
+  return <label style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20, fontSize: 14, color: COLORS.textMuted }}>Health view
+    <select value={active} onChange={(event) => onChange(event.target.value)} style={{ padding: "8px 12px", border: `1px solid ${COLORS.border}`, borderRadius: 4, color: COLORS.text, background: COLORS.white, fontSize: 16 }}>
+      {tabs.map((tab) => <option value={tab.key} key={tab.key}>{tab.label}</option>)}
+    </select>
+  </label>;
 }
 
 function ScoreBar({ value, max = 100, color, width = 60, height = 6 }) {
@@ -314,9 +284,9 @@ function DashboardTab({ data }) {
     {
       label: "Fleet Health Avg",
       value: data.fleetHealthAvg,
-      suffix: "/100",
+      suffix: data.fleetHealthAvg == null ? "" : "/100",
       color:
-        data.fleetHealthAvg >= 65
+        data.fleetHealthAvg == null ? COLORS.textMuted : data.fleetHealthAvg >= 65
           ? COLORS.green
           : data.fleetHealthAvg >= 50
             ? COLORS.amber
@@ -375,7 +345,7 @@ function DashboardTab({ data }) {
             <div
               style={{ fontSize: 28, fontWeight: 700, color: m.color, ...mono }}
             >
-              {m.value}
+              {m.value ?? "Not available"}
               {m.suffix || ""}
             </div>{" "}
           </Card>
@@ -1850,14 +1820,23 @@ function QuietTab() {
 function CustomerHealthSection() {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [dashboard, setDashboard] = useState(null);
+  const [dashboardError, setDashboardError] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
     if (activeTab === "dashboard") {
+      setDashboard(null);
+      setDashboardError(false);
       adminFetch("/admin/health/dashboard")
-        .then(setDashboard)
-        .catch(() => setDashboard(null));
+        .then((result) => {
+          if (result?.complete === false || !["atRiskCount", "healthyCount", "predictedChurns"].every((key) => Number.isFinite(result?.[key])) || !Array.isArray(result?.gradeDistribution) || !Array.isArray(result?.atRiskCustomers)) throw new Error("Incomplete health summary");
+          if (!cancelled) setDashboard(result);
+        })
+        .catch(() => { if (!cancelled) setDashboardError(true); });
     }
-  }, [activeTab]);
+    return () => { cancelled = true; };
+  }, [activeTab, retryKey]);
 
   const tabs = [
     { key: "dashboard", label: "Dashboard" },
@@ -1869,8 +1848,8 @@ function CustomerHealthSection() {
   return (
     <div>
       {" "}
-      <TabBar tabs={tabs} active={activeTab} onChange={setActiveTab} />
-      {activeTab === "dashboard" && <DashboardTab data={dashboard} />}
+      <HealthViewSelect tabs={tabs} active={activeTab} onChange={setActiveTab} />
+      {activeTab === "dashboard" && (dashboardError ? <div role="status" style={{ padding: 24, color: COLORS.textMuted }}><p>Health summary unavailable. Customer scores could not be verified.</p><button type="button" onClick={() => setRetryKey((key) => key + 1)} style={{ marginTop: 12, padding: "10px 16px", border: `1px solid ${COLORS.border}`, borderRadius: 4, background: COLORS.white }}>Retry health summary</button></div> : <DashboardTab data={dashboard} />)}
       {activeTab === "scores" && <ScoresTab />}
       {activeTab === "quiet" && <QuietTab />}
       {activeTab === "alerts" && <AlertsTab />}

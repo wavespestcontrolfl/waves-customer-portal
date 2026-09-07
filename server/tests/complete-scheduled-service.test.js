@@ -85,7 +85,7 @@ test('unexpected read failure rejects and preserves completion failure handling'
   const error = new Error('synthetic database failure');
   builder.first.mockRejectedValueOnce(error);
   await expect(complete()).rejects.toBe(error);
-  expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(null, error);
+  expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(null, error, db);
 });
 
 test('a stored completion replays without rewriting or starting a new completion', async () => {
@@ -106,4 +106,18 @@ test('a claim conflict returns its original status and payload', async () => {
     .resolves.toEqual({ status: 409, body: payload });
   expect(attempts.claimCompletionAttempt).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: 'body-key' }), db);
   expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalled();
+});
+
+test('a saved packet blocks the individual replay/resume claim', async () => {
+  service.visit_id = '00000000-0000-4000-8000-000000000105';
+  const result = await complete();
+  expect(result).toMatchObject({ status: 409, body: { code: 'visit_grouped', visitId: service.visit_id } });
+  expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
+});
+
+test('packet fields in the submitted form cannot grant packet ownership', async () => {
+  service.visit_id = '00000000-0000-4000-8000-000000000105';
+  const result = await complete({ packetRecord: { itemId: SERVICE_ID }, visitPacketId: SERVICE_ID });
+  expect(result.status).toBe(409);
+  expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
 });

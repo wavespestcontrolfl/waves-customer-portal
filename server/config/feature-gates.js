@@ -6,6 +6,7 @@
  * Adam manually enables them after verifying each one works.
  *
  * Set these as environment variables on Railway:
+ *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
  *   GATE_TECH_LINES=true        (per-tech Twilio lines: a text/call to a tech line reaches that tech; dark = office-line semantics)
@@ -96,6 +97,8 @@
 const isProd = process.env.NODE_ENV === 'production';
 
 const gates = {
+  // Staff Quick Links receipt picker; delivery evidence is recorded even while dark.
+  composerReceiptLinks: process.env.GATE_COMPOSER_RECEIPT_LINKS === 'true',
   // GATE_LAWN_PROPERTY_HISTORY: opt-in in every environment. Registered for
   // logGateStatus only; consumers use gateEnvValue at CALL time.
   lawnPropertyHistory: gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'),
@@ -2075,7 +2078,7 @@ const gates = {
   // (minutes per turf zone, hold, conditional-on-rain) from
   // @waves/irrigation-runtime buildWeekPlan. Off = today's copy exactly.
   // Kill = unset GATE_IRRIGATION_WEEK_PLAN.
-  irrigationWeekPlan: process.env.GATE_IRRIGATION_WEEK_PLAN === 'true',
+  irrigationWeekPlan: gateEnvValue('GATE_IRRIGATION_WEEK_PLAN'),
 
   // Saved Monday plan in My Property + the existing property-alerts sweep.
   // Explicit opt-in everywhere; email plan and property-alert gates still apply.
@@ -2513,6 +2516,8 @@ const gates = {
   labelPipeline: gateEnvValue('GATE_LABEL_PIPELINE'),
 
   closeoutMoneyCommsAlerts: gateEnvValue('GATE_CLOSEOUT_MONEY_COMMS_ALERTS'),
+  // Staff source/version UI and APIs. Default off; every request rechecks.
+  controlledStaffDocuments: gateEnvValue('GATE_CONTROLLED_STAFF_DOCUMENTS'),
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks

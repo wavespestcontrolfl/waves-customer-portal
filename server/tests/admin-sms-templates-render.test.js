@@ -35,9 +35,19 @@ describe('admin SMS template renderer', () => {
       track_url: 'https://portal.wavespestcontrol.com/l/abc23',
     });
 
-    // House-voice rule (2026-08-01): SMS portal links are sent BARE — no
-    // https:// — for tappable one-segment sends (g.page links keep it).
+    // SMS output omits the leading HTTPS scheme.
     expect(body).toBe('Hello Sam! Track: portal.wavespestcontrol.com/l/abc23');
+  });
+
+  test('removes schemes from external links in both stored base and variant bodies', async () => {
+    const vars = { first_name: 'Testname', track_url: 'https://g.page/r/demo/review' };
+    expect(await smsTemplates.getTemplate('sample_template', vars))
+      .toBe('Hello Testname! Track: g.page/r/demo/review');
+    SmsTemplateVariants.selectVariant.mockResolvedValueOnce({
+      body: 'Hello {first_name}! Review: {track_url} More: https://www.epa.gov/label',
+    });
+    expect(await smsTemplates.getTemplate('sample_template', vars))
+      .toBe('Hello Testname! Review: g.page/r/demo/review More: www.epa.gov/label');
   });
 
   test('returns null instead of leaking unresolved placeholders', async () => {

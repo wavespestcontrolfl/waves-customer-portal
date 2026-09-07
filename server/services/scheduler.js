@@ -102,7 +102,7 @@ async function scheduledDepositReceiptAllowed(msg) {
       .where({ customer_id: msg.customer_id })
       .first('payment_receipt_channel');
     const channel = prefs?.payment_receipt_channel || 'sms';
-    return channel === 'sms' || channel === 'both';
+    return channel === 'sms' || channel === 'both' || channel === 'push';
   } catch {
     return true;
   }
@@ -553,6 +553,23 @@ async function runAutonomousOpportunityMining({
 function initScheduledJobs() {
   const { isEnabled, logGateStatus } = require('../config/feature-gates');
   logGateStatus();
+
+  // A process that died mid-job (deploy kill) left its job_health row at
+  // 'running'; settle every such row whose advisory lock nobody holds
+  // (cron-lock.settleDeadRunningJobs). Once at boot, then every 15 min: on
+  // a rolling deploy the OUTGOING instance still holds its locks while this
+  // one boots and is killed afterwards, so the boot pass alone would skip
+  // exactly the rows it exists for (pre-push codex P1). Registered ABOVE
+  // the cronJobs early return — it is maintenance of the health ledger,
+  // not a job — and unguarded by runExclusive: the pinned conditional
+  // update makes concurrent passes harmless. The sweep reads pg_locks and
+  // never takes a work lease, and runs at :03/:18/:33/:48 — off every
+  // quarter-hour and top-of-hour job boundary (codex P1 on #4103).
+  // Fire-and-forget, fail-soft.
+  const settleDeadRunning = () => require('../utils/cron-lock').settleDeadRunningJobs()
+    .catch((err) => logger.warn(`[scheduler] dead-running job_health settle failed: ${err.message}`));
+  settleDeadRunning();
+  cron.schedule('3,18,33,48 * * * *', settleDeadRunning, { timezone: 'America/New_York' });
 
   // Cancel-notice late-claim rollout boundary (codex #3233 r35): stamped
   // at BOOT when the hook gate is on, so the boundary necessarily
@@ -3637,7 +3654,9 @@ function initScheduledJobs() {
             // in metadata and the replay forwards them, or the
             // require_input_ids validator would block a send the immediate
             // path already validated.
-            ...(claimMeta.invoice_id ? { invoiceId: claimMeta.invoice_id } : {}),
+            invoiceId: msg.message_type === 'service_complete_paid_receipt'
+              ? claimMeta.stamp_receipt_invoice_id
+              : claimMeta.invoice_id,
             ...(claimMeta.estimate_id ? { estimateId: claimMeta.estimate_id } : {}),
             // Inbound-reply provenance survives the retry rail: a transient
             // provider failure on an immediate AI reply (Twilio 429/5xx)
@@ -3670,6 +3689,9 @@ function initScheduledJobs() {
             metadata: {
               original_message_type: msg.message_type || 'scheduled',
               scheduled_sms_log_id: msg.id,
+              notificationEventKey: claimMeta.notificationEventKey,
+              useCustomerChannel: claimMeta.useCustomerChannel === true,
+              bundled_review_request_id: claimMeta.bundled_review_request_id,
               // Enqueue provenance survives the replay (codex #3607 r4): the
               // audit row is written under this worker's own entry point, so
               // the ORIGINAL one (e.g. autopay_completion_decline_deferred)
@@ -6571,8 +6593,8 @@ function initScheduledJobs() {
     try {
       const { runScheduleIntegrityWatchdog } = require('./schedule-integrity-watchdog');
       const result = await runScheduleIntegrityWatchdog();
-      if (!result.skipped && (result.stale > 0 || result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.acceptedScheduleGaps > 0 || result.acceptedScheduleCheckFailed)) {
-        logger.warn(`[schedule-integrity] stale=${result.stale} unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} acceptedScheduleGaps=${result.acceptedScheduleGaps}${result.acceptedScheduleCheckFailed ? ' ACCEPTED-SCHEDULE-CHECK-FAILED' : ''} alerted=${result.alerted}`);
+      if (!result.skipped && (result.stale > 0 || result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed || result.acceptedScheduleGaps > 0 || result.acceptedScheduleCheckFailed || result.prepayCoverageGaps > 0)) {
+        logger.warn(`[schedule-integrity] stale=${result.stale} unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} acceptedScheduleGaps=${result.acceptedScheduleGaps}${result.acceptedScheduleCheckFailed ? ' ACCEPTED-SCHEDULE-CHECK-FAILED' : ''} prepayCoverageGaps=${result.prepayCoverageGaps} alerted=${result.alerted}`);
       }
     } catch (err) {
       logger.error(`Schedule-integrity watchdog tick failed: ${err.message}`);

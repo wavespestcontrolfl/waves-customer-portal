@@ -1066,6 +1066,7 @@ export default function PublicBookingPage() {
               <div>
                 <AddressAutocomplete
                   autoFocus
+                  aria-label="Street address"
                   value={address.line1}
                   onChange={(v) => updateAddress(a => ({ ...a, line1: v, line2: '', formatted: '' }))}
                   onSelect={(parts) => {
@@ -1105,6 +1106,7 @@ export default function PublicBookingPage() {
                     step. The match re-checks on blur with the unit included. */}
                 <input
                   type="text"
+                  aria-label="Apartment or unit (optional)"
                   value={address.line2}
                   onChange={(e) => {
                     const v = e.target.value;

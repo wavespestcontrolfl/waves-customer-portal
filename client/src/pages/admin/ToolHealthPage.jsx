@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import useIsMobile from "../../hooks/useIsMobile";
 import { Link } from "react-router-dom";
 import { Activity, CalendarDays, Clock, RefreshCw, Timer } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -433,9 +434,20 @@ export default function ToolHealthPage() {
         return (
           <div key={key} style={sCard}>
             {" "}
-            <div
+            <button
+              type="button"
+              aria-expanded={isOpen}
+              className="u-focus-ring"
               onClick={() => setExpanded((e) => ({ ...e, [key]: !isOpen }))}
               style={{
+                background: "none",
+                border: 0,
+                padding: 0,
+                margin: 0,
+                font: "inherit",
+                color: "inherit",
+                textAlign: "inherit",
+                width: "100%",
                 display: "flex",
                 alignItems: "center",
                 gap: 12,
@@ -465,16 +477,16 @@ export default function ToolHealthPage() {
                 {ctx.toolsUsed} tools · {ctx.total} calls · {ctx.failed} failed
                 ({pct(ctx.errorRate)})
               </div>{" "}
-              <div style={{ color: D.muted, fontSize: 12 }}>
+              <div style={{ color: D.muted, fontSize: 12 }} aria-hidden="true">
                 {isOpen ? "▾" : "▸"}
               </div>{" "}
-            </div>
+            </button>
             {isOpen && (
+              <div style={{ overflowX: "auto", marginTop: 14 }}>
               <table
                 style={{
                   width: "100%",
                   borderCollapse: "collapse",
-                  marginTop: 14,
                 }}
               >
                 {" "}
@@ -581,6 +593,7 @@ export default function ToolHealthPage() {
                     ))}
                 </tbody>{" "}
               </table>
+              </div>
             )}
           </div>
         );
@@ -661,19 +674,34 @@ function Metric({ label, value }) {
 }
 
 function RecentErrorRow({ err, isLast }) {
+  const isMobile = useIsMobile(720);
+  // Expandable rows are real buttons (keyboard + aria-expanded); plain rows stay divs.
   const [open, setOpen] = useState(false);
   const msg = err.errorMessage || "(no message)";
   const canExpand = msg.length > 120 || msg.includes("\n");
+  const Row = canExpand ? "button" : "div";
 
   return (
-    <div
+    <Row
+      type={canExpand ? "button" : undefined}
+      aria-expanded={canExpand ? open : undefined}
+      className={canExpand ? "u-focus-ring" : undefined}
       onClick={() => canExpand && setOpen((o) => !o)}
       style={{
+        background: "none",
+        border: 0,
+        margin: 0,
+        font: "inherit",
+        color: "inherit",
+        textAlign: "inherit",
+        width: "100%",
+        boxSizing: "border-box",
         padding: "7px 14px",
         borderBottom: isLast ? "none" : `1px solid ${D.border}`,
         display: "grid",
-        gridTemplateColumns: "80px 170px 1fr",
+        gridTemplateColumns: isMobile ? "1fr" : "80px 170px 1fr",
         columnGap: 14,
+        rowGap: isMobile ? 4 : 0,
         alignItems: "start",
         cursor: canExpand ? "pointer" : "default",
       }}
@@ -743,6 +771,6 @@ function RecentErrorRow({ err, isLast }) {
       >
         {msg}
       </div>{" "}
-    </div>
+    </Row>
   );
 }

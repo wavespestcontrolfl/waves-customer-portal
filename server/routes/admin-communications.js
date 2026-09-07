@@ -16,7 +16,6 @@ const { placeBridgeCall } = require('../services/call-bridge');
 const { parseETDateTime, etDateString, etParts } = require('../utils/datetime-et');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { buildRescheduleLink } = require('../services/reschedule-link');
-const smsTemplatesRouter = require('./admin-sms-templates');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
 const { purposeForScheduledMessageType } = require('../services/scheduler');
 const { normalizePhone: normalizeCompliancePhone, phoneHash } = require('../services/messaging/compliance-contact-checks');
@@ -1451,11 +1450,15 @@ router.post('/messages/read', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Same conversation count consumed by Customer 360's one global badge.
+// Shared inbox count; Customer 360 may scope it to the selected customer.
 router.get('/unread-count', requireAdmin, async (req, res, next) => {
   try {
+    const { customerId } = req.query;
+    if (customerId !== undefined && (typeof customerId !== 'string' || !UUID_RE.test(customerId))) {
+      return res.status(400).json({ error: 'Invalid customer id' });
+    }
     const { countUnreadInboundSms } = require('../services/inbound-sms-read');
-    res.json(await countUnreadInboundSms({ excludePhones: ADMIN_PHONES }));
+    res.json(await countUnreadInboundSms({ excludePhones: ADMIN_PHONES, customerId }));
   } catch (err) { next(err); }
 });
 
@@ -1757,15 +1760,8 @@ async function firstNameForPhone(last10, customerIds) {
   return agreedFirstName(rows);
 }
 
-// Composer link inserts are SMS bodies the operator sends verbatim — they
-// never pass through getTemplate, so the owned-host scheme strip (owner
-// directive 2026-08-01: portal links go bare in SMS) has to happen here.
-// Same renderer function as the template path (admin-sms-templates
-// stripPortalUrlScheme) so the two paths can never disagree about which
-// hosts go bare; third-party hosts keep their scheme.
-const stripSmsLinkScheme = typeof smsTemplatesRouter.stripPortalUrlScheme === 'function'
-  ? smsTemplatesRouter.stripPortalUrlScheme
-  : (s) => s;
+// Composer inserts use the same SMS formatting as templates and sends.
+const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 
 // POST /api/admin/communications/reschedule-link  { phone, customerId? }
 // Composer helper: resolve the recipient's next upcoming reschedulable visit
@@ -1848,8 +1844,8 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     if (!url) return res.status(404).json({ error: 'This appointment has no reschedule link' });
 
     res.json({
-      url: stripSmsLinkScheme(url),
-      line: stripSmsLinkScheme(line),
+      url: stripSmsUrlScheme(url),
+      line: stripSmsUrlScheme(line),
       firstName: recipientFirstName,
       appointment: {
         id: svc.id,
@@ -1962,8 +1958,8 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
     if (!url) return res.status(404).json({ error: 'This customer has no re-service link' });
 
     res.json({
-      url: stripSmsLinkScheme(url),
-      line: stripSmsLinkScheme(line),
+      url: stripSmsUrlScheme(url),
+      line: stripSmsUrlScheme(line),
       customerId: eligible.id,
       lanes,
       firstName: recipientFirstName,
@@ -2116,7 +2112,7 @@ const EMAIL_SEND_CHANNELS = ['email', 'both'];
 // The Insert Link sheet's other per-customer links — kind ∈ review_request |
 // pay_balance | estimate | referral | autopay_setup | appointment |
 // card_request | prep_guide | service_report | contract | statement |
-// project_report. Same
+// receipt | project_report. Same
 // fail-closed recipient contract as
 // /reschedule-link (requireAdmin, POST body, full last-10 phone, customerId
 // cross-checked then expanded to the account, cross-account 409). Builders
@@ -2161,8 +2157,8 @@ async function statementLinkInsert(builders, last10, bodyCustomerId) {
     status: 200,
     body: {
       kind: 'statement',
-      url: stripSmsLinkScheme(result.url),
-      line: stripSmsLinkScheme(result.line),
+      url: stripSmsUrlScheme(result.url),
+      line: stripSmsUrlScheme(result.line),
       statement: result.statement || undefined,
       immediateOnly: result.immediateOnly || undefined,
       customerId: (selected || owners[0])?.id,
@@ -2251,7 +2247,11 @@ function composerLinkBuilders() {
     // Handled by statementLinkInsert before any customer resolution (the
     // key here only admits the kind).
     statement: null,
-    // A project report is the account's, like a service report.
+    // A receipt is the account's, like the pay link (a household shares
+    // its bills) — the resolved owner is the recipient whose receipt-text
+    // consent the builder checks; a project report the account's, like a
+    // service report.
+    receipt: (ids, primaryId) => builders.buildReceiptLink(ids, primaryId),
     project_report: (ids) => builders.buildProjectReportLink(ids),
   };
 }
@@ -2274,7 +2274,10 @@ const STRICT_OWNER_KINDS = ['autopay_setup', 'card_request', 'contract', 'prep_g
 // typed-in number sends as an unverified conversational lead, whose consent
 // read can miss the customer's notification_prefs entirely when the number
 // is formatted differently on file (GH Codex #3844 r4 P1).
-const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report', 'project_report'];
+// A receipt link is account-scoped like the pay link but its text is a
+// customer bearer too — the owner rides back so /sms applies the recipient's
+// own consent policy, never the unverified-lead one (GH Codex #3893 r3 P1).
+const OWNER_RIDES_BACK_KINDS = [...STRICT_OWNER_KINDS, 'appointment', 'service_report', 'project_report', 'receipt'];
 
 // The row a /customer-link kind targets: the operator-selected row first,
 // else the account row whose phone matches the number, else the first
@@ -2311,7 +2314,7 @@ async function resolveLinkOwner(kind, customerIds, customerId, last10, { emailSe
 // the composer refuses to schedule or draft those kinds; /schedule-sms +
 // drafts re-fence. standalone: the line is a complete greeted message,
 // inserted as-is.
-const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'projectReport', 'expiresAt', 'immediateOnly', 'standalone'];
+const LINK_RESULT_FIELDS = ['requestId', 'balance', 'estimate', 'appointment', 'prep', 'report', 'contract', 'statement', 'receipt', 'projectReport', 'expiresAt', 'immediateOnly', 'standalone'];
 
 router.post('/customer-link', requireAdmin, async (req, res) => {
   try {
@@ -2364,8 +2367,8 @@ router.post('/customer-link', requireAdmin, async (req, res) => {
     res.json({
       kind,
       channel,
-      url: stripSmsLinkScheme(result.url),
-      line: stripSmsLinkScheme(result.line),
+      url: stripSmsUrlScheme(result.url),
+      line: stripSmsUrlScheme(result.line),
       firstName: recipientFirstName,
       ...Object.fromEntries(LINK_RESULT_FIELDS.map((field) => [field, result[field] || undefined])),
       // Owner-bound kinds (and the account-scoped bearers above): the
@@ -2392,7 +2395,7 @@ router.get('/link-library', async (req, res) => {
       linkLibrary.listLinks(),
       linkLibrary.sitemapLastSyncedAt(),
     ]);
-    res.json({ links, lastSyncedAt });
+    res.json({ links, lastSyncedAt, receiptLinksEnabled: require('../config/feature-gates').isEnabled('composerReceiptLinks') });
   } catch (err) {
     logger.error(`link-library list failed: ${err.message}`);
     res.status(500).json({ error: err.message });
