@@ -151,30 +151,9 @@ const SEO_QUERY_TOOLS = SEO_TOOLS.filter(t => !SEO_CONFIRMED_ACTION_TOOL_NAMES.h
 // tool surfaces only redacted text — no names, no customer ids.
 const BASE_TOOLS = [...TOOLS, ...COMMS_READ_TOOLS, ...EMAIL_SHARED_TOOLS, ...CALL_RESEARCH_TOOLS];
 
-function toolsNamed(tools, names) {
-  const allowed = new Set(names);
-  return tools.filter((tool) => allowed.has(tool.name));
-}
-
-// The Agent Estimate page gets a deliberately narrow tool cabinet. Property
-// truth, pricing, protocols, and inventory are readable; its one write can
-// only create/revise a draft through the UI-confirmation path. It cannot send,
-// schedule, update a lead, or reach any other business-data write.
-const AGENT_ESTIMATE_TOOLS = [
-  ...toolsNamed(ESTIMATE_TOOLS, [
-    'lookup_property',
-    'compute_estimate',
-    'read_pricing_config',
-    'recent_pricing_changes',
-    'find_similar_estimates',
-    'match_existing_customer',
-    'get_waveguard_tiers',
-    'get_neighborhood_grass_profile',
-    AGENT_ESTIMATE_WRITE_TOOL,
-  ]),
-  ...toolsNamed(TECH_TOOLS, ['get_protocol', 'get_product_info', 'search_knowledge_base']),
-  ...toolsNamed(PROCUREMENT_TOOLS, ['query_products', 'analyze_margins', 'query_stock']),
-];
+const AGENT_ESTIMATE_TOOL_NAMES = require('../services/intelligence-bar/agent-estimate-policy');
+const AGENT_ESTIMATE_TOOLS = [...ESTIMATE_TOOLS, ...TECH_TOOLS, ...PROCUREMENT_TOOLS]
+  .filter(tool => AGENT_ESTIMATE_TOOL_NAMES.has(tool.name));
 
 // Tools whose REST equivalents guard with requireAdmin — technician tokens
 // must not reach them through the intelligence bar either. The email surface
