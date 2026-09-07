@@ -71,6 +71,15 @@ describe('app education content contracts', () => {
     expect(rendered.text).toContain('#start-here-sign-in');
   });
 
+  test('an edited old tour paragraph requires review even when its headings survive', () => {
+    const blocks = structuredClone(APP_V4.blocks);
+    const paragraph = blocks.find(b => b.type === 'paragraph');
+    paragraph.content += ' Staff changed this existing paragraph.';
+    const { assertOriginalTour } = require('../models/migrations/20260907000089_app_onboarding_tour_preflight');
+    expect(() => assertOriginalTour(blocks)).toThrow('edited app tour block');
+    expect(() => assertOriginalTour(APP_V4.blocks)).not.toThrow();
+  });
+
   test('unrecognized active copy and custom plaintext require review instead of being overwritten', () => {
     expect(() => buildVersion('welcome.new_recurring', { blocks: [] })).toThrow('missing welcome first visit anchor');
     expect(() => buildVersion('app_intro', { blocks: APP_V4.blocks, text_body: 'Staff authored plaintext' })).toThrow('custom plaintext');
