@@ -73,10 +73,13 @@ postgres('visit completion packet records on PostgreSQL', () => {
     if (!fixture) return;
     // Only the synthetic fixture's rows; the private database's seeded catalog
     // and migration data remain intact for later billing/UI verification.
+    // Movements first: the customer cascade would otherwise SET NULL a
+    // movement's customer while its service_product is deleted in the same
+    // statement, and that row's re-check fails the service_product FK.
+    await mockPg('product_inventory_movements').where({ product_id: fixture.productId }).del();
     await mockPg('customers').where({ id: fixture.customerId }).del();
     await mockPg('technicians').where({ id: fixture.techId }).del();
     await mockPg('services').where({ id: fixture.catalogId }).del();
-    await mockPg('product_inventory_movements').where({ product_id: fixture.productId }).del();
     await mockPg('products_catalog').where({ id: fixture.productId }).del();
   });
 

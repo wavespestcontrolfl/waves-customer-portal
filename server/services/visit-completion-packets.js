@@ -27,13 +27,17 @@ function packetRequest({ visitId, idempotencyKey, items }) {
   }
   if (!Array.isArray(items) || items.length < 2 || items.some((item) => (
     !isUuid(item?.serviceId) || !item.body || typeof item.body !== 'object' || Array.isArray(item.body)
-  )) || new Set(items.map((item) => item.serviceId)).size !== items.length) {
+  )) || new Set(items.map((item) => item.serviceId.toLowerCase())).size !== items.length) {
     return { error: failure(400, 'visit_closeout_members_invalid', 'Submit each visit service once with its completion form.') };
   }
   // Canonical completion normalizes some form fields in place. Keep the
   // submitted snapshot immutable, and use its existing semantic hash rules
   // so a ticking panel timer does not invalidate a retry of the same packet.
-  const ordered = structuredClone(items).sort((a, b) => a.serviceId.localeCompare(b.serviceId));
+  // PostgreSQL returns uuid columns lowercase; compare, sort and hash the
+  // submitted ids in that same canonical form.
+  const ordered = structuredClone(items)
+    .map((item) => ({ ...item, serviceId: item.serviceId.toLowerCase() }))
+    .sort((a, b) => a.serviceId.localeCompare(b.serviceId));
   const hash = crypto.createHash('sha256').update(JSON.stringify({
     visitId, items: ordered.map((item) => ({ serviceId: item.serviceId, hash: hashCompletionRequest(item.body) })),
   })).digest('hex');
@@ -51,6 +55,7 @@ function recordsResult(packet, items, replayed = false) {
 async function saveVisitCompletionRecords(input, database = db) {
   const request = packetRequest(input);
   if (request.error) return request.error;
+  const actor = input.actor || {};
   const uploadedPhotoRows = [];
   let readyToCommit = false;
   try {
@@ -68,12 +73,12 @@ async function saveVisitCompletionRecords(input, database = db) {
         const candidates = await trx('scheduled_services').where({ visit_id: peek.id })
           .whereIn('id', reviewed.map((item) => item.serviceId)).orderBy('id');
         for (const member of candidates) {
-          const denied = completionOwnershipError({ role: input.actor?.techRole,
-            actorTechnicianId: input.actor?.technicianId, assignedTechnicianId: member.technician_id });
+          const denied = completionOwnershipError({ role: actor.techRole,
+            actorTechnicianId: actor.technicianId, assignedTechnicianId: member.technician_id });
           if (denied) return { status: denied.status, body: denied.payload };
           const form = reviewed.find((item) => item.serviceId === member.id);
           pricingPlans.push(await pricing.prepareCompletionPricingReview(member.id, form.body.pricingReview,
-            { database: trx, role: input.actor?.techRole }));
+            { database: trx, role: actor.techRole }));
         }
         pricingPlans.sort((a, b) => (a.source.estimate?.id || '').localeCompare(b.source.estimate?.id || ''));
         for (const plan of pricingPlans) await pricing.lockCompletionPricingEstimate(trx, plan);
@@ -84,18 +89,20 @@ async function saveVisitCompletionRecords(input, database = db) {
       pricingPlans.sort((a, b) => (a.source.parent?.id || '').localeCompare(b.source.parent?.id || ''));
       for (const plan of pricingPlans) await pricing.lockCompletionPricingParent(trx, plan);
       await lockStop(trx, peek.stop_base_key);
-      const visit = await trx('service_visits').where({ id: peek.id }).forUpdate().first();
-      if (!visit || visit.stop_base_key !== peek.stop_base_key || visit.customer_id !== peek.customer_id) {
-        return failure(409, 'visit_changed', 'The visit moved. Refresh before closing it.');
-      }
+      // Re-read under the lock with the peeked identity in the predicate: a
+      // visit that moved stop or customer in between is simply not found.
+      const visit = await trx('service_visits')
+        .where({ id: peek.id, stop_base_key: peek.stop_base_key, customer_id: peek.customer_id })
+        .forUpdate().first();
+      if (!visit) return failure(409, 'visit_changed', 'The visit moved. Refresh before closing it.');
       const members = await trx('scheduled_services').where({ visit_id: visit.id }).orderBy('id').forUpdate();
       const ownership = members.map((member) => completionOwnershipError({
-        role: input.actor?.techRole, actorTechnicianId: input.actor?.technicianId,
-        assignedTechnicianId: member.technician_id,
+        role: actor.techRole, actorTechnicianId: actor.technicianId, assignedTechnicianId: member.technician_id,
       })).find(Boolean);
       if (ownership) return { status: ownership.status, body: ownership.payload };
-      if (members.length !== request.items.length
-          || members.some((member, index) => member.id !== request.items[index].serviceId)) {
+      // Both lists are ordered by id: the visit's members must be exactly the
+      // submitted services.
+      if (members.map((member) => member.id).join() !== request.items.map((item) => item.serviceId).join()) {
         return failure(409, 'visit_members_changed', 'The visit service list changed. Refresh all service forms.');
       }
       if (members.some((member) => member.customer_id !== visit.customer_id
@@ -110,8 +117,9 @@ async function saveVisitCompletionRecords(input, database = db) {
         if (existing.idempotency_key !== request.key || existing.request_hash !== request.hash) {
           return failure(409, 'visit_closeout_payload_mismatch', 'A saved closeout already owns this visit. Resume that closeout.');
         }
-        const saved = await trx('visit_completion_packet_items').where({ packet_id: existing.id }).orderBy('scheduled_service_id');
-        if (saved.length !== members.length || saved.some((item) => !item.service_record_id)) {
+        const saved = await trx('visit_completion_packet_items').where({ packet_id: existing.id })
+          .whereNotNull('service_record_id').orderBy('scheduled_service_id');
+        if (saved.length !== members.length) {
           return failure(409, 'visit_closeout_pending', 'The saved closeout has not finished recording its services.');
         }
         return recordsResult(existing, saved, true);
@@ -135,7 +143,7 @@ async function saveVisitCompletionRecords(input, database = db) {
         }).returning('*');
         const result = await completeScheduledService({
           serviceId: item.serviceId, idempotencyKey: key,
-          body: structuredClone(item.body), actor: input.actor,
+          body: structuredClone(item.body), actor,
         }, { trx, itemId: packetItem.id, uploadedPhotoRows });
         if (result.status !== 202 || !result.body.serviceRecordId) {
           const rejected = new Error('Visit member completion rejected');

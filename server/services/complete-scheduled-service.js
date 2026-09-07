@@ -1129,13 +1129,19 @@ function frozenResumeCompletionState(frozenStructuredNotes, { requestBackfill = 
   };
 }
 
+// Fail-soft reads that inherit a packet member's OUTER transaction: a failed
+// statement aborts that transaction (25P02) despite the JavaScript catch, so
+// on a transaction handle the read runs on a savepoint (mirrors
+// productReentryFloor). On the root connection it is the plain query.
+function failSoftRead(database, query, fallback) {
+  const run = database.isTransaction ? database.transaction((sp) => query(sp)) : query(database);
+  return Promise.resolve(run).catch(() => fallback);
+}
+
 async function loadSubmittedCatalogProducts(submittedProducts = [], database = db) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p?.productId).filter(Boolean))];
   if (!productIds.length) return [];
-  return database('products_catalog')
-    .whereIn('id', productIds)
-    .select('*')
-    .catch(() => []);
+  return failSoftRead(database, (k) => k('products_catalog').whereIn('id', productIds).select('*'), []);
 }
 
 function treeShrubPhotoUploadRequiredError(uploadResult, minimum = TREE_SHRUB_MIN_CLOSEOUT_PHOTOS) {
@@ -1157,16 +1163,13 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = [], database
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
   if (!productIds.length) return [];
 
-  const [profile, catalogProducts] = await Promise.all([
-    database('customer_turf_profiles')
-      .where({ customer_id: svc.customer_id, active: true })
-      .first()
-      .catch(() => null),
-    database('products_catalog')
-      .whereIn('id', productIds)
-      .select('id', 'name', 'analysis_n', 'analysis_p')
-      .catch(() => []),
-  ]);
+  // Sequential: savepoints on one transaction connection cannot interleave.
+  const profile = await failSoftRead(database, (k) => k('customer_turf_profiles')
+    .where({ customer_id: svc.customer_id, active: true })
+    .first(), null);
+  const catalogProducts = await failSoftRead(database, (k) => k('products_catalog')
+    .whereIn('id', productIds)
+    .select('id', 'name', 'analysis_n', 'analysis_p'), []);
   if (!profile) return [];
 
   // Stamped visit address OUTRANKS the turf-profile municipality (matches
@@ -1191,16 +1194,16 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = [], database
   const city = stampedCity || profileCity || customerCity;
   if (!county && !city) return [];
 
-  let ordinanceQuery = database('municipality_ordinances').where({ active: true });
-  ordinanceQuery = ordinanceQuery.where(function () {
-    if (county) this.orWhere(function () {
-      this.where({ jurisdiction_type: 'county' }).whereILike('county', county);
-    });
-    if (city) this.orWhere(function () {
-      this.where({ jurisdiction_type: 'city' }).whereILike('city', city);
-    });
-  });
-  const ordinances = await ordinanceQuery.catch(() => []);
+  const ordinances = await failSoftRead(database, (k) => k('municipality_ordinances')
+    .where({ active: true })
+    .where(function () {
+      if (county) this.orWhere(function () {
+        this.where({ jurisdiction_type: 'county' }).whereILike('county', county);
+      });
+      if (city) this.orWhere(function () {
+        this.where({ jurisdiction_type: 'city' }).whereILike('city', city);
+      });
+    }), []);
   if (!ordinances.length) return [];
 
   const productById = new Map(catalogProducts.map((product) => [String(product.id), product]));
@@ -1307,10 +1310,9 @@ async function actualProductInventoryBlocks(submittedProducts = [], database = d
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
   if (!productIds.length) return [];
 
-  const catalogProducts = await database('products_catalog')
+  const catalogProducts = await failSoftRead(database, (k) => k('products_catalog')
     .whereIn('id', productIds)
-    .select('id', 'name', 'active', 'inventory_on_hand', 'inventory_unit')
-    .catch(() => []);
+    .select('id', 'name', 'active', 'inventory_on_hand', 'inventory_unit'), []);
   const productById = new Map(catalogProducts.map((product) => [String(product.id), product]));
   const blocks = [];
 
@@ -2468,9 +2470,8 @@ async function completeScheduledService(completionInput, packetRecord = null) {
       // failure here is must-be-in-the-future; 0 = "due now" preserves the
       // intent (the chosen time has arrived). Fresh completions keep the
       // strict gate.
-      const committed = await CompletionAttempts
-        .hasCommittedCompletionAttempt(completionInput.serviceId, db)
-        .catch(() => false);
+      const committed = await failSoftRead(db,
+        (k) => CompletionAttempts.hasCommittedCompletionAttempt(completionInput.serviceId, k), false);
       if (!committed) throw timingErr;
       completionReviewDelayMinutes = 0;
     }
@@ -2794,7 +2795,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
       // exists — the clean path costs nothing — and a lookup error skips
       // the prompt too (fail open).
       if (reconcileBlock
-        && !(await CompletionAttempts.hasCommittedCompletionAttempt(svc.id, db).catch(() => true))) {
+        && !(await failSoftRead(db, (k) => CompletionAttempts.hasCommittedCompletionAttempt(svc.id, k), true))) {
         return ({ status: reconcileBlock.status, body: reconcileBlock.payload });
       }
     }
@@ -3184,7 +3185,8 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     // keeps this strictly off pest / rodent / mosquito. The flag reads the SAME
     // DB-backed source the tech UI checks (useFeatureFlag). A provided height is
     // still range-validated (below), but its absence is fine.
-    const turfHeightFlagOn = await isUserFeatureEnabled(completionInput.actor.technicianId, 'turf-height-capture', false, db).catch(() => false);
+    const turfHeightFlagOn = await failSoftRead(db,
+      (k) => isUserFeatureEnabled(completionInput.actor.technicianId, 'turf-height-capture', false, k), false);
     // Exempt typed-findings lawn jobs (e.g. one_time_lawn_treatment): the client
     // hides TurfHeightCapture when isTypedFindings, so the server must not capture
     // a field the UI never renders (matches client isLawn = !isTypedFindings && lawn).
@@ -3361,17 +3363,15 @@ async function completeScheduledService(completionInput, packetRecord = null) {
           && reportProtocolActions.includes(entry.label)),
       ];
     }
-    const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable, activityScoresAvailable] = await Promise.all([
-      db('service_records').columnInfo().catch(() => ({})),
-      db('service_products').columnInfo().catch(() => ({})),
-      db.schema.hasTable('service_findings').catch(() => false),
-      db.schema.hasTable('service_activity_scores').catch(() => false),
-    ]);
+    const serviceRecordCols = await failSoftRead(db, (k) => k('service_records').columnInfo(), {});
+    const serviceProductCols = await failSoftRead(db, (k) => k('service_products').columnInfo(), {});
+    const serviceFindingsAvailable = await failSoftRead(db, (k) => k.schema.hasTable('service_findings'), false);
+    const activityScoresAvailable = await failSoftRead(db, (k) => k.schema.hasTable('service_activity_scores'), false);
     const useServiceReportV1 = true;
     let conditionsAtApplication = null;
 
     const canLinkLawnAssessmentRecord = !isIncompleteVisit
-      && await db.schema.hasColumn('lawn_assessments', 'service_record_id').catch(() => false);
+      && await failSoftRead(db, (k) => k.schema.hasColumn('lawn_assessments', 'service_record_id'), false);
 
     const rawIdempotencyKey = completionInput.idempotencyKey || bodyIdempotencyKey
       || `legacy_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
@@ -4469,7 +4469,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
         let dissolveVisitId = legacyVisitToDissolve;
         legacyVisitToDissolve = null;
         if (!dissolveVisitId) {
-          const nowRow = await db('scheduled_services').where({ id: svc.id }).first('visit_id').catch(() => null);
+          const nowRow = await failSoftRead(db, (k) => k('scheduled_services').where({ id: svc.id }).first('visit_id'), null);
           dissolveVisitId = nowRow && nowRow.visit_id;
         }
         if (dissolveVisitId) {
@@ -6299,7 +6299,7 @@ async function completeScheduledService(completionInput, packetRecord = null) {
         let dissolveVisitId = legacyVisitToDissolve;
         legacyVisitToDissolve = null;
         if (!dissolveVisitId) {
-          const nowRow = await db('scheduled_services').where({ id: svc.id }).first('visit_id').catch(() => null);
+          const nowRow = await failSoftRead(db, (k) => k('scheduled_services').where({ id: svc.id }).first('visit_id'), null);
           dissolveVisitId = nowRow && nowRow.visit_id;
         }
         if (dissolveVisitId) {
