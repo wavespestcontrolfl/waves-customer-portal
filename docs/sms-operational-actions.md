@@ -14,7 +14,7 @@ Intake recovers interrupted processing every five minutes, including mixed-conte
 
 The admin-triggered data-hygiene extraction phase keeps proposing regex matches from the unified inbox for human approval; it never auto-applies, so it cannot host an automatic empty-field write. This lane shares its compare-and-set writer and receipt store instead. Both writers check pending proposals under the customer preference lock and preserve a newer distinct message, even when it arrives seconds after the earlier one. A shared Twilio message id identifies the two records of one SMS; older proposals resolve that identity through their linked source row. The SMS lane may replace its inbox twin with whole-message evidence, while the extraction phase preserves an existing SMS twin. Older distinct proposals retire when a newer proposal is inserted. Applying either a typed fact or an approved proposal retires pending siblings whose before-value checks can no longer pass. For typed fields the reverse order needs nothing extra: the extraction phase already skips values the live profile contains. The call-profile enrichment writer takes the same customer preference lock and re-reads the row under it before appending, so a call processed while an SMS fact lands adds to that value instead of replacing it from a stale snapshot.
 
-Irrigation approvals record the active-system companion flag and keyed hashes of existing irrigation inputs. Revert can distinguish unchanged inputs from later edits without copying private text into proposal evidence or audit metadata. Previously saved preview approvals retain their revert behavior.
+Irrigation approvals record the active-system companion flag, keyed hashes of existing inputs, and the row's irrigation revision after approval. Migration `20260907000020_property_irrigation_revision.js` increments that revision whenever a writer changes an irrigation input, the active-system flag, confirmation fields, or the home's address-change stamp. Revert preserves the active flag after a later irrigation edit even if the customer restores the original value; unrelated preferences and same-value saves do not count as edits. Private text stays out of proposal evidence and audit metadata. Older approvals without a saved revision keep their existing value and confirmation checks, including approvals made by the old release after the pre-deploy migration. Edit-then-restore history cannot be reconstructed for those approvals.
 
 ## Activation and rollback
 
@@ -43,3 +43,13 @@ Contact preferences join the existing sensitive approval/revert path through
 migration `20260907000021_sms_replay_contact_preference.js`; replay itself
 never writes the preference. The migration rollback refuses to remove the
 allowance while a NULL-target contact-preference proposal still exists.
+
+Scheduled outbound SMS has one capture identity: the original queue row.
+The provider delivery row is excluded from capture when `metadata.scheduled_sms_log_id` identifies a scheduled outbound row for
+the same customer. This holds before and after settlement and when the
+provider log is missing. Distinct sends with identical text remain distinct;
+orphan/malformed links never suppress a source. The relationship is used
+only in database selection, outside model prompts. Conversation history keeps
+its existing endpoint-based selection so the actual delivered message remains
+available after a send-time phone or location-number refresh. Send/retry writers
+are unchanged. Outbound commitment capture remains a separate gated follow-up.

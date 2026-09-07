@@ -7,6 +7,7 @@ const { parseArgs } = require('node:util');
 const db = require('../models/db');
 const protocols = require('../config/protocols.json');
 const { LAWN_MATERIAL_BUDGETS, MATERIAL_REFERENCE_SQFT } = require('@waves/lawn-cost-floor');
+const { unitDefinition } = require('../services/inventory-units');
 const { convertToOz, unitPriceBreakdown } = require('../services/product-costing');
 const {
   calculateProductAmount,
@@ -53,7 +54,7 @@ async function getProtocolProducts() {
       'frac_group', 'irac_group', 'hrac_group',
       'analysis_n', 'analysis_p', 'analysis_k',
       'default_rate_per_1000', 'rate_unit',
-      'best_price', 'cost_per_unit', 'cost_unit', 'container_size', 'unit_size_oz', 'needs_pricing',
+      'best_price', 'cost_per_unit', 'cost_unit', 'inventory_unit', 'container_size', 'unit_size_oz', 'needs_pricing',
       'mixing_order_category', 'mixing_instructions',
       'label_verified_at',
     )
@@ -156,12 +157,16 @@ function analyzeVisit({ trackKey, track, visit, products, options, lawnSqft = DE
     if (item.mix.materialCostSource === 'inventory_cost_per_unit'
       && convertToOz(1, item.product.cost_unit) == null) return true;
     const amountUnit = String(item.mix.amountUnit || '').replaceAll('_', ' ');
-    const amountFamily = unitPriceBreakdown(1, `1 ${amountUnit}`)?.family;
+    // Only an explicit inventory dimension resolves legacy plain-ounce rates.
+    const dimension = unitDefinition(item.product.inventory_unit)?.dimension;
+    const unitEvidence = { isWeight: dimension === 'weight', isLiquid: dimension === 'volume' };
+    const amountFamily = unitPriceBreakdown(1, `1 ${amountUnit}`, unitEvidence)?.family;
     const costQuantity = item.mix.materialCostSource === 'inventory_cost_per_unit'
       ? `1 ${item.product.cost_unit || ''}` : item.product.container_size;
-    const costFamily = unitPriceBreakdown(1, String(costQuantity || '').replaceAll('_', ' '))?.family;
+    const costFamily = unitPriceBreakdown(1, String(costQuantity || '').replaceAll('_', ' '), unitEvidence)?.family;
     return !amountFamily || !costFamily || amountFamily === 'ambiguous'
-      || costFamily === 'ambiguous' || amountFamily !== costFamily;
+      || costFamily === 'ambiguous' || amountFamily !== costFamily
+      || (dimension && dimension !== 'ambiguous' && dimension !== amountFamily);
   });
   const varianceFlag = variance != null
     && (Math.abs(variance) >= VARIANCE_WARN_DOLLARS || varianceRatio >= VARIANCE_WARN_RATIO);

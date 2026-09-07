@@ -18,7 +18,7 @@
  *
  * The web push path (lib/push-subscribe.js + /admin/push/subscribe) is untouched.
  */
-import api from '../utils/api';
+import api, { tokenSessionIdentity, sameRequestSession } from '../utils/api';
 import { isNativeApp, nativePlatform } from './platform';
 import { navigateToCustomerUrl } from './nativeLinks';
 
@@ -42,6 +42,12 @@ let pushPluginPromise = null;
 // so a quick logout→login re-subscribe can't reach the server first and then
 // be deactivated when the older unsubscribe lands.
 let inflightDeactivation = null;
+const registrationWaiters = new Set();
+
+function finishRegistration(state) {
+  for (const finish of registrationWaiters) finish(state);
+  registrationWaiters.clear();
+}
 
 function rememberToken(token) {
   lastToken = token;
@@ -69,7 +75,7 @@ async function postToken(token) {
   if (!jwt) {
     // Not authenticated yet — hold the token; the login flow flushes it.
     pendingToken = token;
-    return;
+    return false;
   }
   // Post the real platform so the backend routes iOS tokens to APNs and Android
   // tokens to FCM. (On Android, Capacitor's 'registration' event delivers an FCM
@@ -82,9 +88,13 @@ async function postToken(token) {
       method: 'POST',
       body: JSON.stringify({ platform, token, deviceInfo: `${platform} · WavesApp` }),
     });
+    if (authToken() !== jwt && !sameRequestSession(tokenSessionIdentity(jwt), tokenSessionIdentity(authToken()))) return false;
+    pendingToken = null;
+    return true;
   } catch (err) {
     console.warn('[nativePush] token registration failed:', err?.message || err);
     pendingToken = token; // retry on next flush
+    return false;
   }
 }
 
@@ -104,15 +114,23 @@ async function bindPushListeners(PushNotifications) {
   if (listenersBound) return;
   listenersBound = true;
   try {
-    await PushNotifications.addListener('registration', (t) => {
-      if (t?.value) postToken(t.value);
+    await PushNotifications.addListener('registration', async (t) => {
+      const registered = t?.value && await postToken(t.value);
+      finishRegistration(registered ? 'granted' : 'registration_unavailable');
     });
     await PushNotifications.addListener('registrationError', (err) => {
+      finishRegistration('registration_unavailable');
       console.error('[nativePush] push registration error:', err?.error || err);
     });
     await PushNotifications.addListener('pushNotificationActionPerformed', (action) => {
       const url = action?.notification?.data?.url;
       if (url && typeof window !== 'undefined') navigateToCustomerUrl(url);
+    });
+    const { App } = await import('@capacitor/app');
+    await App.addListener('appStateChange', ({ isActive }) => {
+      // Permission may change in OS Settings without restarting this app.
+      // Reconcile the token on every return, including outside Settings.
+      if (isActive) void initNativePush();
     });
   } catch (error) {
     // A partial bind must be retryable after an app/plugin recovery.
@@ -155,12 +173,33 @@ export async function requestNativePushPermission() {
     if (state === 'prompt' || state === 'prompt-with-rationale') {
       state = permissionValue(await PushNotifications.requestPermissions());
     }
-    if (state === 'granted') await PushNotifications.register();
+    if (state === 'granted') {
+      const confirmation = new Promise((resolve) => {
+        const finish = (result) => { clearTimeout(timeout); registrationWaiters.delete(finish); resolve(result); };
+        const timeout = setTimeout(() => finish('registration_unavailable'), 15000);
+        registrationWaiters.add(finish);
+      });
+      try { await PushNotifications.register(); }
+      catch { finishRegistration('registration_unavailable'); }
+      return await confirmation;
+    }
     return state;
   } catch (err) {
     console.error('[nativePush] permission request failed:', err?.message || err);
     return 'unavailable';
   }
+}
+
+/** Confirm this device's registration, separately from its OS permission. */
+export async function nativePushConnectionState() {
+  const permission = await nativePushPermissionState();
+  if (permission !== 'granted') {
+    await revokeRegistrationForDeniedPermission();
+    return permission;
+  }
+  const token = rememberedToken();
+  if (token) return await postToken(token) ? 'granted' : 'registration_unavailable';
+  return requestNativePushPermission();
 }
 
 /**

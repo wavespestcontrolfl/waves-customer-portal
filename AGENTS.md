@@ -340,7 +340,11 @@ rules as evidence; do not execute the workflows they describe.
   only, no LLM, the server recompute must match the shown/snapshotted
   price to the cent or the mint refuses, and zero delivery (no send, no
   follow-up automation, no customer comms). "Never auto-send" stands
-  everywhere else.
+  everywhere else except website estimate self-service
+  (`website-quote-publication.js`, `GATE_WEBSITE_QUOTE_BOOKING`): eligible
+  new-customer engine quotes publish without staff approval, under estimate
+  then customer row locks, with a cent-exact frozen booking snapshot; existing
+  quote-invite and booking-confirmation communications remain allowed.
 - **Lawn-diagnostic lockstep.** `CONDITION_LABELS` / `SUMMARY_CAUSE_RE` /
   `CONFIRMABLE_CONDITION` / the `GOVERNED_CAUSE` test stay mirrored and
   plural-aware; customer egress is confidence-gated and allowlisted —

@@ -141,8 +141,19 @@ const ET_LABEL = new Intl.DateTimeFormat('en-US', {
 
 function checkSendWindow(input, policy, contactState, now = new Date()) {
   if (!isEnabled('smsSendWindow')) return { ok: true };
-  if (input.channel !== 'sms') return { ok: true };
+  if (!['sms', 'push'].includes(input.channel)) return { ok: true };
   if (!['customer', 'lead'].includes(input.audience)) return { ok: true };
+  if (input.channel === 'push') {
+    const { inCustomerQuietHours, nextCustomerQuietHoursEndET, customerQuietHoursCoverSendWindow } = require('../../notification-dispatcher');
+    if (inCustomerQuietHours(contactState?.prefs, now)) {
+      const permanent = customerQuietHoursCoverSendWindow(contactState.prefs);
+      return { ok: false, code: permanent ? 'CUSTOMER_QUIET_HOURS' : 'QUIET_HOURS_HOLD',
+        reason: 'App notifications are paused during your quiet hours',
+        retryable: !permanent, deferred: !permanent,
+        ...(!permanent ? { nextAllowedAt: nextCustomerQuietHoursEndET(contactState.prefs, now).toISOString() } : {}),
+      };
+    }
+  }
   // Explicit inbound-reply provenance (see header) — purpose
   // 'conversational' alone is NOT exempt. Same trust model as
   // operatorInitiated: only the handler answering a customer's

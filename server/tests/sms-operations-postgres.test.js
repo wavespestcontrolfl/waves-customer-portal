@@ -18,6 +18,7 @@ const { recordMessageOperations, loadMessageContext, runSmsOperationalActions, r
 const numbers = require('../config/twilio-numbers');
 const NotificationService = require('../services/notification-service');
 const migration = require('../models/migrations/20260906000001_sms_operational_actions');
+const irrigationRevisionMigration = require('../models/migrations/20260907000020_property_irrigation_revision');
 const replayMigration = require('../models/migrations/20260907000021_sms_replay_contact_preference');
 const { listOpenCommitments } = require('../services/call-commitments');
 const connection = process.env.SMS_OPERATIONS_TEST_DATABASE_URL;
@@ -55,6 +56,9 @@ postgres('SMS operations on PostgreSQL', () => {
     for (const table of TABLES) {
       await admin.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
     }
+    // LIKE does not copy triggers. Exercise the real migration inside the
+    // private schema so every profile writer uses its production counter.
+    await irrigationRevisionMigration.up(mockPg);
     await mockPg.transaction((trx) => replayMigration.up(trx));
   });
   beforeEach(async () => {
@@ -85,6 +89,73 @@ postgres('SMS operations on PostgreSQL', () => {
     delete process.env.DATA_HYGIENE_VAULT_KEY;
     if (mockPg) await mockPg.destroy();
     if (admin) { await admin.schema.dropSchemaIfExists(schema, true); await admin.destroy(); }
+  });
+
+  test.each(['provider-first', 'queue-first', 'missing-provider'])(
+    'scheduled SMS keeps one source through %s capture order', async (order) => {
+      const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
+        twilio_sid: null, from_phone: message.to_phone, to_phone: message.from_phone,
+        message_body: 'I will call with an update.', created_at: new Date(message.created_at.getTime() - 600),
+        scheduled_for: new Date(message.created_at.getTime() - 800), status: order === 'provider-first' ? 'sending' : 'sent' };
+      const provider = { ...queue, id: randomUUID(), twilio_sid: `SM${randomUUID().replaceAll('-', '')}`,
+        scheduled_for: null, status: 'sent', created_at: new Date(message.created_at.getTime() - 500),
+        metadata: { scheduled_sms_log_id: queue.id, media_urls: ['https://invalid.example/private'] } };
+      await mockPg('sms_log').insert(queue);
+      const extract = jest.fn(async () => ({ facts: [], dropped: 0 }));
+      const run = () => runSmsOperationalActions({ conn: mockPg, extract });
+      if (order === 'provider-first') {
+        await mockPg('sms_log').insert(provider);
+        await run();
+        expect(await mockPg('data_hygiene_source_extractions').whereIn('source_id', [queue.id, provider.id])).toHaveLength(0);
+        await mockPg('sms_log').where({ id: queue.id }).update({ status: 'sent' });
+      } else if (order === 'queue-first') {
+        await run();
+        await mockPg('sms_log').insert(provider);
+      }
+      await run();
+      await run();
+      // Main's profile-only lane records one outbound no-fields receipt;
+      // the commitment child will use this same source selection for work.
+      const receipts = await mockPg('data_hygiene_source_extractions').whereIn('source_id', [queue.id, provider.id]);
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0].source_id).toBe(queue.id);
+      const loaded = await loadMessageContext(mockPg, message);
+      expect(loaded.history.map((entry) => entry.id)).toEqual(order === 'missing-provider' ? [queue.id] : [queue.id, provider.id]);
+      expect(JSON.stringify(loaded)).not.toContain('scheduled_sms_log_id');
+      expect(JSON.stringify(loaded)).not.toContain('invalid.example');
+    },
+  );
+
+  test('conversation history keeps provider evidence when scheduled send endpoints refresh', async () => {
+    const queue = { ...message, id: randomUUID(), direction: 'outbound', message_type: 'manual',
+      twilio_sid: null, from_phone: numbers.locations.bradenton.number, to_phone: '+12025550199',
+      created_at: new Date(message.created_at.getTime() - 600),
+      scheduled_for: new Date(message.created_at.getTime() - 800), status: 'sent' };
+    const provider = { ...queue, id: randomUUID(), twilio_sid: `SM${randomUUID().replaceAll('-', '')}`,
+      from_phone: message.to_phone, to_phone: message.from_phone, scheduled_for: null,
+      created_at: new Date(message.created_at.getTime() - 500), metadata: { scheduled_sms_log_id: queue.id } };
+    await mockPg('sms_log').insert([queue, provider]);
+    const loaded = await loadMessageContext(mockPg, message);
+    expect(loaded.history.map((entry) => entry.id)).toEqual([provider.id]);
+    expect(loaded.history[0]).not.toHaveProperty('metadata');
+  });
+
+  test('identical separate sends and orphan or mismatched provider links stay distinct', async () => {
+    const base = { ...message, direction: 'outbound', message_type: 'manual',
+      from_phone: message.to_phone, to_phone: message.from_phone, message_body: 'I will call with an update.',
+      created_at: new Date(message.created_at.getTime() - 500), status: 'sent' };
+    const rows = [
+      { metadata: {} }, { metadata: {} },
+      { metadata: { scheduled_sms_log_id: randomUUID() } },
+      { metadata: { scheduled_sms_log_id: 'malformed-link' } },
+      // An inbound row is never the scheduled source of an outbound delivery.
+      { metadata: { scheduled_sms_log_id: message.id } },
+    ].map((data) => ({ ...base, ...data, id: randomUUID(), twilio_sid: `SM${randomUUID().replaceAll('-', '')}` }));
+    await mockPg('sms_log').insert(rows);
+    await runSmsOperationalActions({ conn: mockPg, extract: async () => ({ facts: [], dropped: 0 }) });
+    expect(await mockPg('data_hygiene_source_extractions').whereIn('source_id', rows.map((row) => row.id))).toHaveLength(rows.length);
+    const loaded = await loadMessageContext(mockPg, message);
+    expect(new Set(loaded.history.map((entry) => entry.id))).toEqual(new Set(rows.map((row) => row.id)));
   });
 
   test('concurrent retries commit one free-form proposal and extraction receipt', async () => {
@@ -810,7 +881,7 @@ postgres('SMS operations on PostgreSQL', () => {
       expect(companions).toEqual({ irrigation_system: false, irrigation_baseline: { input_hashes: {
         irrigation_zones: expect.stringMatching(/^[a-f0-9]{64}$/),
         irrigation_schedule_notes: expect.stringMatching(/^[a-f0-9]{64}$/),
-      }, confirmed: [] } });
+      }, confirmed: [], revision: '1' } });
       expect(JSON.stringify(companions)).not.toContain('Private watering instructions.');
       recorded = companions;
     });
@@ -840,14 +911,100 @@ postgres('SMS operations on PostgreSQL', () => {
     await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_confirmed_fields: JSON.stringify([]), irrigation_zones: 8 });
     expect(await revert()).toEqual({ reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } });
     await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_zones: 6 });
-    expect(await revert()).toEqual({ reverted: ['irrigation_system'] });
-    expect((await mockPg('property_preferences').first()).irrigation_system).toBe(false);
-    // Existing preview approvals retain their revert semantics after the format change.
+    expect(await revert()).toEqual({ reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } });
+    expect((await mockPg('property_preferences').first()).irrigation_system).toBe(true);
+    // Revision-less approvals keep their original value-based semantics.
     recorded = { irrigation_system: false, irrigation_baseline: {
       inputs: { irrigation_zones: 6, irrigation_schedule_notes: 'Private watering instructions.' }, confirmed: [],
     } };
     await mockPg('property_preferences').where({ id: row.id }).update({ irrigation_system: true });
     expect(await revert()).toEqual({ reverted: ['irrigation_system'] });
+  });
+
+  test.each([
+    ['unchanged irrigation', []],
+    ['an unrelated preference edit', [{ parking_notes: 'Use the driveway.' }]],
+    ['a same-value irrigation save', [{ irrigation_zones: 6 }]],
+  ])('revert restores its companion after %s', async (_label, edits) => {
+    const writer = require('../services/data-hygiene/property-preferences');
+    const [row] = await mockPg('property_preferences').insert({ customer_id: message.customer_id,
+      irrigation_system: false, irrigation_zones: 6 }).returning('*');
+    const proposal = { scope_id: message.customer_id, field: 'irrigation_controller_location', resource_id: row.id };
+    const { companions } = await mockPg.transaction(async (trx) => writer.applyPropertyPreferenceValue({
+      trx, proposal, target: row, proposedRaw: 'Beside the garage.',
+    }));
+    for (const edit of edits) await mockPg('property_preferences').where({ id: row.id }).update(edit);
+    await mockPg.transaction(async (trx) => {
+      // Mirror the approve route: lock before restoring the proposed value,
+      // and judge companion ownership against that locked snapshot.
+      const target = await trx('property_preferences').where({ id: row.id }).forUpdate().first();
+      await trx('property_preferences').where({ id: row.id }).update({ irrigation_controller_location: null });
+      expect(await writer.revertPropertyPreferenceCompanions({ trx, proposal, target, companions }))
+        .toEqual({ reverted: ['irrigation_system'] });
+    });
+    expect(await mockPg('property_preferences').first()).toMatchObject({
+      irrigation_system: false, irrigation_controller_location: null,
+    });
+  });
+
+  test.each([
+    ['input', { irrigation_zones: 8 }, { irrigation_zones: 6 }],
+    ['confirmation', { irrigation_confirmed_fields: JSON.stringify(['watering_days']) }, { irrigation_confirmed_fields: '[]' }],
+    ['active-system choice', { irrigation_system: false }, { irrigation_system: true }],
+  ])('edit-then-restore of an irrigation %s retains the companion', async (_label, edit, restore) => {
+    const writer = require('../services/data-hygiene/property-preferences');
+    const [row] = await mockPg('property_preferences').insert({ customer_id: message.customer_id,
+      irrigation_system: false, irrigation_zones: 6 }).returning('*');
+    const proposal = { scope_id: message.customer_id, field: 'irrigation_controller_location', resource_id: row.id };
+    const { companions } = await mockPg.transaction(async (trx) => writer.applyPropertyPreferenceValue({
+      trx, proposal, target: row, proposedRaw: 'Beside the garage.',
+    }));
+    await mockPg('property_preferences').where({ id: row.id }).update(edit);
+    await mockPg('property_preferences').where({ id: row.id }).update(restore);
+    await mockPg.transaction(async (trx) => {
+      const target = await trx('property_preferences').where({ id: row.id }).forUpdate().first();
+      await trx('property_preferences').where({ id: row.id }).update({ irrigation_controller_location: null });
+      expect(await writer.revertPropertyPreferenceCompanions({ trx, proposal, target, companions }))
+        .toEqual({ reverted: [], retained: { irrigation_system: 'later_irrigation_evidence' } });
+    });
+    expect((await mockPg('property_preferences').first()).irrigation_system).toBe(true);
+  });
+
+  test.each([false, true])('a legacy approval can restore its companion (approved during deployment: %s)', async (duringDeploy) => {
+    const writer = require('../services/data-hygiene/property-preferences');
+    const [row] = await mockPg('property_preferences').insert({ customer_id: message.customer_id,
+      irrigation_system: !duringDeploy, irrigation_controller_location: duringDeploy ? null : 'Beside the garage.',
+      irrigation_zones: 6 }).returning('*');
+    if (duringDeploy) {
+      // Pre-deploy migrations install the trigger while the old application
+      // still writes approvals without recording a revision in the baseline.
+      await mockPg('property_preferences').where({ id: row.id })
+        .update({ irrigation_system: true, irrigation_controller_location: 'Beside the garage.' });
+    }
+    const target = await mockPg('property_preferences').where({ id: row.id }).first();
+    expect(target.irrigation_revision).toBe(duringDeploy ? '1' : '0');
+    const proposal = { scope_id: message.customer_id, field: 'irrigation_controller_location', resource_id: row.id };
+    const companions = { irrigation_system: false, irrigation_baseline: { inputs: { irrigation_zones: 6 }, confirmed: [] } };
+    await mockPg.transaction(async (trx) => {
+      expect(await writer.revertPropertyPreferenceCompanions({ trx, proposal, target, companions }))
+        .toEqual({ reverted: ['irrigation_system'] });
+    });
+  });
+
+  test('irrigation revision migration is reversible and an aborted edit leaves no revision', async () => {
+    await mockPg('property_preferences').insert({ customer_id: message.customer_id, irrigation_zones: 6 });
+    const abort = new Error('synthetic rollback');
+    await expect(mockPg.transaction(async (trx) => {
+      await irrigationRevisionMigration.down(trx);
+      await irrigationRevisionMigration.down(trx);
+      expect(await trx.schema.hasColumn('property_preferences', 'irrigation_revision')).toBe(false);
+      await irrigationRevisionMigration.up(trx);
+      await irrigationRevisionMigration.up(trx);
+      await trx('property_preferences').where({ customer_id: message.customer_id }).update({ irrigation_zones: 8 });
+      expect((await trx('property_preferences').first()).irrigation_revision).toBe('1');
+      throw abort;
+    })).rejects.toBe(abort);
+    expect(await mockPg('property_preferences').first()).toMatchObject({ irrigation_zones: 6, irrigation_revision: '0' });
   });
 
   test('a failed critical audit rolls back profile and processed marker together', async () => {

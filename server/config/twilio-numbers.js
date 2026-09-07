@@ -86,6 +86,17 @@ const TWILIO_NUMBERS = {
     venice: { number: '+19414774880', formatted: '(941) 477-4880', label: 'GBP — Venice', location: 'venice', area: 'Venice' },
   },
 
+  // ── Field Tech Lines ────────────────────────────────────────
+  // One dedicated line per field technician (Field Team Program, Phase 0
+  // item 3). Which technician answers on a line lives in
+  // `technicians.twilio_number` (Team tab), not here — the registry only
+  // says the number is ours and what kind it is. Dark until GATE_TECH_LINES
+  // is on: findByNumber then reports the line exactly like an unassigned
+  // number (office semantics), so nothing is dropped while the lane is off.
+  fieldTech: [
+    { number: '+19413529161', formatted: '(941) 352-9161', label: 'Tech line 1' },
+  ],
+
   // ── Unassigned ──────────────────────────────────────────────
   unassigned: [],
 
@@ -110,6 +121,7 @@ const TWILIO_NUMBERS = {
       ...Object.entries(this.gbpTracking).map(([id, g]) => ({ ...g, type: 'gbp_tracking', locationId: g.location, gbpProfileId: id })),
       { ...this.tracking.vanWrap, type: 'van_tracking' },
       { ...this.tollFree, type: 'customer_chat' },
+      ...this.fieldTech.map(t => ({ ...t, type: 'tech_line' })),
       ...this.unassigned.map(u => ({ ...u, type: 'unassigned', label: 'Unassigned' })),
     ];
   },
@@ -182,6 +194,15 @@ const TWILIO_NUMBERS = {
     return this.isOwnedNumber(phoneNumber) || this.isStaffForwardNumber(phoneNumber);
   },
 
+  // True for a registry tech line REGARDLESS of GATE_TECH_LINES. Automated
+  // senders that reuse "the line the customer reached" as their From must
+  // never pick a tech line (owner ruling: automated texts stay on the
+  // location lines) — even while the gate is off and findByNumber reports
+  // the line with office semantics.
+  isTechLine(phoneNumber) {
+    return this.fieldTech.some((t) => t.number === phoneNumber);
+  },
+
   findByNumber(phoneNumber) {
     // Location lines
     for (const [locId, loc] of Object.entries(this.locations)) {
@@ -205,6 +226,12 @@ const TWILIO_NUMBERS = {
     if (this.tracking.vanWrap.number === phoneNumber) return { ...this.tracking.vanWrap, type: 'van_tracking' };
     // Toll-free / customer chat
     if (this.tollFree.number === phoneNumber) return { ...this.tollFree, type: 'location', locationId: 'bradenton' };
+    // Field tech line — gate off = unassigned semantics (see fieldTech above).
+    const techLine = this.fieldTech.find(t => t.number === phoneNumber);
+    if (techLine) {
+      const { gateEnvValue } = require('./feature-gates');
+      return { ...techLine, type: gateEnvValue('GATE_TECH_LINES') ? 'tech_line' : 'location', locationId: 'bradenton' };
+    }
     // Unassigned — still handle
     const unassigned = this.unassigned.find(u => u.number === phoneNumber);
     if (unassigned) return { ...unassigned, type: 'location', locationId: 'bradenton' };
