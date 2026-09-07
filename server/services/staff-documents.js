@@ -29,7 +29,9 @@ async function loadDocument(conn, id, actor) {
 }
 
 async function activeOwner(conn, id) {
-  if (!id || !await conn('technicians').where({ id, employment_status: 'active' }).first('id')) reject('Choose an active staff member as owner.');
+  const owner = id && await conn('technicians').where({ id, employment_status: 'active' }).first('id', 'role');
+  if (!owner) reject('Choose an active staff member as owner.');
+  return owner;
 }
 
 async function insertVersion(trx, document, source, actor) {
@@ -239,7 +241,8 @@ async function saveRecord(versionId, input, actor) {
   return db.transaction(async trx => {
     const version = await recordableVersion(trx, versionId, actor, 'record');
     if (input.content_hash !== version.content_hash) reject('The displayed hash does not match this version.', 409);
-    await activeOwner(trx, input.owner_id);
+    const owner = await activeOwner(trx, input.owner_id);
+    await loadDocument(trx, version.template_id, owner);
     if (!isAdmin(actor) && input.owner_id !== actor.id) reject('Only an admin may assign a record to another staff member.', 403);
     if (input.complete && input.owner_id !== actor.id) reject('Only the assigned owner may complete this record.', 403);
     const values = { ...recordAnswers(version, input), owner_id: input.owner_id, due_at: input.due_at,

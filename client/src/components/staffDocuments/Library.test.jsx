@@ -94,3 +94,12 @@ test('admins can save an assigned record but only its owner can complete it', ()
   expect(screen.getByRole('button', { name: 'Complete record' })).toBeDisabled();
   expect(screen.getByText('The assigned owner must complete this record.')).toBeInTheDocument();
 });
+
+
+test('admin-only records offer only administrators as owners', () => {
+  const detail = draft(); detail.document.staff_kind = 'form'; detail.document.staff_access = 'admin'; detail.rendered.kind = 'form'; detail.version.content_hash = 'issued'; detail.current_version_id = 'v1';
+  render(<DocumentReader {...props(detail)} people={[{ id: 'tech', name: 'QA Admin', role: 'admin' }, { id: 'other', name: 'QA Technician', role: 'technician' }]} />);
+  const owners = screen.getByLabelText('Record owner');
+  expect(Array.from(owners.options, option => option.value)).toEqual(['tech']);
+  expect(screen.getByRole('button', { name: 'Complete record' })).toBeEnabled();
+});

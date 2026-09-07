@@ -45,7 +45,7 @@ router.get('/', handle(async (req, res) => {
 router.get('/people', handle(async (req, res) => {
   const people = await db('technicians').where({ employment_status: 'active' }).modify(q => {
     if (req.techRole !== 'admin') q.where('id', req.technicianId);
-  }).select('id', 'name').orderBy('name');
+  }).select('id', 'name', 'role').orderBy('name');
   res.json({ people, self_id: req.technicianId, can_manage: req.techRole === 'admin' });
 }));
 router.get('/policy-values', requireAdmin, handle(async (req, res) => {

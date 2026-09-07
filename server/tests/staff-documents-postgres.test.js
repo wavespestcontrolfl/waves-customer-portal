@@ -236,4 +236,17 @@ describeDb('controlled staff documents on PostgreSQL', () => {
     expect((await db('policy_values').orderBy('revision', 'desc').first()).id).toBe(policy.id);
   });
 
+  test('admin-only records reject owners without document access on create and reassignment', async () => {
+    const draft = await documents.saveDraft({ key: `qa-${run}-admin-owners`, kind: 'form', access: 'admin', source: source('## Evidence {#evidence}\nSynthetic administrator record.') }, admin);
+    const version = await issue(draft.document.id, draft.version.id, at(-1), admin);
+    const payload = { content_hash: version.content_hash, owner_id: tech.id, due_at: at(60), answers: {}, completed_steps: [], complete: false };
+    await expect(documents.saveRecord(version.id, payload, admin)).rejects.toMatchObject({ status: 404 });
+    expect(await db('staff_document_records').where({ version_id: version.id })).toHaveLength(0);
+    const record = await documents.saveRecord(version.id, { ...payload, owner_id: admin.id }, admin);
+    await expect(documents.saveRecord(version.id, { ...payload, id: record.id, base_updated_at: record.updated_at.toISOString() }, admin)).rejects.toMatchObject({ status: 404 });
+    expect((await db('staff_document_records').where({ id: record.id }).first()).owner_id).toBe(admin.id);
+    const completed = await documents.saveRecord(version.id, { ...payload, owner_id: admin.id, id: record.id, base_updated_at: record.updated_at.toISOString(), complete: true }, admin);
+    expect(completed.completed_at).toBeInstanceOf(Date);
+  });
+
 });

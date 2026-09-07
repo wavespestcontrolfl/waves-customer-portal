@@ -24,6 +24,7 @@ role guard. Authoring, policy-value changes and issuance additionally require ad
   records have an owner and next-action deadline; completed records are immutable.
   Admins can assign records; technicians can create and update their own records.
   Only the assigned owner can complete a record, including when an admin saves it.
+  Admin-only documents can be assigned only to active administrators.
   Completed records can be exported with their field values and version identity.
 
 Every issued snapshot contains the accountable owner role, next-review date, bound
