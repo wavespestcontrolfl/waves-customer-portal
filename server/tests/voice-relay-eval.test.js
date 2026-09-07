@@ -1066,7 +1066,9 @@ describe('voice relay eval — the harness', () => {
     const s = scenario({ fixtures: { toolResponses: { [name]: { [effect]: true, ok: false, text: 'Write failed.' } } } });
     expect(await runFixtureTool({ scenario: s, record: rec }, name, input, ctx)).toBe('Write failed.');
     expect(rec.toolCalls.at(-1)).toMatchObject({ name, invalid: false, ok: false, receipt: false });
-    for (const fn of Object.values(ctx)) expect(fn).not.toHaveBeenCalled();
+    // The failure reaches the session the way a thrown live tool does.
+    expect(ctx.toolFailed).toBe(true);
+    for (const fn of Object.values(ctx)) if (jest.isMockFunction(fn)) expect(fn).not.toHaveBeenCalled();
     rec.events.push({ kind: 'agent', text: "We'll call you back.", index: rec.events.length });
     expect(runCheck(exp('commitment_requires_receipt', true), rec).status).toBe('fail');
   });
@@ -1379,6 +1381,36 @@ describe('voice relay eval — the harness', () => {
     expect(result.error).toBeUndefined();
     expect(result.toolCalls).toEqual([expect.objectContaining({ name: 'transfer_to_office', ok: true, receipt: true, text: expect.stringContaining('Transferring the caller') })]);
     expect(result.transcript).toContain(result.toolCalls[0].text);
+    expect(require('../models/db')).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['fails', { text: 'The schedule could not be read right now.', ok: false }, true],
+    ['refuses without failing', 'No visit is on the schedule for this account today.', false],
+  ])('a fixture tool that %s counts toward the provider-failure handoff the way the live tool does', async (label, get_today_eta, handsOff) => {
+    mockSdk();
+    const replay = require('../services/eval/voice-relay-replay');
+    replay.installHarness();
+    // Two consecutive tool rounds, then the model would carry on talking.
+    script.push(toolUse('get_today_eta', {}, 'e1'), toolUse('get_today_eta', {}, 'e2'), say('A team member will follow up about today.'));
+    const result = await replay.runScenario(scenario({
+      id: `harness-tool-failure-${handsOff ? 'handoff' : 'ok'}`,
+      gates: { context: false, booking: false, transfer: true, recovery: true, interrupt: false },
+      allowedTools: ['get_today_eta', 'transfer_to_office', 'capture_lead'],
+      fixtures: { officeHours: 'open', toolResponses: { get_today_eta, transfer_to_office: { transfer: true } } },
+      turns: [{ caller: 'What time is my tech coming today?' }],
+      expect: [],
+    }));
+    expect(result.error).toBeUndefined();
+    const eta = result.toolCalls.filter((t) => t.name === 'get_today_eta');
+    expect(eta).toHaveLength(2);
+    // Live, a thrown tool is answered ok:false and the second failure in a
+    // row hands the call to the office; a refusal answered without a throw
+    // is ok and the call continues.
+    expect(eta.map((t) => t.ok)).toEqual([!handsOff, !handsOff]);
+    const transfer = result.toolCalls.find((t) => t.name === 'transfer_to_office');
+    if (handsOff) expect(transfer).toMatchObject({ ok: true, receipt: true, text: expect.stringContaining('Transferring the caller') });
+    else expect(transfer).toBeUndefined();
     expect(require('../models/db')).not.toHaveBeenCalled();
   });
 

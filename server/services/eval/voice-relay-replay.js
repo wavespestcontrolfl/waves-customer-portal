@@ -562,6 +562,13 @@ async function runFixtureTool(state, name, input = {}, ctx = {}) {
   if (name === 'lookup_customer' && typeof ctx.consumeLookup === 'function' && ctx.consumeLookup() !== true) return answer(LOOKUP_BUDGET_TEXT, false);
   const { text, receipt } = applyToolSideEffects(response, { input, ctx, scenario });
   event.receipt = receipt === true;
+  // A fixture `ok: false` stands in for the live tool THROWING: relay-tools'
+  // catch answers with a string and raises ctx.toolFailed so the session
+  // counts the failure (two in a row hand the call off) and the handoff
+  // record never reports it as ok. The refusals above (invalid arguments, a
+  // spent lookup budget, nothing matching) are answered live without a
+  // throw and stay ok, as they do here.
+  if (response.ok === false && ctx && typeof ctx === 'object') ctx.toolFailed = true;
   return answer(String(text), response.ok !== false);
 }
 
