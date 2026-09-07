@@ -10,7 +10,8 @@ communications are outside the development/testing authorization.
 | Part | Branch | Scope |
 | --- | --- | --- |
 | A | `feat/ib-registry-coverage-foundation` | Typed catalog and explicit action policy over existing executors; source census and CI drift check. No runtime route or UI integration. |
-| B | `feat/ib-target-context-foundation` | Fresh target resolution, parent scope and version checks, shared outcome classification, and identity-bound review publishing. |
+| B1 | `feat/ib-target-validation-foundation` | Current-request identity resolution, fresh parent/child validation and scoped reader input preparation. |
+| B2 | `feat/ib-target-context-foundation` / #4044 | Scoped domain readers, provider outcome classification and identity-bound review publishing. |
 | C | `feat/ib-task-recovery-foundation` | Actor/session task ledger, confirmation receipts, safe resume and bounded sensitive-context retention. |
 | D | `feat/ib-platform-foundation` / #4019 | Route and UI integration, durable conversation continuation, desktop/mobile and real dev-database acceptance tests. |
 
@@ -81,3 +82,28 @@ request sites, retaining 1,739 cumulative sites as unsupported/unverified in A.
 Their baseline fingerprints are proved against that already-merged main
 revision. The former Communications handlers remain recorded as historical
 sites; moving the UI does not remove work from the capability denominator.
+
+
+## Target validation review split
+
+The broad B review ran on `f523688`, `f05c6ec`, `3dc3e90`, `9d72925`, and
+`cb4b81f`. Round five identified a new P1 (3947072372): the standalone
+validator accepted a name-only SMS input without establishing a customer ID.
+Its P2 (3947072379) found that email/call/lead page references did not establish
+the owning customer even though they constrained child record selection.
+The broad review stopped at `cb4b81f`; B1 now isolates target validation from
+the scoped reader and provider adapters in B2. B2 preserves its history and
+will be retargeted to B1 before receiving integration changes.
+
+B1 rejects name-only SMS proposals, including the unsupported camel-case alias,
+until the caller supplies a canonical resolved customer ID. Email, call and
+lead references establish a freshly read customer only in the request's target
+clause, never inside message or note content. Regression tests resolve the
+actual viewed child without manually injecting a customer target, reject a
+same-customer sibling and missing/deleted records, and reread phone data.
+
+B1 has no provider calls, migrations, live-route wiring or UI change. Its
+isolated PostgreSQL tests run in rollback transactions. Approval proof storage
+and resume belong to C; actual request/confirmation acceptance remains in D.
+Exact product/formulation request binding remains required in inventory #4029;
+this resolver does not claim inventory write verification or complete parity.
