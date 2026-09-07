@@ -94,7 +94,9 @@ schedule inserts) and sometimes the bug (you expected a reminder to send).
   guard (`scripts/hooks/pre-push`) blocks a push that modifies, renames, or
   deletes any file under `server/models/migrations/` that exists at the
   remote branch's sha (or at the merge base with `origin/main` for a new
-  branch). The guard sees pushes, not deploys: `SKIP_MIGRATION_GUARD=1` is
+  branch). Content that already equals `origin/main`'s passes: merging
+  main after main repaired a migration in place is not your edit. The
+  guard sees pushes, not deploys: `SKIP_MIGRATION_GUARD=1` is
   for exactly two VERIFIED cases — the file never ran (its deploy failed
   before migrating; no `knex_migrations` row on the preview/prod — a failed
   first migration cannot be repaired by a second file, knex re-runs the

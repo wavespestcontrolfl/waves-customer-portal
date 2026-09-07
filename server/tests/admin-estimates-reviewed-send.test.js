@@ -33,7 +33,6 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 }));
 jest.mock('../routes/admin-sms-templates', () => ({
   getTemplate: jest.fn(async (key, vars) => `Synthetic estimate: ${vars.estimate_url.replace(/^https:\/\//, '')}`),
-  stripPortalUrlScheme: (value) => String(value).replace(/^https:\/\//, ''),
 }));
 jest.mock('../services/email-template-library', () => {
   const template = { template_key: 'estimate.delivery' };

@@ -196,7 +196,7 @@ export default function RescheduleConfirmModal({
           <button
             onClick={busy ? undefined : onCancel}
             disabled={busy}
-            className="text-zinc-500 hover:text-zinc-900 text-20 leading-none w-6 h-6 flex items-center justify-center"
+            className="text-zinc-500 hover:text-zinc-900 text-18 leading-none w-6 h-6 flex items-center justify-center"
             aria-label="Close"
           >
             ×

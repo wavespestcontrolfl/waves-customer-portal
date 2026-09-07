@@ -127,64 +127,27 @@ describe('lintComms mechanics', () => {
     }
   });
 
-  it('flags any bare third-party host, not just g.page', () => {
-    const r = lintComms('Leave us a review at trustpilot.com when you get a chance.', { channel: 'sms', audience: 'customer' });
-    const hit = r.failures.find((f) => f.rule === 'portal-link-scheme');
-    expect(hit).toBeDefined();
-    expect(hit.reason).toContain('trustpilot.com');
-  });
-
-  it('exempts scheme-qualified links, email addresses, and own-domain hosts from the bare-host rule', () => {
-    const r = lintComms(
-      'Pay at portal.wavespestcontrol.com, review us at https://maps.google.com/waves, or email contact@wavespestcontrol.com.',
-      { channel: 'sms', audience: 'customer' }
-    );
-    expect(r.failures.map((f) => f.rule)).not.toContain('portal-link-scheme');
-  });
-
-  it('does not read prose abbreviations or TLD-prefixed words as bare hosts', () => {
-    const r = lintComms('No.problem at all. Communication is key, e.g. we text before arrival.', { channel: 'sms', audience: 'customer' });
-    expect(r.failures.map((f) => f.rule)).not.toContain('portal-link-scheme');
-  });
-
-  it('catches bare hosts glued to prose punctuation', () => {
-    for (const msg of ['See:yelp.com for our reviews', 'Find us here [yelp.com] anytime', 'Reviews at,yelp.com']) {
-      const r = lintComms(msg, { channel: 'sms', audience: 'customer' });
-      expect(r.failures.map((f) => f.rule)).toContain('portal-link-scheme');
+  it('requires the same scheme-free display for portal and external SMS links', () => {
+    for (const host of ['portal.wavespestcontrol.com', 'wavespestcontrol.com', 'waves-customer-portal-production.up.railway.app', 'g.page', 'www.epa.gov', 'example.dev']) {
+      const bare = lintComms(`See ${host}/demo`, { channel: 'sms', audience: 'customer' });
+      expect(bare.failures.map(f => f.rule)).not.toContain('portal-link-scheme');
+      const full = lintComms(`See https://${host}/demo`, { channel: 'sms', audience: 'customer' });
+      expect(full.failures.map(f => f.rule)).toContain('portal-link-scheme');
+      const email = lintComms(`See https://${host}/demo`, { channel: 'email', audience: 'customer' });
+      expect(email.failures.map(f => f.rule)).not.toContain('portal-link-scheme');
     }
   });
 
-  it('treats every canonical schemeless host like the portal (bare required, scheme flagged)', () => {
-    const bare = lintComms('Pay at waves-customer-portal-production.up.railway.app/pay/abc anytime.', { channel: 'sms', audience: 'customer' });
-    expect(bare.failures.map((f) => f.rule)).not.toContain('portal-link-scheme');
-    const schemed = lintComms('Pay at https://waves-customer-portal-production.up.railway.app/pay/abc anytime.', { channel: 'sms', audience: 'customer' });
-    expect(schemed.failures.map((f) => f.rule)).toContain('portal-link-scheme');
-  });
-
-  it('flags bare edu/gov hosts too, regardless of letter case', () => {
-    for (const msg of ['More detail at edis.ifas.ufl.edu if curious.', 'See www.epa.gov for the label.', 'See WWW.EPA.GOV for the label.']) {
-      const r = lintComms(msg, { channel: 'sms', audience: 'customer' });
-      expect(r.failures.map((f) => f.rule)).toContain('portal-link-scheme');
+  it('does not reject ordinary punctuation, email addresses, or bare hosts', () => {
+    for (const text of ['No.problem, e.g. after 3 p.m.', 'Email contact@example.com', 'See:yelp.com', '[trustpilot.com]', 'See WWW.EPA.GOV']) {
+      expect(lintComms(text).failures.map(f => f.rule)).not.toContain('portal-link-scheme');
     }
   });
 
-  it('still sees a bare host glued behind a qualified URL or email', () => {
-    for (const msg of ['See https://example.com,yelp.com today', 'Email contact@wavespestcontrol.com;trustpilot.com has details']) {
-      const r = lintComms(msg, { channel: 'sms', audience: 'customer' });
-      expect(r.failures.map((f) => f.rule)).toContain('portal-link-scheme');
-    }
-  });
-
-  it('extracts the complete host and validates it against the public-suffix list', () => {
-    // .community is a real TLD: the whole host flags, never a truncated
-    // yelp.com prefix.
-    const community = lintComms('Join the yelp.community discussion group', { channel: 'sms', audience: 'customer' });
-    const hit = community.failures.find((f) => f.rule === 'portal-link-scheme');
-    expect(hit).toBeDefined();
-    expect(hit.reason).toContain('yelp.community');
-    // Modern TLDs the old curated list missed are covered by psl.
-    const dev = lintComms('See example.dev for the docs', { channel: 'sms', audience: 'customer' });
-    expect(dev.failures.map((f) => f.rule)).toContain('portal-link-scheme');
+  it('counts the final scheme-free text at the two-segment boundary', () => {
+    const link = 'https://g.page/r/demo';
+    const body = 'a'.repeat(307 - link.length) + link;
+    expect(lintComms(body).failures.map(f => f.rule)).not.toContain('sms-segment-limit');
   });
 
   it('flags dollar-anchored each/every visit forms but not scheduling prose', () => {
@@ -240,25 +203,6 @@ describe('lintComms mechanics', () => {
     expect(memberMonthly.failures.map((f) => f.rule)).not.toContain('no-plan-total');
     const memberYearlyAggregate = lintComms('That comes to $1,176/yr in total.', { channel: 'sms', audience: 'customer', monthlyBilled: true, billingMode: 'monthly_membership' });
     expect(memberYearlyAggregate.failures.map((f) => f.rule)).toContain('no-plan-total');
-  });
-
-  it('never exempts a lookalike host that extends an owned host', () => {
-    for (const msg of ['Pay at portal.wavespestcontrol.com.evil.xyz/pay now', 'See portal.wavespestcontrol.com.evil.com for details']) {
-      const r = lintComms(msg, { channel: 'sms', audience: 'customer' });
-      expect(r.failures.map((f) => f.rule)).toContain('portal-link-scheme');
-    }
-  });
-
-  it('scheme matcher needs a hostname boundary and only covers the must-go-bare set', () => {
-    // A scheme'd lookalike is a third-party URL, not our portal link.
-    const lookalike = lintComms('See https://portal.wavespestcontrol.com.evil.com/x for details', { channel: 'sms', audience: 'customer' });
-    expect(lookalike.failures.map((f) => f.rule)).not.toContain('portal-link-scheme');
-    // Sentence-final scheme'd portal link still flags.
-    const sentenceEnd = lintComms('Pay anytime at https://portal.wavespestcontrol.com.', { channel: 'sms', audience: 'customer' });
-    expect(sentenceEnd.failures.map((f) => f.rule)).toContain('portal-link-scheme');
-    // The marketing site is not in the must-go-bare set: legitimate both ways.
-    const marketing = lintComms('More at https://wavespestcontrol.com/lawn-care anytime.', { channel: 'sms', audience: 'customer' });
-    expect(marketing.failures.map((f) => f.rule)).not.toContain('portal-link-scheme');
   });
 
   it('does not read a mid-message reply instruction as a sign-off closer', () => {

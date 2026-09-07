@@ -15,7 +15,7 @@ jest.mock('../models/db', () => {
 });
 // The week-plan gate stays OFF here: these suites pin the legacy sweep
 // (plan mode has its own suites).
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((gate) => gate !== 'irrigationWeekPlan') }));
+jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => false), isEnabled: jest.fn((gate) => gate !== 'irrigationWeekPlan') }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(async () => ({ sent: true, message: { provider_message_id: 'sg-1', sent_at: '2026-07-06T11:00:00Z' } })),
   activeSuppressionsFor: jest.fn(async () => []),

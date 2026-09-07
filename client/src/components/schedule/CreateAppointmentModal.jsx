@@ -912,6 +912,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return () => { cancelled = true; };
   }, []);
   const [saving, setSaving] = useState(false);
+  // State updates are async — two clicks in one tick both saw saving=false
+  // during the awaited re-quote and booked twice; the ref is synchronous.
+  const submittingRef = useRef(false);
   const [toast, setToast] = useState('');
 
   // Per-line helpers. Each entry in `services` carries its own `price`
@@ -1749,6 +1752,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Submit
   const handleSubmit = async () => {
     if (!selectedCustomer || services.length === 0 || bookingPropertyState === 'loading') return;
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    setSaving(true);
+    const releaseSubmit = () => {
+      submittingRef.current = false;
+      setSaving(false);
+    };
     // An auto-priced mosquito line must not be booked until the live server
     // quote resolved — otherwise the operator confirms a total that omits (or
     // misstates) what the server will stamp. On a failed quote, clear the
@@ -1762,6 +1772,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         setToast('Fetching the lot-based mosquito price — try again in a moment or enter a price');
       }
       setTimeout(() => setToast(''), 2800);
+      releaseSubmit();
       return;
     }
     // Revalidate a cached quote at the moment of booking: lot data or the
@@ -1776,6 +1787,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           setMosquitoQuote({ customerId: selectedCustomer.id, status: 'ready', price: freshPrice });
           setToast('The lot-based mosquito price changed — totals updated, review and submit again');
           setTimeout(() => setToast(''), 3200);
+          releaseSubmit();
           return;
         }
       } catch {
@@ -1783,10 +1795,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         setMosquitoQuote(null);
         setToast('Could not re-verify the mosquito price — retrying; submit again in a moment or enter a price');
         setTimeout(() => setToast(''), 3200);
+        releaseSubmit();
         return;
       }
     }
-    setSaving(true);
     const groups = groupServicesForAppointmentSubmit(services);
     const results = [];
     let firstError = null;
@@ -1996,7 +2008,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         break;
       }
     }
-    setSaving(false);
+    releaseSubmit();
     if (firstError) {
       const created = createdGroupKeysRef.current.size;
       const total = groups.length;

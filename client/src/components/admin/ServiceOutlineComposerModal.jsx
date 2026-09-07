@@ -306,8 +306,8 @@ export default function ServiceOutlineComposerModal({ estimate, adminFetch, onCl
   const staleReasons = activeOutline?.staleReasons || estimate?.lawnServiceOutline?.staleReasons || [];
 
   return createPortal(
-    <div className="fixed inset-0 z-[70] flex items-end justify-center bg-zinc-950/45 sm:items-center sm:p-4" role="dialog" aria-modal="true">
-      <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-t-md border border-zinc-200 bg-white shadow-xl sm:rounded-md">
+    <div className="fixed inset-0 z-[120] flex items-end justify-center bg-zinc-950/45 sm:items-center sm:p-4" role="dialog" aria-modal="true">
+      <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-t-md border border-zinc-200 bg-white shadow-xl max-sm:pb-[env(safe-area-inset-bottom)] sm:rounded-md">
         <div className="flex items-start justify-between gap-4 border-b border-zinc-200 px-5 py-4">
           <div>
             <div className="flex items-center gap-2">

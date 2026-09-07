@@ -360,7 +360,7 @@ describe('route contract', () => {
 describe('saved weekly watering plan delivery', () => {
   const MONDAY = new Date('2026-09-07T14:05:00Z');
   const PLAN = {
-    weekEnding: '2026-09-06', sentAt: '2026-09-07T11:00:00.000Z', validThrough: '2026-09-13',
+    weekEnding: '2026-09-06', sentAt: null, availableAt: '2026-09-07T11:00:00.000Z', validThrough: '2026-09-13',
     notificationEligible: true,
     title: 'This week: about 30 minutes per turf zone',
     notificationBody: 'If the forecast rain arrives, skip this week. Otherwise, use your assigned day.',
@@ -395,6 +395,8 @@ describe('saved weekly watering plan delivery', () => {
     // Re-check just before the next provider leg; changed settings or a gate
     // flip stops delivery even though the durable bell already exists.
     loadCustomerWateringPlan.mockResolvedValue(null);
+    expect(await args[4].pushOptions.shouldContinue()).toBe(false);
+    loadCustomerWateringPlan.mockResolvedValue({ ...PLAN, availableAt: '2026-09-07T11:01:00.000Z' });
     expect(await args[4].pushOptions.shouldContinue()).toBe(false);
     loadCustomerWateringPlan.mockResolvedValue({ ...PLAN, notificationEligible: false });
     expect(await args[4].pushOptions.shouldContinue()).toBe(false);

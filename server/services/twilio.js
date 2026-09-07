@@ -5,6 +5,7 @@ const logger = require("./logger");
 const smsTemplatesRouter = require("../routes/admin-sms-templates");
 const { shortenOrPassthrough } = require("./short-url");
 const { normalizeGsmPunctuation } = require("./messaging/gsm-normalize");
+const { stripSmsUrlScheme } = require("./messaging/sms-link-policy");
 const { formatTechnicianForCustomer } = require("../utils/technician-name");
 const { publicPortalUrl } = require("../utils/portal-url");
 
@@ -547,7 +548,8 @@ const TwilioService = {
       const internalRedirect = await redirectInternalAdminSmsToNotification(to, body, options);
       if (internalRedirect) return internalRedirect;
 
-      // GSM-7 normalization at the true Twilio boundary: legacy callers
+      // SMS link formatting and GSM-7 normalization at the Twilio boundary:
+      // legacy callers
       // reach sendSMS directly without going through sendCustomerMessage,
       // and one typographic character (curly quote, em dash) flips the
       // whole body to UCS-2 — 67 chars/segment instead of 153. AFTER the
@@ -559,7 +561,7 @@ const TwilioService = {
       // unchanged.
       const sendIsMms = (Array.isArray(options.mediaUrls) && options.mediaUrls.length > 0)
         || !!options.mediaUrl;
-      if (!sendIsMms) body = normalizeGsmPunctuation(body);
+      if (!sendIsMms) body = normalizeGsmPunctuation(stripSmsUrlScheme(body));
 
       // Owner-SMS kill switch: when OWNER_SMS_DISABLED=true, suppress
       // every send addressed to one of the operator's known phones.
