@@ -87,10 +87,13 @@ export default function usePortalRead(key, load) {
     verified: false,
     error: '',
   }));
+  useEffect(() => {
+    if (offline) setState(previous => ({ ...previous, verified: false }));
+  }, [offline]);
 
   const refresh = useCallback(async () => {
     const attempt = ++sequence.current;
-    setState(previous => ({ ...previous, loading: previous.data === undefined, pending: true, error: previous.data === undefined ? '' : previous.error }));
+    setState(previous => ({ ...previous, loading: previous.data === undefined, pending: true, verified: false, error: previous.data === undefined ? '' : previous.error }));
     let timer;
     try {
       if (cache && navigator.onLine === false) throw new Error('You are offline. Reconnect to update this information.');
@@ -99,7 +102,7 @@ export default function usePortalRead(key, load) {
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('The connection is taking too long. Please try again.')), READ_TIMEOUT_MS); }),
       ]);
       if (sequence.current !== attempt) return;
-      const next = { data, updatedAt: Date.now(), loading: false, pending: false, verified: true, error: '' };
+      const next = { data, updatedAt: Date.now(), loading: false, pending: false, verified: navigator.onLine !== false, error: '' };
       cache?.set(key, next);
       setState(next);
     } catch (error) {
@@ -129,7 +132,7 @@ export default function usePortalRead(key, load) {
     sequence.current += 1;
     setState(previous => {
       if (previous.data === undefined) return previous;
-      const next = { ...previous, data: change(previous.data), error: '', loading: false, pending: false, verified: true, updatedAt: Date.now() };
+      const next = { ...previous, data: change(previous.data), error: '', loading: false, pending: false, verified: navigator.onLine !== false, updatedAt: Date.now() };
       cache?.set(key, next);
       return next;
     });

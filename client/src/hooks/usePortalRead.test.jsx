@@ -39,6 +39,23 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('customer portal reads', () => {
+  it('keeps a loaded visit read-only until a deferred reconnect read succeeds', async () => {
+    const pending = deferred();
+    const load = vi.fn().mockResolvedValueOnce({ title: 'Saved visit' }).mockReturnValueOnce(pending.promise);
+    render(<App load={load} />);
+    await screen.findByText('Saved visit');
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    expect(screen.getByTestId('state')).toHaveTextContent('saved');
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+    fireEvent(window, new Event('online'));
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId('state')).toHaveTextContent('saved');
+    await act(async () => pending.resolve({ title: 'Current visit' }));
+    expect(screen.getByTestId('state')).toHaveTextContent('ready');
+    expect(screen.getByTestId('data')).toHaveTextContent('Current visit');
+  });
+
   it('keeps a remounted cached read in saved mode until the server verifies it again', async () => {
     const pending = deferred();
     const load = vi.fn().mockResolvedValueOnce({ title: 'Saved visit' }).mockReturnValueOnce(pending.promise);
