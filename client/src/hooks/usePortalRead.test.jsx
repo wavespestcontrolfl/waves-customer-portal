@@ -39,6 +39,29 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('customer portal reads', () => {
+  it('queues one reconnect retry behind an active refresh and recovers without another gesture', async () => {
+    const pending = deferred();
+    const recovered = deferred();
+    const load = vi.fn().mockResolvedValueOnce({ title: 'Saved visit' })
+      .mockReturnValueOnce(pending.promise).mockReturnValueOnce(recovered.promise);
+    render(<App load={load} />);
+    await screen.findByText('Saved visit');
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    fireEvent(window, new Event('offline'));
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+    fireEvent(window, new Event('online'));
+    fireEvent(window, new Event('online'));
+    expect(load).toHaveBeenCalledTimes(2);
+    await act(async () => pending.reject(new Error('Connection interrupted')));
+    expect(load).toHaveBeenCalledTimes(3);
+    expect(screen.getByTestId('state')).toHaveTextContent('saved');
+    await act(async () => recovered.resolve({ title: 'Current visit' }));
+    expect(screen.getByTestId('state')).toHaveTextContent('ready');
+    expect(screen.getByTestId('data')).toHaveTextContent('Current visit');
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+
   it('revalidates after a reconnect during a biometric lock even within the focus throttle', async () => {
     const load = vi.fn().mockResolvedValue({ title: 'Visit' });
     const { rerender } = render(<App load={load} />);

@@ -15384,7 +15384,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
 }
 
 export default function PortalPage() {
-  const { customer, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer } = useAuth();
+  const { customer, sessionEpoch, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer } = useAuth();
   const isMobileShell = useIsMobile(900);
   // C4: /auth/me reports `cancelled` for a churned account admitted under
   // the read-only allowance — the shell narrows to CANCELLED_TABS, shows the
@@ -15682,7 +15682,7 @@ export default function PortalPage() {
 
   return (
     <PortalGlassContext.Provider value={true}>
-    <PortalReadProvider key={`${propertyRenderKey}:${cancelledAccount}`} enabled={refreshEnabled}>
+    <PortalReadProvider key={`${propertyRenderKey}:${cancelledAccount}:${sessionEpoch}`} enabled={refreshEnabled}>
     <div className="portal-root" style={{
       minHeight: '100vh',
       // Under glass the fixed scene on <html> provides the backdrop; an

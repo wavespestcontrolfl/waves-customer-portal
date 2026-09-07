@@ -12,6 +12,7 @@ export function PortalReadProvider({ enabled, children }) {
   const [online, setOnline] = useState(() => navigator.onLine !== false);
   const [refreshing, setRefreshing] = useState(false);
   const refreshingRef = useRef(false);
+  const reconnectPending = useRef(false);
   const lastRefresh = useRef(Date.now());
   const locked = useBiometricLock();
   const lockedRef = useRef(locked);
@@ -28,7 +29,10 @@ export function PortalReadProvider({ enabled, children }) {
     lastRefresh.current = Date.now();
     setRefreshing(true);
     try {
-      await Promise.allSettled([...readers].map(read => read()));
+      do {
+        reconnectPending.current = false;
+        await Promise.allSettled([...readers].map(read => read()));
+      } while (reconnectPending.current && !lockedRef.current && navigator.onLine !== false);
     } finally {
       refreshingRef.current = false;
       setRefreshing(false);
@@ -40,7 +44,11 @@ export function PortalReadProvider({ enabled, children }) {
     const resume = () => {
       if (document.visibilityState === 'visible' && Date.now() - lastRefresh.current >= 30000) void refresh();
     };
-    const reconnect = () => { setOnline(true); void refresh(); };
+    const reconnect = () => {
+      setOnline(true);
+      reconnectPending.current = refreshingRef.current;
+      void refresh();
+    };
     const disconnect = () => setOnline(false);
     window.addEventListener('online', reconnect);
     window.addEventListener('offline', disconnect);
