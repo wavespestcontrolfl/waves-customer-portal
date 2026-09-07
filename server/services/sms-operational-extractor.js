@@ -8,7 +8,7 @@ const { COMMITMENT_KINDS, kindBelongsToParty, parseDueAt } = require('./call-com
 const { parseQuotedETDeadline } = require('../utils/datetime-et');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
 
-const VERSION = 'sms-operations-v9';
+const VERSION = 'sms-operations-v10';
 const FACT_FIELDS = Object.freeze([
   'contact_preference', 'irrigation_controller_location', 'irrigation_schedule_notes',
   'irrigation_issues', 'parking_notes', 'pet_details', 'access_notes', 'special_instructions',
@@ -155,7 +155,7 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
     // An omitted timing field (or shortened quote) cannot silently discard
     // a clock stated in the source. Ambiguous association needs review;
     // only a grounded due_text can establish an automatic deadline.
-    const clockStated = /\b(?:\d{1,2}:\d{2}|\d{1,2}\s*[ap]\.?m\.?|noon|midnight)(?=\s|[,.!?;]|$)/i.test(body);
+    const clockStated = /\b(?:\d{1,2}:\d{2}|\d{1,2}\s*[ap]\.?m\.?|o['’]?clock|noon|midnight)(?=\s|[,.!?;]|$)/i.test(body);
     const resolved = timingGrounded && clockStated ? parseQuotedETDeadline(item.due_text, new Date(message.created_at)) : null;
     const proposed = item.due_at ? parseDueAt(item.due_at) : resolved;
     const due = resolved && proposed instanceof Date && proposed.getTime() === resolved.getTime() ? resolved : null;

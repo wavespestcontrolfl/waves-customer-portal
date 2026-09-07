@@ -127,6 +127,17 @@ describe('SMS operational evidence and ownership', () => {
     expect(result.dropped).toBe(1);
   });
 
+  test.each(["9 o'clock", '9 o’clock', "nine o'clock"])("unsupported clock %s requires review without inventing AM/PM", (clock) => {
+    const message = source(`Please call tomorrow at ${clock}`);
+    for (const due_text of [null, `tomorrow at ${clock}`]) {
+      const result = groundExtraction(extracted([obligation(message.message_body, {
+        kind: 'callback', due_text,
+      })]), { message, properties });
+      expect(result.obligations[0]).toMatchObject({ due_at: null, timing_unverified: true });
+      expect(result.dropped).toBe(1);
+    }
+  });
+
   test.each([['noon', '16:00:00.000Z'], ['midnight', '05:00:00.000Z']])(
     'a grounded named clock resolves without an invented reminder hour: %s', (clock, utcTime) => {
       const message = source(`Please call tomorrow at ${clock}`);

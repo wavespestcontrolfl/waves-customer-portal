@@ -15,7 +15,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => true), logGateStatus: jest.fn(), gateEnvValue: jest.fn(() => true),
 }));
-jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_name, run) => run()) }));
+jest.mock('../utils/cron-lock', () => ({
+  runExclusive: jest.fn(async (_name, run) => run()),
+  recordJobStart: jest.fn(async () => {}), recordJobEnd: jest.fn(async () => {}),
+}));
 jest.mock('../services/sms-operational-actions', () => ({
   runSmsOperationalActions: jest.fn(), refreshSmsCommitments: jest.fn(),
 }));
@@ -26,7 +29,7 @@ jest.mock('../services/analytics/ga4-crons', () => ({ initGA4Crons: jest.fn() })
 
 const cron = require('../utils/scheduled-cron');
 const { gateEnvValue } = require('../config/feature-gates');
-const { runExclusive } = require('../utils/cron-lock');
+const { runExclusive, recordJobStart, recordJobEnd } = require('../utils/cron-lock');
 const { runSmsOperationalActions, refreshSmsCommitments } = require('../services/sms-operational-actions');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
@@ -69,5 +72,28 @@ describe('scheduled SMS intake and fulfillment failure isolation', () => {
     expect(runSmsOperationalActions).not.toHaveBeenCalled();
     expect(refreshSmsCommitments).not.toHaveBeenCalled();
     expect(runExclusive).not.toHaveBeenCalled();
+  });
+
+  test.each(['no_connection', 'lease_held'])('records missed work for %s without blaming a running peer', async (reason) => {
+    runExclusive.mockResolvedValueOnce({ skipped: true, reason });
+    await tick();
+    expect(refreshSmsCommitments).not.toHaveBeenCalled();
+    if (reason === 'lease_held') {
+      expect(recordJobStart).not.toHaveBeenCalled();
+      expect(recordJobEnd).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
+    } else {
+      expect(recordJobStart).toHaveBeenCalledWith('sms-commitment-fulfillment');
+      expect(recordJobEnd).toHaveBeenCalledWith('sms-commitment-fulfillment', expect.any(Number), expect.any(Error));
+      expect(logger.error).toHaveBeenCalledWith('[sms-operations] commitment watcher did not complete');
+    }
+  });
+
+  test('an intentionally disabled fulfillment service is not a missed tick', async () => {
+    refreshSmsCommitments.mockResolvedValue({ skipped: 'gate_off' });
+    await tick();
+    expect(recordJobStart).not.toHaveBeenCalled();
+    expect(recordJobEnd).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
   });
 });
