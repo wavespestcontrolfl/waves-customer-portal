@@ -315,7 +315,7 @@ async function recordLawnProtocolCompletion(trx, {
   // Skipped rows are part of the all-lawn ledger: with the gate off the
   // legacy WaveGuard writer must stay byte-identical even though Complete
   // Service (defaults gates on) now submits removed defaults.
-  const skippedProducts = allLawn ? normalizeSkippedProducts(completionInput.skippedProducts || completionInput.skipped_products) : [];
+  const skippedProducts = allLawn ? normalizeSkippedProducts(completionInput.skippedProducts) : [];
   const skippedIds = [...new Set(skippedProducts.map((row) => row.productId).filter(Boolean).map(String))];
   const catalogIds = skippedIds.length
     ? await trx('products_catalog').whereIn('id', skippedIds).select('id').then((rows) => rows.map((row) => String(row.id))).catch(() => [])

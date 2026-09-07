@@ -94,6 +94,24 @@ test.each([
   expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
 });
 
+test('skipped-default names are measured after trimming: padding around 180 characters is accepted, a 181-character name is rejected', async () => {
+  delete process.env.GATE_LAWN_COMPLETION_DEFAULTS;
+  delete process.env.GATE_LAWN_PROPERTY_HISTORY;
+  process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+  const productId = '00000000-0000-4000-8000-000000000201';
+  const payload = { success: true, serviceRecordId: 'fixture-record' };
+  attempts.claimCompletionAttempt.mockResolvedValue({ action: 'replay', payload });
+  try {
+    const padded = `${' '.repeat(40)}${'x'.repeat(180)}${' '.repeat(40)}`;
+    await expect(complete({ lawnProtocolCompletion: { treatedSqft: 2500, skippedProducts: [{ productId, productName: padded }] } }))
+      .resolves.toEqual({ status: 200, body: payload });
+    const result = await complete({ lawnProtocolCompletion: { treatedSqft: 2500, skippedProducts: [{ productId, productName: 'x'.repeat(181) }] } });
+    expect(result).toMatchObject({ status: 400, body: { code: 'lawn_skipped_products_invalid' } });
+  } finally {
+    delete process.env.GATE_LAWN_ACTUALS_LEDGER;
+  }
+});
+
 test.each([-1, 2500.5, 10000001, 'front'])('invalid lawn visit area %j is rejected under the ledger gate alone (defaults gates off)', async treatedSqft => {
   delete process.env.GATE_LAWN_COMPLETION_DEFAULTS;
   delete process.env.GATE_LAWN_PROPERTY_HISTORY;

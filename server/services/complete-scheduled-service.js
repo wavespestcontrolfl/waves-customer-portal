@@ -2375,12 +2375,15 @@ async function completeScheduledService(completionInput, packetRecord = null) {
     // Plan defaults the technician removed, recorded as skipped on the lawn
     // actuals ledger. No reason is required (owner ruling: no skip-reason
     // checklist); an optional typed reason is kept verbatim. Validated
-    // whenever submitted — independent of the UI-defaults gates — and left
-    // on the payload untouched, so a form opened before a gate rollback
-    // still records its skips.
+    // whenever submitted — independent of the UI-defaults gates, so a form
+    // opened before a gate rollback still records its skips. The writer
+    // receives Joi's validated copy (names and reasons trimmed), never the
+    // raw payload: max(180) is checked after trim, and product_name is
+    // varchar(180), so a padded name that passed here would otherwise roll
+    // back the whole completion as a 500.
     // productId must be a UUID: it lands in lawn_protocol_product_actuals.product_id
     // (uuid), where a bad value would roll back the whole completion as a 500.
-    const { error: lawnSkippedProductsError } = Joi.array().max(50).items(Joi.object({
+    const { value: lawnSkippedProducts, error: lawnSkippedProductsError } = Joi.array().max(50).items(Joi.object({
       productId: Joi.string().uuid().required(),
       productName: Joi.string().trim().max(180).required(),
       reason: Joi.string().trim().max(500).allow(null, ''),
@@ -6155,8 +6158,10 @@ async function completeScheduledService(completionInput, packetRecord = null) {
             completionInput: {
               ...(lawnProtocolCompletion || {}),
               // The validated visit area (or undefined when no consumer gate
-              // is on) — never the raw client field.
+              // is on) and the validated (trimmed) skipped defaults — never
+              // the raw client fields.
               treatedSqft: lawnCompletionArea,
+              skippedProducts: lawnSkippedProducts,
               incompleteVisit: isIncompleteVisit,
               inventoryDeductions,
             },
